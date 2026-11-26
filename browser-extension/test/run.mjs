@@ -661,6 +661,7 @@ await test('actions', async () => {
     ['a list', {...target('Colour'), op: 'fill', text: 'Blue'}, 'unsupported_target'],
     ['clicking a text field', target('Name'), 'unsupported_target'],
     ['a link to another app', target('Write to us'), 'sensitive_action'],
+    ['a download link', target('Download the report'), 'sensitive_action'],
     ['a window from an inline handler', target('More'), 'sensitive_action'],
     ['Turn on notifications', target('Turn on notifications'), 'sensitive_action'],
     ['Use my location', target('Use my location'), 'sensitive_action'],

@@ -217,8 +217,39 @@ class Claktories extends ChangeNotifier {
     theirs: () =>
         connections.account.signedIn ? connections.account.claktories() : null,
     whose: () => '${connections.account.service} ${connections.account.email}',
-  );
+  )..addListener(_feedCheckIns);
   AccountMatch? _accountMatch;
+
+  /// Each Claktory on another machine learns when it last checked in with
+  /// the person's account, for what its connection says while it can't
+  /// connect (friend bug #37).
+  void _feedCheckIns() {
+    final match = _accountMatch;
+    if (match == null) return;
+    for (final claktory in _open.values) {
+      final target = claktory.target;
+      if (target == null) continue;
+      claktory.backend.checkedIn.value = match.checkedIn(target.endpointId);
+    }
+  }
+
+  /// When the account's list was last read again for a Claktory that lost
+  /// its connection: at most every [_relistAfterLoss].
+  DateTime? _relistedForLoss;
+  static const _relistAfterLoss = Duration(minutes: 5);
+
+  /// A Claktory lost its connection: when it last checked in with the
+  /// account says whether it was running since (friend bug #37).
+  void _lost(Backend backend) {
+    if (backend.connected.value) return;
+    final match = _accountMatch;
+    if (match == null) return;
+    final now = DateTime.now();
+    final last = _relistedForLoss;
+    if (last != null && now.difference(last) < _relistAfterLoss) return;
+    _relistedForLoss = now;
+    unawaited(match.relist());
+  }
 
   /// Whether [_sync] is running, and whether [connections] changed
   /// meanwhile.
@@ -264,15 +295,36 @@ class Claktories extends ChangeNotifier {
     for (final MapEntry(:key, value: target) in wanted.entries) {
       final open = _open[key];
       if (open == null) {
+        final backend = this.open(target);
         _open[key] = Claktory(
           target: target,
-          backend: this.open(target),
+          backend: backend,
           drafts: drafts.of(key),
           match: () => accountMatch,
         );
+        if (target != null) {
+          backend.connected.addListener(() => _lost(backend));
+        }
       }
     }
+    _feedCheckIns();
+    _markOnScreen();
     notifyListeners();
+  }
+
+  /// On a phone or an iPad only the Claktory on screen keeps trying every
+  /// few seconds while it can't connect; the others back off, and opening
+  /// one tries it again at once (#454). A Mac keeps them all quick.
+  void _markOnScreen() {
+    final mobile = switch (defaultTargetPlatform) {
+      TargetPlatform.iOS || TargetPlatform.android => true,
+      _ => false,
+    };
+    if (!mobile) return;
+    final current = connections.current?.code ?? '';
+    for (final MapEntry(:key, value: claktory) in _open.entries) {
+      claktory.backend.onScreen = key == current;
+    }
   }
 
   @override
@@ -433,14 +485,19 @@ class _Glance {
             'your Claktory account.',
       ),
       AccountCheck.signedOut => (
-        label: 'This $thisDeviceKind is signed out',
-        meaning: 'Sign in to check that this Claktory is yours.',
+        // The app, not a machine (Matt read "This Mac" as the Claktory's
+        // own computer), and a sign-in apart from the Claktory's own
+        // (Trish, #529).
+        label: "This app isn't signed in to your Claktory account",
+        meaning:
+            "That's separate from the Claktory's own sign-in. Sign in so "
+            'this app can recognize your Claktories.',
       ),
       AccountCheck.unreadable => (
         label: "Couldn't check your account",
         meaning:
-            "Couldn't reach your Claktory account to check that this "
-            'Claktory is yours. Claktory tries again by itself.',
+            "Couldn't reach your Claktory account. Claktory tries again by "
+            'itself.',
       ),
       AccountCheck.theirs || null => null,
     };
@@ -545,9 +602,7 @@ Future<void> showAccountSignIn(BuildContext context) => showModal(
   context,
   (context, close) => DeviceSignInDialog(
     title: 'Sign in to your Claktory account',
-    intro:
-        'So Claktory can check that the Claktories you connect to are '
-        'yours.',
+    intro: 'So this app can recognize the Claktories on your account.',
     close: close,
   ),
 );
@@ -696,6 +751,9 @@ class _RailTile extends StatelessWidget {
               ),
               HoverCard(
                 beside: true,
+                // Signed out, the card has Sign in… to click (#529): it
+                // stays while the pointer moves onto it.
+                interactive: claktory.account == AccountCheck.signedOut,
                 card: (context) => Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
@@ -720,7 +778,11 @@ class _RailTile extends StatelessWidget {
                     ),
                     if (glance.offAccount) ...[
                       const SizedBox(height: Space.xs),
-                      OffAccountMark(claktory: claktory, explained: true),
+                      OffAccountMark(
+                        claktory: claktory,
+                        explained: true,
+                        signIn: true,
+                      ),
                     ],
                   ],
                 ),
@@ -1282,10 +1344,15 @@ class PhoneConnectionWord extends StatelessWidget {
                     ConnectionDot(link: connection.link),
                     const SizedBox(width: Space.xs + 2),
                     Flexible(
+                      // On a phone, whole: at the largest text sizes
+                      // "Can't connect · last seen 1 min ago" lost its
+                      // time to the ellipsis (Zucchero's row 507).
                       child: Text(
                         connection.short,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
+                        maxLines: isPhoneLayout(context) ? null : 2,
+                        overflow: isPhoneLayout(context)
+                            ? null
+                            : TextOverflow.ellipsis,
                         style: TypeScale.of(context).caption.copyWith(
                           color: connection.problem
                               ? palette.danger
@@ -1694,6 +1761,9 @@ class ClaktoryList extends StatelessWidget {
               style: DenseType.title.copyWith(color: palette.text),
             ),
           ),
+          // Signed out, every row says so: what it means and Sign in…, once,
+          // here, since a row is a button of its own (#529).
+          _SignedOutNote(claktories: claktories),
           for (final claktory in claktories.all)
             _ListRow(
               key: ValueKey(claktory.key),
@@ -1748,6 +1818,48 @@ class ClaktoryList extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Above the phone's list of Claktories while this app isn't signed in to
+/// the person's Claktory account, so its Claktories are marked so: what
+/// that means, and Sign in….
+class _SignedOutNote extends StatelessWidget {
+  const _SignedOutNote({required this.claktories});
+
+  final Claktories claktories;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: claktories.accountMatch,
+    builder: (context, _) {
+      final marked = claktories.all.any(
+        (claktory) => claktory.account == AccountCheck.signedOut,
+      );
+      final words = accountWords(AccountCheck.signedOut);
+      if (!marked || words == null) return const SizedBox.shrink();
+      final palette = Palette.of(context);
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(Space.s, 0, Space.s, Space.l),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Short, as a glance takes it (Trish).
+            Text(
+              "This app isn't signed in to your Claktory account, so it "
+              "can't recognize your Claktories.",
+              style: DenseType.caption.copyWith(color: palette.textMuted),
+            ),
+            const SizedBox(height: Space.s),
+            Button(
+              label: 'Sign in…',
+              onPressed: () => showAccountSignIn(context),
+            ),
+          ],
+        ),
+      );
+    },
+  );
 }
 
 class _ListRow extends StatelessWidget {

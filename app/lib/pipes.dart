@@ -18,7 +18,7 @@ import 'mobile/header.dart' show HeaderButton, PhoneHeader;
 import 'mobile/metrics.dart' show TypeScale;
 import 'mobile/page_find.dart' show PhonePageFind, phonePageSearch;
 import 'mobile/input.dart' show InputKind;
-import 'mobile/lines.dart' show ActionLine;
+import 'mobile/lines.dart' show ActionLine, ControlsLine;
 import 'mobile/popover.dart' show presentPopover;
 import 'account.dart' show askSignIn;
 import 'mobile/presentation.dart' show SheetAction, showActions;
@@ -26,7 +26,8 @@ import 'pairing.dart' show PairingDigits;
 import 'pipe_groups.dart' show groupOf, moveToGroup, removeFromGroup;
 import 'pipe_start.dart' show PipeInviteQr, copyInviteCode, pipeInviteCheck;
 import 'scan_code.dart';
-import 'pipe_shares.dart' show PipeSharesField, PipeSharesStrip;
+import 'pipe_shares.dart'
+    show PipeSharesField, PipeSharesStrip, ShareAnnouncement;
 import 'pipe_reports.dart'
     show ForwardReportsField, PipeReportsStrip, forwardApprovalLine;
 import 'pipe_timeline.dart';
@@ -135,10 +136,12 @@ String pipeLimitText(List<Pipe> pipes) {
 }
 
 /// How many things in [pipe] wait for the person: messages held for them
-/// or that no agent answers, its approval, and the loop breaker's Continue.
+/// or that no agent answers, its approval, the loop breaker's Continue,
+/// and trusting its other side again on another account.
 int pipeWaiting(Pipe pipe) =>
     pipe.waitingSeqs.length +
     pipe.unansweredSeqs.length +
+    (pipeAccountChanged(pipe) ? 1 : 0) +
     (pipe.state == PipeState.PIPE_STATE_APPROVAL ? 1 : 0) +
     (pipe.state == PipeState.PIPE_STATE_PAUSED &&
             pipe.paused == PipePause.PIPE_PAUSE_LOOP
@@ -965,6 +968,50 @@ class _ExplainedMark extends StatelessWidget {
   }
 }
 
+/// What a pipe's notice says about a change in who's at its other end
+/// (PipePeer.identity_change): its title, what it means, and whether it's
+/// the warning (another account). Empty while nothing changed.
+(String, String, bool) pipeIdentityNoticeText(Pipe pipe) {
+  final peer = pipe.peer;
+  final was = peer.previousEmail;
+  final now = peer.verifiedEmail;
+  return switch (peer.identityChange) {
+    PipeIdentityChange.PIPE_IDENTITY_CHANGE_LAPSED => (
+      'No longer verified',
+      "Claktory can no longer confirm this pipe is with $was's Claktory, "
+          'perhaps because they signed out of claktory.com. Messages still '
+          'come only from the same Claktory.',
+      false,
+    ),
+    PipeIdentityChange.PIPE_IDENTITY_CHANGE_EMAIL_CHANGED => (
+      'Email changed',
+      "This pipe's Claktory is now $now, on the same account as $was. "
+          "It's still verified.",
+      false,
+    ),
+    PipeIdentityChange.PIPE_IDENTITY_CHANGE_ACCOUNT_CHANGED => (
+      now.isEmpty
+          ? "This pipe's Claktory is no longer confirmed as $was's."
+          : "This pipe's Claktory is now confirmed as $now's, not $was's.",
+      [
+        'Check with ${pipePeerName(pipe)} before you go on.',
+        'Until you check, their messages wait for you in Needs you, and '
+            "your agents can't send here.",
+      ].join(' '),
+      true,
+    ),
+    _ => ('', '', false),
+  };
+}
+
+/// Whether [pipe]'s other side is now confirmed as another account's, or
+/// no longer as its own, and waits for the person to trust it again
+/// (#471 G7); never for a closed pipe.
+bool pipeAccountChanged(Pipe pipe) =>
+    pipe.state != PipeState.PIPE_STATE_CLOSED &&
+    pipe.peer.identityChange ==
+        PipeIdentityChange.PIPE_IDENTITY_CHANGE_ACCOUNT_CHANGED;
+
 /// Under a pipe's header while who's at its other end changed
 /// (PipePeer.identity_change): no longer vouched for, or a new email, with
 /// OK (the pin kept: "Not verified" until the same account vouches
@@ -972,9 +1019,16 @@ class _ExplainedMark extends StatelessWidget {
 /// account, a warning in `danger` with Trust this Claktory…, which asks
 /// first. Nothing otherwise.
 class PipeIdentityNotice extends StatefulWidget {
-  const PipeIdentityNotice({super.key, required this.pipe});
+  const PipeIdentityNotice({
+    super.key,
+    required this.pipe,
+    this.inline = false,
+  });
 
   final Pipe pipe;
+
+  /// In a card of its own (Needs you), not as a band under the header.
+  final bool inline;
 
   @override
   State<PipeIdentityNotice> createState() => _PipeIdentityNoticeState();
@@ -1004,39 +1058,8 @@ class _PipeIdentityNoticeState extends State<PipeIdentityNotice> {
     final peer = pipe.peer;
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    final was = peer.previousEmail;
     final now = peer.verifiedEmail;
-    final (
-      String title,
-      String body,
-      bool danger,
-    ) = switch (peer.identityChange) {
-      PipeIdentityChange.PIPE_IDENTITY_CHANGE_LAPSED => (
-        'No longer verified',
-        "Claktory can no longer confirm this pipe is with $was's Claktory, "
-            'perhaps because they signed out of claktory.com. Messages still '
-            'come only from the same Claktory.',
-        false,
-      ),
-      PipeIdentityChange.PIPE_IDENTITY_CHANGE_EMAIL_CHANGED => (
-        'Email changed',
-        "This pipe's Claktory is now $now, on the same account as $was. "
-            "It's still verified.",
-        false,
-      ),
-      PipeIdentityChange.PIPE_IDENTITY_CHANGE_ACCOUNT_CHANGED => (
-        now.isEmpty
-            ? "This pipe's Claktory is no longer confirmed as $was's."
-            : "This pipe's Claktory is now confirmed as $now's, not $was's.",
-        [
-          'Check with ${pipePeerName(pipe)} before you go on.',
-          'Until you check, their messages wait for you in Needs you, and '
-              "your agents can't send here.",
-        ].join(' '),
-        true,
-      ),
-      _ => ('', '', false),
-    };
+    final (title, body, danger) = pipeIdentityNoticeText(pipe);
     if (title.isEmpty) return const SizedBox.shrink();
     final Widget action = danger
         ? Button(
@@ -1072,13 +1095,17 @@ class _PipeIdentityNoticeState extends State<PipeIdentityNotice> {
           )
         : Button(label: 'OK', onPressed: _busy ? null : _accept);
     return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: Space.xl,
-        vertical: Space.m,
-      ),
+      padding: widget.inline
+          ? const EdgeInsets.all(Space.m)
+          : const EdgeInsets.symmetric(horizontal: Space.xl, vertical: Space.m),
       decoration: BoxDecoration(
         color: danger ? palette.danger.withValues(alpha: 0.06) : null,
-        border: Border(bottom: BorderSide(color: palette.hairline)),
+        border: widget.inline
+            ? null
+            : Border(bottom: BorderSide(color: palette.hairline)),
+        borderRadius: widget.inline
+            ? BorderRadius.circular(Radii.control)
+            : null,
       ),
       child: ActionLine(
         action: action,
@@ -1428,7 +1455,12 @@ class _StateButtonState extends State<_StateButton> {
 /// where and why, the digits both screens show, and which agents may use
 /// it. Nothing goes through until both people approve.
 class PipeApprovalCard extends StatefulWidget {
-  const PipeApprovalCard({super.key, required this.pipe, this.inline = false});
+  const PipeApprovalCard({
+    super.key,
+    required this.pipe,
+    this.inline = false,
+    this.ask,
+  });
 
   final Pipe pipe;
 
@@ -1436,8 +1468,366 @@ class PipeApprovalCard extends StatefulWidget {
   /// centred in the pipe's view.
   final bool inline;
 
+  /// An agent's card asking the person to approve [pipe] (#471 G1): the
+  /// card starts from what the agent proposes, not the pipe's settings,
+  /// and approves through that card. Null: the pipe's own approval.
+  final PipeApprovalAsk? ask;
+
   @override
   State<PipeApprovalCard> createState() => _PipeApprovalCardState();
+}
+
+/// An agent's card asking the person to approve a pipe (AskPerson's
+/// pipe_approval, #471 G1), as [PipeApprovalCard] shows it: what the
+/// agent proposes, each choice the person's to change, and the ask card's
+/// own answers, Dismiss and a reply (its comment field, [comment]).
+/// How wide an approval card's action line must be for its words to sit
+/// beside its buttons; narrower, they go above them.
+const _approvalBesideAt = 440.0;
+
+class PipeApprovalAsk {
+  const PipeApprovalAsk({
+    required this.cardId,
+    required this.agent,
+    required this.proposal,
+    required this.comment,
+    required this.onDismiss,
+    required this.onReply,
+    this.busy = false,
+    this.error,
+    this.updated = false,
+  });
+
+  /// Its agent changed what it proposes since it first asked
+  /// (AskPerson.updated_ms).
+  final bool updated;
+
+  /// AskPerson.id, sent with Approve (ApprovePipe.card_id).
+  final String cardId;
+
+  /// The agent that asks, by name ("Rivet").
+  final String agent;
+
+  final PipeApprovalProposal proposal;
+
+  /// The ask card's comment: with Approve, the lead's note
+  /// (ApprovePipe.comment); alone, a reply to [agent]; with Dismiss, the
+  /// person's comment to it.
+  final TextEditingController comment;
+
+  final VoidCallback onDismiss;
+  final VoidCallback onReply;
+
+  /// The ask card is sending a Dismiss or a reply, or why it couldn't.
+  final bool busy;
+  final String? error;
+}
+
+/// An agent's card asking to approve a pipe (#471 G1), where the card's
+/// answers go: the pipe's approval card started from what the agent
+/// proposes, while the pipe waits for approval; else why it can't be
+/// approved, with only Dismiss (Claktory also takes the card back).
+class PipeApprovalAskView extends StatelessWidget {
+  const PipeApprovalAskView({
+    super.key,
+    required this.pipeId,
+    required this.ask,
+  });
+
+  final String pipeId;
+  final PipeApprovalAsk ask;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context).workspace;
+    // The pipe as it is now, followed as it changes.
+    return ListenableBuilder(
+      listenable: store,
+      builder: (context, _) {
+        Pipe? pipe;
+        for (final each in store.workspace.pipes) {
+          if (each.id == pipeId) pipe = each;
+        }
+        return _build(context, pipe);
+      },
+    );
+  }
+
+  Widget _build(BuildContext context, Pipe? pipe) {
+    final palette = Palette.of(context);
+    if (pipe != null && pipe.state == PipeState.PIPE_STATE_APPROVAL) {
+      return PipeApprovalCard(
+        key: ValueKey(('pipe-approval', ask.cardId)),
+        pipe: pipe,
+        inline: true,
+        ask: ask,
+      );
+    }
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            ask.error ??
+                (pipe == null
+                    ? 'That pipe is gone, so there is nothing to approve.'
+                    : "That pipe isn't waiting for your approval any more."),
+            style: TextStyles.caption.copyWith(
+              color: ask.error != null ? palette.danger : palette.textMuted,
+            ),
+          ),
+        ),
+        const SizedBox(width: Space.s),
+        Button(label: 'Dismiss', onPressed: ask.busy ? null : ask.onDismiss),
+      ],
+    );
+  }
+}
+
+/// An agent's card asking the person to accept a change in who's at a
+/// pipe's other end (AskPerson's pipe_trust, #471 G7), as
+/// [PipeTrustAskView] shows it, with the ask card's own Dismiss and reply.
+class PipeTrustAsk {
+  const PipeTrustAsk({
+    required this.cardId,
+    required this.agent,
+    required this.change,
+    required this.comment,
+    required this.onDismiss,
+    required this.onReply,
+    this.reason,
+    this.busy = false,
+    this.error,
+  });
+
+  /// AskPerson.id, sent with Trust or OK (AcceptPipeIdentity.card_id).
+  final String cardId;
+
+  /// The agent that asks, by name ("Rivet").
+  final String agent;
+
+  /// The change it was asked for.
+  final PipeIdentityChange change;
+
+  /// The ask card's comment: alone, a reply to [agent]; with Dismiss, the
+  /// person's comment to it.
+  final TextEditingController comment;
+
+  final VoidCallback onDismiss;
+  final VoidCallback onReply;
+
+  /// The agent's reason, as the ask card shows it: under Claktory's
+  /// warning, never above it (Fugo).
+  final Widget? reason;
+
+  /// The ask card is sending a Dismiss or a reply, or why it couldn't.
+  final bool busy;
+  final String? error;
+}
+
+/// Where an agent's card asking to accept a change at a pipe's other end
+/// (#471 G7) is answered: who it was and who it is now, from the pipe as
+/// Claktory has it (never from the card), Claktory's warning to check
+/// with them yourself, the agent's reason under it, then Dismiss and Trust
+/// (or OK, for a lapse or a new email). A pipe gone, or whose change
+/// isn't this one any more, shows why, with only Dismiss.
+class PipeTrustAskView extends StatefulWidget {
+  const PipeTrustAskView({super.key, required this.pipeId, required this.ask});
+
+  final String pipeId;
+  final PipeTrustAsk ask;
+
+  @override
+  State<PipeTrustAskView> createState() => _PipeTrustAskViewState();
+}
+
+class _PipeTrustAskViewState extends State<PipeTrustAskView> {
+  var _busy = false;
+  String? _error;
+
+  Future<void> _accept() async {
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await AppScope.of(context)
+          .acceptPipeIdentity(widget.pipeId, cardId: widget.ask.cardId);
+    } on RequestFailure catch (failure) {
+      if (mounted) setState(() => _error = failure.message);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context).workspace;
+    // The pipe as it is now, followed as it changes.
+    return ListenableBuilder(
+      listenable: store,
+      builder: (context, _) {
+        Pipe? pipe;
+        for (final each in store.workspace.pipes) {
+          if (each.id == widget.pipeId) pipe = each;
+        }
+        return _build(context, pipe);
+      },
+    );
+  }
+
+  Widget _build(BuildContext context, Pipe? pipe) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final ask = widget.ask;
+    final busy = _busy || ask.busy;
+    final error = _error ?? ask.error;
+    if (pipe == null ||
+        pipe.state == PipeState.PIPE_STATE_CLOSED ||
+        pipe.peer.identityChange != ask.change) {
+      return ActionLine(
+        lead: Text(
+          error ??
+              (pipe == null
+                  ? 'That pipe is gone, so there is nothing to accept.'
+                  : pipe.state == PipeState.PIPE_STATE_CLOSED
+                  ? 'That pipe is closed, so there is nothing to accept.'
+                  : "That change isn't waiting for you any more."),
+          style: type.caption.copyWith(
+            color: error != null ? palette.danger : palette.textMuted,
+          ),
+        ),
+        action: Button(
+          label: 'Dismiss',
+          onPressed: busy ? null : ask.onDismiss,
+        ),
+      );
+    }
+    final (title, body, danger) = pipeIdentityNoticeText(pipe);
+    final name = pipePeerName(pipe);
+    final account =
+        ask.change == PipeIdentityChange.PIPE_IDENTITY_CHANGE_ACCOUNT_CHANGED;
+    final now = pipe.peer.verifiedEmail;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          padding: const EdgeInsets.all(Space.m),
+          decoration: BoxDecoration(
+            color: danger
+                ? palette.danger.withValues(alpha: 0.06)
+                : palette.canvas,
+            border: Border.all(
+              color: danger
+                  ? palette.danger.withValues(alpha: 0.4)
+                  : palette.hairline,
+            ),
+            borderRadius: BorderRadius.circular(Radii.control),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            spacing: Space.xs,
+            children: [
+              Row(
+                children: [
+                  const PortalGlyph(size: 14),
+                  const SizedBox(width: Space.xs),
+                  Flexible(
+                    child: Text(
+                      proseCodes(pipe.name),
+                      style: type.caption.copyWith(
+                        color: pipeColor,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: Space.s),
+                  PipeVerifiedMark(pipe: pipe),
+                ],
+              ),
+              Text(
+                title,
+                style: type.body.copyWith(
+                  color: danger ? palette.danger : palette.text,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              if (account && now.isNotEmpty)
+                Text(
+                  'Their Claktory now signs in with a different account.',
+                  style: type.body.copyWith(color: palette.text),
+                ),
+              // Claktory's warning, never the agent's word (Fugo).
+              Text(
+                'Check with $name yourself that this change is theirs.',
+                style: type.body.copyWith(
+                  color: palette.text,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              Text(
+                account
+                    ? [
+                        'Until you do, their messages wait for you in Needs '
+                            "you, and your agents can't send here. Trusting "
+                            'it lets them through, and your agents can send '
+                            'here again.',
+                        if (now.isEmpty)
+                          'The pipe then shows Not verified, since nothing '
+                              'confirms whose Claktory it is now.',
+                      ].join(' ')
+                    : body,
+                style: type.body.copyWith(color: palette.textMuted),
+              ),
+            ],
+          ),
+        ),
+        // The agent's reason, under Claktory's warning (Fugo).
+        if (ask.reason case final reason?) ...[
+          const SizedBox(height: Space.s),
+          reason,
+        ],
+        const SizedBox(height: Space.m),
+        CommentTyped(
+          controller: ask.comment,
+          builder: (context, typed) => ActionLine(
+            lead: Text(
+              error ??
+                  (typed
+                      ? '${ask.agent} gets your comment. Nothing changes '
+                            'until you answer.'
+                      : account
+                      ? 'Trust it only once $name told you about the change.'
+                      : 'OK keeps the pipe as it is.'),
+              style: type.caption.copyWith(
+                color: error != null ? palette.danger : palette.textFaint,
+              ),
+            ),
+            action: typed
+                ? SubmitButton(onPressed: busy ? null : ask.onReply)
+                : ControlsLine(
+                    children: [
+                      Button(
+                        label: 'Dismiss',
+                        onPressed: busy ? null : ask.onDismiss,
+                      ),
+                      Button(
+                        label: account ? 'Trust' : 'OK',
+                        primary: true,
+                        onPressed: busy ? null : _accept,
+                      ),
+                    ],
+                  ),
+          ),
+        ),
+        DecisionComment(
+          controller: ask.comment,
+          agent: ask.agent,
+          enabled: !busy,
+          onSubmit: ask.onReply,
+        ),
+      ],
+    );
+  }
 }
 
 /// The lead choice that makes a new liaison agent.
@@ -1450,6 +1840,10 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
   /// turned it; else [_canRunByDefault].
   final _canRun = <String, bool>{};
 
+  /// The members that only send to it (#414): kept as the pipe (or the
+  /// agent's card) has them, shown as such, never the lead.
+  final _sendOnly = <String>{};
+
   /// The lead the person chose; kept while it's unticked, so ticking it
   /// back brings it back. [_shownLead] is the one that counts.
   var _lead = _liaison;
@@ -1457,7 +1851,10 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
   /// The lead as the form has it: the one chosen while it's a member, else
   /// the new liaison agent.
   String get _shownLead =>
-      _lead == _liaison || _members.contains(_lead) ? _lead : _liaison;
+      _lead == _liaison ||
+          _members.contains(_lead) && !_sendOnly.contains(_lead)
+      ? _lead
+      : _liaison;
 
   /// Prefilled with the name Claktory suggests (a first name no agent of
   /// the project has).
@@ -1465,11 +1862,149 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
     text: liaisonNameFor(widget.pipe),
   );
 
-  /// Both reviews start off, as a new pipe's do.
   var _reviewIncoming = false;
   var _reviewOutgoing = false;
   var _busy = false;
   String? _error;
+
+  /// Whether the person changed the card: until then it shows the pipe's
+  /// settings as they are, set before approval (Rivet's settings card,
+  /// #470) or none yet, and follows them as they change.
+  var _touched = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.ask case final ask?) {
+      _readProposal(ask.proposal);
+      // Updated before this card was built (Needs you shows it afresh):
+      // said too, until the person changes the card.
+      _proposalChanged = ask.updated;
+    } else {
+      _read(widget.pipe);
+    }
+  }
+
+  @override
+  void didUpdateWidget(PipeApprovalCard old) {
+    super.didUpdateWidget(old);
+    if (widget.ask case final ask?) {
+      // The agent changed what it proposes (a second card for this pipe,
+      // in place): read again, and said, so the person checks it again.
+      if (ask.proposal != old.ask?.proposal) {
+        _proposalChanged = true;
+        _touched = false;
+        _readProposal(ask.proposal);
+      }
+      return;
+    }
+    if (_settingsOf(widget.pipe) == _readFrom) return;
+    // Changed under the person's own changes (Fugo): read again, never
+    // approved over, and said, so they check it again.
+    if (_touched) _changed = true;
+    _touched = false;
+    _read(widget.pipe);
+  }
+
+  /// The settings the card was last read from ([_settingsOf]).
+  var _readFrom = '';
+
+  /// The pipe's settings changed after the person changed the card: it
+  /// read them again, and says so until they change it again.
+  var _changed = false;
+
+  /// An agent's card: what it proposes changed since the card was first
+  /// shown, or before (its agent updated the card, in a Needs you built
+  /// afresh); said until the person changes the card.
+  var _proposalChanged = false;
+
+  /// An agent's card: the pipe's settings when it was asked (or its
+  /// agent last changed it), from Claktory, to tell what narrowed since.
+  /// Null when it doesn't say.
+  _PipeSettings? _askedFrom;
+
+  /// What of [pipe] the card shows, to tell when it changes.
+  static String _settingsOf(Pipe pipe) => _PipeSettings.of(pipe).key;
+
+  /// The card as [pipe] is set: its members (those that only send to it
+  /// too, kept as they are), who of them can run commands, its lead (else
+  /// a new liaison) and its reviews, which start off on a new pipe.
+  void _read(Pipe pipe) {
+    _readFrom = _settingsOf(pipe);
+    _members
+      ..clear()
+      ..addAll(pipe.memberIds);
+    _sendOnly
+      ..clear()
+      ..addAll(pipe.sendOnlyIds.where(_members.contains));
+    _canRun.clear();
+    for (final id in pipe.memberIds) {
+      _canRun[id] = !pipe.quarantinedIds.contains(id);
+    }
+    _lead = pipe.leadId.isEmpty ? _liaison : pipe.leadId;
+    _reviewIncoming = pipe.reviewIncoming;
+    _reviewOutgoing = pipe.reviewOutgoing;
+  }
+
+  /// The card as an agent proposes it (#471 G1): its members, who of them
+  /// can run commands (the others limited to the pipe), its lead or a new
+  /// liaison of the name it gives, the reviews and who only sends.
+  void _readProposal(PipeApprovalProposal proposal) {
+    _askedFrom = proposal.hasAskedFrom()
+        ? _PipeSettings.asked(proposal.askedFrom)
+        : null;
+    _members
+      ..clear()
+      ..addAll(proposal.memberIds);
+    _sendOnly
+      ..clear()
+      ..addAll(proposal.sendOnlyIds.where(_members.contains));
+    _canRun.clear();
+    for (final id in proposal.memberIds) {
+      _canRun[id] = proposal.canRunCommandsIds.contains(id);
+    }
+    _lead = proposal.leadId.isEmpty ? _liaison : proposal.leadId;
+    if (proposal.liaisonName.trim().isNotEmpty) {
+      _liaisonName.text = proposal.liaisonName.trim();
+    }
+    _reviewIncoming = proposal.reviewIncoming;
+    _reviewOutgoing = proposal.reviewOutgoing;
+  }
+
+  /// An agent's card: the choices wider than the pipe is now where the
+  /// pipe narrowed since the card was asked (Fugo): a member taken out,
+  /// limited to the pipe or made to only send, a review turned on.
+  Set<String> _wider() {
+    final then = _askedFrom;
+    if (widget.ask == null || then == null) return const {};
+    final now = _PipeSettings.of(widget.pipe);
+    return {
+      for (final id in _members) ...[
+        if (then.members.contains(id) && !now.members.contains(id))
+          'removed:$id',
+        if (!then.quarantined.contains(id) &&
+            now.quarantined.contains(id) &&
+            !_sendOnly.contains(id) &&
+            _canRun[id] == true)
+          'commands:$id',
+        if (!then.sendOnly.contains(id) &&
+            now.sendOnly.contains(id) &&
+            !_sendOnly.contains(id))
+          'sendOnly:$id',
+      ],
+      if (!then.reviewIncoming && now.reviewIncoming && !_reviewIncoming)
+        'reviewIncoming',
+      if (!then.reviewOutgoing && now.reviewOutgoing && !_reviewOutgoing)
+        'reviewOutgoing',
+    };
+  }
+
+  void _change(VoidCallback change) => setState(() {
+    _touched = true;
+    _changed = false;
+    _proposalChanged = false;
+    change();
+  });
 
   /// Who the last reply went to (#370), said until the next decision.
   String? _sentTo;
@@ -1477,6 +2012,10 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
   /// The person's comment, for this side's lead with either answer; never
   /// the other side's.
   final _comment = TextEditingController();
+
+  /// Where the comment is typed: an agent's card's own field
+  /// ([PipeApprovalAsk.comment]), else the card's.
+  TextEditingController get _commentField => widget.ask?.comment ?? _comment;
 
   @override
   void dispose() {
@@ -1502,6 +2041,15 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
           pipeId: widget.pipe.id,
           approve: approve,
           memberIds: approve ? _members : const <String>[],
+          // Kept as the pipe (or the agent's card) has them.
+          sendOnly: approve
+              ? PipeMembers(
+                  agentIds: [
+                    for (final id in _sendOnly)
+                      if (_members.contains(id)) id,
+                  ],
+                )
+              : null,
           leadId: approve && !liaison ? lead : '',
           liaisonName: approve && liaison ? _liaisonName.text.trim() : '',
           quarantined: approve
@@ -1510,14 +2058,18 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
                     for (final agent in AppScope.of(
                       context,
                     ).workspace.agentsIn(widget.pipe.projectId))
-                      if (_members.contains(agent.id) && !_canRunOf(agent))
+                      if (_members.contains(agent.id) &&
+                          !_sendOnly.contains(agent.id) &&
+                          !_canRunOf(agent))
                         agent.id,
                   ],
                 )
               : null,
           reviewIncoming: approve ? _reviewIncoming : null,
           reviewOutgoing: approve ? _reviewOutgoing : null,
-          comment: _comment.text.trim(),
+          comment: _commentField.text.trim(),
+          // From an agent's card (#471 G1): approved through it.
+          cardId: widget.ask?.cardId,
         ),
       );
     } on RequestFailure catch (failure) {
@@ -1571,10 +2123,29 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
     final project = store.project(pipe.projectId);
     final agents = store.agentsIn(pipe.projectId);
     final lead = _shownLead;
+    final ask = widget.ask;
     // Who a comment goes to as a reply; none, no Submit.
-    final replyTo = pipe.replyAgentId.isEmpty
+    final replyTo = ask != null
+        ? ask.agent
+        : pipe.replyAgentId.isEmpty
         ? null
         : store.agent(pipe.replyAgentId)?.name ?? 'Your agent';
+    // An agent's card: the pipe changed since it asked, and what of the
+    // card is wider than the pipe now (Fugo).
+    final askedFrom = _askedFrom;
+    final pipeChanged =
+        ask != null &&
+        askedFrom != null &&
+        askedFrom.key != _PipeSettings.of(pipe).key;
+    final wider = _wider();
+    final busy = _busy || (ask?.busy ?? false);
+    final error = _error ?? ask?.error;
+    // Those of another project that only send to it are on the card too.
+    final inProject = {for (final agent in agents) agent.id};
+    final outside = [
+      for (final id in _sendOnly)
+        if (!inProject.contains(id)) ?store.agent(id),
+    ];
     // Their words, on a card to decide on: what reorders text shows by
     // its code (proseCodes, Fugo).
     final who = [
@@ -1593,18 +2164,29 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
+          // Who, and the Verified mark beside it while both fit; on a
+          // narrow card (a phone's Needs you) the mark goes under, so the
+          // words keep their line (Zucchero's row 535).
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: Space.s,
+            runSpacing: Space.xs,
             children: [
-              const PortalGlyph(size: 20),
-              const SizedBox(width: Space.xs + 2),
-              Expanded(
-                child: Text(
-                  '${pipePeerName(pipe, start: true)} wants to connect',
-                  style: TextStyles.caption.copyWith(
-                    color: pipeColor,
-                    fontWeight: FontWeight.w600,
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const PortalGlyph(size: 20),
+                  const SizedBox(width: Space.xs + 2),
+                  Flexible(
+                    child: Text(
+                      '${pipePeerName(pipe, start: true)} wants to connect',
+                      style: TextStyles.caption.copyWith(
+                        color: pipeColor,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                   ),
-                ),
+                ],
               ),
               PipeVerifiedMark(pipe: pipe),
             ],
@@ -1644,10 +2226,17 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
             PairingDigits(pipe.digits),
             const SizedBox(height: Space.xs),
             Text(
-              'Approve only if ${pipePeerName(pipe)} sees the same '
-              'digits.',
+              ask != null
+                  // Never on an agent's word (Fugo, #471).
+                  ? 'Compare these with ${pipePeerName(pipe)} yourself, by '
+                        "voice or in person. Don't approve because an agent "
+                        'says they match.'
+                  : 'Approve only if ${pipePeerName(pipe)} sees the same '
+                        'digits.',
               textAlign: TextAlign.center,
-              style: caption,
+              style: ask != null
+                  ? TextStyles.caption.copyWith(color: palette.text)
+                  : caption,
             ),
           ],
           const SizedBox(height: Space.l),
@@ -1656,30 +2245,50 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
             style: TextStyles.label.copyWith(color: palette.text),
           ),
           const SizedBox(height: Space.xs),
-          for (final agent in agents)
+          for (final agent in [...agents, ...outside])
             Padding(
               padding: const EdgeInsets.only(top: Space.xs),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  _MemberLine(
-                    agent: agent,
-                    value: _members.contains(agent.id),
-                    onChanged: (on) => setState(() {
-                      if (on) {
-                        _members.add(agent.id);
-                      } else {
-                        _members.remove(agent.id);
-                      }
-                    }),
+                  _Narrowed(
+                    note: wider.contains('removed:${agent.id}')
+                        ? 'Since ${ask?.agent} asked, ${agent.name} was taken out '
+                              'of the pipe.'
+                        : wider.contains('sendOnly:${agent.id}')
+                        ? 'Since ${ask?.agent} asked, ${agent.name} was made to '
+                              'only send to the pipe.'
+                        : null,
+                    child: _MemberLine(
+                      agent: agent,
+                      value: _members.contains(agent.id),
+                      held: pipeHeldReason(pipe, agent.id),
+                      onChanged: (on) => _change(() {
+                        if (on) {
+                          _members.add(agent.id);
+                        } else {
+                          _members.remove(agent.id);
+                        }
+                      }),
+                    ),
                   ),
                   if (_members.contains(agent.id))
-                    _CommandsLine(
-                      agent: agent,
-                      pipe: pipe,
-                      value: _canRunOf(agent),
-                      onChanged: (on) => setState(() => _canRun[agent.id] = on),
-                    ),
+                    if (_sendOnly.contains(agent.id))
+                      _SendOnlyLine(agent: agent, pipe: pipe)
+                    else
+                      _Narrowed(
+                        note: wider.contains('commands:${agent.id}')
+                            ? 'Since ${ask?.agent} asked, ${agent.name} was '
+                                  'limited to the pipe.'
+                            : null,
+                        child: _CommandsLine(
+                          agent: agent,
+                          pipe: pipe,
+                          value: _canRunOf(agent),
+                          onChanged: (on) =>
+                              _change(() => _canRun[agent.id] = on),
+                        ),
+                      ),
                 ],
               ),
             ),
@@ -1695,10 +2304,11 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
               options: [
                 const SelectOption(_liaison, 'A new liaison agent'),
                 for (final agent in agents)
-                  if (_members.contains(agent.id))
+                  if (_members.contains(agent.id) &&
+                      !_sendOnly.contains(agent.id))
                     SelectOption(agent.id, agent.name),
               ],
-              onChanged: (lead) => setState(() => _lead = lead),
+              onChanged: (lead) => _change(() => _lead = lead),
             ),
           ),
           if (lead == _liaison)
@@ -1706,13 +2316,25 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
               label: "Liaison's name",
               child: TextField(controller: _liaisonName),
             ),
-          _ReviewIncomingField(
-            value: _reviewIncoming,
-            onChanged: (on) => setState(() => _reviewIncoming = on),
+          _Narrowed(
+            note: wider.contains('reviewIncoming')
+                ? 'Since ${ask?.agent} asked, Review incoming was turned on in '
+                      'the pipe.'
+                : null,
+            child: _ReviewIncomingField(
+              value: _reviewIncoming,
+              onChanged: (on) => _change(() => _reviewIncoming = on),
+            ),
           ),
-          _ReviewOutgoingField(
-            value: _reviewOutgoing,
-            onChanged: (on) => setState(() => _reviewOutgoing = on),
+          _Narrowed(
+            note: wider.contains('reviewOutgoing')
+                ? 'Since ${ask?.agent} asked, Review outgoing was turned on in '
+                      'the pipe.'
+                : null,
+            child: _ReviewOutgoingField(
+              value: _reviewOutgoing,
+              onChanged: (on) => _change(() => _reviewOutgoing = on),
+            ),
           ),
           // Its reports already go somewhere, from the project's default.
           if (forwardApprovalLine(
@@ -1731,57 +2353,114 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
           // A comment typed, with someone to hear it: one Submit, the
           // pipe still waiting (#370).
           CommentTyped(
-            controller: _comment,
+            controller: _commentField,
             builder: (context, typed) {
               final replying = typed && replyTo != null;
-              return Row(
+              // Said until the person changes the card; the pipe's own
+              // change, whenever it differs from when the agent asked.
+              final check = pipeChanged
+                  ? "The pipe's settings changed since ${ask.agent} asked. "
+                        'Check them again.'
+                  : _proposalChanged
+                  ? '${ask?.agent} changed what it proposes. Check it again.'
+                  : _changed
+                  ? "The pipe's settings changed since you started. Check "
+                        'them again.'
+                  : null;
+              final words = Text(
+                error ??
+                    (replying
+                        ? 'The pipe still waits for you. $replyTo '
+                              'gets your comment.'
+                        : check ??
+                              (_sentTo != null
+                                  ? 'Sent to $_sentTo.'
+                                  : 'You can change this later in the '
+                                        "pipe's settings.")),
+                style: TextStyles.caption.copyWith(
+                  color: error != null
+                      ? palette.danger
+                      : !replying && check != null
+                      ? palette.text
+                      : palette.textFaint,
+                ),
+              );
+              // On the narrowest cards the two wrap, rather than spill.
+              final buttons = Wrap(
+                alignment: WrapAlignment.end,
+                spacing: Space.s,
+                runSpacing: Space.xs,
                 children: [
-                  Expanded(
-                    child: Text(
-                      _error ??
-                          (replying
-                              ? 'The pipe still waits for you. $replyTo '
-                                    'gets your comment.'
-                              : _sentTo != null
-                              ? 'Sent to $_sentTo.'
-                              : 'You can change this later in the pipe\'s '
-                                    'settings.'),
-                      style: TextStyles.caption.copyWith(
-                        color: _error == null
-                            ? palette.textFaint
-                            : palette.danger,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: Space.s),
                   if (replying)
                     SubmitButton(
-                      onPressed: _busy ? null : () => _reply(replyTo),
+                      onPressed: busy
+                          ? null
+                          : ask != null
+                          ? ask.onReply
+                          : () => _reply(replyTo),
                     )
                   else ...[
-                    Button(
-                      label: 'Decline',
-                      onPressed: _busy ? null : () => _decide(false),
-                    ),
-                    const SizedBox(width: Space.s),
+                    if (ask != null)
+                      // The card's own: its agent is told, the pipe still
+                      // waits.
+                      Button(
+                        label: 'Dismiss',
+                        onPressed: busy ? null : ask.onDismiss,
+                      )
+                    else
+                      Button(
+                        label: 'Decline',
+                        onPressed: busy ? null : () => _decide(false),
+                      ),
                     Button(
                       label: 'Approve',
                       primary: true,
-                      onPressed: _busy ? null : () => _decide(true),
+                      onPressed: busy ? null : () => _decide(true),
                     ),
                   ],
                 ],
+              );
+              // Words beside the buttons while they keep a line's worth of
+              // room; narrower, above them, whole (Zucchero's row 535).
+              return LayoutBuilder(
+                builder: (context, box) {
+                  final beside = box.maxWidth >= _approvalBesideAt;
+                  if (beside) {
+                    return Row(
+                      children: [
+                        Expanded(child: words),
+                        const SizedBox(width: Space.s),
+                        buttons,
+                      ],
+                    );
+                  }
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      words,
+                      const SizedBox(height: Space.s),
+                      Align(
+                        alignment: AlignmentDirectional.centerEnd,
+                        child: buttons,
+                      ),
+                    ],
+                  );
+                },
               );
             },
           ),
           // Approved, the lead chosen here hears it; declined, the agent
           // that set the pipe up (or Rivet): only this side's agents.
           DecisionComment(
-            controller: _comment,
+            controller: _commentField,
             agent: 'your agents',
             note: 'Only your agents see it, not ${pipePeerClaktory(pipe)}.',
-            enabled: !_busy,
-            onSubmit: replyTo == null ? null : () => _reply(replyTo),
+            enabled: !busy,
+            onSubmit: replyTo == null
+                ? null
+                : ask != null
+                ? ask.onReply
+                : () => _reply(replyTo),
           ),
         ],
       ),
@@ -1797,6 +2476,43 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
       ),
     );
   }
+}
+
+/// A pipe's own settings, the ones its approval card shows: whom it has,
+/// who of them is limited to it or only sends, its lead and its reviews.
+class _PipeSettings {
+  _PipeSettings.of(Pipe pipe)
+    : members = {...pipe.memberIds},
+      quarantined = {...pipe.quarantinedIds},
+      sendOnly = {...pipe.sendOnlyIds},
+      lead = pipe.leadId,
+      reviewIncoming = pipe.reviewIncoming,
+      reviewOutgoing = pipe.reviewOutgoing;
+
+  _PipeSettings.asked(PipeApprovalBaseline asked)
+    : members = {...asked.memberIds},
+      quarantined = {...asked.quarantinedIds},
+      sendOnly = {...asked.sendOnlyIds},
+      lead = asked.leadId,
+      reviewIncoming = asked.reviewIncoming,
+      reviewOutgoing = asked.reviewOutgoing;
+
+  final Set<String> members;
+  final Set<String> quarantined;
+  final Set<String> sendOnly;
+  final String lead;
+  final bool reviewIncoming;
+  final bool reviewOutgoing;
+
+  /// All of it in one string, to tell when it changes.
+  String get key => [
+    ([...members]..sort()).join(','),
+    ([...quarantined]..sort()).join(','),
+    ([...sendOnly]..sort()).join(','),
+    lead,
+    reviewIncoming,
+    reviewOutgoing,
+  ].join('|');
 }
 
 /// What [EntryReveal.reachExtra] names to open a pipe with no liaison at
@@ -2152,13 +2868,19 @@ class _PipeMessageViewState extends State<PipeMessageView> {
       DateTime.fromMillisecondsSinceEpoch(message.timestampMs.toInt()),
     );
     if (author.kind == PipeAuthorKind.PIPE_AUTHOR_KIND_CLAKTORY) {
-      return Center(
+      final line = Center(
         child: Text(
           '$text · $time',
           textAlign: TextAlign.center,
           style: TextStyles.caption.copyWith(color: palette.textFaint),
         ),
       );
+      // Announcing a website the other side shares (W2): Open and Copy
+      // address on it, while the share lasts.
+      if (message.shareId.isNotEmpty) {
+        return ShareAnnouncement(shareId: message.shareId, line: line);
+      }
+      return line;
     }
     final mine =
         author.kind == PipeAuthorKind.PIPE_AUTHOR_KIND_ME ||
@@ -3190,6 +3912,7 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
                       _MemberLine(
                         agent: agent,
                         value: _members.contains(agent.id),
+                        held: pipeHeldReason(pipe, agent.id),
                         onChanged: (on) => setState(() {
                           if (on) {
                             _members.add(agent.id);
@@ -3241,6 +3964,7 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
                       _MemberLine(
                         agent: agent,
                         value: _members.contains(agent.id),
+                        held: pipeHeldReason(pipe, agent.id),
                         onChanged: (on) => setState(() {
                           if (on) {
                             _members.add(agent.id);
@@ -3446,6 +4170,90 @@ class _CommandsLine extends StatelessWidget {
   }
 }
 
+/// Under a member's line on the approval card: it only sends to the pipe
+/// (#414), kept as it's set, with what that leaves out.
+class _SendOnlyLine extends StatelessWidget {
+  const _SendOnlyLine({required this.agent, required this.pipe});
+
+  final Agent agent;
+  final Pipe pipe;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Padding(
+      // Under the name, past the 20px character and its gap.
+      padding: const EdgeInsets.only(left: 20 + Space.s, top: Space.xs),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            pipeAccessLabel(PipeAccess.sendOnly),
+            style: TextStyles.caption.copyWith(color: palette.text),
+          ),
+          Padding(
+            padding: const EdgeInsets.only(top: 2, right: Space.xl),
+            child: Text(
+              sendOnlyNote(agent.name, pipe),
+              style: TextStyles.caption.copyWith(color: palette.textMuted),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A choice on an agent's approval card that's wider than the pipe now,
+/// where the pipe narrowed since the agent asked (Fugo, #471): in the
+/// consent cards' warning box, with what changed under it. [note] null:
+/// just [child].
+class _Narrowed extends StatelessWidget {
+  const _Narrowed({required this.note, required this.child});
+
+  final String? note;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final note = this.note;
+    if (note == null) return child;
+    final palette = Palette.of(context);
+    return Container(
+      margin: const EdgeInsets.only(top: Space.xs),
+      padding: const EdgeInsets.all(Space.s),
+      decoration: BoxDecoration(
+        color: palette.signal.withValues(alpha: 0.06),
+        border: Border.all(color: palette.signal.withValues(alpha: 0.4)),
+        borderRadius: BorderRadius.circular(Radii.control),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          child,
+          const SizedBox(height: Space.xs),
+          Text(
+            note,
+            style: TextStyles.caption.copyWith(
+              color: palette.text,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Why [agentId] can't use [pipe] in any role, as Claktory says it: it's
+/// another pipe's liaison (#414, Pipe.held_agents). Null when it can.
+String? pipeHeldReason(Pipe pipe, String agentId) {
+  for (final held in pipe.heldAgents) {
+    if (held.agentId == agentId) return proseCodes(held.reason);
+  }
+  return null;
+}
+
 /// What a member of a pipe may do (#414): read it and run commands on this
 /// computer, read it limited to the pipe, or only send to it.
 enum PipeAccess { commands, limited, sendOnly }
@@ -3535,26 +4343,54 @@ class _MemberLine extends StatelessWidget {
     required this.agent,
     required this.value,
     required this.onChanged,
+    this.held,
   });
 
   final Agent agent;
   final bool value;
   final ValueChanged<bool> onChanged;
 
+  /// Why it can't use the pipe (#414, [pipeHeldReason]): its switch is off
+  /// and can't be turned on, with why under its name.
+  final String? held;
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    return _SwitchLine(
+    // One already on keeps its switch, to take it off.
+    final held = value ? null : this.held;
+    final line = _SwitchLine(
       label: agent.name,
       value: value,
-      onChanged: onChanged,
+      onChanged: held == null ? onChanged : null,
       leading: AgentCharacter(agent: agent, size: 20),
       child: NameThenRole(
         name: agent.name,
         role: agent.role,
-        style: TextStyles.body.copyWith(color: palette.text),
+        style: TextStyles.body.copyWith(
+          color: held == null ? palette.text : palette.textMuted,
+        ),
         roleColor: palette.textMuted,
       ),
+    );
+    if (held == null) return line;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        line,
+        Padding(
+          // Under the name, past the 20px character and its gap.
+          padding: const EdgeInsets.only(
+            left: 20 + Space.s,
+            top: 2,
+            right: Space.xl,
+          ),
+          child: Text(
+            held,
+            style: TextStyles.caption.copyWith(color: palette.textMuted),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -3615,7 +4451,9 @@ class _SwitchLine extends StatelessWidget {
 
   final String label;
   final bool value;
-  final ValueChanged<bool> onChanged;
+
+  /// Null: it can't be turned.
+  final ValueChanged<bool>? onChanged;
   final Widget? leading;
 
   /// In place of [label]'s plain text.

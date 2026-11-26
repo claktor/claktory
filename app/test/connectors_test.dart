@@ -845,6 +845,14 @@ void main() {
     expect(find.text('eu-central-1'), findsOneWidget);
     // Folded until asked for.
     expect(find.textContaining('ec2:RunInstances'), findsNothing);
+    // A link at rest: underlined, before any pointer finds it.
+    expect(
+      tester
+          .widget<Text>(find.text('Show exact permissions (3 rules)'))
+          .style!
+          .decoration,
+      TextDecoration.underline,
+    );
     await tester.tap(find.text('Show exact permissions (3 rules)'));
     await tester.pump();
     expect(find.text('Allows'), findsNWidgets(3));

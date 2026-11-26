@@ -8,11 +8,15 @@ publish.workspace = true
 [dependencies]
 aho-corasick = "1"
 base64 = "0.23"
+# Request bodies sent compressed (providers/gzip.rs), with the fast zlib-rs backend.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 bytes = "1"
 futures-util = { version = "0.3", default-features = false }
 hashbrown = "0.17"
 http = "1"
+# Retry-After given as a date (accounts::retry_after_header).
+httpdate = "1"
 indexmap = { version = "2", features = ["serde"] }
 libc = "0.2"
 parking_lot = "0.12"

@@ -162,6 +162,9 @@ struct ActiveRelayActor {
     url: RelayUrl,
     /// Builder which can repeatedly build a relay client.
     relay_client_builder: relay::client::ClientBuilder,
+    /// Claktory: the endpoint's relay map, to read this relay's auth token
+    /// from at every dial, not only when the actor starts.
+    relay_map: RelayMap,
     /// Whether or not this is the home relay server.
     ///
     /// The home relay server needs to maintain it's connection to the relay server, even if
@@ -221,6 +224,8 @@ struct ActiveRelayActorOptions {
     stop_token: CancellationToken,
     metrics: Arc<SocketMetrics>,
     my_relay: HomeRelayWatch,
+    /// Claktory: see [`ActiveRelayActor::relay_map`].
+    relay_map: RelayMap,
 }
 
 /// Configuration needed to create a connection to a relay server.
@@ -232,7 +237,6 @@ struct RelayConnectionOptions {
     proxy_url: Option<Url>,
     prefer_ipv6: Arc<AtomicBool>,
     tls_config: rustls::ClientConfig,
-    auth_token: Option<String>,
 }
 
 /// Possible reasons for a failed relay connection.
@@ -293,9 +297,11 @@ impl ActiveRelayActor {
             stop_token,
             metrics,
             my_relay,
+            relay_map,
         } = opts;
         let relay_client_builder = Self::create_relay_builder(url.clone(), connection_opts);
         ActiveRelayActor {
+            relay_map,
             prio_inbox,
             inbox,
             relay_datagrams_recv,
@@ -321,7 +327,6 @@ impl ActiveRelayActor {
             proxy_url,
             prefer_ipv6,
             tls_config,
-            auth_token,
         } = opts;
 
         let mut builder = relay::client::ClientBuilder::new(
@@ -336,9 +341,8 @@ impl ActiveRelayActor {
             builder = builder.proxy_url(proxy_url);
         }
 
-        if let Some(token) = auth_token {
-            builder = builder.auth_token(token);
-        }
+        // Claktory: no auth token here; `dial_relay` takes it from the
+        // relay map at every dial, so the map is its only source.
         builder
     }
 
@@ -577,7 +581,15 @@ impl ActiveRelayActor {
     /// forever.
     // This is using `impl Future` to return a future without a reference to self.
     fn dial_relay(&self) -> impl Future<Output = Result<Client, DialError>> + use<> {
-        let client_builder = self.relay_client_builder.clone();
+        let mut client_builder = self.relay_client_builder.clone();
+        // Claktory: the auth token the relay map holds now, and only that
+        // one, so a token replaced with `Endpoint::insert_relay` (one that
+        // expires and is renewed) goes with the next connection, even to the
+        // home relay, whose actor never stops, and a config inserted without
+        // one (signed out) dials without one.
+        if let Some(token) = self.relay_map.get(&self.url).and_then(|config| config.auth_token.clone()) {
+            client_builder = client_builder.auth_token(token);
+        }
         async move {
             match time::timeout(CONNECT_TIMEOUT, client_builder.connect()).await {
                 Ok(Ok(client)) => Ok(client),
@@ -1406,11 +1418,6 @@ impl RelayActor {
     fn start_active_relay(&mut self, url: RelayUrl) -> ActiveRelayHandle {
         debug!(?url, "Adding relay connection");
 
-        let auth_token = self
-            .config
-            .relay_map
-            .get(&url)
-            .and_then(|cfg| cfg.auth_token.clone());
         let connection_opts = RelayConnectionOptions {
             secret_key: self.config.secret_key.clone(),
             #[cfg(not(wasm_browser))]
@@ -1418,7 +1425,6 @@ impl RelayActor {
             proxy_url: self.config.proxy_url.clone(),
             prefer_ipv6: self.config.ipv6_reported.clone(),
             tls_config: self.config.tls_config.clone(),
-            auth_token,
         };
 
         // TODO: Replace 64 with PER_CLIENT_SEND_QUEUE_DEPTH once that's unused
@@ -1436,6 +1442,7 @@ impl RelayActor {
             stop_token: self.cancel_token.child_token(),
             metrics: self.config.metrics.clone(),
             my_relay: self.config.my_relay.clone(),
+            relay_map: self.config.relay_map.clone(),
         };
         let actor = ActiveRelayActor::new(opts);
         self.active_relay_tasks.spawn(
@@ -1654,11 +1661,11 @@ mod tests {
                 tls_config: CaTlsConfig::insecure_skip_verify()
                     .client_config(default_provider())
                     .expect("infallible"),
-                auth_token: None,
             },
             stop_token,
             metrics,
             my_relay: Default::default(),
+            relay_map: RelayMap::empty(),
         };
         let task = tokio::spawn(ActiveRelayActor::new(opts).run().instrument(span));
         AbortOnDropHandle::new(task)
@@ -2184,11 +2191,11 @@ mod tests {
                 tls_config: CaTlsConfig::insecure_skip_verify()
                     .client_config(default_provider())
                     .expect("infallible"),
-                auth_token: None,
             },
             stop_token: CancellationToken::new(),
             metrics: Default::default(),
             my_relay: Default::default(),
+            relay_map: RelayMap::empty(),
         };
         let mut actor = ActiveRelayActor::new(opts);
 

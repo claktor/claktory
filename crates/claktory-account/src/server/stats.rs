@@ -370,11 +370,14 @@ fn export_rows(conn: &Connection, now: i64) -> rusqlite::Result<Vec<Row>> {
         5,
         &[&first_day, &today_day],
     )?;
+    // By the hour for the last 90 days, by the day before (`db::roll_up`).
     let activity = by_day(
-        "SELECT date(hour - hour % 86400, 'unixepoch'), sum(agent_minutes), sum(runs) FROM activity
-         WHERE hour >= ?1 AND hour < ?2 GROUP BY hour - hour % 86400",
+        "SELECT day, sum(agent_minutes), sum(runs) FROM (
+             SELECT date(hour - hour % 86400, 'unixepoch') AS day, agent_minutes, runs FROM activity WHERE hour >= ?1 AND hour < ?2
+             UNION ALL SELECT day, agent_minutes, runs FROM activity_days WHERE day >= ?3 AND day <= ?4
+         ) GROUP BY day",
         2,
-        &[&first, &(today + DAY)],
+        &[&first, &(today + DAY), &first_day, &today_day],
     )?;
     let health = by_day(
         "SELECT day, sum(rolled_back), sum(crashes) FROM health WHERE day >= ?1 AND day <= ?2 GROUP BY day",

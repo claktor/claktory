@@ -123,12 +123,18 @@ pub(crate) fn sent(factory: &Factory, sender: &str) -> Sent {
     Sent { send_id: send_id(), sender_run, taint: "{}".to_owned() }
 }
 
-/// `said`, checked before anything is sent: a known intent, and each
-/// message it answers one from an agent that the sender received.
+/// `said`, checked before anything is sent: a known intent, never a
+/// decision request sent quietly, and each message it answers one from an
+/// agent that the sender received.
 pub(crate) fn check(factory: &Factory, sender: &str, said: &mut Said) -> Result<(), String> {
     said.intent = said.intent.trim().to_owned();
     if !said.intent.is_empty() && !INTENTS.contains(&said.intent.as_str()) {
         return Err(format!("`intent` is one of {}, or left out.", INTENTS.join(", ")));
+    }
+    // A quiet message waits for its recipient's next wake: a question sent
+    // so hides from the one who should answer it (#280).
+    if said.quiet && said.intent == "decision_request" {
+        return Err("A decision request waits on its answer, so it never goes quietly: send it again without `quiet`. Nothing was sent.".to_owned());
     }
     said.reply_to.sort_unstable();
     said.reply_to.dedup();

@@ -370,7 +370,8 @@ type Props = &'static [(&'static str, Kind, bool)];
 fn catalog(component: &str) -> Option<Props> {
     use Kind::*;
     Some(match component {
-        "Text" => &[("text", DynString, true), ("variant", Choice(&["heading", "body", "caption"]), false)],
+        // title: a panel's title, as a Chart's label draws (#380).
+        "Text" => &[("text", DynString, true), ("variant", Choice(&["heading", "body", "caption", "title"]), false)],
         // A Row stacks its children one under another below stackBelow
         // points wide (#380), as a phone's dashboard does.
         "Row" => &[
@@ -771,7 +772,7 @@ mod tests {
             ),
             (
                 json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [{"id": "x", "component": "Text", "text": "a", "variant": "huge"}]}}),
-                "one of heading, body, caption",
+                "one of heading, body, caption, title",
             ),
             (
                 json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [{"id": "x", "component": "Button", "child": "y", "action": {"functionCall": {}}}]}}),

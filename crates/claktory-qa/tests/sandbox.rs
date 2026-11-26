@@ -287,3 +287,78 @@ fn a_fake_claude_sign_in_reaches_its_usage_limit() {
     assert!(String::from_utf8_lossy(&env.stdout).contains("export FACTORY_QA_ANTHROPIC_URL='http://127.0.0.1:"));
     ok(root, &["down", "three"]);
 }
+
+/// A PNG of `width` × `height` that doesn't compress, as big as a
+/// screenshot's bytes get.
+fn noisy_png(width: u32, height: u32, seed: u64) -> Vec<u8> {
+    let mut state = seed | 1;
+    let pixels = image::RgbImage::from_fn(width, height, |_, _| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let [red, green, blue, ..] = state.to_le_bytes();
+        image::Rgb([red, green, blue])
+    });
+    let mut bytes = Vec::new();
+    pixels.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).expect("png");
+    bytes
+}
+
+/// #490: an agent holding three large screenshots holds a few thousand
+/// tokens of them, what its provider charges for their size, never their
+/// base64's million: it doesn't compact, before a restart or after.
+#[test]
+fn an_agent_holding_three_large_images_doesnt_compact_after_a_restart() {
+    if !built() {
+        return;
+    }
+    let root = Root(std::env::temp_dir().join(format!("claktory-qa-images-{}", std::process::id())));
+    let root = root.0.as_path();
+    std::fs::create_dir_all(root).expect("root");
+    let script = root.join("script.json");
+    std::fs::write(&script, r#"{"default": "Noted."}"#).expect("script");
+    let mut paths = Vec::new();
+    for number in 1..=3_u64 {
+        let path = root.join(format!("shot-{number}.png"));
+        let png = noisy_png(1100, 800, number);
+        assert!(png.len() > 2_000_000, "{} bytes", png.len());
+        std::fs::write(&path, png).expect("png");
+        paths.push(path.to_str().expect("path").to_owned());
+    }
+    ok(root, &["up", "five", "--no-account", "--script", script.to_str().expect("path")]);
+    ok(root, &["send", "five", "CreateProject", r#"{"name": "Site"}"#]);
+    ok(root, &["send", "five", "CreateAgent", r#"{"project_id": "site", "name": "Lea"}"#]);
+    let tokens = |root: &Path| -> u64 {
+        let value = ok(root, &["workspace", "five", "agents[name=Lea].context_tokens"])["value"].clone();
+        value.as_str().and_then(|tokens| tokens.parse().ok()).or_else(|| value.as_u64()).unwrap_or(0)
+    };
+    let compactions = |root: &Path| -> usize {
+        let all = ok(root, &["transcript", "five", "Lea", "--from", "0"]);
+        all["entries"].as_array().expect("entries").iter().filter(|entry| entry.get("compaction").is_some()).count()
+    };
+    assert_eq!(ok(root, &["ask", "five", "Lea", "Hello"])["reply"], "Noted.");
+    let before = tokens(root);
+    assert!(before > 0, "the model reported its input");
+
+    // Copied into Lea's folder and looked at, all three.
+    let copy = format!("cp {} .", paths.join(" "));
+    let looks = format!(
+        "call bash {}\ncall read_image {{\"path\": \"shot-1.png\"}}\ncall read_image {{\"path\": \"shot-2.png\"}}\ncall read_image {{\"path\": \"shot-3.png\"}}",
+        serde_json::json!({"command": copy})
+    );
+    ok(root, &["ask", "five", "Lea", &looks]);
+    assert_eq!(ok(root, &["ask", "five", "Lea", "Seen them?"])["reply"], "Noted.");
+    let with_images = tokens(root);
+    // gpt-4.1-mini, at OpenAI's rule: 1100 × 800 is 6 tiles, 1105 tokens.
+    let images = with_images - before;
+    assert!((3 * 1105..3 * 1105 + 2000).contains(&images), "three images held {images} tokens ({before} before, {with_images} after)");
+    assert_eq!(compactions(root), 0);
+
+    // Restarted, it holds them (from their files) as it did, and carries on.
+    ok(root, &["restart", "five"]);
+    assert_eq!(ok(root, &["ask", "five", "Lea", "Still there?"])["reply"], "Noted.");
+    let after = tokens(root);
+    assert!(after < with_images + 500, "after a restart Lea holds {after} tokens, {with_images} before it");
+    assert_eq!(compactions(root), 0, "Lea compacted");
+    ok(root, &["down", "five"]);
+}

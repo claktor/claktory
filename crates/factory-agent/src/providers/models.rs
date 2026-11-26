@@ -307,7 +307,7 @@ struct EnvState {
 }
 
 /// Which images went to Anthropic as files, beside the sign-ins (#382).
-const IMAGE_FILES: &str = "anthropic-files.jsonl";
+pub const IMAGE_FILES: &str = "anthropic-files.jsonl";
 /// How long whose subscription it is holds once read (`files_for`), and
 /// how soon it's read again when it couldn't be.
 const PERSONAL_KEEP_MS: u64 = 6 * 3_600_000;

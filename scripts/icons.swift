@@ -5,9 +5,11 @@
 //
 //   swift scripts/icons.swift
 //
-// Writes app/macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_*.png
-// and app/macos/dev/AppIcon.icns, and for iOS the 1024px square of
-// app/ios/Runner/Assets.xcassets/AppIcon.appiconset and app/ios/dev's
+// Writes app/macos/Runner/Assets.xcassets/AppIcon.appiconset/app_icon_*.png,
+// the same for Claktory Dev in AppIconDev.appiconset (what Debug and Profile
+// builds show, #501), and app/macos/dev/AppIcon.icns, and for iOS the 1024px square of
+// app/ios/Runner/Assets.xcassets/AppIcon.appiconset (and Claktory Dev's in
+// AppIconDev.appiconset beside it) and app/ios/dev's
 // icons. Run it from the repo root after changing the design; the outputs
 // are checked in.
 
@@ -138,6 +140,16 @@ for pixels in [16, 32, 64, 128, 256, 512, 1024] {
     write(png(claktory, pixels: pixels), "\(catalog)/app_icon_\(pixels).png")
 }
 
+// Debug and Profile builds' icon (Configs/*.xcconfig, CLAKTORY_APP_ICON):
+// Claktory Dev's, the same sizes and Contents.json as Claktory's.
+let devCatalog = root + "/app/macos/Runner/Assets.xcassets/AppIconDev.appiconset"
+try! FileManager.default.createDirectory(atPath: devCatalog, withIntermediateDirectories: true)
+for pixels in [16, 32, 64, 128, 256, 512, 1024] {
+    write(png(dev, pixels: pixels), "\(devCatalog)/app_icon_\(pixels).png")
+}
+try? FileManager.default.removeItem(atPath: devCatalog + "/Contents.json")
+try! FileManager.default.copyItem(atPath: catalog + "/Contents.json", toPath: devCatalog + "/Contents.json")
+
 let devDir = root + "/app/macos/dev"
 let iconset = NSTemporaryDirectory() + "FactoryDev.iconset"
 try? FileManager.default.removeItem(atPath: iconset)
@@ -158,9 +170,16 @@ iconutil.waitUntilExit()
 // dev build uses AppIcon.icns.
 let iosCatalog = root + "/app/ios/Runner/Assets.xcassets/AppIcon.appiconset"
 write(png(claktory, pixels: 1024, square: true), "\(iosCatalog)/Icon-App-1024x1024@1x.png")
+// Debug and Profile builds' icon (Flutter/*.xcconfig, CLAKTORY_APP_ICON,
+// #501): Claktory Dev's square, beside Claktory's.
+let iosDevCatalog = root + "/app/ios/Runner/Assets.xcassets/AppIconDev.appiconset"
+try! FileManager.default.createDirectory(atPath: iosDevCatalog, withIntermediateDirectories: true)
+write(png(dev, pixels: 1024, square: true), "\(iosDevCatalog)/Icon-App-1024x1024@1x.png")
+try? FileManager.default.removeItem(atPath: iosDevCatalog + "/Contents.json")
+try! FileManager.default.copyItem(atPath: iosCatalog + "/Contents.json", toPath: iosDevCatalog + "/Contents.json")
 let iosDev = root + "/app/ios/dev"
 try! FileManager.default.createDirectory(atPath: iosDev, withIntermediateDirectories: true)
 for (name, pixels) in [("AppIcon60x60@2x", 120), ("AppIcon60x60@3x", 180), ("AppIcon76x76@2x~ipad", 152), ("AppIcon83.5x83.5@2x~ipad", 167)] {
     write(png(dev, pixels: pixels, square: true), "\(iosDev)/\(name).png")
 }
-print("wrote \(catalog), \(devDir)/AppIcon.icns, \(iosCatalog) and \(iosDev)")
+print("wrote \(catalog), \(devCatalog), \(devDir)/AppIcon.icns, \(iosCatalog) and \(iosDev)")

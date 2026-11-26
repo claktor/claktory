@@ -1559,91 +1559,112 @@ class _Layout {
     ];
   }
 
+  /// Each cell's cost, the cell it came from and the way it was entered,
+  /// as the search in round [_seen] found them.
   var _cost = Int32List(0);
   var _prev = Int32List(0);
+  var _dir = Uint8List(0);
   var _seen = Int32List(0);
-  var _search_ = 0;
+  var _round = 0;
+  final _queue = _Buckets();
 
   /// The cheapest way from [from]'s first step to anything of [net]
   /// already laid: length, plus bends, crossings and running along
   /// outlines, which all cost extra. Null when there's none.
+  ///
+  /// A* over cells, each kept with the way it was entered by its cheapest
+  /// path (a bend costs from there), its estimate the distance to the
+  /// net's box, which never overestimates; the cells in buckets by cost,
+  /// as every cost is a small whole number.
   List<(int, int)>? _search(int net, _Port from) {
+    if (!_in(from.sx, from.sy)) return null;
     const bend = 6;
     const cross = 10;
     const outline = 3;
-    final states = gw * gh * 4;
-    if (_cost.length != states) {
-      _cost = Int32List(states);
-      _prev = Int32List(states);
-      _seen = Int32List(states);
+    final gw = this.gw;
+    final gh = this.gh;
+    final size = gw * gh;
+    if (_cost.length != size) {
+      _cost = Int32List(size);
+      _prev = Int32List(size);
+      _dir = Uint8List(size);
+      _seen = Int32List(size);
     }
-    _search_++;
     final cost = _cost;
     final prev = _prev;
+    final dirOf = _dir;
     final seen = _seen;
-    final round = _search_;
-    int costOf(int s) => seen[s] == round ? cost[s] : 1 << 30;
-    final heap = _Heap();
-    if (!_in(from.sx, from.sy)) return null;
-    final start = _p(from.sx, from.sy) * 4 + from.dir;
-    cost[start] = 0;
-    prev[start] = -1;
-    seen[start] = round;
+    final round = ++_round;
+    final netAt = this.netAt;
+    final crossAt = this.crossAt;
+    final maskAt = this.maskAt;
+    final blocked = this.blocked;
+    final reserved = this.reserved;
     final box = bounds[net];
-    // The search heads for the net's box: A*, with the distance to it as
-    // the estimate, which never overestimates.
-    int estimate(int p) {
+    final bx0 = box?[0] ?? 0;
+    final by0 = box?[1] ?? 0;
+    final bx1 = box?[2] ?? 0;
+    final by1 = box?[3] ?? 0;
+    int estimate(int x, int y) {
       if (box == null) return 0;
-      final x = p % gw;
-      final y = p ~/ gw;
-      final dx = x < box[0] ? box[0] - x : (x > box[2] ? x - box[2] : 0);
-      final dy = y < box[1] ? box[1] - y : (y > box[3] ? y - box[3] : 0);
+      final dx = x < bx0 ? bx0 - x : (x > bx1 ? x - bx1 : 0);
+      final dy = y < by0 ? by0 - y : (y > by1 ? y - by1 : 0);
       return dx + dy;
     }
 
-    heap.push(estimate(start ~/ 4), start);
-    while (heap.isNotEmpty) {
-      final (f, s) = heap.pop();
-      final c = costOf(s);
-      if (f != c + estimate(s ~/ 4)) continue;
-      final p = s ~/ 4;
-      final d = s % 4;
+    final start = from.sy * gw + from.sx;
+    cost[start] = 0;
+    prev[start] = -1;
+    dirOf[start] = from.dir;
+    seen[start] = round;
+    final queue = _queue..clear();
+    queue.push(estimate(from.sx, from.sy), start);
+    while (queue.isNotEmpty) {
+      final f = queue.least;
+      final p = queue.pop();
+      final c = cost[p];
       final x = p % gw;
       final y = p ~/ gw;
+      // Reached more cheaply since it was queued.
+      if (f != c + estimate(x, y)) continue;
+      final d = dirOf[p];
       final free = netAt[p] == -1 && crossAt[p] == -1;
-      for (final nd in [d, (d + 1) % 4, (d + 3) % 4]) {
-        final turning = nd != d;
+      for (var k = 0; k < 3; k++) {
+        final turning = k != 0;
         // Lines only turn where nothing else is.
         if (turning && !free) continue;
+        final nd = k == 0 ? d : (k == 1 ? (d + 1) & 3 : (d + 3) & 3);
         final nx = x + _dx[nd];
         final ny = y + _dy[nd];
-        if (!_in(nx, ny)) continue;
-        final q = _p(nx, ny);
-        if (blocked[q] == 1) continue;
-        if (reserved[q] != -1 && reserved[q] != net) continue;
-        var step = 1 + (turning ? bend : 0) + (blocked[q] == 2 ? outline : 0);
-        if (netAt[q] == net) {
+        if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue;
+        final q = ny * gw + nx;
+        final solid = blocked[q];
+        if (solid == 1) continue;
+        final held = reserved[q];
+        if (held != -1 && held != net) continue;
+        var step = 1 + (turning ? bend : 0) + (solid == 2 ? outline : 0);
+        final there = netAt[q];
+        if (there == net) {
           // Joining its own net: never at a crossing, never a fourth
           // branch.
           final bit = 1 << _opposite(nd);
           if (crossAt[q] != -1 || maskAt[q] & bit != 0) continue;
           if (_bits(maskAt[q] | bit) > 3) continue;
-          return _path(prev, s, (nx, ny));
+          return _path(prev, p, (nx, ny));
         }
-        if (netAt[q] != -1) {
+        if (there != -1) {
           // Across another line: straight over a straight stretch of it.
-          final mask = maskAt[q];
-          final across = nd % 2 == 0 ? 0xA : 0x5; // up+down, or left+right
-          if (mask != across || crossAt[q] != -1) continue;
+          final across = nd.isEven ? 0xA : 0x5; // up+down, or left+right
+          if (maskAt[q] != across || crossAt[q] != -1) continue;
           step += cross;
         }
-        final ns = q * 4 + nd;
         final nc = c + step;
-        if (nc < costOf(ns)) {
-          cost[ns] = nc;
-          seen[ns] = round;
-          prev[ns] = s;
-          heap.push(nc + estimate(q), ns);
+        if (seen[q] != round || nc < cost[q]) {
+          cost[q] = nc;
+          prev[q] = p;
+          dirOf[q] = nd;
+          seen[q] = round;
+          queue.push(nc + estimate(nx, ny), q);
         }
       }
     }
@@ -1652,65 +1673,66 @@ class _Layout {
 
   List<(int, int)> _path(Int32List prev, int last, (int, int) goal) {
     final out = <(int, int)>[goal];
-    var s = last;
-    while (s != -1) {
-      final p = s ~/ 4;
+    var p = last;
+    while (p != -1) {
       out.add((p % gw, p ~/ gw));
-      s = prev[s];
+      p = prev[p];
     }
     return out.reversed.toList();
   }
 }
 
-/// A binary min-heap of (cost, state), ties broken by state, so the search
-/// is the same every time.
-class _Heap {
-  final _cost = <int>[];
-  final _state = <int>[];
+/// Dial's queue: cells in buckets by their cost and estimate, 32 buckets
+/// round a ring. A step adds at most 21 to it (a crossing at a bend on an
+/// outline, a cell further from the goal) and it never goes down, so the
+/// ring always holds every cost still queued. A bucket is taken last in,
+/// first out, so the search is the same every time.
+class _Buckets {
+  static const _ring = 32;
+  final _items = List.generate(_ring, (_) => Int32List(64));
+  final _lengths = Int32List(_ring);
+  var _count = 0;
+  var _at = 0;
+  var _least = -1;
 
-  bool get isNotEmpty => _cost.isNotEmpty;
+  bool get isNotEmpty => _count > 0;
 
-  bool _less(int i, int j) =>
-      _cost[i] < _cost[j] || (_cost[i] == _cost[j] && _state[i] < _state[j]);
-
-  void _swap(int i, int j) {
-    final c = _cost[i];
-    _cost[i] = _cost[j];
-    _cost[j] = c;
-    final s = _state[i];
-    _state[i] = _state[j];
-    _state[j] = s;
+  void clear() {
+    _lengths.fillRange(0, _ring, 0);
+    _count = 0;
+    _least = -1;
   }
 
-  void push(int cost, int state) {
-    _cost.add(cost);
-    _state.add(state);
-    var i = _cost.length - 1;
-    while (i > 0) {
-      final parent = (i - 1) ~/ 2;
-      if (!_less(i, parent)) break;
-      _swap(i, parent);
-      i = parent;
+  /// The least cost queued.
+  int get least {
+    while (_lengths[_at] == 0) {
+      _at = (_at + 1) % _ring;
+      _least++;
     }
+    return _least;
   }
 
-  (int, int) pop() {
-    final top = (_cost.first, _state.first);
-    final last = _cost.length - 1;
-    _swap(0, last);
-    _cost.removeLast();
-    _state.removeLast();
-    var i = 0;
-    while (true) {
-      final l = 2 * i + 1;
-      final r = l + 1;
-      var m = i;
-      if (l < _cost.length && _less(l, m)) m = l;
-      if (r < _cost.length && _less(r, m)) m = r;
-      if (m == i) break;
-      _swap(i, m);
-      i = m;
+  void push(int cost, int cell) {
+    assert(_least < 0 || (cost >= _least && cost < _least + _ring));
+    if (_least < 0) {
+      _least = cost;
+      _at = cost % _ring;
     }
-    return top;
+    final b = cost % _ring;
+    var items = _items[b];
+    final n = _lengths[b];
+    if (n == items.length) {
+      items = _items[b] = Int32List(n * 2)..setRange(0, n, items);
+    }
+    items[n] = cell;
+    _lengths[b] = n + 1;
+    _count++;
+  }
+
+  /// A cell of the least cost, taken off.
+  int pop() {
+    least;
+    _count--;
+    return _items[_at][--_lengths[_at]];
   }
 }

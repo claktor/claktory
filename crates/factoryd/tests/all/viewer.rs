@@ -232,6 +232,16 @@ async fn an_agent_shows_the_person_a_file_once() {
     apply_request(&mut client, &mut view, show(r#"{"path":"missing.md"}"#)).await;
     view.follow(&mut client, |view| idle(view, "builder")).await;
     assert!(said(&view).expect("said").starts_with("No such file: "));
+    // A named pipe is never opened: that would wait for a writer, and the
+    // agent with it (row 1322).
+    #[cfg(unix)]
+    {
+        assert!(std::process::Command::new("mkfifo").arg(site.join("slow.txt")).status().expect("mkfifo").success());
+        apply_request(&mut client, &mut view, show(r#"{"path":"slow.txt"}"#)).await;
+        view.follow(&mut client, |view| idle(view, "builder")).await;
+        let refused = said(&view).expect("said");
+        assert!(refused.contains("slow.txt isn't a file the app can show: it's a named pipe, a socket or a device."), "{refused}");
+    }
 }
 
 /// show opens panes up to the person's setting (4 until changed), counting

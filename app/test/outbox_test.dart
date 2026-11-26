@@ -38,6 +38,62 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 10));
   }
 
+  test(
+    'sending covers the whole upload and acknowledgement, across targets',
+    () async {
+      final backend = FakeOutboxBackend();
+      final outbox = Outbox(backend);
+      final states = <bool>[];
+      outbox.addListener(() => states.add(outbox.sending));
+      expect(outbox.sending, isFalse);
+      outbox.send('a', 'with a file', files: [big]);
+      expect(
+        outbox.sending,
+        isTrue,
+        reason: 'before the first async file read',
+      );
+      await until(() => backend.answers.isNotEmpty);
+      expect(
+        outbox.sending,
+        isTrue,
+        reason: 'upload done, send not yet acknowledged',
+      );
+      outbox.send('another-target', 'also on its way');
+      await until(() => backend.answers.length == 2);
+      backend.answers.first.complete();
+      await until(() => outbox.of('a').isEmpty);
+      expect(outbox.sending, isTrue, reason: 'another target is still sending');
+      backend.answers.last.complete();
+      await until(() => !outbox.sending);
+      expect(states.first, isTrue);
+      expect(states.last, isFalse);
+    },
+  );
+
+  test(
+    'sending excludes failed and connection-waiting messages, includes retry',
+    () async {
+      final backend = FakeOutboxBackend()
+        ..refuseChunks = const RequestFailure('Connection lost.');
+      final connected = ValueNotifier(true);
+      final outbox = Outbox(backend, connected: connected);
+      final message = outbox.send('a', '', files: [big]);
+      await until(() => message.failed);
+      expect(outbox.sending, isFalse);
+      expect(outbox.of('a'), [
+        message,
+      ], reason: 'waiting content is not discarded');
+      backend.refuseChunks = null;
+      outbox.retry(message);
+      expect(outbox.sending, isTrue);
+      await until(() => backend.answers.isNotEmpty);
+      backend.answers.single.complete();
+      await until(() => !outbox.sending);
+      expect(outbox.of('a'), isEmpty);
+      connected.dispose();
+    },
+  );
+
   test('files upload a chunk at a time, then go with the message', () async {
     final backend = FakeOutboxBackend();
     final outbox = Outbox(backend);

@@ -67,6 +67,10 @@ enum MainError {
     #[cfg(feature = "qa-provider")]
     #[error("{0}")]
     QaProvider(String),
+    /// QA builds only: FACTORY_QA_CLAIM_* that the guard refuses.
+    #[cfg(feature = "qa-lies")]
+    #[error("{0}")]
+    QaLies(String),
 }
 
 fn main() -> ExitCode {
@@ -74,6 +78,12 @@ fn main() -> ExitCode {
     // per command with secrets, so it starts lean, without a runtime or logs.
     if std::env::args().nth(1).as_deref() == Some("redact") {
         return factory_agent::secrets::filter_main();
+    }
+    // Claktory's browser runner (#435): its stdout is the wire to factoryd,
+    // and it makes its own namespaces while it's still a single thread.
+    if std::env::args().nth(1).as_deref() == Some("browser-runner") {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        return factoryd::browser_runner::main(&args);
     }
     // `factoryd install` and `uninstall`, run by the Mac app: their answer
     // is one JSON line on stdout, so no logs there.
@@ -131,7 +141,13 @@ async fn serve_main() -> ExitCode {
     if args.iter().any(|arg| arg == "receive") && args.iter().any(|arg| arg == "--json") {
         tracing_subscriber::fmt().with_env_filter(filter).with_ansi(false).with_writer(std::io::stderr).init();
     } else {
-        tracing_subscriber::fmt().with_env_filter(filter).with_ansi(std::io::stdout().is_terminal()).init();
+        // A line logged over and over is counted rather than written each
+        // time (factoryd::log_file).
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(std::io::stdout().is_terminal())
+            .with_writer(factoryd::log_file::Quieted)
+            .init();
     }
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
@@ -171,6 +187,9 @@ async fn run() -> Result<(), MainError> {
             // It holds the vault's key: no core dumps, and on Linux no other
             // process of this user reads its memory.
             factoryd::vault::memory::harden();
+            // launchd's 256 open files, or systemd's 1024, ran out under
+            // load: as many as the system allows, for agents' commands too.
+            factoryd::open_files::raise();
             // Before anything starts: the open vault's key from the backend
             // before this one, at an update.
             let handed = factoryd::vault::handoff::receive();
@@ -457,7 +476,12 @@ async fn allow_in_terminal(home: &Home, device: &factoryd::remote::Device) -> Re
     use factoryd::remote;
     use std::io::{BufRead, Write};
     let Ok(tty) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty") else {
-        println!("Allow the device in Claktory when it asks, or run factoryd allow {}.", device.id);
+        // Over SSH without -t, say (Matt's case): nothing here can ask for
+        // the digits, so it says how to be asked.
+        println!(
+            "When the device has used the code, allow it in Claktory on one of your devices, or in a terminal on this computer: run factoryd allow {} and type the 4 digits on its screen. Over SSH, connect with ssh -t, or it isn't a terminal.",
+            device.id
+        );
         return Ok(());
     };
     let claktory = remote::secret_key(home)?.public().to_string();
@@ -545,6 +569,10 @@ async fn supervise_backend(home: Home, dev: bool) -> Result<(), MainError> {
     tracing::info!(backend = %home.backend().display(), version = update::VERSION, "supervising");
     // It may hold the vault's key between two backends.
     factoryd::vault::memory::harden();
+    // The backends it starts inherit it. Each backend raises its own as it
+    // starts too, so a supervisor installed before this one (which doesn't)
+    // needs no replacing: no SUPERVISOR_VERSION bump for it.
+    factoryd::open_files::raise();
     let mut holder = factoryd::vault::handoff::Holder::default();
     loop {
         if let Err(error) = update::start_trial(&home) {
@@ -609,7 +637,14 @@ async fn supervise_backend(home: Home, dev: bool) -> Result<(), MainError> {
             }
             Err(error) => Some(format!("It couldn't be started: {error}.")),
         };
-        if update::update_failed(&home) {
+        // A disk that can't be written (friend bug #36) isn't the backend's
+        // fault: going back to an earlier one would only fail there too, and
+        // write over it once the disk works. It's started again as it is.
+        let disk = ended.as_ref().and_then(|_| factoryd::disk::check(home.root()).err()).and_then(|error| factoryd::disk::fault_of(&error));
+        if let Some(fault) = disk {
+            tracing::error!(?fault, "the disk can't be written; not going back to an earlier backend");
+        }
+        if disk.is_none() && update::update_failed(&home) {
             match update::roll_back(&home, ended.as_deref().unwrap_or("It stopped.")) {
                 Ok(()) => continue,
                 Err(error) => tracing::error!(%error, "could not go back to the previous backend"),
@@ -622,6 +657,7 @@ async fn supervise_backend(home: Home, dev: bool) -> Result<(), MainError> {
         // Broken outside a trial (a power cut during an update, say): the
         // one before, once.
         if failures >= FAILURES_TO_FALL_BACK
+            && disk.is_none()
             && let Some(how) = &ended
             && update::fall_back(&home, how)
         {
@@ -686,7 +722,9 @@ fn registry(home: &Home, port: u16) -> Result<Registry, MainError> {
                 *slot = anthropic;
             }
             let store = factory_agent::credentials::FileCredentialStore::new(home.auth_path());
-            return Ok(Registry::with_providers(store, factory_agent::auth::process_env(), providers));
+            // Images go to qa-model's Files API as they would to Anthropic's (#382).
+            let files = home.auth_path().with_file_name(factory_agent::providers::models::IMAGE_FILES);
+            return Ok(Registry::with_providers(store, factory_agent::auth::process_env(), providers).keeping_image_files(Some(files)));
         }
     }
     #[cfg(not(feature = "qa-provider"))]
@@ -701,6 +739,8 @@ async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Hand
         return Err(MainError::ImportUnfinished(why));
     }
     // Before it listens: a QA override the guard refuses stops it here.
+    #[cfg(feature = "qa-lies")]
+    factoryd::qa_lies::init(home.root(), addr.port()).map_err(MainError::QaLies)?;
     let models = Arc::new(registry(&home, addr.port())?);
     // A helper an older backend's update left out goes in beside this one.
     factoryd::update::heal_helpers(&home);
@@ -743,6 +783,7 @@ async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Hand
         _ = terminate.recv() => {
             tracing::info!("stopping");
             factory.finish_writes(Duration::from_secs(5)).await;
+            factory.stopping();
             factoryd::backend_stopped(&home);
         }
     }

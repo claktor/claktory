@@ -8,6 +8,7 @@ pub mod geo;
 pub mod mail;
 mod pipes;
 mod reports;
+pub mod relay_token;
 pub mod review;
 pub mod secrets;
 pub mod statement;
@@ -61,6 +62,7 @@ fn signed(method: &Method, path: &str) -> bool {
             &Method::POST,
             "/v1/share"
                 | "/v1/check-in"
+                | "/v1/relay/token"
                 | "/v1/move"
                 | "/v1/devices/sign-out"
                 | "/v1/devices/remove"
@@ -138,6 +140,8 @@ pub struct UserApps {
 pub struct Service {
     config: Config,
     secrets: Secrets,
+    /// Derived from `secrets`' k_share.
+    relay_tokens: relay_token::Keys,
     mailer: Arc<dyn Mailer>,
     clock: Clock,
     db: Mutex<Connection>,
@@ -153,6 +157,7 @@ impl Service {
         let conn = db::open(db).map_err(|error| format!("can't open {}: {error}", db.display()))?;
         Ok(Arc::new(Service {
             config,
+            relay_tokens: relay_token::Keys::derive(&secrets.k_share),
             secrets,
             mailer,
             clock,
@@ -385,6 +390,7 @@ impl Service {
             (&Method::POST, "/v1/sign-in/verify") => api::sign_in_verify(self, call),
             (&Method::POST, "/v1/share") => api::share(self, call).await,
             (&Method::POST, "/v1/check-in") => api::check_in(self, call),
+            (&Method::POST, "/v1/relay/token") => relay_token::token(self, call),
             (&Method::PUT, "/v1/endpoints") => api::endpoints(self, call),
             (&Method::POST, "/v1/move") => api::move_claktory(self, call).await,
             (&Method::POST, "/v1/devices/sign-in/start") => devices::sign_in_start(self, call).await,

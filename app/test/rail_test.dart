@@ -8,7 +8,6 @@ import 'package:factory_app/account_match.dart';
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/controls.dart';
 import 'package:factory_app/device_account.dart';
-import 'package:factory_app/devices.dart' show thisDeviceKind;
 import 'package:factory_app/drafts.dart';
 import 'package:factory_app/identity.dart';
 import 'package:factory_app/main.dart';
@@ -616,7 +615,9 @@ void main() {
     expect(_labeled('mac-mini has something new'), findsOneWidget);
 
     // Another: its agents, in the drawer still open.
-    await tester.tap(_labeled('mac-mini, this $thisDeviceKind is signed out'));
+    await tester.tap(
+      _labeled("mac-mini, this app isn't signed in to your Claktory account"),
+    );
     await pumpFrames(tester);
     expect(app.connections.current?.code, _mini);
     expect(
@@ -632,10 +633,12 @@ void main() {
     await pumpFrames(tester);
     expect(find.byType(ClaktoryList), findsOneWidget);
     expect(
-      _labeled('nixos, this $thisDeviceKind is signed out'),
+      _labeled("nixos, this app isn't signed in to your Claktory account"),
       findsOneWidget,
     );
-    await tester.tap(_labeled('nixos, this $thisDeviceKind is signed out'));
+    await tester.tap(
+      _labeled("nixos, this app isn't signed in to your Claktory account"),
+    );
     await pumpFrames(tester);
     expect(find.byType(ClaktoryList), findsNothing);
     expect(app.connections.current?.code, _nixos);
@@ -725,9 +728,10 @@ void main() {
             scrollable: find.byType(Scrollable).first,
           );
         }
-        // The last rows are reachable however short the screen.
+        // The last rows are reachable however short the screen: scrolled
+        // until it can be tapped, not only until it's built.
         await tester.scrollUntilVisible(
-          find.text('Add a Claktory'),
+          find.text('Add a Claktory').hitTestable(),
           100,
           scrollable: find.byType(Scrollable).first,
         );
@@ -1081,7 +1085,7 @@ void main() {
       await app.show(tester);
       expect(_labeled('This Mac'), findsOneWidget);
       expect(
-        _labeled('nixos, this $thisDeviceKind is signed out'),
+        _labeled("nixos, this app isn't signed in to your Claktory account"),
         findsOneWidget,
       );
       // Neutral: no `danger` ring, the words in `textMuted`.
@@ -1099,18 +1103,40 @@ void main() {
         ((box.decoration as BoxDecoration?)?.border as Border?)?.top.color,
         isNot(palette.danger),
       );
+      // Its card, on hover, says what it means and signs in from there,
+      // the pointer moved onto it (#529).
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      addTearDown(mouse.removePointer);
+      await mouse.addPointer(location: Offset.zero);
+      await mouse.moveTo(tester.getCenter(find.text('N')));
+      await pumpFrames(tester, const Duration(seconds: 1));
+      final cardSignIn = find.text('Sign in…');
+      expect(cardSignIn, findsOneWidget);
+      await mouse.moveTo(tester.getCenter(cardSignIn));
+      await pumpFrames(tester, const Duration(seconds: 1));
+      await mouse.down(tester.getCenter(cardSignIn));
+      await mouse.up();
+      await pumpFrames(tester);
+      expect(find.text('Sign in to your Claktory account'), findsOneWidget);
+      await tester.tap(find.text('Cancel').last);
+      await mouse.moveTo(Offset.zero);
+      await pumpFrames(tester, const Duration(seconds: 1));
+      expect(find.text('Sign in to your Claktory account'), findsNothing);
       await tester.tap(
-        _labeled('nixos, this $thisDeviceKind is signed out'),
+        _labeled("nixos, this app isn't signed in to your Claktory account"),
         buttons: kSecondaryButton,
       );
       await pumpFrames(tester);
       final signedOut = find.textContaining(
-        'This $thisDeviceKind is signed out',
+        "This app isn't signed in to your Claktory account",
         findRichText: true,
       );
       expect(signedOut, findsOneWidget);
       expect(
-        find.text('Sign in to check that this Claktory is yours.'),
+        find.text(
+          "That's separate from the Claktory's own sign-in. Sign in so this "
+          'app can recognize your Claktories.',
+        ),
         findsOneWidget,
       );
       final label = tester.widget<RichText>(signedOut);
@@ -1120,12 +1146,44 @@ void main() {
       await pumpFrames(tester);
       expect(find.text('Sign in to your Claktory account'), findsOneWidget);
       expect(
+        find.text('So this app can recognize the Claktories on your account.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('on a phone, signed out, the list of Claktories says what it '
+        'means once, with Sign in… (#529)', (tester) async {
+      final app = _App(localBackend: false, account: DeviceAccount());
+      app.connections
+        ..use(parsePairingCode(_mini))
+        ..use(parsePairingCode(_nixos));
+      await app.show(tester, size: const Size(390, 844));
+      final back = tester.widget(
+        find.byWidgetPredicate(
+          (w) => w.runtimeType.toString() == '_BackToList',
+        ),
+      );
+      (back as dynamic).back();
+      await pumpFrames(tester);
+      expect(find.byType(ClaktoryList), findsOneWidget);
+      expect(
         find.text(
-          'So Claktory can check that the Claktories you connect to are '
-          'yours.',
+          "This app isn't signed in to your Claktory account, so it can't "
+          'recognize your Claktories.',
         ),
         findsOneWidget,
       );
+      // Each row still says so; the way to sign in is once, above them.
+      expect(
+        find.textContaining(
+          "This app isn't signed in to your Claktory account",
+          findRichText: true,
+        ),
+        findsNWidgets(3),
+      );
+      await tester.tap(find.text('Sign in…'));
+      await pumpFrames(tester);
+      expect(find.text('Sign in to your Claktory account'), findsOneWidget);
     });
 
     testWidgets("on a phone, signed out, the drawer's header offers Sign "
@@ -1145,7 +1203,7 @@ void main() {
         find.descendant(
           of: header,
           matching: find.textContaining(
-            'This $thisDeviceKind is signed out',
+            "This app isn't signed in to your Claktory account",
             findRichText: true,
           ),
         ),

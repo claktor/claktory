@@ -426,6 +426,52 @@ async fn each_device_keeps_its_own_zoom() {
     assert!(Config::parse(r#"{"display": {"zoom": {"phone": 3}}}"#, std::path::Path::new("/claktory")).is_err());
 }
 
+/// #446: how much of the files each device keeps, its own, as zoom is.
+#[tokio::test]
+async fn each_device_keeps_its_own_file_cache() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let caches = |workspace: &v1::Workspace| workspace.settings.clone().expect("settings").file_cache;
+    assert!(caches(&workspace).is_empty(), "1 GB everywhere");
+    let config = || std::fs::read_to_string(dir.join("home/config.json")).expect("config.json");
+    let set = |bytes: u64| client_message::Body::SetFileCache(v1::SetFileCache { bytes });
+
+    let events = client.ok(set(20_000_000_000)).await;
+    assert_eq!(caches(last_workspace(&events).expect("workspace")), [("local".to_owned(), 20_000_000_000)].into());
+    let saved: serde_json::Value = serde_json::from_str(&config()).expect("json");
+    assert_eq!(saved["display"], serde_json::json!({"file_cache": {"local": 20_000_000_000_u64}}));
+    let (_, workspace, _) = Client::connect(addr).await;
+    assert_eq!(caches(&workspace)["local"], 20_000_000_000, "restored when it connects");
+
+    for wrong in [1, 99_999_999, 100_000_000_001] {
+        let refused = client.request(set(wrong)).await;
+        assert!(
+            matches!(&refused.body, Body::Error(error) if error.code() == v1::ErrorCode::InvalidRequest),
+            "{wrong}: {:?}",
+            refused.body
+        );
+    }
+    for edge in [100_000_000, 100_000_000_000] {
+        let events = client.ok(set(edge)).await;
+        assert_eq!(caches(last_workspace(&events).expect("workspace"))["local"], edge);
+    }
+    // The default isn't written, whether set as 0 or as 1 GB.
+    let events = client.ok(set(0)).await;
+    assert!(caches(last_workspace(&events).expect("workspace")).is_empty());
+    assert!(!config().contains("\"display\""), "{}", config());
+    client.ok(set(300_000_000)).await;
+    client.ok(set(1_000_000_000)).await;
+    assert!(!config().contains("\"display\""), "{}", config());
+    client.ok(set(0)).await;
+
+    let parse = |text: &str| Config::parse(text, std::path::Path::new("/claktory"));
+    assert!(parse(r#"{"display": {"file_cache": {"phone": 5000000000}}}"#).is_ok());
+    for wrong in [r#"{"display": {"file_cache": {"phone": 5}}}"#, r#"{"display": {"file_cache": {"phone": -1}}}"#, r#"{"display": {"file_cache": {"phone": 1.5e9}}}"#] {
+        assert!(parse(wrong).is_err(), "{wrong}");
+    }
+}
+
 #[tokio::test]
 async fn the_vaults_unlock_window_is_a_setting() {
     let dir = temp_dir();

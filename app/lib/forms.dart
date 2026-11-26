@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -175,7 +177,13 @@ class FormFrame extends StatelessWidget {
     );
     final cancel = Button(label: cancelLabel, onPressed: onCancel);
     final words = [
-      Text(title, style: type.emphasis.copyWith(color: palette.text)),
+      Semantics(
+        header: true,
+        child: FittedHeading(
+          title,
+          style: type.emphasis.copyWith(color: palette.text),
+        ),
+      ),
       if (body != null) ...[
         const SizedBox(height: Space.s),
         Text(body, style: type.body.copyWith(color: palette.textMuted)),
@@ -243,15 +251,24 @@ class FormFrame extends StatelessWidget {
     final body = this.body;
     final error = this.error;
     final secondary = this.secondary;
-    final heading = Semantics(
+    // In the bar, two lines at most; under it (the largest text sizes),
+    // whole, however many lines it takes (Zucchero's row 507: "Can't
+    // connect to …" lost the name).
+    Widget heading(bool stacked) => Semantics(
       header: true,
-      child: Text(
-        title,
-        textAlign: TextAlign.center,
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: type.emphasis.copyWith(color: palette.text),
-      ),
+      child: stacked
+          ? FittedHeading(
+              title,
+              textAlign: TextAlign.center,
+              style: type.emphasis.copyWith(color: palette.text),
+            )
+          : Text(
+              title,
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: type.emphasis.copyWith(color: palette.text),
+            ),
     );
     final cancel = _BarButton(
       label: cancelLabel,
@@ -283,7 +300,7 @@ class FormFrame extends StatelessWidget {
           body: body,
           error: error,
           secondary: secondary,
-          heading: heading,
+          heading: heading(stacked),
           cancel: cancel,
           action: action,
           stacked: stacked,
@@ -378,6 +395,61 @@ class FormFrame extends StatelessWidget {
   }
 }
 
+/// A title that wraps between words, never inside one: a word wider than
+/// the line ("Reconnecting…" at the largest text size on a small iPhone)
+/// is drawn just small enough to fit, as iOS shrinks a title, rather than
+/// broken in two (Zucchero's row 507).
+class FittedHeading extends StatelessWidget {
+  const FittedHeading(
+    this.text, {
+    super.key,
+    required this.style,
+    this.textAlign = TextAlign.start,
+  });
+
+  final String text;
+  final TextStyle style;
+  final TextAlign textAlign;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final scaler = MediaQuery.textScalerOf(context);
+      final room = constraints.maxWidth;
+      var fitted = scaler;
+      if (room.isFinite && room > 0) {
+        final widest = _widestWord(context, scaler);
+        if (widest > room) {
+          final size = style.fontSize ?? 14;
+          fitted = TextScaler.linear(scaler.scale(size) * room / widest / size);
+        }
+      }
+      return Text(text, textAlign: textAlign, textScaler: fitted, style: style);
+    },
+  );
+
+  double _widestWord(BuildContext context, TextScaler scaler) {
+    var widest = 0.0;
+    for (final word in text.split(RegExp(r'\s+'))) {
+      if (word.isEmpty) continue;
+      final painter = TextPainter(
+        text: TextSpan(
+          text: word,
+          style: DefaultTextStyle.of(context).style.merge(style),
+        ),
+        textScaler: scaler,
+        textDirection: Directionality.of(context),
+        maxLines: 1,
+      )..layout();
+      // A hair over, so rounding never puts the last letter on a line of
+      // its own.
+      widest = math.max(widest, painter.width + 1);
+      painter.dispose();
+    }
+    return widest;
+  }
+}
+
 /// [child], scrolled into sight once it shows (a new one, by its key).
 class _ScrolledTo extends StatefulWidget {
   const _ScrolledTo({super.key, required this.child});
@@ -445,17 +517,23 @@ class _BarButton extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: Space.s),
             child: Center(
               widthFactor: 1,
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: PhoneType.label.copyWith(
-                  color: !enabled
-                      ? palette.textFaint
-                      : pressed
-                      ? palette.signal.withValues(alpha: 0.6)
-                      : palette.signal,
-                  fontWeight: primary ? FontWeight.w600 : FontWeight.w400,
+              // Wider than its half of the bar (Make video at the largest
+              // text on a small iPhone, Sale's row 149): drawn just small
+              // enough to fit, as iOS shrinks a bar button's title, never
+              // cut short.
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  style: PhoneType.label.copyWith(
+                    color: !enabled
+                        ? palette.textFaint
+                        : pressed
+                        ? palette.signal.withValues(alpha: 0.6)
+                        : palette.signal,
+                    fontWeight: primary ? FontWeight.w600 : FontWeight.w400,
+                  ),
                 ),
               ),
             ),

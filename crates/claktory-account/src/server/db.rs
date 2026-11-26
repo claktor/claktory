@@ -124,6 +124,16 @@ CREATE TABLE IF NOT EXISTS activity (
     runs INTEGER NOT NULL,
     PRIMARY KEY (claktory_id, hour)
 );
+-- Activity older than `ACTIVITY_HOURS_KEPT`, rolled up to its UTC days
+-- (`roll_up`): minutes and runs summed, the most agents working at once.
+CREATE TABLE IF NOT EXISTS activity_days (
+    claktory_id TEXT NOT NULL,
+    day TEXT NOT NULL,
+    agent_minutes INTEGER NOT NULL,
+    agents_working INTEGER NOT NULL,
+    runs INTEGER NOT NULL,
+    PRIMARY KEY (claktory_id, day)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS seen_days (
     claktory_id TEXT NOT NULL,
     account_id TEXT NOT NULL,
@@ -246,10 +256,14 @@ BEGIN SELECT RAISE(ABORT, 'a published month is never deleted'); END;
 ";
 
 /// How long a period's id is kept, to know it if it's sent again. A
-/// Claktory sends a period at most `PERIOD_AGE` after it starts.
-pub const PERIODS_KEPT: i64 = 120 * 86_400;
+/// Claktory sends a period at most `PERIOD_AGE` after it starts, so no
+/// period received earlier than that (and a day, for clocks) can come again.
+pub const PERIODS_KEPT: i64 = PERIOD_AGE + 86_400;
 /// The oldest a period may be when it's sent.
 pub const PERIOD_AGE: i64 = 90 * 86_400;
+/// How long each Claktory's activity is kept by the hour; then by the day
+/// (`activity_days`), so the account disk doesn't grow by the hour forever.
+pub const ACTIVITY_HOURS_KEPT: i64 = 90 * 86_400;
 
 /// How long a share release, with its IP, is kept.
 pub const RELEASES_KEPT: i64 = 30 * 86_400;
@@ -923,6 +937,16 @@ fn anonymize(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     )?;
     conn.execute("DELETE FROM activity WHERE claktory_id = ?1", params![id])?;
     conn.execute(
+        "INSERT INTO activity_days (claktory_id, day, agent_minutes, agents_working, runs)
+         SELECT '', day, agent_minutes, agents_working, runs FROM activity_days WHERE claktory_id = ?1 AND true
+         ON CONFLICT (claktory_id, day) DO UPDATE SET
+           agent_minutes = agent_minutes + excluded.agent_minutes,
+           agents_working = agents_working + excluded.agents_working,
+           runs = runs + excluded.runs",
+        params![id],
+    )?;
+    conn.execute("DELETE FROM activity_days WHERE claktory_id = ?1", params![id])?;
+    conn.execute(
         &format!(
             "INSERT INTO health (claktory_id, day, version, rolled_back, crashes)
              SELECT '', day, version, rolled_back, crashes FROM health WHERE claktory_id = ?1 AND true {ADD_HEALTH}"
@@ -1273,6 +1297,18 @@ pub fn account_data(conn: &Connection, account: &Account) -> rusqlite::Result<Va
                 }))
             },
         )?;
+        let activity_days: Vec<Value> = query(
+            conn.prepare("SELECT day, agent_minutes, agents_working, runs FROM activity_days WHERE claktory_id = ?1 ORDER BY day")?,
+            params![claktory.id],
+            |row| {
+                Ok(json!({
+                    "day": row.get::<_, String>(0)?,
+                    "agent_minutes": row.get::<_, i64>(1)?,
+                    "agents_working": row.get::<_, i64>(2)?,
+                    "runs": row.get::<_, i64>(3)?,
+                }))
+            },
+        )?;
         let table = |sql: &str, names: &[&str]| -> rusqlite::Result<Vec<Value>> {
             query(conn.prepare(sql)?, params![claktory.id], |row| {
                 let mut object = serde_json::Map::new();
@@ -1318,6 +1354,7 @@ pub fn account_data(conn: &Connection, account: &Account) -> rusqlite::Result<Va
             "unlocks": unlocks,
             "usage": usage,
             "activity": activity,
+            "activity_days": activity_days,
             "setup": {"model_connected": setup.0 == Some(1), "first_run": setup.1 == Some(1)},
             "devices": devices_now,
             "devices_connected": devices_connected,
@@ -1383,7 +1420,7 @@ pub fn delete_session(conn: &Connection, token: &str) -> rusqlite::Result<()> {
 
 /// Forgets what has expired: requests, sessions, old limit windows, share
 /// releases (with their IPs) after 30 days, and device keys a day after
-/// their last assertion.
+/// their last assertion; and rolls old hourly activity up to days.
 pub fn purge(conn: &Connection, now: i64) -> rusqlite::Result<()> {
     if conn.execute("DELETE FROM device_keys WHERE issued < ?1", params![now - DEVICE_KEYS_KEPT])? > 0 {
         bump_allowlist(conn)?;
@@ -1393,8 +1430,33 @@ pub fn purge(conn: &Connection, now: i64) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM limits WHERE window < ?1", params![now - 2 * 86_400])?;
     conn.execute("DELETE FROM share_releases WHERE time < ?1", params![now - RELEASES_KEPT])?;
     conn.execute("DELETE FROM periods WHERE received < ?1", params![now - PERIODS_KEPT])?;
+    roll_up(conn, now)?;
     conn.execute("DELETE FROM ai_reports WHERE received < ?1", params![now - crate::protocol::AI_REPORT_KEEP_DAYS * 86_400])?;
     Ok(())
+}
+
+/// Rolls each Claktory's hourly activity from before the UTC day
+/// `ACTIVITY_HOURS_KEPT` ago up to its days (`activity_days`), in one
+/// transaction: minutes and runs summed, `agents_working` the day's most.
+/// An hour that comes in late, already past it, joins its day at the next
+/// roll-up.
+pub fn roll_up(conn: &Connection, now: i64) -> rusqlite::Result<usize> {
+    let before = now - ACTIVITY_HOURS_KEPT;
+    let before = before - before.rem_euclid(86_400);
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT INTO activity_days (claktory_id, day, agent_minutes, agents_working, runs)
+         SELECT claktory_id, date(hour, 'unixepoch'), sum(agent_minutes), max(agents_working), sum(runs) FROM activity
+         WHERE hour < ?1 GROUP BY claktory_id, date(hour, 'unixepoch')
+         ON CONFLICT (claktory_id, day) DO UPDATE SET
+           agent_minutes = agent_minutes + excluded.agent_minutes,
+           agents_working = max(agents_working, excluded.agents_working),
+           runs = runs + excluded.runs",
+        params![before],
+    )?;
+    let rolled = tx.execute("DELETE FROM activity WHERE hour < ?1", params![before])?;
+    tx.commit()?;
+    Ok(rolled)
 }
 
 /// How long a device key stays on the relay allowlist after its last

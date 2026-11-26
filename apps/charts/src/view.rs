@@ -1067,7 +1067,8 @@ pub fn panel_body(id: &str, at: &str, title: &str, viz: &Viz, grid: Grid, outcom
         let second_id = second["id"].as_str().unwrap_or_default().to_owned();
         vec![
             json!({"id": id, "component": "Column", "children": [format!("{id}_title"), second_id]}),
-            text(&format!("{id}_title"), title, "caption"),
+            // Drawn as every panel's title is, as Grafana's (T6).
+            text(&format!("{id}_title"), title, "title"),
             second,
         ]
     };
@@ -1117,7 +1118,9 @@ pub fn panel_body(id: &str, at: &str, title: &str, viz: &Viz, grid: Grid, outcom
             map
         }
         "table" => {
-            let mut table = json!({"id": format!("{id}_table"), "component": "Table", "data": path("data")});
+            // As tall as a chart of its height beside it, as Grafana's table
+            // fills its panel: its rows scroll inside (Zucchero row 454).
+            let mut table = json!({"id": format!("{id}_table"), "component": "Table", "data": path("data"), "height": height(grid)});
             if !viz.columns.is_empty() {
                 table["columns"] = json!(viz.columns);
             }

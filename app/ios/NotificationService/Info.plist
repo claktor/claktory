@@ -21,7 +21,7 @@
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>ClaktoryPushKeychainGroup</key>
-	<string>$(AppIdentifierPrefix)com.claktory.app.notifications</string>
+	<string>$(AppIdentifierPrefix)$(CLAKTORY_PUSH_GROUP)</string>
 	<key>NSExtension</key>
 	<dict>
 		<key>NSExtensionPointIdentifier</key>

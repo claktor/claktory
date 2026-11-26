@@ -1276,6 +1276,27 @@ void main() {
       'when src/, a.csv change',
     );
     expect(describeWhen({'watch': 'tail -F x'}), 'when tail -F x prints');
+    // Pipes (friend bug #34): which, and on what, in words.
+    expect(describeWhen({'pipes': '*'}), 'when any pipe changes');
+    expect(
+      describeWhen({
+        'pipes': 'Website',
+        'on': ['opened', 'closed'],
+      }),
+      'when pipe Website opens or closes',
+    );
+    expect(
+      describeWhen({
+        'pipes': ['Website', 'p2'],
+        'on': ['paused', 'shared', 'offline'],
+      }),
+      'when pipe Website or p2 is paused, has a website shared or goes '
+      'offline',
+    );
+    expect(
+      describeWhen({'pipes': '*', 'on': 'online'}),
+      'when any pipe comes online',
+    );
   });
 
   // Abbacchio's rows 544 and 552: in a conversation narrowed to about 200

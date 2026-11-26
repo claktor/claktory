@@ -28,6 +28,20 @@ typedef MarkdownTextBlock = Widget Function(
   Widget Function(TextSpan span) build,
 );
 
+/// A Markdown file's own pictures and videos (#540): what shows a picture
+/// or video it embeds (`![alt](src)`), and what opens a file it points to.
+/// Only where the Markdown is a file (the text viewer); elsewhere, a
+/// picture is its words.
+abstract class MarkdownFiles {
+  /// The block that shows `![alt](src)` in place; null when [src] isn't a
+  /// picture or video shown so (on the web, a document, an SVG).
+  Widget? embed(String src, String alt);
+
+  /// What opens the file [src] names when its link is clicked; null when
+  /// it names no file here (an address on the web, say).
+  VoidCallback? opener(BuildContext context, String src);
+}
+
 /// Renders agent markdown: paragraphs, headings, lists, quotes, tables,
 /// emphasis, inline code, fenced code and links (a click opens them, with
 /// [openLink]). Parsing happens in [build], so a streaming entry re-parses
@@ -39,9 +53,14 @@ class Markdown extends StatefulWidget {
     this.color,
     this.textBlock,
     this.shortLinks = false,
+    this.files,
   });
 
   final String text;
+
+  /// Pictures and videos shown in place, and files opened from it, in a
+  /// Markdown file; null where it isn't one.
+  final MarkdownFiles? files;
 
   /// Body text color; `text` by default.
   final Color? color;
@@ -129,6 +148,14 @@ class _MarkdownState extends State<Markdown> {
       // What a find in the conversation marks, from the next build after
       // it searches.
       (span) => FindHighlight.mark(context, span),
+      widget.files,
+      widget.files == null
+          ? null
+          : (src) {
+              final open = widget.files!.opener(context, src);
+              if (open == null) return null;
+              return _links.next(src, open, palette.link);
+            },
     );
     final blocks = renderer.blocks(nodes);
     _links.finish();
@@ -582,7 +609,16 @@ class _Renderer {
     this.shortened,
     this.mentions,
     this.mark,
+    this.files,
+    this.fileLink,
   ]);
+
+  /// Pictures and videos shown in place ([Markdown.files]); null where
+  /// a picture is its words.
+  final MarkdownFiles? files;
+
+  /// How a link to a file here looks and opens; null where none open.
+  final LinkLook? Function(String src)? fileLink;
 
   /// A find's matches marked in a span ([FindHighlight]); null where
   /// nothing's found.
@@ -634,7 +670,7 @@ class _Renderer {
     if (node is! md.Element) return null;
     switch (node.tag) {
       case 'p':
-        return _rich(node.children, _body);
+        return _withMedia(node.children, _body);
       case 'h1':
       case 'h2':
         return _rich(
@@ -692,6 +728,8 @@ class _Renderer {
                 shortened,
                 mentions,
                 mark,
+                files,
+                fileLink,
               ).blocks(node.children ?? const []),
             ),
           ),
@@ -753,7 +791,7 @@ class _Renderer {
     final parts = <Widget>[];
     void flushInline() {
       if (inline.isEmpty) return;
-      parts.add(_rich(List.of(inline), _body));
+      parts.add(_withMedia(List.of(inline), _body));
       inline.clear();
     }
 
@@ -837,6 +875,63 @@ class _Renderer {
     );
   }
 
+  /// [nodes] as [_rich] shows them, except that each picture or video
+  /// [files] shows in place is a block of its own, between the words
+  /// before and after it; it's no part of the text, so comments and finds
+  /// count the words alone.
+  Widget _withMedia(List<md.Node>? nodes, TextStyle style) {
+    final files = this.files;
+    final all = nodes ?? const <md.Node>[];
+    if (files == null ||
+        !all.any((node) => node is md.Element && node.tag == 'img')) {
+      return _rich(all, style);
+    }
+    final parts = <Widget>[];
+    final words = <md.Node>[];
+    void flush() {
+      final blank = words.every(
+        (node) =>
+            (node is md.Text && node.text.trim().isEmpty) ||
+            (node is md.Element && node.tag == 'br'),
+      );
+      if (!blank) {
+        // The space beside a picture taken out is no part of the words.
+        final first = words.first;
+        if (first is md.Text) words.first = md.Text(first.text.trimLeft());
+        final last = words.last;
+        if (last is md.Text) words.last = md.Text(last.text.trimRight());
+        parts.add(_rich(List.of(words), style));
+      }
+      words.clear();
+    }
+
+    for (final node in all) {
+      final embed = node is md.Element && node.tag == 'img'
+          ? files.embed(
+              node.attributes['src'] ?? '',
+              node.attributes['alt'] ?? '',
+            )
+          : null;
+      if (embed == null) {
+        words.add(node);
+        continue;
+      }
+      flush();
+      parts.add(embed);
+    }
+    flush();
+    if (parts.length == 1) return parts.single;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final (index, part) in parts.indexed) ...[
+          if (index > 0) const SizedBox(height: Space.s),
+          part,
+        ],
+      ],
+    );
+  }
+
   Widget _rich(List<md.Node>? nodes, TextStyle style) {
     final spans = <InlineSpan>[];
     _inline(nodes ?? const [], style, spans);
@@ -899,7 +994,7 @@ class _Renderer {
         case 'br':
           out.add(const TextSpan(text: '\n'));
         case 'img':
-          out.add(TextSpan(text: node.attributes['alt'] ?? ''));
+          out.add(_picture(node));
         case 'input':
           final checked = node.attributes['checked'] != null;
           out.add(TextSpan(text: checked ? '☑ ' : '☐ '));
@@ -937,6 +1032,20 @@ class _Renderer {
           out.add(TextSpan(style: inner, children: nested));
       }
     }
+  }
+
+  /// A picture not shown in place, as words: on the web, a link to it,
+  /// never fetched (Fugo, 41320); a file here that opens (a document, an
+  /// SVG), a link that opens it; else its words alone.
+  InlineSpan _picture(md.Element node) {
+    final src = node.attributes['src'] ?? '';
+    final alt = node.attributes['alt'] ?? '';
+    final look = link?.call(src) ?? fileLink?.call(src);
+    if (look == null) return TextSpan(text: alt);
+    final words = alt.trim().isNotEmpty
+        ? alt
+        : src.split('/').where((part) => part.isNotEmpty).lastOrNull ?? src;
+    return _linked(TextSpan(text: words, style: look.style), look);
   }
 
   static bool _isBlock(String tag) => const {

@@ -643,10 +643,13 @@ dependencies = [
  "iroh",
  "jni-sys 0.4.1",
  "n0-dns-resolver",
+ "netwatch",
+ "noq-proto",
  "openmls",
  "rusqlite",
  "serde",
  "serde_json",
+ "socket2",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -2942,8 +2945,6 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.20.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2acf7a1ca9205d7c1fc9a1595193a8cbaa7537b4a07dca93c6ae3de7c8d0e597"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -3039,8 +3040,6 @@ dependencies = [
 [[package]]
 name = "noq-udp"
 version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "716df6621d528211d75608903c0dd54bee78745444cdcbb791bcfbc55717a29f"
 dependencies = [
  "cfg_aliases",
  "libc",

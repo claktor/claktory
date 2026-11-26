@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 import 'backend.dart';
 import 'claktory_identity.dart' show claktoryName;
 import 'controls.dart';
+import 'device_account.dart' show AccountClaktory;
 import 'devices.dart' show FactoryChooser, thisDeviceKind;
 import 'extensions.dart' show logTime;
 import 'forms.dart';
@@ -14,7 +15,10 @@ import 'mobile/platform_policy.dart';
 import 'setup.dart'
     show LocalEngine, SetupScope, backgroundItemNote, localEngine;
 import 'tunnel/api/tunnel.dart';
-import 'tunnel_client.dart' show idleTunnel, tunnelAdvice;
+import 'network.dart' show deviceNetwork;
+import 'tunnel_client.dart'
+    show idleTunnel, offlineNow, tunnelAdvice, unreachableAdvice;
+import 'usage.dart' show formatAge;
 
 /// How a Claktory's connection is doing, at a glance.
 enum Link {
@@ -44,13 +48,17 @@ enum Link {
 /// A Claktory's connection as the app shows it: its state and the words
 /// for it, in the sidebar's footer, on the rail's tile and on a phone.
 class Connection {
-  Connection(this.backend, {String? machine})
+  Connection(this.backend, {String? machine, DateTime? now})
     : link = _linkOf(backend),
+      now = now ?? DateTime.now(),
       machine =
           machine ?? (backend.target == null ? null : claktoryName(backend));
 
   final Backend backend;
   final Link link;
+
+  /// When it's read: ages are from it.
+  final DateTime now;
 
   /// The Claktory's name, when it's on another machine; null for this
   /// Mac's own.
@@ -79,6 +87,11 @@ class Connection {
         tunnel.failure != TunnelFailure.none) {
       return Link.failing;
     }
+    // Once it has said it can't connect, it keeps saying so (and what it
+    // knows) through the tries after, until one connects (row 475).
+    if (backend.target != null && backend.lastFailure.value != null) {
+      return Link.failing;
+    }
     return Link.connecting;
   }
 
@@ -90,10 +103,113 @@ class Connection {
     backend.refused,
     backend.movedAway,
     backend.tunnel,
+    backend.lastConnected,
+    backend.checkedIn,
+    backend.relayDownSince,
+    backend.lastFailure,
+    deviceNetwork,
     localEngine,
   ]);
 
+  /// When it was last known to be running, while it can't connect: the
+  /// later of when this app was last connected to it and when it last
+  /// checked in with the person's account (friend bug #37). Null when
+  /// neither is known.
+  DateTime? get lastSeen {
+    final connected = backend.lastConnected.value;
+    final checkedIn = backend.checkedIn.value;
+    if (connected == null) return checkedIn;
+    if (checkedIn == null) return connected;
+    return connected.isAfter(checkedIn) ? connected : checkedIn;
+  }
+
+  String _ago(DateTime time) => formatAge(time.millisecondsSinceEpoch, now);
+
+  /// Why this device can't reach Claktory's servers (its relays), in a
+  /// few words; empty when it doesn't know.
+  static String _relayWhy(TunnelRelayTrouble trouble) => switch (trouble) {
+    TunnelRelayTrouble.dns => ": their address couldn't be looked up",
+    TunnelRelayTrouble.timeout => ': nothing answered in time',
+    TunnelRelayTrouble.tls => ': the secure connection to them failed',
+    TunnelRelayTrouble.network => ': the network turned them away',
+    TunnelRelayTrouble.unchosen => ': none of them answered',
+    TunnelRelayTrouble.other || TunnelRelayTrouble.none => '',
+  };
+
+  /// What's known while it can't connect (friend bug #37): why, as far
+  /// as this device can tell, and when it was last seen running. Only
+  /// what the tunnel and the account say, never a guessed cause.
+  String _failingFacts(TunnelStatus tunnel) {
+    final device = thisDeviceKind;
+    final facts = <String>[];
+    final down = backend.relayDownSince.value;
+    if (offlineNow(tunnel)) {
+      // The advice says this device is offline.
+    } else if (!tunnel.relayConnected &&
+        (down != null || tunnel.failure == TunnelFailure.offline)) {
+      // Its relay out of reach while its own network is up: not offline.
+      final why = _relayWhy(tunnel.relayTrouble);
+      facts.add(
+        down == null
+            ? "This $device is online, but can't reach Claktory's servers$why."
+            : "This $device is online, but hasn't reached Claktory's servers "
+                  'since ${logTime(down, now: now)}$why.',
+      );
+    } else if (tunnel.relayConnected) {
+      facts.add("This $device is online, but $_name doesn't answer.");
+    }
+    final connected = backend.lastConnected.value;
+    final checkedIn = backend.checkedIn.value;
+    if (checkedIn != null) {
+      // Its own check-in: it was running then. An older one says no
+      // more than when (Narancia's wsl-support.md §3: unknown stays
+      // unknown).
+      final ago = _ago(checkedIn);
+      facts.add(
+        now.difference(checkedIn) <= AccountClaktory.onlineWithin
+            ? '$_name last checked in with your Claktory account $ago, so '
+                  'it was running then.'
+            : '$_name last checked in with your Claktory account $ago.',
+      );
+    }
+    if (connected != null) {
+      facts.add(
+        'This $device was last connected to it at '
+        '${logTime(connected, now: now)}.',
+      );
+    }
+    return facts.join(' ');
+  }
+
   String get _name => machine ?? 'this Claktory';
+
+  /// The tunnel's status it says it can't connect for: the try's own once
+  /// it failed; while a new try dials (its status afresh), the last
+  /// failure (row 475, 480).
+  TunnelStatus get _failed {
+    final current = backend.tunnel.value;
+    if (current != null && current.failure != TunnelFailure.none) {
+      return current;
+    }
+    return backend.lastFailure.value ?? current ?? idleTunnel;
+  }
+
+  /// What went wrong exactly, for whoever looks into it, while it can't
+  /// connect; empty otherwise.
+  String get error => switch (link) {
+    Link.failing => _cause(_failed),
+    Link.refused => _cause(backend.tunnel.value ?? idleTunnel),
+    _ => '',
+  };
+
+  /// [status]'s own words, but where the tunnel, which knows neither this
+  /// device's kind nor the Claktory's name, says it reached nothing, in
+  /// the sheet's words: "This iPhone can't reach Claktory's servers or
+  /// Studio" (Trish, #37).
+  String _cause(TunnelStatus status) => status.failure == TunnelFailure.offline
+      ? "This $thisDeviceKind can't reach Claktory's servers or $_name: "
+            'check its network.'
+      : status.error;
 
   /// The footer's line, and the dialog's title.
   String get line => switch (link) {
@@ -117,11 +233,21 @@ class Connection {
     Link.live => 'Connected',
     Link.connecting =>
       backend.reconnecting.value ? 'Reconnecting…' : 'Connecting…',
-    Link.failing => "Can't connect",
+    Link.failing => switch (lastSeen) {
+      null => "Can't connect",
+      final seen => "Can't connect · last seen ${_ago(seen)}",
+    },
     Link.refused => 'Not allowed',
     Link.moved => 'Moved',
     Link.off => 'Turned off',
     Link.blocked => 'Blocked by macOS',
+  };
+
+  /// Under "Can't connect" where nothing else shows (the main pane): when
+  /// it was last seen, and that it keeps trying.
+  String get stillTrying => switch (lastSeen) {
+    null => 'Trying again…',
+    final seen => 'Last seen ${_ago(seen)}. Trying again…',
   };
 
   /// How it connects, and since when.
@@ -161,7 +287,16 @@ class Connection {
         return 'This Claktory moved to '
             '${to.isEmpty ? 'another computer' : to}. The copy it left here '
             'doesn’t run.';
-      case Link.failing || Link.refused:
+      case Link.failing:
+        final tunnel = _failed;
+        return [
+          _failingFacts(tunnel),
+          // Its facts said already that it's online.
+          tunnel.failure == TunnelFailure.offline && !offlineNow(tunnel)
+              ? unreachableAdvice(_name)
+              : tunnelAdvice(tunnel, _name, device: thisDeviceKind),
+        ].where((part) => part.isNotEmpty).join(' ');
+      case Link.refused:
         return tunnelAdvice(
           backend.tunnel.value ?? idleTunnel,
           _name,
@@ -329,7 +464,7 @@ class ConnectionDialog extends StatelessWidget {
       listenable: Connection.of(backend),
       builder: (context, _) {
         final connection = Connection(backend, machine: machine);
-        final error = backend.tunnel.value?.error ?? '';
+        final error = connection.error;
         // This Mac's own, off or blocked: what starts it, not Reconnect.
         final setup = SetupScope.of(context);
         final (String, VoidCallback)? fix = setup == null

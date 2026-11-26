@@ -97,6 +97,10 @@ async fn pipes_between_two_claktories() {
     two_claktories_pair_approve_and_their_agents_talk().await;
     rivet_starts_both_ends_and_never_sees_the_code_or_their_words().await;
     the_persons_comments_reach_their_own_agents_and_never_the_other_side().await;
+    a_senders_posts_never_pause_the_other_side_but_meet_its_limits().await;
+    rivet_continues_a_looped_pipe_only_for_the_pause_it_showed().await;
+    rivet_shares_a_website_only_once_the_person_approves_its_card().await;
+    a_loop_pause_says_what_paused_it_on_both_sides().await;
 }
 
 async fn two_claktories_pair_approve_and_their_agents_talk() {
@@ -596,4 +600,246 @@ async fn the_persons_comments_reach_their_own_agents_and_never_the_other_side() 
     notes.sort();
     let want = ["back", "discard", "drop", "let in", "send"].map(|note| format!("{MARKER} {note}"));
     assert_eq!(notes, want, "the history keeps each held message's note");
+}
+
+/// A's Site (Lea, its lead) and B's Marketing (Max) with an open pipe
+/// "Launch" between them: A's and B's pipes.
+async fn open_pair() -> (Side, Side, v1::Pipe, v1::Pipe) {
+    let (dir_a, dir_b) = (temp_dir(), temp_dir());
+    let mut a = claktory(&dir_a, "Site", "Lea").await;
+    let mut b = claktory(&dir_b, "Marketing", "Max").await;
+    let create = v1::CreatePipeInvite { project_id: "site".into(), name: "Launch".into(), ..Default::default() };
+    let Body::PipeInvite(invite) = a.request(Request::CreatePipeInvite(create)).await else { panic!("no invite") };
+    let accept = v1::AcceptPipeInvite { code: invite.code.clone(), project_id: "marketing".into(), ..Default::default() };
+    assert!(matches!(b.request(Request::AcceptPipeInvite(accept)).await, Body::Ack(_)));
+    let joined = b.until(|pipe| pipe.state() == v1::PipeState::Approval).await;
+    let knocked = a.until(|pipe| pipe.state() == v1::PipeState::Approval).await;
+    let approve = |pipe: &str, agent: &str| {
+        Request::ApprovePipe(v1::ApprovePipe {
+            pipe_id: pipe.into(),
+            approve: true,
+            member_ids: vec![agent.into()],
+            lead_id: agent.into(),
+            ..Default::default()
+        })
+    };
+    assert!(matches!(b.request(approve(&joined.id, "max")).await, Body::Ack(_)));
+    assert!(matches!(a.request(approve(&knocked.id, "lea")).await, Body::Ack(_)));
+    a.until(|pipe| pipe.state() == v1::PipeState::Open).await;
+    b.until(|pipe| pipe.state() == v1::PipeState::Open).await;
+    (a, b, knocked, joined)
+}
+
+/// Friend bug #32 (Fugo 33421): Rivet continues a pipe the loop breaker
+/// paused only on a card that says, in Claktory's words, why it paused and
+/// what continuing does; the card continues only that pause.
+async fn rivet_continues_a_looped_pipe_only_for_the_pause_it_showed() {
+    let (mut a, mut b, knocked, _joined) = open_pair().await;
+    a.rivet().await;
+    let long = "Thanks, we'll pass the release notes on to the whole team today.";
+    let lines = |side: &Side| pipes::messages_for_test(&side.factory, &knocked.id).len();
+    let loop_once = async |a: &mut Side| {
+        for _ in 0..3 {
+            pipes::count_for_loop_for_test(&a.factory, &knocked.id, "my_agent", long);
+        }
+        a.until(|pipe| pipe.paused() == v1::PipePause::Loop).await;
+    };
+    loop_once(&mut a).await;
+    b.until(|pipe| pipe.state() == v1::PipeState::Paused).await;
+
+    let resume = r#"{"pipe": "Launch", "reason": "Matt read the thread; it's fine.", "resume": true}"#;
+    let said = a.call("rivet", "pipes_settings", resume).await;
+    assert!(said.starts_with("Asked "), "{said}");
+    let card = |a: &Side| {
+        a.view
+            .entries
+            .iter()
+            .rev()
+            .find_map(|entry| match &entry.kind {
+                Some(Kind::AskPerson(ask)) => Some((entry.seq, ask.clone())),
+                _ => None,
+            })
+            .expect("the card")
+    };
+    let (first, asked) = card(&a);
+    assert_eq!(asked.title, "Continue the pipe \"Launch\"");
+    assert_eq!(
+        asked.action_description,
+        "Rivet asks to resume the pipe \"Launch\". It paused because the agents on both sides repeated the same message. Continuing lets the agents carry on talking with each other; if they loop again, it pauses again."
+    );
+    assert_eq!(asked.action_reason, "Matt read the thread; it's fine.");
+    assert_eq!(a.pipe().expect("the pipe").paused(), v1::PipePause::Loop, "not until the person approves");
+
+    // The person continues it themselves, and the agents loop again: the
+    // card was for the pause before, so Approve is refused.
+    let action = |action: v1::PipeAction| Request::SetPipeState(v1::SetPipeState { pipe_id: knocked.id.clone(), action: action.into() });
+    assert!(matches!(a.request(action(v1::PipeAction::Resume)).await, Body::Ack(_)));
+    a.until(|pipe| pipe.state() == v1::PipeState::Open).await;
+    let before = lines(&a);
+    loop_once(&mut a).await;
+    assert!(lines(&a) > before);
+    a.request(Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
+    let approve = |seq: u64| Request::AnswerAsk(v1::AnswerAsk { agent_id: "rivet".into(), seq, ..Default::default() });
+    let Body::Error(error) = a.request(approve(first)).await else { panic!("the old card continued the new pause") };
+    assert!(error.message.starts_with("The pipe paused again after this card was asked, so it's for an earlier pause"), "{}", error.message);
+    assert_eq!(a.pipe().expect("the pipe").paused(), v1::PipePause::Loop);
+    let dismiss = v1::AnswerAsk { agent_id: "rivet".into(), seq: first, dismiss: true, ..Default::default() };
+    assert!(matches!(a.request(Request::AnswerAsk(dismiss)).await, Body::Ack(_)));
+
+    // A card of its own for this pause: approved, the pipe is open on both sides.
+    let said = a.call("rivet", "pipes_settings", resume).await;
+    assert!(said.starts_with("Asked "), "{said}");
+    let (second, _) = card(&a);
+    assert!(matches!(a.request(approve(second)).await, Body::Ack(_)));
+    a.until(|pipe| pipe.state() == v1::PipeState::Open).await;
+    b.until(|pipe| pipe.state() == v1::PipeState::Open).await;
+}
+
+/// Friend bug #33 (Fugo 33515): a member that only sends marks its posts on
+/// the wire, so the other side's loop breaker leaves them out too: the same
+/// long post three times, then fifty in a row, pause neither side. They
+/// still meet the other side's limits and its Review incoming.
+async fn a_senders_posts_never_pause_the_other_side_but_meet_its_limits() {
+    let (mut a, mut b, knocked, joined) = open_pair().await;
+    a.request(create_agent("site", "Bo", "")).await;
+    let limits =
+        |per_hour: u32, burst: u32| Some(v1::PipeLimits { messages_per_hour: per_hour, burst, file_mb_per_day: 50, ..Default::default() });
+    let ids = |ids: &[&str]| Some(v1::PipeMembers { agent_ids: ids.iter().map(|id| (*id).to_owned()).collect() });
+    // On A, Bo only sends; both sides' limits out of the way for now.
+    let sender = v1::UpdatePipe {
+        pipe_id: knocked.id.clone(),
+        members: ids(&["lea", "bo"]),
+        send_only: ids(&["bo"]),
+        limits: limits(1000, 1000),
+        ..Default::default()
+    };
+    assert!(matches!(a.request(Request::UpdatePipe(sender)).await, Body::Ack(_)));
+    a.until(|pipe| pipe.send_only_ids == ["bo"]).await;
+    let raise = v1::UpdatePipe { pipe_id: joined.id.clone(), limits: limits(1000, 1000), ..Default::default() };
+    assert!(matches!(b.request(Request::UpdatePipe(raise)).await, Body::Ack(_)));
+
+    let long = "Release notes v2: the export button now keeps your filters and sorting.";
+    let post = |text: &str| serde_json::json!({"pipe": "Launch", "text": text}).to_string();
+    for _ in 0..3 {
+        let sent = a.call("bo", "pipe_send", &post(long)).await;
+        assert!(sent.starts_with("Sent"), "{sent}");
+    }
+    for n in 0..50 {
+        a.call("bo", "pipe_send", &post(&format!("Release note {n}"))).await;
+    }
+    let last = b.message(&joined.id, "Release note 49").await;
+    assert_eq!(last.state(), v1::PipeMessageState::Received);
+    let open = |side: &Side| side.pipe().is_some_and(|pipe| pipe.state() == v1::PipeState::Open);
+    assert!(open(&b) && open(&a), "a sender's posts paused the pipe");
+    assert!(!pipes::messages_for_test(&b.factory, &joined.id).iter().any(|line| line.text.contains("so the pipe is paused")));
+
+    // B's limits: over them, it waits for B's person.
+    let lower = v1::UpdatePipe { pipe_id: joined.id.clone(), limits: limits(30, 5), ..Default::default() };
+    assert!(matches!(b.request(Request::UpdatePipe(lower)).await, Body::Ack(_)));
+    a.call("bo", "pipe_send", &post("One more release note.")).await;
+    let over = b.message(&joined.id, "One more release note.").await;
+    assert_eq!(over.state(), v1::PipeMessageState::HeldIncoming);
+    assert_eq!(over.note, "More than 30 messages arrived in an hour: let it in, or discard it.");
+    // B's Review incoming: it waits for B's person too.
+    let review =
+        v1::UpdatePipe { pipe_id: joined.id.clone(), limits: limits(1000, 1000), review_incoming: Some(true), ..Default::default() };
+    assert!(matches!(b.request(Request::UpdatePipe(review)).await, Body::Ack(_)));
+    a.call("bo", "pipe_send", &post("A last release note.")).await;
+    let held = b.message(&joined.id, "A last release note.").await;
+    assert_eq!((held.state(), held.note.as_str()), (v1::PipeMessageState::HeldIncoming, "Waiting for you: let it in, or discard it."));
+    assert!(open(&b), "still open");
+}
+
+/// Friend bug #32 (Fugo 33421): Rivet asks to share a website with a pipe on
+/// a card; a port that can't be shared makes none, and nothing reaches the
+/// other side until the person approves; then exactly what it showed: that
+/// port, that name, that one pipe.
+async fn rivet_shares_a_website_only_once_the_person_approves_its_card() {
+    let (mut a, mut b, knocked, joined) = open_pair().await;
+    a.rivet().await;
+    let website = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("a website");
+    let port = website.local_addr().expect("its port").port();
+    let ask = |port: u16| {
+        serde_json::json!({"pipe": "Launch", "port": port, "name": "Dashboard", "reason": "Matt wants Max to see it."}).to_string()
+    };
+    let refused = a.call("rivet", "pipes_share", &ask(7420)).await;
+    assert_eq!(refused, "Port 7420 is Claktory's own. Nothing was asked.");
+    let said = a.call("rivet", "pipes_share", &ask(port)).await;
+    assert!(said.starts_with("Asked "), "{said}");
+    let (seq, card) = a
+        .view
+        .entries
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            Some(Kind::AskPerson(ask)) => Some((entry.seq, ask.clone())),
+            _ => None,
+        })
+        .expect("the card");
+    assert!(card.action_description.contains(&format!("http://localhost:{port}")), "{}", card.action_description);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(a.view.workspace.pipe_shares.is_empty() && b.view.workspace.pipe_shares.is_empty(), "nothing until the person approves");
+
+    let approve = v1::AnswerAsk { agent_id: "rivet".into(), seq, ..Default::default() };
+    assert!(matches!(a.request(Request::AnswerAsk(approve)).await, Body::Ack(_)));
+    let wait = a.view.follow(&mut a.client, |view| !view.workspace.pipe_shares.is_empty());
+    tokio::time::timeout(Duration::from_secs(20), wait).await.expect("shared");
+    let mine = a.view.workspace.pipe_shares.clone();
+    assert_eq!(mine.len(), 1);
+    assert_eq!(
+        (mine[0].mine, mine[0].name.as_str(), mine[0].port, mine[0].pipe_ids.clone()),
+        (true, "Dashboard", u32::from(port), vec![knocked.id.clone()])
+    );
+    let wait = b.view.follow(&mut b.client, |view| !view.workspace.pipe_shares.is_empty());
+    tokio::time::timeout(Duration::from_secs(20), wait).await.expect("offered");
+    let theirs = b.view.workspace.pipe_shares.clone();
+    assert_eq!(
+        (theirs.len(), theirs[0].mine, theirs[0].name.as_str(), theirs[0].pipe_ids.clone()),
+        (1, false, "Dashboard", vec![joined.id.clone()])
+    );
+    drop(website);
+}
+
+/// Abbacchio's row 1177 nits: the post that trips the loop breaker is told
+/// it waits behind the pause, not that it was sent; and the other side's
+/// pipe says its Claktory paused it for the agents' looping, not its person.
+async fn a_loop_pause_says_what_paused_it_on_both_sides() {
+    let (mut a, mut b, knocked, joined) = open_pair().await;
+    let post = serde_json::json!({"text": "Release notes v2: the export button now keeps your filters and sorting."}).to_string();
+    for _ in 0..2 {
+        let sent = a.call("lea", "pipe_send", &post).await;
+        assert!(sent.starts_with("Sent to "), "{sent}");
+    }
+    let third = a.call("lea", "pipe_send", &post).await;
+    assert_eq!(
+        third,
+        "Waiting: the pipe is paused, because the agents on both sides went back and forth on their own. Your message goes once the person continues it."
+    );
+    a.until(|pipe| pipe.paused() == v1::PipePause::Loop).await;
+    b.until(|pipe| pipe.paused() == v1::PipePause::ByPeer).await;
+    let line =
+        pipes::messages_for_test(&b.factory, &joined.id).into_iter().rev().find(|line| line.text.contains("paused it")).expect("the line");
+    assert!(line.text.ends_with(" paused it: the agents were going back and forth on their own."), "{}", line.text);
+    assert!(pipes::messages_for_test(&a.factory, &knocked.id).iter().any(|line| line.text.contains("repeated the same message")));
+
+    // Continued: the post that waited behind the pause goes, and it doesn't
+    // trip the other side's loop breaker at once (Abbacchio rows 1193-1195):
+    // both sides start their count over.
+    let resume = v1::SetPipeState { pipe_id: knocked.id.clone(), action: v1::PipeAction::Resume.into() };
+    assert!(matches!(a.request(Request::SetPipeState(resume)).await, Body::Ack(_)));
+    a.until(|pipe| pipe.state() == v1::PipeState::Open).await;
+    b.until(|pipe| pipe.state() == v1::PipeState::Open).await;
+    let copies = |side: &Side, pipe: &str| {
+        pipes::messages_for_test(&side.factory, pipe).iter().filter(|message| message.text.starts_with("Release notes v2")).count()
+    };
+    for _ in 0..3000 {
+        if copies(&b, &joined.id) == 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(copies(&b, &joined.id), 3, "the third post went");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let lines = pipes::messages_for_test(&b.factory, &joined.id);
+    assert!(!lines.iter().any(|line| line.text.contains("so the pipe is paused")), "B paused for the post that waited: {lines:?}");
 }

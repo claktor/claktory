@@ -8,6 +8,7 @@ import 'controls.dart' show showModal;
 import 'forms.dart' show AgentSettingsForm;
 import 'identity.dart' show Motion;
 import 'links.dart' show LinkOpener;
+import 'pipes.dart' show showPipeSettings;
 import 'setup_link.dart' show SetupLinkOpener;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -66,7 +67,8 @@ class InputClock {
 
 /// Opens what an agent asks to show with its show_screen tool, in this
 /// window: a section of Settings, the Map, Usage, the Marketplace, What's
-/// new, an agent's conversation or its settings. It answers the backend
+/// new, an agent's conversation or its settings, a pipe or its settings.
+/// It answers the backend
 /// whether it did. It opens only while the window is on screen (on a
 /// phone, in front) and the person used this app in the last
 /// [recentInput], and never takes focus from another app or device.
@@ -115,6 +117,25 @@ class _ScreenOpenerState extends State<ScreenOpener> {
 
   /// The agent whose settings this opened and are still up, if any.
   String? _agentSettings;
+
+  /// The pipe whose settings this opened and are still up, if any.
+  String? _pipeSettings;
+
+  static Pipe? _pipe(Backend backend, String id) {
+    for (final pipe in backend.workspace.workspace.pipes) {
+      if (pipe.id == id) return pipe;
+    }
+    return null;
+  }
+
+  /// Shows [pipe] in place of any page, and on a phone over the list.
+  void _showPipe(Backend backend, Pipe pipe) {
+    AppScope.closePage(context);
+    if (backend.workspace.workspace.selectedPipeId != pipe.id) {
+      fireAndLog(backend.selectPipe(pipe.id));
+    }
+    _conversations.pulse();
+  }
 
   @override
   void initState() {
@@ -207,6 +228,25 @@ class _ScreenOpenerState extends State<ScreenOpener> {
         if (backend.workspace.agent(id) == null) return false;
         // Its own context is above what it provides: no lookup.
         ScreenOpener._show(context, id, _conversations);
+        return true;
+      // A pipe's view, as its row in the sidebar opens it (#471 G9); on
+      // a phone over the list, as an agent's conversation is.
+      case 'pipe':
+        final pipe = _pipe(backend, id);
+        if (pipe == null) return false;
+        _showPipe(backend, pipe);
+        return true;
+      // Its settings, over its view (#471 G9).
+      case 'pipe_settings':
+        final pipe = _pipe(backend, id);
+        if (pipe == null) return false;
+        _showPipe(backend, pipe);
+        // Already up: it stays as it is, with what the person typed.
+        if (_pipeSettings == id) return true;
+        _pipeSettings = id;
+        showPipeSettings(context, pipe).whenComplete(() {
+          if (_pipeSettings == id) _pipeSettings = null;
+        });
         return true;
       case 'agent_settings':
         final agent = backend.workspace.agent(id);

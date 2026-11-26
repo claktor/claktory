@@ -84,7 +84,7 @@ const SUGGEST: &str = "Suggest that the person talk to another agent (`agent`, b
 /// "the person".
 const SUGGEST_PROMPT: &str = "When {person} should give another agent something or settle something with it directly (secrets it will ask them for, a decision that's theirs), rather than you passing it on, suggest it with agents_suggest_talk: they get a button that opens that agent with your message drafted for them.\n";
 /// `{person}`: the user's name, or "the person".
-const PROPOSE: &str = "Rivet, the admin agent, can't be messaged: only {person} talks to it. When you reach a conclusion Rivet should act on (another agent is needed, say), propose a message with propose_to_rivet, written to stand alone; {person} approves or dismisses it, and you're told which (a dismissal without a comment quietly, with whatever next wakes you). If it stops applying before they decide (they settle it in your chat, say), take it back with proposal_withdraw; if what you propose changes, change it in place with proposal_update.\n";
+const PROPOSE: &str = "Rivet, the admin agent, can't be messaged: only {person} talks to it. When you reach a conclusion Rivet should act on (another agent is needed, say), propose a message with propose_to_rivet, written to stand alone: what's needed and why (the job, its scope, who it works with, the access it needs), never which model or effort, which Rivet chooses; {person} approves or dismisses it, and you're told which (a dismissal without a comment quietly, with whatever next wakes you). If it stops applying before they decide (they settle it in your chat, say), take it back with proposal_withdraw; if what you propose changes, change it in place with proposal_update.\n";
 
 pub(crate) struct Agents;
 

@@ -402,6 +402,104 @@ async fn rivet_gives_and_takes_back_secrets_when_the_person_asks() {
     assert_eq!(kinds.last(), Some(&("grant", "builder", "rivet")));
 }
 
+/// #449: an agent gives up a secret on its own, with no card: only its
+/// own grant goes, as a revoke takes it, and History says so with its reason.
+#[tokio::test]
+async fn an_agent_gives_up_its_own_secret_and_history_says_why() {
+    let dir = temp_dir();
+    let (addr, _factory) = start_with(&dir, Scripted::signed_in()).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Writer", "")).await;
+    let cloudflare = add(&mut client, "Cloudflare", "CLOUDFLARE_API_TOKEN", TOKEN).await;
+    let resend = add(&mut client, "Resend", "RESEND_API_KEY", "re_abcdefghijklmnop").await;
+    for (id, agent) in [(&cloudflare, "builder"), (&cloudflare, "writer"), (&resend, "writer")] {
+        let grant = v1::GrantSecret { id: id.clone(), agent_id: agent.into(), proof: None };
+        apply_request(&mut client, &mut view, Request::GrantSecret(grant)).await;
+    }
+
+    // Only what it holds, said the same whether or not the vault has it;
+    // and it says why.
+    let others = call(&mut client, &mut view, "builder", "secrets_give_up", r#"{"secret":"Resend","reason":"Not mine."}"#).await;
+    assert_eq!(others, "\"Resend\" isn't one of your secrets. Yours: Cloudflare. Nothing was changed.");
+    let missing = call(&mut client, &mut view, "builder", "secrets_give_up", r#"{"secret":"Stripe","reason":"Not mine."}"#).await;
+    assert_eq!(missing.replace("Stripe", "Resend"), others);
+    let why = call(&mut client, &mut view, "builder", "secrets_give_up", r#"{"secret":"Cloudflare","reason":" "}"#).await;
+    assert!(why.starts_with("Say why you're giving it up"), "{why}");
+
+    // Given up while a task that got it runs: the task is left, and said so.
+    let command = r#"{"command":"sleep 30","run_in_background":true,"secrets":["Cloudflare"]}"#;
+    assert!(call(&mut client, &mut view, "builder", "bash", command).await.starts_with("Started task-1"));
+    let said =
+        call(&mut client, &mut view, "builder", "secrets_give_up", r#"{"secret":"cloudflare","reason":"Done deploying the site."}"#).await;
+    assert!(said.starts_with("Gave up Cloudflare: you can't use it from your next command on. The person sees it in History"), "{said}");
+    assert!(
+        said.contains("keep running with what they got: task-1.") && said.ends_with("To get it back, ask with secrets_request."),
+        "{said}"
+    );
+    let grants = |view: &View, id: &str| -> Vec<String> {
+        let secret = vault(&view.workspace).secrets.into_iter().find(|secret| secret.id == id).expect("secret");
+        secret.grants.into_iter().map(|grant| grant.agent_id).collect()
+    };
+    assert_eq!(grants(&view, &cloudflare), ["writer"], "Writer keeps its own");
+    let refused = call(&mut client, &mut view, "builder", "bash", r#"{"command":"true","secrets":["Cloudflare"]}"#).await;
+    assert!(refused.contains("\"Cloudflare\" isn't one of your secrets."), "{refused}");
+    let uses = client.request(Request::ListSecretUses(v1::ListSecretUses { id: cloudflare.clone(), limit: 0 })).await;
+    let Body::SecretUses(uses) = &uses.body else { panic!("expected uses, got {:?}", uses.body) };
+    assert_eq!(
+        (uses.uses[0].kind.as_str(), uses.uses[0].agent_id.as_str(), uses.uses[0].detail.as_str()),
+        ("revoke", "builder", "builder")
+    );
+
+    // With stop_tasks, its tasks that got it stop.
+    let command = r#"{"command":"sleep 30","run_in_background":true,"secrets":["Resend"]}"#;
+    assert!(call(&mut client, &mut view, "writer", "bash", command).await.starts_with("Started task-1"));
+    let said = call(
+        &mut client,
+        &mut view,
+        "writer",
+        "secrets_give_up",
+        r#"{"secret":"Resend","reason":"Only Builder sends mail now.","stop_tasks":true}"#,
+    )
+    .await;
+    assert!(said.contains("Stopped your background tasks that got it: task-1."), "{said}");
+    assert!(grants(&view, &resend).is_empty() && grants(&view, &cloudflare) == ["writer"]);
+
+    // History has both, newest first, each at its call.
+    let list = v1::ListNeedsYouHistory { query: String::new(), before_ms: 0, limit: 0 };
+    let Body::NeedsYouHistory(history) = apply_request(&mut client, &mut view, Request::ListNeedsYouHistory(list)).await else {
+        panic!("history")
+    };
+    let given: Vec<(&str, &str, &str, v1::NeedsYouOutcome, bool)> = history
+        .records
+        .iter()
+        .filter(|record| record.kind() == v1::NeedsYouRecordKind::SecretGivenUp)
+        .map(|record| (record.agent_id.as_str(), record.title.as_str(), record.agent_reason.as_str(), record.outcome(), record.seq > 0))
+        .collect();
+    assert_eq!(
+        given,
+        [
+            ("writer", "Writer gave up Resend", "Only Builder sends mail now.", v1::NeedsYouOutcome::Changed, true),
+            ("builder", "Builder gave up Cloudflare", "Done deploying the site.", v1::NeedsYouOutcome::Changed, true),
+        ]
+    );
+    let builder = history.records.iter().find(|record| record.agent_id == "builder").expect("builder's");
+    apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
+    let at = view.entries.iter().find(|entry| entry.seq == builder.seq).and_then(|entry| match &entry.kind {
+        Some(Kind::ToolCall(call)) => Some(call.name.clone()),
+        _ => None,
+    });
+    assert_eq!(at.as_deref(), Some("secrets_give_up"));
+    // Found by its reason.
+    let list = v1::ListNeedsYouHistory { query: "deploying".into(), before_ms: 0, limit: 0 };
+    let Body::NeedsYouHistory(found) = apply_request(&mut client, &mut view, Request::ListNeedsYouHistory(list)).await else {
+        panic!("history")
+    };
+    assert_eq!(found.records.iter().map(|record| record.title.as_str()).collect::<Vec<_>>(), ["Builder gave up Cloudflare"]);
+}
+
 fn requests(view: &View) -> Vec<String> {
     describe(&view.entries).into_iter().filter(|line| line.starts_with("secret request")).collect()
 }

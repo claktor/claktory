@@ -228,19 +228,23 @@ class _Renderer {
         final variant = c['variant'];
         final text = Text(
           string(c['text'], scope),
-          maxLines: _oneLine ? 1 : null,
+          maxLines: _oneLine ? 1 : (variant == 'title' ? 2 : null),
           softWrap: !_oneLine,
-          overflow: _oneLine ? TextOverflow.ellipsis : null,
+          overflow: _oneLine || variant == 'title'
+              ? TextOverflow.ellipsis
+              : null,
           style: switch (variant) {
             'heading' => type.emphasis.copyWith(
               color: palette.text,
               fontWeight: FontWeight.w600,
             ),
             'caption' => type.caption.copyWith(color: palette.textMuted),
+            // A panel's title, as a Chart's label: Grafana's one style.
+            'title' => panelTitle(context),
             _ => type.body.copyWith(color: palette.text),
           },
         );
-        return variant == 'heading'
+        return variant == 'heading' || variant == 'title'
             ? Semantics(header: true, child: text)
             : text;
       case 'Row':
@@ -269,6 +273,7 @@ class _Renderer {
           return _BarLayout(
             weights: [for (final id in ids) _weightOf(id as String)],
             hasWords: [for (final id in ids) _hasWords(id as String)],
+            labels: [for (final id in ids) _barLabel(id as String, scope)],
             children: buttons,
           );
         }
@@ -328,6 +333,20 @@ class _Renderer {
                 children: [for (final (child, _) in weighted) child],
               );
             }
+            // A dashboard's row of panels side by side: every panel as tall
+            // as the tallest, as Grafana's grid lines up panels of one
+            // height (a map is shorter than its place at a wide width, a
+            // chart's legend makes it taller).
+            if (stackBelow != null &&
+                constraints.hasBoundedWidth &&
+                weighted.isNotEmpty &&
+                weighted.every((one) => one.$2 != null)) {
+              return _EvenRow(
+                weights: [for (final (_, weight) in weighted) weight!],
+                spacing: Space.s,
+                children: [for (final (child, _) in weighted) child],
+              );
+            }
             return Row(
               spacing: Space.s,
               mainAxisAlignment: _justify(c['justify']),
@@ -350,6 +369,19 @@ class _Renderer {
           },
         );
       case 'Column':
+        final align = _align(c['align'], CrossAxisAlignment.stretch);
+        // A panel's title (a "title" Text) sits as near what it titles as
+        // a Chart's label does its plot, so a table's heading row is level
+        // with the plot beside it.
+        final ids = c['children'] is List ? c['children']! as List : const [];
+        final titles = {
+          for (final (i, id) in ids.indexed)
+            if (i + 1 < ids.length &&
+                id is String &&
+                surface.components[id]?['component'] == 'Text' &&
+                surface.components[id]?['variant'] == 'title')
+              i,
+        };
         return _noted(
           context,
           c['children'],
@@ -359,8 +391,21 @@ class _Renderer {
             spacing: Space.s,
             mainAxisSize: MainAxisSize.min,
             mainAxisAlignment: _justify(c['justify']),
-            crossAxisAlignment: _align(c['align'], CrossAxisAlignment.stretch),
-            children: children,
+            crossAxisAlignment: align,
+            children: titles.isEmpty || children.length != ids.length
+                ? children
+                : [
+                    for (var i = 0; i < children.length; i++)
+                      if (titles.contains(i))
+                        Column(
+                          spacing: Space.xs,
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: align,
+                          children: [children[i], children[i + 1]],
+                        )
+                      else if (!titles.contains(i - 1))
+                        children[i],
+                  ],
           ),
         );
       case 'List':
@@ -657,6 +702,10 @@ class _Renderer {
         final columns = c['columns'];
         return AppTableView(
           table: table,
+          height: switch (c['height']) {
+            final num n when n >= 120 && n <= 480 => n.toDouble(),
+            _ => null,
+          },
           columns: table == null || columns is! List
               ? null
               : [
@@ -733,6 +782,26 @@ class _Renderer {
       },
       _ => false,
     };
+  }
+
+  /// A bar button's words and whether they're a heading: its Text's, or
+  /// its List's first Text's; null for one of icons alone.
+  (String, bool)? _barLabel(String id, String scope) {
+    final child = surface.components[surface.components[id]?['child']];
+    final text = switch (child?['component']) {
+      'Text' => child,
+      'List' => switch (child!['children']) {
+        final List ids =>
+          ids
+              .map((id) => surface.components[id])
+              .where((c) => c?['component'] == 'Text')
+              .firstOrNull,
+        _ => null,
+      },
+      _ => null,
+    };
+    if (text == null) return null;
+    return (string(text['text'], scope), text['variant'] == 'heading');
   }
 
   /// A Stat's or Map's thresholds, when they're a list of steps.
@@ -1678,16 +1747,20 @@ class _More extends StatelessWidget {
 /// on a small phone) do they shrink, in proportion to what they have
 /// above it, and where even every button's least doesn't fit, all give
 /// way evenly. Each button's words end in "…" where its room ends. Where
-/// a button would keep less than a letter and "…" (the largest text on a
-/// small phone), the weighted ones take a line of their own and the
+/// a button would keep less than three letters and "…" (large text on a
+/// phone), the weighted ones take a line of their own and the
 /// others go under it, as Grafana's phone bar puts its title above its
 /// controls.
 class _BarLayout extends MultiChildRenderObjectWidget {
   const _BarLayout({
     required this.weights,
     required this.hasWords,
+    required this.labels,
     required super.children,
   });
+
+  /// Each child's words and whether they're a heading, if it has words.
+  final List<(String, bool)?> labels;
 
   /// Each child's weight, null for one at its own width.
   final List<int?> weights;
@@ -1711,18 +1784,60 @@ class _BarLayout extends MultiChildRenderObjectWidget {
   /// padding, the chevron and the gap before it.
   static const buttonChrome = 24.0;
 
-  /// The least a button with words keeps a letter and "…" in at the text
-  /// size: under it the bar takes more lines (see [_RenderBar._lines]).
-  static double _readable(BuildContext context) {
+  /// How many letters a button with words keeps before its "…" on one
+  /// line: one letter doesn't say where you are.
+  static const readableLetters = 3;
+
+  /// The least each button with words keeps its first
+  /// [readableLetters] letters (spaces don't count) and "…" in at the
+  /// text size ("Cla…", "30 d…"): under it the bar takes more lines (see
+  /// [_RenderBar._lines]). Infinite for one without words.
+  List<double> _readable(BuildContext context) {
+    final type = TypeScale.of(context);
+    return [
+      for (final label in labels)
+        if (label case (final text, final heading)?)
+          _width(
+            context,
+            _readablePart(text),
+            heading
+                ? type.emphasis.copyWith(fontWeight: FontWeight.w600)
+                : type.body,
+          )
+        else
+          double.infinity,
+    ];
+  }
+
+  /// [text] up to its [readableLetters]th letter, and "…" if more
+  /// follows.
+  static String _readablePart(String text) {
+    var letters = 0;
+    final runes = text.runes.toList();
+    for (var k = 0; k < runes.length; k++) {
+      if (String.fromCharCode(runes[k]).trim().isEmpty) continue;
+      letters++;
+      if (letters == readableLetters) {
+        return k == runes.length - 1
+            ? text
+            : '${String.fromCharCodes(runes.take(k + 1))}…';
+      }
+    }
+    return text;
+  }
+
+  static double _width(BuildContext context, String text, TextStyle style) {
     final painter = TextPainter(
-      text: TextSpan(text: 'A…', style: TypeScale.of(context).body),
+      text: TextSpan(text: text, style: style),
       textScaler: MediaQuery.textScalerOf(context),
       textDirection: Directionality.of(context),
       maxLines: 1,
     )..layout();
     final width = painter.width;
     painter.dispose();
-    return width.ceilToDouble() + buttonChrome;
+    // A little slack: the button's own chrome is a hair over its round
+    // number, and "…" fits only on room it wholly has.
+    return width.ceilToDouble() + buttonChrome + 2;
   }
 
   @override
@@ -1732,6 +1847,7 @@ class _BarLayout extends MultiChildRenderObjectWidget {
     Directionality.of(context),
     _least(context),
     _readable(context),
+    Metrics.of(context).target,
   );
 
   @override
@@ -1741,23 +1857,143 @@ class _BarLayout extends MultiChildRenderObjectWidget {
       ..hasWords = hasWords
       ..direction = Directionality.of(context)
       ..least = _least(context)
-      ..readable = _readable(context);
+      ..readable = _readable(context)
+      ..target = Metrics.of(context).target;
   }
 }
 
 class _BarParentData extends ContainerBoxParentData<RenderBox> {}
 
-class _RenderBar extends RenderBox
+/// A dashboard's row of panels: each its weight's share of the width, less
+/// [spacing] between, and every one as tall as the tallest.
+class _EvenRow extends MultiChildRenderObjectWidget {
+  const _EvenRow({
+    required this.weights,
+    required this.spacing,
+    required super.children,
+  });
+
+  final List<int> weights;
+  final double spacing;
+
+  @override
+  _RenderEvenRow createRenderObject(BuildContext context) =>
+      _RenderEvenRow(weights, spacing, Directionality.of(context));
+
+  @override
+  void updateRenderObject(BuildContext context, _RenderEvenRow row) => row
+    ..weights = weights
+    ..spacing = spacing
+    ..direction = Directionality.of(context);
+}
+
+class _RenderEvenRow extends RenderBox
     with
         ContainerRenderObjectMixin<RenderBox, _BarParentData>,
         RenderBoxContainerDefaultsMixin<RenderBox, _BarParentData> {
+  _RenderEvenRow(this._weights, this._spacing, this._direction);
+
+  List<int> _weights;
+  set weights(List<int> value) {
+    if (listEquals(value, _weights)) return;
+    _weights = value;
+    markNeedsLayout();
+  }
+
+  double _spacing;
+  set spacing(double value) {
+    if (value == _spacing) return;
+    _spacing = value;
+    markNeedsLayout();
+  }
+
+  TextDirection _direction;
+  set direction(TextDirection value) {
+    if (value == _direction) return;
+    _direction = value;
+    markNeedsLayout();
+  }
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! _BarParentData) {
+      child.parentData = _BarParentData();
+    }
+  }
+
+  @override
+  void performLayout() {
+    final kids = getChildrenAsList();
+    final width = constraints.maxWidth;
+    final total = _weights.take(kids.length).fold(0, (sum, w) => sum + w);
+    final room = math.max(0.0, width - _spacing * (kids.length - 1));
+    final widths = [
+      for (var i = 0; i < kids.length; i++)
+        total == 0 || i >= _weights.length ? 0.0 : room * _weights[i] / total,
+    ];
+    // Each at its own height, then the shorter ones again at the tallest's.
+    var tallest = 0.0;
+    for (final (i, kid) in kids.indexed) {
+      kid.layout(
+        BoxConstraints.tightFor(width: widths[i]),
+        parentUsesSize: true,
+      );
+      tallest = math.max(tallest, kid.size.height);
+    }
+    tallest = constraints.constrainHeight(tallest);
+    var x = 0.0;
+    for (final (i, kid) in kids.indexed) {
+      if (kid.size.height != tallest) {
+        kid.layout(
+          BoxConstraints.tightFor(width: widths[i], height: tallest),
+          parentUsesSize: true,
+        );
+      }
+      (kid.parentData! as _BarParentData).offset = Offset(
+        _direction == TextDirection.rtl ? width - x - widths[i] : x,
+        0,
+      );
+      x += widths[i] + _spacing;
+    }
+    size = constraints.constrain(Size(width, tallest));
+  }
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
+      defaultHitTestChildren(result, position: position);
+
+  @override
+  void paint(PaintingContext context, Offset offset) =>
+      defaultPaint(context, offset);
+}
+
+/// A render object that takes taps in the page's margin beside it: a
+/// view's page retries a tap there that hit nothing on the nearest point
+/// of its content, and keeps it only where one of these takes it (a bar's
+/// •••, a finger's target wide though drawn narrower).
+abstract interface class EdgeTapTarget {}
+
+class _RenderBar extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, _BarParentData>,
+        RenderBoxContainerDefaultsMixin<RenderBox, _BarParentData>
+    implements EdgeTapTarget {
   _RenderBar(
     this._weights,
     this._hasWords,
     this._direction,
     this._least,
     this._readable,
+    this._target,
   );
+
+  /// A finger's target: the least a button of icons alone answers taps
+  /// across, centred on it, whatever it's drawn at.
+  double _target;
+  set target(double value) {
+    if (value == _target) return;
+    _target = value;
+  }
 
   double _least;
   set least(double value) {
@@ -1766,9 +2002,9 @@ class _RenderBar extends RenderBox
     markNeedsLayout();
   }
 
-  double _readable;
-  set readable(double value) {
-    if (value == _readable) return;
+  List<double> _readable;
+  set readable(List<double> value) {
+    if (listEquals(value, _readable)) return;
     _readable = value;
     markNeedsLayout();
   }
@@ -1863,7 +2099,7 @@ class _RenderBar extends RenderBox
   ];
 
   /// The bar's lines on [width]: each child's index and width. One line
-  /// while each button with words keeps at least a letter and "…" on it;
+  /// while each button with words keeps a few letters and "…" on it;
   /// where it wouldn't (the largest text on a small phone), the weighted
   /// ones (the dashboard's name) on a line of their own, as Grafana's
   /// title is, and the others under it, on as many lines as they need to
@@ -1871,13 +2107,15 @@ class _RenderBar extends RenderBox
   List<List<(int, double)>> _lines(double width) {
     final natural = _natural;
     final all = [for (var i = 0; i < natural.length; i++) i];
-    List<(int, double)> fit(List<int> line) => [
-      for (final (k, w) in _fit(line, natural, width).indexed) (line[k], w),
+    List<(int, double)> fit(List<int> line, {bool wrapped = false}) => [
+      for (final (k, w) in _fit(line, natural, width, wrapped: wrapped).indexed)
+        (line[k], w),
     ];
     final one = fit(all);
     if (!width.isFinite) return [one];
-    double readable(int i) =>
-        _words(i) ? math.min(natural[i], _readable) : natural[i];
+    double readable(int i) => _words(i) && i < _readable.length
+        ? math.min(natural[i], _readable[i])
+        : natural[i];
     final squeezed = one.any(
       (slot) => _words(slot.$1) && slot.$2 < readable(slot.$1) - 0.5,
     );
@@ -1893,21 +2131,26 @@ class _RenderBar extends RenderBox
       if (_weight(i) != null) continue;
       final need = readable(i);
       if (line.isNotEmpty && used + _gap + need > width) {
-        lines.add(fit(line));
+        lines.add(fit(line, wrapped: true));
         line = [];
         used = 0;
       }
       used += (line.isEmpty ? 0 : _gap) + need;
       line.add(i);
     }
-    if (line.isNotEmpty) lines.add(fit(line));
+    if (line.isNotEmpty) lines.add(fit(line, wrapped: true));
     return lines;
   }
 
   /// The widths of [line]'s children on a line [width] wide: the
   /// unweighted ones at their own width, the weighted ones sharing the
   /// rest, giving way as [_BarLayout] says.
-  List<double> _fit(List<int> line, List<double> natural, double width) {
+  List<double> _fit(
+    List<int> line,
+    List<double> natural,
+    double width, {
+    bool wrapped = false,
+  }) {
     if (!width.isFinite) return [for (final i in line) natural[i]];
     final room = math.max(0.0, width - _gap * math.max(0, line.length - 1));
     var fixed = 0.0;
@@ -1922,8 +2165,13 @@ class _RenderBar extends RenderBox
     // The least each gives way to: words keep an icon or their first
     // letters and "…", a weighted one of icons alone its chevron, one of
     // icons alone its width.
+    // On a line of its own, packed so each keeps its first letters, none
+    // gives way past them.
     double floor(int i) => _words(i)
-        ? math.min(natural[i], _least)
+        ? math.min(
+            natural[i],
+            wrapped && i < _readable.length ? _readable[i] : _least,
+          )
         : _weight(i) != null
         ? math.min(natural[i], _BarLayout.leastWeighted)
         : natural[i];
@@ -2057,6 +2305,50 @@ class _RenderBar extends RenderBox
       defaultPaint(context, offset);
 
   @override
-  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
-      defaultHitTestChildren(result, position: position);
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {
+    if (defaultHitTestChildren(result, position: position)) return true;
+    // Missed: a button of icons alone (•••) narrower than a finger's
+    // target takes a tap within a target around it, reaching into the
+    // gaps and the page's edge without moving anything or taking another
+    // button's taps (Zucchero row 444).
+    for (final (i, child) in _children.indexed) {
+      if (_words(i) || _weight(i) != null) continue;
+      final offset = (child.parentData! as _BarParentData).offset;
+      final rect = offset & child.size;
+      final reach = Rect.fromCenter(
+        center: rect.center,
+        width: math.max(rect.width, _target),
+        height: math.max(rect.height, _target),
+      );
+      if (!reach.contains(position)) continue;
+      return result.addWithPaintOffset(
+        offset: offset,
+        position: position,
+        hitTest: (result, _) =>
+            child.hitTest(result, position: child.size.center(Offset.zero)),
+      );
+    }
+    return false;
+  }
+
+  /// How far past its sides the bar takes taps: half a target, for a
+  /// button of icons alone at its end.
+  double get _reach => _target / 2;
+
+  @override
+  bool hitTest(BoxHitTestResult result, {required Offset position}) {
+    final reach = Rect.fromLTRB(
+      -_reach,
+      -_reach,
+      size.width + _reach,
+      size.height + _reach,
+    );
+    if (!reach.contains(position)) return false;
+    if (hitTestChildren(result, position: position) ||
+        (size.contains(position) && hitTestSelf(position))) {
+      result.add(BoxHitTestEntry(this, position));
+      return true;
+    }
+    return false;
+  }
 }

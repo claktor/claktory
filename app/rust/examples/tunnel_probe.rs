@@ -31,9 +31,10 @@ async fn main() -> anyhow::Result<()> {
     }
     for _ in 0..tries {
         let key = SecretKey::generate();
+        let homes = tunnel::relay_urls(&relays);
         let make: MakeEndpoint = Arc::new(move || {
-            let key = key.clone();
-            Box::pin(async move { device_endpoint(key).await })
+            let (key, homes) = (key.clone(), homes.clone());
+            Box::pin(async move { device_endpoint(key, &homes).await })
         });
         let tunnel = Tunnel::open_with(make, tunnel::REBUILD_AFTER, backend_addr(&id, &relays, &addrs)?).await?;
         let begun = Instant::now();

@@ -32,7 +32,7 @@ pub mod tools;
 pub mod types;
 pub mod usage;
 
-pub use agent::{AbortHandle, AfterCompaction, Agent, AgentOptions, Arrived, DetachHandle, Inbox, Listener, NewContext, Settings, WaitNetwork, WaitOut};
+pub use agent::{AbortHandle, AfterCompaction, Agent, AgentOptions, Arrived, DetachHandle, Inbox, Listener, NewContext, Settings, WaitNetwork, WaitOut, WaitProvider};
 pub use errors::Error;
 pub use login::login_terminal;
 pub use providers::models::{ModelInfo, Registry};

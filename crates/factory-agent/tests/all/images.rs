@@ -6,7 +6,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::support::{deepseek, luna, reply};
-use base64::Engine;
 use sha2::Digest as _;
 use factory_agent::agent::{Agent, AgentOptions};
 use factory_agent::stream::{StreamFn, ThinkingLevel, event_stream};
@@ -47,7 +46,7 @@ fn parts(result: &ToolResult) -> (String, Vec<u8>, String) {
     let [ToolResultPart::Text { text }, ToolResultPart::Image { data, mime_type, digest }] = result.content.as_slice() else {
         panic!("a text note then one image, got {:?}", result.content.len());
     };
-    let bytes = base64::engine::general_purpose::STANDARD.decode(data).expect("base64");
+    let bytes = data.bytes().expect("its bytes");
     // Named by what it sends (#382), so Anthropic gets it once.
     let hex: String = sha2::Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect();
     assert_eq!(digest.as_deref(), Some(hex.as_str()));

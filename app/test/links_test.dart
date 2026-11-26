@@ -1,6 +1,7 @@
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/devices.dart';
 import 'package:factory_app/links.dart';
+import 'package:factory_app/identity.dart' show Palette;
 import 'package:factory_app/mobile/drawer.dart'
     show PhoneDrawerHost, PhoneDrawerHostState;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -99,6 +100,27 @@ void main() {
     await tester.tap(find.text('Cancel'));
     await settle(tester);
     expect(harness.connections.saved, isEmpty);
+  });
+
+  testWidgets('signed out, or the list unreadable, it claims nothing of '
+      'whose it is: only the caution, not in red (#529, MC3)', (tester) async {
+    onAccountTest = (_, _) async => null;
+    final harness = Harness(Workspace());
+    await harness.show(tester);
+    appLinks.receive(_code);
+    await settle(tester);
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    expect(find.textContaining("isn't on your Claktory account"), findsNothing);
+    final caution = find.text(
+      "Connect only if you're setting it up yourself, right now.",
+    );
+    expect(caution, findsOneWidget);
+    expect(
+      tester.widget<Text>(caution).style?.color,
+      Palette.of(tester.element(caution)).textMuted,
+    );
+    await tester.tap(find.text('Cancel'));
+    await settle(tester);
   });
 
   group('claktory:// pairing codes, read like factory:// ones', () {

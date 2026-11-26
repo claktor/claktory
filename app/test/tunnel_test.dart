@@ -70,13 +70,19 @@ class FakeTunnel implements Tunnel {
   @override
   Future<void> reconnect() async => reconnects++;
 
+  /// What [setRelays] was told, in order.
+  final relaysTold = <List<String>>[];
+
+  @override
+  void setRelays(List<String> relays) => relaysTold.add(relays);
+
   /// The ports asked for; [forwardPort] answers what [forwarded] makes.
   final forwards = <int>[];
   Future<PortForward> Function(int port) forwarded = (_) async =>
       throw const ForwardFailure(ForwardProblem.unsupported);
 
   @override
-  Future<PortForward> forwardPort(int port) {
+  Future<PortForward> forwardPort(int port, {int? target}) {
     forwards.add(port);
     return forwarded(port);
   }
@@ -1038,6 +1044,71 @@ void main() {
     await server.close(force: true);
   });
 
+  test('the tunnel follows the relays its Claktory says it uses, told '
+      'only when they change (#450)', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    WebSocket? connected;
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      connected = socket;
+      socket.listen((frame) {
+        final message = ClientMessage.fromBuffer(frame as List<int>);
+        if (message.hasHello()) {
+          socket.add(
+            ServerMessage(
+              replyTo: message.id,
+              welcome: Welcome(serverVersion: 'test'),
+            ).writeToBuffer(),
+          );
+        }
+      });
+    });
+    const n0s = ['https://use1-1.relay.n0.iroh.link./'];
+    const ours = ['https://relay.claktory.com/', ...n0s];
+    void send(Workspace workspace, String revision) => connected!.add(
+      ServerMessage(
+        workspace: workspace,
+        workspaceRevision: revision,
+      ).writeToBuffer(),
+    );
+    final tunnels = FakeTunnels(FakeTunnel(server.port));
+    final backend = backendWith(tunnels)..deviceKey = (_) => 'k' * 64;
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    Future<void> until(bool Function() done) async {
+      for (var i = 0; i < 250 && !done(); i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+      }
+      expect(done(), isTrue);
+    }
+
+    await until(() => backend.connected.value);
+    // Not signed in: n0's.
+    send(Workspace(remote: RemoteAccess(on: true, relays: n0s)), '1');
+    await until(() => tunnels.tunnel.relaysTold.isNotEmpty);
+    expect(tunnels.tunnel.relaysTold, [n0s]);
+    // The same again tells it nothing; none at all neither.
+    send(Workspace(remote: RemoteAccess(on: true, relays: n0s)), '2');
+    send(Workspace(remote: RemoteAccess(on: true)), '3');
+    send(Workspace(), '4');
+    // Signed in: Claktory's.
+    send(Workspace(remote: RemoteAccess(on: true, relays: ours)), '5');
+    await until(() => tunnels.tunnel.relaysTold.length == 2);
+    expect(tunnels.tunnel.relaysTold, [n0s, ours]);
+    // Made from scratch (as while it can't connect), the new tunnel homes
+    // on the relays it last said, not the pairing code's (Abbacchio, #37).
+    expect(tunnels.opened, hasLength(1));
+    backend.reconnectNow();
+    await until(() => tunnels.opened.length == 2);
+    expect(tunnels.opened.last.$3, ours);
+    await until(() => backend.connected.value);
+    send(Workspace(remote: RemoteAccess(on: true, relays: ours)), '6');
+    await Future<void>.delayed(const Duration(milliseconds: 100));
+    expect(tunnels.tunnel.relaysTold, [n0s, ours], reason: 'told already');
+    await backend.close();
+    await server.close(force: true);
+  });
+
   test('earlier entries are asked for and put before the ones held', () async {
     Entry numbered(int seq) => Entry(
       seq: Int64(seq),
@@ -1147,7 +1218,13 @@ void main() {
       find.textContaining('Make sure mac-mini is on, awake and online'),
       findsOneWidget,
     );
-    await tester.tap(find.text('Reconnect'));
+    // The dialog's (the main pane behind it has one too, row 480).
+    await tester.tap(
+      find.descendant(
+        of: find.byType(ConnectionDialog),
+        matching: find.text('Reconnect'),
+      ),
+    );
     await settle(tester);
     expect(find.byType(ConnectionDialog), findsNothing);
     expect(harness.backend.reconnectsAsked, 2);

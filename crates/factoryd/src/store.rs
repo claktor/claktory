@@ -88,7 +88,7 @@ CREATE TABLE show_all (project TEXT PRIMARY KEY);
 /// Changes to the schema since `SCHEMA`, in order: database version n+1 has
 /// the first n+1 of them. Older backends (after a rollback) ignore tables they
 /// don't know.
-const MIGRATIONS: [&str; 102] = [
+const MIGRATIONS: [&str; 118] = [
     "
 -- Agents with a run that finished or failed since the person last opened them.
 CREATE TABLE unseen (agent TEXT PRIMARY KEY);
@@ -259,6 +259,32 @@ CREATE INDEX tasks_running ON tasks (agent, task) WHERE ended IS NULL;
     crate::service::SCHEMA,
     crate::pipes::shares::SCHEMA,
     crate::pipes::share_listener::SCHEMA,
+    crate::lid_closed::SET_BIT,
+    crate::account::relay_token::SCHEMA,
+    crate::vault::given_up::SCHEMA,
+    crate::extensions::ask::ACTION_ERROR,
+    crate::history::record::SCHEMA,
+    crate::history::NODES,
+    crate::extensions::resources::SCHEMA,
+    crate::pipes::shares::REACH_STATE,
+    crate::pipes::identity::OWN_REGISTRATION,
+    crate::command_cards::SCHEMA,
+    crate::pipes::SHARE_LINES,
+    crate::errands::SCHEMA,
+    crate::pipes::identity::CHANGE_IAT,
+    crate::browser_host::downloads::SCHEMA,
+    "
+-- Read every time the Workspace is built and by the reminder loop, without
+-- reading every row ever kept (#490): each agent's unread quiet copies, and
+-- the checklist items by status (blocked, parked).
+CREATE INDEX quiet_copies_unread ON quiet_copies (agent) WHERE read IS NULL;
+CREATE INDEX checklist_items_by_status ON checklist_items (status);
+",
+    "
+-- The folder a background task started in (friend bug #44: after a restart
+-- that ended it, its agent is told where it ran); null for tasks before it.
+ALTER TABLE tasks ADD COLUMN folder TEXT;
+",
 ];
 
 /// A background task as recorded.
@@ -302,6 +328,14 @@ pub(crate) enum Outcome {
 
 pub(crate) struct Store {
     db: Mutex<Connection>,
+    /// The runs table's latest start and end by agent, read from it once and
+    /// kept up to date as runs start and end, so the reminders that ask every
+    /// few seconds don't scan the whole history. Taken only after `db` is
+    /// released by writers; `run_times` takes it first.
+    run_times: Mutex<Option<RunTimes>>,
+    /// Model calls counted, written together (`crate::calls`): read them
+    /// after `write_calls`.
+    pub(crate) calls: crate::calls::Calls,
 }
 
 /// The schema version this backend writes: a database above it was made by
@@ -349,6 +383,17 @@ pub(crate) fn row4<A: FromSql, B: FromSql, C: FromSql, D: FromSql>(row: &Row<'_>
     Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
 }
 
+/// Each agent's latest run start and end, over the whole runs table.
+fn read_run_times(db: &Connection) -> rusqlite::Result<RunTimes> {
+    let mut statement = db.prepare("SELECT agent, MAX(started), MAX(ended) FROM runs GROUP BY agent")?;
+    let mut rows = statement.query([])?;
+    let mut times = RunTimes::new();
+    while let Some(row) = rows.next()? {
+        times.insert(row.get(0)?, (row.get(1)?, row.get(2)?));
+    }
+    Ok(times)
+}
+
 impl Store {
     pub(crate) fn open(path: &Path) -> Result<Store, rusqlite::Error> {
         let db = Connection::open(path)?;
@@ -356,11 +401,18 @@ impl Store {
         db.pragma_update(None, "synchronous", "NORMAL")?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         migrate(&db, SCHEMA, &MIGRATIONS)?;
-        Ok(Store { db: Mutex::new(db) })
+        Ok(Store { db: Mutex::new(db), run_times: Mutex::new(None), calls: crate::calls::Calls::default() })
     }
 
     pub(crate) fn db(&self) -> MutexGuard<'_, Connection> {
         self.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Writes the model calls counted so far (`crate::calls`): before
+    /// anything reads `model_usage`, `agent_usage` or `runs.last_call`, and
+    /// before Claktory stops. Never with `db` held.
+    pub fn write_calls(&self) {
+        self.calls.write(&mut self.db());
     }
 
     /// Records a message for an agent; returns its id.
@@ -490,9 +542,14 @@ impl Store {
     }
 
     pub(crate) fn start_run(&self, agent: &str, version: &str) -> Result<i64, rusqlite::Error> {
-        let db = self.db();
-        db.execute("INSERT INTO runs (agent, version, started) VALUES (?1, ?2, ?3)", params![agent, version, now_ms()])?;
-        Ok(db.last_insert_rowid())
+        let now = now_ms();
+        let run = {
+            let db = self.db();
+            db.execute("INSERT INTO runs (agent, version, started) VALUES (?1, ?2, ?3)", params![agent, version, now])?;
+            db.last_insert_rowid()
+        };
+        self.ran(agent, Some(now), None);
+        Ok(run)
     }
 
     /// Ends the run, and with it its agent's presence: idle from now, failed
@@ -505,13 +562,21 @@ impl Store {
         let ended =
             transaction.execute("UPDATE runs SET ended = ?2, outcome = ?3 WHERE id = ?1 AND ended IS NULL", params![run, now, outcome])?;
         let mut presence = None;
-        if ended == 1 && outcome != "deleted" {
-            let agent: String = transaction.query_row("SELECT agent FROM runs WHERE id = ?1", [run], |row| row.get(0))?;
-            let now = Presence { idle_since: now, failed: outcome == "failed" };
-            crate::characters::set_presence(&transaction, &agent, now)?;
-            presence = Some((agent, now));
+        let mut agent = None;
+        if ended == 1 {
+            let of: String = transaction.query_row("SELECT agent FROM runs WHERE id = ?1", [run], |row| row.get(0))?;
+            if outcome != "deleted" {
+                let now = Presence { idle_since: now, failed: outcome == "failed" };
+                crate::characters::set_presence(&transaction, &of, now)?;
+                presence = Some((of.clone(), now));
+            }
+            agent = Some(of);
         }
         transaction.commit()?;
+        drop(db);
+        if let Some(agent) = agent {
+            self.ran(&agent, None, Some(now));
+        }
         Ok(presence)
     }
 
@@ -522,7 +587,7 @@ impl Store {
     pub(crate) fn interrupted_runs(&self) -> Result<BTreeMap<String, (String, i64)>, rusqlite::Error> {
         let mut db = self.db();
         let transaction = db.transaction()?;
-        let mut runs = BTreeMap::new();
+        let mut runs: BTreeMap<String, (String, i64)> = BTreeMap::new();
         {
             let mut statement = transaction.prepare("SELECT agent, version, started FROM runs WHERE ended IS NULL ORDER BY id")?;
             let mut rows = statement.query([])?;
@@ -530,15 +595,20 @@ impl Store {
                 runs.insert(row.get(0)?, (row.get(1)?, row.get(2)?));
             }
         }
-        transaction.execute("UPDATE runs SET ended = ?1, outcome = 'interrupted' WHERE ended IS NULL", [now_ms()])?;
+        let now = now_ms();
+        transaction.execute("UPDATE runs SET ended = ?1, outcome = 'interrupted' WHERE ended IS NULL", [now])?;
         transaction.commit()?;
+        drop(db);
+        for agent in runs.keys() {
+            self.ran(agent, None, Some(now));
+        }
         Ok(runs)
     }
 
     pub(crate) fn start_task(&self, agent: &str, task: &Task) -> Result<(), rusqlite::Error> {
         self.db().execute(
-            "INSERT INTO tasks (agent, task, command, pid, log, started) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![agent, task.id, task.command, task.pid, task.log.to_string_lossy(), now_ms()],
+            "INSERT INTO tasks (agent, task, command, pid, log, started, folder) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![agent, task.id, task.command, task.pid, task.log.to_string_lossy(), now_ms(), task.folder.to_string_lossy()],
         )?;
         Ok(())
     }
@@ -568,7 +638,8 @@ impl Store {
 
     pub(crate) fn running_tasks(&self) -> Result<Vec<(String, Task)>, rusqlite::Error> {
         let db = self.db();
-        let mut statement = db.prepare("SELECT agent, task, command, pid, log, started FROM tasks WHERE ended IS NULL ORDER BY id")?;
+        let mut statement =
+            db.prepare("SELECT agent, task, command, pid, log, started, COALESCE(folder, '') FROM tasks WHERE ended IS NULL ORDER BY id")?;
         let mut rows = statement.query([])?;
         let mut tasks = Vec::new();
         while let Some(row) = rows.next()? {
@@ -580,6 +651,7 @@ impl Store {
                 pid: row.get(3)?,
                 log: log.into(),
                 started: u64::try_from(started).unwrap_or(0),
+                folder: row.get::<_, String>(6)?.into(),
             };
             tasks.push((row.get(0)?, task));
         }
@@ -618,16 +690,27 @@ impl Store {
         Ok(())
     }
 
-    /// When each agent's latest run started, and when its latest run ended.
+    /// When each agent's latest run started, and when its latest run ended:
+    /// read from the runs table the first time, then kept in memory.
     pub(crate) fn run_times(&self) -> Result<RunTimes, rusqlite::Error> {
-        let db = self.db();
-        let mut statement = db.prepare("SELECT agent, MAX(started), MAX(ended) FROM runs GROUP BY agent")?;
-        let mut rows = statement.query([])?;
-        let mut times = std::collections::HashMap::new();
-        while let Some(row) = rows.next()? {
-            times.insert(row.get(0)?, (row.get(1)?, row.get(2)?));
+        let mut cached = self.run_times.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(times) = &*cached {
+            return Ok(times.clone());
         }
+        let times = read_run_times(&self.db())?;
+        *cached = Some(times.clone());
         Ok(times)
+    }
+
+    /// A run of the agent started or ended at these times: the latest of
+    /// each is kept, as MAX over the table would give. Nothing to do before
+    /// `run_times` first reads the table, which will see it.
+    fn ran(&self, agent: &str, started: Option<i64>, ended: Option<i64>) {
+        let mut cached = self.run_times.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(times) = cached.as_mut() else { return };
+        let (latest_start, latest_end) = times.entry(agent.to_owned()).or_default();
+        *latest_start = (*latest_start).max(started);
+        *latest_end = (*latest_end).max(ended);
     }
 
     pub(crate) fn state(&self) -> Result<State, rusqlite::Error> {
@@ -751,5 +834,65 @@ fn source_named(name: &str) -> Option<EventSource> {
         "app" => Some(EventSource::App),
         "pipe" => Some(EventSource::Pipe),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn path() -> std::path::PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("factoryd-store-{}-{}-{n}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        dir.join("factory.db")
+    }
+
+    /// What run_times keeps in memory is what the table says, step by step.
+    fn same_as_the_table(store: &Store, step: &str) {
+        let table = read_run_times(&store.db()).expect("table");
+        assert_eq!(store.run_times().expect("run times"), table, "after {step}");
+    }
+
+    #[test]
+    fn run_times_kept_in_memory_match_the_runs_table() {
+        let path = path();
+        let store = Store::open(&path).expect("store");
+        // History from before this start, one run ending later than any
+        // this test makes: the latest stays the latest.
+        let later = now_ms() + 3_600_000;
+        store
+            .db()
+            .execute("INSERT INTO runs (agent, version, started, ended, outcome) VALUES ('ana', 'v', 1000, ?1, 'finished')", [later])
+            .expect("old run");
+        same_as_the_table(&store, "the first read");
+        assert_eq!(store.run_times().expect("run times")["ana"], (Some(1000), Some(later)));
+
+        let first = store.start_run("ana", "v").expect("start");
+        let second = store.start_run("bo", "v").expect("start");
+        same_as_the_table(&store, "two runs start");
+        assert_eq!(store.run_times().expect("run times")["bo"].1, None, "bo's run hasn't ended");
+        store.end_run(first, "finished").expect("end");
+        store.end_run(first, "stopped").expect("an ended run ends once");
+        same_as_the_table(&store, "a run ends");
+        store.end_run(second, "deleted").expect("end");
+        same_as_the_table(&store, "a deleted agent's run ends");
+        let third = store.start_run("cy", "v").expect("start");
+        store.start_run("bo", "v").expect("start");
+        same_as_the_table(&store, "more runs start");
+        let interrupted = store.interrupted_runs().expect("interrupted");
+        assert_eq!(interrupted.keys().collect::<Vec<_>>(), ["bo", "cy"]);
+        same_as_the_table(&store, "Claktory stopped mid-run");
+        store.end_run(third, "finished").expect("an interrupted run stays so");
+        same_as_the_table(&store, "an interrupted run ends again");
+        let kept = store.run_times().expect("run times");
+        drop(store);
+
+        // A restart reads the table again, and finds the same.
+        let store = Store::open(&path).expect("store again");
+        assert_eq!(store.run_times().expect("run times"), kept, "after a restart");
+        store.start_run("cy", "v").expect("start");
+        same_as_the_table(&store, "a run starts after the restart");
     }
 }

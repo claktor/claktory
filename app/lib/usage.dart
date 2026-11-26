@@ -79,21 +79,32 @@ List<UsageMeter> usageMeters(List<Provider> providers) => [
 /// meter.
 ///
 /// With [onAdd], a + after them, a circle's size, to add another provider
-/// (a friend with one couldn't find where to add a second).
+/// (a friend with one couldn't find where to add a second). [leading]
+/// comes first in the same row (the sidebar's who's-at-work badge): with
+/// many accounts they all wrap together onto more lines, each starting at
+/// the row's left edge, each line's cells centred on one another (Matt,
+/// with four subscriptions).
 class ProviderUsageCircles extends StatelessWidget {
-  const ProviderUsageCircles({super.key, required this.providers, this.onAdd});
+  const ProviderUsageCircles({
+    super.key,
+    required this.providers,
+    this.onAdd,
+    this.leading,
+  });
 
   final List<Provider> providers;
   final VoidCallback? onAdd;
+  final Widget? leading;
 
   @override
   Widget build(BuildContext context) {
     final onAdd = this.onAdd;
-    // Their own row, wrapping onto more as they multiply.
     return Wrap(
       spacing: Space.xs,
       runSpacing: Space.xs,
+      crossAxisAlignment: WrapCrossAlignment.center,
       children: [
+        ?leading,
         for (final meter in usageMeters(providers)) UsageCircle(meter: meter),
         if (onAdd != null) AddProviderButton(onTap: onAdd),
       ],

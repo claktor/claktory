@@ -7,7 +7,11 @@ mod app_archive;
 pub mod apps;
 mod arrange;
 pub mod browser;
+pub mod browser_runner;
+pub mod browser_host;
+mod calls;
 mod card_actions;
+mod command_cards;
 mod catalog;
 pub mod channel;
 mod characters;
@@ -21,8 +25,16 @@ mod credit;
 pub mod connectors;
 mod decisions;
 pub mod diagnostics;
+pub mod disk;
+#[doc(hidden)]
+pub mod dm_device;
+mod dm_hello;
+mod dm_link;
 mod encoding;
+pub mod errands;
 mod explorer;
+mod file_watch;
+pub mod log_file;
 mod extensions;
 pub mod factory;
 mod find;
@@ -31,6 +43,7 @@ mod forward;
 pub mod home;
 mod idle;
 mod ink;
+mod iroh_link;
 pub mod install;
 mod keep_awake;
 /// Keeping a laptop's agents working with its lid closed (#371); public
@@ -40,6 +53,7 @@ pub mod launch_agent;
 mod locking;
 mod login;
 mod manual;
+mod history;
 mod map;
 pub mod models;
 pub mod move_bundle;
@@ -53,6 +67,7 @@ mod needs_you;
 mod network;
 pub mod notify;
 mod onboarding;
+pub mod open_files;
 mod patch;
 mod person;
 pub mod pipe_link;
@@ -70,6 +85,8 @@ mod runs;
 mod service;
 mod sketch;
 pub mod speech;
+#[cfg(feature = "qa-lies")]
+pub mod qa_lies;
 mod store;
 pub mod terminal_qr;
 pub mod transcript;
@@ -90,6 +107,9 @@ pub use account::analytics::{backend_started, backend_stopped};
 /// For tests: anchors a test's own account service to roots of its own.
 #[doc(hidden)]
 pub use account::anchor::anchor_for_tests as anchor_account_for_tests;
+/// For tests: Execute cards' runs left going as if Claktory had died.
+#[doc(hidden)]
+pub use command_cards::abandon_runs_for_test;
 pub use connection::{ConnectionError, serve};
 /// For tests: one hourly Team health check, as if at a given time.
 #[doc(hidden)]

@@ -15,6 +15,10 @@ use factory_agent::{Event, EventSource, SecretVariable};
 use zeroize::Zeroizing;
 use serde::{Deserialize, Serialize};
 
+mod pipes;
+
+pub(crate) use pipes::{PipeSeen, sees_pipe};
+
 use super::when::{self, FireOn, MINUTE, Repeat, SECOND, When};
 use super::{Monitor, Query, Status, fired_since, query, save, waiting};
 use crate::factory::{Factory, host_event};
@@ -112,6 +116,11 @@ impl Factory {
         self.monitors.offset.fetch_add(i64::try_from(by.as_millis()).unwrap_or(i64::MAX), Ordering::Relaxed);
     }
 
+    /// Moves the monitors' clock back, as a wall clock set back does; for tests.
+    pub fn rewind_monitor_clock(&self, by: Duration) {
+        self.monitors.offset.fetch_sub(i64::try_from(by.as_millis()).unwrap_or(i64::MAX), Ordering::Relaxed);
+    }
+
     /// How often the monitors' scheduler runs (every second); tests make it shorter.
     pub fn set_monitor_tick(&self, tick: Duration) {
         self.monitors.tick_ms.store(u64::try_from(tick.as_millis()).unwrap_or(1000).max(1), Ordering::Relaxed);
@@ -134,6 +143,9 @@ pub(super) struct Live {
     last_line: i64,
     /// When a check's use of its secrets was last logged in the vault.
     secrets_logged: Option<i64>,
+    /// A pipes monitor's pipes whose other side seems to have come online
+    /// or gone offline, and since when, until it holds (`pipes::SETTLE`).
+    pipes_settling: HashMap<String, (bool, i64)>,
 }
 
 /// A file's size and modification time, by path.
@@ -145,6 +157,9 @@ struct Agent {
     on: bool,
     running: bool,
     folder: PathBuf,
+    /// An admin agent, which hears of every pipe; else only of its project's.
+    admin: bool,
+    project: Option<String>,
 }
 
 /// Runs the monitors for as long as Factory runs.
@@ -177,8 +192,10 @@ async fn tick_once(factory: &Arc<Factory>) -> rusqlite::Result<()> {
                     on: crate::extensions::enabled(config, super::ID) && !inner.config.archived(config),
                     running: inner.agents.get(&config.id).is_some_and(|runtime| runtime.running),
                     folder: crate::runner::places(&factory.home, &inner.config, config, &[]).folder,
+                    admin: crate::proposals::is_admin(config),
+                    project: config.project.clone(),
                 },
-                None => Agent { on: false, running: false, folder: PathBuf::new() },
+                None => Agent { on: false, running: false, folder: PathBuf::new(), admin: false, project: None },
             };
             agents.insert(monitor.agent.clone(), agent);
         }
@@ -205,14 +222,41 @@ async fn tick_once(factory: &Arc<Factory>) -> rusqlite::Result<()> {
                 continue;
             }
         }
+        if let Some(due) = capped(&monitor, now) {
+            monitor.next_due = Some(due);
+            save(&factory.store, &monitor, now, "", None, true)?;
+        }
         match monitor.when.clone() {
             When::At { .. } | When::Every { .. } | When::Cron { .. } => time(factory, &mut monitor, agent, now)?,
             When::Check { .. } => check(factory, &monitor, agent, now),
             When::Files { paths, glob } => files(factory, &mut monitor, &paths, glob.as_deref(), now).await?,
             When::Watch { command, pattern, .. } => watch(factory, &mut monitor, agent, &command, pattern.as_deref(), now)?,
+            When::Pipes { pipes, on } => pipes::poll(factory, &mut monitor, agent, &pipes, &on, now)?,
         }
     }
     Ok(())
+}
+
+/// When a monitor due further ahead than it can be should be due instead:
+/// the wall clock was set back (NTP stepping back a fast clock, a clock
+/// put right, a VM restored), and a time counted from the old clock would
+/// keep it silent for as long as the step (Abbacchio's row 1413). Never
+/// later than one period from now; cron's next time from now. An `at`, and
+/// an `every`'s first fire at the start it was given, are times of their
+/// own and stay.
+pub(super) fn capped(monitor: &Monitor, now: i64) -> Option<i64> {
+    latest_due(&monitor.when, monitor.created, monitor.last_fired, monitor.next_due?, now)
+}
+
+fn latest_due(when: &When, created: i64, last_fired: Option<i64>, due: i64, now: i64) -> Option<i64> {
+    let latest = match when {
+        // Unfired and not due a period after it was made: given a start.
+        When::Every { every } if last_fired.is_none() && due != created + every => return None,
+        When::Every { every } | When::Check { every, .. } => now + every,
+        When::Cron { .. } => when.next(now)?,
+        _ => return None,
+    };
+    (due > latest).then_some(latest)
 }
 
 /// What made a monitor fire.
@@ -431,7 +475,7 @@ fn check(factory: &Arc<Factory>, monitor: &Monitor, agent: &Agent, now: i64) {
     let path = crate::update::agents_path(&factory.home);
     tokio::spawn(async move {
         let run = if secrets.is_empty() {
-            run_check(&folder, &command, since, &path, &[]).await
+            run_check(&agent_id, &folder, &command, since, &path, &[]).await
         } else {
             run_with_secrets(&factory, &agent_id, id, &command, &secrets, own, (&folder, dir), since).await
         };
@@ -565,7 +609,7 @@ async fn run_with_secrets(
         }
         factory.broadcast_workspace(&factory.lock());
     }
-    let run = run_check(folder, command, since, &crate::update::agents_path(&factory.home), &environment).await;
+    let run = run_check(agent, folder, command, since, &crate::update::agents_path(&factory.home), &environment).await;
     drop(environment);
     drop(files);
     let CheckRun::Ran { code, output } = run else { return run };
@@ -618,8 +662,9 @@ impl Drop for SecretFiles {
 /// Runs a check's command in the agent's folder, as bash runs commands,
 /// with FACTORY_MONITOR_LAST_FIRED set to when the monitor last fired (or
 /// was set), in seconds since 1970, the agents' PATH (`path`) and
-/// `environment` (its secrets', which win).
-async fn run_check(folder: &Path, command: &str, last_fired: i64, path: &str, environment: &[(String, Zeroizing<String>)]) -> CheckRun {
+/// `environment` (its secrets', which win). What asks who you are in it
+/// (sudo…) is stopped, and said in its output (`factory_agent::tools::asking`).
+async fn run_check(agent: &str, folder: &Path, command: &str, last_fired: i64, path: &str, environment: &[(String, Zeroizing<String>)]) -> CheckRun {
     use tokio::io::AsyncReadExt;
     let spawned = tokio::process::Command::new("bash")
         .args(["--noprofile", "--norc", "-o", "pipefail", "-c", &format!("exec 2>&1\n{command}")])
@@ -637,6 +682,7 @@ async fn run_check(folder: &Path, command: &str, last_fired: i64, path: &str, en
         Err(error) => return CheckRun::Failed(format!("it couldn't start: {error}")),
     };
     let pid = child.id();
+    let guard = pid.map(|pid| factory_agent::tools::asking::Guard::watch(pid, agent, None));
     let Some(stdout) = child.stdout.take() else { return CheckRun::Failed("it has no output".to_owned()) };
     let ran = tokio::time::timeout(CHECK_TIMEOUT, async move {
         let mut output = Vec::new();
@@ -646,7 +692,14 @@ async fn run_check(folder: &Path, command: &str, last_fired: i64, path: &str, en
     })
     .await;
     match ran {
-        Ok((_, Ok(status), output)) => CheckRun::Ran { code: status.code(), output: String::from_utf8_lossy(&output).into_owned() },
+        Ok((_, Ok(status), output)) => {
+            let mut output = String::from_utf8_lossy(&output).into_owned();
+            let said = guard.map(|guard| guard.said()).unwrap_or_default();
+            if !said.is_empty() {
+                output.push_str(&format!("\n{said}\n"));
+            }
+            CheckRun::Ran { code: status.code(), output }
+        }
         Ok((_, Err(error), _)) => CheckRun::Failed(format!("it failed: {error}")),
         Err(_) => {
             if let Some(pid) = pid {
@@ -909,7 +962,7 @@ fn watch(
             }
             let processes = factory.monitors.processes();
             let environment = [("PATH".to_owned(), crate::update::agents_path(&factory.home))];
-            match factory_agent::tools::bash::spawn_detached(&agent.folder, command, &log, &environment) {
+            match factory_agent::tools::bash::spawn_detached(&agent.folder, command, &log, &environment, &monitor.agent) {
                 Ok((mut child, pid)) => {
                     // Reaped here; whether it runs is read from its group and status file.
                     tokio::spawn(async move {
@@ -1013,8 +1066,10 @@ fn read_lines(log: &Path, from: u64, size: u64) -> (Vec<String>, u64) {
 pub(super) fn added(factory: &Factory, agent: &str, id: u32) {
     let Ok(found) = query(&factory.store, &Query { agent: Some(agent), id: Some(id), active: true, ..Query::default() }) else { return };
     let Some(monitor) = found.into_iter().next() else { return };
-    if let When::Files { paths, glob } = &monitor.when {
-        write_baseline(&baseline_path(factory, &monitor), &snapshot(paths, glob.as_deref()));
+    match &monitor.when {
+        When::Files { paths, glob } => write_baseline(&baseline_path(factory, &monitor), &snapshot(paths, glob.as_deref())),
+        When::Pipes { pipes, .. } => pipes::baseline(factory, monitor.clone(), pipes),
+        _ => {}
     }
 }
 
@@ -1043,6 +1098,36 @@ pub(super) fn forget_live(factory: &Factory, monitor: &Monitor) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_clock_set_back_leaves_nothing_due_more_than_a_period_ahead() {
+        let (hour, day) = (3_600_000, 86_400_000);
+        let now = 1_800_000_000_000;
+        let every = When::Every { every: hour };
+        // Fired an hour after the clock's old time, then set back a day.
+        assert_eq!(latest_due(&every, now, Some(now + day), now + day + hour, now), Some(now + hour));
+        // Never fired, made before the step: its first fire too.
+        assert_eq!(latest_due(&every, now + day, None, now + day + hour, now), Some(now + hour));
+        // Given a start three days off: kept, as an at is.
+        assert_eq!(latest_due(&every, now, None, now + 3 * day, now), None);
+        // Due within a period: as it was (a clock that went forward, too).
+        assert_eq!(latest_due(&every, now, Some(now - 10), now + hour - 10, now), None);
+        assert_eq!(latest_due(&every, now, Some(now - 2 * day), now - day, now), None);
+        let check = When::Check {
+            command: "true".into(),
+            every: 5 * 60_000,
+            fire_on: FireOn::Success,
+            pattern: None,
+            repeat: Repeat::Once,
+            secrets: Vec::new(),
+        };
+        assert_eq!(latest_due(&check, now, None, now + day, now), Some(now + 5 * 60_000));
+        let cron = When::Cron { cron: "0 * * * *".into() };
+        let next = cron.next(now).unwrap();
+        assert_eq!(latest_due(&cron, now, Some(now), now + day, now), Some(next));
+        assert_eq!(latest_due(&cron, now, Some(now), next, now), None);
+        assert_eq!(latest_due(&When::At { at: now + day }, now, None, now + day, now), None);
+    }
 
     #[test]
     fn file_changes_name_paths_up_to_a_limit() {

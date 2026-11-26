@@ -15,6 +15,7 @@
 //!                         openrouter-models.json  OpenRouter's model list as qa-model serves it,
 //!                                        if written (else a built-in one), read for every fetch
 //!                         claude.json    until when the fake Claude sign-in is at its limit (with --claude)
+//!                         claude-files/  the images uploaded to qa-model's Files API (with --claude), one file each
 //!                         home/auth.json the fake Claude sign-in (with --claude): fake tokens only
 //!                         factoryd.log, account.log, model.out
 //! ```
@@ -182,6 +183,10 @@ pub struct Sandbox {
     /// Its Claude is signed in, fake (`up --claude`): Anthropic's side of
     /// qa-model, through a QA build of factoryd, with its agents on Claude.
     pub claude: bool,
+    /// The account it claims to be (`up --claim-email`, `--claim-claktory-id`):
+    /// a QA build of factoryd lies about whose it is (E11 row 6).
+    pub claim_email: Option<String>,
+    pub claim_claktory_id: Option<String>,
     /// Who made it (`caller`), and when (ms since 1970): `down --all` ends
     /// only the caller's own. Empty and 0 for sandboxes from before.
     pub owner: String,
@@ -239,6 +244,8 @@ impl Sandbox {
             "commit": self.commit,
             "machine_name": self.machine_name,
             "speech": self.speech,
+            "claims": (self.claim_email.is_some() || self.claim_claktory_id.is_some())
+                .then(|| json!({"email": self.claim_email, "claktory_id": self.claim_claktory_id})),
             "claude": self.claude.then(|| json!({
                 "account": crate::model::claude::EMAIL,
                 "limited_until_ms": crate::model::claude::limited_until(&self.claude_limit()),
@@ -262,6 +269,8 @@ impl Sandbox {
             "machine_name": self.machine_name,
             "speech": self.speech,
             "claude": self.claude,
+            "claim_email": self.claim_email,
+            "claim_claktory_id": self.claim_claktory_id,
             "owner": self.owner,
             "created_ms": self.created_ms,
         })
@@ -291,6 +300,8 @@ impl Sandbox {
             commit: record.get("commit").and_then(Value::as_str).unwrap_or_default().to_owned(),
             speech: record.get("speech").and_then(Value::as_bool).unwrap_or(false),
             claude: record.get("claude").and_then(Value::as_bool).unwrap_or(false),
+            claim_email: record.get("claim_email").and_then(Value::as_str).map(str::to_owned),
+            claim_claktory_id: record.get("claim_claktory_id").and_then(Value::as_str).map(str::to_owned),
             owner: record.get("owner").and_then(Value::as_str).unwrap_or_default().to_owned(),
             created_ms: number("created_ms").unwrap_or(0),
         })
@@ -361,6 +372,9 @@ pub struct Up {
     /// Claude signed in, fake, on qa-model (which this starts), with every
     /// agent on Claude: `limit` puts it at its usage limit.
     pub claude: bool,
+    /// The account its factoryd claims (a QA build's lie, E11 row 6).
+    pub claim_email: Option<String>,
+    pub claim_claktory_id: Option<String>,
 }
 
 /// Starts a sandbox: its account service (unless left out), its settings,
@@ -434,6 +448,8 @@ pub fn up(request: Up) -> Result<Sandbox, Failure> {
         machine_name,
         speech: speech.is_some(),
         claude: request.claude,
+        claim_email: request.claim_email.clone(),
+        claim_claktory_id: request.claim_claktory_id.clone(),
         owner: caller(),
         created_ms: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -762,6 +778,13 @@ fn environment(sandbox: &Sandbox) -> Vec<(&'static str, String)> {
         ("FACTORY_PORT", sandbox.port.to_string()),
         ("FACTORY_MACHINE_NAME", sandbox.machine_name.clone()),
     ];
+    // Read only by a QA build of factoryd with qa-lies (E11 row 6).
+    if let Some(email) = &sandbox.claim_email {
+        environment.push(("FACTORY_QA_CLAIM_EMAIL", email.clone()));
+    }
+    if let Some(id) = &sandbox.claim_claktory_id {
+        environment.push(("FACTORY_QA_CLAIM_CLAKTORY_ID", id.clone()));
+    }
     if sandbox.speech {
         environment.push(("FACTORY_SPEECH", sandbox.bin.join("claktory-speech").display().to_string()));
     }

@@ -190,3 +190,71 @@ async fn an_agents_commands_find_claktorys_own_tools_first() {
     }
     assert_eq!(std::fs::read_to_string(&file).expect("the task ran rg"), "Claktory's rg in-task\n");
 }
+
+/// Friend bug #44: the computer restarted, ending two of an idle agent's
+/// background tasks. Nothing starts them again; the agent hears of them
+/// once, together, with each one's command, folder, start and log, and
+/// decides itself. A task that's still running isn't listed, and stays
+/// watched.
+#[tokio::test]
+async fn after_a_restart_an_agent_hears_once_of_every_task_it_ended() {
+    let dir = temp_dir();
+    let (addr, _old) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    for command in ["sleep 300", "printf 'listening on 3000\\n'; sleep 300", "sleep 301"] {
+        let args = serde_json::json!({"command": command, "run_in_background": true}).to_string();
+        let started = call(&mut client, &mut view, "builder", "bash", &args).await;
+        assert!(started.starts_with("Started task-"), "{started}");
+    }
+    // The first two began before the computer last started: its restart
+    // ended them. The third survived.
+    let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("db");
+    db.execute("UPDATE tasks SET started = 1000 WHERE task IN ('task-1', 'task-2')", []).expect("backdate");
+    let pids: Vec<i64> =
+        db.prepare("SELECT pid FROM tasks").unwrap().query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+
+    let (addr, _new) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, select("builder")).await;
+    view.follow(&mut client, |view| events(view).iter().any(|line| line.contains("restarted")) && idle(view, "builder")).await;
+    let notes: Vec<&v1::Event> = view
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.kind {
+            Some(Kind::Event(event)) if event.source() == v1::EventSource::Factory => Some(event),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notes.len(), 1, "one note: {notes:?}");
+    let note = notes[0];
+    assert_eq!(note.summary, "The computer restarted, which ended 2 background tasks");
+    assert!(note.text.starts_with("The computer restarted, which ended these background tasks you were running. Claktory started none of them again."), "{}", note.text);
+    assert!(note.text.contains("isn't stale"), "{}", note.text);
+    let site = dir.join("site").display().to_string();
+    assert!(note.text.contains("\n- task-1, started ") && note.text.contains(&format!(" in {site}")), "{}", note.text);
+    assert!(note.text.contains("\n  Command: sleep 300\n") && note.text.contains("Command: printf 'listening on 3000\\n'; sleep 300"), "{}", note.text);
+    assert!(note.text.contains("task-2.log") && !note.text.contains("task-3"), "{}", note.text);
+    let ended: Vec<(String, Option<String>)> = db
+        .prepare("SELECT task, status FROM tasks ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        ended,
+        [
+            ("task-1".to_owned(), Some("the computer restarted".to_owned())),
+            ("task-2".to_owned(), Some("the computer restarted".to_owned())),
+            ("task-3".to_owned(), None)
+        ]
+    );
+    for pid in pids {
+        // SAFETY: ends the test's own sleeps, by their process groups.
+        unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+    }
+}

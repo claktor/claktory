@@ -1,37 +1,24 @@
-//! Messages (D2a): the durable send and the history of a conversation.
+//! Messages (D2a): the conversations' list, and what's left of their
+//! history here.
 //!
 //! A conversation is a friendship's (`dm_contacts.conversation_id`): one per
-//! contact generation, so reconnecting starts a new one. Sending appends a
-//! message in one IMMEDIATE transaction that, inside it:
+//! contact generation, so reconnecting starts a new one.
 //!
-//! 1. checks the sender may (a person in the friendship; an agent with a
-//!    live `dm.send` grant on the conversation, counted against it),
-//! 2. checks the friendship is still on (not removed, nobody blocked) and
-//!    the generation is the one the sender saw,
-//! 3. looks the message up by its id in the sender's own namespace (author,
-//!    actor, conversation, client id): the same body again answers the
-//!    first receipt, other text is a conflict, never a second message,
-//! 4. takes the conversation's next sequence number, stores the body
-//!    ([`bodies`](super::bodies): opaque here) and adds an event to both
-//!    people's outboxes, which their devices sync from (D2b).
-//!
-//! Only after it commits does the sender get the receipt (`message_id`,
-//! `seq`, `accepted_ms`), and only then shows Sent. A block or removal that
-//! commits first refuses the append; one that commits after leaves an
-//! earlier message, which stays in both histories.
+//! Since #451 claktory.com keeps no messages: a device sends through the
+//! person's home Claktory, which delivers to the friend's home, and a send
+//! here is refused with `410 moved_to_home`. What it kept from before
+//! (`dm_messages`, numbered per conversation, both people's outbox events)
+//! stays readable (`GET conversations/<id>/messages`, `sync`) for devices to
+//! take once into their own history, until the sweep lets it go.
 
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use serde::Deserialize;
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 use serde_json::{Value, json};
 
-use super::bodies::{Stored, Submitted, merge};
+use super::bodies::{Stored, merge};
 use super::contacts::{contact_tag, ended_view, person};
-use super::groups;
-use super::identity::{self, Refusal, body, hex, invalid, later, random, take_as};
+use super::identity::{self, Refusal, invalid};
 use super::keys::Keys;
-use super::leaves::{Leaf, leaf_of};
-use super::sync::{self, Kind};
-use crate::grants::{self, Resource};
+use super::sync;
 use crate::ipc::Caller;
 
 pub const SCHEMA: &str = "
@@ -77,59 +64,14 @@ CREATE TABLE IF NOT EXISTS dm_account_events (
 const PAGE: usize = 100;
 const PAGE_DEFAULT: usize = 50;
 const PAGE_BYTES: usize = 256 * 1024;
-/// Messages a person may send a minute, and an hour.
-const PER_MINUTE: i64 = 60;
-const PER_HOUR: i64 = 1000;
+/// A send to claktory.com since #451, from an app that hasn't moved to
+/// the home: the same for a conversation, a self group or a channel.
+pub(super) fn moved_to_home() -> Refusal {
+    Refusal(410, "moved_to_home", "Messages go through your home Claktory now. Update Claktory to send this.".to_owned())
+}
 
 fn not_found() -> Refusal {
     Refusal(404, "not_found", "There's nothing here.".to_owned())
-}
-
-/// The same words whatever ended it: removed, blocked by either, an account
-/// deleted.
-fn closed() -> Refusal {
-    Refusal(410, "closed", "You can't send messages in this conversation anymore.".to_owned())
-}
-
-/// A send's body.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Send {
-    /// The sender's id for this message, the same on every retry: 22 to 64
-    /// letters, digits, - and _, at least 128 random bits.
-    client_message_id: String,
-    /// The friendship's generation the sender saw.
-    contact_generation: i64,
-    /// The sender's MLS application message, in the conversation's group.
-    envelope: Value,
-    #[serde(default)]
-    #[allow(dead_code)]
-    request_nonce: Option<String>,
-}
-
-/// A send's answer, once it committed.
-pub struct Receipt {
-    pub message_id: String,
-    pub seq: i64,
-    pub accepted_ms: i64,
-}
-
-impl Receipt {
-    fn json(&self) -> Value {
-        json!({"message_id": self.message_id, "seq": self.seq, "accepted_ms": self.accepted_ms})
-    }
-}
-
-/// A message to append: where, the sender's id for it, and its body.
-pub struct Outgoing<'a> {
-    pub conversation: &'a str,
-    /// The friendship's generation the sender saw.
-    pub contact_generation: i64,
-    pub client_id: &'a str,
-    pub body: &'a Submitted,
-    /// The leaf that encrypted it: the sender's device, or the device that
-    /// approved an agent's message.
-    pub leaf: &'a Leaf,
 }
 
 /// A conversation as listed: its id, contact, the two people, generation,
@@ -185,134 +127,8 @@ impl Kept {
     }
 }
 
-/// Who sends: the account, and the actor in its namespace.
-fn actor(caller: &Caller) -> Result<(&str, String), Refusal> {
-    match caller {
-        Caller::Device { account_id, .. } => Ok((account_id, "person".to_owned())),
-        Caller::Backend { account_id, claktory_id, epoch, agent: Some(agent) } => Ok((
-            account_id,
-            json!({"claktory": claktory_id, "epoch": epoch, "agent": agent.id, "incarnation": agent.incarnation}).to_string(),
-        )),
-        _ => Err(Refusal(403, "device_only", "Only your own signed-in devices can do this.".to_owned())),
-    }
-}
-
-fn granted(refused: grants::Refused) -> Refusal {
-    match refused {
-        grants::Refused::Quota(wait) => Refusal(429, "rate_limited", format!("Too many messages. Try again {}.", later(wait))),
-        grants::Refused::Db(error) => Refusal::from(super::keys::Refused::Db(error)),
-        _ => Refusal(403, "not_granted", "This agent hasn't been given that.".to_owned()),
-    }
-}
-
 pub(super) fn valid_client_id(id: &str) -> bool {
     (22..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-}
-
-/// Appends a message to `conversation` from `caller`, in the caller's
-/// IMMEDIATE transaction: see the module's notes. The receipt, to give only
-/// once the transaction commits.
-pub fn append(transaction: &Transaction<'_>, caller: &Caller, outgoing: &Outgoing<'_>, now_ms: i64) -> Result<Receipt, Refusal> {
-    let Outgoing { conversation, contact_generation, client_id, body: submitted, leaf } = *outgoing;
-    let (account, actor) = actor(caller)?;
-    // An agent first needs its grant, checked here, every time: a revoked
-    // one is refused even retrying an earlier send.
-    if matches!(caller, Caller::Backend { .. }) {
-        let resource = Resource { kind: "conversation".into(), id: conversation.to_owned() };
-        grants::live(transaction, caller, "dms", "dm.send", Some(&resource), now_ms).map_err(granted)?;
-    }
-    if !valid_client_id(client_id) {
-        return Err(invalid("client_message_id has to be 22 to 64 letters, digits, - and _."));
-    }
-    let found: Option<(String, String, i64, Option<i64>)> = transaction
-        .query_row(
-            "SELECT low, high, generation, ended FROM dm_contacts WHERE conversation_id = ?1 AND (low = ?2 OR high = ?2)",
-            params![conversation, account],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .optional()?;
-    let (low, high, generation, ended) = found.ok_or_else(not_found)?;
-    let digest = submitted.digest();
-
-    // A retry: the first receipt, or a conflict.
-    let earlier: Option<(String, i64, i64, Vec<u8>)> = transaction
-        .query_row(
-            "SELECT id, seq, accepted, digest FROM dm_messages WHERE author = ?1 AND actor = ?2 AND conversation_id = ?3 AND client_id = ?4",
-            params![account, actor, conversation, client_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .optional()?;
-    if let Some((message_id, seq, accepted_ms, was)) = earlier {
-        if was != digest {
-            return Err(Refusal(409, "conflict", "This message's id was already used for another message.".to_owned()));
-        }
-        return Ok(Receipt { message_id, seq, accepted_ms });
-    }
-
-    if contact_generation != generation {
-        return Err(Refusal(409, "stale", "This conversation changed. Look again, then try again.".to_owned()));
-    }
-    let other = if low == account { &high } else { &low };
-    let blocked: bool = transaction.query_row(
-        "SELECT COUNT(*) > 0 FROM dm_blocks WHERE (blocker = ?1 AND blocked = ?2) OR (blocker = ?2 AND blocked = ?1)",
-        params![account, other],
-        |row| row.get(0),
-    )?;
-    if ended.is_some() || blocked {
-        return Err(closed());
-    }
-    // In the conversation's group, at an epoch it still takes.
-    let mut group = groups::of_conversation(transaction, conversation, generation)?
-        .ok_or_else(|| Refusal(409, "not_set_up", "This conversation isn't set up for end-to-end encryption yet.".to_owned()))?;
-    let epoch = groups::fits(&group, submitted)?;
-    // Nothing goes in that the friend can't read (row 676): refused before
-    // anything is counted or kept.
-    if !groups::both_in(transaction, &group, epoch)? {
-        return Err(groups::waiting_for_friend());
-    }
-    if matches!(caller, Caller::Device { .. }) {
-        take_as(transaction, &format!("messages:{account}"), 60, PER_MINUTE, now_ms, "Too many messages.")?;
-        take_as(transaction, &format!("messages-hour:{account}"), 3600, PER_HOUR, now_ms, "Too many messages.")?;
-    }
-    let message_id = hex(&random::<16>());
-    let stored = submitted.store();
-    // Both keep it, so it counts for both; the sender is refused past
-    // their space, never told about the other's.
-    let size = stored.size() as i64;
-    if sync::usage(transaction, account)? + size > sync::QUOTA {
-        return Err(Refusal(
-            413,
-            "storage_full",
-            "Your messages use all your space. Delete some conversations' history to send more.".to_owned(),
-        ));
-    }
-
-    // Numbered in the group's mailbox, with its commits, in the order
-    // every member processes them.
-    let by_agent = (actor != "person").then_some(actor.as_str());
-    let entry =
-        groups::Entry { kind: "application", epoch, envelope: submitted.envelope(), leaf, client_message_id: Some(client_id), by_agent };
-    let seq = groups::append(transaction, &mut group, entry, now_ms)?;
-    transaction.execute(
-        "INSERT INTO dm_conversations (id, last_seq) VALUES (?1, ?2) ON CONFLICT (id) DO UPDATE SET last_seq = ?2",
-        params![conversation, seq],
-    )?;
-    transaction.execute(
-        "INSERT INTO dm_messages (id, conversation_id, seq, author, actor, client_id, contact_generation, format, body, digest, accepted)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        params![message_id, conversation, seq, account, actor, client_id, generation, stored.format, stored.bytes, digest, now_ms],
-    )?;
-    for owner in [&low, &high] {
-        sync::add_usage(transaction, owner, size)?;
-        sync::emit(transaction, owner, Kind::Message, conversation, &message_id, seq, now_ms)?;
-    }
-    Ok(Receipt { message_id, seq, accepted_ms: now_ms })
-}
-
-/// `409 epoch` for a conversation's group, with its epoch now.
-pub fn epoch_of(db: &Connection, conversation: &str, generation: i64) -> Result<(u16, Value), Refusal> {
-    let group = groups::of_conversation(db, conversation, generation)?.ok_or_else(not_found)?;
-    Ok(groups::epoch_answer(group.epoch))
 }
 
 /// Whether `route` is this module's.
@@ -360,23 +176,9 @@ pub fn answer(
         }
         ("POST", ["conversations", conversation, "delete"]) => sync::delete(&transaction, &account, conversation, bytes, now_ms)?,
         ("GET", ["conversations"]) => conversations(&transaction, keys, &account, now_ms)?,
-        ("POST", ["conversations", conversation, "messages"]) => {
-            let send: Send = body(bytes)?;
-            let submitted = Submitted::from_json(&send.envelope)?;
-            let leaf = leaf_of(caller)?;
-            let outgoing = Outgoing {
-                conversation,
-                contact_generation: send.contact_generation,
-                client_id: &send.client_message_id,
-                body: &submitted,
-                leaf: &leaf,
-            };
-            match append(&transaction, caller, &outgoing, now_ms) {
-                Ok(receipt) => receipt.json(),
-                Err(Refusal(409, "epoch", _)) => return epoch_of(&transaction, conversation, send.contact_generation),
-                Err(refused) => return Err(refused),
-            }
-        }
+        // Sent through the person's home now (#451); what was kept here
+        // before stays readable below until it's gone.
+        ("POST", ["conversations", _, "messages"]) => return Err(moved_to_home()),
         ("GET", ["conversations", conversation, "messages"]) => history(&transaction, &account, conversation, query)?,
         _ => return Err(not_found()),
     };
@@ -530,12 +332,209 @@ pub fn purge(transaction: &Transaction<'_>, account: &str) -> rusqlite::Result<(
 
 #[cfg(test)]
 pub(super) mod tests {
-    use super::super::bodies;
+    use super::super::bodies::{self, Submitted};
     use super::super::contacts::tests::World;
+    use super::super::groups;
+    use super::super::identity::{hex, later, random, take_as};
+    use super::super::leaves::{Leaf, leaf_of};
+    use super::super::sync::Kind;
     use super::*;
+    use crate::grants::{self, Resource};
     use crate::ipc::Actor;
     use claktory_dm_crypto::envelope::Envelope;
+    use rusqlite::OptionalExtension;
+    use serde::Deserialize;
     use sha2::Digest as _;
+
+    // How messages were kept before #451, when claktory.com took them: what
+    // the tests of what's left of them (history, sync, deletes) start from.
+
+    /// Messages a person may send a minute, and an hour.
+    const PER_MINUTE: i64 = 60;
+    const PER_HOUR: i64 = 1000;
+
+    /// The same words whatever ended it: removed, blocked by either, an account
+    /// deleted.
+    fn closed() -> Refusal {
+        Refusal(410, "closed", "You can't send messages in this conversation anymore.".to_owned())
+    }
+
+    /// A send's body.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Send {
+        /// The sender's id for this message, the same on every retry: 22 to 64
+        /// letters, digits, - and _, at least 128 random bits.
+        client_message_id: String,
+        /// The friendship's generation the sender saw.
+        contact_generation: i64,
+        /// The sender's MLS application message, in the conversation's group.
+        envelope: Value,
+        #[serde(default)]
+        #[allow(dead_code)]
+        request_nonce: Option<String>,
+    }
+
+    /// A send's answer, once it committed.
+    pub struct Receipt {
+        pub message_id: String,
+        pub seq: i64,
+        pub accepted_ms: i64,
+    }
+
+    impl Receipt {
+        fn json(&self) -> Value {
+            json!({"message_id": self.message_id, "seq": self.seq, "accepted_ms": self.accepted_ms})
+        }
+    }
+
+    /// A message to append: where, the sender's id for it, and its body.
+    pub struct Outgoing<'a> {
+        pub conversation: &'a str,
+        /// The friendship's generation the sender saw.
+        pub contact_generation: i64,
+        pub client_id: &'a str,
+        pub body: &'a Submitted,
+        /// The leaf that encrypted it: the sender's device, or the device that
+        /// approved an agent's message.
+        pub leaf: &'a Leaf,
+    }
+
+    /// Who sends: the account, and the actor in its namespace.
+    fn actor(caller: &Caller) -> Result<(&str, String), Refusal> {
+        match caller {
+            Caller::Device { account_id, .. } => Ok((account_id, "person".to_owned())),
+            Caller::Backend { account_id, claktory_id, epoch, agent: Some(agent) } => Ok((
+                account_id,
+                json!({"claktory": claktory_id, "epoch": epoch, "agent": agent.id, "incarnation": agent.incarnation}).to_string(),
+            )),
+            _ => Err(Refusal(403, "device_only", "Only your own signed-in devices can do this.".to_owned())),
+        }
+    }
+
+    fn granted(refused: grants::Refused) -> Refusal {
+        match refused {
+            grants::Refused::Quota(wait) => Refusal(429, "rate_limited", format!("Too many messages. Try again {}.", later(wait))),
+            grants::Refused::Db(error) => Refusal::from(super::super::keys::Refused::Db(error)),
+            _ => Refusal(403, "not_granted", "This agent hasn't been given that.".to_owned()),
+        }
+    }
+
+    /// Appends a message to `conversation` from `caller`, in the caller's
+    /// IMMEDIATE transaction: see the module's notes. The receipt, to give only
+    /// once the transaction commits.
+    pub fn append(transaction: &Transaction<'_>, caller: &Caller, outgoing: &Outgoing<'_>, now_ms: i64) -> Result<Receipt, Refusal> {
+        let Outgoing { conversation, contact_generation, client_id, body: submitted, leaf } = *outgoing;
+        let (account, actor) = actor(caller)?;
+        // An agent first needs its grant, checked here, every time: a revoked
+        // one is refused even retrying an earlier send.
+        if matches!(caller, Caller::Backend { .. }) {
+            let resource = Resource { kind: "conversation".into(), id: conversation.to_owned() };
+            grants::live(transaction, caller, "dms", "dm.send", Some(&resource), now_ms).map_err(granted)?;
+        }
+        if !valid_client_id(client_id) {
+            return Err(invalid("client_message_id has to be 22 to 64 letters, digits, - and _."));
+        }
+        let found: Option<(String, String, i64, Option<i64>)> = transaction
+            .query_row(
+                "SELECT low, high, generation, ended FROM dm_contacts WHERE conversation_id = ?1 AND (low = ?2 OR high = ?2)",
+                params![conversation, account],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let (low, high, generation, ended) = found.ok_or_else(not_found)?;
+        let digest = submitted.digest();
+
+        // A retry: the first receipt, or a conflict.
+        let earlier: Option<(String, i64, i64, Vec<u8>)> = transaction
+            .query_row(
+                "SELECT id, seq, accepted, digest FROM dm_messages WHERE author = ?1 AND actor = ?2 AND conversation_id = ?3 AND client_id = ?4",
+                params![account, actor, conversation, client_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        if let Some((message_id, seq, accepted_ms, was)) = earlier {
+            if was != digest {
+                return Err(Refusal(409, "conflict", "This message's id was already used for another message.".to_owned()));
+            }
+            return Ok(Receipt { message_id, seq, accepted_ms });
+        }
+
+        if contact_generation != generation {
+            return Err(Refusal(409, "stale", "This conversation changed. Look again, then try again.".to_owned()));
+        }
+        let other = if low == account { &high } else { &low };
+        let blocked: bool = transaction.query_row(
+            "SELECT COUNT(*) > 0 FROM dm_blocks WHERE (blocker = ?1 AND blocked = ?2) OR (blocker = ?2 AND blocked = ?1)",
+            params![account, other],
+            |row| row.get(0),
+        )?;
+        if ended.is_some() || blocked {
+            return Err(closed());
+        }
+        // In the conversation's group, at an epoch it still takes.
+        let mut group = groups::of_conversation(transaction, conversation, generation)?
+            .ok_or_else(|| Refusal(409, "not_set_up", "This conversation isn't set up for end-to-end encryption yet.".to_owned()))?;
+        let epoch = groups::fits(&group, submitted)?;
+        // Nothing goes in that the friend can't read (row 676): refused before
+        // anything is counted or kept.
+        if !groups::both_in(transaction, &group, epoch)? {
+            return Err(groups::waiting_for_friend());
+        }
+        if matches!(caller, Caller::Device { .. }) {
+            take_as(transaction, &format!("messages:{account}"), 60, PER_MINUTE, now_ms, "Too many messages.")?;
+            take_as(transaction, &format!("messages-hour:{account}"), 3600, PER_HOUR, now_ms, "Too many messages.")?;
+        }
+        let message_id = hex(&random::<16>());
+        let stored = submitted.store();
+        // Both keep it, so it counts for both; the sender is refused past
+        // their space, never told about the other's.
+        let size = stored.size() as i64;
+        if sync::usage(transaction, account)? + size > sync::QUOTA {
+            return Err(Refusal(
+                413,
+                "storage_full",
+                "Your messages use all your space. Delete some conversations' history to send more.".to_owned(),
+            ));
+        }
+
+        // Numbered in the group's mailbox, with its commits, in the order
+        // every member processes them.
+        let by_agent = (actor != "person").then_some(actor.as_str());
+        let entry = groups::Entry {
+            kind: "application",
+            epoch,
+            envelope: submitted.envelope(),
+            leaf,
+            client_message_id: Some(client_id),
+            by_agent,
+            room: super::super::space::Entry::Capped,
+        };
+        let seq = groups::append(transaction, &mut group, entry, now_ms)?;
+        transaction.execute(
+            "INSERT INTO dm_conversations (id, last_seq) VALUES (?1, ?2) ON CONFLICT (id) DO UPDATE SET last_seq = ?2",
+            params![conversation, seq],
+        )?;
+        // Its body is a new store too (`groups::append` checked already; kept
+        // so if that ever moves).
+        super::super::space::guard()?;
+        transaction.execute(
+            "INSERT INTO dm_messages (id, conversation_id, seq, author, actor, client_id, contact_generation, format, body, digest, accepted)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![message_id, conversation, seq, account, actor, client_id, generation, stored.format, stored.bytes, digest, now_ms],
+        )?;
+        for owner in [&low, &high] {
+            sync::add_usage(transaction, owner, size)?;
+            sync::emit(transaction, owner, Kind::Message, conversation, &message_id, seq, now_ms)?;
+        }
+        Ok(Receipt { message_id, seq, accepted_ms: now_ms })
+    }
+
+    /// `409 epoch` for a conversation's group, with its epoch now.
+    pub fn epoch_of(db: &Connection, conversation: &str, generation: i64) -> Result<(u16, Value), Refusal> {
+        let group = groups::of_conversation(db, conversation, generation)?.ok_or_else(not_found)?;
+        Ok(groups::epoch_answer(group.epoch))
+    }
 
     /// Ana and Bo, friends: their conversation and its generation.
     pub(in crate::dms) fn friends(world: &mut World, a: &str, b: &str) -> (String, i64) {
@@ -550,6 +549,45 @@ pub(super) mod tests {
         format!("message-{n:018}")
     }
 
+    /// A person's device as the routes see it.
+    pub(in crate::dms) fn device(account: &str) -> Caller {
+        Caller::Device {
+            account_id: account.into(),
+            device_key: format!("{account}-k"),
+            registrations: Vec::new(),
+            removed_devices: Vec::new(),
+            signed_in_at: None,
+            bound_devices: None,
+        }
+    }
+
+    /// A send as claktory.com took it before #451 (`POST
+    /// conversations/<id>/messages`, refused now): kept, or refused.
+    pub(in crate::dms) fn send_as(world: &mut World, caller: &Caller, conversation: &str, send: Value) -> (u16, Value) {
+        let kept = (|| {
+            let send: Send = identity::body(send.to_string().as_bytes())?;
+            let submitted = Submitted::from_json(&send.envelope)?;
+            let leaf = leaf_of(caller)?;
+            let transaction = world.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            identity::ensure(&transaction, &world.keys, caller.account_id(), world.now)?;
+            let outgoing = Outgoing {
+                conversation,
+                contact_generation: send.contact_generation,
+                client_id: &send.client_message_id,
+                body: &submitted,
+                leaf: &leaf,
+            };
+            let answer = match append(&transaction, caller, &outgoing, world.now) {
+                Ok(receipt) => (200, receipt.json()),
+                Err(Refusal(409, "epoch", _)) => epoch_of(&transaction, conversation, send.contact_generation)?,
+                Err(refused) => return Err(refused),
+            };
+            transaction.commit()?;
+            Ok::<_, Refusal>(answer)
+        })();
+        kept.unwrap_or_else(|Refusal(status, error, message)| (status, json!({"error": error, "message": message})))
+    }
+
     pub(in crate::dms) fn post(
         world: &mut World,
         account: &str,
@@ -561,7 +599,7 @@ pub(super) mod tests {
         let (group, epoch) = group_of(world, conversation, generation);
         let envelope = super::super::bodies::tests::sealed(&group, epoch, text);
         let send = json!({"client_message_id": id, "contact_generation": generation, "envelope": envelope, "request_nonce": "n"});
-        world.call(account, "POST", &format!("conversations/{conversation}/messages"), send)
+        send_as(world, &device(account), conversation, send)
     }
 
     /// The conversation's group (made here, if there's none, as if its
@@ -597,7 +635,9 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn a_message_is_appended_once_numbered_and_in_both_histories() {
+    /// What claktory.com kept before #451 stays readable, in order, for
+    /// both; a send now is refused, kept nowhere.
+    fn what_was_kept_stays_readable_and_a_send_moved_to_the_home() {
         let mut world = World::new();
         world.name("ana", "Ana");
         let (conversation, generation) = friends(&mut world, "ana", "bo");
@@ -649,40 +689,22 @@ pub(super) mod tests {
         let sent = Envelope::from_json(&page["messages"][0]["envelope"]).expect("an envelope");
         assert_eq!((format, body.as_slice()), (bodies::END_TO_END, sent.bytes()));
 
-        // Nobody else sees or sends in it; nor does a Claktory, as itself.
+        // Nobody else sees it; nor does a Claktory, as itself.
         assert_eq!(history(&mut world, "carol", &conversation, "").0, 404);
-        assert_eq!(post(&mut world, "carol", &conversation, generation, &client_id(2), "hello").0, 404);
         let backend = Caller::Backend { account_id: "ana".into(), claktory_id: "mac".into(), epoch: 1, agent: None };
         let route = format!("conversations/{conversation}/messages");
         let (status, _) = identity::route(&mut world.db, &world.keys, "GET", &route, &backend, b"", world.now).expect("route");
         assert_eq!(status, 403);
 
-        // What isn't a message.
-        assert_eq!(post(&mut world, "ana", &conversation, generation + 1, &client_id(3), "x").0, 409, "another generation");
-        assert_eq!(post(&mut world, "ana", &conversation, generation, "short", "x").0, 400);
-        let route = format!("conversations/{conversation}/messages");
-        let send = |envelope: Value| json!({"client_message_id": client_id(4), "contact_generation": generation, "envelope": envelope});
-        let text = json!({"client_message_id": client_id(4), "contact_generation": generation, "text": "x"});
-        assert_eq!(world.call("ana", "POST", &route, text).0, 400, "format 1 is refused");
-        let big = json!({"format": 2, "bytes": super::super::leaves::b64(&vec![0; 21 * 1024])});
-        assert_eq!(world.call("ana", "POST", &route, send(big)).0, 400);
-        let elsewhere = super::super::bodies::tests::sealed(&[9; 16], 0, "x");
-        assert_eq!(world.call("ana", "POST", &route, send(elsewhere)).0, 400, "another group's");
-
-        // One too many epochs behind: 409 with the epoch now.
-        let (group, _) = group_of(&mut world, &conversation, generation);
-        world.db.execute("UPDATE dm_groups SET epoch = 7 WHERE group_id = ?1", [&group]).expect("moved on");
-        let behind = super::super::bodies::tests::sealed(&group, 1, "x");
-        let (status, refused) = world.call("ana", "POST", &route, send(behind));
-        assert_eq!((status, &refused["error"], &refused["epoch"]), (409, &json!("epoch"), &json!(7)));
-        assert_eq!(world.call("ana", "POST", &route, send(super::super::bodies::tests::sealed(&group, 2, "x"))).0, 200, "5 behind");
-
-        // A conversation with no group yet.
-        let (other, generation) = friends(&mut world, "ana", "dan");
-        let envelope = super::super::bodies::tests::sealed(&[9; 16], 0, "x");
-        let send = json!({"client_message_id": client_id(5), "contact_generation": generation, "envelope": envelope});
-        let (status, refused) = world.call("ana", "POST", &format!("conversations/{other}/messages"), send);
-        assert_eq!((status, &refused["error"]), (409, &json!("not_set_up")));
+        // A send goes through the person's home now: refused here, as it
+        // is, and nothing kept.
+        let (group, epoch) = group_of(&mut world, &conversation, generation);
+        let envelope = super::super::bodies::tests::sealed(&group, epoch, "x");
+        let send = json!({"client_message_id": client_id(9), "contact_generation": generation, "envelope": envelope});
+        let (status, refused) = world.call("ana", "POST", &route, send);
+        assert_eq!((status, refused["error"].as_str()), (410, Some("moved_to_home")), "{refused}");
+        let kept: i64 = world.db.query_row("SELECT COUNT(*) FROM dm_messages", [], |row| row.get(0)).expect("count");
+        assert_eq!(kept, 2);
     }
 
     /// Text that still fits an application message.
@@ -753,49 +775,6 @@ pub(super) mod tests {
         world.name("ana", "Ana again");
         let (_, listed) = world.call("carol", "GET", "conversations", Value::Null);
         assert_eq!(listed["conversations"][0]["with"]["name"], "Ana again");
-    }
-
-    #[test]
-    fn a_send_waiting_on_a_block_reads_it_once_the_block_commits() {
-        let dir = tempfile::tempdir().expect("dir");
-        let path = dir.path().join("apps.db");
-        let mut world = World::on_file(&path);
-        let (conversation, generation) = friends(&mut world, "ana", "bo");
-        let (low, high) = if "ana" < "bo" { ("ana", "bo") } else { ("bo", "ana") };
-
-        // Bo's block holds the write lock; Ana's send, on another
-        // connection, waits for it.
-        let (group, epoch) = group_of(&mut world, &conversation, generation);
-        let keys = Keys::from_bytes([7; 32]);
-        let mut db = crate::worker::open_db(&path, &keys).expect("db");
-        world.db.execute_batch("BEGIN IMMEDIATE").expect("begin");
-        let sending = {
-            let (conversation, now) = (conversation.clone(), world.now);
-            std::thread::spawn(move || {
-                let caller = Caller::Device { account_id: "ana".into(), device_key: "k".into(), registrations: Vec::new(), removed_devices: Vec::new(), signed_in_at: None, bound_devices: None };
-                let envelope = super::super::bodies::tests::sealed(&group, epoch, "racing");
-                let send = json!({"client_message_id": client_id(1), "contact_generation": generation, "envelope": envelope});
-                identity::route(
-                    &mut db,
-                    &keys,
-                    "POST",
-                    &format!("conversations/{conversation}/messages"),
-                    &caller,
-                    send.to_string().as_bytes(),
-                    now,
-                )
-                .expect("route")
-            })
-        };
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(!sending.is_finished(), "the send waits for the lock");
-        world.db.execute("INSERT INTO dm_blocks (id, blocker, blocked, created) VALUES ('b1', 'bo', 'ana', 0)", []).expect("block");
-        world.db.execute("UPDATE dm_contacts SET ended = 1 WHERE low = ?1 AND high = ?2", params![low, high]).expect("ended");
-        world.db.execute_batch("COMMIT").expect("commit");
-        let (status, _) = sending.join().expect("joined");
-        assert_eq!(status, 410, "it saw the block, not what was there before it waited");
-        let count: i64 = world.db.query_row("SELECT COUNT(*) FROM dm_messages", [], |row| row.get(0)).expect("count");
-        assert_eq!(count, 0);
     }
 
     #[test]

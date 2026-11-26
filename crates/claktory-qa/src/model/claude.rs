@@ -10,6 +10,13 @@
 //! is refused with a 429 and the usage-limit headers, saying when it resets,
 //! and the usage reads 100% until then. After that time, or once the limit
 //! is lifted (`limit --off`, as a plan upgrade would), it answers again.
+//!
+//! It keeps Anthropic's Files API too (#382), so a sandbox shows images
+//! going to Claude once, as files, and named after: an upload is kept in
+//! the sandbox's `claude-files/`, a message naming a file that isn't there
+//! (deleted by hand, as Anthropic letting it go) is refused as Anthropic
+//! refuses it, and each message with images logs which went as files and
+//! how many inline.
 
 use std::path::Path;
 
@@ -140,9 +147,44 @@ pub(super) async fn handle(
             respond(stream, 200, "", &profile).await
         }
         ("GET", "/v1/models") => respond(stream, 200, "", &json!({"data": [], "has_more": false})).await,
+        ("POST", "/v1/files") => {
+            let Some((filename, mime_type, bytes)) = header(head, "content-type").and_then(|kind| uploaded(kind, body)) else {
+                return respond(stream, 400, "", &error("invalid_request_error", "qa-model: no file in this upload")).await;
+            };
+            let files = files_dir(limit);
+            let id = format!("file_qa_{}_{}", now_ms(), bytes.len());
+            if let Err(problem) = std::fs::create_dir_all(&files).and_then(|()| std::fs::write(files.join(&id), &bytes)) {
+                return respond(stream, 500, "", &error("api_error", &format!("qa-model: can't keep the file: {problem}"))).await;
+            }
+            log(&model.log, &json!({"wire": "anthropic", "uploaded": id, "bytes": bytes.len(), "mime_type": mime_type}));
+            let file = json!({"type": "file", "id": id, "size_bytes": bytes.len(), "created_at": rfc3339(now_ms()),
+                              "filename": filename, "mime_type": mime_type, "downloadable": false});
+            respond(stream, 200, "", &file).await
+        }
+        ("DELETE", file) if file.starts_with("/v1/files/") => {
+            let id = file.trim_start_matches("/v1/files/");
+            let kept = files_dir(limit).join(id);
+            if !valid_id(id) || std::fs::remove_file(&kept).is_err() {
+                return respond(stream, 404, "", &error("not_found_error", &format!("File not found: {id}"))).await;
+            }
+            log(&model.log, &json!({"wire": "anthropic", "deleted": id}));
+            respond(stream, 200, "", &json!({"id": id, "type": "file_deleted"})).await
+        }
         ("POST", "/v1/messages") => {
             let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
             let (system, last, tools) = read_request(&request);
+            let (files, inline) = images_of(&request);
+            if files.len() + inline > 0 {
+                let missing: Vec<&String> =
+                    files.iter().filter(|id| !valid_id(id) || !files_dir(limit).join(id.as_str()).is_file()).collect();
+                log(
+                    &model.log,
+                    &json!({"wire": "anthropic", "agent": agent_of(&system), "image_files": files, "inline_images": inline, "missing": missing}),
+                );
+                if let Some(id) = missing.first() {
+                    return respond(stream, 404, "", &error("not_found_error", &format!("File not found: {id}"))).await;
+                }
+            }
             if let Some(until) = limited {
                 log(
                     &model.log,
@@ -163,13 +205,73 @@ pub(super) async fn handle(
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nanthropic-ratelimit-unified-status: allowed\r\nConnection: close\r\n\r\n")
                 .await?;
-            for event in events(&answer, number, &model_id, body.len()) {
+            let kept = files_dir(limit);
+            let file = |id: &str| valid_id(id).then(|| std::fs::read(kept.join(id)).ok()).flatten();
+            let input = super::input_tokens(body.len(), &request, factory_agent::estimate::ImageRule::Anthropic, &file);
+            for event in events(&answer, number, &model_id, input) {
                 stream.write_all(format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap_or_default()).as_bytes()).await?;
             }
             stream.shutdown().await
         }
         _ => respond(stream, 404, "", &error("not_found_error", &format!("qa-model doesn't answer {method} {path}"))).await,
     }
+}
+
+/// Where the sandbox's uploaded files are kept: beside its limit file.
+fn files_dir(limit: &Path) -> std::path::PathBuf {
+    limit.with_file_name("claude-files")
+}
+
+/// A file id qa-model could have made: nothing that reaches outside its folder.
+fn valid_id(id: &str) -> bool {
+    id.starts_with("file_qa_") && id.chars().all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
+/// An upload's file (`multipart/form-data`, its part named "file"): its
+/// filename, its type and its bytes.
+fn uploaded(content_type: &str, body: &[u8]) -> Option<(String, String, Vec<u8>)> {
+    let boundary = content_type.split(';').find_map(|part| part.trim().strip_prefix("boundary="))?.trim_matches('"');
+    let delimiter = format!("--{boundary}");
+    let find = |haystack: &[u8], needle: &[u8]| haystack.windows(needle.len()).position(|window| window == needle);
+    let mut rest = body;
+    while let Some(at) = find(rest, delimiter.as_bytes()) {
+        rest = &rest[at + delimiter.len()..];
+        let head_end = find(rest, b"\r\n\r\n")?;
+        let head = String::from_utf8_lossy(&rest[..head_end]).into_owned();
+        let content = &rest[head_end + 4..];
+        let end = find(content, format!("\r\n{delimiter}").as_bytes()).unwrap_or(content.len());
+        if head.contains("name=\"file\"") {
+            let filename = head.split("filename=\"").nth(1).and_then(|rest| rest.split('"').next()).unwrap_or("file").to_owned();
+            let mime_type = header(&head, "content-type").unwrap_or("application/octet-stream").to_owned();
+            return Some((filename, mime_type, content[..end].to_vec()));
+        }
+        rest = &content[end..];
+    }
+    None
+}
+
+/// The images a Messages request carries, anywhere in its messages (a
+/// tool's result included): the file ids it names, and how many go inline.
+fn images_of(request: &Value) -> (Vec<String>, usize) {
+    fn walk(value: &Value, files: &mut Vec<String>, inline: &mut usize) {
+        match value {
+            Value::Array(items) => items.iter().for_each(|item| walk(item, files, inline)),
+            Value::Object(fields) => {
+                if value["type"] == "image" {
+                    match value["source"]["type"].as_str() {
+                        Some("file") => files.extend(value["source"]["file_id"].as_str().map(str::to_owned)),
+                        _ => *inline += 1,
+                    }
+                    return;
+                }
+                fields.values().for_each(|field| walk(field, files, inline));
+            }
+            _ => {}
+        }
+    }
+    let (mut files, mut inline) = (Vec::new(), 0);
+    walk(&request["messages"], &mut files, &mut inline);
+    (files, inline)
 }
 
 /// A Messages request's system prompt, last message and tools, as the
@@ -211,8 +313,7 @@ fn read_request(request: &Value) -> (String, Last, Vec<String>) {
 }
 
 /// The answer as Messages stream events.
-fn events(answer: &Answer, number: u64, model: &str, request_bytes: usize) -> Vec<Value> {
-    let input = request_bytes / 4;
+fn events(answer: &Answer, number: u64, model: &str, input: usize) -> Vec<Value> {
     let output = (answer.text.len() + answer.calls.iter().map(|(_, args)| args.to_string().len()).sum::<usize>()) / 4 + 1;
     let mut events =
         vec![json!({"type": "message_start", "message": {"id": format!("msg_qa_{number}"), "type": "message", "role": "assistant",
@@ -269,6 +370,29 @@ mod tests {
     }
 
     #[test]
+    fn an_upload_is_read_as_factory_agent_sends_it() {
+        let body = b"--claktory-d1\r\nContent-Disposition: form-data; name=\"file\"; filename=\"image.png\"\r\nContent-Type: image/png\r\n\r\n\x89PNG\r\n--x\r\n--claktory-d1\r\nContent-Disposition: form-data; name=\"expires_in_seconds\"\r\n\r\n604800\r\n--claktory-d1--\r\n";
+        let (filename, mime_type, bytes) = uploaded("multipart/form-data; boundary=claktory-d1", body).expect("a file");
+        assert_eq!((filename.as_str(), mime_type.as_str()), ("image.png", "image/png"));
+        assert_eq!(bytes, b"\x89PNG\r\n--x", "the bytes as they are, up to the next part");
+        assert!(uploaded("multipart/form-data; boundary=other", body).is_none());
+    }
+
+    #[test]
+    fn a_messages_requests_images_are_counted_as_files_or_inline() {
+        let request = json!({"messages": [
+            {"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA=="}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": [
+                {"type": "text", "text": "a.png"},
+                {"type": "image", "source": {"type": "file", "file_id": "file_qa_1_4"}},
+            ]}]},
+        ]});
+        assert_eq!(images_of(&request), (vec!["file_qa_1_4".to_owned()], 1));
+        assert!(valid_id("file_qa_1795_4"));
+        assert!(!valid_id("file_qa_../../auth.json") && !valid_id("file_01abc"), "only ids it made, within its folder");
+    }
+
+    #[test]
     fn a_messages_request_is_read_as_the_agent_sends_it() {
         let request = json!({
             "model": "claude-haiku-4-5",
@@ -290,7 +414,7 @@ mod tests {
         let (_, last, _) = read_request(&asked);
         assert_eq!((last.role.as_str(), last.text.as_str()), ("user", "Hello"));
 
-        let events = events(&Answer { text: "Hi".into(), calls: vec![("bash".into(), json!({"command": "ls"}))] }, 3, "m", 400);
+        let events = events(&Answer { text: "Hi".into(), calls: vec![("bash".into(), json!({"command": "ls"}))] }, 3, "m", 100);
         let types: Vec<&str> = events.iter().filter_map(|event| event["type"].as_str()).collect();
         assert_eq!(
             types,

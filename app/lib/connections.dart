@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'device_account.dart';
 import 'ipad/ink_bridge.dart' show InkJournal;
 import 'tunnel_client.dart' show newDeviceKey;
+import 'viewers/file_cache.dart' show FileCache;
 import 'voice_keep.dart' show forgetKeptVoices, keptClaktoryKey;
 
 /// A Factory on another machine, as its pairing code describes it. Since
@@ -388,17 +389,27 @@ class Connections extends ChangeNotifier {
 
   /// This device's iroh key for each Factory it reaches through the
   /// tunnel, by pairing code: made here, never sent anywhere. One per
-  /// pairing, so two Factories can't tell it's the same device.
+  /// Claktory (by its endpoint id), so two Claktories can't tell it's the
+  /// same device, but the one it pairs with again does: its new pairing
+  /// replaces the old one there instead of listing this device twice
+  /// (friend bug #38).
   final Map<String, String> _keys;
 
   /// This device signed in to the person's Claktory account, to find
   /// their Claktories and show them it's theirs. Kept with the rest.
   final DeviceAccount account;
 
-  /// This device's key for [target], made and kept the first time.
+  /// This device's key for [target], made and kept the first time: the
+  /// one it already has for the same Claktory, under another code, if any.
   String deviceKey(RemoteFactory target, {String Function()? make}) {
-    final kept = _keys[target.code];
-    if (kept != null) return kept;
+    final kept = _keys[target.code] ?? _sameClaktory(target);
+    if (kept != null) {
+      if (!_keys.containsKey(target.code)) {
+        _keys[target.code] = kept;
+        _changed();
+      }
+      return kept;
+    }
     final made = (make ?? newDeviceKey)();
     _keys[target.code] = made;
     _changed();
@@ -422,13 +433,42 @@ class Connections extends ChangeNotifier {
     }
   }
 
+  /// The key this device has for [target]'s Claktory under another code.
+  String? _sameClaktory(RemoteFactory target) {
+    if (!target.tunnelled) return null;
+    for (final other in _saved) {
+      final key = _keys[other.code];
+      if (other.endpointId == target.endpointId && key != null) return key;
+    }
+    return null;
+  }
+
   /// Shows [target] from now on (null for this Mac's), and remembers it:
   /// a new one joins the end of [saved], one already there keeps its place.
+  /// A Claktory is kept once (friend bug #38): a new code for one already
+  /// there takes its place, with its key, as pairing it again; picking it
+  /// from the account's list shows the one there.
   void use(RemoteFactory? target) {
-    if (target != null && !_saved.contains(target)) _saved.add(target);
-    _current = target == null
+    var shown = target;
+    if (target != null && !_saved.contains(target)) {
+      final endpoint = target.endpointId;
+      final same = target.tunnelled
+          ? _saved.indexWhere((other) => other.endpointId == endpoint)
+          : -1;
+      if (same < 0) {
+        _saved.add(target);
+      } else if (target.fromAccount) {
+        shown = _saved[same];
+      } else {
+        final old = _saved[same];
+        final key = _keys.remove(old.code);
+        if (key != null) _keys.putIfAbsent(target.code, () => key);
+        _saved[same] = target;
+      }
+    }
+    _current = shown == null
         ? null
-        : _saved.firstWhere((other) => other == target);
+        : _saved.firstWhere((other) => other == shown);
     _changed();
   }
 
@@ -447,6 +487,8 @@ class Connections extends ChangeNotifier {
     }
     // Its recordings kept until sent (#401): they can never go now.
     unawaited(forgetKeptVoices(keptClaktoryKey(target)));
+    // The files its viewers read, kept on this device (#446).
+    unawaited(FileCache.forget(keptClaktoryKey(target)));
     if (_current == target) _current = null;
     _changed();
   }

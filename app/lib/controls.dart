@@ -1430,9 +1430,15 @@ class Field extends StatelessWidget {
 
 /// Floats [card] above [child] while the pointer rests on [child], like a
 /// tooltip: a floating layer in the sidebar's color, left-aligned with
-/// [child] (or [end]-aligned), or with [beside] to its right, centered on it. It never takes
-/// the pointer itself. With [holdToShow], touching and holding [child]
-/// shows it too, until the finger lifts (on a phone, with no pointer).
+/// [child] (or [end]-aligned), or with [beside] to its right, centered on it.
+/// It's always kept inside the screen's safe area: below [child] where
+/// there's no room above, on the left where there's none at the right, and
+/// shifted in from an edge it would cross (Zucchero's row 604). It never
+/// takes the pointer itself. With [holdToShow], touching and holding
+/// [child] shows it too, until the finger lifts (on a phone, with no
+/// pointer).
+/// With [tapToShow], a finger's tap on [child] shows it until another tap
+/// on [child] or anywhere else (an iPad by touch: nothing only on hover).
 class HoverCard extends StatefulWidget {
   const HoverCard({
     super.key,
@@ -1442,6 +1448,7 @@ class HoverCard extends StatefulWidget {
     this.end = false,
     this.holdToShow = false,
     this.interactive = false,
+    this.tapToShow = false,
   });
 
   final WidgetBuilder card;
@@ -1451,6 +1458,10 @@ class HoverCard extends StatefulWidget {
   /// Right-aligned with [child] instead, for one near a right edge.
   final bool end;
   final bool holdToShow;
+
+  /// A tap by finger or pencil toggles the card; a tap elsewhere closes
+  /// it. A mouse's or trackpad's click leaves it to hover.
+  final bool tapToShow;
 
   /// The card takes clicks (it has buttons): it stays open while the
   /// pointer is over [child] or the card, and closes a moment after it
@@ -1464,7 +1475,6 @@ class HoverCard extends StatefulWidget {
 
 class _HoverCardState extends State<HoverCard> {
   final _portal = OverlayPortalController();
-  final _link = LayerLink();
 
   /// Waits a moment, so the card doesn't flash while the pointer passes by.
   Timer? _wait;
@@ -1513,76 +1523,95 @@ class _HoverCardState extends State<HoverCard> {
     if (_portal.isShowing) _portal.hide();
   }
 
+  /// [HoverCard.tapToShow]: a finger's or pencil's tap shows or hides it.
+  void _tapped(TapUpDetails details) {
+    if (details.kind != PointerDeviceKind.touch &&
+        details.kind != PointerDeviceKind.stylus) {
+      return;
+    }
+    if (_portal.isShowing) return _hide();
+    _wait?.cancel();
+    _portal.show();
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    return CompositedTransformTarget(
-      link: _link,
-      child: OverlayPortal(
-        controller: _portal,
-        overlayChildBuilder: (context) => CompositedTransformFollower(
-          link: _link,
-          targetAnchor: widget.beside
-              ? Alignment.centerRight
-              : widget.end
-              ? Alignment.topRight
-              : Alignment.topLeft,
-          followerAnchor: widget.beside
-              ? Alignment.centerLeft
-              : widget.end
-              ? Alignment.bottomRight
-              : Alignment.bottomLeft,
-          offset: widget.beside
-              ? const Offset(Space.xs, 0)
-              : const Offset(0, -Space.xs),
-          child: Align(
-            alignment: widget.beside
-                ? Alignment.centerLeft
-                : widget.end
-                ? Alignment.bottomRight
-                : Alignment.bottomLeft,
-            child: _cardInput(
-              TweenAnimationBuilder<double>(
-                tween: Tween(begin: 0, end: 1),
-                duration: Motion.fast,
-                curve: Curves.easeOut,
-                builder: (context, t, child) =>
-                    Opacity(opacity: t, child: child),
-                child: Container(
-                  constraints: const BoxConstraints(maxWidth: 320),
-                  padding: const EdgeInsets.all(Space.m),
-                  decoration: BoxDecoration(
-                    color: palette.sidebar,
-                    borderRadius: BorderRadius.circular(Radii.panel),
-                    border: Border.all(color: palette.hairline),
-                    boxShadow: floatingShadow,
-                  ),
-                  child: DefaultTextStyle(
-                    style: TextStyles.body.copyWith(color: palette.text),
-                    child: widget.card(context),
-                  ),
-                ),
+    return OverlayPortal(
+      controller: _portal,
+      overlayChildBuilder: (overlay) => CustomSingleChildLayout(
+        delegate: _HoverCardPlacement(
+          target: _targetIn(overlay),
+          safe: MediaQuery.paddingOf(overlay),
+          beside: widget.beside,
+          end: widget.end,
+        ),
+        child: _cardInput(
+          TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0, end: 1),
+            duration: Motion.fast,
+            curve: Curves.easeOut,
+            // While nothing moves (the window reported unseen, friend
+            // bug #31), it's simply there.
+            builder: (context, t, child) => Opacity(
+              opacity: TickerMode.valuesOf(context).enabled ? t : 1,
+              child: child,
+            ),
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 320),
+              padding: const EdgeInsets.all(Space.m),
+              decoration: BoxDecoration(
+                color: palette.sidebar,
+                borderRadius: BorderRadius.circular(Radii.panel),
+                border: Border.all(color: palette.hairline),
+                boxShadow: floatingShadow,
+              ),
+              child: DefaultTextStyle(
+                style: TextStyles.body.copyWith(color: palette.text),
+                child: widget.card(context),
               ),
             ),
           ),
         ),
-        child: _held(
-          MouseRegion(
-            onEnter: _enter,
-            onExit: _exit,
-            child: widget.holdToShow
-                ? GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onLongPressStart: (_) => _portal.show(),
-                    onLongPressEnd: widget.interactive ? null : (_) => _hide(),
-                    onLongPressCancel: widget.interactive ? null : _hide,
-                    child: widget.child,
-                  )
-                : widget.child,
-          ),
+      ),
+      child: _held(
+        MouseRegion(
+          onEnter: _enter,
+          onExit: _exit,
+          child: widget.holdToShow || widget.tapToShow
+              ? GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTapUp: widget.tapToShow ? _tapped : null,
+                  onLongPressStart: widget.holdToShow
+                      ? (_) => _portal.show()
+                      : null,
+                  onLongPressEnd: widget.holdToShow && !widget.interactive
+                      ? (_) => _hide()
+                      : null,
+                  onLongPressCancel: widget.holdToShow && !widget.interactive
+                      ? _hide
+                      : null,
+                  child: widget.child,
+                )
+              : widget.child,
         ),
       ),
     );
+  }
+
+  /// [HoverCard.child]'s box in the overlay the card shows in, as last laid
+  /// out; null before it has been.
+  Rect? _targetIn(BuildContext overlay) {
+    final target = context.findRenderObject();
+    final into = Overlay.of(overlay).context.findRenderObject();
+    if (target is! RenderBox ||
+        !target.attached ||
+        !target.hasSize ||
+        into is! RenderBox ||
+        !into.attached) {
+      return null;
+    }
+    return target.localToGlobal(Offset.zero, ancestor: into) & target.size;
   }
 
   /// The card as it takes the pointer: not at all, or (interactive) staying
@@ -1598,11 +1627,80 @@ class _HoverCardState extends State<HoverCard> {
     );
   }
 
-  /// A held-open interactive card and its trigger: a tap outside both
-  /// closes it.
-  Widget _held(Widget child) => widget.interactive && widget.holdToShow
+  /// A held-open interactive card, or one a tap showed, and its trigger: a
+  /// tap outside both closes it.
+  Widget _held(Widget child) =>
+      widget.interactive && widget.holdToShow || widget.tapToShow
       ? TapRegion(groupId: this, onTapOutside: (_) => _hide(), child: child)
       : child;
+}
+
+/// Where a [HoverCard]'s card goes in its overlay: above [target] (or
+/// beside it), as close as it can be to where it's asked, never past the
+/// overlay's edges or into [safe] (the status bar, the home indicator).
+class _HoverCardPlacement extends SingleChildLayoutDelegate {
+  _HoverCardPlacement({
+    required this.target,
+    required this.safe,
+    required this.beside,
+    required this.end,
+  });
+
+  /// The card's child, in the overlay; null before it was laid out.
+  final Rect? target;
+  final EdgeInsets safe;
+  final bool beside;
+  final bool end;
+
+  /// Room kept between the card and an edge, and between it and [target].
+  static const _margin = Space.s;
+  static const _gap = Space.xs;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
+      BoxConstraints.loose(
+        Size(
+          math.max(0, constraints.maxWidth - safe.horizontal - 2 * _margin),
+          math.max(0, constraints.maxHeight - safe.vertical - 2 * _margin),
+        ),
+      );
+
+  @override
+  Offset getPositionForChild(Size size, Size card) {
+    final at = target;
+    if (at == null) return Offset.zero;
+    final left = safe.left + _margin;
+    final right = size.width - safe.right - _margin;
+    final top = safe.top + _margin;
+    final bottom = size.height - safe.bottom - _margin;
+    double x, y;
+    if (beside) {
+      x = at.right + _gap;
+      // No room at the right: on the left.
+      if (x + card.width > right && at.left - _gap - card.width >= left) {
+        x = at.left - _gap - card.width;
+      }
+      y = at.center.dy - card.height / 2;
+    } else {
+      x = end ? at.right - card.width : at.left;
+      y = at.top - _gap - card.height;
+      // No room above: below.
+      if (y < top && at.bottom + _gap + card.height <= bottom) {
+        y = at.bottom + _gap;
+      }
+    }
+    return Offset(
+      x.clamp(left, math.max(left, right - card.width)),
+      y.clamp(top, math.max(top, bottom - card.height)),
+    );
+  }
+
+  @override
+  bool shouldRelayout(_HoverCardPlacement old) =>
+      old.target != target ||
+      old.safe != safe ||
+      old.beside != beside ||
+      old.end != end;
 }
 
 class Dot extends StatelessWidget {
@@ -2645,11 +2743,22 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'house': _drawHouse,
   'home': _drawHouse,
   'clock': _drawClock,
+  'puzzle': _drawPuzzle,
 };
 
 /// Whether the app draws the Lucide icon [name] (an app's menu leaves out
 /// an icon it doesn't).
 bool hasLucideIcon(String name) => _lucide.containsKey(name);
+
+final _drawPuzzle = _paths(const [
+  'M15.39 4.39a1 1 0 0 0 1.68-.474 2.5 2.5 0 1 1 3.014 3.015 1 1 0 0 0-.474 '
+      '1.68l1.683 1.682a2.414 2.414 0 0 1 0 3.414L19.61 15.39a1 1 0 0 1-1.68'
+      '-.474 2.5 2.5 0 1 0-3.014 3.015 1 1 0 0 1 .474 1.68l-1.683 1.682a2.414 '
+      '2.414 0 0 1-3.414 0L8.61 19.61a1 1 0 0 0-1.68.474 2.5 2.5 0 1 1-3.014'
+      '-3.015 1 1 0 0 0 .474-1.68l-1.683-1.682a2.414 2.414 0 0 1 0-3.414L4.39 '
+      '8.61a1 1 0 0 1 1.68.474 2.5 2.5 0 1 0 3.014-3.015 1 1 0 0 1-.474-1.68'
+      'l1.683-1.682a2.414 2.414 0 0 1 3.414 0z',
+]);
 
 final _drawStar = _paths(const [
   'M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16'
@@ -3138,7 +3247,9 @@ class CheckMark extends StatelessWidget {
 
 /// Eases something new in, such as a conversation entry or a checklist
 /// item that moved: it fades in and rises the last few pixels, in
-/// [Motion.base]. With [animate] false it's simply there.
+/// [Motion.base]. With [animate] false it's simply there, and so it is
+/// while nothing moves ([TickerMode] off: the window reported unseen,
+/// friend bugs #31 and #40): what's new never waits on an animation.
 class Arrival extends StatelessWidget {
   const Arrival({
     super.key,
@@ -3159,20 +3270,27 @@ class Arrival extends StatelessWidget {
   final bool rise;
 
   @override
-  Widget build(BuildContext context) => TweenAnimationBuilder<double>(
-    tween: Tween(begin: animate ? 0 : 1, end: 1),
-    duration: Motion.base,
-    curve: Curves.easeOut,
-    // The same widgets throughout, so the entry keeps its state when done.
-    builder: (context, t, child) => Opacity(
-      opacity: from + (1 - from) * t,
-      child: Transform.translate(
-        offset: Offset(0, rise ? (1 - t) * Space.s : 0),
-        child: child,
-      ),
-    ),
-    child: child,
-  );
+  Widget build(BuildContext context) {
+    final moving = TickerMode.valuesOf(context).enabled;
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: animate && moving ? 0 : 1, end: 1),
+      duration: Motion.base,
+      curve: Curves.easeOut,
+      // The same widgets throughout, so the entry keeps its state when
+      // done. Stopped partway (the window went unseen), it's all there.
+      builder: (context, t, child) {
+        final shown = moving ? t : 1.0;
+        return Opacity(
+          opacity: from + (1 - from) * shown,
+          child: Transform.translate(
+            offset: Offset(0, rise ? (1 - shown) * Space.s : 0),
+            child: child,
+          ),
+        );
+      },
+      child: child,
+    );
+  }
 }
 
 /// An edge the person drags to resize what's beside it, laid over its

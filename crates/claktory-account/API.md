@@ -254,7 +254,9 @@ At start, then hourly while running. Everything but `version` and
     from the hour `from` is in up to `to`): `agent_minutes`, the minutes agents
     spent working, summed over agents; `agents_working`, the most working at
     once; `runs`, the runs started (a prompt or event through to the agent's
-    reply).
+    reply). Kept by the hour for 90 days, then by the UTC day (minutes and
+    runs summed, `agents_working` the day's most), as Download My Data's
+    `activity` and `activity_days` show.
   - `devices_connected` (optional): how many of its paired devices connected
     in the period.
   - `health` (optional): per backend `version` (a label; "unknown" when the
@@ -488,6 +490,30 @@ of devices still signed in. For Claktory's own relays,
 later: `claktory-account relay-access` runs beside a relay and answers its
 `access.http` checks from this list.
 
+### `POST /v1/relay/token` (signed)
+`{"endpoint_id": "<64 hex>"}` → `200 {"token": "…", "expires_at": 1795788120}`
+(#450). Claktory's relays carry a packet only when its sender or its
+recipient is a signed-in Claktory, which shows it with this token
+(`Authorization: Bearer <token>` to the relay, on our relay's entry only).
+It works 7 days; a Claktory asks again when under 3 days are left.
+- The token is `base64url(P) "." base64url(S)`, unpadded. P is exactly
+  `{"v":1,"e":"<endpoint, 64 lower-case hex>","a":"<32 lower-case hex>","iat":<unix s>,"exp":<unix s>}`;
+  `a` is the account, opaque: HMAC-SHA256 of its id, cut to 16 bytes, for
+  the relays' denylist (`claktory-account relay-token-account` prints an
+  account's). S is Ed25519 over `claktory-relay-token-v1`, a zero byte and
+  P.
+- The relay-token key is derived from `k_share` (HKDF-SHA256, info
+  `claktory relay-token v1`), so it's backed up with it; `claktory-account
+  relay-token-pubkey` prints its public half for the relays' key file. A new
+  `k_share` makes a new key: give the relays both until the old tokens
+  expire.
+- An account gets tokens for 4 new endpoints a day (UTC) across its
+  Claktories, and a Claktory 24 tokens a day; an endpoint that had one
+  today gets another without counting.
+
+Errors: `400 invalid_request` (not 64 hex), `401`, `403 revoked` (removed
+from its account, or the account is gone), `429 rate_limited`.
+
 ### User-level apps: `/v1/apps/…` (signed, or device signed)
 Apps a person keeps at the account rather than in a Claktory (DMs first) run
 in the user-apps worker, a process of its own with its own database and none
@@ -504,6 +530,22 @@ What the worker answers is passed on only as JSON with an app's status, and
 signed like every answer. Without a worker (`--user-apps SOCKET
 --user-apps-uid UID`), while it's down, or when what listens there doesn't
 run as the worker's user: `503 app_unavailable`.
+
+Since #451 the worker keeps no DM messages: each person's home Claktory
+does. A message sent to a conversation, a self group or a channel answers
+`410 moved_to_home`; what was kept before stays readable, to be taken once.
+What the worker still keeps (commits, a leaf's own Remove, the Welcomes
+commits make, KeyPackages, agents' proposal and draft digests, hand-offs) is
+held to room (the worker's README, "Room on the account box"):
+- `429 rate_limited` past what the sender's entries may take, past what the
+  friend they go to may receive, or past one sender's share of that; the
+  last two say nothing about the friend. A removal (a leaf's own Remove, a
+  commit of only Removes, a move to a new security key) counts but goes
+  through, unless it's bigger than one is (64 KiB as sent) or its sender has
+  gone 16 MiB past its own room. A leaf's own Remove asked again at the same
+  epoch answers the one kept.
+- `507 insufficient_storage` while the box's disk is nearly full, a removal
+  going on for longer. The service's own writes go on.
 
 Grants (which agent of which Claktory may use what in an app) live with the
 app's data:

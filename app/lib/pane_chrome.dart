@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 
-import 'controls.dart' show ExtensionGlyph, GlyphButton;
+import 'controls.dart' show ExtensionGlyph, GlyphButton, svgPath;
 import 'identity.dart';
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
@@ -163,6 +163,17 @@ class PaneScaffold extends StatelessWidget {
                   ExtensionGlyph(icon: 'share', name: 'Share', color: color),
             ),
           );
+    // On a Mac, Download beside it: the file saved to Downloads, at once
+    // (Matt, Bruno 41308).
+    final download = canDownloadFiles ? this.share : null;
+    final downloadButton = download == null
+        ? null
+        : GlyphButton(
+            label: downloadLabel,
+            active: false,
+            onTap: () => downloadFiles(context, [download]),
+            glyph: (color) => DownloadGlyph(color: color),
+          );
     // On an iPad it's how a file is saved or sent on (Bruno 27653): never
     // clipped, as the viewer's controls are from their end on a narrow
     // pane beside the conversation. On a Mac, last of them.
@@ -172,7 +183,7 @@ class PaneScaffold extends StatelessWidget {
       children: [
         header(
           details,
-          [...controls, if (!touch) ?shareButton],
+          [...controls, if (!touch) ?downloadButton, if (!touch) ?shareButton],
           pinned: [if (touch) ?shareButton],
         ),
         Expanded(child: body),
@@ -334,4 +345,52 @@ class InPane extends InheritedWidget {
 
   @override
   bool updateShouldNotify(InPane old) => false;
+}
+
+/// Lucide's download: an arrow down into a tray, drawn as the app's other
+/// glyphs are ([ExtensionGlyph]).
+class DownloadGlyph extends StatelessWidget {
+  const DownloadGlyph({super.key, required this.color, this.size = 16});
+
+  final Color color;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    excludeSemantics: true,
+    child: CustomPaint(
+      size: Size.square(size),
+      painter: _DownloadPainter(color),
+    ),
+  );
+}
+
+class _DownloadPainter extends CustomPainter {
+  _DownloadPainter(this.color);
+
+  final Color color;
+
+  static final _paths = [
+    svgPath('M12 15V3'),
+    svgPath('m7 10 5 5 5-5'),
+    svgPath('M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'),
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final scale = size.width / 24;
+    canvas.scale(scale);
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5 / scale
+      ..strokeJoin = StrokeJoin.round
+      ..strokeCap = StrokeCap.round;
+    for (final path in _paths) {
+      canvas.drawPath(path, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_DownloadPainter old) => old.color != color;
 }

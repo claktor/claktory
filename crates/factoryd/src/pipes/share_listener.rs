@@ -22,6 +22,15 @@
 //! every cookie of 127.0.0.1, whatever their port: there, only the cookies
 //! the shared website set itself go on to it.
 //!
+//! A device showing this Claktory from another machine (a paired MacBook)
+//! opens a share through a forward of its own: a port it picks on its own
+//! loopback, carried to the share's port here (W1, Polnareff's contract).
+//! Its browser names that port, so either host is taken at any port: the
+//! port adds nothing to the gate, since a browser names the very port it
+//! reached (only a forward makes them differ), the hostname's 100 random
+//! bits stop DNS rebinding, and the key cookie, which browsers keep by host
+//! and not by port, stops everything else (Fugo, 35888).
+//!
 //! The share's end (Stop on either side, its pipe paused or closed, the
 //! peer's identity changed) closes the listener and every connection at
 //! once. Shares that were opened listen again after a restart, at the same
@@ -188,8 +197,12 @@ pub(crate) fn status(factory: &Factory, share: &str, peer: &str, port: u16) -> S
     }
 }
 
-/// The person hides the share's chip, or shows it again.
-pub(crate) fn set_hidden(factory: &Factory, share: &str, hidden: bool) -> Result<(), String> {
+/// The person hides the share, or shows it again; an agent that may act
+/// on its pipe hides it (#502, Fugo 35687). Hidden, it isn't reachable
+/// here: its listener closes with every connection it has, and it isn't
+/// opened again until it's shown, when it listens again at its address if
+/// it had been opened.
+pub(crate) fn set_hidden(factory: &Arc<Factory>, share: &str, hidden: bool) -> Result<(), String> {
     let changed = factory
         .store
         .db()
@@ -198,9 +211,25 @@ pub(crate) fn set_hidden(factory: &Factory, share: &str, hidden: bool) -> Result
     if changed == 0 {
         return Err("That website isn't shared with you.".to_owned());
     }
+    if hidden {
+        close(factory, share);
+    } else if super::shares::received(factory, share).is_some() {
+        resumed(factory, share);
+    }
     factory.broadcast_workspace(&factory.lock());
     Ok(())
 }
+
+/// Whether the share is hidden here, so not reachable.
+pub(crate) fn hidden(factory: &Factory, share: &str) -> bool {
+    visit(factory, share).is_some_and(|visit| visit.hidden)
+}
+
+/// When this side first opened the share; 0 never.
+pub(crate) fn opened(factory: &Factory, share: &str) -> i64 {
+    visit(factory, share).map_or(0, |visit| visit.opened)
+}
+
 
 /// Whether this computer opens a website shared with it at `port`: such a
 /// port can't be shared back.
@@ -215,6 +244,9 @@ pub(crate) fn open(factory: &Arc<Factory>, share: &str) -> Result<Opened, String
     let Some(received) = super::shares::received(factory, share) else {
         return Err("This website isn't shared with you now.".to_owned());
     };
+    if hidden(factory, share) {
+        return Err("This website is hidden, so it isn't reachable here: show it again first, in the pipe's settings.".to_owned());
+    }
     ensure(factory, share, &received.peer_key, received.port);
     let gate = start(factory, share)?;
     let code = gate.mint();
@@ -242,7 +274,7 @@ pub(crate) fn close(factory: &Factory, share: &str) {
 /// Called as the resume is recorded, before the pipe shows open again, so
 /// it doesn't wait for that: every stream to the sharer is checked anyway.
 pub(crate) fn resumed(factory: &Arc<Factory>, share: &str) {
-    let opened = visit(factory, share).is_some_and(|visit| visit.opened != 0 && visit.ended == 0);
+    let opened = visit(factory, share).is_some_and(|visit| visit.opened != 0 && visit.ended == 0 && !visit.hidden);
     if opened && let Err(why) = start(factory, share) {
         tracing::warn!(share, %why, "a shared website couldn't listen again");
     }
@@ -479,12 +511,18 @@ impl Gate {
         format!("claktory_{}", self.host.replace('-', "_"))
     }
 
-    /// Which of the share's hosts `host` is, exactly; None for any other.
+    /// Which of the share's hosts `host` is, exactly, at a port: its own
+    /// here, or the one a device's forward picked (W1); None for any other
+    /// name, or none.
     fn named(&self, host: Option<&str>) -> Option<Named> {
         let host = host?.to_ascii_lowercase();
-        if host == format!("{}.localhost:{}", self.host, self.port) {
+        let (name, port) = host.rsplit_once(':')?;
+        if !port.bytes().all(|byte| byte.is_ascii_digit()) || port.starts_with('0') || port.parse::<u16>().is_err() {
+            return None;
+        }
+        if name == format!("{}.localhost", self.host) {
             Some(Named::Own)
-        } else if host == format!("127.0.0.1:{}", self.port) {
+        } else if name == "127.0.0.1" {
             Some(Named::Fallback)
         } else {
             None
@@ -553,10 +591,10 @@ async fn handle(
 ) -> Result<Response<Body>, Infallible> {
     let host = request.headers().get(header::HOST).and_then(|host| host.to_str().ok());
     let Some(named) = gate.named(host) else {
-        return Ok(page(StatusCode::MISDIRECTED_REQUEST, "Open this website from Claktory."));
+        return Ok(page(StatusCode::MISDIRECTED_REQUEST, &elsewhere(host)));
     };
     if !same_origin(request.headers()) {
-        return Ok(page(StatusCode::FORBIDDEN, "Open this website from Claktory."));
+        return Ok(page(StatusCode::FORBIDDEN, FROM_ANOTHER_SITE));
     }
     if request.uri().path() == OPEN_PATH {
         let code = request.uri().query().and_then(|query| query.split('&').find_map(|pair| pair.strip_prefix("k="))).unwrap_or("");
@@ -577,7 +615,7 @@ async fn handle(
     }
     let (has_key, cookie) = cookies(&gate, named, request.headers());
     if !has_key {
-        return Ok(page(StatusCode::FORBIDDEN, "Open this website from Claktory."));
+        return Ok(page(StatusCode::FORBIDDEN, NOT_OPENED_HERE));
     }
     let headers = request.headers_mut();
     headers.remove(header::COOKIE);
@@ -712,6 +750,26 @@ fn host_only(cookie: &str) -> Option<String> {
     let first = parts.next()?.trim();
     let rest = parts.map(str::trim).filter(|part| !part.to_ascii_lowercase().starts_with("domain"));
     Some(std::iter::once(first).chain(rest).collect::<Vec<_>>().join("; "))
+}
+
+/// W4: what each refusal says, so the person knows which it is.
+/// No key cookie: another browser, a private window, an address copied
+/// elsewhere.
+const NOT_OPENED_HERE: &str = "This website opens only from Claktory. Choose Open on it in Claktory, and it opens in your usual browser. It doesn't open in a private window or another browser.";
+/// A request another site's page made, or a link from another site.
+const FROM_ANOTHER_SITE: &str = "This website opens only from Claktory, not from a link on another site. Choose Open on it in Claktory.";
+
+/// A page that asked for another address than the share's: most often one
+/// of the shared website's own links, written for the address it has on
+/// the sharer's computer (`http://localhost:3000/…`, a sign-in's return).
+fn elsewhere(host: Option<&str>) -> String {
+    let host: String = host.unwrap_or("").chars().filter(|char| !char.is_control()).take(80).collect();
+    if host.is_empty() {
+        return "This page isn't part of the shared website. Go back, or open the website again from Claktory.".to_owned();
+    }
+    format!(
+        "This page went to {host}, which isn't part of the shared website. The website may link to its address on the computer that shares it. Go back, or open the website again from Claktory."
+    )
 }
 
 /// A short page of Claktory's own.

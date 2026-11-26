@@ -17,10 +17,13 @@ const _allowed = {
   // _connect: one on the account; a pasted code only after confirmPairing
   // (_connectPasted).
   'lib/connect_step.dart': 1,
-  // _connect after confirmPairing (scanned or pasted); one on the account.
-  'lib/phone.dart': 2,
-  // A link, after confirmPairing; one saved already.
-  'lib/links.dart': 2,
+  // A link already saved. A new one, after confirmPairing, goes through
+  // connectNewClaktory (mobile/local_network.dart).
+  'lib/links.dart': 1,
+  // connectNewClaktory, the first connection's Local Network sheet before
+  // it: from phone.dart's _connect after confirmPairing (scanned or
+  // pasted) and its account rows, and from a link after confirmPairing.
+  'lib/mobile/local_network.dart': 1,
   // A Claktory on the person's account (or the caller's onConnect).
   'lib/your_claktories.dart': 1,
   // The rail: This Mac, a saved Claktory, the first saved.

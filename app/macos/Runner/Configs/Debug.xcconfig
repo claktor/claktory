@@ -5,3 +5,11 @@
 // builds get one of their own, so claktory:// links always open the real
 // Claktory. Claktory Dev's is claktory-dev (scripts/lib.sh).
 CLAKTORY_URL_SCHEME = claktory-debug
+
+// Not the real Claktory (#501): its own bundle id, shown as Claktory Dev with
+// the Dev icon. LaunchServices would otherwise open a debug build, launched or
+// not, when the person clicks Claktory in the Dock. scripts/dev.sh turns this
+// build into Claktory Dev (dev.factory.app.dev) as before.
+CLAKTORY_BUNDLE_ID = dev.factory.app.debug
+CLAKTORY_NAME = Claktory Dev
+CLAKTORY_APP_ICON = AppIconDev

@@ -10,8 +10,10 @@
 //! (AcceptPipeIdentity); another email of the same account is a notice; a
 //! statement that ran out (a week) or a peer that signed out is "no longer
 //! verified". The comparison is always with what the person last accepted
-//! (the pin): a lapse never clears it. What this side can't check (signed
-//! out, or another account service) changes nothing.
+//! (the pin): a lapse never clears it. Another account clears by itself only
+//! when the pinned one vouches again, with a statement made after the other
+//! one's; what came meanwhile waits for the person's review. What this side
+//! can't check (signed out, or another account service) changes nothing.
 
 use std::sync::{Arc, Mutex};
 
@@ -57,17 +59,45 @@ CREATE TABLE pipe_identity_own (
 );
 ";
 
+/// The registration a kept statement of this side's was asked for under
+/// (`own`): '' in rows kept before it, which are asked for again.
+pub(crate) const OWN_REGISTRATION: &str = "
+ALTER TABLE pipe_identity_own ADD COLUMN registration TEXT NOT NULL DEFAULT '';
+";
+
+/// The signed iat of the latest statement for another account than the
+/// pinned one (unix seconds; 0 in rows kept before it): only a statement
+/// for the pinned account made after it clears the change (`heard`, Fugo
+/// on row 1327).
+pub(crate) const CHANGE_IAT: &str = "
+ALTER TABLE pipe_identities ADD COLUMN change_iat INTEGER NOT NULL DEFAULT 0;
+";
+
 /// The most of a peer's `identity` looked at.
 const MOST_BYTES: usize = 4 * 1024;
 /// How long a statement lasts (the account service's week).
 const PIPE_PEER_LIFETIME: i64 = 7 * 24 * 3600;
-/// A statement is asked for again a day after the last.
-const REFRESH_MS: i64 = 24 * 3600 * 1000;
+/// A statement is asked for again half an hour after the last, so it's
+/// always fresh enough for the other side (`FRESH_S`).
+const REFRESH_MS: i64 = 30 * 60 * 1000;
+/// How long after the account service made it a statement vouches for the
+/// other side (Fugo, row 1252), so a Claktory that signed in to another
+/// account, or out, isn't shown as the first one for longer, even if it
+/// kept presenting that one's statement. Seconds. 25 hours for now (#199,
+/// Bruno 35906, Fugo 35908): Claktories before this one ask for a statement
+/// once a day, and an hour would show their pipes as no longer verified
+/// most of the day. A release after this one has been out two weeks, it's
+/// an hour.
+const FRESH_S: i64 = 25 * 3600;
 /// After a failed ask, the next waits this long.
 const RETRY_MS: i64 = 10 * 60 * 1000;
 /// How the note on what waits for the person while the other side is
 /// another account ends (`held_note`), which tells those messages apart.
 const HELD_NOTE_ENDS: &str = "then choose Trust this Claktory… to let it through.";
+/// The note on what came while the other side was another account, once
+/// it's back to the one the person accepted (`back_to_accepted`).
+const CAME_MEANWHILE_NOTE: &str =
+    "Waiting for you: this came while their Claktory was signed in to a different account. Let it in, or discard it.";
 
 /// What a statement vouches, once checked.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,9 +182,11 @@ struct Row {
     withdrawn: bool,
     change: i32,
     lapse_seen: bool,
+    /// `CHANGE_IAT`.
+    change_iat: i64,
 }
 
-const COLUMNS: &str = "pinned_account, pinned_email, account, email, iat, exp, withdrawn, change, lapse_seen";
+const COLUMNS: &str = "pinned_account, pinned_email, account, email, iat, exp, withdrawn, change, lapse_seen, change_iat";
 
 fn read(factory: &Factory, pipe: &str) -> Row {
     let db = factory.store.db();
@@ -169,6 +201,7 @@ fn read(factory: &Factory, pipe: &str) -> Row {
             withdrawn: row.get(6)?,
             change: row.get(7)?,
             lapse_seen: row.get(8)?,
+            change_iat: row.get(9)?,
         })
     })
     .optional()
@@ -179,8 +212,20 @@ fn read(factory: &Factory, pipe: &str) -> Row {
 
 fn write(factory: &Factory, pipe: &str, row: &Row) {
     let written = factory.store.db().execute(
-        &format!("INSERT OR REPLACE INTO pipe_identities (pipe, {COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"),
-        params![pipe, row.pinned_account, row.pinned_email, row.account, row.email, row.iat, row.exp, row.withdrawn, row.change, row.lapse_seen],
+        &format!("INSERT OR REPLACE INTO pipe_identities (pipe, {COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"),
+        params![
+            pipe,
+            row.pinned_account,
+            row.pinned_email,
+            row.account,
+            row.email,
+            row.iat,
+            row.exp,
+            row.withdrawn,
+            row.change,
+            row.lapse_seen,
+            row.change_iat
+        ],
     );
     if let Err(error) = written {
         tracing::error!(%pipe, %error, "could not keep who a pipe's other side is");
@@ -201,12 +246,26 @@ pub(crate) fn heard(factory: &Arc<Factory>, pipe: &str, endpoint: &str, identity
         row.withdrawn = !row.account.is_empty();
     } else {
         // What can't be checked here changes nothing.
-        let Some(vouched) = check(factory, identity, endpoint, now_ms() / 1000) else { return };
+        let now = now_ms() / 1000;
+        let Some(vouched) = check(factory, identity, endpoint, now) else { return };
+        // Nor does a statement past its freshness (`FRESH_S`).
+        if vouched.iat.saturating_add(FRESH_S) < now {
+            return;
+        }
         // Never back to an older statement: a peer can't flip to a previous one.
         if vouched.iat < row.iat {
             return;
         }
-        (row.account, row.email, row.iat, row.exp, row.withdrawn, row.lapse_seen) = (vouched.account_id, vouched.email, vouched.iat, vouched.exp, false, false);
+        // Nor the account the person accepted, while it's another one, with
+        // a statement made before that one's (Fugo on row 1327): one kept
+        // from before can't clear the change.
+        if row.change == ACCOUNT_CHANGED && vouched.account_id == row.pinned_account && vouched.iat <= row.change_iat {
+            return;
+        }
+        // It vouches only while it's fresh, however long the service made it for.
+        let exp = vouched.exp.min(vouched.iat.saturating_add(FRESH_S));
+        (row.account, row.email, row.iat, row.exp, row.withdrawn, row.lapse_seen) =
+            (vouched.account_id, vouched.email, vouched.iat, exp, false, false);
         if row.pinned_account.is_empty() {
             // The first identity checked, or the first since the person
             // accepted none: pinned as it is.
@@ -214,18 +273,55 @@ pub(crate) fn heard(factory: &Arc<Factory>, pipe: &str, endpoint: &str, identity
                 (row.pinned_account, row.pinned_email, row.change) = (row.account.clone(), row.email.clone(), 0);
             }
         } else if row.account != row.pinned_account {
-            row.change = ACCOUNT_CHANGED;
-        } else if row.change != ACCOUNT_CHANGED {
+            (row.change, row.change_iat) = (ACCOUNT_CHANGED, row.iat);
+        } else {
+            // The account the person accepted, or back to it (Abbacchio's
+            // row 1327) with a statement made after the other account's.
             row.change = if row.email == row.pinned_email { 0 } else { EMAIL_CHANGED };
         }
     }
+    let back = before.change == ACCOUNT_CHANGED && row.change != ACCOUNT_CHANGED;
     if row != before {
         write(factory, pipe, &row);
+        if back {
+            back_to_accepted(factory, pipe, &row);
+        }
         let shown = |row: &Row| peer_fields(row, true, 0);
         if shown(&row) != shown(&before) {
             factory.broadcast_workspace(&factory.lock());
+            // A card asking to accept the change before is void (#471 G7).
+            let why = if back {
+                "the other side signs in with the account you accepted again"
+            } else if identity.is_empty() {
+                // Signed out there, or signing in again: it presents nothing
+                // for a moment first, whichever account comes next (row 1355).
+                "the other side's Claktory no longer says which account it's signed in to"
+            } else {
+                "who's at the other end of the pipe changed again since it was asked"
+            };
+            super::trust_card::settle(factory, pipe, why);
         }
     }
+}
+
+/// The other side signs in with the account the person accepted again
+/// (row 1327): what came while it was another account isn't let in but
+/// waits for the person's review, agents' messages queued for it go on,
+/// and the pipe says so.
+fn back_to_accepted(factory: &Arc<Factory>, pipe: &str, row: &Row) {
+    if factory.pipes.get(pipe).is_none() {
+        return;
+    }
+    let held = held_for_account(factory, pipe);
+    for seq in &held {
+        super::set_state(factory, pipe, *seq, MessageState::HeldIncoming, Some(CAME_MEANWHILE_NOTE));
+    }
+    let mut line = format!("The other side's Claktory signs in with the account you accepted again, {}.", row.pinned_email);
+    if !held.is_empty() {
+        line.push_str(" What came from it while it was another account waits for you.");
+    }
+    super::line(factory, pipe, line);
+    crate::pipe_link::wake(factory, pipe);
 }
 
 /// (verified, verified_email, identity_change, previous_email) as shown
@@ -293,21 +389,49 @@ pub(crate) fn refusal(factory: &Factory) -> String {
     format!("The other side's Claktory now belongs to a different account; {person} has to accept it first.")
 }
 
+/// What the other side presents now, for a card to be bound to
+/// (`super::trust_card`): the change shown (`v1::PipeIdentityChange`), and
+/// who it was and is, with its key.
+pub(crate) fn presented(factory: &Factory, record: &Record) -> (i32, String) {
+    let row = read(factory, &record.id);
+    let account = factory.lock().config.account.clone();
+    let (_, _, change, _) = peer_fields(&row, can_check(factory, &account), now_ms() / 1000);
+    let endpoint = record.peer.as_ref().map(|peer| peer.endpoint_id.as_str()).unwrap_or_default();
+    let withdrawn = if row.withdrawn { "1" } else { "0" };
+    let presented = [row.pinned_account.as_str(), &row.pinned_email, &row.account, &row.email, withdrawn, endpoint].join("\n");
+    (change, presented)
+}
+
+/// AcceptPipeIdentity, in the pipe or from an agent's card (`card_id`, #471
+/// G7): the card is checked and claimed first, and its agent told.
+pub(crate) fn accept_request(factory: &Arc<Factory>, request: &v1::AcceptPipeIdentity) -> Result<(), RequestError> {
+    let record = super::known(factory, &request.pipe_id)?;
+    unpresented(&read(factory, &request.pipe_id))?;
+    let card = super::trust_card::claim(factory, &record, &request.card_id)?;
+    let accepted = accept(factory, &request.pipe_id);
+    if let Some(id) = card {
+        super::trust_card::settled(factory, id, &record, accepted.is_ok());
+    }
+    accepted
+}
+
 /// AcceptPipeIdentity: what the other side presents now is pinned (with
 /// nothing, the pin stays and "no longer verified" is dismissed), the
 /// change cleared, and what it held goes on.
 pub(crate) fn accept(factory: &Arc<Factory>, pipe: &str) -> Result<(), RequestError> {
     let record = super::known(factory, pipe)?;
     let mut row = read(factory, pipe);
+    unpresented(&row)?;
     // Only what's presented now is pinned: a lapse accepted keeps the pin,
     // so another account later is still a change.
-    if !row.account.is_empty() && !row.withdrawn && now_ms() / 1000 <= row.exp {
+    if presents(&row) {
         (row.pinned_account, row.pinned_email) = (row.account.clone(), row.email.clone());
     } else {
         row.lapse_seen = true;
     }
     let was = std::mem::take(&mut row.change);
     write(factory, pipe, &row);
+    super::trust_card::settle(factory, pipe, "the change was accepted in the pipe");
     if was == ACCOUNT_CHANGED {
         release(factory, &record);
         // Agents' messages queued for the other side go on too.
@@ -317,63 +441,119 @@ pub(crate) fn accept(factory: &Arc<Factory>, pipe: &str) -> Result<(), RequestEr
     Ok(())
 }
 
+/// Whether the other side presents an identity now (a statement, fresh,
+/// not withdrawn since).
+fn presents(row: &Row) -> bool {
+    !row.account.is_empty() && !row.withdrawn && now_ms() / 1000 <= row.exp
+}
+
+/// Another account with nothing presented now (signed out there, or its
+/// statement ran out) can't be accepted: the person would let in what came
+/// from an account they never saw (Abbacchio's row 1328, Fugo).
+fn unpresented(row: &Row) -> Result<(), RequestError> {
+    if row.change == ACCOUNT_CHANGED && !presents(row) {
+        return Err(RequestError::Pipe(
+            "Wait until the other side's Claktory says which account it's signed in to; it doesn't say now.".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// What waited because the other side was another account goes on, in
 /// order: in, or on to wait for the person's review when that's on.
 fn release(factory: &Arc<Factory>, record: &Record) {
-    let (messages, _) = super::messages(factory, &record.id, 0, 1000);
-    for message in messages.iter().filter(|message| message.state == MessageState::HeldIncoming && message.note.ends_with(HELD_NOTE_ENDS)) {
+    for seq in held_for_account(factory, &record.id) {
         if record.review_incoming {
-            super::set_state(factory, &record.id, message.seq, MessageState::HeldIncoming, Some(super::REVIEW_NOTE));
+            super::set_state(factory, &record.id, seq, MessageState::HeldIncoming, Some(super::REVIEW_NOTE));
             continue;
         }
-        let let_in = v1::DecidePipeMessage { pipe_id: record.id.clone(), seq: message.seq, allow: true, ..Default::default() };
+        let let_in = v1::DecidePipeMessage { pipe_id: record.id.clone(), seq, allow: true, ..Default::default() };
         if let Err(error) = super::decide_message(factory, &let_in) {
             tracing::warn!(pipe = %record.id, %error, "could not let in a message held for a change of account");
         }
     }
 }
 
+/// Every message from the other side held because it was another account
+/// (`held_note`), oldest first, however many came since (Fugo 37600: not
+/// only the latest page).
+fn held_for_account(factory: &Factory, pipe: &str) -> Vec<u64> {
+    const HELD: &str = "SELECT seq, note FROM pipe_messages WHERE pipe = ?1 AND state = 'held_incoming' ORDER BY seq";
+    let db = factory.store.db();
+    let read = |row: &rusqlite::Row<'_>| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?));
+    let held = db.prepare(HELD).and_then(|mut statement| statement.query_map([pipe], read)?.collect::<Result<Vec<_>, _>>());
+    let held = held.unwrap_or_else(|error| {
+        tracing::error!(%pipe, %error, "could not read what a pipe holds for a change of account");
+        Vec::new()
+    });
+    held.into_iter().filter(|(_, note)| note.ends_with(HELD_NOTE_ENDS)).filter_map(|(seq, _)| u64::try_from(seq).ok()).collect()
+}
+
 // ---- This side's own statement ----
 
 /// What this side presents (as `heard` takes it): its statement while
 /// signed in, "" when it isn't. Asks for a new one, in the background,
-/// when it's a day old, about to run out, or missing.
+/// when it's half an hour old or missing, and at once when this Claktory
+/// signed in again, or to another account, since it was asked for
+/// (Abbacchio's row 1252). Then the statement kept is dropped at once, and
+/// none is presented until the new one comes (Fugo): never a statement of a
+/// sign-in that's over.
 pub(crate) fn own(factory: &Arc<Factory>) -> Option<String> {
     if let Some(test) = factory.pipes.identity.test() {
         return test.own;
     }
     let account = factory.lock().config.account.clone();
-    if !can_check(factory, &account) {
+    let (Some((account_id, email, service)), Some((_, claktory_id, epoch))) =
+        (factory.account.signed_in_as(&account), factory.account.registration(&account))
+    else {
         let _ = factory.store.db().execute("DELETE FROM pipe_identity_own", []);
         return Some(String::new());
-    }
+    };
+    // The sign-in a statement was asked under.
+    let registration = format!("{service}\n{account_id}\n{email}\n{claktory_id}\n{epoch}");
     let now = now_ms();
-    let kept: Option<(String, i64, i64, i64)> = factory
+    let kept: Option<(String, i64, i64, i64, String)> = factory
         .store
         .db()
-        .query_row("SELECT statement, exp, fetched, tried FROM pipe_identity_own WHERE id = 1", [], crate::store::row4)
+        .query_row("SELECT statement, exp, fetched, tried, registration FROM pipe_identity_own WHERE id = 1", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+        })
         .optional()
         .ok()
         .flatten();
-    let (statement, exp, fetched, tried) = kept.unwrap_or_default();
+    let (statement, exp, fetched, tried, kept_registration) = kept.unwrap_or_default();
+    if kept_registration != registration {
+        fetch(factory, now, &registration, true);
+        return Some(String::new());
+    }
     if now - fetched > REFRESH_MS && now - tried > RETRY_MS {
-        fetch(factory, now);
+        fetch(factory, now, &registration, false);
     }
     Some(if exp * 1000 > now { statement } else { String::new() })
 }
 
-/// Asks the account service for this side's statement, in the background.
-fn fetch(factory: &Arc<Factory>, now: i64) {
-    let tried = factory.store.db().execute(
-        "INSERT INTO pipe_identity_own (id, statement, exp, fetched, tried) VALUES (1, '', 0, 0, ?1)
-         ON CONFLICT (id) DO UPDATE SET tried = ?1",
-        [now],
-    );
+/// Asks the account service for this side's statement under
+/// `registration`, in the background; `anew`, for a new registration, drops
+/// the statement kept now.
+fn fetch(factory: &Arc<Factory>, now: i64, registration: &str, anew: bool) {
+    let tried = if anew {
+        factory.store.db().execute(
+            "INSERT INTO pipe_identity_own (id, statement, exp, fetched, tried, registration) VALUES (1, '', 0, 0, ?1, ?2)
+             ON CONFLICT (id) DO UPDATE SET statement = '', exp = 0, fetched = 0, tried = ?1, registration = ?2",
+            params![now, registration],
+        )
+    } else {
+        factory.store.db().execute(
+            "INSERT INTO pipe_identity_own (id, statement, exp, fetched, tried, registration) VALUES (1, '', 0, 0, ?1, ?2)
+             ON CONFLICT (id) DO UPDATE SET tried = ?1",
+            params![now, registration],
+        )
+    };
     if tried.is_err() {
         return;
     }
     let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
-    let factory = factory.clone();
+    let (factory, registration) = (factory.clone(), registration.to_owned());
     runtime.spawn(async move {
         let statement = match service::statement(&factory).await {
             Ok(statement) => statement.unwrap_or_default(),
@@ -383,9 +563,11 @@ fn fetch(factory: &Arc<Factory>, now: i64) {
             }
         };
         let exp = if statement.is_empty() { 0 } else { now_ms() / 1000 + PIPE_PEER_LIFETIME };
+        // Kept only while it's still the registration it was asked under: a
+        // sign-in meanwhile asked again.
         let kept = factory.store.db().execute(
-            "UPDATE pipe_identity_own SET statement = ?1, exp = ?2, fetched = ?3 WHERE id = 1",
-            params![statement, exp, now_ms()],
+            "UPDATE pipe_identity_own SET statement = ?1, exp = ?2, fetched = ?3 WHERE id = 1 AND registration = ?4",
+            params![statement, exp, now_ms(), registration],
         );
         if let Err(error) = kept {
             tracing::error!(%error, "could not keep this Claktory's statement for pipes");
@@ -410,6 +592,12 @@ pub fn vouch_for_test(
     *factory.pipes.identity.test.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(TestVouch { can_check, own, check });
 }
 
+/// Tests: what this Claktory presents its pipes' other sides now (`own`).
+#[doc(hidden)]
+pub fn own_for_test(factory: &Arc<Factory>) -> Option<String> {
+    own(factory)
+}
+
 /// Tests: this Claktory's own statement, as the account service gives it.
 #[doc(hidden)]
 pub async fn own_statement_for_test(factory: &Arc<Factory>) -> Result<Option<String>, String> {
@@ -426,6 +614,21 @@ pub fn endpoint_for_test(factory: &Factory) -> String {
 #[doc(hidden)]
 pub fn check_for_test(factory: &Factory, statement: &str, endpoint: &str) -> Option<(String, String)> {
     service::verify(factory, statement, endpoint, now_ms() / 1000).map(|vouched| (vouched.account_id, vouched.email))
+}
+
+/// Tests: a pipe message's state and note, however far back it is.
+#[doc(hidden)]
+pub fn kept_for_test(factory: &Factory, pipe: &str, seq: u64) -> Option<(String, String)> {
+    let seq = i64::try_from(seq).ok()?;
+    factory
+        .store
+        .db()
+        .query_row("SELECT state, note FROM pipe_messages WHERE pipe = ?1 AND seq = ?2", params![pipe, seq], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()
+        .ok()
+        .flatten()
 }
 
 /// Tests: the other side presented `identity`, as the transport hands it.
@@ -449,6 +652,7 @@ mod tests {
             withdrawn: false,
             change,
             lapse_seen: false,
+            change_iat: 0,
         }
     }
 

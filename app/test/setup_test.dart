@@ -87,13 +87,42 @@ class FakeSetupChannel implements SetupChannel {
   /// What macOS says of the LaunchAgent.
   BackgroundStatus background = BackgroundStatus.enabled;
 
+  /// How many times it was asked: each look once out of reach.
+  var backgroundAsks = 0;
+
   @override
-  Future<BackgroundStatus> backgroundStatus() async => background;
+  Future<BackgroundStatus> backgroundStatus() async {
+    backgroundAsks++;
+    return background;
+  }
 
   var loginItemsOpened = 0;
 
   @override
   Future<void> openLoginItems() async => loginItemsOpened++;
+}
+
+/// Waits until [ok], on the real clock: these tests run [MacSetup]'s own
+/// timers, so a loaded machine (a bundle of test files sharing a process,
+/// two runs at once) may fire them late. A fixed wait failed there.
+Future<void> until(
+  bool Function() ok, {
+  Duration within = const Duration(seconds: 3),
+}) async {
+  final end = DateTime.now().add(within);
+  while (!ok()) {
+    if (DateTime.now().isAfter(end)) return;
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
+}
+
+/// Waits until [channel] ran `install --check` [times] times, and what
+/// came of the last has been taken in.
+Future<void> checked(FakeSetupChannel channel, int times) async {
+  await until(
+    () => channel.runs.where((run) => run == 'install --check').length >= times,
+  );
+  await pumpEventQueue();
 }
 
 void main() {
@@ -185,7 +214,8 @@ void main() {
           result: 'not_running',
         );
         connected.value = false;
-        await Future<void>.delayed(const Duration(milliseconds: 50));
+        // Once out of reach a moment, it looked, and waits.
+        await checked(channel, 2);
         expect(setup.stage, SetupStage.done);
         connected.value = true;
 
@@ -194,7 +224,7 @@ void main() {
           held: true,
         );
         connected.value = false;
-        await Future<void>.delayed(const Duration(milliseconds: 50));
+        await until(() => setup.stage == SetupStage.stopped);
         expect(setup.stage, SetupStage.stopped);
       });
 
@@ -224,7 +254,8 @@ void main() {
           result: 'stopped',
           held: true,
         );
-        await Future<void>.delayed(const Duration(milliseconds: 600));
+        // At its next look, well within the 5 s a lost connection waits.
+        await until(() => setup.stage == SetupStage.stopped);
         expect(setup.stage, SetupStage.stopped);
       });
 
@@ -269,13 +300,15 @@ void main() {
 
         await setup.openLoginItems();
         expect(channel.loginItemsOpened, 1);
-        // Still off: it waits.
-        await Future<void>.delayed(const Duration(milliseconds: 60));
+        // Still off: it looks again, and waits.
+        final asked = channel.backgroundAsks;
+        await until(() => channel.backgroundAsks >= asked + 2);
+        await pumpEventQueue();
         expect(setup.stage, SetupStage.blocked);
         expect(channel.runs, ['install --check']);
 
         channel.background = BackgroundStatus.enabled;
-        await Future<void>.delayed(const Duration(milliseconds: 60));
+        await until(() => setup.stage == SetupStage.done);
         expect(channel.runs.last, 'install --start');
         expect(setup.stage, SetupStage.done);
         expect(reconnects, 1);
@@ -345,15 +378,15 @@ void main() {
         await setup.start();
         expect(setup.stage, SetupStage.done);
 
-        // A moment's drop with macOS allowing it: nothing.
+        // A moment's drop with macOS allowing it: it looks, and nothing.
         connected.value = false;
-        await Future<void>.delayed(const Duration(milliseconds: 50));
+        await checked(channel, 2);
         expect(setup.stage, SetupStage.done);
         connected.value = true;
 
         channel.background = BackgroundStatus.requiresApproval;
         connected.value = false;
-        await Future<void>.delayed(const Duration(milliseconds: 50));
+        await until(() => setup.stage == SetupStage.blocked);
         expect(setup.stage, SetupStage.blocked);
         expect(setup.showing, isTrue);
 
@@ -457,7 +490,7 @@ void main() {
       );
       await setup.start();
       expect(setup.stage, SetupStage.done);
-      await Future<void>.delayed(const Duration(milliseconds: 100));
+      await until(() => setup.stage == SetupStage.notRunning);
       expect(setup.stage, SetupStage.notRunning);
       expect(setup.showing, isTrue);
       expect(setup.repairable, isTrue);

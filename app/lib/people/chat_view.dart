@@ -5,10 +5,12 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../avatar.dart';
+import '../claktory_identity.dart' show claktoryName;
 import '../controls.dart';
+import '../extensions.dart' show logTime;
 import '../forms.dart' show FormFrame;
 import '../identity.dart';
-import '../message_time.dart' show dayLine;
+import '../message_time.dart' show clockTime, dayLine, sameDay;
 import '../mobile/composer.dart' show PhoneComposerRow;
 import '../mobile/header.dart';
 import '../mobile/lines.dart' show ControlsLine;
@@ -87,31 +89,90 @@ Future<void> openDmChat(BuildContext context, String conversationId) async {
 }
 
 /// What a message written here says of where it stands; [friend] is
-/// who it's to.
-String outgoingLine(OutgoingMessage message, {String friend = ''}) =>
-    switch (message.state) {
-      OutgoingState.sending => 'Sending…',
-      OutgoingState.unknown =>
-        "Couldn't confirm it was sent. Try again: it won't be sent twice.",
-      OutgoingState.refused => switch (message.problem) {
-        'closed' => "Not sent: you're no longer friends.",
-        'stale' => 'Not sent: this conversation changed. Open it again.',
-        'waitingForFriend' =>
-          "Not sent: ${friend.isEmpty ? 'they' : friend} can't get messages "
-              'in this chat yet. Send it again once they can.',
-        'rateLimited' =>
-          'Not sent: too many messages for now. Try again later.',
-        'storageFull' =>
-          "Not sent: you're out of space for messages. Delete some "
-              'conversations to make room.',
-        'unencryptable' =>
-          'Not sent: ${_whose(friend)} security key changed. Read the note '
-              'above, then send it again.',
-        _ => 'Not sent.',
-      },
-    };
+/// who it's to, and [claktory] the name of the Claktory the app shows.
+String outgoingLine(
+  OutgoingMessage message, {
+  String friend = '',
+  String claktory = 'this Claktory',
+}) => switch (message.state) {
+  OutgoingState.sending => 'Sending…',
+  OutgoingState.unknown =>
+    "Couldn't confirm it was sent. Try again: it won't be sent twice.",
+  OutgoingState.refused => switch (message.problem) {
+    'closed' => "Not sent: you're no longer friends.",
+    'stale' => 'Not sent: this conversation changed. Open it again.',
+    'waitingForFriend' =>
+      "Not sent: ${friend.isEmpty ? 'they' : friend} can't get messages "
+          'in this chat yet. Send it again once they can.',
+    'rateLimited' => 'Not sent: too many messages for now. Try again later.',
+    'storageFull' =>
+      "Not sent: you're out of space for messages. Delete some "
+          'conversations to make room.',
+    'unencryptable' =>
+      'Not sent: ${_whose(friend)} security key changed. Read the note '
+          'above, then send it again.',
+    _ => 'Not sent.',
+  },
+  OutgoingState.waiting => switch (message.problem) {
+    'homeFull' => 'Waiting for room on your Claktory. It goes once there is.',
+    'rateLimited' => 'Waiting: too many messages for now. It goes soon.',
+    'behind' => 'Sending again in a moment…',
+    'otherAccount' =>
+      'Waiting: this Claktory is signed in to another account. It goes '
+          'once you connect to one of yours.',
+    'unconfirmable' =>
+      'Waiting: $claktory was added with an older code. Add it again with '
+          'a new code.',
+    _ => 'Waiting for your Claktory',
+  },
+};
+
+/// The name of the Claktory the app shows; "this Claktory" where there's
+/// none to say.
+String shownClaktoryName(BuildContext context) {
+  final backend = context.getInheritedWidgetOfExactType<AppScope>()?.backend;
+  return backend == null ? 'this Claktory' : claktoryName(backend);
+}
 
 String _whose(String name) => name.isEmpty ? 'their' : "$name's";
+
+/// What's said under the person's own message of where it stands past
+/// their home (#451); null when nothing is ([DmDelivered.sent] on any but
+/// the newest, and [DmDelivered.askResend], which asks instead).
+String? deliveredLine(
+  ({DmDelivered state, int sinceMs}) delivered, {
+  String friend = '',
+  bool newest = false,
+  bool byAgent = false,
+  DateTime? now,
+}) {
+  final claktory = "${friend.isEmpty ? 'Their' : "$friend's"} Claktory";
+  final to = "${friend.isEmpty ? 'their' : "$friend's"} Claktory";
+  return switch (delivered.state) {
+    // An agent's says Sent by your agent instead.
+    DmDelivered.sent => newest && !byAgent ? 'Sent' : null,
+    DmDelivered.delivered => newest ? 'Delivered to $to' : null,
+    DmDelivered.notYet || DmDelivered.notTaking when !newest => null,
+    DmDelivered.notTaking =>
+      "Not delivered yet: $to isn't taking messages from yours right now.",
+    DmDelivered.notYet =>
+      delivered.sinceMs > 0
+          ? 'Not delivered yet: $to has been offline since '
+                '${logTime(DateTime.fromMillisecondsSinceEpoch(delivered.sinceMs), now: now)}'
+          : 'Not delivered yet: $to is offline.',
+    DmDelivered.askResend => null,
+    DmDelivered.resending => 'Sending again…',
+    DmDelivered.resent => "$claktory couldn't read this one. Sent again.",
+    DmDelivered.bounced => 'Not delivered to $to.',
+  };
+}
+
+/// The question under the person's message the friend's Claktory
+/// couldn't read, their conversation having gained someone since (Fugo:
+/// never sent again without asking).
+String resendQuestion(String friend) => friend.isEmpty
+    ? "Resend? Their conversation has changed since."
+    : "Resend to $friend? $friend's conversation has changed since.";
 
 /// What a change in who can read a chat says, one line per leaf (Trish's
 /// words): [me] is the person's account, [friend] the friend's name.
@@ -145,6 +206,12 @@ List<String> memberLines(
     for (final account in members.keyChanged)
       if (account != me)
         "${friend.isEmpty ? 'Their' : "$friend's"} security key changed",
+    // A friend's first device here: they joined (Bruno 33634), said for
+    // each leaf all the same (Fugo).
+    for (final member in members.joined)
+      member.account == me
+          ? line(member, true)
+          : '$who joined on ${proseCodes(member.name)}',
     for (final member in members.added) line(member, true),
     // Back with a new key: the device installed again (row 202, Trish).
     for (final member in members.setUpAgain)
@@ -157,6 +224,16 @@ List<String> memberLines(
         '' =>
           "Some messages sent while this device was away can't be shown "
               'on it.',
+        // Sent while a device they've since taken off their list was in
+        // the chat (row 561, Trish 40465).
+        _ when because.startsWith('device:') =>
+          "Some earlier messages can't be shown here: they were sent while "
+              '${because == 'device:$me'
+                  ? "a device you've since removed"
+                  : friend.isEmpty
+                  ? "a device that's since been removed"
+                  : 'a device $friend has since removed'} '
+              'was in this chat.',
         _ =>
           'Some messages sent when '
               '${because == me
@@ -299,6 +376,18 @@ class _ChatViewState extends State<ChatView> {
                     style: type.caption.copyWith(color: palette.danger),
                   ),
                 ),
+              // Listed by the service, not here yet from the agent's
+              // Claktory (#451): never its text until it is.
+              if (_thread.arriving > 0)
+                Padding(
+                  padding: const EdgeInsets.only(top: Space.xs),
+                  child: Text(
+                    _thread.arriving == 1
+                        ? "An agent's suggestion is on its way."
+                        : '${_thread.arriving} suggestions from agents are on their way.',
+                    style: type.caption.copyWith(color: palette.textFaint),
+                  ),
+                ),
               for (final proposal in _thread.proposals.reversed)
                 ProposalCard(
                   key: ValueKey('proposal:${proposal.id}'),
@@ -313,7 +402,9 @@ class _ChatViewState extends State<ChatView> {
                   thread: _thread,
                 ),
               if (_thread.held)
-                _Held(onRejoin: _thread.heldLong ? _thread.rejoin : null),
+                _Held(onRejoin: _thread.heldLong ? _thread.rejoin : null)
+              else if (_thread.behind)
+                const _Behind(),
               if (_thread.waitingFor case final account?)
                 _WaitingForKey(
                   name: account == _thread.e2ee.accountId
@@ -321,16 +412,27 @@ class _ChatViewState extends State<ChatView> {
                       : _thread.conversation.person.name,
                   device: _thread.reinstalling,
                 ),
-              if (_thread.waitingFor == null && _thread.joining != null)
+              // Their key changed: said as such, never as waiting for them
+              // to join, which their devices under it can't (E11-3).
+              if (_thread.waitingFor == null &&
+                  _thread.joining != null &&
+                  !_thread.keyChanged &&
+                  !_thread.keyRefused)
                 _WaitingToJoin(name: _thread.conversation.person.name),
               if (_thread.keyChanged)
                 _KeyChanged(
                   name: _thread.conversation.person.name,
                   onSeen: _thread.keySeen,
                   onVerify: _verify,
+                  mismatched: _thread.keyMismatched,
                   wasVerified: _thread.e2ee.wasVerified.contains(
                     _thread.friend,
                   ),
+                )
+              else if (_thread.keyRefused)
+                _KeyChanged(
+                  name: _thread.conversation.person.name,
+                  onVerify: _verify,
                 ),
               for (final message in _thread.outgoing.reversed)
                 _Outgoing(
@@ -352,11 +454,14 @@ class _ChatViewState extends State<ChatView> {
                 else
                   _Message(
                     message: message,
+                    friend: _thread.conversation.person.name,
                     // The newest, the person's own: it came back.
-                    sent:
+                    newest:
                         message.mine &&
                         i == _thread.messages.length - 1 &&
                         _thread.outgoing.isEmpty,
+                    delivered: message.mine ? _thread.delivered(message) : null,
+                    onResend: () => _thread.resend(message),
                   ),
                 // A day line where the day changes, above its first.
                 if (i == 0 ||
@@ -663,13 +768,25 @@ class _ChatViewState extends State<ChatView> {
 /// the friend's on the left. Plain text, its time at its foot, and who
 /// sent it when an agent did.
 class _Message extends StatelessWidget {
-  const _Message({required this.message, this.sent = false});
+  const _Message({
+    required this.message,
+    this.friend = '',
+    this.newest = false,
+    this.delivered,
+    this.onResend,
+  });
 
   final DmMessage message;
+  final String friend;
 
-  /// Says Sent under it: the service committed it. Never more than that:
-  /// nothing says whether they read it.
-  final bool sent;
+  /// The person's newest, which came back: says Sent, or Delivered to
+  /// their friend's Claktory (#451). Never more than that: nothing says
+  /// whether they read it.
+  final bool newest;
+
+  /// Where the person's own stands past their home; null for the friend's.
+  final ({DmDelivered state, int sinceMs})? delivered;
+  final VoidCallback? onResend;
 
   @override
   Widget build(BuildContext context) {
@@ -686,7 +803,7 @@ class _Message extends StatelessWidget {
           Bubble(
             color: mine ? palette.signal : palette.selected,
             outgoing: mine,
-            sentMs: message.acceptedMs,
+            sentMs: message.shownMs,
             timeColor: mine ? const Color(0xB3FFFFFF) : null,
             // Theirs, or an agent's: what reorders text shows by its code
             // (proseCodes, Fugo). The person's own, as they wrote it.
@@ -710,17 +827,73 @@ class _Message extends StatelessWidget {
                 style: type.caption.copyWith(color: palette.textFaint),
               ),
             ),
-          if (sent && !message.byAgent)
+          // From a device since taken off its person's list, read because
+          // one of theirs that was there all along took it out (row 561).
+          if (message.departed)
             Padding(
               padding: const EdgeInsets.symmetric(
                 horizontal: Space.m,
                 vertical: 2,
               ),
               child: Text(
-                'Sent',
+                departedLine(mine: mine, friend: friend),
+                style: type.caption.copyWith(color: palette.textMuted),
+              ),
+            ),
+          // Held up on the way (a Claktory offline, say): when it came too
+          // (row 556).
+          if (message.arrivedLate case final arrived?)
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: Space.m,
+                vertical: 2,
+              ),
+              child: Text(
+                arrivedLine(
+                  message.shownMs,
+                  arrived,
+                  DateTime.now(),
+                  h24: MediaQuery.maybeAlwaysUse24HourFormatOf(context) ?? true,
+                ),
                 style: type.caption.copyWith(color: palette.textFaint),
               ),
             ),
+          if (delivered case final delivered?)
+            if (deliveredLine(
+                  delivered,
+                  friend: friend,
+                  newest: newest,
+                  byAgent: message.byAgent,
+                )
+                case final line?)
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: Space.m,
+                  vertical: 2,
+                ),
+                child: Text(
+                  line,
+                  textAlign: TextAlign.end,
+                  style: type.caption.copyWith(color: palette.textFaint),
+                ),
+              ),
+          if (delivered?.state == DmDelivered.askResend) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(
+                horizontal: Space.m,
+                vertical: 2,
+              ),
+              child: Text(
+                resendQuestion(friend),
+                textAlign: TextAlign.end,
+                style: type.caption.copyWith(color: palette.textMuted),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(right: Space.m, top: Space.xs),
+              child: Button(label: 'Resend', onPressed: onResend),
+            ),
+          ],
         ],
       ),
     );
@@ -746,7 +919,11 @@ class _Outgoing extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    final stuck = message.state != OutgoingState.sending;
+    // Waiting for the person's home goes by itself: said quietly, and
+    // only Remove (#451).
+    final waiting = message.state == OutgoingState.waiting;
+    final stuck = message.state != OutgoingState.sending && !waiting;
+    final actions = stuck || waiting;
     return Padding(
       padding: const EdgeInsets.only(top: Space.s),
       child: Column(
@@ -763,17 +940,29 @@ class _Outgoing extends StatelessWidget {
               ),
             ),
           ),
+          if (message.agentName.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(right: Space.m, top: 2),
+              child: Text(
+                'Written by your agent',
+                style: type.caption.copyWith(color: palette.textFaint),
+              ),
+            ),
           Padding(
             padding: const EdgeInsets.only(right: Space.m, top: 2),
             child: Text(
-              outgoingLine(message, friend: friend),
+              outgoingLine(
+                message,
+                friend: friend,
+                claktory: shownClaktoryName(context),
+              ),
               textAlign: TextAlign.end,
               style: type.caption.copyWith(
                 color: stuck ? palette.danger : palette.textFaint,
               ),
             ),
           ),
-          if (stuck)
+          if (actions)
             Padding(
               padding: const EdgeInsets.only(right: Space.m, top: Space.xs),
               // On a phone, stacked full width when they don't fit, the
@@ -875,6 +1064,65 @@ class _Held extends StatelessWidget {
   }
 }
 
+/// When a message held up on the way arrived, under it (row 556):
+/// "Arrived 06:56", or with its day when that isn't the day it was sent
+/// ("Arrived yesterday at 23:10", "Arrived Monday at 09:02").
+String arrivedLine(int sentMs, int arrivedMs, DateTime now, {bool h24 = true}) {
+  final time = clockTime(arrivedMs, h24: h24);
+  if (sameDay(sentMs, arrivedMs)) return 'Arrived $time';
+  final day = switch (dayLine(arrivedMs, now)) {
+    'Today' => 'today',
+    'Yesterday' => 'yesterday',
+    final other => other,
+  };
+  return 'Arrived $day at $time';
+}
+
+/// Under a message from a device its person has since removed (row 561):
+/// [mine] when that's the person, [friend] the friend's name.
+String departedLine({required bool mine, required String friend}) => mine
+    ? "From a device you've since removed"
+    : friend.isEmpty
+    ? "From a device they've since removed"
+    : 'From a device $friend has since removed';
+
+/// A message waits until this device catches up with the chat (row 551):
+/// Claktory tries again by itself.
+class _Behind extends StatelessWidget {
+  const _Behind();
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: Space.s),
+      child: Container(
+        padding: const EdgeInsets.all(Space.m),
+        decoration: BoxDecoration(
+          border: Border.all(color: palette.hairline),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'A message is on its way.',
+              style: type.body.copyWith(color: palette.text),
+            ),
+            const SizedBox(height: Space.xs),
+            Text(
+              'It shows here once this device catches up. Claktory keeps '
+              'trying.',
+              style: type.caption.copyWith(color: palette.textMuted),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// The friend isn't in the conversation yet (row 676): nothing is sent
 /// until a device of theirs is. [name] is the friend's.
 class _WaitingToJoin extends StatelessWidget {
@@ -966,20 +1214,26 @@ class _WaitingForKey extends StatelessWidget {
   }
 }
 
+/// The friend's key changed: one to see ([onSeen], OK), or one this device
+/// refused to take ([onSeen] null, E11-3), which only Verify can look into.
 class _KeyChanged extends StatelessWidget {
   const _KeyChanged({
     required this.name,
-    required this.onSeen,
+    this.onSeen,
     required this.onVerify,
     this.wasVerified = false,
+    this.mismatched = false,
   });
 
   final String name;
-  final VoidCallback onSeen;
+  final VoidCallback? onSeen;
   final VoidCallback onVerify;
 
   /// They were verified before: they no longer are.
   final bool wasVerified;
+
+  /// It's a key the person said didn't match before (E11-3).
+  final bool mismatched;
 
   @override
   Widget build(BuildContext context) {
@@ -999,13 +1253,25 @@ class _KeyChanged extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              '$who security key changed. This happens when $them '
-              '${name.isEmpty ? 'set up' : 'sets up'} messages again or '
-              '${name.isEmpty ? 'replace' : 'replaces'} a device. Verify '
-              '${name.isEmpty ? 'them' : name} to be sure it\'s still them.',
+              mismatched && onSeen != null
+                  ? '$who security key changed back to the one that didn\'t '
+                        'match when you compared numbers. Verify '
+                        '${name.isEmpty ? 'them' : name} before you send '
+                        'anything.'
+                  : onSeen == null
+                  ? '$who security key changed to one this device can\'t '
+                        'accept, so nothing is sent to '
+                        '${name.isEmpty ? 'them' : name}. Verify '
+                        '${name.isEmpty ? 'them' : name} to be sure it\'s '
+                        'still them.'
+                  : '$who security key changed. This happens when $them '
+                        '${name.isEmpty ? 'set up' : 'sets up'} messages again '
+                        'or ${name.isEmpty ? 'replace' : 'replaces'} a device. '
+                        'Verify ${name.isEmpty ? 'them' : name} to be sure '
+                        'it\'s still them.',
               style: type.body.copyWith(color: palette.text),
             ),
-            if (wasVerified) ...[
+            if (wasVerified && !mismatched) ...[
               const SizedBox(height: Space.xs),
               Text(
                 '$who security key changed, so ${name.isEmpty ? 'they are' : '$name is'} '
@@ -1020,7 +1286,8 @@ class _KeyChanged extends StatelessWidget {
                 spacing: Space.s,
                 children: [
                   Button(label: 'Verify…', onPressed: onVerify),
-                  Button(label: 'OK', primary: true, onPressed: onSeen),
+                  if (onSeen case final seen?)
+                    Button(label: 'OK', primary: true, onPressed: seen),
                 ],
               ),
             ),

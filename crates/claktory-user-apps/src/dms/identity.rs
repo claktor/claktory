@@ -526,6 +526,7 @@ pub fn purge(db: &mut Connection, keys: &Keys, account: &str, now_ms: i64) -> Re
     super::leaves::purge(&transaction, account)?;
     super::groups::purge(&transaction, account)?;
     super::handoffs::purge(&transaction, account)?;
+    super::space::purge(&transaction, account)?;
     transaction.execute(
         "UPDATE dm_friend_codes SET retired = COALESCE(retired, ?2), reveal = NULL, account_id = '' WHERE account_id = ?1",
         params![account, now_ms],
@@ -565,6 +566,7 @@ mod tests {
         db.execute_batch(super::super::agents::SCHEMA).expect("schema");
         db.execute_batch(super::super::leaves::SCHEMA).expect("schema");
         db.execute_batch(super::super::groups::SCHEMA).expect("schema");
+        db.execute_batch(super::super::space::SCHEMA).expect("schema");
         db.execute_batch(super::super::handoffs::SCHEMA).expect("schema");
         db.execute_batch(claktory_dm_crypto::storage::SCHEMA).expect("schema");
         (db, keys)

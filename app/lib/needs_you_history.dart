@@ -317,6 +317,11 @@ bool _ofModel(NeedsYouRecord record) =>
 bool _ofConversation(NeedsYouRecord record) =>
     record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_CONVERSATION;
 
+/// Whether [record] is an agent giving up a secret of its own (#449): no
+/// card; Claktory's sentence, and its why in its own words.
+bool _ofGivenUp(NeedsYouRecord record) =>
+    record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_SECRET_GIVEN_UP;
+
 /// The change Undo undoes: an app access change's or a model change's; ""
 /// for none (a declined card, another kind).
 String _changeOf(NeedsYouRecord record) => _ofApp(record)
@@ -387,7 +392,11 @@ String historyOutcome(
   // person's dismissal.
   NeedsYouOutcome.NEEDS_YOU_OUTCOME_WITHDRAWN =>
     'Withdrawn by ${agent ?? 'the agent'}',
-  // Talked through on the card and ended with no decision.
+  // Talked through on the card and ended with no decision: by its agent
+  // once the talk settled it (#496), its words under it, or by the person.
+  NeedsYouOutcome.NEEDS_YOU_OUTCOME_RESOLVED
+      when record.agentReason.isNotEmpty =>
+    '${agent ?? 'The agent'} closed it: settled in the talk',
   NeedsYouOutcome.NEEDS_YOU_OUTCOME_RESOLVED => 'Resolved',
   _ => '',
 };
@@ -480,14 +489,15 @@ class HistoryRow extends StatelessWidget {
       // Its agent changed the card while it waited (#428).
       if (record.updates > 0) updatedTimes(record.updates),
     ].where((part) => part.isNotEmpty).join(' · ');
-    // Rivet's reason, or why an agent withdrew its card, as the agent's
-    // own words, never as Claktory's.
+    // Rivet's reason, why an agent withdrew its card, closed it as settled
+    // or gave up a secret, as the agent's own words, never as Claktory's.
     final reason =
         (_ofApp(record) ||
                 _ofModel(record) ||
                 _ofConversation(record) ||
-                record.outcome ==
-                    NeedsYouOutcome.NEEDS_YOU_OUTCOME_WITHDRAWN) &&
+                _ofGivenUp(record) ||
+                record.outcome == NeedsYouOutcome.NEEDS_YOU_OUTCOME_WITHDRAWN ||
+                record.outcome == NeedsYouOutcome.NEEDS_YOU_OUTCOME_RESOLVED) &&
             record.agentReason.isNotEmpty
         ? '${agentName ?? 'An agent'}: “${proseCodes(_shortened(record.agentReason, 300))}”'
         : '';
@@ -880,17 +890,17 @@ class NeedsYouTabs extends StatelessWidget {
                             child: FittedBox(
                               fit: BoxFit.scaleDown,
                               child: Text(
-                              _labels[i],
-                              maxLines: 1,
-                              style: type.secondary.copyWith(
-                                fontWeight: chosen
-                                    ? FontWeight.w600
-                                    : FontWeight.w500,
-                                color: chosen || pressed
-                                    ? palette.text
-                                    : palette.textMuted,
+                                _labels[i],
+                                maxLines: 1,
+                                style: type.secondary.copyWith(
+                                  fontWeight: chosen
+                                      ? FontWeight.w600
+                                      : FontWeight.w500,
+                                  color: chosen || pressed
+                                      ? palette.text
+                                      : palette.textMuted,
+                                ),
                               ),
-                            ),
                             ),
                           ),
                         );

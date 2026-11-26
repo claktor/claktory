@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show FileSystemException;
 
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart'
@@ -14,6 +15,7 @@ import '../protocol/factory/v1/factory.pb.dart';
 import '../resources.dart' show formatBytes;
 import '../scope.dart';
 import '../selection.dart';
+import 'file_cache.dart';
 import 'image.dart';
 import 'loading_progress.dart';
 import 'pdf.dart';
@@ -191,6 +193,15 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
   /// The request failed outright (rather than the file being unreadable).
   String? failure;
 
+  /// Why [failure] is, as the viewer shows it: the file's path under it,
+  /// except for a read lost with the connection, which is no fault of the
+  /// file (Zucchero's row 588).
+  String get failurePath => lostWithConnection(failure) ? '' : path;
+
+  /// From a drop, how long a read lost with it waits for the connection
+  /// before it says it failed (#375, Zucchero's row 588).
+  Timer? _giveUp;
+
   Listenable? _reloads;
 
   Backend? _backend;
@@ -241,6 +252,7 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
     _backend?.connected.removeListener(_connectedChanged);
     comments?.dispose();
     _updatedFor?.cancel();
+    _giveUp?.cancel();
     super.dispose();
   }
 
@@ -248,13 +260,41 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
   void _connectedChanged() {
     final now = _backend?.connected.value ?? false;
     final connecting = now && !_wasConnected;
+    final dropped = !now && _wasConnected;
     _wasConnected = now;
-    if (connecting && (failure != null || file == null)) unawaited(reload());
+    // Dropped: a read lost with it waits for it, as a read in pieces does,
+    // up to [lostReadWaits], then says it failed. A read made of one piece
+    // (a video's next part) fails with its request, so this is what holds
+    // it to the same time (Zucchero's row 588).
+    if (dropped) {
+      _giveUp?.cancel();
+      _giveUp = Timer(lostReadWaits, _gaveUp);
+    }
+    if (now) {
+      _giveUp?.cancel();
+      _giveUp = null;
+    }
+    // A kept copy shown while offline is checked against the file now.
+    if (connecting && (failure != null || file == null || _unchecked)) {
+      // Lost with the connection, it carries on now it's back: loading,
+      // not the failure, while it does.
+      if (lostWithConnection(failure)) setState(() => failure = null);
+      unawaited(reload());
+    }
     // The original, given up on with the connection: on from where it
     // got, as Share carries on, rather than waiting for Try again (Bruno
     // 29790).
     if (connecting && originalLoad is OriginalFailed && _originalLost) {
       unawaited(loadOriginal());
+    }
+  }
+
+  /// The connection didn't come back in time: a read lost with it says so.
+  void _gaveUp() {
+    _giveUp = null;
+    if (!mounted || (_backend?.connected.value ?? true)) return;
+    if (failure != null && lostWithConnection(failure)) {
+      setState(() => failure = lostWhileReading);
     }
   }
 
@@ -276,12 +316,83 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
   /// changed the file, who did.
   String details(String usual) {
     final by = _updatedBy;
-    if (by == null) return usual;
-    for (final agent in _backend?.workspace.workspace.agents ?? <Agent>[]) {
-      if (agent.id == by) return '${agent.name} just updated this file';
+    if (by != null) {
+      for (final agent in _backend?.workspace.workspace.agents ?? <Agent>[]) {
+        if (agent.id == by) return '${agent.name} just updated this file';
+      }
+    }
+    // The copy kept on this device, offline (#446).
+    if (_unchecked) {
+      return usual.isEmpty ? mayBeOutOfDate : '$mayBeOutOfDate · $usual';
     }
     return usual;
   }
+
+  /// What shows is the copy this device kept (#446), and whether the file
+  /// is still that version couldn't be asked (offline): the header says
+  /// so, and it's asked once connected.
+  var _unchecked = false;
+
+  /// A viewer that reads its file its own way says whether it shows a
+  /// kept copy that couldn't be checked.
+  @protected
+  set showingUnchecked(bool unchecked) => _unchecked = unchecked;
+
+  /// The copy of [variants] of the file this device keeps, if any and
+  /// still the file's version, or offline (#446): shown, and true; false
+  /// when it has to be read.
+  Future<bool> _showKept(Backend backend, List<String> variants) async {
+    final cache = FileCache.of(backend);
+    if (cache == null) return false;
+    final found = await cache.lookup(backend, path, variants);
+    if (!mounted || found == null) return false;
+    final kept = found.kept.content;
+    final shown = file;
+    final FileContent read;
+    if (shown != null &&
+        shown.error.isEmpty &&
+        !shown.truncated &&
+        shown.sha256 == kept.sha256 &&
+        shown.isPreview == kept.isPreview &&
+        shown.size == kept.size) {
+      // Already showing: nothing to decode again.
+      read = shown;
+    } else {
+      try {
+        read = await found.kept.read();
+      } on FileSystemException {
+        await cache.drop(path);
+        return false;
+      }
+      if (!mounted) return false;
+    }
+    setState(() {
+      file = read;
+      failure = null;
+      _progress = null;
+      _unchecked = !found.current;
+      if (!read.isPreview) originalLoad = const OriginalNotLoaded();
+    });
+    if (!identical(read, shown)) loaded(read);
+    return true;
+  }
+
+  /// Keeps [read] on this device, for next time (#446).
+  void _keep(Backend backend, FileContent read) {
+    final cache = FileCache.of(backend);
+    if (cache == null || read.truncated || read.error.isNotEmpty) return;
+    if (!keeps(read)) return;
+    final variant = read.isPreview
+        ? previewVariant(previewScreen())
+        : originalVariant;
+    unawaited(cache.keepRead(path, variant, read));
+  }
+
+  /// Whether [read] may be kept on this device: a viewer that reads files
+  /// it wasn't asked to open (a Markdown file's pictures, #540) keeps only
+  /// what is what it says it is (Fugo, 41320).
+  @protected
+  bool keeps(FileContent read) => true;
 
   /// How far the read on its way has got, while it's on its way (#375).
   ({int through, int size})? _progress;
@@ -321,6 +432,13 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
   Future<void> reload() async {
     try {
       final backend = AppScope.of(context);
+      // Kept on this device and still the file (#446): the original if
+      // it's here, else the preview made for this screen.
+      final kept = await _showKept(backend, [
+        originalVariant,
+        if (previews && !wantOriginal) previewVariant(previewScreen()),
+      ]);
+      if (kept || !mounted) return;
       void progress(int through, int size) {
         if (!mounted) return;
         setState(() => _progress = (through: through, size: size));
@@ -364,14 +482,18 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
         file = read;
         failure = null;
         _progress = null;
+        _unchecked = false;
         if (!read.isPreview) originalLoad = const OriginalNotLoaded();
       });
       loaded(read);
+      _keep(backend, read);
     } on RequestFailure catch (error) {
       if (mounted) {
         setState(() {
           failure = error.message;
-          _progress = null;
+          // Lost with the connection: how far it got stays shown while it
+          // waits for it.
+          if (!lostWithConnection(error.message)) _progress = null;
         });
       }
     }
@@ -387,7 +509,10 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
     wantOriginal = true;
     setState(() => originalLoad = const OriginalLoading(0, 0));
     try {
-      final read = await AppScope.of(context).readFile(
+      final backend = AppScope.of(context);
+      // Kept on this device (#446): at once.
+      if (await _showKept(backend, [originalVariant]) || !mounted) return;
+      final read = await backend.readFile(
         path,
         onProgress: (through, size) {
           if (!mounted || originalLoad is! OriginalLoading) return;
@@ -403,8 +528,10 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
       setState(() {
         file = read;
         originalLoad = const OriginalNotLoaded();
+        _unchecked = false;
       });
       loaded(read);
+      _keep(backend, read);
     } on RequestFailure catch (error) {
       originalFailed(error);
     }
@@ -428,15 +555,20 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
     final connected = _backend?.connected;
     // Lost with the connection: read again once it's back (#375), so it
     // waits for it rather than saying it failed.
-    if (failure != null && connected != null && !connected.value) {
+    // Lost a moment before the connection says it's down, the same.
+    // Given up on, it says so (Zucchero's row 588).
+    if (failure != null &&
+        failure != lostWhileReading &&
+        connected != null &&
+        (!connected.value || lostWithConnection(failure))) {
       return LoadingProgress(
         label: loadingLabel,
-        received: 0,
-        size: 0,
+        received: _progress?.through ?? 0,
+        size: _progress?.size ?? 0,
         connected: connected,
       );
     }
-    if (failure != null) return ViewerProblem(failure!, path: path);
+    if (failure != null) return ViewerProblem(failure!, path: failurePath);
     // Coming over the link: how much has, once more than a piece is due.
     final progress = _progress;
     if (file == null && progress != null && connected != null) {
@@ -517,6 +649,18 @@ class HeaderTextButton extends StatelessWidget {
     );
   }
 }
+
+/// The header's word on a copy kept on this device that couldn't be
+/// checked against the file, offline (#446).
+const mayBeOutOfDate = 'Saved copy, may be out of date';
+
+/// How long after a drop a read lost with it waits for the connection
+/// before it says it failed: as long as a read in pieces waits.
+const lostReadWaits = Duration(seconds: 60);
+
+/// Whether [failure] is a read's lost with its connection: given up on
+/// after a drop, or asked for while not connected.
+bool lostWithConnection(String? failure) => _lostWith.contains(failure);
 
 /// What a read lost with its connection fails with: given up on after a
 /// drop, or asked for while not connected.

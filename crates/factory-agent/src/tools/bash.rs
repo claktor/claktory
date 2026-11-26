@@ -16,6 +16,8 @@ use zeroize::Zeroizing;
 use crate::errors::{AgentError, AgentFailure, Error};
 use crate::secrets::{Redaction, Redactor, SecretUse, SecretVariable, Secrets, StreamRedactor};
 use crate::text::{utf16_head, utf16_len, utf16_tail};
+use crate::tools::asking::Guard;
+use crate::tools::task_logs;
 use crate::tools::{MAX_OUTPUT, Update, checks};
 use crate::types::ToolResult;
 
@@ -44,6 +46,8 @@ const PREVIEW_TAIL: usize = 10_000;
 const TIME_LIMIT: &str = "stopped at its time limit";
 /// The status of a task the computer's restart ended.
 const RESTARTED: &str = "the computer restarted";
+/// The status of a task that ended unwatched, without saying how.
+const LOST: &str = "ended while Claktory was stopped";
 /// How often a running command's log is read for its output.
 const POLL: Duration = Duration::from_millis(100);
 
@@ -66,6 +70,11 @@ pub struct Background {
 }
 
 impl Background {
+    /// The agent whose commands these are (FACTORY_AGENT_ID), or ''.
+    fn agent(&self) -> &str {
+        self.environment.iter().find(|(name, _)| name == "FACTORY_AGENT_ID").map_or("", |(_, value)| value.as_str())
+    }
+
     /// Its own variables, then `secrets` (so a secret's variable wins).
     fn with(&self, secrets: Vec<(String, Zeroizing<String>)>) -> Vec<(String, Zeroizing<String>)> {
         let own = self.environment.iter().map(|(name, value)| (name.clone(), Zeroizing::new(value.clone())));
@@ -83,6 +92,8 @@ pub struct Task {
     pub log: PathBuf,
     /// When it started, in ms since 1970; 0 if unknown.
     pub started: u64,
+    /// The folder it started in; empty if unknown.
+    pub folder: PathBuf,
 }
 
 impl Task {
@@ -107,10 +118,32 @@ impl Task {
             done.seconds = None;
             return done;
         }
+        let mut measured = Instant::now();
         while self.recorded_exit().is_none() && group_alive(self.pid) {
             sleep(Duration::from_secs(1)).await;
+            if measured.elapsed() >= task_logs::CHECK_EVERY {
+                measured = Instant::now();
+                capped(&self).await;
+            }
         }
         self.finished("stopped".to_owned(), &redaction.current())
+    }
+
+    /// Whether this task, which this process no longer watches (it was
+    /// started before a restart), ended unwatched without recording how:
+    /// the computer's restart ended it, or its process group is gone. Its
+    /// agent is told of such tasks together, once (friend bug #44).
+    pub fn lost(&self) -> bool {
+        self.recorded_exit().is_none() && (started_before_boot(self.started) || !group_alive(self.pid))
+    }
+
+    /// A lost task's end, which no event tells: its status says why, and
+    /// its secrets' files go.
+    pub fn lost_end(self, redaction: &Redaction) -> Finished {
+        let why = if started_before_boot(self.started) { RESTARTED } else { LOST };
+        let mut done = self.finished(why.to_owned(), &redaction.current());
+        done.seconds = None;
+        done
     }
 
     fn recorded_exit(&self) -> Option<i32> {
@@ -121,6 +154,12 @@ impl Task {
     /// recorded none (it was killed). Its secrets' files go.
     fn finished(self, otherwise: String, redactor: &Redactor) -> Finished {
         remove_secret_files(&self.secrets_dir());
+        // Written past its cap between two checks: cut now that it's done.
+        if let Err(error) = task_logs::cap_finished(&self.log, self.pid)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(task = %self.id, %error, "could not cut a task's log");
+        }
         let status = match self.recorded_exit() {
             Some(code) if code > 128 => format!("signal {}", signal_name(code - 128)),
             Some(code) => format!("exit {code}"),
@@ -235,6 +274,19 @@ pub fn group_alive(pid: u32) -> bool {
     // SAFETY: signal 0 only checks that the process group exists.
     let result = unsafe { libc::kill(-(pid as i32), 0) };
     result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Cuts the middle of a running task's log once it's past its cap
+/// (`task_logs`), off the async threads.
+async fn capped(task: &Task) {
+    let (log, pid) = (task.log.clone(), task.pid);
+    match tokio::task::spawn_blocking(move || task_logs::cap(&log, pid)).await {
+        Ok(Ok(true)) => tracing::info!(task = %task.id, log = %task.log.display(), "cut the middle of a task's log"),
+        Ok(Err(error)) if error.kind() != std::io::ErrorKind::NotFound => {
+            tracing::warn!(task = %task.id, %error, "could not cut a task's log");
+        }
+        _ => {}
+    }
 }
 
 /// The last FINISHED_TAIL characters of a log, reading only its end, with
@@ -558,11 +610,14 @@ pub async fn run(
     let files = SecretFiles(Some(std::env::temp_dir().join(format!("claktory-secrets-{}", uuid::Uuid::new_v4()))));
     let environment = injected.environment(files.0.as_deref().unwrap_or(cwd))?;
     let (child, pid) = spawn(cwd, &args.command, &environment)?;
+    let guard = Guard::watch(pid, "", None);
     let ended = collect(child, pid, Some(foreground_timeout(args.timeout)), cancel, update, &injected.redactor).await?;
     drop(files);
     injected.used(&args.command, None, started);
     let truncated = if ended.characters > utf16_len(&ended.tail) { "[Earlier output truncated]\n" } else { "" };
-    let text = format!("{truncated}{}\n[{}, {}]", ended.tail, ended.state, took(began.elapsed().as_secs_f64()));
+    let said = guard.said();
+    let stopped = if said.is_empty() { String::new() } else { format!("\n{said}") };
+    let text = format!("{truncated}{}{stopped}\n[{}, {}]", ended.tail, ended.state, took(began.elapsed().as_secs_f64()));
     Ok(ToolResult::text(
         text,
         json!({"exitCode": ended.exit_code, "exitSignal": ended.exit_signal, "stopped": ended.stopped, "characters": ended.characters, "outputBytes": ended.output_bytes}),
@@ -576,9 +631,9 @@ async fn start_background(cwd: &Path, args: BashArgs, background: &Background, i
     let (id, log, file) = new_log(&background.dir)?;
     let mut files = SecretFiles(Some(log.with_extension("secrets")));
     let environment = background.with(injected.environment(files.0.as_deref().unwrap_or(cwd))?);
-    let (child, pid) = spawn_wrapped(cwd, &args.command, &log, file, &environment, injected.filter())?;
+    let (child, pid) = spawn_wrapped(cwd, &args.command, &log, file, &environment, injected.filter(), background.agent())?;
     files.keep();
-    let task = Task { id, command: args.command, pid, log, started: crate::clock::now_ms() };
+    let task = Task { id, command: args.command, pid, log, started: crate::clock::now_ms(), folder: cwd.to_path_buf() };
     injected.used(&task.command, Some(task.id.clone()), task.started);
     let limit = args.timeout.unwrap_or(BACKGROUND_TIMEOUT_SECS).min(MAX_BACKGROUND_SECS);
     let started = format!(
@@ -601,9 +656,11 @@ async fn watch(mut child: Child, task: Task, limit: f64, finished: Arc<dyn Fn(Fi
     let deadline = sleep(Duration::from_secs_f64(limit));
     tokio::pin!(deadline);
     let mut timed_out = false;
+    let mut measure = tokio::time::interval(task_logs::CHECK_EVERY);
     let status = loop {
         tokio::select! {
             status = child.wait() => break status,
+            _ = measure.tick() => capped(&task).await,
             () = &mut deadline, if !timed_out => {
                 timed_out = true;
                 kill_group(pid, libc::SIGTERM);
@@ -717,7 +774,7 @@ async fn run_logged(
     let mut reader = std::fs::File::open(&log)?;
     let mut files = SecretFiles(Some(log.with_extension("secrets")));
     let environment = background.with(injected.environment(files.0.as_deref().unwrap_or(cwd))?);
-    let (mut child, pid) = spawn_wrapped(cwd, &args.command, &log, file, &environment, injected.filter())?;
+    let (mut child, pid) = spawn_wrapped(cwd, &args.command, &log, file, &environment, injected.filter(), background.agent())?;
     let timeout = foreground_timeout(args.timeout);
     let sleeping = checks::starts_with_sleep(&args.command);
     let mut decoder = Utf8Decoder::default();
@@ -741,7 +798,7 @@ async fn run_logged(
                     kill_armed = true;
                 } else {
                     read_more(&mut reader, &mut decoder, &mut redactor, &mut captured, update)?;
-                    let task = Task { id, command: args.command, pid, log, started };
+                    let task = Task { id, command: args.command, pid, log, started, folder: cwd.to_path_buf() };
                     files.keep();
                     injected.used(&task.command, Some(task.id.clone()), started);
                     return Ok(moved(task, child, &captured, Moved::Timeout(timeout), began, background, injected.redactor.clone()));
@@ -755,7 +812,7 @@ async fn run_logged(
                     kill_armed = true;
                 } else {
                     read_more(&mut reader, &mut decoder, &mut redactor, &mut captured, update)?;
-                    let task = Task { id, command: args.command, pid, log, started };
+                    let task = Task { id, command: args.command, pid, log, started, folder: cwd.to_path_buf() };
                     files.keep();
                     injected.used(&task.command, Some(task.id.clone()), started);
                     return Ok(moved(task, child, &captured, Moved::ForMessage, began, background, injected.redactor.clone()));
@@ -795,7 +852,7 @@ async fn run_logged(
     }
     drop(files);
     injected.used(&args.command, None, started);
-    let task = Task { id, command: args.command, pid, log, started };
+    let task = Task { id, command: args.command, pid, log, started, folder: cwd.to_path_buf() };
     let recorded = task.recorded_exit();
     let _ = std::fs::remove_file(task.status_path());
     let (exit_code, exit_signal) = match recorded {
@@ -870,8 +927,8 @@ fn moved(
 /// outlives whoever started it, its output appended to `log` and its exit
 /// code written to `log` with the extension `status` (removed first). Returns
 /// the shell, to reap, and its process group. `environment`: variables set
-/// for it on top of what it inherits.
-pub fn spawn_detached(cwd: &Path, script: &str, log: &Path, environment: &[(String, String)]) -> std::io::Result<(Child, u32)> {
+/// for it on top of what it inherits. `agent`: whose it is (`super::asking`).
+pub fn spawn_detached(cwd: &Path, script: &str, log: &Path, environment: &[(String, String)], agent: &str) -> std::io::Result<(Child, u32)> {
     let file = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
     match std::fs::remove_file(log.with_extension("status")) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
@@ -879,12 +936,13 @@ pub fn spawn_detached(cwd: &Path, script: &str, log: &Path, environment: &[(Stri
     }
     let environment: Vec<(String, Zeroizing<String>)> =
         environment.iter().map(|(name, value)| (name.clone(), Zeroizing::new(value.clone()))).collect();
-    spawn_wrapped(cwd, script, log, file, &environment, None)
+    spawn_wrapped(cwd, script, log, file, &environment, None, agent)
 }
 
 /// `environment`: variables set for this command only, on top of what it
 /// inherits. `filter`: the program (with its arguments) its output goes
-/// through to the log, and the values it hides.
+/// through to the log, and the values it hides. `agent`: whose it is: what
+/// asks who you are in it is stopped, and said in its log (`super::asking`).
 fn spawn_wrapped(
     cwd: &Path,
     script: &str,
@@ -892,7 +950,11 @@ fn spawn_wrapped(
     file: std::fs::File,
     environment: &[(String, Zeroizing<String>)],
     filter: Option<(&[std::ffi::OsString], Zeroizing<String>)>,
+    agent: &str,
 ) -> std::io::Result<(Child, u32)> {
+    // Shares the command's own offset in the log, so what it says lands
+    // between the command's output, never over it.
+    let told = file.try_clone()?;
     let mut command = Command::new("bash");
     let wrapper = if filter.is_some() { FILTERED_TASK_WRAPPER } else { TASK_WRAPPER };
     command
@@ -905,10 +967,14 @@ fn spawn_wrapped(
     command.current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::from(file.try_clone()?)).stderr(Stdio::from(file)).process_group(0);
     let child = command.spawn()?;
     let pid = child.id().ok_or_else(|| std::io::Error::other("the shell was spawned without a pid"))?;
+    Guard::watch(pid, agent, Some(told));
     Ok((child, pid))
 }
 
-/// A new, numbered log file for a background task.
+/// A new, numbered log file for a background task. Its number comes after
+/// every log there and every one that went (`task_logs::prune`), so no id
+/// that went is used again. Opened to append, so the task writes at its end wherever
+/// that is, and its middle can be cut.
 fn new_log(dir: &Path) -> std::io::Result<(String, PathBuf, std::fs::File)> {
     let mut number = 1;
     for entry in std::fs::read_dir(dir)? {
@@ -916,10 +982,11 @@ fn new_log(dir: &Path) -> std::io::Result<(String, PathBuf, std::fs::File)> {
             number += 1;
         }
     }
+    number = number.max(task_logs::pruned(dir) + 1);
     loop {
         let id = format!("task-{number}");
         let path = dir.join(format!("{id}.log"));
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        match std::fs::OpenOptions::new().append(true).create_new(true).open(&path) {
             Ok(file) => return Ok((id, path, file)),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => number += 1,
             Err(error) => return Err(error),

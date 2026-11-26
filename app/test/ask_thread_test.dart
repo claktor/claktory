@@ -5,6 +5,8 @@
 // from; a reopened card rises in Needs you by its thread's last message;
 // History says Resolved.
 import 'package:factory_app/ask_card.dart';
+import 'package:factory_app/avatar.dart' show PersonAvatar;
+import 'package:factory_app/characters/character.dart' show AgentCharacter;
 import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/decision.dart' show DecisionComment;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -37,6 +39,8 @@ AskPerson _ask({
   bool resolved = false,
   String answer = '',
   List<AskStep> steps = const [],
+  bool followsTalk = false,
+  String action = '',
 }) => AskPerson(
   id: 'ask7',
   title: 'Use the EU bucket?',
@@ -49,6 +53,8 @@ AskPerson _ask({
   thread: thread ?? const [],
   decidedMs: Int64(state == AskPersonState.ASK_PERSON_STATE_PENDING ? 0 : 1000),
   steps: steps,
+  approveFollowsTalk: followsTalk,
+  actionDescription: action,
 );
 
 Agent _agent(String id, String name, {List<int> waiting = const []}) => Agent(
@@ -192,6 +198,157 @@ void main() {
     expect(harness.last.answerAsk.text, 'Use it');
   });
 
+  // #492 (Fugo's rulings): after a talk, Approve agrees with where it
+  // ended, and says so; an answer says how much of the talk it showed, so
+  // one after a reply the person didn't see is refused.
+  group('approving after a talk', () {
+    const follows = "Approving agrees with June's last reply.";
+
+    testWidgets('the card says Approve agrees with the last reply, above '
+        'it, and the answer says how much of the talk it showed', (
+      tester,
+    ) async {
+      final harness = _inConversation(
+        _ask(thread: _thread(), followsTalk: true),
+      );
+      await harness.show(tester);
+      await settle(tester);
+      final line = tester.getTopLeft(_inCard(find.text(follows)));
+      expect(
+        line.dy,
+        lessThan(tester.getTopLeft(_inCard(find.text('Approve'))).dy),
+      );
+      expect(
+        tester.getTopLeft(_inCard(find.text(_theirs))).dy,
+        lessThan(line.dy),
+      );
+      await tester.tap(_inCard(find.text('Approve')));
+      await settle(tester);
+      final sent = harness.last.answerAsk;
+      expect(sent.dismiss, isFalse);
+      expect(sent.hasTalkSeen(), isTrue);
+      expect(sent.talkSeen, 2);
+      expect(sent.revision, 2);
+    });
+
+    testWidgets('a written answer follows the last reply', (tester) async {
+      final harness = _inConversation(
+        _ask(wantsText: true, thread: _thread(), followsTalk: true),
+      );
+      await harness.show(tester);
+      await settle(tester);
+      expect(
+        _inCard(find.text("Your answer follows June's last reply.")),
+        findsOne,
+      );
+      expect(_inCard(find.text(follows)), findsNothing);
+    });
+
+    testWidgets('without it, no line, and a card with no talk sends 0', (
+      tester,
+    ) async {
+      final harness = _inConversation(_ask());
+      await harness.show(tester);
+      await settle(tester);
+      expect(_inCard(find.text(follows)), findsNothing);
+      await tester.tap(_inCard(find.text('Approve')));
+      await settle(tester);
+      expect(harness.last.answerAsk.hasTalkSeen(), isTrue);
+      expect(harness.last.answerAsk.talkSeen, 0);
+    });
+
+    testWidgets('Resolve says how much of the talk it showed too', (
+      tester,
+    ) async {
+      final harness = _inConversation(_ask(thread: _thread()));
+      await harness.show(tester);
+      await settle(tester);
+      expect(_inCard(find.text(follows)), findsNothing);
+      await tester.tap(_inCard(find.text('Resolve')));
+      await settle(tester);
+      expect(harness.last.answerAsk.resolve, isTrue);
+      expect(harness.last.answerAsk.talkSeen, 2);
+    });
+
+    testWidgets('refused for a reply it did not show, the card says why and '
+        'keeps what was typed', (tester) async {
+      final harness = _inConversation(_ask(wantsText: true, thread: _thread()));
+      await harness.show(tester);
+      await settle(tester);
+      const refusal =
+          'June replied on this card since you looked at it. Read the '
+          'reply, then answer again.';
+      harness.backend.refuse = refusal;
+      final field = _inCard(find.byType(EditableText)).first;
+      await tester.enterText(field, 'Use it');
+      await settle(tester);
+      await tester.tap(_inCard(find.text('Answer')));
+      await settle(tester);
+      expect(_inCard(find.text(refusal)), findsOne);
+      expect(tester.widget<EditableText>(field).controller.text, 'Use it');
+    });
+
+    testWidgets('sent again once the connection is back, it says the talk '
+        'as it was when pressed', (tester) async {
+      final harness = _inConversation(
+        _ask(thread: _thread(), followsTalk: true),
+      );
+      await harness.show(tester);
+      await settle(tester);
+      harness.backend.refuse = 'Connection lost.';
+      await tester.tap(_inCard(find.text('Approve')));
+      await settle(tester);
+      expect(_inCard(find.text(askWaiting)), findsOne);
+      // Meanwhile June replied again.
+      harness.backend.transcript.update(
+        EntryUpdate(
+          agentId: 'june',
+          entry: Entry(
+            seq: Int64(7),
+            timestampMs: Int64(_ago(const Duration(hours: 2))),
+            askPerson: _ask(
+              thread: [
+                ..._thread(),
+                AskThreadMessage(
+                  fromAgent: true,
+                  text: 'Also, it is cheaper.',
+                  atMs: Int64(_ago(const Duration(minutes: 1))),
+                ),
+              ],
+              followsTalk: true,
+            ),
+          ),
+        ),
+      );
+      await settle(tester);
+      harness.backend.refuse = null;
+      harness.backend.connected.value = false;
+      await tester.pump();
+      harness.backend.connected.value = true;
+      await settle(tester);
+      expect(harness.last.answerAsk.talkSeen, 2);
+    });
+
+    testWidgets('an action card with a talk says Approve does only what it '
+        'shows', (tester) async {
+      final harness = _inConversation(
+        _ask(thread: _thread(), action: 'Give June the Charts app.'),
+      );
+      await harness.show(tester);
+      await settle(tester);
+      expect(
+        _inCard(
+          find.text(
+            'Approving does only what the card says, not what was said in '
+            'the talk.',
+          ),
+        ),
+        findsOne,
+      );
+      expect(_inCard(find.text(follows)), findsNothing);
+    });
+  });
+
   testWidgets('a procedure with a thread has Reply and Resolve under Done', (
     tester,
   ) async {
@@ -306,6 +463,64 @@ void main() {
     );
     expect(_inCard(find.text('We talked it through')), findsOneWidget);
     expect(_inCard(find.text('Resolve')), findsNothing);
+  });
+
+  testWidgets("closed by its agent as settled in the talk, the line is the "
+      "agent's: its character and '<Agent> closed it' (row 482)", (
+    tester,
+  ) async {
+    // The agent's words end the talk, said as it closed the card.
+    final closed = _ask(
+      thread: [
+        ..._thread(),
+        AskThreadMessage(
+          fromAgent: true,
+          text: 'Settled: the EU bucket.',
+          atMs: Int64(1000),
+        ),
+      ],
+      state: AskPersonState.ASK_PERSON_STATE_ANSWERED,
+      resolved: true,
+    );
+    expect(agentResolved(closed), isTrue);
+    final harness = _inConversation(closed);
+    await harness.show(tester);
+    await settle(tester);
+    expect(
+      _inCard(find.textContaining('June closed it', findRichText: true)),
+      findsOne,
+    );
+    expect(
+      _inCard(find.textContaining('Resolved', findRichText: true)),
+      findsNothing,
+    );
+    final line = find
+        .ancestor(
+          of: _inCard(
+            find.textContaining('June closed it', findRichText: true),
+          ),
+          matching: find.byType(Row),
+        )
+        .first;
+    expect(
+      find.descendant(of: line, matching: find.byType(AgentCharacter)),
+      findsOne,
+    );
+    expect(
+      find.descendant(of: line, matching: find.byType(PersonAvatar)),
+      findsNothing,
+    );
+    // The person's Resolve after the agent's last reply stays theirs.
+    expect(
+      agentResolved(
+        _ask(
+          thread: _thread(),
+          state: AskPersonState.ASK_PERSON_STATE_ANSWERED,
+          resolved: true,
+        ),
+      ),
+      isFalse,
+    );
   });
 
   testWidgets("the agent's words show what reorders text by its code", (

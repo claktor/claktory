@@ -51,7 +51,9 @@ CREATE TABLE IF NOT EXISTS dm_groups (
 CREATE INDEX IF NOT EXISTS dm_groups_account ON dm_groups (account_id);
 CREATE INDEX IF NOT EXISTS dm_groups_conversation ON dm_groups (conversation_id);
 -- Each group's mailbox: application messages, commits and proposals, as
--- sent (MLS messages), numbered in the order the worker took them.
+-- sent (MLS messages), numbered in the order the worker took them;
+-- `receiver`, the other account a conversation's entry went to, whose
+-- room it takes too (`dms::space`; added after, so it comes last).
 CREATE TABLE IF NOT EXISTS dm_mailbox (
     group_id BLOB NOT NULL,
     seq INTEGER NOT NULL,
@@ -64,12 +66,16 @@ CREATE TABLE IF NOT EXISTS dm_mailbox (
     client_message_id TEXT,
     by_agent TEXT,
     accepted INTEGER NOT NULL,
+    receiver TEXT,
     PRIMARY KEY (group_id, seq)
 ) WITHOUT ROWID;
 CREATE UNIQUE INDEX IF NOT EXISTS dm_mailbox_client ON dm_mailbox (group_id, leaf_id, client_message_id)
     WHERE client_message_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS dm_mailbox_accepted ON dm_mailbox (accepted);
--- Welcomes waiting for their leaves: one row per leaf a commit added.
+-- A leaf's own Remove waiting at an epoch, asked again (`propose`).
+CREATE INDEX IF NOT EXISTS dm_mailbox_proposals ON dm_mailbox (group_id, epoch, leaf_id) WHERE kind = 'proposal';
+-- Welcomes waiting for their leaves: one row per leaf a commit added;
+-- `sender`, the account whose commit made it (`dms::space`).
 CREATE TABLE IF NOT EXISTS dm_welcomes (
     id TEXT PRIMARY KEY,
     group_id BLOB NOT NULL,
@@ -78,7 +84,8 @@ CREATE TABLE IF NOT EXISTS dm_welcomes (
     welcome BLOB NOT NULL,
     -- The seq of the commit that made it: the leaf reads on after it.
     seq INTEGER NOT NULL,
-    accepted INTEGER NOT NULL
+    accepted INTEGER NOT NULL,
+    sender TEXT
 );
 CREATE INDEX IF NOT EXISTS dm_welcomes_leaf ON dm_welcomes (account_id, leaf_id);
 CREATE INDEX IF NOT EXISTS dm_welcomes_accepted ON dm_welcomes (accepted);
@@ -111,11 +118,16 @@ const COMMITS_PER_ACCOUNT: i64 = 600;
 const ROTATION_COMMITS_PER_LEAF: i64 = 1000;
 const ROTATION_COMMITS_PER_ACCOUNT: i64 = 5000;
 const PROPOSALS_PER_LEAF: i64 = 120;
-const MESSAGES_PER_LEAF: i64 = 60;
+/// Proposals an hour per account, as its commits.
+const PROPOSALS_PER_ACCOUNT: i64 = 600;
 /// A page of a mailbox: messages by default and at most, and bytes.
 const PAGE: usize = 50;
 const PAGE_MOST: usize = 100;
 const PAGE_BYTES: usize = 256 * 1024;
+/// What a home pulls (#451): commits a page at most, and pages of commits
+/// and GroupInfos an hour per Claktory leaf.
+const COMMITS_PAGE: usize = 50;
+const PULLS_PER_LEAF: i64 = 600;
 /// The Claktory's event feed: rows looked at, and events answered, a call.
 const SCAN: i64 = 500;
 const EVENTS: usize = 100;
@@ -197,6 +209,9 @@ pub fn channel_of(db: &Connection, account: &str, claktory: &str) -> rusqlite::R
         .optional()
 }
 
+// Only what was kept before #451 is checked so; the home checks a send
+// now (the tests' kept sends still are).
+#[cfg(test)]
 /// Whether an application message goes in `group` now: its epoch, or
 /// `400` for another group's and `409 epoch` (no more said: the caller
 /// answers it with [`epoch_answer`]) for one too old.
@@ -253,6 +268,11 @@ fn group_id_of(text: &str) -> Result<Vec<u8>, Refusal> {
 }
 
 /// An envelope from a body, of `kind`: or why not.
+/// How big an envelope came, in its base64, for the room it may take.
+fn received(value: &Value) -> usize {
+    value["bytes"].as_str().map_or(usize::MAX, str::len)
+}
+
 fn envelope_of(value: &Value, kind: MlsKind, what: &str) -> Result<(Envelope, Parsed), Refusal> {
     let envelope = Envelope::from_json(value).map_err(|error| invalid(&format!("{what} isn't an envelope: {error}.")))?;
     let parsed = envelope.parsed();
@@ -270,6 +290,13 @@ fn seal_key(keys: &Keys, db: &Connection, id: &[u8], now_ms: i64) -> Result<Seal
 
 fn purpose(id: &[u8]) -> String {
     format!("group:{}", b64(id))
+}
+
+/// Whether no two of a tree's leaves share a signature key or an
+/// encryption key.
+fn keys_unique(members: impl Iterator<Item = openmls::group::Member>) -> bool {
+    let (mut signing, mut encrypting) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+    members.into_iter().all(|member| signing.insert(member.signature_key) && encrypting.insert(member.encryption_key))
 }
 
 /// The certificate a leaf carries, when it's one and for the leaf's own
@@ -313,6 +340,9 @@ fn missing(db: &Connection, public: &PublicGroup, people: &[String]) -> Result<V
     Ok(people.iter().filter(|person| !present.contains(*person)).cloned().collect())
 }
 
+// Only what was kept before #451 is checked so; the home checks a send
+// now (the tests' kept sends still are).
+#[cfg(test)]
 /// Whether an application message at `epoch` may go into `group`: in a
 /// conversation, only once both people have been in it since that epoch or
 /// before (row 676). A group from before this was kept goes as it was until
@@ -461,14 +491,23 @@ pub struct Entry<'a> {
     pub leaf: &'a Leaf,
     pub client_message_id: Option<&'a str>,
     pub by_agent: Option<&'a str>,
+    /// The room it may take (`space`): exempt only as a removal the worker
+    /// read as one.
+    pub room: super::space::Entry,
 }
 
 /// Appends to `group`'s mailbox and tells its accounts: the new seq.
-pub fn append(transaction: &Transaction<'_>, group: &mut Group, entry: Entry<'_>, now_ms: i64) -> rusqlite::Result<i64> {
+/// Refused while the disk is nearly full, or (unless exempt) past the room
+/// the sender's entries, or its friend's, may take (`space`).
+pub fn append(transaction: &Transaction<'_>, group: &mut Group, entry: Entry<'_>, now_ms: i64) -> Result<i64, Refusal> {
+    let sender = &entry.leaf.account;
+    let receiver = people(transaction, group)?.into_iter().find(|account| account != sender);
+    let size = entry.envelope.bytes().len() as i64 + super::space::ENTRY_OVERHEAD;
+    super::space::take(transaction, sender, receiver.as_deref(), size, entry.room)?;
     let seq = group.last_seq + 1;
     transaction.execute(
-        "INSERT INTO dm_mailbox (group_id, seq, kind, epoch, envelope, digest, account_id, leaf_id, client_message_id, by_agent, accepted)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO dm_mailbox (group_id, seq, kind, epoch, envelope, digest, account_id, leaf_id, client_message_id, by_agent, accepted, receiver)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             group.id,
             seq,
@@ -480,7 +519,8 @@ pub fn append(transaction: &Transaction<'_>, group: &mut Group, entry: Entry<'_>
             entry.leaf.leaf_id,
             entry.client_message_id,
             entry.by_agent,
-            now_ms
+            now_ms,
+            receiver
         ],
     )?;
     transaction.execute("UPDATE dm_groups SET last_seq = ?2 WHERE group_id = ?1", params![group.id, seq])?;
@@ -767,7 +807,11 @@ fn commit(
     // Only Removes of the account's own leaves its current key and list no
     // longer vouch for: a removed device's, or one a new key left behind.
     let mut cleanup = staged.queued_proposals().next().is_some();
+    // Only Removes (the checks below allow only the account's own leaves'
+    // and leaves' own): a removal, exempt from the caps (`space`).
+    let mut removal = cleanup && !external;
     for queued in staged.queued_proposals() {
+        removal = removal && matches!(queued.proposal(), Proposal::Remove(_) | Proposal::SelfRemove);
         if matches!(leaf.kind, LeafKind::Claktory) && !external {
             return Err(Refusal(403, "claktory_update_only", "A Claktory commits only its own update.".to_owned()));
         }
@@ -881,16 +925,26 @@ fn commit(
 
     // The new epoch, and its GroupInfo.
     public.merge_commit(provider.storage(), *staged).map_err(|error| broken(&format!("merging a commit: {error}")))?;
+    // Every leaf's keys are its own in the group (RFC 9420 §7.3). OpenMLS
+    // checks an Add's, not the leaf a commit's path brings in: a tree with
+    // one key twice would freeze the group's membership for everyone in
+    // it (Fugo, after Mista's rejoin race). Refused, nothing of it is kept.
+    if !keys_unique(public.members()) {
+        return Err(invalid("A leaf's keys must be its own in the group."));
+    }
     let next = group.epoch + 1;
     let (info_envelope, parsed) = envelope_of(&commit.group_info, MlsKind::GroupInfo, "group_info")?;
     let MlsMessageBodyIn::GroupInfo(info) = parsed.message.extract() else { return Err(invalid("group_info isn't a GroupInfo.")) };
     if info.epoch().as_u64() != next || info.group_id().as_slice() != group.id.as_slice() || !is_state_of(info, &public)? {
         return Err(invalid("The GroupInfo is the new epoch's."));
     }
+    // A removal, or a leaf's move to a new key, as read here from the
+    // commit itself, never from anything the client says.
+    let room = super::space::Entry::of(!external && (removal || rotation), received(&commit.commit));
     let seq = append(
         transaction,
         &mut group,
-        Entry { kind: "commit", epoch, envelope: &envelope, leaf: &leaf, client_message_id: None, by_agent: None },
+        Entry { kind: "commit", epoch, envelope: &envelope, leaf: &leaf, client_message_id: None, by_agent: None, room },
         now_ms,
     )?;
     transaction.execute(
@@ -918,9 +972,13 @@ fn commit(
     if let Some(welcome) = welcome {
         for (reference, account, leaf_id) in welcomed {
             let id = hex(&rand_id());
+            let size = welcome.bytes().len() as i64 + super::space::ENTRY_OVERHEAD;
+            // A commit that adds is never a removal.
+            super::space::take(transaction, &leaf.account, Some(&account), size, super::space::Entry::Capped)?;
             transaction.execute(
-                "INSERT INTO dm_welcomes (id, group_id, account_id, leaf_id, welcome, seq, accepted) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![id, group.id, account, leaf_id, welcome.bytes(), seq, now_ms],
+                "INSERT INTO dm_welcomes (id, group_id, account_id, leaf_id, welcome, seq, accepted, sender)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![id, group.id, account, leaf_id, welcome.bytes(), seq, now_ms, leaf.account],
             )?;
             transaction.execute("DELETE FROM dm_claims WHERE ref = ?1", [reference])?;
             sync::emit(transaction, &account, Kind::Welcome, "", &id, 0, now_ms)?;
@@ -982,7 +1040,23 @@ fn propose(
     if epoch != group.epoch {
         return Ok(epoch_answer(group.epoch));
     }
+    // One own Remove a leaf keeps waiting at an epoch (Fugo): asking again
+    // answers the one kept and keeps nothing new; once the epoch moved
+    // without taking it in, it may ask once more.
+    let kept: Option<i64> = transaction
+        .query_row(
+            // Its own index: unanalyzed, SQLite would scan the group's mailbox.
+            "SELECT seq FROM dm_mailbox INDEXED BY dm_mailbox_proposals
+             WHERE group_id = ?1 AND kind = 'proposal' AND epoch = ?2 AND account_id = ?3 AND leaf_id = ?4",
+            params![group.id, epoch as i64, leaf.account, leaf.leaf_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(seq) = kept {
+        return Ok((200, json!({"seq": seq})));
+    }
     take(transaction, &format!("proposal:{}", leaf.leaf_id), 3600, PROPOSALS_PER_LEAF, now_ms)?;
+    take(transaction, &format!("proposals:{}", leaf.account), 3600, PROPOSALS_PER_ACCOUNT, now_ms)?;
     let message = parsed.into_protocol_message().map_err(|error| invalid(&format!("That proposal isn't one: {error}.")))?;
     let key = seal_key(keys, transaction, &group.id, now_ms)?;
     let provider = Provider::public(crypto(), transaction, &key).map_err(|error| broken(&error.to_string()))?;
@@ -1011,82 +1085,22 @@ fn propose(
         return Err(invalid("The only proposal here is a leaf's own Remove."));
     }
     public.add_proposal(provider.storage(), *queued).map_err(|error| broken(&format!("keeping a proposal: {error}")))?;
+    let room = super::space::Entry::of(true, received(&propose.proposal));
     let seq = append(
         transaction,
         &mut group,
-        Entry { kind: "proposal", epoch, envelope: &envelope, leaf: &leaf, client_message_id: None, by_agent: None },
+        Entry { kind: "proposal", epoch, envelope: &envelope, leaf: &leaf, client_message_id: None, by_agent: None, room },
         now_ms,
     )?;
     Ok((200, json!({"seq": seq})))
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Send {
-    client_message_id: String,
-    envelope: Value,
-    #[serde(default)]
-    #[allow(dead_code)]
-    request_nonce: Option<String>,
-}
-
+// Only what was kept before #451 is checked so; the home checks a send
+// now (the tests' kept sends still are).
+#[cfg(test)]
 /// Whether an application message's `epoch` may still go into `group`.
 pub fn epoch_fits(group: &Group, epoch: u64) -> bool {
     epoch <= group.epoch && group.epoch - epoch <= EPOCHS_BEHIND
-}
-
-/// `POST groups/<id>/messages`: an application message in a self group or
-/// a channel. A Claktory sends only in its own channel.
-fn send(transaction: &Transaction<'_>, caller: &Caller, id: &str, send: Send, now_ms: i64) -> Result<(u16, Value), Refusal> {
-    let leaf = leaf_of(caller)?;
-    let (mut group, _) = reached(transaction, caller, id, now_ms)?;
-    match (group.kind, caller) {
-        (GroupKind::Conversation, _) => return Err(invalid("A conversation's messages go through conversations/<id>/messages.")),
-        (GroupKind::SelfGroup, Caller::Backend { .. }) => return Err(not_found()),
-        _ => {}
-    }
-    if send.client_message_id.is_empty()
-        || send.client_message_id.len() > 64
-        || !send.client_message_id.bytes().all(|b| b.is_ascii_graphic())
-    {
-        return Err(invalid("client_message_id is 1 to 64 visible characters."));
-    }
-    let (envelope, parsed) = envelope_of(&send.envelope, MlsKind::Application, "envelope")?;
-    let (group_id, epoch) = parsed.group.ok_or_else(|| invalid("envelope isn't an application message."))?;
-    if group_id.as_slice() != group.id.as_slice() {
-        return Err(invalid("That message is another group's."));
-    }
-    let earlier: Option<(i64, Vec<u8>, i64)> = transaction
-        .query_row(
-            "SELECT seq, digest, accepted FROM dm_mailbox WHERE group_id = ?1 AND leaf_id = ?2 AND client_message_id = ?3",
-            params![group.id, leaf.leaf_id, send.client_message_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()?;
-    if let Some((seq, digest, accepted)) = earlier {
-        if digest == envelope.digest() {
-            return Ok((200, json!({"seq": seq, "accepted_ms": accepted})));
-        }
-        return Err(Refusal(409, "conflict", "That message id was used for another message.".to_owned()));
-    }
-    if !epoch_fits(&group, epoch) {
-        return Ok(epoch_answer(group.epoch));
-    }
-    super::identity::take_as(transaction, &format!("group-message:{}", leaf.leaf_id), 60, MESSAGES_PER_LEAF, now_ms, "Too many messages.")?;
-    let seq = append(
-        transaction,
-        &mut group,
-        Entry {
-            kind: "application",
-            epoch,
-            envelope: &envelope,
-            leaf: &leaf,
-            client_message_id: Some(&send.client_message_id),
-            by_agent: None,
-        },
-        now_ms,
-    )?;
-    Ok((200, json!({"seq": seq, "accepted_ms": now_ms})))
 }
 
 /// `GET groups/<id>/messages?after=&limit=`: the mailbox after a seq, in
@@ -1170,15 +1184,107 @@ fn list(db: &Connection, caller: &Caller, now_ms: i64) -> Result<Value, Refusal>
     Ok(json!({"groups": groups}))
 }
 
-/// `GET groups/<id>/group-info`: the current epoch's, for a rejoin.
-fn group_info(db: &Connection, caller: &Caller, id: &str, now_ms: i64) -> Result<Value, Refusal> {
+/// `GET groups/<id>/group-info`: the current epoch's, for a rejoin, or for
+/// the person's home to follow the group (`homes_reach`).
+fn group_info(transaction: &Transaction<'_>, keys: &Keys, caller: &Caller, id: &str, now_ms: i64) -> Result<Value, Refusal> {
+    let db: &Connection = transaction;
     let group = load(db, &group_id_of(id)?)?.ok_or_else(not_found)?;
     if reach(db, caller, &group, now_ms)?.is_none() && !may_rejoin(db, caller, &group, now_ms)? {
-        return Err(not_found());
+        if !matches!(caller, Caller::Backend { agent: None, .. }) {
+            return Err(not_found());
+        }
+        homes_reach(transaction, keys, caller, &group, now_ms)?;
     }
     let info: Vec<u8> = db.query_row("SELECT group_info FROM dm_groups WHERE group_id = ?1", [&group.id], |row| row.get(0))?;
     let envelope = Envelope::new(info).map_err(|_| broken("a kept GroupInfo doesn't parse"))?;
     Ok(json!({"epoch": group.epoch, "group_info": envelope.to_json()}))
+}
+
+/// Whether `caller` may follow `group` as its person's home (#451, Fugo
+/// 32380), checked on every request: a Claktory (never an agent) whose
+/// leaf its account's current signed list names, its account in the group
+/// now (a leaf of it among the group's members), within its pulls an hour.
+/// Only the group's public state and commits: never a message.
+fn homes_reach(transaction: &Transaction<'_>, keys: &Keys, caller: &Caller, group: &Group, now_ms: i64) -> Result<(), Refusal> {
+    let Caller::Backend { account_id, agent: None, .. } = caller else {
+        return Err(Refusal(403, "claktory_only", "Only the Claktory itself, not an agent, can do this.".to_owned()));
+    };
+    let leaf = leaf_of(caller)?;
+    let listed = keys_of(transaction, account_id)?
+        .is_some_and(|kept| kept.list.list.leaves.iter().any(|listed| listed.kind == LeafKind::Claktory && listed.leaf_id == leaf.leaf_id));
+    if !listed {
+        return Err(Refusal(403, "not_listed", "Your device list doesn't name this Claktory.".to_owned()));
+    }
+    let key = seal_key(keys, transaction, &group.id, now_ms)?;
+    let provider = Provider::public(crypto(), transaction, &key).map_err(|error| broken(&error.to_string()))?;
+    let public = PublicGroup::load(provider.storage(), &GroupId::from_slice(&group.id)).map_err(|error| broken(&error.to_string()))?;
+    let member = public.is_some_and(|public| {
+        public.members().any(|member| {
+            certified(&member.credential, &member.signature_key).is_some_and(|certificate| certificate.leaf.account_id == *account_id)
+        })
+    });
+    if !member {
+        return Err(not_found());
+    }
+    take(transaction, &format!("dm-pull:{account_id}:{}", leaf.leaf_id), 3_600_000, PULLS_PER_LEAF, now_ms)
+}
+
+/// `GET groups/<id>/commits?after_epoch=E`: the group's commits from the
+/// one that took it from epoch E on, in order, for the person's home
+/// (`homes_reach`). `410 too_far_behind` when the log no longer holds that
+/// one: the home takes the group's GroupInfo instead.
+fn commits(
+    transaction: &Transaction<'_>,
+    keys: &Keys,
+    caller: &Caller,
+    id: &str,
+    query: &str,
+    now_ms: i64,
+) -> Result<(u16, Value), Refusal> {
+    let db: &Connection = transaction;
+    let group = load(db, &group_id_of(id)?)?.ok_or_else(not_found)?;
+    homes_reach(transaction, keys, caller, &group, now_ms)?;
+    let mut after: Option<u64> = None;
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        match name {
+            "after_epoch" => after = Some(value.parse().map_err(|_| invalid("after_epoch is an epoch."))?),
+            "request_nonce" => {}
+            _ => return Err(invalid("Commits take after_epoch.")),
+        }
+    }
+    let after = after.ok_or_else(|| invalid("Commits take after_epoch."))?;
+    if after >= group.epoch {
+        return Ok((200, json!({"commits": [], "has_more": false})));
+    }
+    let after_db = i64::try_from(after).map_err(|_| invalid("after_epoch is an epoch."))?;
+    let rows: Vec<(i64, Vec<u8>)> = {
+        let mut statement = db.prepare(
+            "SELECT epoch, envelope FROM dm_mailbox WHERE group_id = ?1 AND kind = 'commit' AND epoch >= ?2 ORDER BY seq LIMIT ?3",
+        )?;
+        statement
+            .query_map(params![group.id, after_db, COMMITS_PAGE as i64 + 1], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?
+    };
+    if rows.first().is_none_or(|(epoch, _)| *epoch != after_db) {
+        return Ok((
+            410,
+            json!({"error": "too_far_behind", "message": "Those commits are gone: take the group's GroupInfo.", "epoch": group.epoch}),
+        ));
+    }
+    let mut has_more = rows.len() > COMMITS_PAGE;
+    let mut bytes = 0;
+    let mut shown = Vec::new();
+    for (epoch, envelope) in rows.into_iter().take(COMMITS_PAGE) {
+        bytes += envelope.len();
+        if bytes > PAGE_BYTES && !shown.is_empty() {
+            has_more = true;
+            break;
+        }
+        let envelope = Envelope::new(envelope).map_err(|_| broken("a kept commit doesn't parse"))?;
+        shown.push(json!({"epoch": epoch, "commit": envelope.to_json()}));
+    }
+    Ok((200, json!({"commits": shown, "has_more": has_more})))
 }
 
 /// `GET welcomes`: the Welcomes waiting for the caller's leaf.
@@ -1205,8 +1311,16 @@ fn welcomes(db: &Connection, caller: &Caller) -> Result<Value, Refusal> {
 }
 
 /// `GET claktory/events?since=&wait=`: what the Claktory's leaf follows, from
-/// its account's outbox: messages in the groups it fetches, Welcomes to it,
-/// and its groups changing.
+/// its account's outbox: commits and proposals in the groups it fetches
+/// (only those go into a mailbox since #451), Welcomes to it,
+/// its groups changing, and the person's own device list changing (so its
+/// home learns at once of a Claktory taken off it, #451).
+///
+/// And, to a Claktory the person's list names, each commit in any group of
+/// theirs (`commit`: the group and the epoch it was made in), so their home
+/// pulls one it didn't carry: a device away from the home commits only
+/// here (Zucchero's row 568). Only the id and epoch, never the commit; the
+/// pull checks `homes_reach` in full.
 fn events(db: &Connection, caller: &Caller, query: &str, now_ms: i64) -> Result<Value, Refusal> {
     let leaf = leaf_of(caller)?;
     if !matches!(caller, Caller::Backend { .. }) {
@@ -1231,7 +1345,7 @@ fn events(db: &Connection, caller: &Caller, query: &str, now_ms: i64) -> Result<
     let rows: Vec<(i64, String, String, i64)> = {
         let mut statement = db.prepare(
             "SELECT seq, kind, object_id, object_seq FROM dm_account_events WHERE account = ?1 AND seq > ?2
-             AND kind IN ('group_message', 'welcome', 'groups') ORDER BY seq LIMIT ?3",
+             AND kind IN ('group_message', 'welcome', 'groups', 'keys') ORDER BY seq LIMIT ?3",
         )?;
         statement
             .query_map(params![leaf.account, since, SCAN], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
@@ -1243,6 +1357,9 @@ fn events(db: &Connection, caller: &Caller, query: &str, now_ms: i64) -> Result<
     let mut through = since;
     let mut shown = Vec::new();
     let mut complete = true;
+    // Whether the person's list names this Claktory: read once, at the
+    // first commit.
+    let mut listed: Option<bool> = None;
     for (seq, kind, object, object_seq) in rows {
         if shown.len() >= EVENTS {
             complete = false;
@@ -1253,14 +1370,25 @@ fn events(db: &Connection, caller: &Caller, query: &str, now_ms: i64) -> Result<
             "group_message" => {
                 let Ok(id) = unb64(&object, "a group") else { continue };
                 let Some(group) = load(db, &id)? else { continue };
-                let Some(from) = reach(db, caller, &group, now_ms)? else { continue };
-                let accepted: Option<i64> = db
-                    .query_row("SELECT accepted FROM dm_mailbox WHERE group_id = ?1 AND seq = ?2", params![id, object_seq], |row| {
-                        row.get(0)
-                    })
+                let entry: Option<(i64, String, i64)> = db
+                    .query_row(
+                        "SELECT accepted, kind, epoch FROM dm_mailbox WHERE group_id = ?1 AND seq = ?2",
+                        params![id, object_seq],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
                     .optional()?;
-                if accepted.is_some_and(|accepted| accepted >= from) {
+                let Some((accepted, entry_kind, epoch)) = entry else { continue };
+                if reach(db, caller, &group, now_ms)?.is_some_and(|from| accepted >= from) {
                     shown.push(json!({"kind": "group_message", "group_id": object, "seq": object_seq}));
+                }
+                if entry_kind == "commit" && people(db, &group)?.contains(&leaf.account) {
+                    let listed = match listed {
+                        Some(listed) => listed,
+                        None => *listed.insert(lists_it(db, caller, &leaf)?),
+                    };
+                    if listed {
+                        shown.push(json!({"kind": "commit", "group_id": object, "epoch": epoch}));
+                    }
                 }
             }
             "welcome" => {
@@ -1271,6 +1399,12 @@ fn events(db: &Connection, caller: &Caller, query: &str, now_ms: i64) -> Result<
                 )?;
                 if mine {
                     shown.push(json!({"kind": "welcome", "id": object}));
+                }
+            }
+            // The account's own keys: its list. A friend's isn't the leaf's.
+            "keys" => {
+                if object == leaf.account {
+                    shown.push(json!({"kind": "device_list"}));
                 }
             }
             _ => shown.push(json!({"kind": "groups"})),
@@ -1284,6 +1418,16 @@ fn events(db: &Connection, caller: &Caller, query: &str, now_ms: i64) -> Result<
         )?;
     }
     Ok(json!({"events": shown, "next_cursor": sync::cursor(through)}))
+}
+
+/// Whether `caller` is a Claktory itself (never an agent) whose leaf its
+/// account's current signed list names.
+fn lists_it(db: &Connection, caller: &Caller, leaf: &Leaf) -> Result<bool, Refusal> {
+    if !matches!(caller, Caller::Backend { agent: None, .. }) {
+        return Ok(false);
+    }
+    Ok(keys_of(db, &leaf.account)?
+        .is_some_and(|kept| kept.list.list.leaves.iter().any(|listed| listed.kind == LeafKind::Claktory && listed.leaf_id == leaf.leaf_id)))
 }
 
 /// Forgets what's past its time: mailboxes after 30 days (a self group's
@@ -1307,8 +1451,10 @@ pub fn sweep(db: &mut Connection, now_ms: i64) -> Result<usize, Refused> {
              AND m.accepted < CASE dm_groups.kind WHEN 'self' THEN ?2 ELSE ?1 END), 0))",
         params![now_ms - MAILBOX_KEEP_MS, now_ms - SELF_KEEP_MS],
     )?;
-    let mut deleted = transaction
-        .execute("DELETE FROM dm_mailbox WHERE seq <= (SELECT pruned_seq FROM dm_groups g WHERE g.group_id = dm_mailbox.group_id)", [])?;
+    let pruned = "seq <= (SELECT pruned_seq FROM dm_groups g WHERE g.group_id = dm_mailbox.group_id)";
+    super::space::free_entries(&transaction, pruned, &[])?;
+    let mut deleted = transaction.execute(&format!("DELETE FROM dm_mailbox WHERE {pruned}"), [])?;
+    super::space::free_welcomes(&transaction, "accepted < ?1", &[&(now_ms - WELCOME_KEEP_MS)])?;
     deleted += transaction.execute("DELETE FROM dm_welcomes WHERE accepted < ?1", [now_ms - WELCOME_KEEP_MS])?;
     transaction.commit()?;
     Ok(deleted + ended.len())
@@ -1318,7 +1464,9 @@ pub fn sweep(db: &mut Connection, now_ms: i64) -> Result<usize, Refused> {
 fn forget(transaction: &Transaction<'_>, id: &[u8]) -> Result<(), Refused> {
     mls_storage::forget_group(transaction, &GroupId::from_slice(id)).map_err(|error| Refused::Db(error.to_string()))?;
     super::keys::forget(transaction, &purpose(id))?;
+    super::space::free_entries(transaction, "group_id = ?1", &[&id])?;
     transaction.execute("DELETE FROM dm_mailbox WHERE group_id = ?1", [id])?;
+    super::space::free_welcomes(transaction, "group_id = ?1", &[&id])?;
     transaction.execute("DELETE FROM dm_welcomes WHERE group_id = ?1", [id])?;
     transaction.execute("DELETE FROM dm_group_people WHERE group_id = ?1", [id])?;
     transaction.execute("DELETE FROM dm_groups WHERE group_id = ?1", [id])?;
@@ -1335,6 +1483,7 @@ pub fn purge(transaction: &Transaction<'_>, account: &str) -> Result<(), Refused
     for id in ids {
         forget(transaction, &id)?;
     }
+    super::space::free_welcomes(transaction, "account_id = ?1", &[&account])?;
     transaction.execute("DELETE FROM dm_welcomes WHERE account_id = ?1", [account])?;
     Ok(())
 }
@@ -1346,7 +1495,7 @@ pub fn knows(method: &str, route: &str) -> bool {
         ("POST" | "GET", ["groups"])
             | ("GET" | "POST", ["groups", _, "messages"])
             | ("POST", ["groups", _, "commits" | "proposals"])
-            | ("GET", ["groups", _, "group-info"])
+            | ("GET", ["groups", _, "group-info" | "commits"])
             | ("GET", ["welcomes"])
             | ("DELETE", ["welcomes", _])
             | ("GET", ["claktory", "events"])
@@ -1368,13 +1517,20 @@ pub fn answer(
         ("POST", ["groups"]) => (200, create(&transaction, keys, caller, body(bytes)?, now_ms)?),
         ("GET", ["groups"]) => (200, list(&transaction, caller, now_ms)?),
         ("GET", ["groups", id, "messages"]) => messages(&transaction, caller, id, query, now_ms)?,
-        ("POST", ["groups", id, "messages"]) => send(&transaction, caller, id, body(bytes)?, now_ms)?,
+        // A self group's and a channel's go through the home now (#451).
+        ("POST", ["groups", _, "messages"]) => return Err(super::messages::moved_to_home()),
         ("POST", ["groups", id, "commits"]) => commit(&transaction, keys, caller, id, body(bytes)?, now_ms)?,
         ("POST", ["groups", id, "proposals"]) => propose(&transaction, keys, caller, id, body(bytes)?, now_ms)?,
-        ("GET", ["groups", id, "group-info"]) => (200, group_info(&transaction, caller, id, now_ms)?),
+        ("GET", ["groups", id, "group-info"]) => (200, group_info(&transaction, keys, caller, id, now_ms)?),
+        ("GET", ["groups", id, "commits"]) => commits(&transaction, keys, caller, id, query, now_ms)?,
         ("GET", ["welcomes"]) => (200, welcomes(&transaction, caller)?),
         ("DELETE", ["welcomes", id]) => {
             let leaf = leaf_of(caller)?;
+            super::space::free_welcomes(
+                &transaction,
+                "id = ?1 AND account_id = ?2 AND leaf_id = ?3",
+                &[&id, &leaf.account, &leaf.leaf_id],
+            )?;
             let gone = transaction.execute(
                 "DELETE FROM dm_welcomes WHERE id = ?1 AND account_id = ?2 AND leaf_id = ?3",
                 params![id, leaf.account, leaf.leaf_id],
@@ -1404,6 +1560,92 @@ mod tests {
     use crate::ipc::{Actor, Registration};
     use claktory_dm_crypto::group::{Group as Mls, Outgoing};
     use claktory_dm_crypto::validation::{GroupKind as Says, Pins};
+
+    /// A message as claktory.com kept them before #451 (the routes refuse
+    /// one now): a conversation's as `messages` kept it, a self group's or
+    /// a channel's as [`kept_send`] did.
+    fn keep_message(world: &mut World, caller: &Caller, path: &str, body: Value) -> (u16, Value) {
+        match path.split('/').collect::<Vec<_>>().as_slice() {
+            ["conversations", conversation, "messages"] => super::super::messages::tests::send_as(world, caller, conversation, body),
+            ["groups", id, "messages"] => {
+                let kept = (|| {
+                    let transaction = world.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    let answer =
+                        kept_send(&transaction, caller, id, super::super::identity::body(body.to_string().as_bytes())?, world.now)?;
+                    transaction.commit()?;
+                    Ok::<_, Refusal>(answer)
+                })();
+                kept.unwrap_or_else(|Refusal(status, error, message)| (status, json!({"error": error, "message": message})))
+            }
+            _ => panic!("not a message's path: {path}"),
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Send {
+        client_message_id: String,
+        envelope: Value,
+        #[serde(default)]
+        #[allow(dead_code)]
+        request_nonce: Option<String>,
+    }
+
+    /// How `POST groups/<id>/messages` kept an application message in a self
+    /// group or a channel before #451 (refused now): what the tests of what's
+    /// left of them start from.
+    fn kept_send(transaction: &Transaction<'_>, caller: &Caller, id: &str, send: Send, now_ms: i64) -> Result<(u16, Value), Refusal> {
+        let leaf = leaf_of(caller)?;
+        let (mut group, _) = reached(transaction, caller, id, now_ms)?;
+        match (group.kind, caller) {
+            (GroupKind::Conversation, _) => return Err(invalid("A conversation's messages go through conversations/<id>/messages.")),
+            (GroupKind::SelfGroup, Caller::Backend { .. }) => return Err(not_found()),
+            _ => {}
+        }
+        if send.client_message_id.is_empty()
+            || send.client_message_id.len() > 64
+            || !send.client_message_id.bytes().all(|b| b.is_ascii_graphic())
+        {
+            return Err(invalid("client_message_id is 1 to 64 visible characters."));
+        }
+        let (envelope, parsed) = envelope_of(&send.envelope, MlsKind::Application, "envelope")?;
+        let (group_id, epoch) = parsed.group.ok_or_else(|| invalid("envelope isn't an application message."))?;
+        if group_id.as_slice() != group.id.as_slice() {
+            return Err(invalid("That message is another group's."));
+        }
+        let earlier: Option<(i64, Vec<u8>, i64)> = transaction
+            .query_row(
+                "SELECT seq, digest, accepted FROM dm_mailbox WHERE group_id = ?1 AND leaf_id = ?2 AND client_message_id = ?3",
+                params![group.id, leaf.leaf_id, send.client_message_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if let Some((seq, digest, accepted)) = earlier {
+            if digest == envelope.digest() {
+                return Ok((200, json!({"seq": seq, "accepted_ms": accepted})));
+            }
+            return Err(Refusal(409, "conflict", "That message id was used for another message.".to_owned()));
+        }
+        if !epoch_fits(&group, epoch) {
+            return Ok(epoch_answer(group.epoch));
+        }
+        super::super::identity::take_as(transaction, &format!("group-message:{}", leaf.leaf_id), 60, 60, now_ms, "Too many messages.")?;
+        let seq = append(
+            transaction,
+            &mut group,
+            Entry {
+                kind: "application",
+                epoch,
+                envelope: &envelope,
+                leaf: &leaf,
+                client_message_id: Some(&send.client_message_id),
+                by_agent: None,
+                room: super::super::space::Entry::Capped,
+            },
+            now_ms,
+        )?;
+        Ok((200, json!({"seq": seq, "accepted_ms": now_ms})))
+    }
 
     fn env(bytes: Vec<u8>) -> Value {
         Envelope::new(bytes).expect("an envelope").to_json()
@@ -1620,10 +1862,16 @@ mod tests {
         assert_eq!((status, &refused["error"]), (403, &json!("not_allowed")), "{refused}");
         ana.with(0, |provider, _| group.clear_pending(provider).expect("cleared"));
 
-        // A conversation's messages don't come this way.
+        // Messages go through the home now (#451): refused here, as they are.
         let sent = ana.with(0, |provider, me| group.send(provider, me, &Pins::default(), b"hi").expect("sent"));
         let send = json!({"client_message_id": "m-1", "envelope": env(sent)});
-        assert_eq!(call(&mut world, &phone, "POST", &format!("groups/{}/messages", b64(&id)), send).0, 400);
+        let (status, refused) = call(&mut world, &phone, "POST", &format!("groups/{}/messages", b64(&id)), send.clone());
+        assert_eq!((status, refused["error"].as_str()), (410, Some("moved_to_home")), "{refused}");
+        assert_eq!(
+            keep_message(&mut world, &phone, &format!("groups/{}/messages", b64(&id)), send).0,
+            400,
+            "a conversation's never came this way"
+        );
 
         // Only KeyPackages handed out here: Ana's Mac, unclaimed, then claimed.
         let mac = ana.add(device("ana", "ana-mac"));
@@ -1692,44 +1940,47 @@ mod tests {
         };
 
         // Only Ana's phone in: what she says waits, and nothing is kept.
-        let (status, refused) = call(&mut world, &phone, "POST", &path, say(1, 0));
+        let (status, refused) = keep_message(&mut world, &phone, &path, say(1, 0));
         assert_eq!((status, refused), (409, json!({"error": "waiting_for_friend", "message": waiting_for_friend().2})));
         assert_eq!(kept(&world), (0, 0, 0));
         // Her Mac doesn't join ahead of Bo.
         let state = info(&mut world, &ana.caller(mac));
-        let (_, early) = ana.with(mac, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &id, &state).expect("rejoined"));
+        let (_, early) = ana.with(mac, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &id, &state, 0).expect("rejoined"));
         let (status, refused) = post_commit(&mut world, &ana.caller(mac), &id, &early);
         assert_eq!((status, &refused["error"]), (409, &json!("waiting_for_friend")), "{refused}");
         assert_eq!(kept(&world), (0, 0, 0));
 
         // Bo's phone joins: both are in from epoch 1.
         let state = info(&mut world, &bo_phone);
-        let (mut theirs, joined) = bo.with(0, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &id, &state).expect("rejoined"));
+        let (mut theirs, joined) = bo.with(0, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &id, &state, 0).expect("rejoined"));
         assert_eq!(post_commit(&mut world, &bo_phone, &id, &joined), (200, json!({"seq": 1, "epoch": 1})));
         bo.with(0, |provider, _| theirs.merge_pending(provider).expect("merged"));
         ana.with(0, |provider, _| group.process(provider, &trust, &joined.commit).expect("processed"));
-        let (status, receipt) = call(&mut world, &phone, "POST", &path, say(2, 1));
+        let (status, receipt) = keep_message(&mut world, &phone, &path, say(2, 1));
         assert_eq!(status, 200, "{receipt}");
-        let (status, refused) = call(&mut world, &phone, "POST", &path, say(3, 0));
+        let (status, refused) = keep_message(&mut world, &phone, &path, say(3, 0));
         assert_eq!((status, &refused["error"]), (409, &json!("waiting_for_friend")), "said before he was in");
 
         // Her Mac joins now.
         let state = info(&mut world, &ana.caller(mac));
-        let (_, later) = ana.with(mac, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &id, &state).expect("rejoined"));
+        let (_, later) = ana.with(mac, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &id, &state, 0).expect("rejoined"));
         let (status, taken) = post_commit(&mut world, &ana.caller(mac), &id, &later);
         assert_eq!((status, &taken["epoch"]), (200, &json!(2)), "{taken}");
         ana.with(0, |provider, _| group.process(provider, &trust, &later.commit).expect("processed"));
         bo.with(0, |provider, _| theirs.process(provider, &trust, &later.commit).expect("processed"));
-        assert_eq!(call(&mut world, &bo_phone, "POST", &path, say(4, 2)).0, 200);
+        assert_eq!(keep_message(&mut world, &bo_phone, &path, say(4, 2)).0, 200);
 
         // Bo leaves: she waits again.
         let leave = bo.with(0, |provider, me| theirs.leave(provider, me).expect("proposed"));
-        assert_eq!(call(&mut world, &bo_phone, "POST", &format!("groups/{}/proposals", b64(&id)), json!({"proposal": env(leave.clone())})).0, 200);
+        assert_eq!(
+            call(&mut world, &bo_phone, "POST", &format!("groups/{}/proposals", b64(&id)), json!({"proposal": env(leave.clone())})).0,
+            200
+        );
         ana.with(0, |provider, _| group.process(provider, &trust, &leave).expect("processed"));
         let taken = ana.with(0, |provider, me| group.update(provider, me).expect("committed"));
         assert_eq!(post_commit(&mut world, &phone, &id, &taken).1["epoch"], 3);
         ana.with(0, |provider, _| group.merge_pending(provider).expect("merged"));
-        let (status, refused) = call(&mut world, &phone, "POST", &path, say(5, 3));
+        let (status, refused) = keep_message(&mut world, &phone, &path, say(5, 3));
         assert_eq!((status, &refused["error"]), (409, &json!("waiting_for_friend")));
     }
 
@@ -1780,15 +2031,15 @@ mod tests {
         let sent = ana.with(mac, |provider, me| its.send(provider, me, &Pins::default(), b"done").expect("sent"));
         let send = json!({"client_message_id": "c-1", "envelope": env(sent.clone())});
         let path = format!("groups/{}/messages", b64(&channel_id));
-        assert_eq!(call(&mut world, &machine, "POST", &path, send.clone()).1["seq"], 2);
-        assert_eq!(call(&mut world, &machine, "POST", &path, send).1["seq"], 2, "a retry is the same message");
+        assert_eq!(keep_message(&mut world, &machine, &path, send.clone()).1["seq"], 2);
+        assert_eq!(keep_message(&mut world, &machine, &path, send).1["seq"], 2, "a retry is the same message");
         let other = ana.with(mac, |provider, me| its.send(provider, me, &Pins::default(), b"other").expect("sent"));
-        let (status, refused) = call(&mut world, &machine, "POST", &path, json!({"client_message_id": "c-1", "envelope": env(other)}));
+        let (status, refused) = keep_message(&mut world, &machine, &path, json!({"client_message_id": "c-1", "envelope": env(other)}));
         assert_eq!((status, &refused["error"]), (409, &json!("conflict")));
         let self_id = [5; 16];
         let _own = start(&mut world, &ana, 0, Says::SelfGroup { account: "ana".into() }, self_id, json!({"kind": "self"}));
         let in_self = json!({"client_message_id": "c-2", "envelope": env(sent)});
-        assert_eq!(call(&mut world, &machine, "POST", &format!("groups/{}/messages", b64(&self_id)), in_self).0, 404);
+        assert_eq!(keep_message(&mut world, &machine, &format!("groups/{}/messages", b64(&self_id)), in_self).0, 404);
         assert_eq!(mailbox(&mut world, &machine, &self_id, 0).0, 404);
 
         // Its own Update; nothing else.
@@ -1857,19 +2108,26 @@ mod tests {
         assert_eq!(
             kinds,
             vec![
-                // The channel made, the Claktory added, its message.
+                // The channel made, the Claktory added (each commit in a
+                // group of Ana's also as `commit`: her list names this
+                // Claktory), its message.
                 ("groups".to_owned(), Value::Null),
                 ("group_message".to_owned(), channel_b64.clone()),
+                ("commit".to_owned(), channel_b64.clone()),
                 ("welcome".to_owned(), Value::Null),
                 ("group_message".to_owned(), channel_b64.clone()),
                 // Ana's self group (a group of the account's, not one it
-                // fetches), its own Update, the conversation made.
+                // fetches), its own Update, the conversation made, Bo added
+                // before any grant: only as a commit.
                 ("groups".to_owned(), Value::Null),
-                ("group_message".to_owned(), channel_b64),
+                ("group_message".to_owned(), channel_b64.clone()),
+                ("commit".to_owned(), channel_b64),
                 ("groups".to_owned(), Value::Null),
+                ("commit".to_owned(), chat_b64.clone()),
                 // The grant, then added to the conversation.
                 ("groups".to_owned(), Value::Null),
-                ("group_message".to_owned(), chat_b64),
+                ("group_message".to_owned(), chat_b64.clone()),
+                ("commit".to_owned(), chat_b64),
                 ("welcome".to_owned(), Value::Null),
             ]
         );
@@ -1905,6 +2163,158 @@ mod tests {
         assert_eq!(seqs(&mailbox(&mut world, &phone, &chat_id, 2).1), vec![(3, "proposal".to_owned())]);
     }
 
+    /// The person's home Claktory follows their groups' public state from
+    /// here (#451, Fugo 32380): their commits after an epoch, in order, and
+    /// the GroupInfo, only while their signed list names its leaf and they
+    /// are in the group; never a message. It hears of their list changing.
+    #[test]
+    fn the_persons_home_reads_their_groups_commits_and_group_info() {
+        let mut world = World::new();
+        let (conversation, generation) = friends(&mut world, "ana", "bo");
+        let mut ana = Person::new("ana");
+        ana.add(phone_of("ana", &["mac", "pc"]));
+        let mac = ana.add(claktory("ana", "mac"));
+        assert_eq!(call(&mut world, &ana.caller(0), "PUT", "me/keys", ana.put(true)).0, 200);
+        let bo = set_up(&mut world, "bo");
+        let packages = bo.key_packages(0, 1);
+        assert_eq!(upload(&mut world, &bo.caller(0), packages, None).0, 200);
+        let trust = pins(&[&ana, &bo]);
+        let (phone, home) = (ana.caller(0), ana.caller(mac));
+        let cursor = call(&mut world, &home, "GET", "claktory/events", Value::Null).1["next_cursor"].as_str().expect("a cursor").to_owned();
+
+        // Ana and Bo's conversation, through two commits: its home isn't
+        // in it, nor granted on it.
+        let says = Says::Conversation { people: ["ana".into(), "bo".into()] };
+        let chat_id = [7; 16];
+        let body = json!({"kind": "conversation", "conversation_id": conversation, "contact_generation": generation});
+        let mut chat = start(&mut world, &ana, 0, says, chat_id, body);
+        let package = claim_one(&mut world, &phone, "bo", "bo-phone");
+        let added = ana.with(0, |provider, me| chat.add(provider, me, &trust, &[package]).expect("added"));
+        assert_eq!(post_commit(&mut world, &phone, &chat_id, &added).0, 200);
+        ana.with(0, |provider, _| chat.merge_pending(provider).expect("merged"));
+        let updated = ana.with(0, |provider, me| chat.update(provider, me).expect("updated"));
+        assert_eq!(post_commit(&mut world, &phone, &chat_id, &updated).0, 200);
+        ana.with(0, |provider, _| chat.merge_pending(provider).expect("merged"));
+
+        let path = |after: &str| format!("groups/{}/commits{after}", b64(&chat_id));
+        let (status, page) = call(&mut world, &home, "GET", &path("?after_epoch=0"), Value::Null);
+        assert_eq!(status, 200, "{page}");
+        let commits = page["commits"].as_array().expect("commits");
+        assert_eq!(commits.iter().map(|commit| commit["epoch"].as_i64().expect("an epoch")).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(bytes_of(&commits[0]["commit"]), added.commit);
+        assert_eq!(bytes_of(&commits[1]["commit"]), updated.commit);
+        assert_eq!(page["has_more"], false);
+        let (_, page) = call(&mut world, &home, "GET", &path("?after_epoch=1"), Value::Null);
+        assert_eq!(page["commits"].as_array().map(Vec::len), Some(1));
+        assert_eq!(call(&mut world, &home, "GET", &path("?after_epoch=2"), Value::Null).1, json!({"commits": [], "has_more": false}));
+        assert_eq!(call(&mut world, &home, "GET", &path(""), Value::Null).0, 400);
+        assert_eq!(call(&mut world, &home, "GET", &path("?after_epoch=0&limit=1"), Value::Null).0, 400);
+        let (status, info) = call(&mut world, &home, "GET", &format!("groups/{}/group-info", b64(&chat_id)), Value::Null);
+        assert_eq!((status, &info["epoch"]), (200, &json!(2)), "{info}");
+
+        // Not its agent, not a device, not a Claktory its list doesn't
+        // name, not Bo's Claktory (Ana's group), not a group of no one's.
+        let june = Caller::Backend {
+            account_id: "ana".into(),
+            claktory_id: "mac".into(),
+            epoch: 1,
+            agent: Some(Actor { id: "june".into(), incarnation: "1".into() }),
+        };
+        assert_eq!(call(&mut world, &june, "GET", &path("?after_epoch=0"), Value::Null).0, 403);
+        assert_eq!(call(&mut world, &phone, "GET", &path("?after_epoch=0"), Value::Null).0, 403);
+        let (status, refused) = call(&mut world, &claktory("ana", "pc"), "GET", &path("?after_epoch=0"), Value::Null);
+        assert_eq!((status, &refused["error"]), (403, &json!("not_listed")), "signed in alone isn't enough");
+        let (status, refused) =
+            call(&mut world, &claktory("ana", "pc"), "GET", &format!("groups/{}/group-info", b64(&chat_id)), Value::Null);
+        assert_eq!((status, &refused["error"]), (403, &json!("not_listed")));
+        assert_eq!(call(&mut world, &claktory("bo", "studio"), "GET", &path("?after_epoch=0"), Value::Null).0, 403);
+        assert_eq!(call(&mut world, &home, "GET", &format!("groups/{}/commits?after_epoch=0", b64(&[8; 16])), Value::Null).0, 404);
+
+        // Someone else's home, listed on their own list: not their group.
+        let mut cy = Person::new("cy");
+        cy.add(phone_of("cy", &["box"]));
+        let cy_home = cy.add(claktory("cy", "box"));
+        assert_eq!(call(&mut world, &cy.caller(0), "PUT", "me/keys", cy.put(true)).0, 200);
+        assert_eq!(call(&mut world, &cy.caller(cy_home), "GET", &path("?after_epoch=0"), Value::Null).0, 404);
+        assert_eq!(call(&mut world, &cy.caller(cy_home), "GET", &format!("groups/{}/group-info", b64(&chat_id)), Value::Null).0, 404);
+        // The log let go of the commit after epoch 0: take the GroupInfo.
+        world.db.execute("DELETE FROM dm_mailbox WHERE group_id = ?1 AND epoch = 0", [chat_id.to_vec()]).expect("pruned");
+        let (status, behind) = call(&mut world, &home, "GET", &path("?after_epoch=0"), Value::Null);
+        assert_eq!((status, &behind["error"], &behind["epoch"]), (410, &json!("too_far_behind"), &json!(2)));
+
+        // A list that no longer names it: refused at once.
+        let (status, followed) = call(&mut world, &home, "GET", &format!("claktory/events?since={cursor}"), Value::Null);
+        assert_eq!(status, 200);
+        assert!(!followed["events"].as_array().expect("events").iter().any(|event| event["kind"] == "device_list"));
+        let cursor = followed["next_cursor"].as_str().expect("a cursor").to_owned();
+        ana.leaves.truncate(1);
+        assert_eq!(call(&mut world, &phone, "PUT", "me/keys", ana.put(false)).0, 200);
+        let (_, followed) = call(&mut world, &home, "GET", &format!("claktory/events?since={cursor}"), Value::Null);
+        assert_eq!(followed["events"], json!([{"kind": "device_list"}]), "Bo's keys aren't its");
+        assert_eq!(call(&mut world, &home, "GET", &path("?after_epoch=1"), Value::Null).1["error"], "not_listed");
+    }
+
+    /// The person's home hears of each commit in a group of theirs, one it
+    /// isn't in and isn't granted on too (Zucchero's row 568: a device away
+    /// from the home commits only here), as its group and the epoch it was
+    /// made in, never the commit. Not a friend's own group's; not to a
+    /// Claktory their list doesn't name (an agent follows no feed here).
+    #[test]
+    fn the_persons_home_hears_of_every_commit_in_their_groups() {
+        let mut world = World::new();
+        let (conversation, generation) = friends(&mut world, "ana", "bo");
+        let mut ana = Person::new("ana");
+        ana.add(phone_of("ana", &["mac", "pc"]));
+        let mac = ana.add(claktory("ana", "mac"));
+        assert_eq!(call(&mut world, &ana.caller(0), "PUT", "me/keys", ana.put(true)).0, 200);
+        let bo = set_up(&mut world, "bo");
+        let packages = bo.key_packages(0, 1);
+        assert_eq!(upload(&mut world, &bo.caller(0), packages, None).0, 200);
+        let trust = pins(&[&ana, &bo]);
+        let phone = ana.caller(0);
+        let callers = [ana.caller(mac), claktory("ana", "pc")];
+        let cursors: Vec<String> = callers
+            .iter()
+            .map(|caller| {
+                let (status, start) = call(&mut world, caller, "GET", "claktory/events", Value::Null);
+                assert_eq!(status, 200, "{start}");
+                start["next_cursor"].as_str().expect("a cursor").to_owned()
+            })
+            .collect();
+
+        // Ana and Bo's conversation, through two commits; Bo's own group,
+        // through one.
+        let says = Says::Conversation { people: ["ana".into(), "bo".into()] };
+        let chat_id = [7; 16];
+        let body = json!({"kind": "conversation", "conversation_id": conversation, "contact_generation": generation});
+        let mut chat = start(&mut world, &ana, 0, says, chat_id, body);
+        let package = claim_one(&mut world, &phone, "bo", "bo-phone");
+        let added = ana.with(0, |provider, me| chat.add(provider, me, &trust, &[package]).expect("added"));
+        assert_eq!(post_commit(&mut world, &phone, &chat_id, &added).0, 200);
+        ana.with(0, |provider, _| chat.merge_pending(provider).expect("merged"));
+        let updated = ana.with(0, |provider, me| chat.update(provider, me).expect("updated"));
+        assert_eq!(post_commit(&mut world, &phone, &chat_id, &updated).0, 200);
+        let bos_id = [8; 16];
+        let mut bos = start(&mut world, &bo, 0, Says::SelfGroup { account: "bo".into() }, bos_id, json!({"kind": "self"}));
+        let updated = bo.with(0, |provider, me| bos.update(provider, me).expect("updated"));
+        assert_eq!(post_commit(&mut world, &bo.caller(0), &bos_id, &updated).0, 200);
+
+        let commits = |world: &mut World, caller: &Caller, cursor: &str| -> Vec<Value> {
+            let (status, followed) = call(world, caller, "GET", &format!("claktory/events?since={cursor}"), Value::Null);
+            assert_eq!(status, 200, "{followed}");
+            let events = followed["events"].as_array().expect("events");
+            assert!(!events.iter().any(|event| event["kind"] == "group_message"), "not in it, not granted: {followed}");
+            events.iter().filter(|event| event["kind"] == "commit").cloned().collect()
+        };
+        let chat = b64(&chat_id);
+        assert_eq!(
+            commits(&mut world, &callers[0], &cursors[0]),
+            vec![json!({"kind": "commit", "group_id": chat, "epoch": 0}), json!({"kind": "commit", "group_id": chat, "epoch": 1})],
+            "the home, of Ana's conversation only"
+        );
+        assert_eq!(commits(&mut world, &callers[1], &cursors[1]), Vec::<Value>::new(), "a Claktory her list doesn't name");
+    }
+
     /// A device of the account joins its groups by external commit from the
     /// GroupInfo the worker keeps; no one else does.
     #[test]
@@ -1921,7 +2331,7 @@ mod tests {
         let (status, info) = call(&mut world, &ana.caller(mac), "GET", &path, Value::Null);
         assert_eq!(status, 200, "{info}");
         let (mut joined, out) = ana
-            .with(mac, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &id, &bytes_of(&info["group_info"])).expect("rejoined"));
+            .with(mac, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &id, &bytes_of(&info["group_info"]), 0).expect("rejoined"));
         let bo = set_up(&mut world, "bo");
         assert_eq!(post_commit(&mut world, &bo.caller(0), &id, &out).0, 404, "Bo can't join Ana's self group");
         assert_eq!(post_commit(&mut world, &ana.caller(mac), &id, &out), (200, json!({"seq": 1, "epoch": 1})));
@@ -1932,7 +2342,7 @@ mod tests {
         // In a self group, the devices talk.
         let sent = ana.with(mac, |provider, me| joined.send(provider, me, &Pins::default(), b"read 4").expect("sent"));
         let body = json!({"client_message_id": "r-1", "envelope": env(sent)});
-        assert_eq!(call(&mut world, &ana.caller(mac), "POST", &format!("groups/{}/messages", b64(&id)), body).1["seq"], 2);
+        assert_eq!(keep_message(&mut world, &ana.caller(mac), &format!("groups/{}/messages", b64(&id)), body).1["seq"], 2);
         let (_, page) = mailbox(&mut world, &ana.caller(0), &id, 1);
         assert_eq!(seqs(&page), vec![(2, "application".to_owned())]);
         assert_eq!(page["messages"][0]["client_message_id"], "r-1");
@@ -1944,6 +2354,460 @@ mod tests {
         let (status, behind) = mailbox(&mut world, &ana.caller(0), &id, 1);
         assert_eq!((status, &behind["error"]), (410, &json!("too_far_behind")));
         assert_eq!(mailbox(&mut world, &ana.caller(0), &id, 2), (200, json!({"messages": [], "has_more": false})));
+    }
+
+    /// Fugo, after Mista's rejoin race: a device already in a group that
+    /// rejoins it by external commit takes its old leaf out (OpenMLS's
+    /// resync), and the worker takes that; the tree keeps one leaf for it.
+    #[test]
+    fn a_member_rejoining_takes_its_old_leaf_out_and_is_taken() {
+        let mut world = World::new();
+        let mut ana = set_up(&mut world, "ana");
+        let says = Says::SelfGroup { account: "ana".into() };
+        let id = [9; 16];
+        let _group = start(&mut world, &ana, 0, says.clone(), id, json!({"kind": "self"}));
+        let mac = ana.add(device("ana", "ana-mac"));
+        assert_eq!(call(&mut world, &ana.caller(0), "PUT", "me/keys", ana.put(false)).0, 200);
+        let trust = pins(&[&ana]);
+        let path = format!("groups/{}/group-info", b64(&id));
+        for (seq, epoch) in [(1, 1), (2, 2)] {
+            let (status, info) = call(&mut world, &ana.caller(mac), "GET", &path, Value::Null);
+            assert_eq!(status, 200, "{info}");
+            let (_, out) = ana
+                .with(mac, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &id, &bytes_of(&info["group_info"]), 0).expect("rejoined"));
+            assert_eq!(post_commit(&mut world, &ana.caller(mac), &id, &out), (200, json!({"seq": seq, "epoch": epoch})));
+        }
+        let (_, info) = call(&mut world, &ana.caller(0), "GET", &path, Value::Null);
+        let (joined, _) = ana
+            .with(0, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &id, &bytes_of(&info["group_info"]), 0).expect("read"));
+        assert_eq!(joined.members(&trust).len(), 2, "the phone and the Mac once, as the tree has them");
+    }
+
+    /// RFC 9420 §7.3: no two leaves share a signature key or an encryption
+    /// key. OpenMLS's own client never makes such a commit (its external
+    /// commit takes the joiner's old leaf out; it refuses an Add of a key
+    /// already in), and the worker's OpenMLS refuses an Add or a path
+    /// repeating an encryption key, but not a path leaf repeating a
+    /// signature key: this is checked on every tree a commit leaves.
+    #[test]
+    fn a_tree_with_one_key_twice_is_refused() {
+        use openmls::group::Member;
+        use openmls::prelude::{BasicCredential, LeafNodeIndex};
+        let credential = || BasicCredential::new(b"leaf".to_vec()).into();
+        let member = |index: u32, encryption: u8, signature: u8| {
+            Member::new(LeafNodeIndex::new(index), vec![encryption; 32], vec![signature; 32], credential())
+        };
+        assert!(keys_unique([member(0, 1, 1), member(1, 2, 2), member(2, 3, 3)].into_iter()));
+        assert!(!keys_unique([member(0, 1, 1), member(1, 2, 1)].into_iter()), "a signature key twice");
+        assert!(!keys_unique([member(0, 1, 1), member(1, 1, 2)].into_iter()), "an encryption key twice");
+        assert!(keys_unique(std::iter::empty()));
+    }
+
+    /// Ana and Bo talking: their conversation's group with both in from
+    /// epoch 1 (Bo's commit, seq 1, the only entry yet).
+    struct Talk {
+        id: [u8; 16],
+        ana: Caller,
+        bo: Caller,
+        people: (Person, Person),
+        groups: (Mls, Mls),
+        trust: Pins,
+    }
+
+    fn talking(world: &mut World) -> Talk {
+        let (conversation, generation) = friends(world, "ana", "bo");
+        let ana = set_up(world, "ana");
+        let bo = set_up(world, "bo");
+        let says = Says::Conversation { people: ["ana".into(), "bo".into()] };
+        let id = [13; 16];
+        let body = json!({"kind": "conversation", "conversation_id": conversation, "contact_generation": generation});
+        let mut group = start(world, &ana, 0, says.clone(), id, body);
+        let trust = pins(&[&ana, &bo]);
+        let (status, info) = call(world, &bo.caller(0), "GET", &format!("groups/{}/group-info", b64(&id)), Value::Null);
+        assert_eq!(status, 200, "{info}");
+        let (mut theirs, joined) =
+            bo.with(0, |provider, me| Mls::rejoin(provider, me, &trust, says.clone(), &id, &bytes_of(&info["group_info"]), 0).expect("rejoined"));
+        assert_eq!(post_commit(world, &bo.caller(0), &id, &joined), (200, json!({"seq": 1, "epoch": 1})));
+        bo.with(0, |provider, _| theirs.merge_pending(provider).expect("merged"));
+        ana.with(0, |provider, _| group.process(provider, &trust, &joined.commit).expect("processed"));
+        Talk {
+            id,
+            ana: ana.caller(0),
+            bo: bo.caller(0),
+            people: (ana, bo),
+            groups: (group, theirs),
+            trust,
+        }
+    }
+
+    fn entries(world: &World) -> i64 {
+        world.db.query_row("SELECT COUNT(*) FROM dm_mailbox", [], |row| row.get(0)).expect("count")
+    }
+
+    /// Ana's own Update commit in their conversation, not posted yet.
+    fn update(talk: &mut Talk) -> Outgoing {
+        let (ana, _) = &talk.people;
+        let (group, _) = &mut talk.groups;
+        ana.with(0, |provider, me| group.update(provider, me).expect("committed"))
+    }
+
+    /// Posts Ana's commit: merged when it's taken, dropped when it isn't.
+    fn ana_commits(world: &mut World, talk: &mut Talk, out: &Outgoing) -> (u16, Value) {
+        let answer = post_commit(world, &talk.ana, &talk.id, out);
+        let (ana, _) = &talk.people;
+        let (group, _) = &mut talk.groups;
+        ana.with(0, |provider, _| if answer.0 == 200 { group.merge_pending(provider) } else { group.clear_pending(provider) })
+            .expect("settled");
+        answer
+    }
+
+    /// What a commit takes as stored.
+    fn stored(out: &Outgoing) -> i64 {
+        out.commit.len() as i64 + super::super::space::ENTRY_OVERHEAD
+    }
+
+    fn set_room(world: &World, account: &str, column: &str, bytes: i64) {
+        world
+            .db
+            .execute(
+                &format!("INSERT INTO dm_mailbox_space (account, {column}) VALUES (?1, ?2) ON CONFLICT (account) DO UPDATE SET {column} = ?2"),
+                params![account, bytes],
+            )
+            .expect("set");
+    }
+
+    fn set_share(world: &World, receiver: &str, sender: &str, bytes: i64) {
+        world
+            .db
+            .execute(
+                "INSERT INTO dm_mailbox_shares (receiver, sender, bytes) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (receiver, sender) DO UPDATE SET bytes = ?3",
+                params![receiver, sender, bytes],
+            )
+            .expect("set");
+    }
+
+    fn named(world: &World, table: &str, column: &str, account: &str) -> i64 {
+        world.db.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"), [account], |row| row.get(0)).expect("count")
+    }
+
+    const SENDER_FULL: &str = "You've sent a lot of messages recently. Older ones need to expire before you can send more.";
+    const RECEIVER_FULL: &str = "This message can't be delivered right now. Try again later.";
+
+    /// #448, #451: what an account's commits take counts for it and for the
+    /// friend they go to, and the friend's for that sender, each up to its
+    /// most; the sender is refused past any, at exactly the boundary, and an
+    /// entry past its 30 days gives its room back.
+    #[test]
+    fn an_accounts_room_is_capped_and_expiry_frees_it() {
+        use super::super::space::{ENTRY_OVERHEAD, RECEIVED_MOST, SENT_MOST, of, recount, share};
+        let mut world = World::new();
+        let mut talk = talking(&mut world);
+        let rejoin: i64 =
+            world.db.query_row("SELECT length(envelope) FROM dm_mailbox WHERE seq = 1", [], |row| row.get(0)).expect("Bo's rejoin");
+        let rejoin = rejoin + ENTRY_OVERHEAD;
+        assert_eq!((of(&world.db, "bo").expect("bo"), of(&world.db, "ana").expect("ana")), ((rejoin, 0), (0, rejoin)));
+        assert_eq!(share(&world.db, "ana", "bo").expect("share"), rejoin);
+        let out = update(&mut talk);
+        let size = stored(&out);
+        assert_eq!(ana_commits(&mut world, &mut talk, &out).0, 200);
+        let sums = (of(&world.db, "ana").expect("ana"), of(&world.db, "bo").expect("bo"), share(&world.db, "bo", "ana").expect("share"));
+        assert_eq!(sums, ((size, rejoin), (rejoin, size), size));
+        recount(&world.db).expect("recounted");
+        let again = (of(&world.db, "ana").expect("ana"), of(&world.db, "bo").expect("bo"), share(&world.db, "bo", "ana").expect("share"));
+        assert_eq!(again, sums, "the running sums are the mailbox's");
+
+        // Ana commits up to exactly her most, then no more; nothing is kept.
+        let out = update(&mut talk);
+        set_room(&world, "ana", "sent", SENT_MOST - stored(&out));
+        assert_eq!(ana_commits(&mut world, &mut talk, &out).0, 200);
+        assert_eq!(of(&world.db, "ana").expect("ana").0, SENT_MOST);
+        let out = update(&mut talk);
+        assert_eq!(ana_commits(&mut world, &mut talk, &out), (429, json!({"error": "rate_limited", "message": SENDER_FULL})));
+        assert_eq!((entries(&world), of(&world.db, "ana").expect("ana").0), (3, SENT_MOST));
+
+        // Bo can take up to exactly his most from others; then Ana is
+        // refused, told nothing about him.
+        recount(&world.db).expect("recounted");
+        let out = update(&mut talk);
+        set_room(&world, "bo", "received", RECEIVED_MOST - stored(&out));
+        assert_eq!(ana_commits(&mut world, &mut talk, &out).0, 200);
+        let out = update(&mut talk);
+        assert_eq!(ana_commits(&mut world, &mut talk, &out), (429, json!({"error": "rate_limited", "message": RECEIVER_FULL})));
+        assert_eq!(entries(&world), 4);
+
+        // Past their 30 days her commits go, and give their room back.
+        recount(&world.db).expect("recounted");
+        let hers = of(&world.db, "ana").expect("ana").0;
+        set_room(&world, "ana", "sent", SENT_MOST);
+        let out = update(&mut talk);
+        assert_eq!(ana_commits(&mut world, &mut talk, &out).0, 429);
+        world.now += 31 * 86_400_000;
+        sweep(&mut world.db, world.now).expect("swept");
+        assert_eq!(entries(&world), 0);
+        assert_eq!(of(&world.db, "ana").expect("ana"), (SENT_MOST - hers, 0));
+        assert_eq!((named(&world, "dm_mailbox_space", "account", "bo"), named(&world, "dm_mailbox_shares", "receiver", "bo")), (0, 0));
+        let out = update(&mut talk);
+        assert_eq!(ana_commits(&mut world, &mut talk, &out).0, 200);
+        assert_eq!(of(&world.db, "bo").expect("bo").1, stored(&out));
+    }
+
+    /// #451, Fugo: one friend fills only their share of a person's room, so
+    /// another friend's commits still reach them; and once the person ends
+    /// that friendship, what the first sent stops counting for them at once.
+    #[test]
+    fn one_friend_fills_only_their_share_of_a_persons_room() {
+        use super::super::space::{SHARE_MOST, of, recount, share};
+        let mut world = World::new();
+        let mut talk = talking(&mut world);
+        let out = update(&mut talk);
+        set_share(&world, "bo", "ana", SHARE_MOST - stored(&out));
+        assert_eq!(ana_commits(&mut world, &mut talk, &out).0, 200);
+        assert_eq!(share(&world.db, "bo", "ana").expect("share"), SHARE_MOST);
+        let out = update(&mut talk);
+        assert_eq!(ana_commits(&mut world, &mut talk, &out), (429, json!({"error": "rate_limited", "message": RECEIVER_FULL})));
+
+        // Cy, Bo's friend too, in a conversation of their own.
+        let (conversation, generation) = friends(&mut world, "cy", "bo");
+        let cy = set_up(&mut world, "cy");
+        let says = Says::Conversation { people: ["cy".into(), "bo".into()] };
+        let body = json!({"kind": "conversation", "conversation_id": conversation, "contact_generation": generation});
+        let mut theirs = start(&mut world, &cy, 0, says, [14; 16], body);
+        let out = cy.with(0, |provider, me| theirs.update(provider, me).expect("committed"));
+        assert_eq!(post_commit(&mut world, &cy.caller(0), &[14; 16], &out).0, 200, "Ana's share isn't Cy's");
+        assert_eq!(share(&world.db, "bo", "cy").expect("share"), stored(&out));
+
+        // Bo ends his friendship with Ana: her commits stay for the drain,
+        // but no longer count for him.
+        recount(&world.db).expect("recounted");
+        let from_ana = share(&world.db, "bo", "ana").expect("share");
+        let before = of(&world.db, "bo").expect("bo").1;
+        let contact: String = world
+            .db
+            .query_row(
+                "SELECT c.id FROM dm_contacts c JOIN dm_groups g ON g.conversation_id = c.conversation_id WHERE g.group_id = ?1",
+                [&talk.id[..]],
+                |row| row.get(0),
+            )
+            .expect("their contact");
+        let (status, ended) = world.call("bo", "DELETE", &format!("contacts/{contact}"), Value::Null);
+        assert!(status < 300, "{status} {ended}");
+        assert_eq!(share(&world.db, "bo", "ana").expect("share"), 0);
+        assert_eq!(of(&world.db, "bo").expect("bo").1, before - from_ana);
+        assert_eq!(share(&world.db, "bo", "cy").expect("share"), stored(&out));
+        assert_eq!(entries(&world) - 1, 2, "Ana's and Bo's commits are still there, beside Cy's");
+        let sums = (of(&world.db, "bo").expect("bo"), of(&world.db, "ana").expect("ana"));
+        recount(&world.db).expect("recounted");
+        assert_eq!((of(&world.db, "bo").expect("bo"), of(&world.db, "ana").expect("ana")), sums, "and counted so again");
+    }
+
+    /// #448, #451: a device's removal always goes through: Bo's leaving, and
+    /// Ana's commit that takes it in, with both accounts' room full and only
+    /// 2 GiB free, where any other commit is refused; under 1 GiB, not even
+    /// that.
+    #[test]
+    fn a_removal_goes_through_at_full_room_and_on_a_fuller_disk() {
+        use super::super::space::{COMMIT_FLOOR, Disk, FREE_FLOOR, RECEIVED_MOST, SENT_MOST, with};
+        let mut world = World::new();
+        let mut talk = talking(&mut world);
+        world
+            .db
+            .execute("UPDATE dm_mailbox_space SET sent = ?1, received = ?2", params![SENT_MOST, RECEIVED_MOST])
+            .expect("full");
+        let fuller = std::sync::Arc::new(Disk::fixed(2 * 1024 * 1024 * 1024));
+        const { assert!(COMMIT_FLOOR < 2 * 1024 * 1024 * 1024 && 2 * 1024 * 1024 * 1024 < FREE_FLOOR) };
+        let room = std::sync::Arc::new(Disk::fixed(FREE_FLOOR));
+        let out = update(&mut talk);
+        assert_eq!(with(&fuller, || ana_commits(&mut world, &mut talk, &out)).0, 507, "an Update on the fuller disk");
+        let out = update(&mut talk);
+        assert_eq!(with(&room, || ana_commits(&mut world, &mut talk, &out)).0, 429, "an Update with her room full");
+
+        let (ana, bo) = &talk.people;
+        let (group, theirs) = &mut talk.groups;
+        let leave = bo.with(0, |provider, me| theirs.leave(provider, me).expect("proposed"));
+        let path = format!("groups/{}/proposals", b64(&talk.id));
+        let proposed = with(&fuller, || call(&mut world, &talk.bo, "POST", &path, json!({"proposal": env(leave.clone())})));
+        assert_eq!(proposed, (200, json!({"seq": 2})));
+        ana.with(0, |provider, _| group.process(provider, &talk.trust, &leave).expect("processed"));
+        let taken = ana.with(0, |provider, me| group.update(provider, me).expect("committed"));
+        let full = std::sync::Arc::new(Disk::fixed(COMMIT_FLOOR - 1));
+        assert_eq!(with(&full, || post_commit(&mut world, &talk.ana, &talk.id, &taken)).0, 507, "under the commits' floor");
+        assert_eq!(with(&fuller, || post_commit(&mut world, &talk.ana, &talk.id, &taken)), (200, json!({"seq": 3, "epoch": 2})));
+        ana.with(0, |provider, _| group.merge_pending(provider).expect("merged"));
+        assert_eq!(group.members(&talk.trust).len(), 1, "Bo's phone is out");
+        let (sent, _) = super::super::space::of(&world.db, "ana").expect("ana");
+        assert!(sent > SENT_MOST, "counted all the same");
+    }
+
+    /// #451, Fugo: a removal is exempt only up to `EXEMPT_MOST` as received:
+    /// padded past it, Bo's leaving and Ana's commit taking it in count like
+    /// any commit, and are refused at the cap.
+    #[test]
+    fn a_padded_removal_is_capped_like_any_commit() {
+        use super::super::space::{EXEMPT_MOST, RECEIVED_MOST, SENT_MOST};
+        let mut world = World::new();
+        let mut talk = talking(&mut world);
+        world
+            .db
+            .execute("UPDATE dm_mailbox_space SET sent = ?1, received = ?2", params![SENT_MOST, RECEIVED_MOST])
+            .expect("full");
+        let pad = EXEMPT_MOST;
+        let (ana, bo) = &talk.people;
+        let (group, theirs) = &mut talk.groups;
+        let path = format!("groups/{}/proposals", b64(&talk.id));
+
+        let padded = bo.with(0, |provider, me| {
+            theirs.pad_next_for_test(pad);
+            theirs.leave(provider, me).expect("proposed")
+        });
+        assert!(base64url_len(padded.len()) > EXEMPT_MOST);
+        let refused = call(&mut world, &talk.bo, "POST", &path, json!({"proposal": env(padded)}));
+        assert_eq!(refused, (429, json!({"error": "rate_limited", "message": SENDER_FULL})));
+        let leave = bo.with(0, |provider, me| theirs.leave(provider, me).expect("proposed"));
+        assert_eq!(call(&mut world, &talk.bo, "POST", &path, json!({"proposal": env(leave.clone())})), (200, json!({"seq": 2})));
+
+        ana.with(0, |provider, _| group.process(provider, &talk.trust, &leave).expect("processed"));
+        let padded = ana.with(0, |provider, me| {
+            group.pad_next_for_test(pad);
+            group.update(provider, me).expect("committed")
+        });
+        assert!(base64url_len(padded.commit.len()) > EXEMPT_MOST);
+        let refused = post_commit(&mut world, &talk.ana, &talk.id, &padded);
+        assert_eq!(refused, (429, json!({"error": "rate_limited", "message": SENDER_FULL})));
+        ana.with(0, |provider, _| group.clear_pending(provider).expect("dropped"));
+        let taken = ana.with(0, |provider, me| group.update(provider, me).expect("committed"));
+        assert!(base64url_len(taken.commit.len()) <= EXEMPT_MOST);
+        assert_eq!(post_commit(&mut world, &talk.ana, &talk.id, &taken), (200, json!({"seq": 3, "epoch": 2})));
+    }
+
+    /// #451 H6, Fugo: a leaf keeps one own Remove waiting an epoch: asking
+    /// again answers the one kept, with nothing new kept or counted; once
+    /// the epoch moved without taking it in, it may ask once more. And
+    /// removals take an account at most `EXEMPT_ROOM` past its most.
+    #[test]
+    fn a_leaf_keeps_one_own_remove_waiting_an_epoch() {
+        use super::super::space::{EXEMPT_ROOM, SENT_MOST, of};
+        let mut world = World::new();
+        let mut talk = talking(&mut world);
+        let path = format!("groups/{}/proposals", b64(&talk.id));
+        let leave = |talk: &mut Talk| {
+            let (_, bo) = &talk.people;
+            let (_, theirs) = &mut talk.groups;
+            bo.with(0, |provider, me| theirs.leave(provider, me).expect("proposed"))
+        };
+        let first = leave(&mut talk);
+        assert_eq!(call(&mut world, &talk.bo, "POST", &path, json!({"proposal": env(first)})), (200, json!({"seq": 2})));
+        let (sums, kept) = ((of(&world.db, "bo").expect("bo"), of(&world.db, "ana").expect("ana")), entries(&world));
+        for _ in 0..3 {
+            let again = leave(&mut talk);
+            assert_eq!(call(&mut world, &talk.bo, "POST", &path, json!({"proposal": env(again)})), (200, json!({"seq": 2})));
+        }
+        assert_eq!(((of(&world.db, "bo").expect("bo"), of(&world.db, "ana").expect("ana")), entries(&world)), (sums, kept));
+
+        // Ana's Update moves the epoch without taking it in: Bo may ask once
+        // more, then not again at that epoch.
+        let out = update(&mut talk);
+        assert_eq!(ana_commits(&mut world, &mut talk, &out), (200, json!({"seq": 3, "epoch": 2})));
+        let (_, bo) = &talk.people;
+        let (_, theirs) = &mut talk.groups;
+        bo.with(0, |provider, _| theirs.process(provider, &talk.trust, &out.commit).expect("processed"));
+        bo.with(0, |provider, _| theirs.merge_pending(provider).ok());
+        let second = leave(&mut talk);
+        assert_eq!(call(&mut world, &talk.bo, "POST", &path, json!({"proposal": env(second)})), (200, json!({"seq": 4})));
+        let again = leave(&mut talk);
+        assert_eq!(call(&mut world, &talk.bo, "POST", &path, json!({"proposal": env(again)})), (200, json!({"seq": 4})));
+
+        // Another epoch; at `EXEMPT_ROOM` past his most, not even a removal.
+        let out = update(&mut talk);
+        assert_eq!(ana_commits(&mut world, &mut talk, &out).0, 200);
+        let (_, bo) = &talk.people;
+        let (_, theirs) = &mut talk.groups;
+        bo.with(0, |provider, _| theirs.process(provider, &talk.trust, &out.commit).expect("processed"));
+        bo.with(0, |provider, _| theirs.merge_pending(provider).ok());
+        let third = leave(&mut talk);
+        set_room(&world, "bo", "sent", SENT_MOST + EXEMPT_ROOM);
+        let refused = call(&mut world, &talk.bo, "POST", &path, json!({"proposal": env(third.clone())}));
+        assert_eq!(refused, (429, json!({"error": "rate_limited", "message": SENDER_FULL})));
+        set_room(&world, "bo", "sent", SENT_MOST);
+        assert_eq!(call(&mut world, &talk.bo, "POST", &path, json!({"proposal": env(third)})).0, 200, "past his most, a removal still goes");
+    }
+
+    fn base64url_len(bytes: usize) -> usize {
+        (bytes * 4).div_ceil(3)
+    }
+
+    /// #448, #451: on a nearly full disk no new commit or KeyPackage is
+    /// kept, while pickups go on; with room again, they are.
+    #[test]
+    fn a_nearly_full_disk_refuses_new_commits_and_key_packages_and_nothing_else() {
+        use super::super::space::{Disk, FREE_FLOOR, with};
+        let mut world = World::new();
+        let mut talk = talking(&mut world);
+        let full = std::sync::Arc::new(Disk::fixed(FREE_FLOOR - 1));
+        let out = update(&mut talk);
+        let refused = with(&full, || ana_commits(&mut world, &mut talk, &out));
+        let later = json!({"error": "insufficient_storage", "message": "Messages can't be sent right now. Try again later."});
+        assert_eq!(refused, (507, later.clone()));
+        let packages = talk.people.0.key_packages(0, 2);
+        assert_eq!(with(&full, || upload(&mut world, &talk.ana, packages.clone(), None)), (507, later));
+        assert_eq!(entries(&world), 1, "nothing kept");
+        let (status, page) = with(&full, || mailbox(&mut world, &talk.bo, &talk.id, 0));
+        assert_eq!((status, seqs(&page)), (200, vec![(1, "commit".to_owned())]));
+
+        let room = std::sync::Arc::new(Disk::fixed(FREE_FLOOR));
+        assert_eq!(with(&room, || upload(&mut world, &talk.ana, packages, None)).0, 200);
+        let out = update(&mut talk);
+        assert_eq!(with(&room, || ana_commits(&mut world, &mut talk, &out)).0, 200);
+        assert_eq!(entries(&world), 2);
+    }
+
+    /// #451 H6: deleting an account leaves nothing of it in what the worker
+    /// counts or keeps for it: its room and its shares of others', who its
+    /// commits went to, Welcomes it made, its agents' proposal and draft
+    /// digests, its device list (and home). Its commits stay in its friends'
+    /// conversations for their drain, until their time.
+    #[test]
+    fn deleting_an_account_leaves_nothing_of_it_counted() {
+        use super::super::space::{of, recount, share};
+        let mut world = World::new();
+        let mut talk = talking(&mut world);
+        let out = update(&mut talk);
+        assert_eq!(ana_commits(&mut world, &mut talk, &out).0, 200);
+        world
+            .db
+            .execute_batch(&format!(
+                "INSERT INTO dm_welcomes (id, group_id, account_id, leaf_id, welcome, seq, accepted, sender)
+                     VALUES ('w', x'{}', 'bo', 'bo-phone', zeroblob(50), 2, {now}, 'ana');
+                 INSERT INTO dm_proposals (id, account, conversation_id, contact_generation, claktory_id, epoch, agent_id, incarnation,
+                     agent_name, grant_id, client_id, revision, format, body, digest, state, created, updated, expires)
+                     VALUES ('p', 'ana', 'c', 1, 'mac', 1, 'june', 'i', 'June', 'g', 'x', 1, 3, x'', zeroblob(32), 'waiting', 0, 0, 0);
+                 INSERT INTO dm_agent_drafts (id, account, actor, conversation_id, client_id, agent_name, revision, format, body, digest, created, updated)
+                     VALUES ('d', 'ana', 'june', 'c', 'x', 'June', 1, 3, x'', zeroblob(32), 0, 0);",
+                hex(&talk.id),
+                now = world.now
+            ))
+            .expect("rows");
+        recount(&world.db).expect("counted");
+        assert!(share(&world.db, "bo", "ana").expect("share") > 0 && share(&world.db, "ana", "bo").expect("share") > 0);
+
+        assert!(super::super::identity::purge(&mut world.db, &world.keys, "ana", world.now).is_ok());
+        let left = [
+            ("dm_mailbox_space", "account"),
+            ("dm_mailbox_shares", "receiver"),
+            ("dm_mailbox_shares", "sender"),
+            ("dm_mailbox", "receiver"),
+            ("dm_welcomes", "sender"),
+            ("dm_welcomes", "account_id"),
+            ("dm_proposals", "account"),
+            ("dm_agent_drafts", "account"),
+            ("dm_identities", "account_id"),
+        ]
+        .map(|(table, column)| (table, column, named(&world, table, column, "ana")));
+        assert!(left.iter().all(|(.., count)| *count == 0), "{left:?}");
+        assert_eq!(of(&world.db, "bo").expect("bo").1, 0, "what Ana sent no longer counts for Bo");
+        assert_eq!(named(&world, "dm_mailbox", "account_id", "ana"), 1, "her commit stays for Bo's drain");
+        recount(&world.db).expect("counted again, as at a start");
+        assert_eq!((named(&world, "dm_mailbox_space", "account", "ana"), named(&world, "dm_mailbox_shares", "sender", "ana")), (0, 0));
     }
 
     /// Deleting an account deletes its own groups, their state and key.

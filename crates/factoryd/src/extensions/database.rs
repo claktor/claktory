@@ -140,6 +140,10 @@ async fn call(factory: &Arc<Factory>, agent: &str, kind: Kind, args: Value) -> R
     let args: Args = serde_json::from_value(args).map_err(|error| error.to_string())?;
     let target = access(factory, agent, args.instance.as_deref(), kind == Kind::Exec)?;
     let instance = if target == Target::Factory { FACTORY.name } else { "" };
+    if target == Target::Factory {
+        // Model calls counted are read with the rest (`crate::calls`).
+        factory.store.write_calls();
+    }
     let home = factory.home.clone();
     let done = tokio::task::spawn_blocking(move || run(&home, &target, kind, &args))
         .await

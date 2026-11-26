@@ -9,14 +9,15 @@
 //!   ones its grant names, with the other person as the person's devices
 //!   show them (an ended one as they were when it ended), and nothing of
 //!   the person's own view (read, drafts).
-//! - **History** (`GET agent/conversations/<id>/messages`, dm.read): the
-//!   person's history pager, from the grant's start (`granted_ms`) and at
-//!   most 64 KiB a page. Their deletions apply; reading never moves their
-//!   read position.
+//! - **History and wakes** aren't here any more (#451): a Claktory given
+//!   access is a member of the conversation's group and reads it, and
+//!   wakes its agents, from its own home.
 //! - **Drafts** (`PUT conversations/<id>/agent-drafts/<client id>`,
 //!   dm.draft): a suggestion for the person, apart from their own composer
-//!   draft, sealed like a message (`Place::agent_draft`), for an active
-//!   friendship of the generation the agent saw. The same id with the same
+//!   draft, for an active friendship of the generation the agent saw. The
+//!   text goes into the Claktory's channel through the person's home
+//!   (#451): only its digest is kept here, which the person's devices find
+//!   it by. The same id with the same
 //!   text answers the same; other text revises it while it's open. At most
 //!   three open a conversation an agent; the grant's quota keeps it to 20 an
 //!   hour. Each change adds an `agent_draft` event for the person's devices,
@@ -24,28 +25,21 @@
 //!   uses or dismisses it (`DELETE …/agent-drafts/<id>`). An agent never
 //!   sends one: the person does, as their own message.
 //! - **Following** (`PUT`/`DELETE agent/subscriptions/<id>`, dm.subscribe
-//!   with dm.read).
-//! - **Events** (`GET agent/events?since=&wait=`, the backend itself, no
-//!   agent): the account's own outbox, filtered to messages from the other
-//!   person in conversations one of the calling Claktory's agents follows
-//!   with a live grant to read and follow them, sent after the grant
-//!   began. Ids only, never text; each delivery is counted against the
-//!   grant's dm.subscribe quota. The backend long-polls it, authenticated
-//!   afresh by the root every time, so no delivery outlives the
-//!   registration it was checked against.
+//!   with dm.read): checked and kept here, so the grant decides; the
+//!   Claktory wakes its agents from its home.
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::bodies::{Stored, Submitted, merge};
+use super::bodies::{at_home, digest_of};
 use super::groups;
 use super::identity::{Refusal, body, hex, invalid, random};
 use super::keys::Keys;
-use super::messages::{self, Bounds};
+use super::messages;
 use super::sync::{self, Kind};
 use crate::grants::{self, Resource};
-use crate::ipc::{Actor, Caller};
+use crate::ipc::Caller;
 
 pub const SCHEMA: &str = "
 -- What an agent drafted for the person in a conversation: its id for it
@@ -81,15 +75,10 @@ CREATE TABLE IF NOT EXISTS dm_agent_subscriptions (
 ";
 
 const APP: &str = "dms";
-/// A page an agent reads: at most 64 KiB of bodies.
-const AGENT_PAGE_BYTES: usize = 64 * 1024;
 /// Drafts an agent may have open in one conversation.
 const OPEN_DRAFTS: i64 = 3;
 /// Open drafts the sync snapshot lists, at most.
 const OPEN_LISTED: i64 = 200;
-/// An event page: outbox rows looked at, and events answered, at most.
-const SCAN: i64 = 500;
-const EVENTS: usize = 100;
 /// The longest name an agent's draft is shown under.
 const MAX_AGENT_NAME: usize = 64;
 
@@ -98,7 +87,7 @@ pub fn knows(method: &str, route: &str) -> bool {
     let parts: Vec<&str> = route.split('/').collect();
     matches!(
         (method, parts.as_slice()),
-        ("GET", ["agent", "conversations"] | ["agent", "events"] | ["agent", "conversations", _, "messages"])
+        ("GET", ["agent", "conversations"])
             | ("PUT" | "DELETE", ["agent", "subscriptions", _])
             | ("GET", ["conversations", _, "agent-drafts"])
             | ("PUT" | "DELETE", ["conversations", _, "agent-drafts", _])
@@ -110,7 +99,7 @@ pub fn answer(
     db: &mut Connection,
     keys: &Keys,
     method: &str,
-    (route, query): (&str, &str),
+    (route, _query): (&str, &str),
     caller: &Caller,
     bytes: &[u8],
     now_ms: i64,
@@ -126,14 +115,9 @@ pub fn answer(
             close(&transaction, account_id, conversation, id, now_ms)?;
             (204, Value::Null)
         }
-        // The backend itself: the events its agents follow.
-        ("GET", ["agent", "events"], Caller::Backend { agent: None, .. }) => (200, events(&transaction, caller, query, now_ms)?),
         // The backend for one of its agents.
         (_, _, Caller::Backend { agent: Some(_), .. }) => match (method, parts.as_slice()) {
             ("GET", ["agent", "conversations"]) => (200, conversations(&transaction, keys, caller, now_ms)?),
-            ("GET", ["agent", "conversations", conversation, "messages"]) => {
-                (200, history(&transaction, caller, conversation, query, now_ms)?)
-            }
             ("PUT", ["conversations", conversation, "agent-drafts", client_id]) => {
                 draft(&transaction, caller, conversation, client_id, bytes, now_ms)?
             }
@@ -257,24 +241,13 @@ fn conversations(transaction: &Transaction<'_>, keys: &Keys, caller: &Caller, no
     Ok(json!({"conversations": shown}))
 }
 
-/// `GET agent/conversations/<id>/messages`: the person's history from the
-/// grant's start, smaller pages.
-fn history(transaction: &Transaction<'_>, caller: &Caller, on: &str, query: &str, now_ms: i64) -> Result<Value, Refusal> {
-    let granted = allowed(transaction, caller, "dm.read", on, now_ms)?;
-    let asked = Bounds::asked(query)?;
-    // Times are whole seconds: a message in the grant's own second may have
-    // come before it, so it isn't shown.
-    let bounds = Bounds { max_bytes: AGENT_PAGE_BYTES.min(asked.max_bytes), from_ms: granted + 1, ..asked };
-    messages::page(transaction, caller.account_id(), on, &bounds)
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DraftAsk {
     contact_generation: i64,
-    /// The draft as an MLS application message in the Claktory's channel
-    /// with the person's devices.
-    envelope: Value,
+    /// SHA-256 of the draft's MLS bytes (an application message in the
+    /// Claktory's channel, sent through the person's home), lowercase hex.
+    draft_digest: String,
     #[serde(default)]
     agent_name: String,
     #[serde(default)]
@@ -318,7 +291,7 @@ fn draft(
     if !valid_client_id(client_id) {
         return Err(invalid("A draft's id has to be 22 to 64 letters, digits, - and _."));
     }
-    let submitted = Submitted::from_json(&ask.envelope)?;
+    let digest = digest_of(&ask.draft_digest, "draft_digest")?;
     let account = caller.account_id();
     let actor = actor(caller).ok_or_else(not_granted)?;
     let found: Option<(i64, Option<i64>)> = transaction
@@ -335,17 +308,11 @@ fn draft(
     if generation != ask.contact_generation {
         return Err(Refusal(409, "stale", "The friendship's generation changed. Look again, then try again.".to_owned()));
     }
-    // In the Claktory's channel with the person's devices, at an epoch it
-    // still takes.
+    // In the Claktory's channel with the person's devices: its home checks
+    // the epoch.
     let Caller::Backend { claktory_id, .. } = caller else { return Err(not_granted()) };
-    let channel = groups::channel_of(transaction, account, claktory_id)?
+    groups::channel_of(transaction, account, claktory_id)?
         .ok_or_else(|| Refusal(409, "not_set_up", "This Claktory has no channel with the person's devices yet.".to_owned()))?;
-    match groups::fits(&channel, &submitted) {
-        Ok(_) => {}
-        Err(Refusal(409, "epoch", _)) => return Ok(groups::epoch_answer(channel.epoch)),
-        Err(refused) => return Err(refused),
-    }
-    let digest = submitted.digest();
     let name = shown_name(&ask.agent_name);
     let earlier: Option<(String, i64, Vec<u8>, Option<i64>)> = transaction
         .query_row(
@@ -364,7 +331,7 @@ fn draft(
             return Ok((200, json!({"draft_id": id, "revision": revision, "accepted_ms": now_ms})));
         }
         Some((id, revision, _, None)) => {
-            let stored = submitted.store();
+            let stored = at_home();
             transaction.execute(
                 "UPDATE dm_agent_drafts SET revision = ?2, format = ?3, body = ?4, digest = ?5, agent_name = ?6, updated = ?7 WHERE id = ?1",
                 params![id, revision + 1, stored.format, stored.bytes, digest, name, now_ms],
@@ -387,7 +354,7 @@ fn draft(
                 ));
             }
             let id = format!("ad{}", hex(&random::<16>()));
-            let stored = submitted.store();
+            let stored = at_home();
             transaction.execute(
                 "INSERT INTO dm_agent_drafts (id, account, actor, conversation_id, client_id, agent_name, revision, format, body, digest, created, updated)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?9, ?10, ?10)",
@@ -411,30 +378,29 @@ fn drafts(transaction: &Transaction<'_>, account: &str, on: &str) -> Result<Valu
     if !theirs {
         return Err(not_found());
     }
-    type Kept = (String, String, String, i64, i64, Vec<u8>, i64, i64);
+    type Kept = (String, String, String, i64, Vec<u8>, i64, i64);
     let rows: Vec<Kept> = {
         let mut statement = transaction.prepare(
-            "SELECT id, actor, agent_name, revision, format, body, created, updated FROM dm_agent_drafts
+            "SELECT id, actor, agent_name, revision, digest, created, updated FROM dm_agent_drafts
              WHERE account = ?1 AND conversation_id = ?2 AND closed IS NULL ORDER BY updated DESC",
         )?;
         statement
             .query_map(params![account, on], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
             })?
             .collect::<Result<_, _>>()?
     };
     let mut shown = Vec::new();
-    for (id, actor, name, revision, format, bytes, created, updated) in rows {
+    for (id, actor, name, revision, digest, created, updated) in rows {
         let actor: Value = serde_json::from_str(&actor).unwrap_or_default();
-        let mut draft = json!({
+        shown.push(json!({
             "id": id,
             "agent": {"name": name, "claktory_id": actor["claktory"]},
             "revision": revision,
+            "draft_digest": hex(&digest),
             "created_ms": created,
             "updated_ms": updated,
-        });
-        merge(&mut draft, Stored { format, bytes }.shown()?);
-        shown.push(draft);
+        }));
     }
     Ok(json!({"drafts": shown}))
 }
@@ -516,83 +482,6 @@ fn unfollow(transaction: &Transaction<'_>, caller: &Caller, on: &str) -> Result<
     Ok(())
 }
 
-/// `GET agent/events`: where the account's outbox is now (no `since`), or
-/// the messages after it that wake one of the calling Claktory's agents.
-fn events(transaction: &Transaction<'_>, caller: &Caller, query: &str, now_ms: i64) -> Result<Value, Refusal> {
-    let Caller::Backend { account_id, claktory_id, epoch, .. } = caller else { return Err(not_granted()) };
-    let mut since_text = None;
-    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
-        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-        match name {
-            "since" => since_text = Some(value.to_owned()),
-            "wait" | "request_nonce" => {}
-            _ => return Err(invalid("Events take since and wait.")),
-        }
-    }
-    let Some(since_text) = since_text else {
-        let last: i64 =
-            transaction
-                .query_row("SELECT COALESCE(MAX(seq), 0) FROM dm_account_events WHERE account = ?1", [account_id], |row| row.get(0))?;
-        return Ok(json!({"events": [], "next_cursor": sync::cursor(last)}));
-    };
-    let since = sync::since(&since_text)?;
-    sync::within(transaction, account_id, since)?;
-    type Row = (i64, String, String, String);
-    let rows: Vec<Row> = {
-        let mut statement = transaction.prepare(
-            "SELECT seq, kind, conversation_id, object_id FROM dm_account_events WHERE account = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3",
-        )?;
-        statement
-            .query_map(params![account_id, since, SCAN], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
-            .collect::<Result<_, _>>()?
-    };
-    let mut events = Vec::new();
-    let mut through = since;
-    for (seq, kind, on, object) in rows {
-        if events.len() >= EVENTS {
-            break;
-        }
-        through = seq;
-        if kind != "message" {
-            continue;
-        }
-        let message: Option<(String, i64, i64)> = transaction
-            .query_row("SELECT author, seq, accepted FROM dm_messages WHERE id = ?1 AND conversation_id = ?2", params![object, on], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .optional()?;
-        // Only the other person's words wake anyone.
-        let Some((author, message_seq, accepted)) = message.filter(|(author, _, _)| author != account_id) else { continue };
-        let _ = author;
-        let followers: Vec<(String, String)> = {
-            let mut statement = transaction.prepare(
-                "SELECT agent_id, incarnation FROM dm_agent_subscriptions WHERE account = ?1 AND claktory_id = ?2 AND conversation_id = ?3",
-            )?;
-            statement.query_map(params![account_id, claktory_id, on], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<Result<_, _>>()?
-        };
-        for (agent_id, incarnation) in followers {
-            let agent = Actor { id: agent_id, incarnation };
-            let as_agent = Caller::Backend {
-                account_id: account_id.clone(),
-                claktory_id: claktory_id.clone(),
-                epoch: *epoch,
-                agent: Some(agent.clone()),
-            };
-            // Its grant, now: live, naming the conversation, to follow and
-            // read it, and begun before the message.
-            let Some((scopes, _, granted)) = grant_of(transaction, &as_agent, now_ms)? else { continue };
-            if !scopes.iter().any(|scope| scope == "dm.read") || accepted <= granted {
-                continue;
-            }
-            if grants::check(transaction, &as_agent, APP, "dm.subscribe", Some(&conversation(&on)), now_ms).is_err() {
-                continue;
-            }
-            events.push(json!({"agent": {"id": agent.id, "incarnation": agent.incarnation}, "conversation_id": on, "seq": message_seq}));
-        }
-    }
-    Ok(json!({"events": events, "next_cursor": sync::cursor(through)}))
-}
-
 /// An account is deleted: its agents' drafts and subscriptions go.
 pub fn purge(transaction: &Transaction<'_>, account: &str) -> rusqlite::Result<()> {
     transaction.execute("DELETE FROM dm_agent_drafts WHERE account = ?1", [account])?;
@@ -602,11 +491,11 @@ pub fn purge(transaction: &Transaction<'_>, account: &str) -> rusqlite::Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::super::bodies::tests::{opened, sealed};
     use super::super::contacts::tests::World;
-    use super::super::messages::tests::group_of;
     use super::*;
     use crate::grants::Put;
+    use crate::ipc::Actor;
+    use sha2::{Digest as _, Sha256};
 
     const MAC: &str = "mac";
 
@@ -636,15 +525,6 @@ mod tests {
         (contact["conversation_id"].as_str().expect("id").to_owned(), contact["generation"].as_i64().expect("generation"))
     }
 
-    fn post(world: &mut World, account: &str, conversation: &str, generation: i64, text: &str) -> i64 {
-        world.actions += 1;
-        let (group, epoch) = group_of(world, conversation, generation);
-        let send = json!({"client_message_id": format!("message-{:018}", world.actions), "contact_generation": generation, "envelope": sealed(&group, epoch, text)});
-        let (status, receipt) = world.call(account, "POST", &format!("conversations/{conversation}/messages"), send);
-        assert_eq!(status, 200, "{receipt}");
-        receipt["seq"].as_i64().expect("seq")
-    }
-
     fn grant(world: &mut World, scopes: &[&str], conversations: &[&str]) {
         let put = Put {
             app: APP.into(),
@@ -656,25 +536,19 @@ mod tests {
         grants::put(&mut world.db, &backend(), put, world.now).expect("granted");
     }
 
-    fn texts(page: &Value) -> Vec<String> {
-        page["messages"].as_array().expect("messages").iter().map(|m| opened(&m["envelope"])).collect()
-    }
-
-    /// An agent reads only what it was given: the conversations its grant
-    /// names, from when it was given, in small pages, never moving what
-    /// the person has read.
+    /// An agent sees only what it was given: the conversations its grant
+    /// names, from when it was given, and nothing of the person's own view.
+    /// Their history isn't on claktory.com to read (#451).
     #[test]
-    fn an_agent_reads_only_its_conversations_from_its_grant_on() {
+    fn an_agent_sees_only_its_conversations() {
         let mut world = World::new();
         world.name("bo", "Bo");
-        let (c1, generation) = friends(&mut world, "ana", "bo");
+        let (c1, _) = friends(&mut world, "ana", "bo");
         let (c2, _) = friends(&mut world, "ana", "cy");
-        post(&mut world, "bo", &c1, generation, "before the grant");
         let june = as_agent(june());
 
         // No grant: nothing.
         assert_eq!(call(&mut world, &june, "GET", "agent/conversations", Value::Null).0, 403);
-        assert_eq!(call(&mut world, &june, "GET", &format!("agent/conversations/{c1}/messages"), Value::Null).0, 403);
         // A device or the backend itself can't use an agent's routes.
         assert_eq!(world.call("ana", "GET", "agent/conversations", Value::Null).0, 403);
         assert_eq!(call(&mut world, &backend(), "GET", "agent/conversations", Value::Null).0, 403);
@@ -682,9 +556,6 @@ mod tests {
         world.now += 1_000;
         grant(&mut world, &["dm.read"], &[&c1]);
         world.now += 1_000;
-        post(&mut world, "bo", &c1, generation, "after it");
-        post(&mut world, "ana", &c1, generation, "and Ana's");
-
         let (status, listed) = call(&mut world, &june, "GET", "agent/conversations", Value::Null);
         assert_eq!(status, 200, "{listed}");
         let listed = listed["conversations"].as_array().expect("a list").clone();
@@ -694,31 +565,15 @@ mod tests {
         assert!(listed[0]["with"]["tag"].as_str().is_some_and(|tag| !tag.is_empty()), "{listed:?}");
         assert_eq!(listed[0]["from_ms"], json!(world.now - 1_000));
         assert!(listed[0].get("view").is_none(), "nothing of the person's own view");
+        assert!(!listed.iter().any(|c| c["id"] == json!(c2)));
 
-        let (status, page) = call(&mut world, &june, "GET", &format!("agent/conversations/{c1}/messages"), Value::Null);
-        assert_eq!(status, 200, "{page}");
-        assert_eq!(texts(&page), ["after it", "and Ana's"]);
-        assert_eq!(call(&mut world, &june, "GET", &format!("agent/conversations/{c2}/messages"), Value::Null).0, 403);
-        // Reading moved nothing the person has read.
-        let read: Option<i64> = world
-            .db
-            .query_row("SELECT read_seq FROM dm_views WHERE account = 'ana' AND conversation_id = ?1", [&c1], |row| row.get(0))
-            .optional()
-            .expect("sql");
-        assert!(read.unwrap_or(0) == 0, "read_seq {read:?}");
-
-        // A page stays under 64 KiB.
-        for _ in 0..6 {
-            post(&mut world, "bo", &c1, generation, &"x".repeat(16 * 1024));
-        }
-        let (_, page) = call(&mut world, &june, "GET", &format!("agent/conversations/{c1}/messages?after=0"), Value::Null);
-        let bytes: usize = texts(&page).iter().map(String::len).sum();
-        assert!(bytes <= AGENT_PAGE_BYTES && page["has_more"] == json!(true), "{bytes}");
+        // The history and events routes are gone.
+        assert!(!knows("GET", &format!("agent/conversations/{c1}/messages")) && !knows("GET", "agent/events"));
 
         // Taken back: refused at once.
         let id: String = world.db.query_row("SELECT id FROM grants", [], |row| row.get(0)).expect("the grant");
         grants::revoke(&mut world.db, &backend(), &id, world.now).expect("revoked");
-        assert_eq!(call(&mut world, &june, "GET", &format!("agent/conversations/{c1}/messages"), Value::Null).0, 403);
+        assert_eq!(call(&mut world, &june, "GET", "agent/conversations", Value::Null).0, 403);
     }
 
     /// A draft waits for the person: kept once per id, revised while open,
@@ -740,7 +595,8 @@ mod tests {
             )
             .expect("a channel");
         let route = |id: &str| format!("conversations/{c1}/agent-drafts/{id}");
-        let ask = |text: &str, generation: i64| json!({"contact_generation": generation, "envelope": sealed(&channel, 0, text), "agent_name": "June\u{202e}", "request_nonce": "n"});
+        let digest = |text: &str| hex(&Sha256::digest(text.as_bytes()));
+        let ask = |text: &str, generation: i64| json!({"contact_generation": generation, "draft_digest": digest(text), "agent_name": "June\u{202e}", "request_nonce": "n"});
         let first = "draft-000000000000000000001";
 
         assert_eq!(call(&mut world, &june, "PUT", &route(first), ask("Hi", generation)).0, 403, "no grant");
@@ -761,7 +617,8 @@ mod tests {
         // The person's devices see it, under the agent's name as shown.
         let (status, listed) = world.call("ana", "GET", &format!("conversations/{c1}/agent-drafts"), Value::Null);
         assert_eq!(status, 200, "{listed}");
-        assert_eq!(opened(&listed["drafts"][0]["envelope"]), "Hi Bo!");
+        assert_eq!(listed["drafts"][0]["draft_digest"], json!(digest("Hi Bo!")));
+        assert!(listed["drafts"][0].get("envelope").is_none(), "no text is kept here: {listed}");
         assert_eq!(listed["drafts"][0]["agent"]["name"], json!("June"));
         assert_eq!(world.call("bo", "GET", &format!("conversations/{c1}/agent-drafts"), Value::Null).1["drafts"], json!([]));
         // And the sync snapshot says who left one where, without its text.
@@ -800,52 +657,22 @@ mod tests {
         assert_eq!(left, 0);
     }
 
-    /// Only the other person's messages, in a conversation an agent follows
-    /// with a live grant to read and follow it, sent after the grant began,
-    /// reach the backend's events: ids, never text.
+    /// Following needs a live grant to read and follow the conversation;
+    /// the Claktory wakes its agents from its home.
     #[test]
-    fn events_wake_only_followers_with_a_live_grant() {
+    fn following_needs_reading_too() {
         let mut world = World::new();
-        let (c1, generation) = friends(&mut world, "ana", "bo");
+        let (c1, _) = friends(&mut world, "ana", "bo");
         let june = as_agent(june());
-        let (status, start) = call(&mut world, &backend(), "GET", "agent/events", Value::Null);
-        assert_eq!(status, 200, "{start}");
-        let cursor = start["next_cursor"].as_str().expect("a cursor").to_owned();
-        let events =
-            |world: &mut World, cursor: &str| call(world, &backend(), "GET", &format!("agent/events?since={cursor}&wait=1"), Value::Null);
-
+        let follow = format!("agent/subscriptions/{c1}");
         grant(&mut world, &["dm.subscribe"], &[&c1]);
-        assert_eq!(call(&mut world, &june, "PUT", &format!("agent/subscriptions/{c1}"), json!({})).0, 403, "following needs reading");
+        assert_eq!(call(&mut world, &june, "PUT", &follow, json!({})).0, 403, "following needs reading");
         grant(&mut world, &["dm.read", "dm.subscribe"], &[&c1]);
-        assert_eq!(call(&mut world, &june, "PUT", &format!("agent/subscriptions/{c1}"), json!({})).0, 204);
-        world.now += 1_000;
-
-        let theirs = post(&mut world, "bo", &c1, generation, "Are you there?");
-        post(&mut world, "ana", &c1, generation, "Yes");
-        let (status, got) = events(&mut world, &cursor);
-        assert_eq!(status, 200, "{got}");
-        assert_eq!(got["events"], json!([{"agent": {"id": "june", "incarnation": "inc-1"}, "conversation_id": c1, "seq": theirs}]));
-        assert!(!got.to_string().contains("Are you there"), "ids only");
-        let cursor = got["next_cursor"].as_str().expect("a cursor").to_owned();
-
-        // Another Claktory of the account hears nothing of June's.
-        let other = Caller::Backend { account_id: "ana".into(), claktory_id: "server".into(), epoch: 1, agent: None };
-        assert_eq!(
-            call(&mut world, &other, "GET", &format!("agent/events?since={}", start["next_cursor"].as_str().expect("c")), Value::Null).1["events"],
-            json!([])
-        );
-
-        // Not following, or the grant taken back: nothing.
-        assert_eq!(call(&mut world, &june, "DELETE", &format!("agent/subscriptions/{c1}"), Value::Null).0, 204);
-        post(&mut world, "bo", &c1, generation, "Hello?");
-        let (_, got) = events(&mut world, &cursor);
-        assert_eq!(got["events"], json!([]));
-        let cursor = got["next_cursor"].as_str().expect("a cursor").to_owned();
-        assert_eq!(call(&mut world, &june, "PUT", &format!("agent/subscriptions/{c1}"), json!({})).0, 204);
-        let id: String = world.db.query_row("SELECT id FROM grants", [], |row| row.get(0)).expect("the grant");
-        grants::revoke(&mut world.db, &backend(), &id, world.now).expect("revoked");
-        post(&mut world, "bo", &c1, generation, "Still?");
-        assert_eq!(events(&mut world, &cursor).1["events"], json!([]));
-        assert_eq!(events(&mut world, "c1.garbage").0, 410, "a cursor never handed out");
+        assert_eq!(call(&mut world, &june, "PUT", &follow, json!({})).0, 204);
+        let listed = call(&mut world, &june, "GET", "agent/conversations", Value::Null).1;
+        assert_eq!(listed["conversations"][0]["subscribed"], json!(true), "{listed}");
+        assert_eq!(call(&mut world, &june, "DELETE", &follow, Value::Null).0, 204);
+        let listed = call(&mut world, &june, "GET", "agent/conversations", Value::Null).1;
+        assert_eq!(listed["conversations"][0]["subscribed"], json!(false), "{listed}");
     }
 }

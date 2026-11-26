@@ -419,3 +419,63 @@ async fn a_reports_files_are_copied_out_of_the_inbox_and_open_only_for_its_reade
     let lea = call(&mut client, &mut view, "lea", "extension_call", &format!(r#"{{"tool": "handoff_read", "args": {{"report": {id}, "file": 2}}}}"#)).await;
     assert!(!lea.contains(MARKER), "{lea}");
 }
+
+/// #471 G6 (Fugo 33607): Rivet asks on cards to send or discard a pipe's
+/// waiting reports, bound to those reports and their reader, and to let a
+/// reader go, fresh unless asked, refused while reports still go to it.
+#[tokio::test]
+async fn rivet_asks_on_cards_to_send_waiting_reports_and_to_let_a_reader_go() {
+    use crate::rivet_cards::{answer, cards};
+    let (_dir, factory, mut client, mut view, pipe) = setup().await;
+    pipes::handoff::set_wake_every(&factory, std::time::Duration::from_secs(3600));
+    apply_request(&mut client, &mut view, forward(&pipe, "ingrid", true)).await;
+    view.follow(&mut client, |view| view.agent("ingrid").reads_reports).await;
+    assert_eq!(call(&mut client, &mut view, "liaison", "handoff_submit", &report("One")).await, "accepted #1");
+    assert_eq!(call(&mut client, &mut view, "liaison", "handoff_submit", &report("Two")).await, "accepted #2");
+    apply_request(&mut client, &mut view, forward(&pipe, "", false)).await;
+    view.follow(&mut client, |view| shown(view, &pipe).and_then(|pipe| pipe.reports).is_some_and(|counts| counts.waiting == 2)).await;
+
+    // No reader now: nothing to send them to.
+    let send = r#"{"pipe": "Website ⇄ Marketing", "send": true, "reason": "Matt wants Ingrid to read them."}"#;
+    let said = call(&mut client, &mut view, "rivet", "pipes_reports", send).await;
+    assert_eq!(said, "No agent reads that pipe's reports now: set who does first (pipes_forward). Nothing was asked.");
+    apply_request(&mut client, &mut view, forward(&pipe, "ingrid", false)).await;
+    let said = call(&mut client, &mut view, "rivet", "pipes_reports", send).await;
+    assert!(said.starts_with("Asked "), "{said}");
+    let (seq, card) = cards(&view).pop().expect("a card");
+    assert_eq!(card.title, "Send the reports waiting on the pipe \"Website ⇄ Marketing\" to Ingrid");
+    assert!(card.action_description.starts_with("Rivet asks to send the 2 reports waiting on the pipe"), "{}", card.action_description);
+    assert!(!card.action_description.contains(MARKER), "never their words");
+    assert_eq!(card.action_reason, "Matt wants Ingrid to read them.");
+
+    // Who reads them changes first: void.
+    apply_request(&mut client, &mut view, forward(&pipe, "", false)).await;
+    apply_request(&mut client, &mut view, select("rivet")).await;
+    let why = refused(&mut client, &mut view, answer(seq, false)).await;
+    assert_eq!(why, "Who reads that pipe's reports changed since this card was asked: dismiss it, and ask again.");
+    apply_request(&mut client, &mut view, forward(&pipe, "ingrid", false)).await;
+    apply_request(&mut client, &mut view, answer(seq, false)).await;
+    let page = list(&mut client, &mut view, &pipe, "").await;
+    let states: Vec<_> = page.reports.iter().filter(|report| report.number > 0).map(|report| report.state()).collect();
+    assert_eq!(states, [v1::PipeReportState::New, v1::PipeReportState::New]);
+
+    // Ingrid still gets the pipe's reports: she can't be let go.
+    let release = r#"{"agent": "Ingrid", "reason": "Matt wants her back on the site."}"#;
+    let said = call(&mut client, &mut view, "rivet", "pipes_release_reader", release).await;
+    assert_eq!(said, "Reports still go to Ingrid from 1 place: choose who reads them there first. Nothing was asked.");
+    apply_request(&mut client, &mut view, forward(&pipe, "", false)).await;
+    let said = call(&mut client, &mut view, "rivet", "pipes_release_reader", release).await;
+    assert!(said.starts_with("Asked "), "{said}");
+    let (seq, card) = cards(&view).pop().expect("a card");
+    assert_eq!(card.title, "Let Ingrid stop reading reports");
+    assert!(card.action_description.contains("Its conversation holds the reports it read, written on the other side of pipes."));
+    assert!(card.action_description.ends_with("It starts a fresh conversation, the old one kept, so none of that stays in it."));
+    apply_request(&mut client, &mut view, select("rivet")).await;
+    apply_request(&mut client, &mut view, answer(seq, false)).await;
+    view.follow(&mut client, |view| !view.agent("ingrid").reads_reports).await;
+
+    // Tainted, Rivet asks neither.
+    pipes::taint_for_test(&factory, "rivet", "browser:https://example.com");
+    let said = call(&mut client, &mut view, "rivet", "pipes_reports", send).await;
+    assert!(said.starts_with("Not while you've read"), "{said}");
+}

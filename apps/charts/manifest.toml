@@ -1,6 +1,6 @@
 id = "charts"
 name = "Charts"
-version = "0.7.0"
+version = "0.7.2"
 world = "claktory:app@1.1"
 publisher = "claktory"
 description = "Live charts of what your agents do, such as their runs, messages and tokens. Tell Rivet what you'd like to see."

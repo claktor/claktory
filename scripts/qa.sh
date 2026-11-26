@@ -279,6 +279,9 @@ if ! built; then
     # `up --claude` signs Claude in, fake, on qa-model.
     FEATURES=()
     if grep -q '^qa-provider' "$SRC/crates/factoryd/Cargo.toml"; then FEATURES=(--features factoryd/qa-provider); fi
+    # And the QA lies (qa-lies, debug builds only, each off until `up
+    # --claim-…` asks for it), where the commit has them.
+    if grep -q '^qa-lies' "$SRC/crates/factoryd/Cargo.toml"; then FEATURES+=(--features factoryd/qa-lies); fi
     (cd "$SRC" && env -u FACTORY_UPDATE_URL -u FACTORY_VERSION ${VERSION:+FACTORY_VERSION="$VERSION"} CARGO_TARGET_DIR="$ROOT/target" \
       cargo build --quiet --message-format=json-render-diagnostics \
       -p factoryd -p claktory-account -p claktory-qa ${FEATURES[@]+"${FEATURES[@]}"}) >"$MESSAGES"

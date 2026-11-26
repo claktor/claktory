@@ -209,3 +209,145 @@ async fn the_machine_is_rivets_and_without_rivet_claktory_tells_the_person() {
     apply_request(&mut client, &mut view, select("rivet")).await;
     assert_eq!(told(&view, low_memory), 1, "Rivet heard only the first");
 }
+
+/// #455: a disk that's still short after a restart isn't told again: what
+/// was told is kept in factory.db until the disk recovers, and a later drop
+/// is told again.
+#[tokio::test]
+async fn a_low_disk_is_told_once_across_restarts_and_again_after_it_recovers() {
+    let (dir, factory, mut client, mut view) = setup().await;
+    apply_request(&mut client, &mut view, select("rivet")).await;
+    let low_disk = "The volume ";
+    let open = v1::OpenPanel { extension_id: "resources".into(), agent_id: "rivet".into() };
+    apply_request(&mut client, &mut view, client_message::Body::OpenPanel(open.clone())).await;
+    let panel = |view: &View| match view.extension_view.as_ref().and_then(|view| view.body.clone()) {
+        Some(v1::extension_view::Body::Resources(resources)) => resources,
+        other => panic!("expected the Resources panel, got {other:?}"),
+    };
+    let alerts = |view: &View| panel(view).alerts.iter().filter(|alert| alert.starts_with(low_disk)).count();
+    // Less free than all of it, or than 100,000 GB: every volume Claktory uses.
+    let short = v1::UpdateSettings { disk_free_gb: Some(100_000), disk_free_percent: Some(100), ..Default::default() };
+    apply_request(&mut client, &mut view, settings(short.clone())).await;
+    view.follow(&mut client, |view| alerts(view) >= 1 && told(view, low_disk) == alerts(view) && idle(view, "rivet")).await;
+    let volumes = alerts(&view);
+
+    // Restart, the disk still short: nothing new once a few samples are in.
+    factory.set_resources_every(Duration::from_secs(3600), Duration::from_secs(3600));
+    drop(client);
+    drop(factory);
+    let (addr, factory) = start(&dir).await;
+    factory.set_resources_every(Duration::from_millis(50), Duration::from_millis(300));
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, select("rivet")).await;
+    apply_request(&mut client, &mut view, client_message::Body::OpenPanel(open)).await;
+    view.follow(&mut client, |view| panel(view).history.len() >= 5).await;
+    assert_eq!(told(&view, low_disk), volumes, "told again after a restart");
+    assert_eq!(alerts(&view), volumes, "the alerts in effect are kept");
+
+    // Recovered, then short again: told again, once.
+    apply_request(&mut client, &mut view, settings(v1::UpdateSettings { disk_free_gb: Some(0), ..Default::default() })).await;
+    view.follow(&mut client, |view| alerts(view) == 0).await;
+    // Kept just after the panel shows it, and a save that failed (the
+    // database busy under load) is made again at the next sample.
+    let kept = || -> i64 {
+        rusqlite::Connection::open(dir.join("home/factory.db"))
+            .and_then(|db| db.query_row("SELECT count(*) FROM resource_alerts", [], |row| row.get(0)))
+            .expect("factory.db")
+    };
+    for _ in 0..400 {
+        if kept() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let rows: Vec<(String, i64)> = rusqlite::Connection::open(dir.join("home/factory.db"))
+        .and_then(|db| {
+            let mut statement = db.prepare("SELECT about, told FROM resource_alerts")?;
+            statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect()
+        })
+        .expect("factory.db");
+    assert!(rows.is_empty(), "cleared once it recovered: {rows:?}, panel {:?}", panel(&view).alerts);
+    apply_request(&mut client, &mut view, settings(short)).await;
+    view.follow(&mut client, |view| told(view, low_disk) == 2 * volumes && idle(view, "rivet")).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    view.follow(&mut client, |view| panel(view).history.len() >= 2).await;
+    assert_eq!(told(&view, low_disk), 2 * volumes);
+}
+
+/// Kills a process when the test ends, however it ends.
+struct Killed(String);
+
+impl Drop for Killed {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("kill").arg(&self.0).status();
+    }
+}
+
+/// Part 2 #4 (#454): a process that uses a full core for an hour, owned by
+/// no agent's task (a leftover `cat /dev/zero` did for 37 hours), is told
+/// to the admin agents once, a restart included; an agent's task isn't.
+#[tokio::test]
+async fn a_stray_process_on_a_full_core_is_told_once_and_an_agents_task_never() {
+    let (dir, factory, mut client, mut view) = setup().await;
+    factory.set_resources_stray(Duration::from_millis(400), 5.0);
+    // Scout's task: a full core in its own group, for a few seconds.
+    // Named in its command line, so no other test's busy process passes for it.
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |since| since.subsec_nanos());
+    let marker = format!("task{}x{nanos}", std::process::id());
+    let task = serde_json::json!({
+        "command": format!("sh -c ': {marker}; while :; do :; done' & p=$!; sleep 4; kill $p"),
+        "run_in_background": true,
+    });
+    let started = call(&mut client, &mut view, "scout", "bash", &task.to_string()).await;
+    assert!(started.contains("task-1"), "{started}");
+    // A leftover: started by a command that ended, so its parent is gone.
+    let spawned = std::process::Command::new("sh").args(["-c", "yes > /dev/null 2>&1 & echo $!"]).output().expect("sh");
+    let pid = String::from_utf8_lossy(&spawned.stdout).trim().to_owned();
+    let _killed = Killed(pid.clone());
+    apply_request(&mut client, &mut view, select("rivet")).await;
+    let about = "A process has used a full processor core for over an hour: ";
+    let of = |view: &View, pid: &str| {
+        view.entries
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                Some(Kind::Event(event)) if event.text.starts_with(about) && event.text.contains(&format!("(pid {pid},")) => {
+                    Some(event.text.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let tasks = |view: &View| {
+        view.entries.iter().filter(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.text.contains(&marker))).count()
+    };
+    // Every process counts at 5% of a core here: Rivet hears of others too.
+    view.follow(&mut client, |view| of(view, &pid).len() == 1).await;
+    let event = of(&view, &pid).remove(0);
+    assert!(event.contains("`yes`") && event.contains("No agent's task owns it."), "{event}");
+    assert!(event.contains("Don't stop, kill or delete anything yourself."), "{event}");
+    // Once: more samples, and Scout's task ran out its time, never told.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    view.follow(&mut client, |view| view.agent("rivet").queued_messages == 0).await;
+    assert_eq!(of(&view, &pid).len(), 1);
+    assert_eq!(tasks(&view), 0, "never Scout's task");
+
+    // A restart doesn't tell it again while it runs.
+    factory.set_resources_every(Duration::from_secs(3600), Duration::from_secs(3600));
+    drop(client);
+    drop(factory);
+    let (addr, factory) = start(&dir).await;
+    factory.set_resources_every(Duration::from_millis(50), Duration::from_millis(300));
+    factory.set_resources_stray(Duration::from_millis(400), 5.0);
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, select("rivet")).await;
+    let open = v1::OpenPanel { extension_id: "resources".into(), agent_id: "rivet".into() };
+    apply_request(&mut client, &mut view, client_message::Body::OpenPanel(open)).await;
+    let samples = |view: &View| match view.extension_view.as_ref().and_then(|view| view.body.as_ref()) {
+        Some(v1::extension_view::Body::Resources(resources)) => resources.history.len(),
+        _ => 0,
+    };
+    view.follow(&mut client, |view| samples(view) >= 20).await;
+    assert_eq!(of(&view, &pid).len(), 1, "told again after a restart");
+}

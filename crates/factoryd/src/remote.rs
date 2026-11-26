@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 
 use factory_protocol::v1;
 use iroh::endpoint::{AfterHandshakeOutcome, BindOpts, Builder, Connection, EndpointHooks, presets};
-use iroh::{Endpoint, RelayMap, RelayMode, RelayUrl, SecretKey, TransportAddr, Watcher};
+use iroh::{Endpoint, RelayConfig, RelayMap, RelayMode, RelayUrl, SecretKey, TransportAddr, Watcher};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -68,6 +68,9 @@ const COMPRESSION: async_compression::Level = async_compression::Level::Default;
 /// How often the tunnel checks whether it should change (a device paired or
 /// unpaired, a code expired, the relays changed) and what it shows.
 const CHECK: Duration = Duration::from_secs(1);
+/// The longest the monitor waits with no app connected and nothing coming
+/// due, for a change that didn't wake it (#454).
+const IDLE_CHECK: Duration = Duration::from_secs(10);
 /// A device that gave a wrong token waits at least this long for the answer
 /// to its next try.
 const FAILURE_PAUSE: Duration = Duration::from_secs(1);
@@ -131,7 +134,14 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&partial)?;
     file.write_all(bytes)?;
     file.sync_all()?;
-    std::fs::rename(partial, path)
+    std::fs::rename(partial, path)?;
+    // The rename itself on disk too (friend bug #38): without it, a crash
+    // or a disk that fails soon after can bring back the file before it, a
+    // device paired a minute earlier forgotten.
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 /// Factory's iroh key, made the first time: its public half is the
@@ -225,6 +235,20 @@ pub struct Device {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub app_version: String,
 }
+
+/// Why a device isn't let in while this Claktory's disk fails it (friend bug
+/// #38): nothing about it changed, so it isn't told to pair again.
+const DISK_TROUBLE: &str = "This Claktory can't use its disk right now, so it can't let this device in. You don't need to add this device again: \
+     it connects by itself once the disk works.";
+
+/// What a device found through the account is told while this Claktory is
+/// signed out of it (friend bug #38: after a disk failure, say): signing it
+/// in again lets the device in as before, where a new code would pair it
+/// twice. With SignInRequired, not Unauthorized: the app keeps what it
+/// hasn't sent (Unauthorized means removed, and wipes it: #446) and tries
+/// again rather than asking for a code.
+const SIGNED_OUT: &str = "This Claktory was signed out of your Claktory account, so it can't let this device in. \
+     Sign it in again in its Settings → Account, then try again here.";
 
 /// What a device made without a name is called until one uses its code.
 const UNNAMED: &str = "New device";
@@ -535,8 +559,8 @@ pub enum Ended {
 /// Changes a device that hasn't been let in yet: `Some(Ended)` removes it
 /// (only one not allowed yet), None allows the device waiting with its code.
 /// Err(NotWaiting) when there's none so (for Denied and allowing, one that
-/// isn't waiting).
-fn settle(home: &Home, device: &str, ended: Option<Ended>) -> Result<Device, RemoteError> {
+/// isn't waiting). With the devices an allowed one replaced (`replace_same_key`).
+fn settle(home: &Home, device: &str, ended: Option<Ended>) -> Result<(Device, Vec<Device>), RemoteError> {
     let _changing = devices_lock();
     let mut devices = devices(home)?;
     let now = now_ms();
@@ -550,7 +574,7 @@ fn settle(home: &Home, device: &str, ended: Option<Ended>) -> Result<Device, Rem
     if ended.is_some() {
         let removed = devices.remove(index);
         save_devices(home, &devices)?;
-        return Ok(removed);
+        return Ok((removed, Vec::new()));
     }
     let allowed = &mut devices[index];
     allowed.endpoint_id = std::mem::take(&mut allowed.pending_endpoint_id);
@@ -558,24 +582,45 @@ fn settle(home: &Home, device: &str, ended: Option<Ended>) -> Result<Device, Rem
     allowed.pending_since = None;
     allowed.pending_signed_in = false;
     allowed.code_expires = None;
-    let allowed = allowed.clone();
+    let (index, replaced) = replace_same_key(&mut devices, index);
+    let allowed = devices[index].clone();
     save_devices(home, &devices)?;
-    Ok(allowed)
+    Ok((allowed, replaced))
 }
 
 /// Lets in the device waiting with this device's code (by id or name).
+/// A device paired before with the same key is gone: it was this one.
 pub fn approve(home: &Home, device: &str) -> Result<Device, RemoteError> {
-    settle(home, device, None)
+    settle(home, device, None).map(|(allowed, _)| allowed)
 }
 
 /// Turns away the device waiting with this device's code, and forgets it.
 pub fn deny(home: &Home, device: &str) -> Result<Device, RemoteError> {
-    settle(home, device, Some(Ended::Denied))
+    settle(home, device, Some(Ended::Denied)).map(|(denied, _)| denied)
 }
 
 /// Ends a code that hasn't let a device in, and forgets its device.
 pub fn cancel(home: &Home, device: &str) -> Result<Device, RemoteError> {
-    settle(home, device, Some(Ended::Cancelled))
+    settle(home, device, Some(Ended::Cancelled)).map(|(ended, _)| ended)
+}
+
+/// Drops every other device that connects with the key `devices[keep]` was
+/// just let in with (friend bug #38): a key is one device, so one paired
+/// again (with a new code, or by a code after it came through the account)
+/// is listed once, as the pairing the person just allowed, never twice. Only
+/// ever on the person's Allow or a device's own code and account: holding a
+/// key never brings back a device that was removed. Returns where
+/// `devices[keep]` is now, and the devices dropped.
+fn replace_same_key(devices: &mut Vec<Device>, keep: usize) -> (usize, Vec<Device>) {
+    let (id, key) = (devices[keep].id.clone(), devices[keep].endpoint_id.clone());
+    if key.is_empty() || devices[keep].local {
+        return (keep, Vec::new());
+    }
+    let (replaced, kept): (Vec<Device>, Vec<Device>) =
+        devices.drain(..).partition(|device| device.id != id && !device.local && device.endpoint_id == key);
+    *devices = kept;
+    let keep = devices.iter().position(|device| device.id == id).expect("the device let in is kept");
+    (keep, replaced)
 }
 
 /// Forgets devices whose codes ran out before one was let in with them: a
@@ -753,6 +798,9 @@ struct Gate {
     home: Home,
     /// Who may use pipes (`pipe_link`): only they get its ALPN, and only it.
     pipes: Arc<crate::pipe_link::Admits>,
+    /// Who may use the direct-message link (`dm_link`): only they get its
+    /// ALPN, and only it.
+    dms: Arc<crate::dm_link::Admits>,
     /// This Claktory is signed in: its account's devices prove themselves
     /// in their Hello, so unknown keys get past the handshake.
     open: Arc<AtomicBool>,
@@ -767,6 +815,9 @@ impl Gate {
         if connection.alpn() == crate::pipe_link::ALPN_PIPE {
             return self.pipes.admits(&connection.remote_id().to_string(), now_ms());
         }
+        if connection.alpn() == crate::dm_link::ALPN_DM {
+            return self.dms.admits(&connection.remote_id().to_string());
+        }
         if from_this_machine(path_of(connection).1) || self.open.load(Ordering::Relaxed) {
             return true;
         }
@@ -777,9 +828,12 @@ impl Gate {
                 (!device.endpoint_id.is_empty() && device.endpoint_id == id)
                     || (device.awaiting(now) && (device.pending_endpoint_id.is_empty() || device.pending_endpoint_id == id))
             }),
+            // A file that can't be read for now (a failing disk, friend bug
+            // #38) isn't taken as "not paired": the Hello that follows is
+            // still checked, and tells the device why it can't come in.
             Err(error) => {
                 tracing::error!(%error, "could not read the paired devices");
-                false
+                true
             }
         }
     }
@@ -819,8 +873,12 @@ struct Wanted {
 #[derive(Default)]
 struct Tunnel {
     local: Option<(Endpoint, tokio::task::JoinHandle<()>)>,
-    /// With the relays it was started with.
+    /// With config.json's relays it was started with.
     remote: Option<(Vec<String>, Endpoint, tokio::task::JoinHandle<()>)>,
+    /// The remote endpoint's relays now (#450), its token on Claktory's.
+    relays: Vec<RelayConfig>,
+    /// Relays it no longer uses, kept until then (`RELAY_GRACE`).
+    retiring: Vec<(RelayUrl, Instant)>,
     /// What failed to start last, so it isn't tried every second.
     failed: Option<Wanted>,
 }
@@ -849,6 +907,8 @@ pub(crate) struct State {
     online_wait: Mutex<Option<Duration>>,
     /// Local relays and address lookup in place of the internet's; tests'.
     network: Mutex<Option<Network>>,
+    /// How long a relay no longer used is kept; tests make it shorter.
+    relay_grace: Mutex<Option<Duration>>,
     /// Notified when a waiting device is allowed or its code ends.
     pairing: tokio::sync::Notify,
     /// How each code that let no device in ended, by its device's id, for
@@ -866,6 +926,9 @@ pub(crate) struct State {
     /// Notified whenever devices may have changed, for agents' pairings to
     /// show it (`extensions::devices::monitor`).
     pub(crate) changed: Arc<tokio::sync::Notify>,
+    /// Wakes the tunnel's monitor: something it follows may have changed
+    /// (`refresh_remote`, a device waiting).
+    wake: Arc<tokio::sync::Notify>,
     /// This Claktory is signed in to an account: the gate lets in keys it
     /// doesn't know, for the person's devices to find it (see `admit`).
     account_open: Arc<AtomicBool>,
@@ -1078,6 +1141,7 @@ fn admit(
         }
         if known && !signed_in {
             return match shown {
+                Some(Err(_)) if owner.is_none() => Admission::Turned(v1::ErrorCode::SignInRequired, SIGNED_OUT.to_owned()),
                 Some(Err((code, reason))) => Admission::Turned(code, reason),
                 _ => Admission::Turned(
                     v1::ErrorCode::SignInRequired,
@@ -1225,16 +1289,41 @@ pub fn default_relays() -> Vec<String> {
     vec![DEFAULT_RELAY.to_owned(), iroh::defaults::prod::default_na_east_relay().url.to_string()]
 }
 
-/// `default_relays`, as iroh takes them.
-pub(crate) fn default_relay_map() -> RelayMap {
-    default_relays().iter().filter_map(|relay| relay.parse::<RelayUrl>().ok()).collect()
+/// n0's public relays (iroh's default ones): what a Claktory that isn't
+/// signed in to claktory.com uses, and its devices with it, since
+/// Claktory's relay forwards only to or from a signed-in Claktory (#450).
+pub fn public_relays() -> Vec<String> {
+    let urls: Vec<RelayUrl> = iroh::defaults::prod::default_relay_map().urls();
+    urls.iter().map(ToString::to_string).collect()
 }
 
+/// `public_relays`, as iroh takes them: where moves go, since neither end
+/// of one has a token for Claktory's relay.
+pub(crate) fn public_relay_map() -> RelayMap {
+    iroh::defaults::prod::default_relay_map()
+}
+
+/// Whether `url` is Claktory's own relay, however it's written (a dot
+/// after the host, no slash after it), and only over https: the one relay
+/// the tunnel gives its relay token to.
+fn is_claktorys_relay(url: &RelayUrl) -> bool {
+    let ours: RelayUrl = DEFAULT_RELAY.parse().expect("Claktory's relay URL");
+    url.scheme() == ours.scheme() && url.port() == ours.port() && url.host_str().map(|host| host.trim_end_matches('.')) == ours.host_str()
+}
+
+/// How long the tunnel keeps a relay it no longer uses (#450), so devices
+/// that learn the new ones from the Workspace still reach it meanwhile.
+const RELAY_GRACE: Duration = Duration::from_secs(60);
+
 /// What tests put in place of the internet (`set_tunnel_network`): the
-/// default relays, and what sets up the address lookup `presets::N0` would.
+/// default relays (the first standing for Claktory's, which gets the relay
+/// token), n0's public ones, and what sets up the address lookup
+/// `presets::N0` would.
 #[derive(Clone)]
 struct Network {
     relays: Vec<String>,
+    /// None: the default ones stand for them too.
+    public: Option<Vec<String>>,
     lookup: Arc<dyn Fn(Builder) -> Builder + Send + Sync>,
 }
 
@@ -1283,26 +1372,73 @@ impl Factory {
                 .map(|assertion| assertion.account_id)
                 .map_err(refusal)
         });
-        let mut admission = Admission::Unknown;
+        let mut replaced = Vec::new();
         let changing = devices_lock();
-        match devices(&self.home) {
+        let admission = match devices(&self.home) {
             Ok(mut devices) => {
-                admission = admit(&mut devices, knock, peer, owner.as_ref(), shown, now);
+                // Let in with this key before (or this machine's app): it
+                // stays in when only its last connection can't be noted.
+                let bound = |devices: &[Device], index: usize| {
+                    devices
+                        .get(index)
+                        .is_some_and(|device| device.local || (!peer.endpoint_id.is_empty() && device.endpoint_id == peer.endpoint_id))
+                };
+                let before: Vec<bool> = (0..devices.len()).map(|index| bound(&devices, index)).collect();
+                let mut admission = admit(&mut devices, knock, peer, owner.as_ref(), shown, now);
+                // A device just bound to its key by its code and account
+                // replaces any other with that key: the same device.
+                if let Admission::Connected { index, confirm_by } = admission
+                    && !before.get(index).copied().unwrap_or(false)
+                {
+                    let (index, dropped) = replace_same_key(&mut devices, index);
+                    replaced = dropped;
+                    admission = Admission::Connected { index, confirm_by };
+                }
                 if matches!(admission, Admission::Connected { .. } | Admission::Pending(_))
                     && let Err(error) = save_devices(&self.home, &devices)
                 {
-                    tracing::warn!(%error, "could not note when a device connected");
-                    admission = Admission::Unknown;
+                    // A disk that can't be written (read-only, failing:
+                    // friend bug #38) doesn't unpair anyone: a device let
+                    // in before comes in, only when it came isn't noted. One that
+                    // would be new is told why it can't be, not that it
+                    // isn't paired.
+                    replaced.clear();
+                    admission = match admission {
+                        Admission::Connected { index, .. } if before.get(index).copied().unwrap_or(false) => {
+                            tracing::warn!(%error, "could not note when a device connected; it's let in all the same");
+                            admission
+                        }
+                        _ => {
+                            tracing::warn!(%error, "could not save a device's pairing");
+                            Admission::Turned(v1::ErrorCode::Internal, DISK_TROUBLE.to_owned())
+                        }
+                    };
                 }
-                admission = match admission {
+                match admission {
                     Admission::Connected { index, confirm_by } => Admission::Found(devices.swap_remove(index), confirm_by),
                     Admission::Pending(index) => Admission::Waits(devices.swap_remove(index)),
                     other => other,
-                };
+                }
             }
-            Err(error) => tracing::error!(%error, "could not read the paired devices"),
-        }
+            // Only a device known here (as last shown, or this machine's
+            // app) hears it's the disk; any other key, the usual refusal.
+            Err(error) => {
+                tracing::error!(%error, "could not read the paired devices");
+                let known = peer.loopback
+                    || from_this_machine(peer.address)
+                    || lock(&self.remote.shown).devices.iter().any(|device| {
+                        !peer.endpoint_id.is_empty()
+                            && (device.endpoint_id == peer.endpoint_id || device.pending_endpoint_id == peer.endpoint_id)
+                    });
+                if known { Admission::Turned(v1::ErrorCode::Internal, DISK_TROUBLE.to_owned()) } else { Admission::Unknown }
+            }
+        };
         drop(changing);
+        if !replaced.is_empty() {
+            tracing::info!(replaced = replaced.len(), "a device paired again replaced its earlier pairing");
+            // Their key is the one coming in: its tunnel stays.
+            self.forget_devices(&replaced, false).await;
+        }
         let (device, confirm_by) = match admission {
             Admission::Found(device, confirm_by) => (device, confirm_by),
             Admission::Waits(device) => {
@@ -1465,6 +1601,7 @@ impl Factory {
     /// that waits to be allowed, so it hears how that ended.
     pub(crate) fn waiting(self: &Arc<Self>) -> Waiting {
         self.remote.waiting.fetch_add(1, Ordering::Relaxed);
+        self.remote.wake.notify_one();
         Waiting { factory: Arc::downgrade(self) }
     }
 
@@ -1493,8 +1630,7 @@ impl Factory {
             return Err(RequestError::UnknownDevice(id.to_owned()));
         };
         let endpoint = lock(&self.remote.shown).endpoint_id.clone();
-        let (name, shows) =
-            (shown_name(&device.name), approval_number(&endpoint, &device.pending_endpoint_id, &device.token_sha256));
+        let (name, shows) = (shown_name(&device.name), approval_number(&endpoint, &device.pending_endpoint_id, &device.token_sha256));
         let number = number.trim();
         if number.is_empty() {
             return Err(RequestError::Remote(format!("Type the 4 digits {name} shows to allow it.")));
@@ -1519,12 +1655,17 @@ impl Factory {
             return Err(RequestError::Remote(format!("That's not the number {name} shows. {tries}.")));
         }
         lock(&self.remote.wrong_numbers).remove(id);
-        match approve(&self.home, id) {
-            Ok(device) => tracing::info!(device = %device.id, "the person allowed a device"),
+        let replaced = match settle(&self.home, id, None) {
+            Ok((device, replaced)) => {
+                tracing::info!(device = %device.id, replaced = replaced.len(), "the person allowed a device");
+                replaced
+            }
             Err(RemoteError::NotWaiting(id)) => return Err(RequestError::UnknownDevice(id)),
             Err(error) => return Err(RequestError::Remote(error.to_string())),
-        }
+        };
         self.remote.pairing.notify_waiters();
+        // Their key is the one just let in: its tunnel stays.
+        self.forget_devices(&replaced, false).await;
         self.refresh_remote();
         Ok(())
     }
@@ -1555,18 +1696,24 @@ impl Factory {
 
     /// Closes a device's sessions and its tunnel connections.
     fn close_device(&self, id: &str, endpoint_id: &str) {
+        self.close_sessions(id, endpoint_id, true);
+    }
+
+    /// Closes a device's sessions, and with `links` its tunnel connections
+    /// (by the keys its sessions came with and `endpoint_id`).
+    fn close_sessions(&self, id: &str, endpoint_id: &str, links: bool) {
         let sessions = lock(&self.remote.connected).remove(id).unwrap_or_default();
         let mut keys: Vec<&str> = sessions.iter().map(|session| session.endpoint_id.as_str()).collect();
         keys.push(endpoint_id);
-        keys.retain(|key| !key.is_empty());
+        keys.retain(|key| links && !key.is_empty());
         keys.sort_unstable();
         keys.dedup();
         for session in &sessions {
             session.closed.notify_one();
         }
-        let links = lock(&self.remote.links);
+        let open = lock(&self.remote.links);
         for key in keys {
-            for (_, connection) in links.get(key).into_iter().flatten() {
+            for (_, connection) in open.get(key).into_iter().flatten() {
                 connection.close(UNPAIRED.into(), b"this device was unpaired");
             }
         }
@@ -1583,20 +1730,35 @@ impl Factory {
 
     /// Re-reads what the Workspace shows of remote access, and sends it if
     /// it changed. Devices unpaired meanwhile (by `factoryd unpair`) are
-    /// disconnected.
+    /// disconnected. The tunnel's monitor looks again too.
     pub(crate) fn refresh_remote(&self) {
+        self.show_remote();
+        self.remote.wake.notify_one();
+    }
+
+    /// `refresh_remote`, from the tunnel's monitor itself.
+    fn show_remote(&self) {
         let now = now_ms();
-        let devices = devices(&self.home).unwrap_or_else(|error| {
-            tracing::error!(%error, "could not read the paired devices");
-            Vec::new()
-        });
-        let gone: Vec<String> =
-            lock(&self.remote.connected).keys().filter(|id| !devices.iter().any(|device| &device.id == *id)).cloned().collect();
-        for id in gone {
-            self.close_device(&id, "");
-        }
+        let devices = match devices(&self.home) {
+            Ok(devices) => {
+                let gone: Vec<String> =
+                    lock(&self.remote.connected).keys().filter(|id| !devices.iter().any(|device| &device.id == *id)).cloned().collect();
+                for id in gone {
+                    self.close_device(&id, "");
+                }
+                devices
+            }
+            // A file that can't be read for now (a failing disk, friend bug
+            // #38) unpairs nobody: what was shown stays, and the tunnel
+            // with it.
+            Err(error) => {
+                tracing::error!(%error, "could not read the paired devices");
+                lock(&self.remote.shown).devices.clone()
+            }
+        };
         let relays = self.lock().config.remote.as_ref().map(|remote| remote.relays.clone()).unwrap_or_default();
         let on = remote_on(&devices, now) || self.account_open();
+        let plan = if on { self.relay_plan() } else { Vec::new() };
         let endpoint = lock(&self.remote.endpoint).clone();
         let (home_relay, relay_connected) = match &endpoint {
             Some(endpoint) if on => {
@@ -1622,11 +1784,7 @@ impl Factory {
                 // This machine's app isn't one of the devices shown.
                 devices: devices.into_iter().filter(|device| !device.local).collect(),
                 on,
-                relays: match (on, relays.is_empty()) {
-                    (false, _) => Vec::new(),
-                    (true, true) => self.default_relays(),
-                    (true, false) => relays.clone(),
-                },
+                relays: plan,
                 custom_relays: !relays.is_empty(),
                 home_relay,
                 relay_connected,
@@ -1743,12 +1901,91 @@ impl Factory {
     /// `relays` become the default ones, and `lookup` sets up the remote
     /// endpoint as `presets::N0` would. Applies from the tunnel's next start.
     pub fn set_tunnel_network(&self, relays: Vec<String>, lookup: impl Fn(Builder) -> Builder + Send + Sync + 'static) {
-        *lock(&self.remote.network) = Some(Network { relays, lookup: Arc::new(lookup) });
+        *lock(&self.remote.network) = Some(Network { relays, public: None, lookup: Arc::new(lookup) });
     }
 
-    /// The relays the tunnel uses when config.json names none.
+    /// Puts `relays` in place of n0's public ones (#450), after
+    /// `set_tunnel_network`.
+    pub fn set_tunnel_public_relays(&self, relays: Vec<String>) {
+        if let Some(network) = lock(&self.remote.network).as_mut() {
+            network.public = Some(relays);
+        }
+    }
+
+    /// How long a relay the tunnel no longer uses is kept (60 s); tests make
+    /// it shorter.
+    pub fn set_tunnel_relay_grace(&self, grace: Duration) {
+        *lock(&self.remote.relay_grace) = Some(grace);
+    }
+
+    /// The relays the tunnel uses when config.json names none and it's
+    /// signed in to claktory.com.
     fn default_relays(&self) -> Vec<String> {
         lock(&self.remote.network).as_ref().map_or_else(default_relays, |network| network.relays.clone())
+    }
+
+    /// n0's public relays, or tests' stand-ins.
+    fn public_relays(&self) -> Vec<String> {
+        lock(&self.remote.network)
+            .as_ref()
+            .map_or_else(public_relays, |network| network.public.clone().unwrap_or_else(|| network.relays.clone()))
+    }
+
+    /// Whether the tunnel uses Claktory's relays (#450): only while it's
+    /// signed in to claktory.com and holds a relay token for its tunnel key,
+    /// so it never reaches Claktory's relay without one. That comes with
+    /// the first check-in after a sign-in; until then, and after a
+    /// sign-out, n0's. A Claktory signed in to an account service of the
+    /// person's own holds no token Claktory's relay would take. With tests'
+    /// relays in place of the internet, signed in to any.
+    fn on_claktorys_relays(&self) -> bool {
+        let config = self.lock().config.account.clone();
+        let Some((_, _, service)) = self.account.signed_in_as(&config) else { return false };
+        let claktorys = service == crate::account::DEFAULT_SERVICE || lock(&self.remote.network).is_some();
+        let endpoint_id = lock(&self.remote.shown).endpoint_id.clone();
+        claktorys && crate::account::relay_token::current(self, &endpoint_id).is_some()
+    }
+
+    /// The relays the tunnel uses now: config.json's; else Claktory's
+    /// (`default_relays`) while it's signed in to claktory.com, and n0's
+    /// public ones while it isn't (#450).
+    pub(crate) fn relay_plan(&self) -> Vec<String> {
+        let configured = self.lock().config.remote.as_ref().map(|remote| remote.relays.clone()).unwrap_or_default();
+        if !configured.is_empty() {
+            configured
+        } else if self.on_claktorys_relays() {
+            self.default_relays()
+        } else {
+            self.public_relays()
+        }
+    }
+
+    /// Whether `url` is Claktory's relay, or the test relay standing for it
+    /// (the first of `set_tunnel_network`'s).
+    fn is_claktorys(&self, url: &RelayUrl) -> bool {
+        match lock(&self.remote.network).as_ref() {
+            Some(network) => network.relays.first().is_some_and(|first| first.parse::<RelayUrl>().ok().as_ref() == Some(url)),
+            None => is_claktorys_relay(url),
+        }
+    }
+
+    /// `relay_plan` as iroh takes it: Claktory's relay with this
+    /// Claktory's relay token for the tunnel key `endpoint_id`, if it has
+    /// one, and every other relay without.
+    fn relay_configs(&self, endpoint_id: &str) -> Result<Vec<RelayConfig>, iroh::RelayUrlParseError> {
+        let token = crate::account::relay_token::current(self, endpoint_id);
+        self.relay_plan()
+            .iter()
+            .map(|relay| {
+                let url = relay.parse::<RelayUrl>()?;
+                let ours = self.is_claktorys(&url);
+                let config = RelayConfig::from(url);
+                Ok(match &token {
+                    Some(token) if ours => config.with_auth_token(token.clone()),
+                    _ => config,
+                })
+            })
+            .collect()
     }
 
     /// Pairs a new device, from the app: remote access turns on, and the
@@ -1796,7 +2033,7 @@ impl Factory {
         let configured = self.lock().config.remote.as_ref().map(|remote| remote.relays.clone()).unwrap_or_default();
         let using = match (configured.is_empty(), relays.is_empty()) {
             (false, _) => configured,
-            (true, true) => self.default_relays(),
+            (true, true) => self.relay_plan(),
             (true, false) => Vec::new(),
         };
         for relay in using {
@@ -1880,22 +2117,47 @@ impl Factory {
             Err(RemoteError::NoDevice(id)) => return Err(RequestError::UnknownDevice(id)),
             Err(error) => return Err(RequestError::Remote(error.to_string())),
         };
-        self.close_device(&removed.id, &removed.endpoint_id);
-        self.cancel_device_flows(&removed.id);
-        // And its notification key.
-        crate::notify::push::forget(self, &removed.id);
-        // And where it was reading.
-        if let Err(error) = crate::presentation::forget_device(self, &removed.id) {
-            tracing::warn!(%error, device = %removed.id, "could not forget an unpaired device's reading places");
+        self.forget_devices(std::slice::from_ref(&removed), true).await;
+        Ok(())
+    }
+
+    /// What goes with devices taken out of the devices file (unpaired, or
+    /// replaced by the same device paired again): their sessions close (and
+    /// with `links`, their tunnel connections), and their notification keys,
+    /// reading places, zoom and file cache go.
+    pub(crate) async fn forget_devices(&self, removed: &[Device], links: bool) {
+        if removed.is_empty() {
+            return;
+        }
+        for removed in removed {
+            self.close_sessions(&removed.id, &removed.endpoint_id, links);
+            self.cancel_device_flows(&removed.id);
+            // And its notification key.
+            crate::notify::push::forget(self, &removed.id);
+            // And where it was reading.
+            if let Err(error) = crate::presentation::forget_device(self, &removed.id) {
+                tracing::warn!(%error, device = %removed.id, "could not forget an unpaired device's reading places");
+            }
         }
         self.refresh_remote();
-        // Its zoom goes with it.
-        if self.lock().config.display.zoom.contains_key(&removed.id)
-            && let Err(error) = self.set_zoom(&removed.id, 1.0).await
+        // Their zoom and file cache go with them.
+        let kept = {
+            let display = &self.lock().config.display;
+            removed.iter().any(|removed| display.zoom.contains_key(&removed.id) || display.file_cache.contains_key(&removed.id))
+        };
+        if kept
+            && let Err(error) = self
+                .edit_config(|config| {
+                    for removed in removed {
+                        config.display.zoom.remove(&removed.id);
+                        config.display.file_cache.remove(&removed.id);
+                    }
+                    Ok(())
+                })
+                .await
         {
-            tracing::warn!(%error, device = %removed.id, "could not forget an unpaired device's zoom");
+            tracing::warn!(%error, "could not forget unpaired devices' zoom and file cache");
         }
-        Ok(())
     }
 
     /// Sets the relays the tunnel uses, in config.json's `remote.relays`;
@@ -1968,6 +2230,7 @@ fn plain_error(error: &std::io::Error) -> String {
 /// within a second of a change. Also keeps what the Workspace shows of it
 /// current, and forgets codes that ran out.
 pub(crate) async fn monitor(factory: Weak<Factory>) {
+    let Some(mut woken) = factory.upgrade().map(|factory| factory.loops_woken()) else { return };
     if let Some(strong) = factory.upgrade() {
         crate::pipe_link::reload(&strong);
     }
@@ -1981,9 +2244,33 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
             Err(error) => tracing::error!(%error, "could not forget expired pairing codes"),
         }
         sync_tunnel(&strong).await;
-        strong.refresh_remote();
+        strong.show_remote();
+        let nap = next_look(&strong);
+        let wake = strong.remote.wake.clone();
         drop(strong);
-        tokio::time::sleep(CHECK).await;
+        tokio::select! {
+            () = tokio::time::sleep(nap) => {}
+            () = wake.notified() => {}
+            changed = woken.changed() => if changed.is_err() { return },
+        }
+    }
+}
+
+/// How long the monitor waits before it looks again: a second while an app
+/// is connected (it shows the tunnel's state live) or a device waits to be
+/// allowed; otherwise until the next pairing code or pipe invitation runs
+/// out, at most `IDLE_CHECK`, woken sooner by a change (#454).
+fn next_look(factory: &Factory) -> Duration {
+    if factory.clients() > 0 || factory.remote.waiting.load(Ordering::Relaxed) > 0 {
+        return CHECK;
+    }
+    let now = now_ms();
+    let codes = devices(&factory.home).unwrap_or_default().into_iter().filter_map(|device| device.code_expires);
+    let invite = factory.remote.pipes.invite_until();
+    match codes.chain(std::iter::once(invite)).filter(|at| *at > now).min() {
+        // Just past it, so it has run out.
+        Some(at) => Duration::from_millis(u64::try_from(at - now).unwrap_or(0) + 1).min(IDLE_CHECK),
+        None => IDLE_CHECK,
     }
 }
 
@@ -1993,13 +2280,15 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
 /// back here.
 fn sync_tunnel(factory: &Arc<Factory>) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
     Box::pin(async move {
+        // A file that can't be read for now (a failing disk, friend bug
+        // #38) turns nothing off: the devices last shown stand for it.
         let devices = devices(&factory.home).unwrap_or_else(|error| {
             tracing::error!(%error, "could not read the paired devices");
-            Vec::new()
+            lock(&factory.remote.shown).devices.clone()
         });
         let relays = factory.lock().config.remote.as_ref().map(|remote| remote.relays.clone()).unwrap_or_default();
         let waiting = factory.remote.waiting.load(Ordering::Relaxed) > 0;
-        let pipes = factory.remote.pipes.wants_tunnel(now_ms());
+        let pipes = factory.remote.pipes.wants_tunnel(now_ms()) || factory.dm_link.wants_tunnel();
         let open = factory.account_open();
         let wanted = Wanted { on: remote_on(&devices, now_ms()) || waiting || pipes || open, relays };
         let mut tunnel = factory.remote.tunnel.lock().await;
@@ -2007,7 +2296,11 @@ fn sync_tunnel(factory: &Arc<Factory>) -> std::pin::Pin<Box<dyn Future<Output = 
             Some((relays, ..)) => wanted.on && *relays == wanted.relays,
             None => !wanted.on,
         };
-        if (tunnel.local.is_some() && remote_as_wanted) || tunnel.failed.as_ref() == Some(&wanted) {
+        if tunnel.local.is_some() && remote_as_wanted {
+            follow_relays(factory, &mut tunnel).await;
+            return;
+        }
+        if tunnel.failed.as_ref() == Some(&wanted) {
             return;
         }
         let mut failed = None;
@@ -2032,14 +2325,33 @@ fn sync_tunnel(factory: &Arc<Factory>) -> std::pin::Pin<Box<dyn Future<Output = 
             }
             if wanted.on {
                 let network = lock(&factory.remote.network).clone();
-                let started =
-                    start_remote(&factory.home, &wanted, network.as_ref(), &factory.remote.pipes.admits, &factory.remote.account_open);
-                match started.await {
-                    Ok(endpoint) => {
+                let endpoint_id = lock(&factory.remote.shown).endpoint_id.clone();
+                let started = match factory.relay_configs(&endpoint_id) {
+                    Ok(relays) => {
+                        let map = relays.iter().cloned().collect::<RelayMap>();
+                        let pipes = &factory.remote.pipes.admits;
+                        start_remote(
+                            &factory.home,
+                            &wanted,
+                            map,
+                            network.as_ref(),
+                            pipes,
+                            &factory.dm_link.gate,
+                            &factory.remote.account_open,
+                        )
+                        .await
+                        .map(|endpoint| (endpoint, relays))
+                    }
+                    Err(error) => Err(RemoteError::Tunnel(error.to_string())),
+                };
+                match started {
+                    Ok((endpoint, relays)) => {
                         tracing::info!(endpoint = %endpoint.id(), "remote access started");
                         let accept = tokio::spawn(accept(endpoint.clone(), Arc::downgrade(factory)));
                         *lock(&factory.remote.endpoint) = Some(endpoint.clone());
                         tunnel.remote = Some((wanted.relays.clone(), endpoint, accept));
+                        tunnel.relays = relays;
+                        tunnel.retiring.clear();
                     }
                     Err(error) => failed = Some(error),
                 }
@@ -2059,6 +2371,55 @@ fn sync_tunnel(factory: &Arc<Factory>) -> std::pin::Pin<Box<dyn Future<Output = 
     })
 }
 
+/// Keeps the remote endpoint's relays as `relay_plan` says, while it runs
+/// (#450): a sign-in or sign-out moves it between Claktory's relays and
+/// n0's, and a new relay token goes on Claktory's. New relays are added at
+/// once and the Workspace names them (`refresh_remote`); relays no longer
+/// used are kept for `RELAY_GRACE`, so devices that follow it there still
+/// reach it meanwhile. Never a restart: connections stay up.
+async fn follow_relays(factory: &Arc<Factory>, tunnel: &mut Tunnel) {
+    let Some((_, endpoint, _)) = &tunnel.remote else { return };
+    let endpoint_id = lock(&factory.remote.shown).endpoint_id.clone();
+    let wanted = match factory.relay_configs(&endpoint_id) {
+        Ok(wanted) => wanted,
+        Err(error) => {
+            tracing::warn!(%error, "a relay that isn't a URL");
+            return;
+        }
+    };
+    for config in &wanted {
+        if !tunnel.relays.contains(config) {
+            // Its URL only: never the token.
+            tracing::info!(relay = %config.url, token = config.auth_token.is_some(), "the tunnel uses a relay");
+            endpoint.insert_relay(config.url.clone(), Arc::new(config.clone())).await;
+            tunnel.relays.retain(|kept| kept.url != config.url);
+            tunnel.relays.push(config.clone());
+        }
+    }
+    let grace = lock(&factory.remote.relay_grace).unwrap_or(RELAY_GRACE);
+    let now = Instant::now();
+    tunnel.retiring.retain(|(url, _)| !wanted.iter().any(|config| config.url == *url));
+    for kept in &tunnel.relays {
+        let unused = !wanted.iter().any(|config| config.url == kept.url);
+        if unused && !tunnel.retiring.iter().any(|(url, _)| *url == kept.url) {
+            tunnel.retiring.push((kept.url.clone(), now + grace));
+        }
+    }
+    let due: Vec<RelayUrl> = tunnel.retiring.iter().filter(|(_, at)| *at <= now).map(|(url, _)| url.clone()).collect();
+    for url in due {
+        tracing::info!(relay = %url, "the tunnel leaves a relay");
+        endpoint.remove_relay(&url).await;
+        tunnel.relays.retain(|kept| kept.url != url);
+        tunnel.retiring.retain(|(retiring, _)| *retiring != url);
+    }
+}
+
+/// Signed in or out, or a new relay token (#450): what the Workspace shows
+/// now, and the tunnel follows within a second (`follow_relays`).
+pub(crate) fn relay_access_changed(factory: &Arc<Factory>) {
+    factory.refresh_remote();
+}
+
 /// The loopback endpoint, on the port this machine's pairing code names
 /// when it's free, and the code written for it.
 async fn start_local(factory: &Arc<Factory>) -> Result<Endpoint, RemoteError> {
@@ -2068,9 +2429,12 @@ async fn start_local(factory: &Arc<Factory>) -> Result<Endpoint, RemoteError> {
         tokio::task::spawn_blocking(move || secret_key(&home)).await.map_err(std::io::Error::other)??
     };
     let pipes = factory.remote.pipes.admits.clone();
+    let dms = factory.dm_link.gate.clone();
     // Local connections are this machine's whoever is signed in.
     let closed = Arc::new(AtomicBool::new(false));
-    let endpoint = bind(&home, key, &Wanted { on: false, relays: Vec::new() }, None, local_port(&home), &pipes, &closed).await?;
+    let endpoint =
+        bind(&home, key, &Wanted { on: false, relays: Vec::new() }, RelayMap::empty(), None, local_port(&home), &pipes, &dms, &closed)
+            .await?;
     let (id, port) = (endpoint.id().to_string(), loopback_port(&endpoint).unwrap_or_default());
     let written = tokio::task::spawn_blocking(move || write_local_pairing(&home, &id, port)).await.map_err(std::io::Error::other)?;
     if let Err(error) = written {
@@ -2085,8 +2449,10 @@ async fn start_local(factory: &Arc<Factory>) -> Result<Endpoint, RemoteError> {
 async fn start_remote(
     home: &Home,
     wanted: &Wanted,
+    relays: RelayMap,
     network: Option<&Network>,
     pipes: &Arc<crate::pipe_link::Admits>,
+    dms: &Arc<crate::dm_link::Admits>,
     open: &Arc<AtomicBool>,
 ) -> Result<Endpoint, RemoteError> {
     let key = {
@@ -2095,7 +2461,7 @@ async fn start_remote(
     };
     let path = dir(home).join("remote-port");
     let port = std::fs::read_to_string(&path).ok().and_then(|text| text.trim().parse().ok()).unwrap_or(0);
-    let endpoint = bind(home, key, wanted, network, port, pipes, open).await?;
+    let endpoint = bind(home, key, wanted, relays, network, port, pipes, dms, open).await?;
     if let Some(bound) = loopback_port(&endpoint)
         && bound != port
         && let Err(error) = write_private(&path, format!("{bound}\n").as_bytes())
@@ -2120,13 +2486,18 @@ fn loopback_port(endpoint: &Endpoint) -> Option<u16> {
 /// those whose codes name n0's relays, the default before, too. `network`
 /// puts tests' relays and lookup in place of those. Never a port mapping
 /// (no portmapper).
+// The gate's three lists come apart: pipes, direct messages and the
+// account's devices.
+#[allow(clippy::too_many_arguments)]
 async fn bind(
     home: &Home,
     key: SecretKey,
     wanted: &Wanted,
+    relays: RelayMap,
     network: Option<&Network>,
     port: u16,
     pipes: &Arc<crate::pipe_link::Admits>,
+    dms: &Arc<crate::dm_link::Admits>,
     open: &Arc<AtomicBool>,
 ) -> Result<Endpoint, RemoteError> {
     let failed = |error: &dyn std::fmt::Display| RemoteError::Tunnel(error.to_string());
@@ -2136,27 +2507,20 @@ async fn bind(
             (true, None) => Endpoint::builder(presets::N0),
             (true, Some(network)) => (network.lookup)(Endpoint::builder(presets::Minimal)),
         };
-        let relay_mode = if !wanted.on {
-            RelayMode::Disabled
-        } else {
-            let relays = match (wanted.relays.is_empty(), network) {
-                (false, _) => wanted.relays.clone(),
-                (true, None) => default_relays(),
-                (true, Some(network)) => network.relays.clone(),
-            };
-            let urls = relays
-                .iter()
-                .map(|relay| relay.parse::<RelayUrl>())
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| failed(&error))?;
-            RelayMode::Custom(urls.into_iter().collect::<RelayMap>())
-        };
+        let relay_mode = if wanted.on { RelayMode::Custom(relays.clone()) } else { RelayMode::Disabled };
         let ip: IpAddr = if wanted.on { Ipv4Addr::UNSPECIFIED.into() } else { Ipv4Addr::LOCALHOST.into() };
         let mut builder = builder
             .secret_key(key.clone())
-            .alpns(vec![ALPN_COMPRESSED.to_vec(), ALPN.to_vec(), ALPN_FORWARD.to_vec(), crate::pipe_link::ALPN_PIPE.to_vec()])
-            .hooks(Gate { home: home.clone(), pipes: pipes.clone(), open: open.clone() })
+            .alpns(vec![
+                ALPN_COMPRESSED.to_vec(),
+                ALPN.to_vec(),
+                ALPN_FORWARD.to_vec(),
+                crate::pipe_link::ALPN_PIPE.to_vec(),
+                crate::dm_link::ALPN_DM.to_vec(),
+            ])
+            .hooks(Gate { home: home.clone(), pipes: pipes.clone(), dms: dms.clone(), open: open.clone() })
             .relay_mode(relay_mode)
+            .transport_config(transport())
             .clear_ip_transports()
             .bind_addr(SocketAddr::new(ip, port))
             .map_err(|error| failed(&error))?;
@@ -2185,6 +2549,21 @@ async fn bind(
     }
 }
 
+/// iroh's QUIC settings with BBR3 in place of Cubic for what this
+/// Claktory sends its devices (row 129). On a slow mobile link (Sale's
+/// emulator at 2000 kbit/s) Cubic's bursts overran the link's shaper and
+/// it declared lost, and sent again, as much as the file: 14.6 MB on the
+/// wire for 6.7 MB of video, most of the "lost" bytes having arrived.
+/// BBR3 paces to the bandwidth it measures: 7.5 MB, as fast, and as fast
+/// on Wi-Fi; and where a queue is deep it keeps the round trip near the
+/// link's own (about 0.1 s where Cubic filled it to 3 s), so a message
+/// isn't stuck behind a video. The rest stays iroh's.
+fn transport() -> iroh::endpoint::QuicTransportConfig {
+    iroh::endpoint::QuicTransportConfig::builder()
+        .congestion_controller_factory(Arc::new(noq_proto::congestion::Bbr3Config::default()))
+        .build()
+}
+
 /// Serves each connection the gate let in until the endpoint closes.
 async fn accept(endpoint: Endpoint, factory: Weak<Factory>) {
     while let Some(incoming) = endpoint.accept().await {
@@ -2208,8 +2587,14 @@ async fn serve_link(connection: Connection, factory: Weak<Factory>) {
         lock(&strong.remote.links).entry(endpoint_id.clone()).or_default().push((number, connection.clone()));
         number
     };
+    tokio::spawn(log_stats(connection.clone(), endpoint_id.clone()));
     if connection.alpn() == crate::pipe_link::ALPN_PIPE {
         crate::pipe_link::serve(connection, factory.clone()).await;
+        forget_link(&factory, &endpoint_id, number);
+        return;
+    }
+    if connection.alpn() == crate::dm_link::ALPN_DM {
+        crate::dm_link::serve(connection, factory.clone()).await;
         forget_link(&factory, &endpoint_id, number);
         return;
     }
@@ -2249,6 +2634,77 @@ async fn serve_link(connection: Connection, factory: Weak<Factory>) {
     forget_link(&factory, &endpoint_id, number);
 }
 
+/// How often [log_stats] looks at a connection, and how much it must have
+/// sent since its last line to say so again.
+const STATS_EVERY: Duration = Duration::from_secs(10);
+const STATS_AFTER_BYTES: u64 = 256 * 1024;
+
+/// What a device's connection costs on the wire, in the log (row 129: a
+/// video sent twice over on a slow link): QUIC's bytes sent and declared
+/// lost (each resent), and per open path what went on it, its congestion
+/// events and those found spurious (data only late, resent anyway), its
+/// window and round trip. With the log at debug (`RUST_LOG=factoryd=debug`):
+/// every [STATS_EVERY] while it sends, and once when it ends.
+async fn log_stats(connection: Connection, endpoint: String) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+    let mut said = 0;
+    loop {
+        tokio::select! {
+            _ = connection.closed() => break,
+            () = tokio::time::sleep(STATS_EVERY) => {
+                let sent = connection.stats().udp_tx.bytes;
+                if sent.saturating_sub(said) >= STATS_AFTER_BYTES {
+                    said = sent;
+                    stats_line(&connection, &endpoint, "now");
+                }
+            }
+        }
+    }
+    stats_line(&connection, &endpoint, "at its end");
+}
+
+fn stats_line(connection: &Connection, endpoint: &str, when: &str) {
+    let stats = connection.stats();
+    let paths: Vec<String> = connection
+        .paths()
+        .iter()
+        .map(|path| {
+            let at = match path.remote_addr() {
+                TransportAddr::Ip(address) => address.to_string(),
+                TransportAddr::Relay(url) => format!("relay {url}"),
+                other => format!("{other:?}"),
+            };
+            let path_stats = path.stats();
+            format!(
+                "{at}{} sent {} B in {} packets, lost {} B in {}, congestion events {} ({} spurious), cwnd {} B, rtt {} ms",
+                if path.is_selected() { " (selected)" } else { "" },
+                path_stats.sent_bytes,
+                path_stats.sent_packets,
+                path_stats.lost_bytes,
+                path_stats.lost_packets,
+                path_stats.congestion_events,
+                path_stats.spurious_congestion_events,
+                path_stats.cwnd,
+                path_stats.rtt.as_millis(),
+            )
+        })
+        .collect();
+    tracing::debug!(
+        %endpoint,
+        alpn = %String::from_utf8_lossy(connection.alpn()),
+        udp_sent = stats.udp_tx.bytes,
+        udp_received = stats.udp_rx.bytes,
+        quic_sent = stats.sent_bytes,
+        lost = stats.lost_bytes,
+        lost_packets = stats.lost_packets,
+        stream_frames_sent = stats.frame_tx.stream,
+        paths = %paths.join("; "),
+        "a device's connection on the wire, {when}"
+    );
+}
+
 /// A tunnel connection that ended no longer needs closing on unpair.
 fn forget_link(factory: &Weak<Factory>, endpoint_id: &str, number: u64) {
     if let Some(strong) = factory.upgrade() {
@@ -2284,6 +2740,64 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Row 129: what this Claktory sends is paced by BBR3, and what a
+    /// connection cost on the wire is in the log once it ends, its path's
+    /// bytes and losses with it.
+    #[tokio::test]
+    async fn a_connection_is_paced_by_bbr3_and_says_in_the_log_what_it_sent_and_lost() {
+        #[derive(Clone, Default)]
+        struct Captured(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Captured {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                lock(&self.0).extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber =
+            tracing_subscriber::fmt().with_ansi(false).with_max_level(tracing::Level::DEBUG).with_writer(move || writer.clone()).finish();
+        let _logging = tracing::subscriber::set_default(subscriber);
+
+        let alpn = b"row129".to_vec();
+        let server = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .transport_config(transport())
+            .alpns(vec![alpn.clone()])
+            .bind()
+            .await
+            .unwrap();
+        let client = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).bind().await.unwrap();
+        let accepted = tokio::spawn({
+            let server = server.clone();
+            async move { server.accept().await.unwrap().await.unwrap() }
+        });
+        let dialled = client.connect(server.addr(), &alpn).await.unwrap();
+        let connection = accepted.await.unwrap();
+        let path = connection.paths().iter().next().unwrap().id();
+        let controller = connection.congestion_state(path).unwrap().into_any();
+        assert!(controller.downcast::<noq_proto::congestion::Bbr3>().is_ok(), "BBR3, not iroh's Cubic");
+        let logged = tokio::spawn(log_stats(connection.clone(), "device".into()));
+        let mut send = connection.open_uni().await.unwrap();
+        send.write_all(&vec![7u8; 1 << 20]).await.unwrap();
+        send.finish().unwrap();
+        let mut receive = dialled.accept_uni().await.unwrap();
+        assert_eq!(receive.read_to_end(2 << 20).await.unwrap().len(), 1 << 20);
+        connection.close(0u32.into(), b"done");
+        logged.await.unwrap();
+
+        let log = String::from_utf8(lock(&captured.0).clone()).unwrap();
+        let line = log.lines().find(|line| line.contains("on the wire, at its end")).unwrap_or_else(|| panic!("{log}"));
+        let sent: u64 = line.split("udp_sent=").nth(1).and_then(|rest| rest.split(' ').next()).unwrap().parse().unwrap();
+        assert!(sent >= 1 << 20, "{line}");
+        assert!(line.contains("lost=") && line.contains("spurious") && line.contains("alpn=row129"), "{line}");
+        client.close().await;
+        server.close().await;
+    }
 
     #[test]
     fn a_sandbox_chooses_the_machine_name_shown() {
@@ -2467,6 +2981,66 @@ mod tests {
             "not signed in: as before"
         );
         assert!(devices.is_empty());
+    }
+
+    #[test]
+    fn a_known_account_device_is_told_to_sign_its_claktory_in_again_not_to_pair_again() {
+        let now = 1_000;
+        let mut devices = vec![Device {
+            id: "mac".into(),
+            token_sha256: token_hash("A0"),
+            endpoint_id: "k".into(),
+            discovered: true,
+            ..Device::default()
+        }];
+        // Signed out (after a disk failure, friend bug #38): a new code
+        // would pair it twice.
+        let signed_out = Some(Err(refusal(crate::account::AssertionRefusal::NotSignedIn)));
+        let turned = admit(&mut devices, &knock("", "A1", true), &tunnel("k"), None, signed_out.clone(), now);
+        // Not Unauthorized: that says it was removed, and the app wipes
+        // what it hadn't sent (#446).
+        assert!(matches!(turned, Admission::Turned(v1::ErrorCode::SignInRequired, reason) if reason == SIGNED_OUT));
+        // A device it doesn't know still hears how to be added, as one
+        // not paired (Unauthorized).
+        let turned = admit(&mut devices, &knock("", "A1", true), &tunnel("other"), None, signed_out, now);
+        assert!(matches!(turned, Admission::Turned(v1::ErrorCode::Unauthorized, reason) if reason.contains("with a code")));
+        // Signed in, an assertion that ran out is still the device's to renew.
+        let expired = Some(Err(refusal(crate::account::AssertionRefusal::Expired)));
+        let turned = admit(&mut devices, &knock("", "A1", true), &tunnel("k"), Some(&owner(1)), expired, now);
+        assert!(matches!(turned, Admission::Turned(v1::ErrorCode::SignInRequired, _)));
+    }
+
+    #[test]
+    fn a_device_paired_again_with_its_key_replaces_its_earlier_pairing_once_allowed() {
+        let root = std::env::temp_dir().join(format!("factoryd-pair-again-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = Home::new(root.clone());
+        let bound = |name: &str, key: &str| {
+            let (_, device) = pair(&home, name).expect("paired");
+            let mut saved = devices(&home).expect("devices");
+            let at = saved.iter().position(|known| known.id == device.id).expect("there");
+            saved[at].pending_endpoint_id = key.into();
+            save_devices(&home, &saved).expect("save");
+            device.id
+        };
+        let first = bound("MacBook", "k");
+        approve(&home, &first).expect("allowed");
+        let other = bound("iPhone", "p");
+        approve(&home, &other).expect("allowed");
+        // The same key with a new code waits, the earlier pairing kept…
+        let again = bound("MacBook", "k");
+        let ids = |home: &Home| devices(home).expect("devices").into_iter().map(|device| device.id).collect::<Vec<_>>();
+        assert_eq!(ids(&home), [first.clone(), other.clone(), again.clone()]);
+        // …and turned away, nothing of it is undone.
+        deny(&home, &again).expect("denied");
+        assert_eq!(ids(&home), [first.clone(), other.clone()]);
+        // Allowed, it's the one pairing of that key.
+        let again = bound("MacBook", "k");
+        let (allowed, replaced) = settle(&home, &again, None).expect("allowed");
+        assert_eq!(replaced.iter().map(|device| device.id.as_str()).collect::<Vec<_>>(), [first.as_str()]);
+        assert_eq!((allowed.id.as_str(), allowed.endpoint_id.as_str()), (again.as_str(), "k"));
+        assert_eq!(ids(&home), [other, again]);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -78,7 +78,8 @@ Workspace _workspace({
 );
 
 /// Done on step [at] (1-based), as the backend then has it: the entry at
-/// its next step, and the Workspace sent again (Kai told of it).
+/// its next step, and the Workspace sent again with Kai changed (told of it,
+/// it starts or stops working).
 Future<void> _done(WidgetTester tester, Harness harness, int at) async {
   await tester.ensureVisible(find.text('Step $at of 7'));
   // The card's own Done, its primary button (not the page's).
@@ -91,18 +92,74 @@ Future<void> _done(WidgetTester tester, Harness harness, int at) async {
   final answer = harness.last.answerAsk;
   expect((answer.agentId, answer.seq.toInt(), answer.step), ('kai', 9, at - 1));
   harness.backend.entriesById['kai/9'] = _procedure(at);
+  final kai = harness.backend.workspace.workspace.agents.firstWhere(
+    (agent) => agent.id == 'kai',
+  );
   await harness.apply(
     tester,
     _workspace(
       selected: harness.backend.workspace.workspace.selectedAgentId,
       waiting: at < _steps.length,
-      working: at.isOdd,
+      working: kai.status != AgentStatus.AGENT_STATUS_WORKING,
     ),
   );
   await settle(tester);
 }
 
+/// How many times Kai's procedure was fetched so far.
+int _fetches(Harness harness) => harness.backend.sent
+    .where(
+      (message) =>
+          message.hasLoadEntries() &&
+          message.loadEntries.agentId == 'kai' &&
+          message.loadEntries.fromSeq.toInt() == 9,
+    )
+    .length;
+
 void main() {
+  // Polpo's needs-you-refetch.md: every waiting procedure was fetched again
+  // on every change to the Workspace, several a second on a busy Claktory.
+  testWidgets('a procedure is fetched again only once its agent changes', (
+    tester,
+  ) async {
+    final harness = Harness(_workspace());
+    harness.backend.entriesById['kai/9'] = _procedure(5);
+    await harness.show(tester);
+    await settle(tester);
+    harness.page.value = AppPage.inbox;
+    await settle(tester);
+    await settle(tester);
+    await tester.tap(find.text('Allow the helper · Step 6 of 7').first);
+    await settle(tester);
+    expect(find.text('Step 6 of 7'), findsOneWidget);
+    final fetched = _fetches(harness);
+
+    // June works, again and again: nothing of Kai's to fetch.
+    for (var i = 0; i < 5; i++) {
+      final workspace = _workspace();
+      workspace.agents.first
+        ..status = i.isEven
+            ? AgentStatus.AGENT_STATUS_WORKING
+            : AgentStatus.AGENT_STATUS_IDLE
+        ..contextTokens = Int64(1000 * i);
+      await harness.apply(tester, workspace);
+      await settle(tester);
+    }
+    expect(_fetches(harness), fetched);
+
+    // Kai told of a step answered on the phone: fetched once, its next step.
+    harness.backend.entriesById['kai/9'] = _procedure(6);
+    await harness.apply(tester, _workspace(working: true));
+    await settle(tester);
+    expect(_fetches(harness), fetched + 1);
+    expect(find.text('Step 7 of 7'), findsOneWidget);
+
+    // The same Workspace again: nothing more.
+    await harness.apply(tester, _workspace(working: true));
+    await settle(tester);
+    expect(_fetches(harness), fetched + 1);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
   testWidgets("on the Mac's Needs you page, Done shows the next step", (
     tester,
   ) async {

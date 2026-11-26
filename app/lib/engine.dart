@@ -226,7 +226,7 @@ class _WhenAppQuitsStepState extends State<WhenAppQuitsStep> {
           choice(stopAgentsLabel, QuitMode.QUIT_MODE_STOP),
           const SizedBox(height: Space.m),
           Text(
-            'You can change this anytime in Settings → General.',
+            'You can change this at any time in Settings → General.',
             style: type.caption.copyWith(color: palette.textFaint),
           ),
           if (_error case final error?) ...[

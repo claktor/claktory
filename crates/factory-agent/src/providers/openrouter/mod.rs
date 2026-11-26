@@ -594,6 +594,33 @@ impl Parser {
     }
 }
 
+/// The fewest completion tokens worth asking for again when OpenRouter
+/// can't afford a request: below it a reply with tool calls or thinking
+/// would be cut short.
+const FEWEST_TOKENS: u64 = 2048;
+
+/// What to ask for instead of `max_tokens` when OpenRouter said the key
+/// can afford only `affordable` (a little under it, as the input's estimate
+/// moves), or didn't say (a quarter); None when that's too few to be worth
+/// a try, or no fewer.
+fn fewer_tokens(max_tokens: u64, affordable: Option<u64>) -> Option<u64> {
+    let fewer = match affordable {
+        Some(affordable) => affordable / 10 * 9,
+        None => max_tokens / 4,
+    };
+    (FEWEST_TOKENS..max_tokens).contains(&fewer).then_some(fewer)
+}
+
+/// Claktory's words before OpenRouter's when a request costs more than the
+/// key may spend on it: the key isn't out of credit, so other models and
+/// agents carry on.
+fn unaffordable_said(model: &Model) -> String {
+    format!(
+        "OpenRouter turned this request down as costing more than the key may spend on it at once: {} is priced high for a conversation this long. The key still has credit, so cheaper models keep working. Add credit at OpenRouter, or choose a cheaper model.",
+        if model.name.is_empty() { &model.id } else { &model.name }
+    )
+}
+
 fn completion_error(error: ProviderError) -> String {
     let text = error.format(None);
     match error.raw_metadata {
@@ -625,27 +652,41 @@ async fn request(
     sink: &EventSink,
 ) -> Result<(), String> {
     let compat = compat(model);
-    let params = build_params(model, context, &compat, max_tokens, effort)?;
     let mut headers = vec![user_agent_header()];
     let model_headers = model_headers(model);
     headers = merge_headers(&headers, &model_headers);
     headers = merge_headers(&headers, &options.headers);
     let key = options.api_key.clone().unwrap_or_else(|| "unused".into());
-    let mut builder = client().post(format!("{}/chat/completions", model.base_url.trim_end_matches('/')));
-    for (name, value) in merge_headers(&[("Authorization".to_owned(), format!("Bearer {key}"))], &headers) {
-        builder = builder.header(name, value);
-    }
-    builder = builder.header("Content-Type", "application/json").header("Accept", "application/json").body(params.to_string());
-    let response = send_request(builder, options).await?;
-    let status = response.status().as_u16();
-    if !(200..300).contains(&status) {
-        let retry_after_ms = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .map(|seconds| seconds * 1000);
+    let mut max_tokens = max_tokens;
+    let mut lowered = false;
+    let response = loop {
+        let params = build_params(model, context, &compat, max_tokens, effort)?;
+        let mut builder = client().post(format!("{}/chat/completions", model.base_url.trim_end_matches('/')));
+        for (name, value) in merge_headers(&[("Authorization".to_owned(), format!("Bearer {key}"))], &headers) {
+            builder = builder.header(name, value);
+        }
+        builder = builder.header("Content-Type", "application/json").header("Accept", "application/json").body(params.to_string());
+        let response = send_request(builder, options).await?;
+        let status = response.status().as_u16();
+        if (200..300).contains(&status) {
+            break response;
+        }
+        let retry_after_ms = crate::accounts::retry_after_header(response.headers());
+        let retry_after = response.headers().clone();
         let body = response_text(response).await;
+        // This request costs more than the key may spend on it (friend bug
+        // #42): asked once more for as many tokens as it can afford; still
+        // too much, an error of its own, the account untouched.
+        if let Some(affordable) = crate::accounts::unaffordable(status, &body) {
+            if !lowered && let Some(fewer) = fewer_tokens(max_tokens, affordable) {
+                tracing::info!(model = %model.id, from = max_tokens, to = fewer, "OpenRouter can't afford the request's max_tokens; asking for fewer");
+                max_tokens = fewer;
+                lowered = true;
+                continue;
+            }
+            return Err(format!("{} {}", unaffordable_said(model), completion_error(status_error(status, &body))));
+        }
+        crate::accounts::mark_retry_after(&mut parser.output, &retry_after);
         // A spending cap on the key: skipped until it resets, as a
         // subscription at its limit is; one that never does, as out of credit.
         if let Some(resets_at) = crate::accounts::spending_limit(status, &body, retry_after_ms) {
@@ -659,7 +700,7 @@ async fn request(
             crate::accounts::mark_refused(&mut parser.output, &crate::accounts::Refused::default());
         }
         return Err(completion_error(status_error(status, &body)));
-    }
+    };
     sink.push(StreamEvent::Start { partial: parser.output.clone() });
     let outcome = read_sdk_stream(response, &options.cancel, |chunk| {
         parser.handle(&chunk, model, sink);

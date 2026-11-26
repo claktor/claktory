@@ -9,6 +9,10 @@
 //! then both sides pass the bytes as they are, or `no <sentence>\n` and ends
 //! the stream (nothing listens there, a port of Claktory's own, a device
 //! that isn't paired).
+//!
+//! A website a pipe's peer shares, opened here (#503), is forwarded the same
+//! way from a port of this device's own ([forward_to]): the share's port on
+//! the backend's machine is often one this device uses itself (3000, say).
 
 use std::{
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -77,10 +81,17 @@ impl Drop for Forward {
     }
 }
 
-/// Starts forwarding [port] to the backend's machine. The forwarding
-/// connection is dialled first, so a backend from before it fails here.
+/// Starts forwarding [port] to the same port on the backend's machine. The
+/// forwarding connection is dialled first, so a backend from before it
+/// fails here.
 pub async fn forward(tunnel: &Tunnel, port: u16) -> Result<Forward, ForwardingFailure> {
-    if port == 0 {
+    forward_to(tunnel, port, port).await
+}
+
+/// Starts forwarding this device's [port] to [target] on the backend's
+/// machine.
+pub async fn forward_to(tunnel: &Tunnel, port: u16, target: u16) -> Result<Forward, ForwardingFailure> {
+    if port == 0 || target == 0 {
         return Err(ForwardingFailure::Failed("Port 0 can't be forwarded.".to_owned()));
     }
     let mut listeners = Vec::new();
@@ -104,7 +115,7 @@ pub async fn forward(tunnel: &Tunnel, port: u16) -> Result<Forward, ForwardingFa
             tokio::spawn(async move {
                 while let Ok((socket, _)) = listener.accept().await {
                     let _ = socket.set_nodelay(true);
-                    tokio::spawn(carry(socket, port, tunnel.clone(), status.clone()));
+                    tokio::spawn(carry(socket, target, tunnel.clone(), status.clone()));
                 }
             })
         })
@@ -284,6 +295,33 @@ mod tests {
         forward.stop();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         TcpListener::bind(("127.0.0.1", port)).await.expect("free after stop");
+        tunnel.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_port_of_its_own_reaches_another_there() {
+        // The backend's test double connects every stream to `target`; what
+        // it was asked for is the device's word, checked by the backend's
+        // own tests. Here: the device listens on a port other than the one
+        // it names, and the line says the one it names.
+        let target = callback_server().await;
+        let backend = forwarding_backend(target).await;
+        let tunnel = Tunnel::open(device().await, backend.addr()).await.unwrap();
+        let port = free_port().await;
+        let forward = forward_to(&tunnel, port, 1).await.expect("forwarding");
+        assert_eq!(forward.port(), port);
+        let _ = TcpStream::connect(("127.0.0.1", port)).await;
+        for _ in 0..100 {
+            if !forward.status().last_error.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(forward.status().last_error, "Port 1 is Claktory's own.", "it named port 1 there");
+        let other = free_port().await;
+        let forward = forward_to(&tunnel, other, target).await.expect("forwarding");
+        assert_eq!(ask(other, b"GET / HTTP/1.1\r\n\r\n").await, b"got: GET / HTTP/1.1\r\n\r\n");
+        assert_eq!(forward.status().connections, 1);
         tunnel.close().await;
     }
 

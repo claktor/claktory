@@ -6,6 +6,7 @@ import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
 import 'package:protobuf/protobuf.dart';
 
+import 'android/background_connection.dart';
 import 'annotations.dart' show ThreadStore;
 import 'app_views/transport.dart';
 import 'app_update.dart';
@@ -22,7 +23,9 @@ import 'protocol/factory/v1/factory.pb.dart';
 import 'highlights.dart';
 import 'network.dart';
 import 'outbox.dart';
-import 'voice_keep.dart' show KeptKind, KeptVoices, keptClaktoryKey;
+import 'viewers/file_cache.dart' show FileCache;
+import 'voice_keep.dart'
+    show KeptKind, KeptVoices, forgetKeptVoices, keptClaktoryKey;
 import 'paced.dart';
 import 'pairing.dart';
 import 'state.dart';
@@ -90,6 +93,11 @@ Future<RemoteFactory?> readLocalPairing() async {
 
 const _minRetryDelay = Duration(milliseconds: 250);
 const _maxRetryDelay = Duration(seconds: 5);
+
+/// The longest a Claktory that isn't on screen waits between tries while
+/// it can't connect ([Backend.onScreen], #454): each try at one that isn't
+/// there costs a burst of packets, ~80 KB a minute at [_maxRetryDelay].
+const _awayRetryMost = Duration(minutes: 15);
 
 /// The private tunnel couldn't even start on this device.
 class TunnelOpenFailure implements Exception {
@@ -171,6 +179,44 @@ class Backend implements AppViewTransport {
        ) {
     // Before the app first leaves the screen, so its grace is heard.
     BackgroundGrace.watch();
+    tunnel.addListener(_keepFailure);
+    reconnecting.addListener(_keepFailure);
+  }
+
+  /// The failure it last said it can't connect for, kept through the tries
+  /// after it until one connects (Zucchero's row 475, #37): each try's
+  /// tunnel starts its status afresh, and a reconnect made from scratch is
+  /// quiet, so what it knows would show for a moment every half minute and
+  /// "Reconnecting…" the rest of the time. Null while connected, before
+  /// it first said so, and once a reason to try afresh makes it stale (back
+  /// from the background, the network moved, the person asked).
+  final lastFailure = ValueNotifier<TunnelStatus?>(null);
+
+  /// [lastFailure] as it was when a reason to try afresh set it aside:
+  /// once the quiet tries after it fail too and the tunnel has no failure
+  /// of its own yet, it shows again at once, rather than "Connecting…"
+  /// until the tunnel's own dial gives up, half a minute and more (Bruno's
+  /// row 480). Gone once connected, or connecting elsewhere.
+  TunnelStatus? _setAside;
+
+  /// Sets [lastFailure] aside: a reason to try afresh.
+  void _freshFailure() {
+    _setAside = lastFailure.value ?? _setAside;
+    lastFailure.value = null;
+  }
+
+  void _keepFailure() {
+    if (_target == null || connected.value || reconnecting.value) return;
+    final status = tunnel.value;
+    if (status == null || status.failure == TunnelFailure.none) {
+      final before = _setAside;
+      if (before == null || lastFailure.value != null) return;
+      lastFailure.value = before;
+      _setAside = null;
+      return;
+    }
+    _setAside = null;
+    lastFailure.value = status;
   }
 
   final WorkspaceStore workspace;
@@ -275,6 +321,22 @@ class Backend implements AppViewTransport {
   /// When the backend last welcomed this connection; null while it's down.
   final connectedSince = ValueNotifier<DateTime?>(null);
 
+  /// When this app was last connected to it, since it started: the moment
+  /// its last connection dropped; null while connected, or never this
+  /// run. Kept in memory only (friend bug #37).
+  final lastConnected = ValueNotifier<DateTime?>(null);
+
+  /// When it last checked in with the person's Claktory account (its
+  /// service's last_contact_ms), as the account's list last said; null
+  /// when it isn't on the account, or the list isn't read (friend bug
+  /// #37). Set by whoever reads the list ([Claktories]).
+  final checkedIn = ValueNotifier<DateTime?>(null);
+
+  /// Since when this device's tunnel can't reach its relay, as first seen
+  /// so, across the tunnels opened meanwhile; null while it can (friend
+  /// bug #37).
+  final relayDownSince = ValueNotifier<DateTime?>(null);
+
   /// True while it reconnects after the app came back from the background,
   /// the network moved or a connection that was up dropped: what shows
   /// stays, and nothing says it can't connect. It lasts at least
@@ -337,7 +399,13 @@ class Backend implements AppViewTransport {
   }
 
   void _endQuiet() {
-    if (_quietTimeUp && _quietTried && !_moving) reconnecting.value = false;
+    // What it knew before shows again once the quiet time is up, without
+    // waiting for a try that may take half a minute to fail: a glance at
+    // Control Center made it say "Reconnecting…" for up to a minute
+    // (Zucchero's row 486).
+    if (_quietTimeUp && (_quietTried || _setAside != null) && !_moving) {
+      reconnecting.value = false;
+    }
   }
 
   /// This Claktory's move to another computer, as last seen (Workspace
@@ -346,6 +414,22 @@ class Backend implements AppViewTransport {
   /// answers no one. Null with no move, or before this Claktory's
   /// Workspace arrives.
   final move = ValueNotifier<Move?>(null);
+
+  /// The relays its Claktory uses now, as its Workspace says (#450:
+  /// Claktory's own while it's signed in, n0's while it isn't): the tunnel
+  /// homes on them from its next endpoint on, and dials through them. Its
+  /// pairing code's stay as they were kept; this is for this run only.
+  void _followRelays(Workspace workspace) {
+    if (!workspace.hasRemote()) return;
+    final relays = workspace.remote.relays;
+    if (relays.isEmpty) return;
+    // Kept for the tunnels opened after this one, while it's away.
+    _relaysSaid = List.unmodifiable(relays);
+    final tunnel = _tunnel;
+    if (tunnel == null || listEquals(relays, _relaysTold)) return;
+    _relaysTold = List.unmodifiable(relays);
+    tunnel.setRelays(relays);
+  }
 
   void _sawMove(Workspace workspace) {
     final next = workspace.hasMove() ? workspace.move : null;
@@ -493,6 +577,43 @@ class Backend implements AppViewTransport {
     ),
   );
 
+  /// What the home sends this connection about the person's direct
+  /// messages (#451): DmFollow's pages, then each new entry and delivery as
+  /// it comes, and DmSend's answers too.
+  final _dmFeeds = StreamController<DmFeed>.broadcast();
+  Stream<DmFeed> get dmFeeds => _dmFeeds.stream;
+
+  /// The home's state as it last said (DmHome): the answer to DmRoutes,
+  /// and sent again to a following connection when it changes.
+  final _dmHomes = StreamController<DmHome>.broadcast();
+  Stream<DmHome> get dmHomes => _dmHomes.stream;
+
+  /// Hands an MLS message to the home (DmSend): its receipt.
+  Future<DmReceipt> dmSend(DmSend send) async {
+    final reply = await _call(ClientMessage(dmSend: send));
+    if (!reply.hasDmFeed() || !reply.dmFeed.hasSent()) {
+      throw const RequestFailure('Claktory sent no receipt.');
+    }
+    return reply.dmFeed.sent;
+  }
+
+  /// Follows this device's groups from [DmFollow.cursors] (DmFollow): the
+  /// pages, and what comes after, arrive on [dmFeeds].
+  Future<void> dmFollow(DmFollow follow) =>
+      _call(ClientMessage(dmFollow: follow));
+
+  /// Says this device kept its groups' entries through these seqs (DmAck).
+  Future<void> dmAck(DmAck ack) => _request(ClientMessage(dmAck: ack));
+
+  /// Gives the home its routing table (DmRoutes): the home's state.
+  Future<DmHome> dmRoutes(DmRoutes routes) async {
+    final reply = await _call(ClientMessage(dmRoutes: routes));
+    if (!reply.hasDmHome()) {
+      throw const RequestFailure('Claktory sent no state.');
+    }
+    return reply.dmHome;
+  }
+
   /// Turns advanced diagnostics on or off, or deletes what they kept
   /// (SetDiagnostics).
   Future<void> setDiagnostics(SetDiagnostics ask) =>
@@ -585,6 +706,7 @@ class Backend implements AppViewTransport {
   /// network.
   void networkMoved() {
     if (_closed ||
+        _suspended ||
         _target == null ||
         refused.value != null ||
         signInRequired.value != null) {
@@ -592,13 +714,120 @@ class Backend implements AppViewTransport {
     }
     _log('the network moved: connecting afresh');
     _prefetchAssertion();
+    // Not on screen, it tries at once too, whatever its backoff.
+    _tryNow = true;
     _restart(ConnectionReason.network);
+  }
+
+  /// Whether this is the Claktory on screen, the one the window shows. On
+  /// a phone or an iPad only it tries again every few seconds while it
+  /// can't connect; the others, once their first quick tries fail, wait
+  /// twice as long each time, up to [awayRetryMost] (#454), and try again
+  /// at once when the network moves or the person opens them. True unless
+  /// told otherwise: a Mac keeps every Claktory at the quick pace.
+  bool get onScreen => _onScreen;
+  var _onScreen = true;
+  set onScreen(bool value) {
+    if (value == _onScreen) return;
+    _onScreen = value;
+    if (!value || _closed) return;
+    // Opened: tried again at once, as quickly as before.
+    final away = _awayDelay;
+    _awayDelay = Duration.zero;
+    if (!connected.value && away > Duration.zero) {
+      _log('on screen: trying again now');
+      check();
+    }
+  }
+
+  /// How long a Claktory not on screen waits between tries now; zero
+  /// while it's connected, on screen, or in its first quick tries.
+  var _awayDelay = Duration.zero;
+
+  /// The longest a Claktory not on screen waits between tries.
+  Duration awayRetryMost = _awayRetryMost;
+
+  /// The longest a Claktory on screen waits between tries.
+  @visibleForTesting
+  Duration retryMost = _maxRetryDelay;
+
+  /// The next try goes at once even off screen: the network moved, or the
+  /// person asked.
+  var _tryNow = false;
+
+  /// Whether this one is backing off ([onScreen]): not on screen, and its
+  /// quick tries have failed.
+  bool get _backingOff => !_onScreen && _awayDelay > Duration.zero;
+
+  /// Not on screen, the wait after a failed try ([since]) goes on to its
+  /// backoff, through wakes that don't call for a try (back in front, a
+  /// check after sleep), and through the background, where timers don't
+  /// run: back, a try already due goes at once.
+  Future<void> _awayWait(DateTime since) async {
+    while (!_closed && _backingOff && !_tryNow) {
+      final left = since.add(_awayDelay).difference(DateTime.now());
+      if (left <= Duration.zero) break;
+      if (_hiddenAt != null || _suspended) {
+        await _wake.future;
+        continue;
+      }
+      final due = Completer<void>();
+      final timer = Timer(left, due.complete);
+      await Future.any([due.future, _wake.future]);
+      timer.cancel();
+    }
+    _tryNow = false;
+  }
+
+  /// Whether the connection is closed while the app is in the background
+  /// ([suspend]), until it's back.
+  var _suspended = false;
+
+  /// Closes the connection while the app is in the background, tunnel and
+  /// all, so nothing goes out until it's back ([resumed] makes it afresh):
+  /// for Android, which keeps the app running there (#454). Only while
+  /// hidden; a dial that ends after this is closed at once.
+  void suspend() {
+    if (_closed || _suspended || _hiddenAt == null) return;
+    _suspended = true;
+    _log('in the background: closing the connection until the app is back');
+    _tunnelBack?.cancel();
+    _tunnelBack = null;
+    _backWatch?.cancel();
+    _backWatch = null;
+    final abandon = _abandon;
+    _abandon = Completer<void>();
+    abandon.complete();
+    _redialed = _socket;
+    unawaited(_socket?.close());
+    _freshTunnel();
+    _wakeUp();
+  }
+
+  /// Work the person waits on with this Claktory (an upload, a recording's
+  /// words), while any is under way ([holding]): an app in the background
+  /// keeps its connection for it.
+  ValueListenable<bool> get holds => _holds;
+  final _holds = ValueNotifier<bool>(false);
+  var _holding = 0;
+
+  /// Runs [work], counted in [holds] until it ends, however it ends.
+  Future<T> holding<T>(Future<T> Function() work) async {
+    _holding++;
+    _holds.value = true;
+    try {
+      return await work();
+    } finally {
+      if (--_holding == 0) _holds.value = false;
+    }
   }
 
   StreamSubscription<NetworkPath>? _network;
 
   /// When the app went to the background, while it's there.
   DateTime? _hiddenAt;
+
+  AndroidBackgroundConnection? _android;
 
   /// The app went to the background: iOS suspends it soon, and the
   /// connection dies without saying so.
@@ -607,6 +836,7 @@ class Backend implements AppViewTransport {
     _hiddenAt = DateTime.now();
     _log('to the background');
     _note(ConnectionKind.lifecycle, {ConnectionKey.app: AppLife.background});
+    _android?.hidden();
   }
 
   /// How long the tunnel has, once told to reconnect (back from the
@@ -623,9 +853,12 @@ class Backend implements AppViewTransport {
   /// it's only checked: no new endpoint, nor the whole sync, unless the
   /// check goes unanswered.
   void resumed({DateTime? now}) {
+    _android?.resumed();
     final hiddenAt = _hiddenAt;
     _hiddenAt = null;
     _leftInBackground = false;
+    final suspended = _suspended;
+    _suspended = false;
     // Its assertion may have lapsed meanwhile: on its way before it's
     // needed, whether or not the connection is made afresh.
     _prefetchAssertion();
@@ -641,6 +874,16 @@ class Backend implements AppViewTransport {
     }
     if (_qaStallResume && away >= const Duration(seconds: 3)) {
       _qaStallNext = true;
+    }
+    // One that can't connect and isn't on screen keeps to its backoff,
+    // counting the time away: a try already due goes now (#454).
+    if (_backingOff && !connected.value) {
+      _wakeUp();
+      return;
+    }
+    if (suspended) {
+      _restart(ConnectionReason.resume);
+      return;
     }
     if (away < const Duration(seconds: 3)) {
       // Not connected, whatever it last said is stale now: it tries again.
@@ -659,6 +902,11 @@ class Backend implements AppViewTransport {
   /// likely dead (the tunnel's too), and the backend's snapshot brings what
   /// shows up to date.
   void _restart(ConnectionReason reason) {
+    // Back, or on another network: what failed before says nothing now.
+    if (reason == ConnectionReason.resume ||
+        reason == ConnectionReason.network) {
+      _freshFailure();
+    }
     _note(ConnectionKind.reconnect, {ConnectionKey.reason: reason});
     _reconnectQuietly();
     _reconnectTunnel(again: true);
@@ -694,6 +942,7 @@ class Backend implements AppViewTransport {
       if (_closed ||
           connected.value ||
           _hiddenAt != null ||
+          _backingOff ||
           refused.value != null ||
           signInRequired.value != null) {
         return;
@@ -762,6 +1011,7 @@ class Backend implements AppViewTransport {
   }) {
     if (_closed) return;
     _log('starting the connection from scratch: $why');
+    _tryNow = true;
     _note(ConnectionKind.reconnect, {ConnectionKey.reason: reason});
     _reconnectQuietly();
     final abandon = _abandon;
@@ -802,6 +1052,7 @@ class Backend implements AppViewTransport {
       if (_closed ||
           connected.value ||
           _hiddenAt != null ||
+          _backingOff ||
           !identical(_tunnel, open)) {
         return;
       }
@@ -856,11 +1107,18 @@ class Backend implements AppViewTransport {
   /// before (the Mac asleep, the app away) says nothing about now, so
   /// "can't connect" waits for a try made since to fail.
   void check() {
-    if (_closed || refused.value != null || signInRequired.value != null) {
+    if (_closed ||
+        _suspended ||
+        refused.value != null ||
+        signInRequired.value != null) {
       return;
     }
     final socket = _socket;
+    // Backing off, it keeps to its backoff (#454).
+    if (_backingOff && !connected.value) return;
     if (socket == null || !connected.value) {
+      // A failure from before (asleep, away) says nothing about now.
+      _freshFailure();
       _reconnectQuietly();
       _reconnectTunnel();
       _retryDelay = _minRetryDelay;
@@ -1025,6 +1283,14 @@ class Backend implements AppViewTransport {
 
   Tunnel? _tunnel;
 
+  /// The relays [_tunnel] was last told its Claktory uses.
+  List<String> _relaysTold = const [];
+
+  /// The relays its Claktory last said it uses ([_followRelays]): a
+  /// tunnel opened afresh (made from scratch while it can't connect, say)
+  /// homes on them rather than the pairing code's, which may be gone.
+  List<String> _relaysSaid = const [];
+
   /// Whether [_tunnel]'s port on this device has let a connection in: only
   /// then does its going quiet mean the system took it back (opened afresh
   /// at once), rather than a tunnel that can't reach its Claktory (shown).
@@ -1045,12 +1311,13 @@ class Backend implements AppViewTransport {
   late final forwards = LoopbackForwards(
     remote: () => target != null,
     forward: forwardPort,
+    forwardTo: (port, target) => forwardPort(port, target: target),
   );
 
   /// Listens on [port] of this device's loopback and carries each
   /// connection through the tunnel to the same port on the backend's
-  /// machine (throws [ForwardFailure]).
-  Future<PortForward> forwardPort(int port) async {
+  /// machine, or to [target] there (throws [ForwardFailure]).
+  Future<PortForward> forwardPort(int port, {int? target}) async {
     final open = _tunnel;
     if (open == null) {
       throw const ForwardFailure(
@@ -1058,7 +1325,25 @@ class Backend implements AppViewTransport {
         'Not connected to it right now.',
       );
     }
-    return open.forwardPort(port);
+    return open.forwardPort(port, target: target);
+  }
+
+  /// The websites pipes' peers share that this device forwards (#503): on
+  /// a computer showing a Claktory on another machine, each one opened
+  /// there (listening), live and not hidden, for as long as that lasts;
+  /// none on a phone or tablet, which can't open them yet.
+  void _keepShares(Workspace workspace) {
+    final wanted = <String, int>{};
+    if (target != null && !cantOpenSharesHere) {
+      for (final share in workspace.pipeShares) {
+        if (share.mine || !share.live || share.hidden || !share.listening) {
+          continue;
+        }
+        final port = Uri.tryParse(share.address)?.port ?? 0;
+        if (port > 0) wanted[share.id] = port;
+      }
+    }
+    unawaited(forwards.keepShares(wanted));
   }
 
   Timer? _tunnelWatch;
@@ -1078,6 +1363,7 @@ class Backend implements AppViewTransport {
   static const _transferPause = Duration(seconds: 60);
 
   Future<void> run() async {
+    if (Platform.isAndroid) _android = AndroidBackgroundConnection(this);
     _watchSleep();
     // Recordings kept on this device from before, sent once connected.
     KeptVoices.of(this);
@@ -1090,6 +1376,12 @@ class Backend implements AppViewTransport {
     while (!_closed) {
       if (refused.value != null || signInRequired.value != null) {
         reconnecting.value = false;
+        await _wake.future;
+        continue;
+      }
+      // In the background with its connection closed: nothing until the
+      // app is back.
+      if (_suspended) {
         await _wake.future;
         continue;
       }
@@ -1411,14 +1703,31 @@ class Backend implements AppViewTransport {
       if (target != _target || abandoned) continue;
       // In the background, nothing tries again until the app is back
       // (resumed wakes it): no new connection, nor endpoint, meanwhile.
+      // Not on screen, its quick tries done, it backs off (#454).
+      if (!_onScreen &&
+          !_welcomed &&
+          (_awayDelay > Duration.zero || _retryDelay >= retryMost)) {
+        final next = _awayDelay * 2;
+        _awayDelay = next < retryMost * 2
+            ? retryMost * 2
+            : next > awayRetryMost
+            ? awayRetryMost
+            : next;
+        _log('not on screen: next try in ${_awayDelay.inSeconds}s at most');
+      }
+      final failedAt = DateTime.now();
       if (_hiddenAt != null) {
         _log('in the background: trying again once the app is back');
         await _wake.future;
       } else {
-        await Future.any([Future<void>.delayed(_retryDelay), _wake.future]);
+        final due = Completer<void>();
+        final timer = Timer(_retryDelay, due.complete);
+        await Future.any([due.future, _wake.future]);
+        timer.cancel();
       }
+      await _awayWait(failedAt);
       final doubled = _retryDelay * 2;
-      _retryDelay = doubled > _maxRetryDelay ? _maxRetryDelay : doubled;
+      _retryDelay = doubled > retryMost ? retryMost : doubled;
     }
   }
 
@@ -1571,8 +1880,12 @@ class Backend implements AppViewTransport {
   /// old one showed goes at once, so nothing of it shows as the new one's.
   void connectTo(RemoteFactory? target) {
     _target = target;
+    _relaysSaid = const [];
+    lastFailure.value = null;
+    _setAside = null;
     // Decisions made on the last one aren't this one's.
     _whenBack.clear();
+    _selecting = null;
     diagnostics?.select(
       target == null
           ? 'local'
@@ -1642,12 +1955,13 @@ class Backend implements AppViewTransport {
         _runtime.fresh();
       }
     }
+    final relays = _relaysSaid.isNotEmpty ? _relaysSaid : target.relays;
     final Tunnel opened;
     try {
       final opening = _tunnels.open(
         deviceKey: key ?? deviceKey(target),
         endpointId: target.endpointId,
-        relays: target.relays,
+        relays: relays,
         addresses: target.addresses,
       );
       opened = await opening.timeout(
@@ -1688,6 +2002,7 @@ class Backend implements AppViewTransport {
       throw const _NotNow();
     }
     _tunnel = opened;
+    _relaysTold = relays;
     _tunnelTarget = target;
     _tunnelServed = false;
     return opened;
@@ -1775,6 +2090,11 @@ class Backend implements AppViewTransport {
         ConnectionKey.reach: ?_reach(status.reach),
       });
     }
+    if (status.relayConnected) {
+      relayDownSince.value = null;
+    } else if (status.relayTrouble != TunnelRelayTrouble.none) {
+      relayDownSince.value ??= DateTime.now();
+    }
     tunnel.value = status;
   }
 
@@ -1785,6 +2105,9 @@ class Backend implements AppViewTransport {
     _tunnel = null;
     _tunnelTarget = null;
     tunnel.value = null;
+    // relayDownSince stays: the next tunnel's relay, the same one, is
+    // likely still out of reach, and since when is what it says. The
+    // first status with the relay up clears it.
     // Its forwards go with it.
     if (open != null) {
       await forwards.stopAll().timeout(
@@ -1814,6 +2137,7 @@ class Backend implements AppViewTransport {
       return retry();
     }
     _backNext = null;
+    _freshFailure();
     reconnectFromScratch('asked to');
   }
 
@@ -1831,6 +2155,7 @@ class Backend implements AppViewTransport {
   }
 
   Future<void> close() async {
+    _android?.dispose();
     _closed = true;
     _diagnosticsTimer?.cancel();
     _tunnelBack?.cancel();
@@ -1839,6 +2164,7 @@ class Backend implements AppViewTransport {
     account = null;
     unawaited(_notified.close());
     unawaited(_browser.close());
+    unawaited(_historyPushes.close());
     _quiet?.cancel();
     _sleepWatch?.cancel();
     unawaited(_network?.cancel());
@@ -1869,8 +2195,67 @@ class Backend implements AppViewTransport {
   Future<void> deleteAgent(String agentId) =>
       _request(ClientMessage(deleteAgent: DeleteAgent(agentId: agentId)));
 
-  Future<void> selectAgent(String agentId) =>
-      _request(ClientMessage(selectAgent: SelectAgent(agentId: agentId)));
+  /// Shows [agentId] at once, from what this app has (its conversation
+  /// fills in as it arrives), and asks the backend to select it. Cut off by
+  /// the connection, it's asked again once the connection is back, the
+  /// latest choice only, and shown meanwhile: a click while a connection
+  /// died under it was lost, and the view stayed on the agent before
+  /// (Matt's MacBook, Bruno 36927).
+  Future<void> selectAgent(String agentId) async {
+    final shown = workspace.workspace.selectedAgentId;
+    _selecting = agentId;
+    if (shown != agentId && workspace.agent(agentId) != null) {
+      workspace.apply(_withSelection(workspace.workspace.deepCopy()));
+    }
+    try {
+      await _request(ClientMessage(selectAgent: SelectAgent(agentId: agentId)));
+    } on RequestFailure catch (failure) {
+      // It goes again once the connection is back.
+      if (connectionLost(failure) && _selecting == agentId) return;
+      if (_selecting == agentId) {
+        _selecting = null;
+        // Refused: what the backend has selected shows again.
+        if (workspace.workspace.selectedAgentId == agentId) {
+          workspace.apply(
+            workspace.workspace.deepCopy()..selectedAgentId = shown,
+          );
+        }
+      }
+      rethrow;
+    }
+    if (_selecting == agentId) _selecting = null;
+  }
+
+  /// The agent [selectAgent] asked for, until the backend has selected it:
+  /// what's shown, whatever a Workspace from before says.
+  String? _selecting;
+
+  /// [workspace] with the agent being selected shown as selected, if
+  /// it's there.
+  Workspace _withSelection(Workspace workspace) {
+    final selecting = _selecting;
+    if (selecting == null || workspace.selectedAgentId == selecting) {
+      return workspace;
+    }
+    if (!workspace.agents.any((agent) => agent.id == selecting)) {
+      // Gone meanwhile: nothing to select.
+      _selecting = null;
+      return workspace;
+    }
+    return workspace..selectedAgentId = selecting;
+  }
+
+  /// The selection cut off by the connection, asked for again.
+  void _selectAgain() {
+    final selecting = _selecting;
+    if (selecting == null) return;
+    unawaited(
+      selectAgent(selecting).catchError(
+        (Object error) => _log('selection sent again: $error'),
+        test: (error) => error is RequestFailure,
+      ),
+    );
+  }
 
   /// The person opened [paneId] of [agentId]'s layout: it's the newest now,
   /// on every device (its opened time).
@@ -2299,6 +2684,8 @@ class Backend implements AppViewTransport {
     List<Attachment> attachments = const [],
     int? step,
     int? revision,
+    int? talkSeen,
+    bool confirmed = false,
   }) => _request(
     ClientMessage(
       answerAsk: AnswerAsk(
@@ -2316,6 +2703,13 @@ class Backend implements AppViewTransport {
         // this.
         step: step,
         revision: _revision(revision),
+        // How much of the card's talk the person saw (#492): an approval
+        // after a reply they didn't see is refused.
+        talkSeen: talkSeen,
+        // A command card's Execute (#494): the person saw the command and
+        // tapped Execute, and its confirm when it warns. Never sent from
+        // anywhere that doesn't show the command.
+        confirmed: confirmed ? true : null,
       ),
     ),
   );
@@ -2914,6 +3308,56 @@ class Backend implements AppViewTransport {
     return reply.branches;
   }
 
+  /// The whole history of this Claktory's shape (#458): every node and
+  /// edge that ever was, with when, the messages per hour and the
+  /// chapters. Asked again when [historyChanged] moves.
+  Future<HistoryOverview> historyOverview() async {
+    final reply = await _call(
+      ClientMessage(getHistoryOverview: GetHistoryOverview()),
+    );
+    if (!reply.hasHistoryOverview()) {
+      throw const RequestFailure("Couldn't load the history. Try again.");
+    }
+    return reply.historyOverview;
+  }
+
+  /// A page of the history's events after [cursor] (from the start when
+  /// empty), up to [untilMs] when given.
+  Future<HistoryEvents> historyEvents({
+    List<int> cursor = const [],
+    Int64? untilMs,
+    int limit = 0,
+    bool runs = true,
+  }) async {
+    final reply = await _call(
+      ClientMessage(
+        getHistoryEvents: GetHistoryEvents(
+          afterCursor: cursor,
+          untilMs: untilMs,
+          limit: limit,
+          includeRuns: runs,
+        ),
+      ),
+    );
+    if (!reply.hasHistoryEvents()) {
+      throw const RequestFailure("Couldn't load the history. Try again.");
+    }
+    return reply.historyEvents;
+  }
+
+  /// While [on], new events come on [historyPushes] and a changed overview
+  /// moves [historyChanged].
+  Future<void> watchHistory(bool on) =>
+      _request(ClientMessage(watchHistory: WatchHistory(on: on)));
+
+  /// New events while History is watched (WatchHistory).
+  Stream<HistoryEvents> get historyPushes => _historyPushes.stream;
+  final _historyPushes = StreamController<HistoryEvents>.broadcast(sync: true);
+
+  /// The history's version, from the backend's word that its overview
+  /// changed (HistoryChanged).
+  final historyChanged = ValueNotifier<Int64>(Int64.ZERO);
+
   /// Makes [branchId] [agentId]'s conversation; the one it has now is kept
   /// as another version.
   Future<void> switchBranch(String agentId, String branchId) => _request(
@@ -3250,23 +3694,10 @@ class Backend implements AppViewTransport {
   Future<void> setKeepAwake(bool on) =>
       _request(ClientMessage(setKeepAwake: SetKeepAwake(on: on)));
 
-  /// Turns keeping agents working with the lid closed on or off (#371),
-  /// with what macOS says of the helper ([registration], and [error] when
-  /// it failed); turning it on works only from the Mac app on that Mac.
-  Future<void> setLidClosed({
-    required bool on,
-    LidClosedRegistration registration =
-        LidClosedRegistration.LID_CLOSED_REGISTRATION_UNKNOWN,
-    String error = '',
-  }) => _request(
-    ClientMessage(
-      setLidClosed: SetLidClosed(
-        on: on,
-        registration: registration,
-        error: error,
-      ),
-    ),
-  );
+  /// Turns keeping agents working with the lid closed on or off (#371);
+  /// turning it on works only from the Mac app on that Mac.
+  Future<void> setLidClosed({required bool on}) =>
+      _request(ClientMessage(setLidClosed: SetLidClosed(on: on)));
 
   /// An agent asked to show [request]'s screen: the window showing this
   /// Claktory opens it if it can, and the backend hears whether it did.
@@ -3286,6 +3717,12 @@ class Backend implements AppViewTransport {
   /// for this device only (`Settings.zoom`, see zoom.dart).
   Future<void> setZoom(double zoom) =>
       _request(ClientMessage(setZoom: SetZoom(zoom: zoom)));
+
+  /// How much of this Claktory's files this device keeps for its viewers
+  /// ([bytes]; 0 puts back the default, 1 GB): kept for this device only
+  /// (`Settings.file_cache`, see viewers/file_cache.dart).
+  Future<void> setFileCache(int bytes) =>
+      _request(ClientMessage(setFileCache: SetFileCache(bytes: Int64(bytes))));
 
   /// Gives the person's avatar new colors (Workspace.person), the same on
   /// every device: [choice], one of Person.avatar_choices, or else others
@@ -3527,9 +3964,16 @@ class Backend implements AppViewTransport {
 
   /// Accepts who [pipeId]'s other side is now, after a change
   /// (PipePeer.identity_change): pins it, and lets through what was held.
-  Future<void> acceptPipeIdentity(String pipeId) => _request(
-    ClientMessage(acceptPipeIdentity: AcceptPipeIdentity(pipeId: pipeId)),
-  );
+  /// [cardId]: accepted on an agent's card asking for it (#471 G7).
+  Future<void> acceptPipeIdentity(String pipeId, {String cardId = ''}) =>
+      _request(
+        ClientMessage(
+          acceptPipeIdentity: AcceptPipeIdentity(
+            pipeId: pipeId,
+            cardId: cardId,
+          ),
+        ),
+      );
 
   Future<void> setPipeState(String pipeId, PipeAction action) => _request(
     ClientMessage(
@@ -3660,9 +4104,12 @@ class Backend implements AppViewTransport {
   }
 
   /// The person writes in a pipe.
-  Future<void> sendPipeMessage(String pipeId, String text) => _request(
-    ClientMessage(
-      sendPipeMessage: SendPipeMessage(pipeId: pipeId, text: text),
+  /// Held ([holding]) until the pipe takes it: it has no outbox.
+  Future<void> sendPipeMessage(String pipeId, String text) => holding(
+    () => _request(
+      ClientMessage(
+        sendPipeMessage: SendPipeMessage(pipeId: pipeId, text: text),
+      ),
     ),
   );
 
@@ -4170,6 +4617,7 @@ class Backend implements AppViewTransport {
         _backWatch = null;
         _backNext = null;
         _retryDelay = _minRetryDelay;
+        _awayDelay = Duration.zero;
         _quiet?.cancel();
         reconnecting.value = false;
         deviceId = message.welcome.deviceId;
@@ -4183,9 +4631,13 @@ class Backend implements AppViewTransport {
         pairing.value = null;
         movedAway.value = null;
         connectedSince.value = DateTime.now();
+        lastConnected.value = null;
+        lastFailure.value = null;
+        _setAside = null;
         connected.value = true;
         _log('connected to factoryd ${message.welcome.serverVersion}');
         _sendWhenBack();
+        _selectAgain();
         final started = _tryStarted;
         _welcomedAt = DateTime.now();
         _note(ConnectionKind.connected, {
@@ -4214,6 +4666,12 @@ class Backend implements AppViewTransport {
             message.error.code == ErrorCode.ERROR_CODE_UNAUTHORIZED) {
           if (_target != null) {
             // Not (or no longer) a paired device: retrying won't help.
+            // Removed from its Claktory (lost, say), it keeps nothing of
+            // it: the files its viewers kept and its unsent recordings go
+            // first, as forgetting it here does (Fugo 33088).
+            final key = keptClaktoryKey(_target);
+            unawaited(FileCache.forget(key));
+            unawaited(forgetKeptVoices(key));
             refused.value = message.error.message;
           } else if (!connected.value) {
             // This Mac's own, not ready for this app yet (just installed,
@@ -4246,8 +4704,10 @@ class Backend implements AppViewTransport {
       case ServerMessage_Body.workspace:
         _wholeWorkspace = true;
         _workspaceRevision = message.workspaceRevision;
-        workspace.apply(message.workspace);
+        workspace.apply(_withSelection(message.workspace));
         _sawMove(message.workspace);
+        _followRelays(message.workspace);
+        _keepShares(message.workspace);
         _shareDiagnostics(message.workspace.diagnostics.share);
       case ServerMessage_Body.workspacePatch:
         // A patch names the Workspace it changes: the one held, also the one
@@ -4270,8 +4730,10 @@ class Backend implements AppViewTransport {
         }
         _wholeWorkspace = true;
         _workspaceRevision = message.workspaceRevision;
-        workspace.apply(next);
+        workspace.apply(_withSelection(next));
         _sawMove(next);
+        _followRelays(next);
+        _keepShares(next);
         _shareDiagnostics(next.diagnostics.share);
       case ServerMessage_Body.transcript:
         transcript.load(
@@ -4333,6 +4795,31 @@ class Backend implements AppViewTransport {
       case ServerMessage_Body.pipeShareOpened:
       case ServerMessage_Body.pipeSharePort:
         _pending.remove(message.replyTo.toInt())?.complete(message);
+      case ServerMessage_Body.historyOverview:
+        _pending.remove(message.replyTo.toInt())?.complete(message);
+      case ServerMessage_Body.historyEvents:
+        // An answer to historyEvents, or new events while watched.
+        if (message.replyTo != 0) {
+          _pending.remove(message.replyTo.toInt())?.complete(message);
+        } else {
+          _historyPushes.add(message.historyEvents);
+        }
+      case ServerMessage_Body.historyChanged:
+        historyChanged.value = message.historyChanged.historyVersion;
+      case ServerMessage_Body.agentBrowserFrame:
+      case ServerMessage_Body.agentBrowserClipboard:
+      case ServerMessage_Body.agentBrowserViewMoved:
+      case ServerMessage_Body.errandLog:
+      case ServerMessage_Body.timeZones:
+        // Claktory's browser (#435): the live view comes with P5.
+        _pending.remove(message.replyTo.toInt())?.complete(message);
+      case ServerMessage_Body.dmFeed:
+        // DmSend's receipt, DmFollow's pages, or pushed as things come.
+        _pending.remove(message.replyTo.toInt())?.complete(message);
+        _dmFeeds.add(message.dmFeed);
+      case ServerMessage_Body.dmHome:
+        _pending.remove(message.replyTo.toInt())?.complete(message);
+        _dmHomes.add(message.dmHome);
       case ServerMessage_Body.monitorsChanged:
         // The Monitors page asks again while it's on screen.
         monitorsChanged.value++;
@@ -4596,6 +5083,7 @@ class Backend implements AppViewTransport {
     // A connection that was up and dropped is most likely a network change:
     // it comes back without a word, if it can.
     if (connected.value && !_closed) _reconnectQuietly();
+    if (connected.value) lastConnected.value = DateTime.now();
     connectedSince.value = null;
     connected.value = false;
     final pending = _pending.values.toList();

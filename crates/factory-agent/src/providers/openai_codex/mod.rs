@@ -116,7 +116,6 @@ fn base_headers(model: &Model, options: &StreamOptions, account: &str, token: &s
 
 pub struct Request {
     pub body: Value,
-    pub body_json: String,
     pub sse_headers: Vec<(String, String)>,
     pub websocket_headers: Vec<(String, String)>,
     pub session_id: Option<String>,
@@ -167,7 +166,6 @@ pub fn build_request(
         }
     }
     let body = Value::Object(body);
-    let body_json = body.to_string();
     let request_id = session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let mut sse_headers = base_headers(model, options, &account, &token);
     set_header(&mut sse_headers, "OpenAI-Beta", "responses=experimental");
@@ -184,7 +182,7 @@ pub fn build_request(
     set_header(&mut websocket_headers, "OpenAI-Beta", "responses_websockets=2026-02-06");
     set_header(&mut websocket_headers, "x-client-request-id", &request_id);
     set_header(&mut websocket_headers, "session-id", &request_id);
-    Ok(Request { body, body_json, sse_headers, websocket_headers, session_id, account_id: account, request_id })
+    Ok(Request { body, sse_headers, websocket_headers, session_id, account_id: account, request_id })
 }
 
 fn truthy_str(value: &Value) -> Option<&str> {
@@ -341,7 +339,7 @@ async fn sse_request(
     for (name, value) in &request.sse_headers {
         builder = builder.header(name, value);
     }
-    builder = builder.body(request.body_json.clone());
+    builder = builder.body(request.body.to_string());
     let send = async {
         match options.timeout_ms {
             Some(timeout) if timeout > 0 => tokio::time::timeout(Duration::from_millis(timeout), builder.send())
@@ -360,6 +358,7 @@ async fn sse_request(
     };
     let status = response.status();
     if !status.is_success() {
+        crate::accounts::mark_retry_after(&mut parser.output, response.headers());
         let text = response_text(response).await;
         if let Ok(body) = serde_json::from_str::<Value>(&text) {
             mark_if_usage_limit(&mut parser.output, &body["error"]);
@@ -390,6 +389,25 @@ async fn sse_request(
     }
     check_transport_cancelled(options)?;
     parser.finish().map_err(CodexFailure::Protocol)
+}
+
+/// How many bytes `value` is as JSON, without writing it out: a request's
+/// body can be hundreds of MB of images (#454).
+fn json_len(value: &Value) -> usize {
+    struct Counting(usize);
+    impl std::io::Write for Counting {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counting = Counting(0);
+    let _ = serde_json::to_writer(&mut counting, value);
+    counting.0
 }
 
 fn assert_successful(output: &AssistantMessage) -> Result<(), String> {
@@ -498,7 +516,7 @@ async fn run(
                     if aborted || (failure.is_non_transport() && !limit_before_start) {
                         return Err(failure.message().to_owned());
                     }
-                    append_diagnostic(&mut parser.output, &failure, started, request.body_json.len());
+                    append_diagnostic(&mut parser.output, &failure, started, json_len(&request.body));
                     record_websocket_failure(session);
                     if started {
                         return Err(failure.message().to_owned());

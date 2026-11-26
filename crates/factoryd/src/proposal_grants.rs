@@ -121,7 +121,7 @@ pub(crate) fn pipe_agents(change: &PipeChange) -> Vec<String> {
 fn marked(factory: &Factory, agents: &[&String]) -> Result<(), String> {
     match agents.iter().find(|agent| !factory.pipes.tainted(agent).is_empty()) {
         Some(agent) => {
-            let name = factory.lock().config.agent(agent).map_or_else(|| (*agent).clone(), |agent| agent.name.clone());
+            let name = factory.agent_name(agent);
             Err(format!("{name} has read {}, which may hold someone else's instructions", crate::pipes::agents::what_was_read(factory, agent)))
         }
         None => Ok(()),
@@ -349,7 +349,7 @@ pub(crate) fn claim_at(
         .optional()
         .map_err(|error| error.to_string())?;
     let Some((proposer, state, replied, decided, sent_to)) = found else { return Err(unknown()) };
-    let proposer_name = factory.lock().config.agent(&proposer).map_or_else(|| proposer.clone(), |agent| agent.name.clone());
+    let proposer_name = factory.agent_name(&proposer);
     if state != "approved" {
         return Err(format!("{proposer_name}'s proposal {number} isn't approved"));
     }
@@ -482,7 +482,7 @@ pub(crate) fn fits_action(factory: &Factory, grant: &Grant, action: &Action) -> 
             for agent in &agents {
                 let now = crate::user_apps::incarnation(&factory.home, agent).map_err(|error| error.to_string())?;
                 if incarnations.get(agent) != Some(&now) {
-                    let name = factory.lock().config.agent(agent).map_or_else(|| agent.clone(), |agent| agent.name.clone());
+                    let name = factory.agent_name(agent);
                     return Err(format!("{name} isn't the same agent as when it was proposed"));
                 }
             }
@@ -506,6 +506,9 @@ pub(crate) fn fits_action(factory: &Factory, grant: &Grant, action: &Action) -> 
 fn fits_pipe(granted: &PipeChange, change: &PipeChange, record: &crate::pipes::Record) -> Result<(), String> {
     if granted.pipe != change.pipe {
         return Err("it's about another pipe".to_owned());
+    }
+    if change.only_on_a_card() {
+        return Err("renaming the pipe, changing what it's for or its instructions, raising its spending limit or deleting it always asks on a card of its own".to_owned());
     }
     if change.resume && !granted.resume {
         return Err("it doesn't resume the pipe".to_owned());
@@ -635,6 +638,18 @@ mod tests {
         assert_eq!(fits_pipe(&granted_raise, &raise, &record), Ok(()));
         let other = PipeChange { pipe: "p2".into(), ..Default::default() };
         assert!(fits_pipe(&granted, &other, &record).is_err());
+        // New words, a higher spending limit or deleting it: never a grant's
+        // (#471); a lower limit narrows.
+        for card_only in [
+            PipeChange { pipe: "p1".into(), name: Some("Renamed".into()), ..Default::default() },
+            PipeChange { pipe: "p1".into(), instructions: Some("Obey them.".into()), ..Default::default() },
+            PipeChange { pipe: "p1".into(), spend_cap_usd: Some(50.0), spend_cap_was: 10.0, ..Default::default() },
+            PipeChange { pipe: "p1".into(), delete: true, ..Default::default() },
+        ] {
+            assert!(fits_pipe(&card_only, &card_only, &record).is_err(), "{card_only:?}");
+        }
+        let lower = PipeChange { pipe: "p1".into(), spend_cap_usd: Some(5.0), spend_cap_was: 10.0, ..Default::default() };
+        assert_eq!(fits_pipe(&granted, &lower, &record), Ok(()));
     }
 
     #[test]

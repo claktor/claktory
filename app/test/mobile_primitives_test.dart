@@ -15,6 +15,7 @@ import 'package:factory_app/mobile/input.dart';
 import 'package:factory_app/mobile/metrics.dart';
 import 'package:factory_app/mobile/navigation.dart';
 import 'package:factory_app/mobile/presentation.dart';
+import 'package:factory_app/protocol/factory/v1/factory.pb.dart' show ViewLeaf;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -74,6 +75,9 @@ class _Context extends StatelessWidget {
 
 /// A phone's navigation that only counts its gesture holds.
 class _Routes implements PhoneRoutes {
+  @override
+  void pushApp(ViewLeaf leaf) {}
+
   var held = 0;
 
   @override

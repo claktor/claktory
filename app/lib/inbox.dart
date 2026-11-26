@@ -34,6 +34,7 @@ import 'find.dart';
 import 'forms.dart' show archivedProjectOf, rivetIn;
 import 'identity.dart';
 import 'keep_awake_card.dart';
+import 'lid_closed.dart' show LidClosedStuck, lidClosedStuck;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
@@ -73,6 +74,12 @@ enum NeedsYouKind {
 
   /// A pipe the loop breaker paused, for the person to continue.
   pipeLoop,
+
+  /// A pipe whose other side is now confirmed as another account's
+  /// (PipePeer.identity_change, #471 G7): its messages wait and agents
+  /// can't send in it until the person trusts it again, whether or not an
+  /// agent asked them to.
+  pipeIdentity,
 
   /// A pipe's message held for the person (Pipe.waiting_seqs).
   pipeHeld,
@@ -127,6 +134,10 @@ enum NeedsYouKind {
   /// (Workspace.backend_service BY_HAND, friend bug #24): Restore, in the
   /// card.
   backendService,
+
+  /// The Mac can't sleep with its lid closed although Claktory isn't
+  /// keeping it awake (KeepAwake.lid_closed STUCK, #371): what fixes it.
+  lidStuck,
 }
 
 /// One thing that waits for the person's answer.
@@ -218,6 +229,17 @@ class NeedsYouItem {
       sessionId = '',
       conversationId = '';
 
+  const NeedsYouItem.lidStuck()
+    : kind = NeedsYouKind.lidStuck,
+      agentId = '',
+      chatId = '',
+      pipeId = '',
+      providerId = '',
+      accountId = '',
+      seq = 0,
+      sessionId = '',
+      conversationId = '';
+
   const NeedsYouItem.keepAwake()
     : kind = NeedsYouKind.keepAwake,
       agentId = '',
@@ -290,6 +312,7 @@ class NeedsYouItem {
     NeedsYouKind.pipeUnanswered => 'pipe:$pipeId/unanswered/$seq',
     NeedsYouKind.pipeApproval => 'pipe:$pipeId/approval',
     NeedsYouKind.pipeLoop => 'pipe:$pipeId/loop',
+    NeedsYouKind.pipeIdentity => 'pipe:$pipeId/identity',
     NeedsYouKind.signIn => 'signin:$providerId/$accountId',
     NeedsYouKind.vault => 'vault',
     NeedsYouKind.move => 'move',
@@ -300,6 +323,7 @@ class NeedsYouItem {
     NeedsYouKind.device => 'device:$sessionId',
     NeedsYouKind.keepAwake => 'keepAwake',
     NeedsYouKind.backendService => 'backendService',
+    NeedsYouKind.lidStuck => 'lidStuck',
   };
 
   /// Done in a click, with no card to open: signing in again, unlocking
@@ -337,6 +361,8 @@ List<NeedsYouItem> needsYouItems(Workspace workspace) {
         if (pipe.state == PipeState.PIPE_STATE_PAUSED &&
             pipe.paused == PipePause.PIPE_PAUSE_LOOP)
           NeedsYouItem.pipe(NeedsYouKind.pipeLoop, pipe.id),
+        if (pipeAccountChanged(pipe))
+          NeedsYouItem.pipe(NeedsYouKind.pipeIdentity, pipe.id),
         for (final seq in pipe.waitingSeqs)
           NeedsYouItem.pipe(NeedsYouKind.pipeHeld, pipe.id, seq: seq.toInt()),
         for (final seq in pipe.unansweredSeqs)
@@ -359,6 +385,9 @@ List<NeedsYouItem> needsYouItems(Workspace workspace) {
     if (workspace.keepAwake.ask) const NeedsYouItem.keepAwake(),
     // Started by hand: Restore hands it back to its service.
     if (backendByHand(workspace)) const NeedsYouItem.backendService(),
+    // A laptop that can't sleep with its lid closed: factoryd notifies too.
+    if (workspace.keepAwake.lidClosed == LidClosedState.LID_CLOSED_STUCK)
+      const NeedsYouItem.lidStuck(),
     // Also floating over the window on every device (MoveGate).
     if (workspace.hasMove() && moveStatusOf(workspace.move).awaitsPerson)
       const NeedsYouItem.move(),
@@ -736,10 +765,13 @@ class _NeedsYouListState extends State<NeedsYouList> {
   /// person answered here, to show how it ended.
   void _changed() {
     if (!mounted) return;
-    final items = needsYouItems(_backend.workspace.workspace);
+    final workspace = _backend.workspace.workspace;
+    final items = needsYouItems(workspace);
     final now = {for (final item in items) item.key};
+    final agents = {for (final agent in workspace.agents) agent.id: agent};
+    final chats = {for (final chat in workspace.chats) chat.id: chat};
     for (final item in items) {
-      if (!_has(item) || _stepping(item)) _fetch(item);
+      if (!_has(item) || _stepping(item, agents, chats)) _fetch(item);
     }
     for (final MapEntry(key: key, value: item) in _kept.entries) {
       if (_waiting.contains(key) && !now.contains(key)) _fetch(item);
@@ -756,11 +788,18 @@ class _NeedsYouListState extends State<NeedsYouList> {
   };
 
   /// A procedure (ask_person's steps) that waits moves on a step at a time
-  /// with no change to what waits: once the Workspace comes again (its
-  /// agent told of the step, done here or on another device), what was
+  /// with no change to what waits: once its agent (or chat) changes in the
+  /// Workspace (told of the step, done here or on another device), what was
   /// fetched of it may be a step behind, so it's fetched again (friend bug
-  /// #11). Not when the open conversation holds it: that copy is live.
-  bool _stepping(NeedsYouItem item) {
+  /// #11). Only then: a busy Claktory sends the Workspace a few times a
+  /// second, and fetching every waiting procedure each time was most of what
+  /// the app asked of it (Polpo's needs-you-refetch.md). Not when the open
+  /// conversation holds it: that copy is live.
+  bool _stepping(
+    NeedsYouItem item,
+    Map<String, Agent> agents,
+    Map<String, Chat> chats,
+  ) {
     final entry = _entries[item.key];
     if (entry == null ||
         !entry.hasAskPerson() ||
@@ -768,13 +807,38 @@ class _NeedsYouListState extends State<NeedsYouList> {
         entry.askPerson.state != AskPersonState.ASK_PERSON_STATE_PENDING) {
       return false;
     }
-    return identical(_entryOf(item), entry);
+    if (!identical(_entryOf(item), entry)) return false;
+    final was = _fetchedUnder[item.key];
+    final now = item.kind == NeedsYouKind.chat
+        ? chats[item.chatId]
+        : agents[item.agentId];
+    // A patch keeps an unchanged agent's own object; a whole Workspace
+    // brings a new one, the same or not.
+    return !(identical(was, now) || was == now);
+  }
+
+  /// The agent (or chat) each fetched card's fetch started under, as the
+  /// Workspace had it: [_stepping] fetches it again once that changes.
+  final _fetchedUnder = <String, Object?>{};
+
+  /// [item]'s agent, or chat, in the Workspace now.
+  Object? _ownerOf(NeedsYouItem item) {
+    final workspace = _backend.workspace.workspace;
+    if (item.kind == NeedsYouKind.chat) {
+      return workspace.chats
+          .where((chat) => chat.id == item.chatId)
+          .firstOrNull;
+    }
+    return workspace.agents
+        .where((agent) => agent.id == item.agentId)
+        .firstOrNull;
   }
 
   void _fetch(NeedsYouItem item) {
     final key = item.key;
     if (item.kind == NeedsYouKind.pipeApproval ||
         item.kind == NeedsYouKind.pipeLoop ||
+        item.kind == NeedsYouKind.pipeIdentity ||
         item.kind == NeedsYouKind.browser ||
         item.kind == NeedsYouKind.dmSend ||
         item.kind == NeedsYouKind.device) {
@@ -787,6 +851,11 @@ class _NeedsYouListState extends State<NeedsYouList> {
       return;
     }
     Future<void> run() async {
+      // Before the request: a step answered meanwhile changes its agent
+      // after this, and so fetches it again.
+      if (item.kind == NeedsYouKind.entry || item.kind == NeedsYouKind.chat) {
+        _fetchedUnder[key] = _ownerOf(item);
+      }
       try {
         if (item.kind == NeedsYouKind.entry) {
           final entry = await _backend.fetchEntry(item.agentId, item.seq);
@@ -1041,6 +1110,9 @@ class _NeedsYouListState extends State<NeedsYouList> {
         NeedsYouKind.keepAwake => workspace.keepAwake.available,
         // Restored: the backend that comes back runs as installed.
         NeedsYouKind.backendService => false,
+        // Opened here, it stays once the Mac can sleep, saying so
+        // (Abbacchio's row 1159).
+        NeedsYouKind.lidStuck => true,
         _ => workspace.pipes.any((pipe) => pipe.id == item.pipeId),
       };
 }
@@ -1134,6 +1206,8 @@ class _Bubble extends StatelessWidget {
         ? keepAwakeTitle
         : item.kind == NeedsYouKind.backendService
         ? backendServiceTitle
+        : item.kind == NeedsYouKind.lidStuck
+        ? lidClosedStuck(backend)
         : liaisonOf != null
         ? '${agent!.name} · ${liaisonOf.name}'
         : agent?.name ??
@@ -1181,6 +1255,10 @@ class _Bubble extends StatelessWidget {
         pendingDeviceOf(workspace, item)?.requestedMs.toInt() ?? 0,
       _ => 0,
     };
+    final updated =
+        (item.kind == NeedsYouKind.entry || item.kind == NeedsYouKind.chat) &&
+        time > 0 &&
+        updatedSince(entry) == time;
     final header = Semantics(
       button: true,
       expanded: open,
@@ -1223,7 +1301,8 @@ class _Bubble extends StatelessWidget {
                           ),
                         }
                       : item.kind == NeedsYouKind.keepAwake ||
-                            item.kind == NeedsYouKind.backendService
+                            item.kind == NeedsYouKind.backendService ||
+                            item.kind == NeedsYouKind.lidStuck
                       ? ExtensionGlyph(
                           icon: 'laptop-minimal',
                           name: '',
@@ -1273,9 +1352,21 @@ class _Bubble extends StatelessWidget {
                           TextSpan(
                             children: [
                               TextSpan(text: who),
-                              if (time > 0)
+                              if (time > 0) ...[
+                                // Changed by its agent last (#473): said
+                                // so, in signal, timed from then.
+                                if (updated)
+                                  TextSpan(
+                                    text: ' · $updatedMark',
+                                    style: TextStyles.caption.copyWith(
+                                      color: palette.signal,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
                                 TextSpan(
-                                  text: ' · ${formatAge(time, now)}',
+                                  text:
+                                      '${updated ? ' ' : ' · '}'
+                                      '${formatAge(time, now)}',
                                   style: TextStyles.caption.copyWith(
                                     color: waiting && waitedADay(time, now)
                                         ? palette.signal
@@ -1283,6 +1374,7 @@ class _Bubble extends StatelessWidget {
                                     fontWeight: FontWeight.w400,
                                   ),
                                 ),
+                              ],
                             ],
                           ),
                         ),
@@ -1391,6 +1483,7 @@ class _Bubble extends StatelessWidget {
                         item.kind != NeedsYouKind.device &&
                         item.kind != NeedsYouKind.keepAwake &&
                         item.kind != NeedsYouKind.backendService &&
+                        item.kind != NeedsYouKind.lidStuck &&
                         item.kind != NeedsYouKind.dmSend) ...[
                       const SizedBox(height: Space.s),
                       Wrap(
@@ -1465,6 +1558,14 @@ class _Bubble extends StatelessWidget {
           );
         }
         return PipeLoopCard(pipe: pipe);
+      case NeedsYouKind.pipeIdentity:
+        if (pipe == null || !pipeAccountChanged(pipe)) {
+          return line(
+            pipe == null ? 'This pipe was deleted.' : pipeStatus(pipe),
+          );
+        }
+        // The pipe header's notice, with Trust this Claktory…
+        return PipeIdentityNotice(pipe: pipe, inline: true);
       case NeedsYouKind.pipeHeld:
         final message = this.message;
         if (pipe == null) return line('This pipe was deleted.');
@@ -1524,6 +1625,12 @@ class _Bubble extends StatelessWidget {
           return line('Claktory runs in the background again.');
         }
         return const BackendServiceRestore();
+      case NeedsYouKind.lidStuck:
+        final keep = workspace.keepAwake;
+        if (keep.lidClosed != LidClosedState.LID_CLOSED_STUCK) {
+          return line('It can sleep again.');
+        }
+        return LidClosedStuck(keep: keep, heading: false);
       case NeedsYouKind.move:
         final move = _move;
         if (!MoveConfirmCard.shows(move)) {
@@ -1632,6 +1739,11 @@ class _Bubble extends StatelessWidget {
             : '${pipePeerName(pipe, start: true)} wants to connect';
       case NeedsYouKind.pipeLoop:
         return 'Paused: agents kept talking on their own';
+      case NeedsYouKind.pipeIdentity:
+        return pipe == null
+            ? 'Another account now'
+            : '${pipePeerClaktory(pipe)} is on another account '
+                  'now';
       case NeedsYouKind.pipeHeld:
         final message = this.message;
         if (message == null) return 'A message waits for you';
@@ -1678,6 +1790,12 @@ class _Bubble extends StatelessWidget {
         return backendByHand(workspace)
             ? backendServiceSummary(workspace.backendService)
             : 'Claktory runs in the background again.';
+      case NeedsYouKind.lidStuck:
+        final keep = workspace.keepAwake;
+        final fix = keep.lidClosedFix.replaceAll('`', '');
+        return keep.lidClosed != LidClosedState.LID_CLOSED_STUCK || fix.isEmpty
+            ? 'It can sleep again.'
+            : fix;
       case NeedsYouKind.browser:
         final session = browserSessionOf(workspace, item);
         if (session == null) return 'No longer needs you';
@@ -1764,20 +1882,37 @@ class _OpenLink extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    // Underlined at rest, so it reads as something to click before the
+    // pointer finds it, and where there's no pointer at all; a finger's
+    // height on a touch screen.
     return Semantics(
       button: true,
       child: Pressable(
         onTap: onTap,
-        builder: (context, hovered) => Padding(
-          padding: const EdgeInsets.symmetric(vertical: Space.xs),
-          child: Text(
-            label,
-            style: TextStyles.caption.copyWith(
-              color: hovered ? palette.text : palette.textMuted,
-              fontWeight: FontWeight.w500,
+        builder: (context, hovered) {
+          final color = hovered ? palette.text : palette.textMuted;
+          return ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: touchFirst(context) ? Metrics.of(context).target : 0,
             ),
-          ),
-        ),
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              widthFactor: 1,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: Space.xs),
+                child: Text(
+                  label,
+                  style: TypeScale.of(context).caption.copyWith(
+                    color: color,
+                    fontWeight: FontWeight.w500,
+                    decoration: TextDecoration.underline,
+                    decorationColor: color,
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
       ),
     );
   }

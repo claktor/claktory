@@ -13,7 +13,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Claktory</string>
+	<string>$(CLAKTORY_NAME)</string>
 	<key>CFBundleDisplayName</key>
 	<string>$(PRODUCT_NAME)</string>
 	<key>LSHasLocalizedDisplayName</key>
@@ -41,6 +41,8 @@
 	</array>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Speak your messages and answers to your agents. Claktory turns them into text.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Lets it connect directly to your Claktories on other computers on this network, which is faster.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Claktory saves videos and pictures you choose to your Photos.</string>
 	<key>NSMainNibFile</key>

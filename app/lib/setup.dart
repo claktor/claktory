@@ -393,7 +393,7 @@ class MacSetup extends ChangeNotifier {
   /// it starts as soon as it's allowed.
   final Duration lookEvery;
 
-  /// How often, once it was asked to stop (Turn Off, Stop Claktory) and
+  /// How often, once it was asked to stop (Turn off, Stop Claktory) and
   /// went, the app asks whether it has stopped, so it says so at once
   /// rather than Reconnecting….
   final Duration stopCheckEvery;

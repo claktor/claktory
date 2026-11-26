@@ -240,6 +240,7 @@ async fn deleting_an_account_keeps_only_anonymous_totals() {
     let linked: i64 = conn
         .query_row(
             "SELECT (SELECT count(*) FROM usage WHERE claktory_id != '') + (SELECT count(*) FROM activity WHERE claktory_id != '')
+             + (SELECT count(*) FROM activity_days WHERE claktory_id != '')
              + (SELECT count(*) FROM seen_days WHERE claktory_id = ?1) + (SELECT count(*) FROM periods)
              + (SELECT count(*) FROM health WHERE claktory_id != '') + (SELECT count(*) FROM claktory_devices)
              + (SELECT count(*) FROM devices_connected)",
@@ -251,6 +252,84 @@ async fn deleting_an_account_keeps_only_anonymous_totals() {
     instance.advance(60);
     let after: PublicStats = instance.send("GET", "/v1/stats/public", Vec::new(), &[]).await.json();
     assert_eq!((after.tokens_total, after.claktories), (before.tokens_total, 0));
+}
+
+/// Polpo's cost-per-user §8: a Claktory's hourly activity from before the
+/// day 90 days ago is rolled up to its days, so the account disk stops
+/// growing by the hour; Download My Data, the daily export and the account
+/// page read the same across the boundary, an hour that comes in late joins
+/// its day, and deleting the account keeps the days only in the anonymous
+/// totals.
+#[tokio::test]
+async fn hourly_activity_rolls_up_to_days_after_90_days() {
+    const DAY: i64 = 86_400;
+    let instance = start_located().await;
+    let mut claktory = Claktory::new("203.0.113.32");
+    instance.sign_in(&mut claktory, "matt@example.com", "Mac mini").await;
+    let now = instance.now();
+    let today = now - now.rem_euclid(DAY);
+    let (old, kept) = (today - 91 * DAY, today - 90 * DAY);
+    let conn = db::open(&instance.db).unwrap();
+    let add = |hour: i64, minutes: i64, working: i64, runs: i64| {
+        conn.execute(
+            "INSERT INTO activity (claktory_id, hour, agent_minutes, agents_working, runs) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![claktory.id, hour, minutes, working, runs],
+        )
+        .unwrap();
+    };
+    add(old + 3600, 60, 1, 2);
+    add(old + 5 * 3600, 30, 3, 1);
+    add(kept + 3600, 45, 2, 1);
+    add(today - 3600, 15, 1, 1);
+    let cookie = crate::web::web_sign_in(&instance, "matt@example.com", "192.0.2.32").await;
+    let mine = |data: &serde_json::Value| data["claktories"][0].clone();
+    let before = mine(&crate::web::get(&instance, "/account/data", &cookie).await.value());
+    let minutes = |data: &serde_json::Value| -> i64 {
+        ["activity", "activity_days"]
+            .iter()
+            .flat_map(|list| data[list].as_array().cloned().unwrap_or_default())
+            .map(|row| row["agent_minutes"].as_i64().unwrap())
+            .sum()
+    };
+    assert_eq!((before["activity"].as_array().unwrap().len(), minutes(&before)), (4, 150));
+    let exported = series(&export(&instance), "day", "agent_minutes");
+    let page = crate::web::get(&instance, "/account", &cookie).await.text();
+
+    assert_eq!(db::roll_up(&conn, now).unwrap(), 2, "the old day's two hours");
+    let after = mine(&crate::web::get(&instance, "/account/data", &cookie).await.value());
+    assert_eq!(after["activity"].as_array().unwrap().len(), 2, "the hours of the last 90 days");
+    assert_eq!(after["activity"][0]["hour"], kept + 3600);
+    assert_eq!(
+        after["activity_days"],
+        serde_json::json!([{"day": db::day(old), "agent_minutes": 90, "agents_working": 3, "runs": 3}]),
+        "summed, the most at once"
+    );
+    assert_eq!(minutes(&after), minutes(&before));
+    assert_eq!(series(&export(&instance), "day", "agent_minutes"), exported);
+    assert_eq!(crate::web::get(&instance, "/account", &cookie).await.text(), page);
+
+    // Rolling again changes nothing; an hour of that day sent late joins it.
+    assert_eq!(db::roll_up(&conn, now).unwrap(), 0);
+    add(old + 7 * 3600, 10, 5, 1);
+    assert_eq!(db::roll_up(&conn, now).unwrap(), 1);
+    let days = mine(&crate::web::get(&instance, "/account/data", &cookie).await.value())["activity_days"].clone();
+    assert_eq!(days, serde_json::json!([{"day": db::day(old), "agent_minutes": 100, "agents_working": 5, "runs": 4}]));
+    // A day later, the day that was kept goes too.
+    assert_eq!(db::roll_up(&conn, now + DAY).unwrap(), 1);
+
+    // Deleting the account keeps them only in the anonymous totals.
+    let page = crate::web::get(&instance, "/account", &cookie).await.text();
+    let csrf = crate::web::field(&page, "csrf");
+    crate::web::post_form(&instance, "/account/delete", &cookie, &format!("csrf={csrf}&confirm=yes")).await;
+    let left: (i64, i64, i64) = conn
+        .query_row(
+            "SELECT (SELECT count(*) FROM activity_days WHERE claktory_id != ''), coalesce((SELECT sum(agent_minutes) FROM activity_days WHERE claktory_id = ''), 0),
+                    coalesce((SELECT sum(agent_minutes) FROM activity WHERE claktory_id = ''), 0)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(left, (0, 100 + 45, 15));
 }
 
 #[tokio::test]

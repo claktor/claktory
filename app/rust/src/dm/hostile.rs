@@ -3,6 +3,14 @@
 //! device, driven through what Dart calls ([`DmDevice`]). Each test is
 //! named by its number in the spec's list. History transfer's (20–23) are
 //! in transfer.rs's tests, beside the wire they attack.
+//!
+//! Since #451 the messages come from the person's home, and a friend's
+//! home relays theirs to it; claktory.com keeps only commits, proposals,
+//! Welcomes and key packages. "The service" here stands for whichever of
+//! them carries what's attacked: the device trusts none of them, so the
+//! same checks hold (test 3, homes, adds what a home can do that the
+//! service couldn't: serve again, at its own seqs, what the device read
+//! from the service before).
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -87,7 +95,7 @@ fn world() -> World {
     ipad.accept_list("matt".into(), at_phone.device_list).unwrap();
     let id = b"conversation-1".to_vec();
     phone.create_group(id.clone(), chat()).unwrap();
-    let added = phone.add_members(id.clone(), ipad.key_packages(1).unwrap()).unwrap();
+    let added = phone.add_members(id.clone(), ipad.key_packages(1).unwrap()).unwrap().expect("something to add");
     assert_eq!(phone.process(id.clone(), 1, added.commit, 1).unwrap().outcome, DmOutcome::Committed);
     ipad.join_group(id.clone(), chat(), added.welcome.unwrap(), 1).unwrap();
     let key = |secret: Vec<u8>| IdentityKey::from_secret(&secret.try_into().unwrap());
@@ -139,7 +147,7 @@ impl World {
         self.phone.accept_list("matt".into(), v2.clone()).unwrap();
         tablet.accept_list("matt".into(), v2.clone()).unwrap();
         self.ipad.accept_list("matt".into(), v2).unwrap();
-        let added = self.phone.add_members(self.id.clone(), tablet.key_packages(1).unwrap()).unwrap();
+        let added = self.phone.add_members(self.id.clone(), tablet.key_packages(1).unwrap()).unwrap().expect("something to add");
         let welcome = added.welcome.clone().unwrap();
         for done in self.commit(added, &[&self.phone, &self.ipad]) {
             assert_eq!(done.outcome, DmOutcome::Committed);
@@ -221,8 +229,13 @@ fn not_taken(processed: &[DmProcessed]) -> bool {
     processed.iter().all(|done| matches!(done.outcome, DmOutcome::Dropped | DmOutcome::Held) && done.message.is_none())
 }
 
+/// Never taken: dropped, or held as unlisted (row 561), which the app
+/// takes again only once the account's newer list names the leaf, and
+/// otherwise passes over as refused.
 fn dropped(processed: &[DmProcessed]) -> bool {
-    processed.iter().all(|done| done.outcome == DmOutcome::Dropped && done.message.is_none())
+    processed.iter().all(|done| {
+        (done.outcome == DmOutcome::Dropped || (done.outcome == DmOutcome::Held && done.unlisted)) && done.message.is_none()
+    })
 }
 
 /// Test 1: The service substitutes a contact's key package or identity:
@@ -296,7 +309,7 @@ fn test_2_a_leaf_the_service_adds_is_refused_by_every_member() {
     fake_matt.accept_list("ana".into(), list(&w.ana, "ana", 1, vec![listed(&w.ipad, "ipad")])).unwrap();
     let other = b"conversation-2".to_vec();
     fake_matt.create_group(other.clone(), chat()).unwrap();
-    let added = fake_matt.add_members(other.clone(), w.ipad.key_packages(1).unwrap()).unwrap();
+    let added = fake_matt.add_members(other.clone(), w.ipad.key_packages(1).unwrap()).unwrap().expect("something to add");
     let joined = w.ipad.join_group(other.clone(), chat(), added.welcome.unwrap(), 1);
     assert!(joined.unwrap_err().to_string().contains("isn't from their security key"));
     assert!(w.ipad.groups().unwrap().iter().all(|group| group.group_id != other));
@@ -391,7 +404,7 @@ fn test_3_a_replayed_message_or_commit_is_refused() {
     // The message put in another of Ana's groups: not that group's.
     let other = b"conversation-2".to_vec();
     w.phone.create_group(other.clone(), chat()).unwrap();
-    let added = w.phone.add_members(other.clone(), w.ipad.key_packages(1).unwrap()).unwrap();
+    let added = w.phone.add_members(other.clone(), w.ipad.key_packages(1).unwrap()).unwrap().expect("something to add");
     w.phone.commit_taken(other.clone()).unwrap();
     w.ipad.join_group(other.clone(), chat(), added.welcome.unwrap(), 1).unwrap();
     let moved = w.ipad.process(other.clone(), 2, said, 9).unwrap();
@@ -401,6 +414,27 @@ fn test_3_a_replayed_message_or_commit_is_refused() {
     // Still in step: a new message reads.
     let next = w.ipad.send(w.id.clone(), text("a1", "after"), 10).unwrap();
     assert_eq!(w.feed(&next, &[&w.phone])[0].outcome, DmOutcome::Message);
+}
+
+/// Test 3, homes (#451): a message the device read from the service before
+/// its home took over, served again by the home at the home's own seqs
+/// (past 2^32), or twice there, or a home's later message served at a seq
+/// already read: refused or not looked at, and nothing shows twice.
+#[test]
+fn test_3_a_home_serving_again_what_was_read_is_refused() {
+    const FIRST_HOME_SEQ: i64 = (1 << 32) + 1;
+    let w = world();
+    let said = w.phone.send(w.id.clone(), text("m1", "before the home"), 2).unwrap();
+    assert_eq!(w.feed(&said, &[&w.ipad])[0].outcome, DmOutcome::Message);
+    // The home's log starts past the service's seqs, with the same message.
+    assert!(dropped(&w.at(FIRST_HOME_SEQ, &said, &[&w.ipad])));
+    // The home's own next message, then that one again under a later seq.
+    let next = w.phone.send(w.id.clone(), text("m2", "from the home"), 3).unwrap();
+    assert_eq!(w.at(FIRST_HOME_SEQ + 1, &next, &[&w.ipad])[0].outcome, DmOutcome::Message);
+    assert!(dropped(&w.at(FIRST_HOME_SEQ + 2, &next, &[&w.ipad])));
+    // Served again at a seq the device already read: not even looked at.
+    assert_eq!(w.at(FIRST_HOME_SEQ + 1, &next, &[&w.ipad])[0].outcome, DmOutcome::Already);
+    assert_eq!(w.texts(&w.ipad), ["before the home", "from the home"]);
 }
 
 /// Test 4: A format-1 body arrives in any conversation: never shown.
@@ -566,7 +600,7 @@ fn test_14_a_claktory_leaf_the_service_substituted_is_refused() {
 
     // The real Claktory's own package goes in.
     let package = key_package(&scratch, &real, certificate.to_credential().unwrap());
-    let added = w.phone.add_members(channel.clone(), vec![package]).unwrap();
+    let added = w.phone.add_members(channel.clone(), vec![package]).unwrap().expect("something to add");
     w.phone.commit_taken(channel.clone()).unwrap();
     assert!(added.welcome.is_some());
     assert_eq!(w.phone.members(channel).unwrap().len(), 2);
@@ -640,13 +674,24 @@ fn test_19_after_a_rotation_the_old_key_signs_nothing() {
         let error = w.phone.accept_list("ana".into(), old).unwrap_err();
         assert!(error.to_string().contains("replaced"), "{error}");
     }
-    // The old key back as hers, by any route: refused.
-    assert!(w.phone.key_changed("ana".into(), w.ana.public().0.to_vec()).is_err());
+    // Not as a first contact. As a key change (only the service said she
+    // moved off it), it may come back, visibly: unseen, sending held
+    // (Fugo's E11-3); a key a held commit proved replaced never does.
     assert!(w.phone.first_contact("ana".into(), w.ana.public().0.to_vec()).is_err());
+    w.phone.key_changed("ana".into(), w.ana.public().0.to_vec()).unwrap();
+    assert!(w.phone.pin("ana".into()).unwrap().changed_unseen);
+    w.phone.key_changed("ana".into(), new_ana.public().0.to_vec()).unwrap();
+    w.phone.seen("ana".into()).unwrap();
     // The new key's list names her iPad, but its certificate is the old
     // key's: its key package, and its messages, are refused.
     w.phone.accept_list("ana".into(), list(&new_ana, "ana", 1, vec![listed(&w.ipad, "ipad")])).unwrap();
-    assert!(w.phone.add_members(w.id.clone(), w.ipad.key_packages(1).unwrap()).is_err());
+    // In a conversation she isn't in yet: one she's in has nothing to add
+    // (her key is there already), which says nothing of her certificate.
+    let fresh = b"conversation-3".to_vec();
+    w.phone.create_group(fresh.clone(), chat()).unwrap();
+    let refused = w.phone.add_members(fresh, w.ipad.key_packages(1).unwrap()).unwrap_err();
+    assert!(refused.to_string().contains("was replaced"), "{refused}");
+    assert!(w.phone.add_members(w.id.clone(), w.ipad.key_packages(1).unwrap()).unwrap().is_none());
     let said = w.ipad.send(w.id.clone(), text("a1", "under the old key"), 3).unwrap();
     assert!(dropped(&w.feed(&said, &[&w.phone])));
     assert!(w.texts(&w.phone).is_empty());

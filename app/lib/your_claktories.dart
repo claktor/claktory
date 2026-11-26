@@ -1019,9 +1019,9 @@ class _DeviceSignInDialogState extends State<DeviceSignInDialog> {
 Future<void> showConfirmSignIn(BuildContext context, String name) => showModal(
   context,
   (context, close) => DeviceSignInDialog(
-    title: "Confirm this $thisDeviceKind is yours",
+    title: 'Sign in to keep using $name',
     intro:
-        'Sign in with the email $name is signed in with. Your '
+        'Use the email $name is signed in with. Your '
         "$thisDeviceKind stays connected, and you won't be asked again.",
     close: close,
   ),
@@ -1060,7 +1060,7 @@ class ConfirmDeviceBanner extends StatelessWidget {
             ),
             child: _BannerLine(
               words: Text(
-                'Confirm this $thisDeviceKind is yours by '
+                'Sign in to your Claktory account in this app by '
                 '${deadlineDay(by, DateTime.now())} to keep using $name.',
                 style: type.body.copyWith(color: palette.text),
               ),
@@ -1131,6 +1131,12 @@ class _SignInRequiredViewState extends State<SignInRequiredView> {
       builder: (context, _) {
         final name = claktoryName(backend);
         final said = backend.signInRequired.value ?? '';
+        // The Claktory itself was signed out of the account (friend bug
+        // #38): it's the one to sign in again, in its own Settings, as
+        // the backend's sentence says, not this device (Trish 35985).
+        final claktorySignedOut = said.contains(
+          'was signed out of your Claktory account',
+        );
         final signOut = Button(
           label: 'Sign out',
           onPressed: () => unawaited(signOutOfAccount(context, account)),
@@ -1151,7 +1157,9 @@ class _SignInRequiredViewState extends State<SignInRequiredView> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Text(
-                    'Sign in to connect to $name',
+                    claktorySignedOut
+                        ? '$name was signed out'
+                        : 'Sign in to connect to $name',
                     style: type.title.copyWith(color: palette.text),
                   ),
                   if (said.isNotEmpty) ...[
@@ -1162,7 +1170,9 @@ class _SignInRequiredViewState extends State<SignInRequiredView> {
                     ),
                   ],
                   const SizedBox(height: Space.xl),
-                  if (account.signedIn) ...[
+                  if (claktorySignedOut)
+                    Align(alignment: Alignment.centerRight, child: retry)
+                  else if (account.signedIn) ...[
                     Text(
                       'Signed in as ${account.email}.',
                       style: type.body.copyWith(color: palette.text),

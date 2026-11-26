@@ -243,7 +243,7 @@ class _MessageBoxState extends State<MessageBox> {
         : _BoxVoice(widget.target);
     _session.box = this;
     _voice.addListener(_voiceChanged);
-    _wasRecording = _voice.recording || _voice.starting;
+    _wasVoice = (recording: _voice.recording, starting: _voice.starting);
   }
 
   /// The box goes, or writes to another target: a recording going on goes
@@ -348,14 +348,15 @@ class _MessageBoxState extends State<MessageBox> {
 
   /// Has the keys while recording: Esc cancels, Return sends.
   final _recordingFocus = FocusNode();
-  var _wasRecording = false;
+  var _wasVoice = (recording: false, starting: false);
 
-  /// Rebuilds when recording starts or stops; the strip follows the
-  /// sound itself.
+  /// Rebuilds when the microphone is asked for, and when recording starts
+  /// or stops: from starting to recording too, which puts Send in the strip
+  /// (#497); the strip follows the sound itself.
   void _voiceChanged() {
-    final now = _voice.recording || _voice.starting;
-    if (now == _wasRecording) return;
-    _wasRecording = now;
+    final now = (recording: _voice.recording, starting: _voice.starting);
+    if (now == _wasVoice) return;
+    _wasVoice = now;
     if (mounted) setState(() {});
   }
 
@@ -1078,6 +1079,24 @@ class _MessageBoxState extends State<MessageBox> {
                                             child: RecordingStrip(
                                               voice: _voice,
                                               onCancel: _cancelVoice,
+                                              // Send in the strip, so the
+                                              // waveform centers on the
+                                              // whole row (#497).
+                                              // The box's padding is
+                                              // more at the start.
+                                              shift: -(Space.m - Space.xs) / 2,
+                                              trailing: _voice.recording
+                                                  ? Button(
+                                                      // With something
+                                                      // written, it's added
+                                                      // to that (#425).
+                                                      label: _hasDraft
+                                                          ? 'Add'
+                                                          : 'Send',
+                                                      primary: true,
+                                                      onPressed: _sendVoice,
+                                                    )
+                                                  : null,
                                             ),
                                           ),
                                         )
@@ -1149,26 +1168,18 @@ class _MessageBoxState extends State<MessageBox> {
                                       ],
                                       // One voice note to a message: no mic
                                       // while the box has one (#425).
+                                      // Recording, Send is in the strip.
                                       if (voice &&
+                                          !_voice.recording &&
                                           (recording || _note == null)) ...[
                                         const SizedBox(width: Space.xs),
-                                        _voice.recording
-                                            ? Button(
-                                                // With something written,
-                                                // it's added to that (#425).
-                                                label: _hasDraft
-                                                    ? 'Add'
-                                                    : 'Send',
-                                                primary: true,
-                                                onPressed: _sendVoice,
-                                              )
-                                            : _MicButton(
-                                                unavailable: voiceUnavailable(
-                                                  workspace.speechModel,
-                                                ),
-                                                starting: _voice.starting,
-                                                onTap: _record,
-                                              ),
+                                        _MicButton(
+                                          unavailable: voiceUnavailable(
+                                            workspace.speechModel,
+                                          ),
+                                          starting: _voice.starting,
+                                          onTap: _record,
+                                        ),
                                       ],
                                       // A phone has no Enter key; an
                                       // iPad has one only with a hardware
@@ -1386,7 +1397,14 @@ class _BoxVoice extends VoiceSession {
   /// message. What's written in its box (and its files) goes with it, as
   /// one message (#425): from the bar, away from the box, that's how it
   /// takes the text along. Sent from the bar, the bar says so.
-  Future<void> _deliver() async {
+  Future<void> _deliver() {
+    final backend = _backend;
+    return backend == null
+        ? _deliverRecording()
+        : backend.holding(_deliverRecording);
+  }
+
+  Future<void> _deliverRecording() async {
     final stopped = await _stop();
     if (stopped == null) return;
     final made = stopped.made;

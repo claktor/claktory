@@ -670,3 +670,90 @@ ClaktoryMap crowdedMap({bool leads = false}) => fakeMap(
       ]),
   ],
 );
+
+/// A Claktory shaped like a busy person's, [agents] agents in all: an
+/// admin; a big project holding over half of them, in three folders, each
+/// nested under and reporting to the one before it in fours; small projects
+/// of one to five agents, every fifth with folders, the first reporting to
+/// no one and the rest to it in every third; a secret for about every
+/// seven agents, held by two to five of them; and an app for about every
+/// fifty, given to two agents each. The same for the same [agents].
+ClaktoryMap busyClaktoryMap(int agents) {
+  final big = (agents - 1) * 55 ~/ 100;
+  final ids = <String>['rivet'];
+  final team = <FakeAgent>[
+    const FakeAgent('rivet', 'Rivet', role: 'Admin', admin: true),
+  ];
+  final leads = <String, String>{};
+  const folders = ['app', 'research', 'ops'];
+  for (var a = 0; a < big; a++) {
+    final parent = a == 0 ? '' : 'b${(a - 1) ~/ 4}';
+    team.add(
+      FakeAgent(
+        'b$a',
+        'Builder $a',
+        role: 'Role $a',
+        project: 'big',
+        folder: folders[a % 3],
+        parent: parent,
+      ),
+    );
+    if (parent.isNotEmpty) leads['b$a'] = parent;
+    ids.add('b$a');
+  }
+  final projects = <FakeProject>[
+    const FakeProject(
+      'big',
+      'Big project',
+      folders: ['App', 'Research', 'Ops'],
+    ),
+  ];
+  for (var p = 0; team.length < agents; p++) {
+    final withFolders = p % 5 == 0;
+    projects.add(
+      FakeProject(
+        'p$p',
+        'Project $p',
+        folders: withFolders ? const ['Data', 'Copy'] : const [],
+      ),
+    );
+    final size = 1 + (p * 7) % 5;
+    for (var a = 0; a < size && team.length < agents; a++) {
+      team.add(
+        FakeAgent(
+          'p$p-$a',
+          'Agent $p.$a',
+          role: 'Role',
+          project: 'p$p',
+          folder: withFolders && a > 0 ? (a.isOdd ? 'data' : 'copy') : '',
+          parent: a == 0 ? '' : 'p$p-0',
+        ),
+      );
+      if (a > 0 && p % 3 == 0) leads['p$p-$a'] = 'p$p-0';
+      ids.add('p$p-$a');
+    }
+  }
+  return fakeMap(
+    projects: projects,
+    agents: team,
+    leads: leads,
+    secrets: [
+      for (var s = 0; s < agents ~/ 7; s++)
+        FakeSecret('k$s', 'Key $s', [
+          for (var i = 0; i < 2 + s % 4; i++)
+            ids[(s * 37 + i * 53) % ids.length],
+        ]),
+    ],
+    apps: [
+      for (var i = 0; i <= agents ~/ 50; i++)
+        FakeApp(
+          'app$i',
+          'App $i',
+          given: {
+            ids[(i * 41) % ids.length]: 'edit',
+            ids[(i * 41 + 17) % ids.length]: 'read',
+          },
+        ),
+    ],
+  );
+}

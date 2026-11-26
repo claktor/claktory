@@ -6,7 +6,7 @@ void main() {
   test(
     "the app knows Charts' menu icons (#419), and says which it doesn't",
     () {
-      for (final name in ['star', 'house', 'home', 'clock', 'copy']) {
+      for (final name in ['star', 'house', 'home', 'clock', 'copy', 'puzzle']) {
         expect(hasLucideIcon(name), isTrue, reason: name);
       }
       expect(hasLucideIcon('no-such-icon'), isFalse);

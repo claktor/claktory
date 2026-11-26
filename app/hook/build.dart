@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter_rust_bridge_hooks/flutter_rust_bridge_hooks.dart';
 
 import 'macho.dart';
+import 'shared_build.dart';
 
 /// The oldest iOS the app runs on, as in ios/Runner.xcodeproj
 /// (IPHONEOS_DEPLOYMENT_TARGET; test/ios_build_test.dart keeps the two the
@@ -69,7 +70,8 @@ String rustFlags(String triple, {required String home}) => [
 /// later.
 void main(List<String> args) async {
   await build(args, (input, output) async {
-    await FlutterRustBridgeNativeAssetsBuilder(
+    final shared = sharedBuildDir(Platform.environment);
+    Future<void> rust() => FlutterRustBridgeNativeAssetsBuilder(
       cratePath: 'rust',
       assetName: 'tunnel/frb_generated.io.dart',
       extraCargoEnvironmentVariables: {
@@ -79,13 +81,38 @@ void main(List<String> args) async {
         for (final triple in [...iosTriples, ...macTriples, ...androidTriples])
           'CARGO_TARGET_${triple.replaceAll('-', '_').toUpperCase()}_RUSTFLAGS':
               rustFlags(triple, home: Platform.environment['HOME'] ?? ''),
+        // Dependencies built once for every checkout (shared_build.dart).
+        if (shared.isNotEmpty) 'CARGO_BUILD_BUILD_DIR': shared,
       },
     ).run(input: input, output: output);
+    List<File> libraries() => [
+      for (final asset in output.build().assets.encodedAssets)
+        if (asset.encoding['file'] case final String file)
+          File.fromUri(Uri.parse(file)),
+    ];
+    if (shared.isEmpty) {
+      await rust();
+    } else {
+      final dir = Directory(shared);
+      await withSharedBuildLock(dir, () async {
+        final crate = input.packageRoot.resolve('rust/');
+        claimTunnelBuild(
+          dir,
+          crate.toFilePath(),
+          pathPackages(
+            File.fromUri(crate.resolve('Cargo.lock')).readAsStringSync(),
+          ),
+        );
+        await rust();
+        for (final library in libraries()) {
+          ownCopy(library);
+          // <target>/<triple>/<profile>/<library>
+          dropOwnBuild(library.parent.parent.parent);
+        }
+      });
+    }
     // An Apple library dyld would refuse fails the build, not the app.
-    for (final asset in output.build().assets.encodedAssets) {
-      final file = asset.encoding['file'];
-      if (file is! String) continue;
-      final library = File.fromUri(Uri.parse(file));
+    for (final library in libraries()) {
       if (!library.existsSync()) continue;
       final problems = misalignedStringPools(library.readAsBytesSync());
       if (problems.isNotEmpty) {

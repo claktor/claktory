@@ -152,6 +152,11 @@ fn log_tail(path: &str) -> String {
     lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n")
 }
 
+/// Whether an app shows the Tasks panel now.
+fn shown(factory: &Factory) -> bool {
+    factory.clients() > 0 && factory.lock().view.as_ref().is_some_and(|view| view.extension_id == ID)
+}
+
 /// Shows the open Tasks panel as it is now, if one is open: tasks started or
 /// ended, and running ones' output grew. Sent only when it changed.
 pub(crate) fn refresh_view(factory: &Factory) {
@@ -297,16 +302,67 @@ pub(crate) fn stop(factory: &Factory, agent: &str, task: &str, by: &str) -> Resu
 }
 
 /// Tells admin agents of tasks that have run long, once each, for as long
-/// as Factory runs.
+/// as Factory runs. An open Tasks panel follows its tasks' output every
+/// second while an app shows it; otherwise it sleeps until the next check
+/// (#454), woken when that changes.
+/// Logs of tasks that finished over a week ago go (#525): at start, then
+/// every day, off the async threads.
+async fn prune_logs(factory: Weak<Factory>) {
+    use factory_agent::tools::task_logs::{self, Ended};
+    loop {
+        let Some(strong) = factory.upgrade() else { return };
+        let pruned = tokio::task::spawn_blocking(move || {
+            let agents = strong.home.root().join("agents");
+            // When each task ended, by agent and task: the newest row of
+            // each, never a running one's log (Bruno 39663).
+            let rows = match strong.store.tasks(None, 0) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    tracing::warn!(%error, "could not read tasks to remove old logs");
+                    return 0;
+                }
+            };
+            let mut ends = std::collections::HashMap::new();
+            for row in rows {
+                ends.entry((row.agent, row.task)).or_insert(row.ended);
+            }
+            let folders = std::fs::read_dir(&agents).into_iter().flatten().flatten();
+            folders
+                .map(|folder| {
+                    let agent = folder.file_name().to_string_lossy().into_owned();
+                    let ended = |task: &str| match ends.get(&(agent.clone(), task.to_owned())) {
+                        Some(None) => Ended::Running,
+                        Some(Some(ms)) => Ended::At(std::time::UNIX_EPOCH + std::time::Duration::from_millis(u64::try_from(*ms).unwrap_or(0))),
+                        None => Ended::Unknown,
+                    };
+                    task_logs::prune(&folder.path().join("tasks"), std::time::SystemTime::now(), ended)
+                })
+                .sum::<usize>()
+        });
+        let removed = pruned.await.unwrap_or(0);
+        if removed > 0 {
+            tracing::info!(removed, "removed the logs of tasks that finished over a week ago");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(24 * 3600)).await;
+    }
+}
+
 pub(crate) async fn monitor(factory: Weak<Factory>) {
+    tokio::spawn(prune_logs(factory.clone()));
+    let Some(mut woken) = factory.upgrade().map(|factory| factory.loops_woken()) else { return };
     let mut checked = tokio::time::Instant::now();
     loop {
-        let Some(every) = factory.upgrade().map(|factory| factory.task_check_every()) else { return };
-        // Short naps, so a change of `every` applies soon, and an open
-        // panel follows its tasks' output.
-        tokio::time::sleep(every.min(std::time::Duration::from_secs(1))).await;
+        let Some((every, watched)) = factory.upgrade().map(|factory| (factory.task_check_every(), shown(&factory))) else { return };
+        let due = every.saturating_sub(checked.elapsed());
+        let nap = if watched { due.min(std::time::Duration::from_secs(1)) } else { due };
+        tokio::select! {
+            () = tokio::time::sleep(nap) => {}
+            changed = woken.changed() => if changed.is_err() { return },
+        }
         let Some(strong) = factory.upgrade() else { return };
-        refresh_view(&strong);
+        if shown(&strong) {
+            refresh_view(&strong);
+        }
         drop(strong);
         if checked.elapsed() < every {
             continue;

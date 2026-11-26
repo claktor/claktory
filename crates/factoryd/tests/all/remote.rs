@@ -373,6 +373,12 @@ async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_
     assert_eq!(zooms(&view), [("phone".to_owned(), 0.8)].into());
     apply_request(&mut client, &mut view, client_message::Body::SetZoom(v1::SetZoom { zoom: 1.5 })).await;
     assert_eq!(zooms(&view), [("local".to_owned(), 1.5), ("phone".to_owned(), 0.8)].into());
+    // So is how much it keeps of the files (#446).
+    let cache = client_message::Body::SetFileCache(v1::SetFileCache { bytes: 5_000_000_000 });
+    socket.send(Message::Binary(ClientMessage { id: 4, body: Some(cache) }.encode_to_vec().into())).await.expect("send");
+    let caches = |view: &View| view.workspace.settings.clone().expect("settings").file_cache;
+    view.follow(&mut client, |view| !caches(view).is_empty()).await;
+    assert_eq!(caches(&view), [("phone".to_owned(), 5_000_000_000)].into());
 
     // Another key is turned away right after the handshake, before any of
     // Factory's protocol: the code is used, and nothing else is waiting.
@@ -406,8 +412,96 @@ async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_
     view.follow(&mut client, |view| !remote(view).on && remote(view).devices.is_empty()).await;
     view.follow(&mut client, |view| !zooms(view).contains_key("phone")).await;
     assert_eq!(zooms(&view), [("local".to_owned(), 1.5)].into());
+    assert!(caches(&view).is_empty(), "its file cache went with it");
     let unknown = client_message::Body::UnpairDevice(v1::UnpairDevice { device_id: "phone".into() });
     assert!(matches!(apply_request(&mut client, &mut view, unknown).await, Body::Error(error) if error.code() == ErrorCode::NotFound));
+}
+
+/// Friend bug #38: a disk that turns read-only or fails unpairs nobody. A
+/// paired device still comes in (only when it came isn't noted), one that
+/// would be new is told it's the disk, a devices file that can't be read
+/// keeps the devices connected, and none of it says "not paired".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_disk_that_fails_unpairs_nobody() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    factory.set_tunnel_online_wait(Duration::from_millis(100));
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let remote = |view: &View| view.workspace.remote.clone().expect("remote access");
+    let relays = v1::SetRemoteAccess { relays: vec!["http://127.0.0.1:9/".into()], set_relays: true, ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::SetRemoteAccess(relays)).await;
+    let make = |name: &str| client_message::Body::CreatePairing(v1::CreatePairing { name: name.into(), host: String::new() });
+    let Body::PairingCode(made) = apply_request(&mut client, &mut view, make("Phone")).await else { panic!("a code") };
+    let code = parse(&made.code);
+    let phone = new_device().await;
+    let connection = dial(&phone, &code, &code.addresses).await.expect("let in");
+    let mut socket = open(&connection).await;
+    assert!(matches!(hello(&mut socket, &code.token).await, Body::PairingPending(_)));
+    factoryd::remote::approve(&home(&dir), "phone").expect("allowed");
+    assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
+    // A second code, waiting for its device.
+    let Body::PairingCode(second) = apply_request(&mut client, &mut view, make("Tablet")).await else { panic!("a code") };
+    let second = parse(&second.code);
+
+    // The disk turns read-only (as far as Claktory can tell).
+    let folder = dir.join("home/remote");
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o500)).expect("read-only");
+    if std::fs::write(folder.join("probe"), b"").is_ok() {
+        eprintln!("skipped: this user writes to read-only folders (root)");
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).expect("writable");
+        return;
+    }
+    let last_seen = |dir: &Path| factoryd::remote::devices(&home(dir)).expect("devices")[1].last_seen;
+    let before = last_seen(&dir);
+    let mut again = open(&connection).await;
+    match hello(&mut again, &code.token).await {
+        Body::Welcome(welcome) => assert_eq!(welcome.device_id, "phone"),
+        other => panic!("a paired device still comes in, got {other:?}"),
+    }
+    assert_eq!(last_seen(&dir), before, "only when it came isn't noted");
+    let tablet = new_device().await;
+    let to_tablet = dial(&tablet, &second, &second.addresses).await.expect("its code is waiting");
+    let mut waiting = open(&to_tablet).await;
+    match hello(&mut waiting, &second.token).await {
+        Body::Error(error) => {
+            assert_eq!(error.code(), ErrorCode::Internal);
+            assert!(
+                error.message.contains("can't use its disk") && error.message.contains("You don't need to add this device again"),
+                "{}",
+                error.message
+            );
+        }
+        other => panic!("a new device is told it's the disk, got {other:?}"),
+    }
+
+    // The devices file can't even be read: the devices stay connected and
+    // shown, and one connecting again hears why it can't, not that it isn't
+    // paired.
+    let file = folder.join("devices.json");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).expect("unreadable");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(remote(&view).devices.iter().any(|device| device.id == "phone"), "still shown");
+    assert!(connection.close_reason().is_none(), "its connection stays");
+    let ping = client_message::Body::SelectAgent(v1::SelectAgent { agent_id: String::new() });
+    again.send(Message::Binary(ClientMessage { id: 2, body: Some(ping) }.encode_to_vec().into())).await.expect("send");
+    assert!(next(&mut again).await.is_some(), "its session still answers");
+    let phone_again = dial(&phone, &code, &code.addresses).await.expect("the gate lets the Hello say why");
+    let mut third = open(&phone_again).await;
+    match hello(&mut third, &code.token).await {
+        Body::Error(error) => {
+            assert!(error.code() == ErrorCode::Internal && error.message.contains("can't use its disk"), "{}", error.message)
+        }
+        other => panic!("expected the disk's reason, got {other:?}"),
+    }
+
+    // Once the disk works again, nothing needs pairing again.
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).expect("readable");
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).expect("writable");
+    let mut fourth = open(&phone_again).await;
+    assert!(matches!(hello(&mut fourth, &code.token).await, Body::Welcome(_)));
+    assert!(last_seen(&dir) > before, "noted again");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -498,7 +592,8 @@ async fn remote_access_turning_on_and_off_keeps_this_machines_app_connected() {
     let app = new_device().await;
     let connection = dial(&app, &local, &local.addresses).await.expect("let in");
     let mut socket = open(&connection).await;
-    assert!(matches!(hello(&mut socket, &local.token).await, Body::Welcome(_)));
+    let answer = hello(&mut socket, &local.token).await;
+    assert!(matches!(answer, Body::Welcome(_)), "{answer:?}");
     let relays = v1::SetRemoteAccess { relays: vec!["http://127.0.0.1:9/".into()], set_relays: true, ..Default::default() };
     assert!(matches!(ask(&mut socket, 2, client_message::Body::SetRemoteAccess(relays)).await, Body::Ack(_)));
 
@@ -616,7 +711,9 @@ async fn a_code_lets_a_device_in_only_once_the_person_allows_it_and_ends_when_th
     // Allow goes by the file at once, not by what the Workspace showed a
     // moment ago.
     let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone(), ..Default::default() });
-    assert!(matches!(apply_request(&mut client, &mut view, allow.clone()).await, Body::Error(error) if error.code() == ErrorCode::NotFound));
+    assert!(
+        matches!(apply_request(&mut client, &mut view, allow.clone()).await, Body::Error(error) if error.code() == ErrorCode::NotFound)
+    );
     let why = turned_away(&mut socket, "expired").await;
     assert!(why.contains("expired"), "{why}");
     assert!(matches!(apply_request(&mut client, &mut view, allow).await, Body::Error(error) if error.code() == ErrorCode::NotFound));
@@ -964,4 +1061,153 @@ async fn a_device_reaching_claktory_at_an_address_other_than_its_route_back_gets
     let connection = dial(&device, &code, &[lan]).await.expect("answered from the address it dialled");
     let mut socket = open(&connection).await;
     assert!(matches!(hello(&mut socket, &code.token).await, Body::PairingPending(_)));
+}
+
+/// Who reached a relay, and the token each showed (#450).
+#[derive(Debug, Default)]
+struct Heard(std::sync::Mutex<Vec<(EndpointId, Option<String>)>>);
+
+impl iroh_relay::server::AccessControl for Heard {
+    async fn on_connect(&self, request: &iroh_relay::server::ClientRequest) -> iroh_relay::server::Access {
+        self.0.lock().unwrap().push((request.endpoint_id(), request.auth_token()));
+        iroh_relay::server::Access::Allow
+    }
+}
+
+/// #450: Claktory's relay forwards only to or from a signed-in Claktory,
+/// which shows it a token from the account service. Signed out, the tunnel
+/// is on n0's relays; signed in, it gets a token at its first check-in and
+/// moves to Claktory's with it, giving it to Claktory's alone; signed out
+/// again, back to n0's, the token forgotten. The Workspace names the relays
+/// each time, for devices to follow, and a device's session stays up
+/// throughout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_signed_in_claktory_takes_its_relay_token_to_claktorys_relay_alone_and_signed_out_uses_n0s() {
+    use iroh::test_utils::{DnsPkarrServer, run_relay_server_with_access};
+
+    let heard = std::sync::Arc::new(Heard::default());
+    let (_, ours, _ours) = run_relay_server_with_access(false, heard.clone()).await.expect("Claktory's relay");
+    let n0_heard = std::sync::Arc::new(Heard::default());
+    let (_, n0s, _n0s) = run_relay_server_with_access(false, n0_heard.clone()).await.expect("n0's");
+    let lookup: Lookup = std::sync::Arc::new(DnsPkarrServer::run().await.expect("an address lookup"));
+    let dir = temp_dir();
+    let service = crate::claktory_account::Instance::start(&dir).await;
+    let (addr, factory) = crate::claktory_account::open(&dir, &service.url).await;
+    factory.set_tunnel_online_wait(WAIT);
+    factory.set_tunnel_relay_grace(Duration::from_millis(500));
+    on_local_network(&factory, &[&ours], &lookup);
+    factory.set_tunnel_public_relays(vec![n0s.to_string()]);
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let remote = |view: &View| view.workspace.remote.clone().expect("remote access");
+
+    // Not signed in: n0's relays, and a phone paired through them.
+    let code = pair_phone(&mut client, &mut view, &lookup).await;
+    assert_eq!(remote(&view).relays, [n0s.to_string()]);
+    assert_eq!(code.relays, [n0s.to_string()]);
+    let phone = device_on(&n0s, Some(&lookup), iroh::SecretKey::generate()).await;
+    let connection = dial_at(&phone, from_away(&code), WAIT).await.expect("reached through n0's relay");
+    let mut socket = open(&connection).await;
+    assert!(matches!(hello(&mut socket, &code.token).await, Body::PairingPending(_)));
+    factoryd::remote::approve(&home(&dir), "phone").expect("allowed");
+    assert!(matches!(next(&mut socket).await, Some(Body::Welcome(welcome)) if welcome.device_id == "phone"));
+    let backend: EndpointId = code.endpoint;
+    assert!(heard.0.lock().unwrap().iter().all(|(who, _)| *who != backend), "never on Claktory's relay unsigned");
+
+    // Signed in: the check-in brings a token, and the tunnel moves.
+    crate::claktory_account::sign_in(&mut client, &service, "ana@example.com").await;
+    view.follow(&mut client, |view| remote(view).relays == [ours.to_string()]).await;
+    view.follow(&mut client, |view| remote(view).home_relay == ours.to_string() && remote(view).relay_connected).await;
+    let token = tokio::time::timeout(WAIT, async {
+        loop {
+            if let Some(token) = heard.0.lock().unwrap().iter().find(|(who, _)| *who == backend).map(|(_, token)| token.clone()) {
+                return token;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the tunnel reaches Claktory's relay")
+    .expect("with its token");
+    let keys = claktory_account::server::relay_token::Keys::derive(&service.secrets.0);
+    let public: Vec<u8> = (0..64).step_by(2).map(|at| u8::from_str_radix(&keys.public_hex()[at..at + 2], 16).expect("hex")).collect();
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&public.try_into().expect("32 bytes")).expect("the relay-token key");
+    let payload = claktory_account::protocol::open_relay_token(&key, &token).expect("signed by the account service");
+    let payload: serde_json::Value = serde_json::from_slice(&payload).expect("JSON");
+    assert_eq!(payload["e"], backend.to_string(), "bound to the tunnel key");
+    // Never to another relay.
+    assert!(n0_heard.0.lock().unwrap().iter().all(|(_, token)| token.is_none()));
+    // The phone's session is still up: it hears the sign-in.
+    assert!(next(&mut socket).await.is_some(), "still connected after the move");
+
+    // Signed out: back to n0's, the token forgotten.
+    client.ok(client_message::Body::AccountSignOut(v1::AccountSignOut {})).await;
+    view.follow(&mut client, |view| remote(view).relays == [n0s.to_string()]).await;
+    let kept: i64 = rusqlite::Connection::open(dir.join("home/factory.db"))
+        .expect("factory.db")
+        .query_row("SELECT count(*) FROM relay_token", [], |row| row.get(0))
+        .expect("the table");
+    assert_eq!(kept, 0);
+    assert!(next(&mut socket).await.is_some(), "still connected after the move back");
+}
+
+/// #450: a relay token replaced at runtime (a renewal, `insert_relay`) goes
+/// with the next connection to that relay, the home relay's too, whose
+/// connection lasts as long as the endpoint (vendor/iroh reads the token at
+/// every dial).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_renewed_relay_token_goes_with_the_next_connection_to_the_home_relay() {
+    assert_eq!(redialled_with(Some("two")).await, [Some("one".to_owned()), Some("two".to_owned())]);
+}
+
+/// #450: a relay config put back without a token (signed out, with
+/// Claktory's relay named in config.json) dials without one: the relay map is
+/// the only place the token comes from, not the one the connection started
+/// with.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relay_config_without_a_token_dials_without_one() {
+    assert_eq!(redialled_with(None).await, [Some("one".to_owned()), None]);
+}
+
+/// The tokens a relay heard from an endpoint homed on it with the token
+/// "one": at its first connection, then at the next, after its config was
+/// replaced with one holding `token` and the relay dropped it.
+async fn redialled_with(token: Option<&str>) -> Vec<Option<String>> {
+    let heard = std::sync::Arc::new(Heard::default());
+    let (_, url, server) = iroh::test_utils::run_relay_server_with_access(false, heard.clone()).await.expect("a relay");
+    let first = iroh::RelayConfig::from(url.clone()).with_auth_token("one");
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
+        .relay_mode(RelayMode::Custom(iroh::RelayMap::from(first)))
+        .bind()
+        .await
+        .expect("an endpoint");
+    tokio::time::timeout(WAIT, endpoint.online()).await.expect("homed on the relay");
+    let tokens =
+        || heard.0.lock().unwrap().iter().filter(|(who, _)| *who == endpoint.id()).map(|(_, token)| token.clone()).collect::<Vec<_>>();
+    let mut replaced = iroh::RelayConfig::from(url.clone());
+    if let Some(token) = token {
+        replaced = replaced.with_auth_token(token);
+    }
+    endpoint.insert_relay(url, std::sync::Arc::new(replaced)).await;
+    // The relay drops it, once it holds the connection: the relay confirms
+    // the handshake (and the client counts itself connected) a moment before
+    // it registers the client, and dropping an endpoint it doesn't hold yet
+    // does nothing, so a single try could miss it and nothing would redial.
+    let clients = server.relay_service().expect("a relay").clients();
+    tokio::time::timeout(WAIT, async {
+        while !clients.disconnect(endpoint.id(), None) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the relay holds the connection");
+    tokio::time::timeout(WAIT, async {
+        while tokens().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("connected again");
+    tokens()[..2].to_vec()
 }

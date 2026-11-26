@@ -58,6 +58,28 @@ pub const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mls_values (
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS mls_values_grp ON mls_values (grp) WHERE grp IS NOT NULL;";
 
+/// Each group's epoch floor (Melone's F2, Fugo 40159): the highest epoch an
+/// endpoint ever merged in it, recorded as OpenMLS writes the group's
+/// context and kept apart from `mls_values`, so neither [`forget_group`] nor
+/// a broken state lowers it. A rejoin is refused a GroupInfo below it
+/// (`Group::rejoin`'s `floor`, from [`epoch_floor`]), so a sequencer can't
+/// send an endpoint back past a Remove it merged. A table of its own, for
+/// the caller's migrations after [`SCHEMA`]; the worker's storage
+/// ([`SqlStorage::public`]) never writes it.
+pub const FLOOR_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mls_floor (
+    grp BLOB PRIMARY KEY NOT NULL,
+    epoch INTEGER NOT NULL
+) WITHOUT ROWID;";
+
+/// The highest epoch this endpoint merged in `group_id` (0 if none): what
+/// `Group::rejoin` takes as its floor.
+pub fn epoch_floor(db: &Connection, group_id: &[u8]) -> Result<u64> {
+    let grp = json(&openmls::prelude::GroupId::from_slice(group_id))?;
+    let epoch: Option<i64> =
+        db.query_row("SELECT epoch FROM mls_floor WHERE grp = ?1", params![grp], |row| row.get(0)).optional().map_err(sql)?;
+    Ok(epoch.unwrap_or(0).max(0) as u64)
+}
+
 /// The sealed value's format byte.
 const SEALED_V1: u8 = 1;
 const NONCE: usize = 24;
@@ -159,6 +181,38 @@ pub struct SqlStorage<'a> {
 pub fn forget_group(db: &Connection, group_id: &openmls::prelude::GroupId) -> Result<usize> {
     let grp = json(group_id)?;
     db.execute("DELETE FROM mls_values WHERE grp = ?1", params![grp]).map_err(sql)
+}
+
+/// Deletes the key packages this endpoint made whose lifetime ended by
+/// `now` (seconds since the epoch), their private init and encryption keys
+/// with them (Melone's F4): one never used, or a last resort replaced since,
+/// opens no Welcome after. A used one-time package is gone already (OpenMLS
+/// deletes it as it joins). Returns how many went; one that doesn't open
+/// under `key` is left alone.
+pub fn sweep_key_packages(db: &Connection, key: &SealKey, now: u64) -> Result<usize> {
+    let rows: Vec<(Vec<u8>, Vec<u8>)> = {
+        let mut statement = db.prepare("SELECT key, value FROM mls_values WHERE grp IS NULL AND substr(key, 1, ?1) = ?2").map_err(sql)?;
+        statement
+            .query_map(params![KEY_PACKAGE.len() as i64, KEY_PACKAGE], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(sql)?
+            .collect::<std::result::Result<_, _>>()
+            .map_err(sql)?
+    };
+    let mut gone = 0;
+    for (at, sealed) in rows {
+        let Ok(plain) = key.open(&at, &sealed) else { continue };
+        let Ok(bundle) = serde_json::from_slice::<openmls::prelude::KeyPackageBundle>(&plain) else { continue };
+        if bundle.key_package().life_time().not_after() <= now {
+            gone += db.execute("DELETE FROM mls_values WHERE key = ?1", params![at]).map_err(sql)?;
+        }
+    }
+    Ok(gone)
+}
+
+impl SqlStorage<'_> {
+    pub(crate) fn sweep_key_packages(&self, now: u64) -> Result<usize> {
+        sweep_key_packages(self.db, self.key, now)
+    }
 }
 
 fn sql(error: rusqlite::Error) -> Error {
@@ -393,7 +447,21 @@ impl StorageProvider<CURRENT_VERSION> for SqlStorage<'_> {
         group_id: &GroupId,
         group_context: &GroupContext,
     ) -> Result<()> {
-        self.put_group(GROUP_CONTEXT, group_id, group_context)
+        self.put_group(GROUP_CONTEXT, group_id, group_context)?;
+        if !self.public {
+            // The floor only rises (F2).
+            let epoch = serde_json::to_value(group_context)
+                .ok()
+                .and_then(|context| context.get("epoch").and_then(serde_json::Value::as_u64))
+                .ok_or_else(|| Error::Storage("a group context without its epoch".to_owned()))?;
+            self.db
+                .execute(
+                    "INSERT INTO mls_floor (grp, epoch) VALUES (?1, ?2) ON CONFLICT (grp) DO UPDATE SET epoch = MAX(epoch, excluded.epoch)",
+                    params![json(group_id)?, epoch as i64],
+                )
+                .map_err(sql)?;
+        }
+        Ok(())
     }
 
     fn write_confirmation_tag<GroupId: traits::GroupId<CURRENT_VERSION>, ConfirmationTag: traits::ConfirmationTag<CURRENT_VERSION>>(
@@ -758,6 +826,7 @@ mod tests {
         let db = Connection::open_in_memory().unwrap();
         db.pragma_update(None, "secure_delete", "ON").unwrap();
         db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch(FLOOR_SCHEMA).unwrap();
         db
     }
 

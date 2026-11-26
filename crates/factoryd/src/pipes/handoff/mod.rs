@@ -985,6 +985,20 @@ pub(crate) fn hold(factory: &Factory, ids: &[i64]) {
     }
 }
 
+/// A pipe's reports waiting for the person (DecidePipeReports), by id,
+/// oldest first: what a card to send or discard them is bound to (#471 G6).
+pub(crate) fn waiting_ids(factory: &Factory, pipe: &str) -> Vec<i64> {
+    let db = factory.store.db();
+    let read = || -> rusqlite::Result<Vec<i64>> {
+        let mut statement = db.prepare("SELECT id FROM pipe_handoff_reports WHERE pipe = ?1 AND state = 'waiting' ORDER BY id")?;
+        statement.query_map([pipe], |row| row.get(0))?.collect()
+    };
+    read().unwrap_or_else(|error| {
+        tracing::error!(%error, "could not read a pipe's waiting reports");
+        Vec::new()
+    })
+}
+
 /// The person sends a pipe's waiting reports to its current recipient, or
 /// discards them.
 pub(crate) fn decide_waiting(factory: &Arc<Factory>, pipe: &str, send: bool) -> Result<(), String> {

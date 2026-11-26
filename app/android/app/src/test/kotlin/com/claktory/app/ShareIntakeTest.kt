@@ -82,6 +82,23 @@ class ShareIntakeTest {
     }
 
     @Test
+    fun whatTheShareScreenLeftOutIsSaid() {
+        // Files the sharing app gave no access to were left out before the app saw the share (#193).
+        val refused = intake.plan("hello", null, emptyList(), ShareIntake.REFUSED)!!
+        assertEquals("hello", refused.text)
+        assertEquals(ShareIntake.REFUSED, refused.error)
+        // Nothing else in it: it still comes, so the app can say so.
+        assertEquals(ShareIntake.REFUSED, intake.plan(null, null, emptyList(), ShareIntake.REFUSED)!!.error)
+        val kept = intake.plan(null, null, listOf("content://media/1"), ShareIntake.REFUSED)!!
+        assertEquals(listOf("content://media/1"), kept.uris)
+        assertEquals(ShareIntake.REFUSED, kept.error)
+        assertEquals(ShareIntake.TOO_MANY, intake.plan(null, null, emptyList(), ShareIntake.TOO_MANY)!!.error)
+        // Anything else said there is ignored.
+        assertNull(intake.plan(null, null, emptyList(), "no_space"))
+        assertNull(intake.plan("hi", null, emptyList(), "no_space")!!.error)
+    }
+
+    @Test
     fun aStallClosesWhatsRead() {
         var now = 0L
         val guard = StallGuard(30_000) { now }

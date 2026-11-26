@@ -1,5 +1,5 @@
-// Sale's row 22: a phone on its side, typing, with "Confirm this phone is
-// yours by …" showing. The banner steps aside while the keyboard leaves
+// Sale's row 22: a phone on its side, typing, with "Sign in to your
+// Claktory account in this app by …" showing. The banner steps aside while the keyboard leaves
 // little room, so the message box stays in sight, and comes back when it's
 // down. Upright on a big phone, with room, it stays.
 import 'package:factory_app/message_box.dart';
@@ -10,7 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
 
-final _banner = find.textContaining('is yours by ');
+final _banner = find.textContaining('in this app by ');
 
 Future<Harness> _phone(WidgetTester tester, Size size) async {
   debugDefaultTargetPlatformOverride = TargetPlatform.iOS;

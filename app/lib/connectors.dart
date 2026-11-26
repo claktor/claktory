@@ -13,7 +13,7 @@ import 'decision.dart';
 import 'extensions.dart' show logTime;
 import 'forms.dart';
 import 'identity.dart';
-import 'mobile/metrics.dart' show TypeScale;
+import 'mobile/metrics.dart' show Metrics, TypeScale;
 import 'mobile/input.dart' show InputKind;
 import 'mobile/lines.dart';
 import 'mobile/platform_policy.dart' show PhonePlatformPolicy;
@@ -2096,16 +2096,40 @@ class _PolicyStatementsState extends State<PolicyStatements> {
       children: [
         Align(
           alignment: Alignment.centerLeft,
-          child: Pressable(
-            onTap: () => setState(() => _open = !_open),
-            builder: (context, hovered) => Text(
-              _open
-                  ? 'Hide exact permissions'
-                  : count == 1
-                  ? 'Show exact permissions (1 rule)'
-                  : 'Show exact permissions ($count rules)',
-              style: TypeScale.of(context).caption
-                  .copyWith(color: hovered ? palette.text : palette.textMuted),
+          // A caption link, underlined at rest so it reads as one before
+          // the pointer finds it; a finger's height on a touch screen.
+          child: Semantics(
+            button: true,
+            expanded: _open,
+            child: Pressable(
+              onTap: () => setState(() => _open = !_open),
+              builder: (context, hovered) {
+                final color = hovered ? palette.text : palette.textMuted;
+                return ConstrainedBox(
+                  constraints: BoxConstraints(
+                    minHeight: touchFirst(context)
+                        ? Metrics.of(context).target
+                        : 0,
+                  ),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    widthFactor: 1,
+                    child: Text(
+                      _open
+                          ? 'Hide exact permissions'
+                          : count == 1
+                          ? 'Show exact permissions (1 rule)'
+                          : 'Show exact permissions ($count rules)',
+                      style: TypeScale.of(context).caption.copyWith(
+                        color: color,
+                        fontWeight: FontWeight.w500,
+                        decoration: TextDecoration.underline,
+                        decorationColor: color,
+                      ),
+                    ),
+                  ),
+                );
+              },
             ),
           ),
         ),

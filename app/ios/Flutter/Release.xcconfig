@@ -3,3 +3,23 @@
 // The scheme of the links this build opens (links.dart): claktory:// is
 // always the real Claktory's; Claktory Dev's is claktory-dev (scripts/ios.sh).
 CLAKTORY_URL_SCHEME = claktory
+
+// The real Claktory (com.claktory.app): only the Release build that
+// scripts/testflight.sh archives. A Profile build shares this file and is
+// a debug build like any other (#501).
+CLAKTORY_BUNDLE_ID = com.claktory.app
+CLAKTORY_NAME = Claktory
+CLAKTORY_APP_ICON = AppIcon
+// The keychain group the app shares with its notification extension, where
+// the shipped app's push keys are: never change it (scripts/testflight.sh
+// signs with it).
+CLAKTORY_PUSH_GROUP = com.claktory.app.notifications
+CLAKTORY_BUNDLE_ID[config=Profile] = com.claktory.app.debug
+CLAKTORY_NAME[config=Profile] = Claktory Dev
+CLAKTORY_APP_ICON[config=Profile] = AppIconDev
+CLAKTORY_URL_SCHEME[config=Profile] = claktory-debug
+CLAKTORY_PUSH_GROUP[config=Profile] = com.claktory.app.debug.notifications
+
+// The app's entitlements; scripts/ios.sh --dev gives Claktory Dev its own
+// (RunnerDev.entitlements), on the Simulator only.
+CLAKTORY_RUNNER_ENTITLEMENTS = Runner/Runner.entitlements

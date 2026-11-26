@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message as Frame;
@@ -34,10 +34,60 @@ struct Job {
     idle_timeout: Option<Duration>,
 }
 
+/// What the next request on the socket needs of the last one to send only
+/// what's new: digests, not the request itself (#454), which carries every
+/// image of the conversation.
 struct Continuation {
-    last_request_body: Value,
+    /// The last request's body, all but its input.
+    last_rest: Digest,
+    /// How many items the last request's input and its response's own
+    /// items make together, and their digest: the start the next request's
+    /// input must have.
+    baseline_len: usize,
+    baseline: Digest,
     last_response_id: String,
-    last_response_items: Vec<Value>,
+}
+
+type Digest = [u8; 32];
+
+/// Feeds what serde_json writes into a SHA-256.
+struct Hashing(sha2::Sha256);
+
+impl std::io::Write for Hashing {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        sha2::Digest::update(&mut self.0, bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The digest of `values` in order, each as its JSON.
+fn digest<'a>(values: impl IntoIterator<Item = &'a Value>) -> Digest {
+    let mut hashing = Hashing(<sha2::Sha256 as sha2::Digest>::new());
+    for value in values {
+        // A newline never occurs in compact JSON: it ends each one.
+        let _ = serde_json::to_writer(&mut hashing, value);
+        sha2::Digest::update(&mut hashing.0, b"\n");
+    }
+    sha2::Digest::finalize(hashing.0).into()
+}
+
+/// The digest of a request body without its input and continuation, the
+/// part a delta must share with the last request.
+fn rest_digest(body: &Value) -> Digest {
+    let mut hashing = Hashing(<sha2::Sha256 as sha2::Digest>::new());
+    for (key, value) in body.as_object().into_iter().flatten() {
+        if key == "input" || key == "previous_response_id" {
+            continue;
+        }
+        let _ = serde_json::to_writer(&mut hashing, key);
+        let _ = serde_json::to_writer(&mut hashing, value);
+        sha2::Digest::update(&mut hashing.0, b"\n");
+    }
+    sha2::Digest::finalize(hashing.0).into()
 }
 
 /// One task owns each socket; requests queue through `jobs`, the task notices server closes while idle.
@@ -301,48 +351,68 @@ async fn acquire(
     Ok(Acquired { connection, cached: Some((session.to_owned(), account.to_owned())) })
 }
 
-fn without_input(body: &Value) -> Value {
-    let mut rest = body.clone();
-    if let Some(object) = rest.as_object_mut() {
-        object.remove("input");
-        object.remove("previous_response_id");
-    }
-    rest
-}
-
-fn input_items(body: &Value) -> Vec<Value> {
-    body["input"].as_array().cloned().unwrap_or_default()
+fn input_items(body: &Value) -> &[Value] {
+    body["input"].as_array().map_or(&[], Vec::as_slice)
 }
 
 /// The items after the cached baseline (the previous request's input plus its response items), when the rest of the body matches.
-fn delta(body: &Value, continuation: &Continuation) -> Option<Vec<Value>> {
-    if without_input(body) != without_input(&continuation.last_request_body) {
+fn delta<'a>(body: &'a Value, continuation: &Continuation) -> Option<&'a [Value]> {
+    if rest_digest(body) != continuation.last_rest {
         return None;
     }
     let current = input_items(body);
-    let mut baseline = input_items(&continuation.last_request_body);
-    baseline.extend(continuation.last_response_items.iter().cloned());
-    if current.len() < baseline.len() || current[..baseline.len()] != baseline[..] {
+    if current.len() < continuation.baseline_len || digest(&current[..continuation.baseline_len]) != continuation.baseline {
         return None;
     }
-    Some(current[baseline.len()..].to_vec())
+    Some(&current[continuation.baseline_len..])
 }
 
-fn continuation_body(connection: &Connection, body: &Value) -> Value {
-    let mut guard = connection.continuation.lock();
-    let Some(continuation) = guard.as_ref() else { return body.clone() };
-    match delta(body, continuation) {
-        Some(delta) if !continuation.last_response_id.is_empty() => {
-            let mut next = body.clone();
-            next["previous_response_id"] = json!(continuation.last_response_id);
-            next["input"] = Value::Array(delta);
-            next
+/// A `response.create` frame: the body's fields after its type, as they
+/// are, or with only the input that's new since the response it continues.
+struct CreateFrame<'a> {
+    body: &'a Value,
+    continues: Option<(&'a str, &'a [Value])>,
+}
+
+impl serde::Serialize for CreateFrame<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut frame = serializer.serialize_map(None)?;
+        let fields = self.body.as_object();
+        match fields.and_then(|fields| fields.get("type")) {
+            Some(kind) => frame.serialize_entry("type", kind)?,
+            None => frame.serialize_entry("type", "response.create")?,
         }
-        _ => {
-            *guard = None;
-            body.clone()
+        for (key, value) in fields.into_iter().flatten() {
+            match (key.as_str(), self.continues) {
+                ("type", _) => {}
+                ("input", Some((_, delta))) => frame.serialize_entry(key, delta)?,
+                ("previous_response_id", Some((id, _))) => frame.serialize_entry(key, id)?,
+                _ => frame.serialize_entry(key, value)?,
+            }
         }
+        if let Some((id, _)) = self.continues
+            && !fields.is_some_and(|fields| fields.contains_key("previous_response_id"))
+        {
+            frame.serialize_entry("previous_response_id", id)?;
+        }
+        frame.end()
     }
+}
+
+/// The frame for `body`: a delta when the socket's last response is its
+/// start, else the whole body (and the socket forgets that response).
+fn frame_for(connection: &Connection, body: &Value) -> String {
+    let mut guard = connection.continuation.lock();
+    let continues = guard.as_ref().and_then(|continuation| {
+        let delta = delta(body, continuation)?;
+        (!continuation.last_response_id.is_empty()).then_some((continuation.last_response_id.as_str(), delta))
+    });
+    let frame = serde_json::to_string(&CreateFrame { body, continues }).unwrap_or_default();
+    if continues.is_none() {
+        *guard = None;
+    }
+    frame
 }
 
 fn response_items(model: &Model, output: &crate::types::AssistantMessage) -> Vec<Value> {
@@ -367,15 +437,14 @@ pub async fn process(
     start_emitted: &mut bool,
 ) -> Result<(), CodexFailure> {
     let acquired = acquire(url, &request.websocket_headers, request.session_id.as_deref(), &request.account_id, &options.cancel).await?;
-    let body = if acquired.cached.is_some() { continuation_body(&acquired.connection, &request.body) } else { request.body.clone() };
-    let mut frame = Map::new();
-    frame.insert("type".into(), json!("response.create"));
-    if let Some(fields) = body.as_object() {
-        frame.extend(fields.clone());
-    }
+    let frame = if acquired.cached.is_some() {
+        frame_for(&acquired.connection, &request.body)
+    } else {
+        serde_json::to_string(&CreateFrame { body: &request.body, continues: None }).unwrap_or_default()
+    };
     let (events, mut received) = mpsc::unbounded_channel();
     let job = Job {
-        frame: Value::Object(frame).to_string(),
+        frame,
         events,
         cancel: options.cancel.clone(),
         idle_timeout: options.timeout_ms.filter(|ms| *ms > 0).map(Duration::from_millis),
@@ -420,11 +489,16 @@ pub async fn process(
     let keep = outcome.is_ok() && !options.cancel.is_cancelled();
     if acquired.cached.is_some() {
         let continuation = match (&outcome, parser.output.extra.get("responseId").and_then(Value::as_str)) {
-            (Ok(()), Some(id)) if keep => Some(Continuation {
-                last_request_body: request.body.clone(),
-                last_response_id: id.to_owned(),
-                last_response_items: response_items(model, &parser.output),
-            }),
+            (Ok(()), Some(id)) if keep => {
+                let input = input_items(&request.body);
+                let answered = response_items(model, &parser.output);
+                Some(Continuation {
+                    last_rest: rest_digest(&request.body),
+                    baseline_len: input.len() + answered.len(),
+                    baseline: digest(input.iter().chain(&answered)),
+                    last_response_id: id.to_owned(),
+                })
+            }
             _ => None,
         };
         *acquired.connection.continuation.lock() = continuation;

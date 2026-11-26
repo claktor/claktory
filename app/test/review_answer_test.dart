@@ -5,8 +5,11 @@
 // answered, the pane closes and the person is back where they pressed
 // Review. On media nothing else is offered meanwhile; on text, line
 // comments go with the answer.
+import 'package:factory_app/backend.dart' show RequestFailure;
+import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/dictation.dart' show transcribeRecording;
 import 'package:factory_app/layout.dart' show leaves;
+import 'package:factory_app/outbox.dart' show decisionWaiting;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/recorder.dart' show deviceRecorder;
 import 'package:factory_app/review_answer.dart';
@@ -71,6 +74,7 @@ Entry _ask(String path, {bool wantsText = false}) => Entry(
     wantsText: wantsText,
     state: AskPersonState.ASK_PERSON_STATE_PENDING,
     reviewPath: path,
+    revision: 1,
   ),
 );
 
@@ -109,6 +113,23 @@ Finder get _field => find.descendant(
   matching: find.byType(EditableText),
 );
 
+/// What a held bar says (row 1325).
+Finder get _held => find.descendant(
+  of: find.byType(ReviewBar),
+  matching: find.text('You replied. Waiting for Fugo to answer.'),
+);
+
+Button _button(String label) =>
+    find
+            .descendant(
+              of: find.byType(ReviewBar),
+              matching: find.widgetWithText(Button, label),
+            )
+            .evaluate()
+            .single
+            .widget
+        as Button;
+
 Future<void> _type(WidgetTester tester, String text) async {
   await tester.tap(_field);
   await tester.enterText(_field, text);
@@ -116,6 +137,9 @@ Future<void> _type(WidgetTester tester, String text) async {
 }
 
 void main() {
+  // Which card's Review was pressed is the app's, across tests.
+  tearDown(forgetReviewChoices);
+
   testWidgets('the expanded file shows the question and its answer field; '
       'typed, one Submit, and Return sends the words as a reply, never a yes '
       '(#370); the pane closes', (tester) async {
@@ -253,6 +277,9 @@ void main() {
         .lastWhere((m) => m.hasAnswerAsk())
         .answerAsk;
     expect((answer.text, answer.dismiss), ('', false));
+    // Opened from the file, not its card: no talk seen (#492).
+    expect(answer.hasTalkSeen(), isTrue);
+    expect(answer.talkSeen, 0);
   });
 
   testWidgets('an ask that wants words: Send, faint until there are some', (
@@ -287,15 +314,58 @@ void main() {
     expect(harness.last.hasSetLayout(), isTrue);
   });
 
-  testWidgets('a failed answer keeps the text and the file', (tester) async {
+  testWidgets('cut off by the connection, the answer waits as "Not sent '
+      'yet", keeps the text and the file, and goes by itself once the '
+      "connection's back (Abbacchio's rows 1298-1301)", (tester) async {
     final harness = await _showing(tester, _text, 'text');
     await _type(tester, 'The second');
-    harness.backend.refuse = 'Claktory is restarting.';
+    harness.backend.refuse = 'Connection lost.';
     await tester.tap(find.text('Submit'));
     await settle(tester);
-    expect(find.text("Couldn't send your answer. Try again."), findsOneWidget);
+    expect(find.text(decisionWaiting), findsOneWidget);
+    expect(find.text("Couldn't send your answer. Try again."), findsNothing);
     expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
     expect(tester.widget<EditableText>(_field).controller.text, 'The second');
+    final tries = harness.backend.sent.where((m) => m.hasAnswerAsk()).length;
+
+    // Back: it goes again; the first got there meanwhile, so the
+    // Claktory's "already" means it went, and the pane closes.
+    harness.backend.refuse = null;
+    harness.backend.onSend = (m) {
+      if (m.hasAnswerAsk()) {
+        throw const RequestFailure('This question was already answered.');
+      }
+    };
+    harness.backend.connected.value = false;
+    await tester.pump();
+    harness.backend.connected.value = true;
+    await settle(tester);
+    expect(
+      harness.backend.sent.where((m) => m.hasAnswerAsk()).length,
+      tries + 1,
+    );
+    expect(harness.backend.sent.where((m) => m.hasSetLayout()), isNotEmpty);
+    expect(find.text(decisionWaiting), findsNothing);
+  });
+
+  testWidgets('cut off, then refused once back: the refusal shows, not '
+      '"Couldn\'t send"', (tester) async {
+    final harness = await _showing(tester, _text, 'text');
+    harness.backend.refuse = 'Connection lost.';
+    await tester.tap(find.text('Approve'));
+    await settle(tester);
+    expect(find.text(decisionWaiting), findsOneWidget);
+    const refusal =
+        'Fugo replied on this card since you looked at it. Read the reply, '
+        'then answer again.';
+    harness.backend.refuse = refusal;
+    harness.backend.connected.value = false;
+    await tester.pump();
+    harness.backend.connected.value = true;
+    await settle(tester);
+    expect(find.text(refusal), findsOneWidget);
+    expect(find.text(decisionWaiting), findsNothing);
+    harness.backend.refuse = null;
   });
 
   testWidgets(
@@ -312,6 +382,22 @@ void main() {
       expect(tester.widget<EditableText>(_field).controller.text, 'The second');
     },
   );
+
+  testWidgets("refused because its agent replied on the card since, the bar "
+      "says so in Claktory's words, never as a failure to send (D2)", (
+    tester,
+  ) async {
+    final harness = await _showing(tester, _text, 'text');
+    const refusal =
+        'Fugo replied on this card since you looked at it. Read the reply on '
+        'the card, then answer again.';
+    harness.backend.refuse = refusal;
+    await tester.tap(find.text('Approve'));
+    await settle(tester);
+    expect(find.text(refusal), findsOneWidget);
+    expect(find.text("Couldn't send your answer. Try again."), findsNothing);
+    expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
+  });
 
   testWidgets('on media the field is all there is: no Comment meanwhile', (
     tester,
@@ -391,5 +477,423 @@ void main() {
       SelectAgent(agentId: 'bruno'),
     );
     expect(harness.page.value, AppPage.inbox);
+  });
+
+  testWidgets("Review from a card with a talk: the answer says how much of "
+      'it the card showed (#492)', (tester) async {
+    final harness = Harness(_workspace(_fugo(), selected: 'bruno'));
+    harness.backend.entriesById['fugo/7'] = _ask(_text)
+      ..askPerson.thread.addAll([
+        AskThreadMessage(text: 'Why the second?'),
+        AskThreadMessage(fromAgent: true, text: 'It is shorter.'),
+      ]);
+    harness.backend.files[_text] = FileContent(
+      path: _text,
+      data: 'The plan.\n'.codeUnits,
+      size: Int64(10),
+      sha256: 'abc',
+    );
+    await harness.show(tester, size: const Size(1400, 900));
+    await settle(tester);
+    harness.page.value = AppPage.inbox;
+    await settle(tester);
+    await settle(tester);
+    await tester.tap(find.text('Which option is better?'));
+    await pumpFrames(tester);
+    await tester.ensureVisible(find.text('Review'));
+    await tester.tap(find.text('Review'));
+    await settle(tester);
+    final opened = harness.last.setLayout;
+    await harness.apply(
+      tester,
+      _workspace(
+        _fugo()
+          ..layout = opened.root
+          ..layoutFocus = opened.focus,
+      ),
+    );
+    await settle(tester);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Approve'));
+    await settle(tester);
+    final answer = harness.backend.sent
+        .lastWhere((m) => m.hasAnswerAsk())
+        .answerAsk;
+    expect((answer.text, answer.dismiss), ('', false));
+    expect(answer.talkSeen, 2);
+  });
+
+  group('a card its agent replied on while the file was open (row 485)', () {
+    const changed = 'This card changed. Look at it again.';
+
+    /// Fugo's card after his reply on it: a new revision, the reply its
+    /// talk.
+    Entry replied() => _ask(_text)
+      ..askPerson.revision = 2
+      ..askPerson.thread.add(
+        AskThreadMessage(fromAgent: true, text: 'The second is shorter.'),
+      );
+
+    /// The backend: anything but the latest revision is refused.
+    void latestOnly(Harness harness) => harness.backend.onSend = (m) {
+      if (m.hasAnswerAsk() && m.answerAsk.revision != 2) {
+        throw const RequestFailure(changed);
+      }
+    };
+
+    List<AnswerAsk> answers(Harness harness) => [
+      for (final m in harness.backend.sent)
+        if (m.hasAnswerAsk()) m.answerAsk,
+    ];
+
+    testWidgets('Dismiss goes with its latest revision, and the pane closes', (
+      tester,
+    ) async {
+      final harness = await _showing(tester, _text, 'text');
+      harness.backend.entriesById['fugo/7'] = replied();
+      latestOnly(harness);
+      await tester.tap(find.text('Dismiss'));
+      await settle(tester);
+      final sent = answers(harness);
+      expect([for (final a in sent) a.revision], [1, 2]);
+      expect((sent.last.dismiss, sent.last.reply), (true, false));
+      expect(find.text(changed), findsNothing);
+      expect(harness.last.hasSetLayout(), isTrue);
+    });
+
+    testWidgets('a typed reply goes too', (tester) async {
+      final harness = await _showing(tester, _text, 'text');
+      harness.backend.entriesById['fugo/7'] = replied();
+      latestOnly(harness);
+      await _type(tester, 'Why shorter?');
+      await tester.tap(find.text('Submit'));
+      await settle(tester);
+      final sent = answers(harness);
+      expect([for (final a in sent) a.revision], [1, 2]);
+      expect((sent.last.reply, sent.last.text), (true, 'Why shorter?'));
+      expect(harness.last.hasSetLayout(), isTrue);
+    });
+
+    testWidgets('Approve is refused, and the bar shows the reply; approved '
+        'again, it goes with the reply seen', (tester) async {
+      final harness = await _showing(tester, _text, 'text');
+      expect(find.text('The second is shorter.'), findsNothing);
+      harness.backend.entriesById['fugo/7'] = replied();
+      latestOnly(harness);
+      await tester.tap(find.text('Approve'));
+      await settle(tester);
+      expect(answers(harness), hasLength(1));
+      expect(find.text(changed), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(ReviewBar),
+          matching: find.textContaining(
+            'The second is shorter.',
+            findRichText: true,
+          ),
+        ),
+        findsOneWidget,
+      );
+      expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
+
+      await tester.tap(find.text('Approve'));
+      await settle(tester);
+      final last = answers(harness).last;
+      expect((last.revision, last.talkSeen, last.dismiss), (2, 1, false));
+      expect(harness.last.hasSetLayout(), isTrue);
+    });
+
+    testWidgets('with its conversation open, the reply shows as it comes, '
+        'and Dismiss goes at once', (tester) async {
+      final harness = await _showing(tester, _text, 'text');
+      harness.backend.transcript.load(
+        Transcript(agentId: 'fugo', entries: [_ask(_text)]),
+      );
+      await tester.pump();
+      harness.backend.transcript.update(
+        EntryUpdate(agentId: 'fugo', entry: replied()),
+      );
+      await tester.pump();
+      expect(
+        find.descendant(
+          of: find.byType(ReviewBar),
+          matching: find.textContaining(
+            'The second is shorter.',
+            findRichText: true,
+          ),
+        ),
+        findsOneWidget,
+      );
+      latestOnly(harness);
+      await tester.tap(
+        find.descendant(
+          of: find.byType(ReviewBar),
+          matching: find.text('Dismiss'),
+        ),
+      );
+      await settle(tester);
+      expect([for (final a in answers(harness)) a.revision], [2]);
+    });
+  });
+
+  testWidgets("what's typed stays while a reply from another device takes "
+      "the card out of waiting and its agent's answer brings it back "
+      "(Zucchero's row 496)", (tester) async {
+    final harness = await _showing(tester, _text, 'text');
+    harness.backend.transcript.load(
+      Transcript(agentId: 'fugo', entries: [_ask(_text)]),
+    );
+    await tester.pump();
+    await _type(tester, 'Fine by me');
+    // Replied from the Mac: it waits on Fugo, the bar held (row 1325).
+    harness.backend.transcript.update(
+      EntryUpdate(
+        agentId: 'fugo',
+        entry: _ask(_text)
+          ..askPerson.state = AskPersonState.ASK_PERSON_STATE_ANSWERED
+          ..askPerson.replied = true
+          ..askPerson.answer = 'From the Mac',
+      ),
+    );
+    await harness.apply(
+      tester,
+      _workspace(_fugo(layout: _open(_text, 'text'), waiting: false)),
+    );
+    await settle(tester);
+    expect(find.byType(ReviewBar), findsOneWidget);
+    expect(_held, findsOneWidget);
+    expect(_button('Submit').onPressed, isNull);
+    // Fugo answers on the card: it waits again, the bar with it.
+    await harness.apply(
+      tester,
+      _workspace(_fugo(layout: _open(_text, 'text'))),
+    );
+    harness.backend.transcript.update(
+      EntryUpdate(
+        agentId: 'fugo',
+        entry: _ask(_text)
+          ..askPerson.revision = 2
+          ..askPerson.thread.addAll([
+            AskThreadMessage(text: 'From the Mac'),
+            AskThreadMessage(fromAgent: true, text: 'Noted.'),
+          ]),
+      ),
+    );
+    await settle(tester);
+    expect(find.byType(ReviewBar), findsOneWidget);
+    expect(_held, findsNothing);
+    expect(tester.widget<EditableText>(_field).controller.text, 'Fine by me');
+    expect(_button('Submit').onPressed, isNotNull);
+  });
+
+  testWidgets('the bar says what Approve means after the talk, as the card '
+      'does (Bruno 37281)', (tester) async {
+    final harness = Harness(_workspace(_fugo(layout: _open(_text, 'text'))));
+    harness.backend.entriesById['fugo/7'] = _ask(_text)
+      ..askPerson.approveFollowsTalk = true
+      ..askPerson.thread.addAll([
+        AskThreadMessage(text: 'Why the second?'),
+        AskThreadMessage(fromAgent: true, text: 'It is shorter.'),
+      ]);
+    harness.backend.files[_text] = FileContent(
+      path: _text,
+      data: 'The plan.\n'.codeUnits,
+      size: Int64(10),
+      sha256: 'abc',
+    );
+    await harness.show(tester, size: const Size(1400, 900));
+    await settle(tester);
+    await pumpFrames(tester);
+    expect(
+      find.descendant(
+        of: find.byType(ReviewBar),
+        matching: find.text("Approving agrees with Fugo's last reply."),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets("two cards waiting on one file: the bar answers the one whose "
+      "Review was pressed (Abbacchio's row 1312)", (tester) async {
+    final fugo = _fugo(layout: _open(_text, 'text'))..waitingSeqs.add(Int64(8));
+    final harness = Harness(_workspace(fugo));
+    harness.backend.entriesById['fugo/7'] = _ask(_text);
+    harness.backend.entriesById['fugo/8'] = Entry(
+      seq: Int64(8),
+      timestampMs: Int64(DateTime.now().millisecondsSinceEpoch),
+      askPerson: AskPerson(
+        id: 'ask8',
+        title: 'And the revised one?',
+        state: AskPersonState.ASK_PERSON_STATE_PENDING,
+        reviewPath: _text,
+        revision: 1,
+      ),
+    );
+    harness.backend.files[_text] = FileContent(
+      path: _text,
+      data: 'The plan.\n'.codeUnits,
+      size: Int64(10),
+      sha256: 'abc',
+    );
+    await harness.show(tester, size: const Size(1400, 900));
+    await settle(tester);
+    await pumpFrames(tester);
+    Finder inBar(String text) =>
+        find.descendant(of: find.byType(ReviewBar), matching: find.text(text));
+    // Opened from the file: the oldest.
+    expect(inBar('Which option is better?'), findsOneWidget);
+    // Card 8's Review.
+    rememberReviewTalk('fugo', 8, 0);
+    await settle(tester);
+    expect(inBar('And the revised one?'), findsOneWidget);
+    await tester.tap(find.text('Approve'));
+    await settle(tester);
+    final answer = harness.backend.sent
+        .lastWhere((m) => m.hasAnswerAsk())
+        .answerAsk;
+    expect(answer.seq.toInt(), 8);
+  });
+
+  group('the card whose Review was pressed, replied on from another device '
+      "(Abbacchio's row 1325)", () {
+    Entry card8({
+      AskPersonState state = AskPersonState.ASK_PERSON_STATE_PENDING,
+      bool replied = false,
+      int revision = 1,
+    }) => Entry(
+      seq: Int64(8),
+      timestampMs: Int64(DateTime.now().millisecondsSinceEpoch),
+      askPerson: AskPerson(
+        id: 'ask8',
+        title: 'And the revised one?',
+        state: state,
+        replied: replied,
+        answer: replied ? 'From the Mac' : '',
+        reviewPath: _text,
+        revision: revision,
+      ),
+    );
+
+    Workspace waiting(List<int> seqs) => _workspace(
+      _fugo(layout: _open(_text, 'text'), waiting: false)
+        ..waitingSeqs.addAll([for (final seq in seqs) Int64(seq)]),
+    );
+
+    Finder inBar(String text) =>
+        find.descendant(of: find.byType(ReviewBar), matching: find.text(text));
+
+    Future<Harness> pressed(WidgetTester tester) async {
+      final harness = Harness(waiting([7, 8]));
+      harness.backend.entriesById['fugo/7'] = _ask(_text);
+      harness.backend.entriesById['fugo/8'] = card8();
+      harness.backend.files[_text] = FileContent(
+        path: _text,
+        data: 'The plan.\n'.codeUnits,
+        size: Int64(10),
+        sha256: 'abc',
+      );
+      await harness.show(tester, size: const Size(1400, 900));
+      await settle(tester);
+      await pumpFrames(tester);
+      rememberReviewTalk('fugo', 8, 0);
+      await settle(tester);
+      expect(inBar('And the revised one?'), findsOneWidget);
+      await _type(tester, 'Half done');
+      // Replied from the Mac: card 8 waits on Fugo, as fetched again.
+      harness.backend.entriesById['fugo/8'] = card8(
+        state: AskPersonState.ASK_PERSON_STATE_ANSWERED,
+        replied: true,
+      );
+      await harness.apply(tester, waiting([7]));
+      await settle(tester);
+      return harness;
+    }
+
+    testWidgets('the bar keeps it, held, never the older card; back with '
+        "what's typed once its agent answers", (tester) async {
+      final harness = await pressed(tester);
+      expect(inBar('And the revised one?'), findsOneWidget);
+      expect(inBar('Which option is better?'), findsNothing);
+      expect(_held, findsOneWidget);
+      expect(_button('Submit').onPressed, isNull);
+      // The reply, as the person's, in the talk until the agent answers
+      // (Abbacchio's row 1376).
+      expect(
+        find.descendant(
+          of: find.byType(ReviewTalk),
+          matching: find.textContaining('From the Mac', findRichText: true),
+        ),
+        findsOneWidget,
+      );
+      // Return sends nothing either.
+      final before = harness.backend.sent.where((m) => m.hasAnswerAsk()).length;
+      await tester.tap(_field);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await settle(tester);
+      expect(
+        harness.backend.sent.where((m) => m.hasAnswerAsk()),
+        hasLength(before),
+      );
+      // Fugo answers on it: waiting again, at a new revision.
+      harness.backend.entriesById['fugo/8'] = card8(revision: 2);
+      await harness.apply(tester, waiting([7, 8]));
+      await settle(tester);
+      expect(inBar('And the revised one?'), findsOneWidget);
+      expect(_held, findsNothing);
+      expect(tester.widget<EditableText>(_field).controller.text, 'Half done');
+      await tester.tap(find.text('Submit'));
+      await settle(tester);
+      final answer = harness.backend.sent
+          .lastWhere((m) => m.hasAnswerAsk())
+          .answerAsk;
+      expect(answer.seq.toInt(), 8);
+      expect(answer.revision, 2);
+    });
+
+    testWidgets('closed instead, the bar moves on to the older card, '
+        "saying so, its field empty: the closed card's words stay with it "
+        "(Zucchero's row 513)", (tester) async {
+      final harness = await pressed(tester);
+      // Fugo closes it, settled in the talk (#496).
+      harness.backend.entriesById['fugo/8'] = card8(
+        state: AskPersonState.ASK_PERSON_STATE_ANSWERED,
+        replied: true,
+      )..askPerson.resolved = true;
+      await harness.apply(tester, waiting([7]));
+      await settle(tester);
+      expect(inBar('Which option is better?'), findsOneWidget);
+      expect(_held, findsNothing);
+      expect(
+        inBar('That card was closed. This is another one from Fugo.'),
+        findsOneWidget,
+      );
+      expect(tester.widget<EditableText>(_field).controller.text, isEmpty);
+      expect(_button('Approve').onPressed, isNotNull);
+    });
+
+    testWidgets("the file's pane built again after the card stopped waiting "
+        "still holds it (Abbacchio's row 1359)", (tester) async {
+      final harness = Harness(waiting([7]));
+      harness.backend.entriesById['fugo/7'] = _ask(_text);
+      harness.backend.entriesById['fugo/8'] = card8(
+        state: AskPersonState.ASK_PERSON_STATE_ANSWERED,
+        replied: true,
+      );
+      harness.backend.files[_text] = FileContent(
+        path: _text,
+        data: 'The plan.\n'.codeUnits,
+        size: Int64(10),
+        sha256: 'abc',
+      );
+      // Card 8's Review pressed; the pane comes once it's been replied on.
+      rememberReviewTalk('fugo', 8, 0);
+      await harness.show(tester, size: const Size(1400, 900));
+      await settle(tester);
+      await pumpFrames(tester);
+      expect(inBar('And the revised one?'), findsOneWidget);
+      expect(inBar('Which option is better?'), findsNothing);
+      expect(_held, findsOneWidget);
+      expect(_button('Approve').onPressed, isNull);
+    });
   });
 }

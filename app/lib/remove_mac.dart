@@ -12,9 +12,7 @@ import 'package:flutter/widgets.dart';
 import 'controls.dart';
 import 'forms.dart' show FormFrame;
 import 'identity.dart';
-import 'lid_closed.dart' show removeLidHelper;
 import 'main.dart' show isDevBuild;
-import 'protocol/factory/v1/factory.pb.dart' show LidClosedState;
 import 'resources.dart' show formatBytes;
 import 'scope.dart';
 import 'settings_view.dart' show SettingRow;
@@ -115,18 +113,6 @@ class _RemoveFormState extends State<RemoveForm> {
       _error = null;
       _detail = '';
     });
-    // Keeping agents working with the lid closed goes first: the backend
-    // lets go of the Mac and its helper is removed (lid-closed.md I5).
-    final backend = AppScope.of(context);
-    if (backend.workspace.workspace.keepAwake.lidClosed !=
-        LidClosedState.LID_CLOSED_OFF) {
-      try {
-        await removeLidHelper(backend);
-      } on Exception {
-        // Removed with the app all the same: macOS drops a helper whose
-        // app is gone, and the helper lets go within 10 minutes.
-      }
-    }
     final result = await removalChannel.uninstall([
       'uninstall',
       if (_deleteData) '--delete-data',

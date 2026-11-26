@@ -259,6 +259,23 @@ A rule fits when all of the conditions it has hold:
 (`bash` included), so keep the commands harmless, or run the sandbox in a
 container (next section). qa-model itself reaches nothing.
 
+## A Claktory that lies about whose it is: `--claim-email`, `--claim-claktory-id`
+
+For Fugo's hostile pass (E11 row 6): `up NAME --claim-email ana@example.com`
+starts a sandbox whose Workspace says it's signed in to that account, and
+`--claim-claktory-id ID` makes its direct-message leaf offer name another
+Claktory (one of that account's listed ones, by its id), and so its leaf id.
+Give either alone, or both. It's signed in to its own account all the same;
+only what it says lies, so the person's device must catch it by checking
+claktory.com's list and the endpoint it dials. A QA build of factoryd only
+(`qa-lies`, which a release build refuses: `scripts/check-qa-lies.sh`), and a
+real Claktory's folder or port refuses to start with either set.
+
+```sh
+scripts/qa.sh up bo --claim-email ana@example.com --claim-claktory-id <Ana's Claktory id>
+scripts/qa.sh list                          # its "claims"
+```
+
 ## Claude at its usage limit: `--claude`
 
 `up NAME --claude` signs the sandbox in to Claude, fake, on qa-model, so you
@@ -291,6 +308,16 @@ $Q limit qa1 --for 20                       # or let it reset by itself: Lea car
   message the agent, or at its usage read each minute while an agent waits.
 - **The account:** Claude Max 5x, `claude@example.test`, as Settings →
   Providers shows it. `up` prints it as `claude`, with `limited_until_ms`.
+- **Images as files (#382):** as with Anthropic, an image an agent reads
+  goes to Claude once, uploaded to qa-model's Files API, and later requests
+  name its file instead of sending it again. Uploads are kept in the
+  sandbox's `claude-files/`. qa-model's log has a line for each upload
+  (`uploaded`), each delete (`deleted`, at compaction or /clear) and each
+  message with images (`image_files`, `inline_images`, `missing`). Delete a
+  file there to have qa-model lose it, as Anthropic lets one go: the next
+  message naming it is refused (404 "File not found"), and Claktory sends
+  that request again with the images inline. Images read before an update to
+  #382, or with no digest, always go inline.
 - **What it is:** qa-model answers Anthropic's wire too (messages, usage,
   profile, the sign-in's token), and the sandbox's `auth.json` holds a sign-in
   with fixed, obviously fake tokens that only qa-model accepts. factoryd

@@ -90,10 +90,47 @@ void main() {
     ),
     ('a crowded', () => layoutMap(crowdedMap())),
     ('a crowded, with leads,', () => layoutMap(crowdedMap(leads: true))),
+    ('a busy', () => layoutMap(busyClaktoryMap(60), you: true)),
   ]) {
     test('$name Claktory: no line runs through a chip, no two lines share '
         'a stretch, and no chips overlap', () {
       _clean(map());
+    });
+  }
+
+  // Matt's Map took most of a second to open with about 60 agents: every
+  // line found its way by searching the whole board, cell by cell in each
+  // of four directions. It's a fraction of that now, and still quick at
+  // 200 agents. The bounds are generous, for a busy machine and a test
+  // runner slower than the app.
+  for (final (agents, within) in [
+    (60, const Duration(milliseconds: 400)),
+    (200, const Duration(seconds: 4)),
+  ]) {
+    test('a busy Claktory of $agents agents lays out quickly, every chip '
+        'placed', () {
+      final map = busyClaktoryMap(agents);
+      layoutMap(map, you: true); // once to warm up
+      final watch = Stopwatch()..start();
+      final layout = layoutMap(map, you: true);
+      watch.stop();
+      // ignore: avoid_print
+      print(
+        '$agents agents: layout ${watch.elapsedMilliseconds} ms, '
+        '${layout.wires.length} wires',
+      );
+      expect(
+        layout.chips.length,
+        map.nodes
+            .where(
+              (node) =>
+                  node.kind != MapNodeKind.MAP_NODE_KIND_PROJECT &&
+                  node.kind != MapNodeKind.MAP_NODE_KIND_FOLDER &&
+                  node.kind != MapNodeKind.MAP_NODE_KIND_WORKSPACE,
+            )
+            .length,
+      );
+      expect(watch.elapsed, lessThan(within));
     });
   }
 

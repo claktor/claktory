@@ -24,6 +24,7 @@
 pub(crate) mod analytics;
 pub(crate) mod anchor;
 pub(crate) mod apps;
+pub(crate) mod relay_token;
 pub(crate) mod reports;
 
 use std::path::PathBuf;
@@ -338,20 +339,49 @@ fn sign_in_error(service: &str, failure: Failure) -> RequestError {
     }
 }
 
+/// Deletes the sign-ins set aside as unreadable (`State::new`): signed in
+/// again, they're of no more use, and one may still hold a working token
+/// (Fugo).
+fn forget_set_aside(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with("account.json.unreadable-")
+            && let Err(error) = std::fs::remove_file(entry.path())
+        {
+            tracing::warn!(%error, "could not delete a sign-in set aside as unreadable");
+        }
+    }
+}
+
 impl State {
     /// The account as `<home>/account` keeps it. With signing in on
     /// (`enabled`), the step is "asked", whatever it was; while it's off,
     /// nothing is written.
     pub(crate) fn new(home: &crate::home::Home, enabled: bool) -> State {
         let dir = home.root().join("account");
-        let mut saved: Saved = match std::fs::read(dir.join("account.json")) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-                tracing::error!(%error, "account.json can't be read; signed out");
+        let path = dir.join("account.json");
+        let read = std::fs::read(&path).map_err(|error| error.to_string()).and_then(|bytes| match bytes.is_empty() {
+            true => Err("it's empty".to_owned()),
+            false => serde_json::from_slice::<Saved>(&bytes).map_err(|error| error.to_string()),
+        });
+        // One that's there but can't be read (cut short or garbled by a
+        // failing disk: friend bug #38) is never written over: it's set
+        // aside, and the person is told to sign in again, which brings back
+        // everything the account had.
+        let mut kept = true;
+        let mut problem = String::new();
+        let mut saved = match read {
+            Ok(saved) => saved,
+            Err(_) if !path.exists() => Saved::default(),
+            Err(error) => {
+                let aside = dir.join(format!("account.json.unreadable-{}", crate::transcript::now_ms()));
+                kept = std::fs::rename(&path, &aside).is_ok();
+                tracing::error!(%error, set_aside = kept, "account.json can't be read; signed out until this Claktory signs in again");
+                problem = "This Claktory's sign-in couldn't be read after a problem with its disk. Sign in again.".to_owned();
                 Saved::default()
-            }),
-            Err(_) => Saved::default(),
+            }
         };
-        let first = enabled && saved.step != ASKED;
+        let first = enabled && saved.step != ASKED && kept;
         if first {
             saved.step = ASKED.to_owned();
         }
@@ -359,7 +389,7 @@ impl State {
         let inner = Inner {
             saved,
             pending: None,
-            problem: String::new(),
+            problem,
             clock_offset: 0,
             next_unlock: now,
             unlock_tries: 0,
@@ -681,6 +711,8 @@ impl State {
             None => (String::new(), configured_service(config)),
         };
         let name = if saved.name.is_empty() { computer_name() } else { saved.name.clone() };
+        #[cfg(feature = "qa-lies")]
+        let email = crate::qa_lies::email(email);
         Some(v1::ClaktoryAccount {
             state: state.into(),
             email,
@@ -1001,6 +1033,8 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<String,
         account.set_problem("Your secrets stay locked until you open them with the recovery key.");
     }
     factory.vault_changed();
+    forget_set_aside(&account.dir);
+    relay_token::signed_in(factory);
     account.wake.notify_one();
     Ok(signed_in.account_id)
 }
@@ -1028,6 +1062,7 @@ pub(crate) async fn sign_out(factory: &Arc<Factory>) -> Result<(), RequestError>
     }
     account.save();
     tracing::info!("signed out of the account service");
+    relay_token::signed_out(factory);
     factory.vault_changed();
     Ok(())
 }
@@ -1248,6 +1283,7 @@ fn changed_key(name: &str) -> String {
 /// registers endpoints that changed.
 async fn check_in(factory: &Arc<Factory>) {
     let account = &factory.account;
+    factory.store.write_calls();
     let made = {
         let since = account.lock().saved.periods_until;
         let names = analytics::names(factory);
@@ -1300,6 +1336,7 @@ async fn check_in(factory: &Arc<Factory>) {
             account.save();
             reseal(factory, checked.epoch).await;
             register_endpoints(factory).await;
+            relay_token::renew(factory).await;
             note_key_from(account).await;
             crate::user_apps::reconcile(factory).await;
         }

@@ -9,7 +9,7 @@
 	<key>keychain-access-groups</key>
 	<array>
 		<string>$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-		<string>$(AppIdentifierPrefix)com.claktory.app.notifications</string>
+		<string>$(AppIdentifierPrefix)$(CLAKTORY_PUSH_GROUP)</string>
 	</array>
 </dict>
 </plist>

@@ -1,3 +1,4 @@
+import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 
 import '../controls.dart';
@@ -243,16 +244,73 @@ class _Page extends StatelessWidget {
   Widget build(BuildContext context) {
     final inset = touchFirst(context) ? Space.l : Space.xl;
     return SingleChildScrollView(
-      padding: EdgeInsets.all(inset),
-      child: SelectableArea(
-        child: Column(
-          spacing: Space.l,
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [?top, child],
+      child: _EdgeTaps(
+        inset: inset,
+        child: Padding(
+          padding: EdgeInsets.all(inset),
+          child: SelectableArea(
+            child: Column(
+              spacing: Space.l,
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [?top, child],
+            ),
+          ),
         ),
       ),
     );
+  }
+}
+
+/// A page's side margins [inset] wide: a tap there within half a finger's
+/// target of the content that hits nothing goes to the content's nearest
+/// edge, kept only where an [EdgeTapTarget] takes it (a bar's ••• at the
+/// line's end: Zucchero row 444). Nothing else gains the margin's taps.
+class _EdgeTaps extends SingleChildRenderObjectWidget {
+  const _EdgeTaps({required this.inset, required super.child});
+
+  final double inset;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderEdgeTaps(inset);
+
+  @override
+  void updateRenderObject(BuildContext context, _RenderEdgeTaps renderObject) {
+    renderObject.inset = inset;
+  }
+}
+
+class _RenderEdgeTaps extends RenderProxyBox {
+  _RenderEdgeTaps(this.inset);
+
+  double inset;
+
+  /// How far into the margin a tap still counts: half a finger's target.
+  static const _reach = 22.0;
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) {
+    if (super.hitTestChildren(result, position: position)) return true;
+    final child = this.child;
+    if (child == null) return false;
+    final x = position.dx;
+    final Offset edge;
+    if (x < inset && x >= inset - _reach) {
+      edge = Offset(inset + 0.5, position.dy);
+    } else if (x > size.width - inset && x <= size.width - inset + _reach) {
+      edge = Offset(size.width - inset - 0.5, position.dy);
+    } else {
+      return false;
+    }
+    // Tried first on the side: kept only where a target that wants the
+    // margin's taps takes it.
+    final tried = BoxHitTestResult();
+    if (!child.hitTest(tried, position: edge) ||
+        !tried.path.any((entry) => entry.target is EdgeTapTarget)) {
+      return false;
+    }
+    return child.hitTest(result, position: edge);
   }
 }
 

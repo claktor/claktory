@@ -66,6 +66,11 @@ abstract class TunnelHandle implements RustOpaqueInterface {
   /// dialled first, so a backend from before it fails here (Unsupported).
   Future<ForwardHandle> forwardPort({required int port});
 
+  /// Listens on this device's loopback at [port] and carries each
+  /// connection to [target] on the backend's machine: a website a pipe's
+  /// peer shares, from a port of this device's own (#503).
+  Future<ForwardHandle> forwardPortTo({required int port, required int target});
+
   /// The path the app asks for at [port]: `/<secret>`, the tunnel's own.
   /// Nothing else there is forwarded, so no other program on this device
   /// passes for it. Never shown, saved or logged.
@@ -78,6 +83,12 @@ abstract class TunnelHandle implements RustOpaqueInterface {
   /// is made afresh by the next socket, and iroh looks at the network
   /// again.
   Future<void> reconnect();
+
+  /// The relays its Claktory uses now, as its Workspace says
+  /// (`RemoteAccess.relays`, #450): the device homes on them from its next
+  /// endpoint on, and dials through them. Those that aren't http(s) URLs
+  /// are left out; none changes nothing.
+  void setRelays({required List<String> relays});
 
   TunnelStatus status();
 }

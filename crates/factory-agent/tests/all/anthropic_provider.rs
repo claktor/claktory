@@ -556,3 +556,62 @@ async fn a_request_refused_for_bound_thinking_is_sent_again_once_without_any_and
     assert!(failed.error_message.as_deref().is_some_and(|text| text.contains("bound to a different conversation")), "{failed:?}");
     assert_eq!(server.requests.lock().len(), 5);
 }
+
+/// The "thinking off" exchange, its context long enough to compress, to a
+/// model that sends gzip (`gzipRequests`) or not.
+fn long_exchange(gzip: bool) -> (Value, factory_agent::stream::LlmContext, factory_agent::types::Model) {
+    let all = cases();
+    let case = all.iter().find(|case| case["name"] == "thinking off").expect("case").clone();
+    let mut context = context(&case);
+    context.messages.push(factory_agent::types::Message::User(factory_agent::types::UserMessage::text("Read this line. ".repeat(400), 5)));
+    let mut model = fixture_model("anthropic", &case);
+    model.compat.get_or_insert_with(Default::default).insert("gzipRequests".into(), json!(gzip));
+    (case, context, model)
+}
+
+fn answer(case: &Value) -> Served {
+    served(case["http"]["chunks"].as_array().expect("chunks").iter().filter_map(Value::as_str).map(str::to_owned).collect(), false, false)
+}
+
+fn header(request: &crate::support::server::Recorded, name: &str) -> Option<String> {
+    request.headers.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone())
+}
+
+#[tokio::test]
+async fn a_request_goes_gzip_compressed_and_reads_as_the_same_request() {
+    let mut bodies = Vec::new();
+    for gzip in [true, false] {
+        let (case, context, mut model) = long_exchange(gzip);
+        let server = serve(vec![answer(&case)]).await;
+        model.base_url = server.base_url.clone();
+        let message = stream_simple(&model, context, fixture_options(&case)).expect("stream").result().await.expect("message");
+        assert_eq!(message.stop_reason, StopReason::Stop, "{:?}", message.error_message);
+        let request = server.requests.lock()[0].clone();
+        assert_eq!(header(&request, "content-encoding").as_deref(), gzip.then_some("gzip"));
+        let sent: usize = header(&request, "content-length").and_then(|length| length.parse().ok()).expect("a length");
+        bodies.push((request.body, request.raw.len(), sent));
+    }
+    let ((compressed, raw, sent), (plain, plain_raw, plain_sent)) = (&bodies[0], &bodies[1]);
+    assert_eq!(compressed, plain, "the provider reads the same request");
+    assert_eq!((raw, plain_raw), (plain_sent, plain_sent));
+    assert!(*sent * 4 < *plain_sent, "{sent} bytes sent for {plain_sent}");
+}
+
+#[tokio::test]
+async fn a_provider_that_refuses_gzip_gets_the_request_again_as_it_is_and_no_gzip_after() {
+    let (case, context, mut model) = long_exchange(true);
+    let refusal = crate::support::server::served_json(
+        400,
+        json!({"type": "error", "error": {"type": "invalid_request_error", "message": "Unsupported Content-Encoding \"gzip\": send the request body uncompressed.", "details": {"error_code": "request_body_encoding_unsupported"}}}),
+    );
+    let server = serve(vec![refusal, answer(&case), answer(&case)]).await;
+    model.base_url = server.base_url.clone();
+    for _ in 0..2 {
+        let message = stream_simple(&model, context.clone(), fixture_options(&case)).expect("stream").result().await.expect("message");
+        assert_eq!(message.stop_reason, StopReason::Stop, "{:?}", message.error_message);
+    }
+    let requests = server.requests.lock().clone();
+    let encodings: Vec<Option<String>> = requests.iter().map(|request| header(request, "content-encoding")).collect();
+    assert_eq!(encodings, [Some("gzip".to_owned()), None, None]);
+    assert_eq!(requests[0].body, requests[1].body);
+}

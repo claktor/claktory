@@ -1,6 +1,9 @@
+import 'dart:math' as math;
+
 import 'package:factory_app/message_time.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -189,5 +192,108 @@ void main() {
     final time = tester.getRect(find.text('09:41'));
     expect(time.top, greaterThanOrEqualTo(words.bottom));
     expect(time.right, 200);
+  });
+
+  testWidgets("a reversed run at the end of the words doesn't run under the "
+      'time (Sale)', (tester) async {
+    Future<(Rect, Rect)> lay(String text) async {
+      await tester.pumpWidget(
+        Directionality(
+          textDirection: TextDirection.ltr,
+          child: Align(
+            alignment: Alignment.topLeft,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 400),
+              child: TimeFoot(
+                ms: _ms(DateTime(2026, 1, 1, 10, 52)),
+                color: const Color(0xFF888888),
+                child: Text(text),
+              ),
+            ),
+          ),
+        ),
+      );
+      return (
+        tester.getRect(find.text(text)),
+        tester.getRect(find.text('10:52')),
+      );
+    }
+
+    // The person's own words, as they wrote them: the override reverses
+    // what follows it, out to the end of the line.
+    const said = 'call show {"path": "invoice\u202Efdp.mp4"}';
+    final (words, time) = await lay(said);
+    final paragraph = tester.renderObject<RenderParagraph>(find.text(said));
+    final boxes = paragraph.getBoxesForSelection(
+      const TextSelection(baseOffset: 0, extentOffset: said.length),
+    );
+    final top = boxes.map((box) => box.top).reduce(math.max);
+    final reach =
+        words.left +
+        boxes
+            .where((box) => box.top >= top - 1)
+            .map((box) => box.right)
+            .reduce(math.max);
+    final inline = time.top < words.bottom;
+    expect(
+      inline ? time.left >= reach : true,
+      isTrue,
+      reason: 'last line reaches $reach, time $time',
+    );
+  });
+
+  testWidgets('words ending in another script, in a taller font, keep clear '
+      'of the time too (Sale, row 123)', (tester) async {
+    // Hebrew or Arabic come from a fallback font: its runs sit higher or
+    // lower on the line than the rest.
+    const english = 'Please check the file ';
+    const hebrew = '\u05e9\u05dc\u05d5\u05dd \u05e2\u05d5\u05dc\u05dd';
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: Align(
+          alignment: Alignment.topLeft,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 800),
+            child: TimeFoot(
+              ms: _ms(DateTime(2026, 1, 1, 11, 25)),
+              color: const Color(0xFF888888),
+              child: const Text.rich(
+                TextSpan(
+                  text: english,
+                  style: TextStyle(fontSize: 14),
+                  children: [
+                    TextSpan(text: hebrew, style: TextStyle(fontSize: 22)),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    final words = tester.getRect(
+      find.text(english + hebrew, findRichText: true),
+    );
+    final paragraph = tester.renderObject<RenderParagraph>(
+      find.text(english + hebrew, findRichText: true),
+    );
+    final reach =
+        words.left +
+        paragraph
+            .getBoxesForSelection(
+              const TextSelection(
+                baseOffset: 0,
+                extentOffset: english.length + hebrew.length,
+              ),
+            )
+            .map((box) => box.right)
+            .reduce(math.max);
+    final time = tester.getRect(find.text('11:25'));
+    expect(
+      time.top < words.bottom ? time.left >= reach : true,
+      isTrue,
+      reason: 'words reach $reach, time $time',
+    );
   });
 }

@@ -3,6 +3,7 @@
 // stays; every answer says which version it's for, and the refusal of an
 // answer to an older one shows as it is; History says how often.
 import 'package:factory_app/ask_card.dart';
+import 'package:factory_app/identity.dart' show Palette;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:fixnum/fixnum.dart';
@@ -88,8 +89,9 @@ void main() {
     );
   });
 
-  testWidgets("an answer to an older version: the refusal shows, the words "
-      'stay', (tester) async {
+  testWidgets("an answer to an older version is set aside, not lost: the "
+      'card says its agent changed it after the answer, and what the person '
+      "said; the words stay to send again (#473)", (tester) async {
     final harness = _asking(_ask());
     await harness.show(tester);
     await settle(tester);
@@ -100,8 +102,13 @@ void main() {
     await settle(tester);
     expect(
       _inCard(find.text('This card changed. Look at it again.')),
+      findsNothing,
+    );
+    expect(
+      _inCard(find.text('Builder changed this after your answer.')),
       findsOneWidget,
     );
+    expect(_inCard(find.text('You said: “Yes, do”')), findsOneWidget);
     expect(
       tester
           .widget<EditableText>(_inCard(find.byType(EditableText)))
@@ -109,6 +116,71 @@ void main() {
           .text,
       'Yes, do',
     );
+
+    // The new version comes: marked Updated in signal, with its reason, and
+    // the answer set aside still shown until the person answers again.
+    _load(harness, _ask(revision: 2, title: 'Restart the new build server?'));
+    await settle(tester);
+    final mark = _inCard(find.textContaining('Updated · '));
+    expect(mark, findsOneWidget);
+    final span =
+        (tester.widget<Text>(mark).textSpan! as TextSpan).children!.first
+            as TextSpan;
+    expect(span.text, 'Updated');
+    expect(span.style!.color, Palette.of(tester.element(mark)).signal);
+    expect(_inCard(find.text("Builder's reason")), findsOneWidget);
+    expect(_inCard(find.text('You said: “Yes, do”')), findsOneWidget);
+    harness.backend.refuse = null;
+    await tester.tap(_inCard(find.text('Answer')));
+    await settle(tester);
+    expect(harness.last.answerAsk.revision, 2);
+    expect(_inCard(find.textContaining('You said')), findsNothing);
+  });
+
+  testWidgets('Needs you times a changed card from its change, says '
+      'Updated, and puts it first (#473)', (tester) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final workspace = snapshot(selected: 'a1');
+    workspace.agents.last.waitingSeqs.addAll([Int64(7), Int64(8)]);
+    final harness = Harness(workspace);
+    harness.backend.transcript.load(
+      Transcript(
+        agentId: 'a1',
+        entries: [
+          // Asked an hour ago, changed a minute ago.
+          Entry(
+            seq: Int64(7),
+            timestampMs: Int64(now - 3600000),
+            askPerson: _ask(revision: 2)..updatedMs = Int64(now - 60000),
+          ),
+          // Asked ten minutes ago, never changed.
+          Entry(
+            seq: Int64(8),
+            timestampMs: Int64(now - 600000),
+            askPerson: AskPerson(
+              id: 'ask8',
+              title: 'Deploy the site?',
+              state: AskPersonState.ASK_PERSON_STATE_PENDING,
+            ),
+          ),
+        ],
+      ),
+    );
+    await harness.show(tester, size: const Size(1200, 900));
+    await settle(tester);
+    harness.page.value = AppPage.inbox;
+    await pumpFrames(tester);
+    await settle(tester);
+    expect(
+      find.textContaining('Updated 1 min ago', findRichText: true),
+      findsWidgets,
+    );
+    expect(find.textContaining('1 h ago', findRichText: true), findsNothing);
+    final changed = tester.getTopLeft(
+      find.text('Restart the build server?').first,
+    );
+    final other = tester.getTopLeft(find.text('Deploy the site?').first);
+    expect(changed.dy, lessThan(other.dy));
   });
 
   testWidgets("a procedure's step answer says the version too", (tester) async {

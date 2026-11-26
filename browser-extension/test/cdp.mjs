@@ -22,12 +22,15 @@ export function findChrome() {
 }
 
 export class Chrome {
-  /// Starts Chrome headless in `profile`, with `args` added.
+  /// Starts Chrome headless in `profile` (a fresh folder, never the
+  /// person's), with `args` added.
   static async launch({profile, args = [], env = process.env}) {
     const chrome = new Chrome();
     chrome.process = spawn(findChrome(), [
       '--headless=new', '--remote-debugging-pipe', '--enable-unsafe-extension-debugging', '--no-first-run', '--no-default-browser-check',
-      '--disable-background-networking', '--disable-component-update', '--disable-sync', `--user-data-dir=${profile}`, ...args, 'about:blank',
+      '--disable-background-networking', '--disable-component-update', '--disable-sync',
+      // Never macOS's Keychain prompt for "Chrome Safe Storage" (Bruno 41667).
+      '--use-mock-keychain', '--password-store=basic', `--user-data-dir=${profile}`, ...args, 'about:blank',
     ], {stdio: ['ignore', 'ignore', process.env.CHROME_LOG ? 'inherit' : 'ignore', 'pipe', 'pipe'], env});
     chrome.write = chrome.process.stdio[3];
     chrome.next = 1;

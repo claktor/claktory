@@ -1,3 +1,5 @@
+import 'dart:async' show Completer;
+
 import 'package:cupertino_ui/cupertino_ui.dart'
     show DefaultCupertinoLocalizations;
 import 'package:factory_app/app_update.dart';
@@ -94,7 +96,9 @@ class RecordingBackend extends Backend {
 
   @override
   Future<void> paneOpened(String agentId, String paneId) => _record(
-    ClientMessage(paneOpened: PaneOpened(agentId: agentId, paneId: paneId)),
+    ClientMessage(
+      paneOpened: PaneOpened(agentId: agentId, paneId: paneId),
+    ),
   );
 
   @override
@@ -507,11 +511,27 @@ class RecordingBackend extends Backend {
     final end = maxBytes == 0
         ? file.data.length
         : (offset + maxBytes).clamp(0, file.data.length);
-    return file.deepCopy()
+    final truncated = offset > 0 || end < file.data.length;
+    final read = file.deepCopy()
       ..data = file.data.sublist(offset.clamp(0, file.data.length), end)
       ..offset = Int64(offset)
-      ..truncated = offset > 0 || end < file.data.length;
+      ..truncated = truncated;
+    // As the backend reads an image, or any file but a video or a PDF: a
+    // part from its start has no hash unless one was asked for.
+    final ranged =
+        offset > 0 ||
+        file.mime.startsWith('video/') ||
+        file.mime == 'application/pdf';
+    if (partsUnhashed && truncated && !ranged && expectedSha256.isEmpty) {
+      read.sha256 = '';
+    }
+    return read;
   }
+
+  /// Answers a part of an image read from its start without its hash, as
+  /// the backend does (only ranges of videos and PDFs, and every range
+  /// past the start, carry the whole file's).
+  var partsUnhashed = false;
 
   /// Whether [setLayout] changes the agent's layout, as the backend would
   /// (Settings and other pages open as panes); else it's only recorded.
@@ -837,13 +857,52 @@ class RecordingBackend extends Backend {
       _record(ClientMessage(addModel: AddModel(model: model)));
 
   @override
-  Future<void> restoreBackendService() => _record(
-    ClientMessage(restoreBackendService: RestoreBackendService()),
-  );
+  Future<void> restoreBackendService() =>
+      _record(ClientMessage(restoreBackendService: RestoreBackendService()));
 
   @override
   Future<void> stopEngine({required bool quitting}) =>
       _record(ClientMessage(stopEngine: StopEngine(quitting: quitting)));
+
+  /// What History (#458) reads: the overview, then [historyPages] one
+  /// after another; until [historyReply] is set it stays loading.
+  HistoryOverview? historyReply;
+  var historyPages = <HistoryEvents>[];
+
+  /// Set, pages wait for it.
+  Future<void>? historyHold;
+
+  @override
+  Future<HistoryOverview> historyOverview() async {
+    await _record(ClientMessage(getHistoryOverview: GetHistoryOverview()));
+    return historyReply ?? Completer<HistoryOverview>().future;
+  }
+
+  @override
+  Future<HistoryEvents> historyEvents({
+    List<int> cursor = const [],
+    Int64? untilMs,
+    int limit = 0,
+    bool runs = true,
+  }) async {
+    await _record(
+      ClientMessage(
+        getHistoryEvents: GetHistoryEvents(
+          afterCursor: cursor,
+          untilMs: untilMs,
+        ),
+      ),
+    );
+    if (historyHold case final hold?) await hold;
+    final page = cursor.isEmpty ? 0 : cursor.first;
+    if (page >= historyPages.length) return HistoryEvents();
+    return historyPages[page].deepCopy()
+      ..nextCursor = page + 1 < historyPages.length ? [page + 1] : [];
+  }
+
+  @override
+  Future<void> watchHistory(bool on) =>
+      _record(ClientMessage(watchHistory: WatchHistory(on: on)));
 
   @override
   Future<void> signOut(String providerId, {String accountId = ''}) => _record(
@@ -956,20 +1015,8 @@ class RecordingBackend extends Backend {
       _record(ClientMessage(setKeepAwake: SetKeepAwake(on: on)));
 
   @override
-  Future<void> setLidClosed({
-    required bool on,
-    LidClosedRegistration registration =
-        LidClosedRegistration.LID_CLOSED_REGISTRATION_UNKNOWN,
-    String error = '',
-  }) => _record(
-    ClientMessage(
-      setLidClosed: SetLidClosed(
-        on: on,
-        registration: registration,
-        error: error,
-      ),
-    ),
-  );
+  Future<void> setLidClosed({required bool on}) =>
+      _record(ClientMessage(setLidClosed: SetLidClosed(on: on)));
 
   @override
   Future<void> screenOpened(String id, bool opened) => _record(
@@ -981,6 +1028,10 @@ class RecordingBackend extends Backend {
   @override
   Future<void> setZoom(double zoom) =>
       _record(ClientMessage(setZoom: SetZoom(zoom: zoom)));
+
+  @override
+  Future<void> setFileCache(int bytes) =>
+      _record(ClientMessage(setFileCache: SetFileCache(bytes: Int64(bytes))));
 
   @override
   Future<void> shuffleAvatar({int? choice}) =>
@@ -1738,15 +1789,19 @@ class RecordingBackend extends Backend {
         ),
       );
 
-  /// The ports [forwardPort] was asked for; it answers what [forwarded]
-  /// makes, by default that the Claktory can't forward.
+  /// The ports [forwardPort] was asked for, and where each goes on the
+  /// Claktory's machine ([forwardedTargets]: the same port unless asked
+  /// for another); it answers what [forwarded] makes, by default that the
+  /// Claktory can't forward.
   final forwardedPorts = <int>[];
+  final forwardedTargets = <int>[];
   Future<PortForward> Function(int port) forwarded = (_) async =>
       throw const ForwardFailure(ForwardProblem.unsupported);
 
   @override
-  Future<PortForward> forwardPort(int port) {
+  Future<PortForward> forwardPort(int port, {int? target}) {
     forwardedPorts.add(port);
+    forwardedTargets.add(target ?? port);
     return forwarded(port);
   }
 
@@ -1907,15 +1962,14 @@ class RecordingBackend extends Backend {
   }
 
   @override
-  Future<void> setPipeGroupCollapsed(String groupId, bool collapsed) =>
-      _record(
-        ClientMessage(
-          setPipeGroupCollapsed: SetPipeGroupCollapsed(
-            groupId: groupId,
-            collapsed: collapsed,
-          ),
-        ),
-      );
+  Future<void> setPipeGroupCollapsed(String groupId, bool collapsed) => _record(
+    ClientMessage(
+      setPipeGroupCollapsed: SetPipeGroupCollapsed(
+        groupId: groupId,
+        collapsed: collapsed,
+      ),
+    ),
+  );
 
   @override
   Future<void> setPipeState(String pipeId, PipeAction action) => _record(
@@ -1925,9 +1979,15 @@ class RecordingBackend extends Backend {
   );
 
   @override
-  Future<void> acceptPipeIdentity(String pipeId) => _record(
-    ClientMessage(acceptPipeIdentity: AcceptPipeIdentity(pipeId: pipeId)),
-  );
+  Future<void> acceptPipeIdentity(String pipeId, {String cardId = ''}) =>
+      _record(
+        ClientMessage(
+          acceptPipeIdentity: AcceptPipeIdentity(
+            pipeId: pipeId,
+            cardId: cardId,
+          ),
+        ),
+      );
 
   @override
   Future<void> selectPipe(String pipeId) =>
@@ -2035,6 +2095,8 @@ class RecordingBackend extends Backend {
     List<Attachment> attachments = const [],
     int? step,
     int? revision,
+    int? talkSeen,
+    bool confirmed = false,
   }) => _record(
     ClientMessage(
       answerAsk: AnswerAsk(
@@ -2048,6 +2110,8 @@ class RecordingBackend extends Backend {
         attachments: attachments,
         step: step,
         revision: revision == null || revision <= 0 ? null : revision,
+        talkSeen: talkSeen,
+        confirmed: confirmed ? true : null,
       ),
     ),
   );

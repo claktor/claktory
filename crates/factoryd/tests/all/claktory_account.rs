@@ -277,13 +277,15 @@ async fn signing_in_protects_the_vault_with_the_account_which_opens_it_after_a_r
 
     // A model call is counted for the next check-in.
     {
-        let (addr, _factory) = open(&dir, &instance.url).await;
+        let (addr, factory) = open(&dir, &instance.url).await;
         let (mut client, _, _) = Client::connect(addr).await;
         client.ok(create_agent("", "Builder", "")).await;
         client.ok(send_message("builder", "hello")).await;
         let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("factory.db");
         let mut counted = 0i64;
         for _ in 0..100 {
+            // Counted calls are written together (#454).
+            factory.write_calls();
             counted = db.query_row("SELECT COALESCE(SUM(requests), 0) FROM model_usage", [], |row| row.get(0)).expect("model_usage");
             if counted > 0 {
                 break;
@@ -491,6 +493,34 @@ async fn while_signing_in_is_off_nothing_shows_and_nothing_is_sent() {
     // The recovery key is the vault's, signed in or not.
     let shown = client.request(Request::ShowRecoveryKey(v1::ShowRecoveryKey {})).await;
     assert!(matches!(shown.body, Body::RecoveryKey(ref key) if !key.key.is_empty()), "{:?}", shown.body);
+}
+
+/// Friend bug #38: an account.json a failing disk left unreadable (cut
+/// short, zeroed) is set aside, never written over, and the person is told
+/// to sign in again, which brings the sign-in back.
+#[tokio::test]
+async fn an_unreadable_sign_in_is_set_aside_and_signing_in_again_brings_it_back() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let path = dir.join("home/account/account.json");
+    std::fs::create_dir_all(dir.join("home/account")).expect("the folder");
+    let good = 600;
+    std::fs::write(&path, vec![0u8; good]).expect("as a failing disk leaves it");
+    let (addr, _factory) = open(&dir, &instance.url).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let shown = account(&workspace);
+    assert!(shown.problem.contains("couldn't be read") && shown.problem.contains("Sign in again"), "{shown:?}");
+    let aside: Vec<_> = std::fs::read_dir(dir.join("home/account"))
+        .expect("the folder")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("account.json.unreadable-"))
+        .collect();
+    assert_eq!(aside.len(), 1, "set aside");
+    assert_eq!(std::fs::read(aside[0].path()).expect("kept"), vec![0u8; good], "as it was");
+    let workspace = sign_in(&mut client, &instance, "matt@example.com").await;
+    assert!(account(&workspace).problem.is_empty(), "{:?}", account(&workspace));
+    assert!(!aside[0].path().exists(), "signed in again, what was set aside goes (it may hold a working token)");
+    assert!(std::fs::read_to_string(&path).expect("account.json").contains("matt@example.com"));
 }
 
 /// Onboarding slice 3: an agent signs a Claktory in from a shell, with the
@@ -778,7 +808,8 @@ async fn a_check_in_counts_devices_setup_and_how_backend_versions_fared() {
         db.execute(&format!("UPDATE {table} SET hour = ?1"), [hour - 3600]).expect("an hour back");
     }
     // A run that never reached a model (none to run on) isn't a first run.
-    db.execute("INSERT INTO runs (agent, version, started, ended, outcome) VALUES ('rivet', 'v0.1.16', ?1, ?1, 'finished')", [hour * 1000]).expect("a run");
+    db.execute("INSERT INTO runs (agent, version, started, ended, outcome) VALUES ('rivet', 'v0.1.16', ?1, ?1, 'finished')", [hour * 1000])
+        .expect("a run");
     let path = home.join("account/account.json");
     let mut saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("account.json")).expect("json");
     saved["periods_until"] = serde_json::json!(hour - 7200);

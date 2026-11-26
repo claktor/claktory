@@ -18,6 +18,7 @@
 // new version shown, the view going) and shows what it says under the
 // page, in Trish's words.
 import 'dart:async';
+import 'dart:io' show Directory, File;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -38,6 +39,7 @@ import '../pane_chrome.dart' show PaneAction, PaneChrome, PaneScaffold;
 // not the protocol's review-item composite.
 import '../protocol/factory/v1/factory.pb.dart' hide InkComposite;
 import '../scope.dart';
+import '../viewers/file_cache.dart' show FileCache, originalVariant;
 import '../viewers/registry.dart' show HeaderTextButton, ViewerProblem;
 import 'ink_bridge.dart';
 import 'ink_surface.dart';
@@ -530,8 +532,12 @@ class DocumentSurface extends ChangeNotifier {
     notifyListeners();
     try {
       final version = await _version(backend, claktory);
-      if (_disposed) return;
+      if (_disposed) {
+        _letGo(version.kept);
+        return;
+      }
       _current = version;
+      _hold(version.kept);
       _shown = version.source.sha256;
       if (_sync == null) {
         _sync = newInkSync(backend: backend, path: path, machine: _machine);
@@ -600,8 +606,11 @@ class DocumentSurface extends ChangeNotifier {
       return;
     }
     _reloading = true;
+    // The new version's kept copy, let go unless it's shown.
+    ({FileCache cache, File file})? spare;
     try {
       final version = await _version(backend, claktory);
+      spare = version.kept;
       if (_disposed || version.source.sha256 == _shown) return;
       // Each page with ink, as drawn on the version shown: its ink won't
       // show on a page that changes.
@@ -620,8 +629,11 @@ class DocumentSurface extends ChangeNotifier {
       );
       if (_disposed) return;
       _shown = reloaded.sourceSha256;
-      // A view made again shows the new version.
+      // A view made again shows the new version; the copy of the one
+      // before is let go only now, as the surface compared the two.
       _current = version;
+      _hold(version.kept);
+      spare = null;
       for (final layer in reloaded.outdatedLayers) {
         final page = layer.page1based;
         if (page == null) continue;
@@ -651,6 +663,7 @@ class DocumentSurface extends ChangeNotifier {
       // Native couldn't show it (too long, locked, another version than
       // asked for): the version shown stays.
     } finally {
+      _letGo(spare);
       _reloading = false;
       _progress = null;
       if (!_disposed) {
@@ -678,10 +691,35 @@ class DocumentSurface extends ChangeNotifier {
   }
 
   Future<_Version> _versionOnce(Backend backend, String claktory) async {
-    final first = await backend.readFile(path, maxBytes: documentChunk);
+    // From a Claktory on another machine (an iPad's always is), the copies
+    // this device keeps, which Settings → Storage counts and clears
+    // (#446); else the render cache. A byte first: the file's version, so
+    // a copy already here isn't brought over the link again.
+    final cache = FileCache.of(backend);
+    final first = await backend.readFile(
+      path,
+      maxBytes: cache == null ? documentChunk : 1,
+    );
     if (first.error.isNotEmpty) throw _Problem(first.error);
     final size = first.size.toInt();
-    final sha = first.sha256;
+    var sha = first.sha256;
+    // What the first read brought is part of the file to keep, unless the
+    // version comes from another read.
+    var head = first.data;
+    if (sha.isEmpty && first.truncated) {
+      // An image read in part has no hash (only ranges of videos and PDFs
+      // do, and every range past the start): the next byte's read brings
+      // the whole file's. Without one there either, the backend is one
+      // from before ranged reads.
+      final next = await backend.readFile(
+        path,
+        maxBytes: 1,
+        offset: first.data.length,
+      );
+      if (next.error.isNotEmpty) throw _Problem(next.error);
+      sha = next.sha256;
+      head = const [];
+    }
     if (sha.isEmpty) throw _Problem(_update(kind, _machine));
     final name = path.split('/').last;
     final source = InkSource(
@@ -691,6 +729,51 @@ class DocumentSurface extends ChangeNotifier {
       mime: first.mime,
       size: size,
     );
+    _Version version(String file, [({FileCache cache, File file})? kept]) => (
+      source: source,
+      document: InkDocument.file(file: file, sha256: sha),
+      kept: kept,
+    );
+    if (cache != null) {
+      final found = await cache.find(path, originalVariant);
+      if (found != null && found.sha256 == sha && found.file.existsSync()) {
+        // Held at once, so nothing clears it before it shows.
+        cache.hold(found.file);
+        await cache.touch(found);
+        return version(found.file.path, (cache: cache, file: found.file));
+      }
+      if (found != null) await cache.drop(path);
+      // Written here first, then moved in.
+      final temp = File(
+        '${Directory.systemTemp.path}/claktory-'
+        '${sha.substring(0, sha.length.clamp(0, 16))}-$name',
+      );
+      final sink = temp.openWrite();
+      try {
+        await _readAll(backend, sha, size, from: 0, into: sink.add);
+        await sink.close();
+      } catch (_) {
+        await sink.close().catchError((Object _) {});
+        await temp.delete().catchError((Object _) => temp);
+        rethrow;
+      }
+      // Kept under the whole file's version, which an image's first read
+      // didn't carry.
+      final kept = await cache.adopt(
+        path,
+        originalVariant,
+        first.deepCopy()
+          ..data = const []
+          ..sha256 = sha
+          ..truncated = false,
+        temp,
+      );
+      // Not kept (more than this Claktory keeps, or it can't be moved in):
+      // read from where it was written, in the folder the system clears.
+      if (kept == null) return version(temp.path);
+      cache.hold(kept.file);
+      return version(kept.file.path, (cache: cache, file: kept.file));
+    }
     var file = await InkRenderCache.lookup(
       backend: claktory,
       sha256: sha,
@@ -703,38 +786,69 @@ class DocumentSurface extends ChangeNotifier {
         name: name,
       );
       try {
-        await writer.append(Uint8List.fromList(first.data));
-        var offset = first.data.length;
-        while (offset < size) {
-          _progress = (received: offset, size: size);
-          if (!_disposed) notifyListeners();
-          final chunk = await backend.readFile(
-            path,
-            maxBytes: documentChunk,
-            offset: offset,
-            expectedSha256: sha,
-          );
-          if (_disposed) throw const _Problem('');
-          if (chunk.error == 'changed' || chunk.sha256 != sha) {
-            throw const _Changed();
-          }
-          if (chunk.error.isNotEmpty) throw _Problem(chunk.error);
-          if (chunk.offset.toInt() != offset || chunk.data.isEmpty) {
-            throw _Problem(_update(kind, _machine));
-          }
-          await writer.append(Uint8List.fromList(chunk.data));
-          offset += chunk.data.length;
-        }
+        await writer.append(Uint8List.fromList(head));
+        await _readAll(
+          backend,
+          sha,
+          size,
+          from: head.length,
+          into: (data) => writer.append(Uint8List.fromList(data)),
+        );
         file = await writer.finish();
       } catch (_) {
         await writer.cancel().catchError((Object _) {});
         rethrow;
       }
     }
-    return (
-      source: source,
-      document: InkDocument.file(file: file, sha256: sha),
-    );
+    return version(file);
+  }
+
+  /// The file's version [sha] from [from] to its [size], a range at a
+  /// time, each into [into].
+  Future<void> _readAll(
+    Backend backend,
+    String sha,
+    int size, {
+    required int from,
+    required FutureOr<void> Function(List<int> data) into,
+  }) async {
+    var offset = from;
+    while (offset < size) {
+      _progress = (received: offset, size: size);
+      if (!_disposed) notifyListeners();
+      final chunk = await backend.readFile(
+        path,
+        maxBytes: documentChunk,
+        offset: offset,
+        expectedSha256: sha,
+      );
+      if (_disposed) throw const _Problem('');
+      if (chunk.error == 'changed' || chunk.sha256 != sha) {
+        throw const _Changed();
+      }
+      if (chunk.error.isNotEmpty) throw _Problem(chunk.error);
+      if (chunk.offset.toInt() != offset || chunk.data.isEmpty) {
+        throw _Problem(_update(kind, _machine));
+      }
+      await into(chunk.data);
+      offset += chunk.data.length;
+    }
+  }
+
+  /// The kept copy the surface shows (#446): held, so the device's
+  /// storage limit or Clear never takes it from under the view.
+  ({FileCache cache, File file})? _held;
+
+  /// Shows [next]'s copy (already held) in place of the one before, which
+  /// is let go.
+  void _hold(({FileCache cache, File file})? next) {
+    final was = _held;
+    _held = next;
+    _letGo(was);
+  }
+
+  static void _letGo(({FileCache cache, File file})? kept) {
+    if (kept != null) kept.cache.release(kept.file);
   }
 
   void _on(InkEvent event) {
@@ -875,6 +989,7 @@ class DocumentSurface extends ChangeNotifier {
     final sync = _sync;
     if (sync == null) {
       controller.dispose();
+      _hold(null);
     } else {
       // A save under way finishes first (its export is done; what's left
       // is the backend's), then the sync and the controller go.
@@ -887,6 +1002,7 @@ class DocumentSurface extends ChangeNotifier {
             .whenComplete(() {
               sync.dispose();
               controller.dispose();
+              _hold(null);
             }),
       );
     }
@@ -912,7 +1028,11 @@ const _changing =
     'This file keeps changing while it opens. Try again once it stops changing.';
 
 /// A version of the file, in the render cache.
-typedef _Version = ({InkSource source, InkDocument document});
+typedef _Version = ({
+  InkSource source,
+  InkDocument document,
+  ({FileCache cache, File file})? kept,
+});
 
 /// The file became another version while it came: start again.
 class _Changed implements Exception {

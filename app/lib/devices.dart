@@ -23,6 +23,7 @@ import 'mobile/input.dart' show InputKind;
 import 'mobile/lines.dart' show ActionLine, ControlsLine;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'phone.dart' show pairingProblem;
+import 'pipes.dart' show backendOnMac;
 import 'rail.dart' show ClaktoriesScope;
 import 'scan_code.dart';
 import 'scope.dart';
@@ -105,10 +106,33 @@ class _DevicesSettingsState extends State<DevicesSettings>
             ),
           ),
         ),
+        // macOS 15 asks before letting the backend take connections from
+        // this network; denied, devices at home go through a relay (#543).
+        if (backendOnMac(widget.workspace)) ...[
+          const SizedBox(height: Space.m),
+          Text(
+            localNetworkNote(
+              backend.target == null
+                  ? 'this Mac'
+                  : remote.machine.isEmpty
+                  ? "this Claktory's Mac"
+                  : remote.machine,
+            ),
+            style: TypeScale.of(context).caption
+                .copyWith(color: palette.textMuted),
+          ),
+        ],
       ],
     );
   }
 }
+
+/// Settings → Devices on a Claktory that runs on a Mac: what lets devices on
+/// the same network connect straight to it (#543).
+String localNetworkNote(String mac) =>
+    'To let your phone, iPad and other computers on this network connect '
+    'faster, turn on Claktory Agents in System Settings → Privacy & '
+    'Security → Local Network on $mac.';
 
 /// A device that can show this Claktory: its name, whether it's this one,
 /// when it last connected and was added, and Remove.

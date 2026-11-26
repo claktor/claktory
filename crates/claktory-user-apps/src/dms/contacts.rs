@@ -207,6 +207,8 @@ fn end_contact(transaction: &Transaction<'_>, keys: &Keys, id: &str, now_ms: i64
         sync::emit(transaction, account, Kind::Contacts, "", id, 0, now_ms)?;
         sync::emit(transaction, account, Kind::Conversation, &conversation, id, 0, now_ms)?;
     }
+    // What each sent the other stops counting for the other (`space`).
+    super::space::release(transaction, &conversation)?;
     grants::drop_resource(transaction, "dms", &[&low, &high], &Resource { kind: "conversation".into(), id: conversation })?;
     Ok(())
 }
@@ -811,16 +813,9 @@ pub(super) mod tests {
             db.execute_batch(super::super::leaves::SCHEMA).expect("schema");
             db.execute_batch(super::super::groups::SCHEMA).expect("schema");
             db.execute_batch(super::super::handoffs::SCHEMA).expect("schema");
+            db.execute_batch(super::super::space::SCHEMA).expect("schema");
             db.execute_batch(claktory_dm_crypto::storage::SCHEMA).expect("schema");
             db.pragma_update(None, "secure_delete", "ON").expect("secure_delete");
-            World { db, keys, now: NOW, actions: 0 }
-        }
-
-        /// The same on a database that's a file, which other connections
-        /// can open too.
-        pub(in crate::dms) fn on_file(path: &std::path::Path) -> World {
-            let keys = Keys::from_bytes([7; 32]);
-            let db = crate::worker::open_db(path, &keys).expect("db");
             World { db, keys, now: NOW, actions: 0 }
         }
 

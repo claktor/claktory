@@ -232,6 +232,64 @@ async fn a_background_command_returns_at_once_and_reports_when_it_finishes() {
     assert_eq!(result.details["task"], "task-2");
 }
 
+/// A chatty task's log keeps its start and its most recent output, at most
+/// 50 MB (#525), with a line saying how much went; the event's end of its
+/// output is still its end.
+#[tokio::test]
+async fn a_chatty_tasks_log_keeps_its_start_and_its_end() {
+    use factory_agent::tools::task_logs::CAP;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let Watched { background, started, mut finished, _reaper } = watched(dir.path());
+    let bash = bash_with(dir.path(), &background);
+    // 60 MB of lines (yes stops at a broken pipe: not a failure here),
+    // then it waits to be measured, then a last word.
+    let command = format!(
+        "echo first; yes 'a chatty line of output, again and again' | head -c 62914500 || true; {}; echo last",
+        until_file("go")
+    );
+    let args = json!({"command": command, "run_in_background": true});
+    bash.execute(&args, &CancellationToken::new(), &|_| {}).await.expect("started");
+    let log = started.lock()[0].log.clone();
+    // Past the cap, then cut: measured by its size, never read meanwhile.
+    let size = || std::fs::metadata(&log).map_or(0, |metadata| metadata.len());
+    let until = std::time::Instant::now() + HANG;
+    let mut grew = false;
+    while std::time::Instant::now() < until {
+        let now = size();
+        grew |= now > CAP;
+        if grew && now <= CAP {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    std::fs::write(dir.path().join("go"), "").expect("go");
+    let done = tokio::time::timeout(HANG, finished.recv()).await.expect("finished in time").expect("finished");
+    let text = std::fs::read_to_string(&done.log).expect("log");
+    assert!((text.len() as u64) < CAP / 2 + 2 * 1024 * 1024, "{} bytes", text.len());
+    assert!(text.starts_with("first\na chatty line"), "its start");
+    assert!(text.ends_with("again and again\nlast\n") && done.tail.ends_with("again and again\nlast\n"), "its end: {}", done.tail);
+    let line = text.lines().find(|line| line.starts_with("[Claktory cut ")).expect("where it was cut");
+    assert!(line.contains(" bytes of this task's output here, to keep its log under 50 MB"), "{line}");
+    let went: u64 = line["[Claktory cut ".len()..].split(' ').next().unwrap().parse().unwrap();
+    assert_eq!(went + text.len() as u64 - line.len() as u64 - 1, "first\n".len() as u64 + 62914500 + "last\n".len() as u64, "every byte counted");
+}
+
+/// One that writes it all and ends before it's measured is cut as it ends
+/// (Abbacchio's F2).
+#[tokio::test]
+async fn a_task_that_dumps_past_the_cap_and_ends_is_cut_as_it_ends() {
+    use factory_agent::tools::task_logs::CAP;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let Watched { background, mut finished, _reaper, .. } = watched(dir.path());
+    let bash = bash_with(dir.path(), &background);
+    let command = "yes 'a chatty line of output, again and again' | head -c 62914500 || true; echo last";
+    bash.execute(&json!({"command": command, "run_in_background": true}), &CancellationToken::new(), &|_| {}).await.expect("started");
+    let done = tokio::time::timeout(HANG, finished.recv()).await.expect("finished in time").expect("finished");
+    let size = std::fs::metadata(&done.log).expect("log").len();
+    assert!(size < CAP / 2 + 2 * 1024 * 1024, "{size} bytes");
+    assert!(done.tail.ends_with("again and again\nlast\n"), "{}", done.tail);
+}
+
 #[tokio::test]
 async fn a_background_task_outlives_whoever_started_it_and_can_be_picked_up_again() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -270,7 +328,7 @@ async fn a_task_from_before_the_computer_restarted_has_ended_whatever_has_its_pi
     // Its pid is now this test's own process group, which is alive.
     // SAFETY: getpgrp has no preconditions.
     let pid = unsafe { libc::getpgrp() } as u32;
-    let task = factory_agent::Task { id: "task-1".into(), command: "cargo build".into(), pid, log, started: boot - 60_000 };
+    let task = factory_agent::Task { id: "task-1".into(), command: "cargo build".into(), pid, log, started: boot - 60_000, folder: Default::default() };
     let done = tokio::time::timeout(HANG, task.wait_detached(&factory_agent::Redaction::default())).await.expect("at once");
     assert_eq!((done.status.as_str(), done.seconds), ("the computer restarted", None));
     assert!(done.text().contains("The computer restarted while it ran, which ended it."), "{}", done.text());

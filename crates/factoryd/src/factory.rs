@@ -25,7 +25,12 @@ use crate::login::Flow;
 use crate::models::Models;
 use crate::transcript::{Change, Transcript, TranscriptError, now_ms};
 
+/// How often the explorer's folders are listed while an app is connected,
+/// and the watched files read while they can't be watched.
 const WATCH_INTERVAL: Duration = Duration::from_millis(500);
+/// How often the watched files are read anyway, in case a change went
+/// unreported.
+const WATCH_SAFETY: Duration = Duration::from_secs(30);
 const EVENT_BUFFER: usize = 4096;
 /// How long a bash command runs before another agent's message moves it to
 /// the background (the person's does at once).
@@ -360,6 +365,14 @@ pub struct Factory {
     task_check_every: std::sync::atomic::AtomicU64,
     /// Wakes the usage monitor, so a new sign-in's usage and plan are read at once.
     pub(crate) usage_wake: Arc<tokio::sync::Notify>,
+    /// Counts up when what apps look at may need a loop that waits while
+    /// nothing does (#454): an app connected, the open panel or the panes
+    /// changed, or a test changed an interval (`wake_loops`).
+    loops_wake: tokio::sync::watch::Sender<u64>,
+    /// Counts up at each change to the Workspace (`broadcast_workspace`):
+    /// what wakes the loops that look for work only after something
+    /// happened, such as the Checklist's reminders.
+    activity: tokio::sync::watch::Sender<u64>,
     /// Providers whose accounts' usage and plan are read again at the
     /// monitor's next look, whenever they were last read: signed in to
     /// again, or Try now (`crate::usage`).
@@ -375,6 +388,12 @@ pub struct Factory {
     /// How long a provider can't be reached while the network works before
     /// a run waiting on it gives up, in ms (`crate::waits`).
     pub(crate) network_give_up_ms: std::sync::atomic::AtomicI64,
+    /// How long a provider's answers can keep failing before the run gives
+    /// up (`crate::waits`, #490); tests make it shorter.
+    pub(crate) provider_give_up_ms: std::sync::atomic::AtomicI64,
+    /// The least a wait for such a provider lasts, doubling with each in a
+    /// row (`crate::waits`); tests make it shorter.
+    pub(crate) provider_wait_ms: std::sync::atomic::AtomicU64,
     /// The accounts a usage reset is being used on now (`crate::usage`).
     pub(crate) resetting: Mutex<std::collections::HashSet<crate::usage::AccountKey>>,
     /// The Monitors extension's scheduler.
@@ -410,8 +429,16 @@ pub struct Factory {
     /// This Claktory's direct-message leaf: its sealed store, one writer at
     /// a time (`user_apps::dms::leaf`).
     pub(crate) dm_leaf: crate::user_apps::dms::leaf::State,
+    /// This Claktory as the person's direct-message mailbox (`user_apps::dms::home`).
+    pub(crate) dm_home: crate::user_apps::dms::home::State,
     /// What wakes its direct-message loops (`user_apps::dms::Wakes`).
     pub(crate) dm_wakes: crate::user_apps::dms::Wakes,
+    /// Direct messages between home Claktories (#451, `claktory-dm/1`).
+    pub(crate) dm_link: crate::dm_link::State,
+    /// The person's devices' sends to their home (#451 H3, `crate::dm_device`).
+    pub(crate) dm_device: crate::dm_device::State,
+    /// Hellos from the person's other Claktories (#451 H2, `crate::dm_hello`).
+    pub(crate) dm_hello: crate::dm_hello::State,
     /// The apps installed, as they run (`crate::apps`).
     pub(crate) apps: crate::apps::Apps,
     /// Websites pipes' peers share, as this side listens for them
@@ -436,6 +463,8 @@ pub struct Factory {
     /// Websites shared over pipes: the streams this side serves, and their
     /// rates (`crate::pipes::shares`).
     pub(crate) pipe_shares: crate::pipes::shares::State,
+    /// The Map last recorded for History (#458).
+    pub(crate) map_history: crate::history::record::Recorder,
     /// Transcribes voice messages (`crate::speech::voice`).
     pub(crate) voices: crate::speech::voice::Voices,
     /// The person's chats (`crate::chats`).
@@ -450,6 +479,10 @@ pub struct Factory {
     pub(crate) transcript_log: crate::transcript::resume::Log,
     /// Keeping the Mac awake while agents work (P1).
     pub(crate) keep_awake: crate::keep_awake::KeepAwake,
+    /// Commands Execute cards are running (`crate::command_cards`).
+    pub(crate) command_runs: crate::command_cards::Runs,
+    /// Errands in Claktory's browser (`crate::errands`).
+    pub(crate) errands: crate::errands::Errands,
     /// Whether its background service runs it, on a Mac (friend bug #24).
     pub(crate) service: crate::service::Service,
     /// How each provider's model list was last read (friend bug #14).
@@ -460,6 +493,8 @@ pub struct Factory {
     /// Browser control's sessions and the connections brokering them
     /// (`crate::browser`).
     pub(crate) browser: crate::browser::Browser,
+    /// Claktory's browser for errands (#435, `crate::browser_host`).
+    pub(crate) agent_browser: crate::browser_host::Host,
     /// Each device's connections, waiting for where it was reading
     /// (`crate::presentation`).
     pub(crate) presentations: crate::presentation::Hub,
@@ -655,6 +690,12 @@ pub(crate) struct Runtime {
     /// 0 once a call gets an answer.
     pub(crate) network_since: i64,
     pub(crate) network_waits: u32,
+    /// Since when its provider's answers keep failing in a way that passes
+    /// (an overload, a 5xx; `crate::waits`, #490), in ms since 1970, and
+    /// how many times it has waited them out since its last answer; 0 once
+    /// a call gets an answer.
+    pub(crate) provider_since: i64,
+    pub(crate) provider_waits: u32,
     /// When its conversation was last needed: read, or a run of it ended,
     /// in ms since 1970. An idle one is unloaded a while after (`crate::unload`).
     pub(crate) used_ms: i64,
@@ -676,10 +717,8 @@ impl Runtime {
     /// the rest stays.
     pub(crate) fn take_ready(&mut self) -> Vec<Queued> {
         let ready = crate::speech::voice::deliverable(&self.queue);
-        let (taken, kept) = std::mem::take(&mut self.queue)
-            .into_iter()
-            .zip(ready)
-            .partition::<Vec<_>, _>(|(queued, ready)| *ready && !queued.quiet());
+        let (taken, kept) =
+            std::mem::take(&mut self.queue).into_iter().zip(ready).partition::<Vec<_>, _>(|(queued, ready)| *ready && !queued.quiet());
         self.queue = kept.into_iter().map(|(queued, _)| queued).collect();
         taken.into_iter().map(|(queued, _)| queued).collect()
     }
@@ -778,7 +817,10 @@ impl Factory {
         crate::runs::import_files(&home, &store).await?;
         let chats = crate::chats::Chats::load(&store);
         let usage_switches = crate::usage_switch::Switches::load(&store);
-        let keep_awake = crate::keep_awake::KeepAwake::load(&store, crate::keep_awake::Machine::this());
+        // Only the real Claktory (~/.factory) keeps a closed lid from
+        // sleeping the Mac: Claktory Dev's clearing would undo its hold.
+        let real = home.root().file_name().is_some_and(|name| name == ".factory");
+        let keep_awake = crate::keep_awake::KeepAwake::load(&store, crate::keep_awake::Machine::this(), real);
         let mut state: State = store.state()?;
         if state.selected_agent.as_deref().is_some_and(|id| config.agent(id).is_none()) {
             state.selected_agent = None;
@@ -845,11 +887,15 @@ impl Factory {
             nudge_minute: std::sync::atomic::AtomicU64::new(60_000),
             task_check_every: std::sync::atomic::AtomicU64::new(60_000),
             usage_wake: Arc::default(),
+            loops_wake: tokio::sync::watch::channel(0).0,
+            activity: tokio::sync::watch::channel(0).0,
             usage_reread: Mutex::default(),
             credit_tried: Mutex::default(),
             capacity: Arc::default(),
             network_says: std::sync::atomic::AtomicU8::new(0),
             network_give_up_ms: std::sync::atomic::AtomicI64::new(crate::waits::NETWORK_GIVE_UP_MS),
+            provider_give_up_ms: std::sync::atomic::AtomicI64::new(crate::waits::PROVIDER_GIVE_UP_MS),
+            provider_wait_ms: std::sync::atomic::AtomicU64::new(crate::waits::PROVIDER_LEAST_MS),
             resetting: Mutex::default(),
             monitors: crate::extensions::monitors::State::default(),
             web,
@@ -867,7 +913,11 @@ impl Factory {
             vault,
             vault_moved: Arc::default(),
             dm_leaf: crate::user_apps::dms::leaf::State::default(),
+            dm_home: crate::user_apps::dms::home::State::default(),
             dm_wakes: crate::user_apps::dms::Wakes::default(),
+            dm_link: crate::dm_link::State::default(),
+            dm_device: crate::dm_device::State::default(),
+            dm_hello: crate::dm_hello::State::default(),
             apps: crate::apps::Apps::default(),
             share_listeners: crate::pipes::share_listener::Listeners::default(),
             account,
@@ -876,16 +926,20 @@ impl Factory {
             moving: crate::move_run::Moving::new(&home_for_speech),
             pipes: crate::pipes::Pipes::default(),
             pipe_shares: crate::pipes::shares::State::default(),
+            map_history: crate::history::record::Recorder::default(),
             voices: crate::speech::voice::Voices::new(),
             chats,
             usage_switches,
             resumes: Arc::default(),
             transcript_log: crate::transcript::resume::Log::default(),
             keep_awake,
+            command_runs: crate::command_cards::Runs::default(),
+            errands: crate::errands::Errands::default(),
             service,
             catalog,
             notify: crate::notify::State::default(),
             browser: crate::browser::Browser::default(),
+            agent_browser: crate::browser_host::Host::default(),
             presentations: crate::presentation::Hub::default(),
             diagnostics: crate::diagnostics::Recorder::default(),
             unarchived: tokio::sync::Notify::new(),
@@ -906,6 +960,8 @@ impl Factory {
         // Before runs Factory stopped in are ended, so they don't count as the last.
         factory.add_presences(&factory.lock().config.agents.clone());
         crate::pipes::start(&factory);
+        // History: the Map from before recording began, reconstructed once.
+        crate::history::backfill::spawn(&factory.home);
         factory.watch_trial();
         factory.refresh_explorer().await;
         {
@@ -915,7 +971,17 @@ impl Factory {
         if let Err(error) = factory.resume() {
             tracing::error!(%error, "could not resume what agents were doing");
         }
+        // Commands a card ran when Claktory last stopped: stopped, never run again.
+        crate::command_cards::recover(&factory);
+        crate::errands::recover(&factory);
+        // Errands drive Claktory's browser, once it's on here (#435).
+        if crate::browser_host::enabled() {
+            crate::errands::install(&factory, Arc::new(crate::browser_host::Handle::new(&factory)));
+        }
         tokio::spawn(watch(Arc::downgrade(&factory)));
+        // factoryd.log, rotated past 50 MB (#525).
+        tokio::spawn(crate::log_file::watch(factory.home.root().join("factoryd.log")));
+        tokio::spawn(explore(Arc::downgrade(&factory)));
         tokio::spawn(crate::usage::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::catalog::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::credit::monitor(Arc::downgrade(&factory)));
@@ -943,8 +1009,10 @@ impl Factory {
         tokio::spawn(crate::speech::model::check(Arc::downgrade(&factory)));
         tokio::spawn(crate::speech::voice::work(Arc::downgrade(&factory)));
         tokio::spawn(crate::notify::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::disk::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::browser::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::pipes::spend::monitor(Arc::downgrade(&factory)));
+        tokio::spawn(crate::calls::monitor(Arc::downgrade(&factory)));
         // The agent the app opens on, read before an app asks for it.
         if let Some(selected) = factory.lock().state.selected_agent.clone() {
             let factory = Arc::downgrade(&factory);
@@ -974,6 +1042,7 @@ impl Factory {
     /// it's reminded (30s); tests make it shorter.
     pub fn set_nudge_after(&self, after: Duration) {
         self.nudge_after.store(u64::try_from(after.as_millis()).unwrap_or(u64::MAX), std::sync::atomic::Ordering::Relaxed);
+        self.wake_loops();
     }
 
     pub(crate) fn nudge_after(&self) -> Duration {
@@ -984,6 +1053,7 @@ impl Factory {
     /// (`nudge_every`) lasts; tests make it shorter.
     pub fn set_nudge_minute(&self, minute: Duration) {
         self.nudge_minute.store(u64::try_from(minute.as_millis()).unwrap_or(u64::MAX), std::sync::atomic::Ordering::Relaxed);
+        self.wake_loops();
     }
 
     pub(crate) fn nudge_minute(&self) -> i64 {
@@ -994,10 +1064,26 @@ impl Factory {
     /// tests make it shorter.
     pub fn set_task_check_every(&self, every: Duration) {
         self.task_check_every.store(u64::try_from(every.as_millis()).unwrap_or(u64::MAX), std::sync::atomic::Ordering::Relaxed);
+        self.wake_loops();
     }
 
     pub(crate) fn task_check_every(&self) -> Duration {
         Duration::from_millis(self.task_check_every.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Wakes the loops that wait while nothing needs them (`loops_wake`).
+    pub(crate) fn wake_loops(&self) {
+        self.loops_wake.send_modify(|count| *count = count.wrapping_add(1));
+    }
+
+    /// What wakes them: changed() resolves at the next `wake_loops`.
+    pub(crate) fn loops_woken(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.loops_wake.subscribe()
+    }
+
+    /// changed() resolves at the Workspace's next change (`activity`).
+    pub(crate) fn activity(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.activity.subscribe()
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, Inner> {
@@ -1046,6 +1132,8 @@ impl Factory {
                 continue;
             }
             let receiver = self.events.subscribe();
+            // The explorer, the panes and the open panel follow it now.
+            self.wake_loops();
             let (transcript, transcript_revision) = match selected.as_deref() {
                 None => (None, String::new()),
                 Some(id) => match self.resumed(&inner, id, held) {
@@ -1254,6 +1342,7 @@ impl Factory {
                     avatar: Default::default(),
                     lead: None,
                     fallback_model: String::new(),
+                    compact_at_tokens: None,
                     other: Default::default(),
                 };
                 let lead = lead.trim();
@@ -1538,6 +1627,30 @@ impl Factory {
         .await
     }
 
+    /// SetFileCache: how many bytes of files `device` (a connection's own)
+    /// keeps for its viewers (#446); 0 or the default (1 GB) leaves it out
+    /// of config.json.
+    pub async fn set_file_cache(&self, device: &str, bytes: u64) -> Result<(), RequestError> {
+        use crate::config::{FILE_CACHE_DEFAULT, FILE_CACHE_MAX, FILE_CACHE_MIN};
+        let default = bytes == 0 || bytes == FILE_CACHE_DEFAULT;
+        if !default && !(FILE_CACHE_MIN..=FILE_CACHE_MAX).contains(&bytes) {
+            let why = format!("file_cache must be from {FILE_CACHE_MIN} to {FILE_CACHE_MAX} bytes");
+            return Err(RequestError::Invalid(crate::config::Invalid::BadDisplay(why)));
+        }
+        if default && !self.lock().config.display.file_cache.contains_key(device) {
+            return Ok(());
+        }
+        self.edit_config(|config| {
+            if default {
+                config.display.file_cache.remove(device);
+            } else {
+                config.display.file_cache.insert(device.to_owned(), bytes);
+            }
+            Ok(())
+        })
+        .await
+    }
+
     /// Overwrites a broken config.json with the settings in effect, keeping
     /// the broken file as config.broken.json.
     pub async fn restore_settings(&self) -> Result<(), RequestError> {
@@ -1599,6 +1712,12 @@ impl Factory {
                 notify: _,
             } = change;
             if let Some(extension) = extension {
+                // Errands only for an agent the person contained for them.
+                if extension.id == crate::errands::ERRANDS && extension.enabled == Some(true) && !self.pipes.errand_agent(id) {
+                    return Err(RequestError::Remote(
+                        "Errands is only for an agent contained for errands: contain it first, in its settings.".to_owned(),
+                    ));
+                }
                 crate::extensions::apply_change(config, id, extension)?;
             }
             let Some(agent) = config.agent_mut(id) else { return Err(RequestError::UnknownAgent(id.to_owned())) };
@@ -1775,8 +1894,12 @@ impl Factory {
         };
         let attachments = self.attachments(id, attached)?;
         let mut inner = self.lock();
-        let queued =
-            Queued { client_id: client_id.to_owned(), attachments, checklist_item: checklist_item.clone(), ..Queued::from_person(text, sent_from) };
+        let queued = Queued {
+            client_id: client_id.to_owned(),
+            attachments,
+            checklist_item: checklist_item.clone(),
+            ..Queued::from_person(text, sent_from)
+        };
         self.enqueue(&mut inner, id, queued)?;
         drop(inner);
         if let Some(item) = checklist_item {
@@ -1909,7 +2032,7 @@ impl Factory {
         if let Err(error) = crate::pipes::agents::restore(self, id, &mut transcript) {
             tracing::error!(agent = %id, %error, "could not read pipe secret approvals; decided ones show as waiting");
         }
-        if let Err(error) = crate::extensions::ask::restore(&self.store, id, &mut transcript) {
+        if let Err(error) = crate::extensions::ask::restore(&self.store, &self.command_runs, id, &mut transcript) {
             tracing::error!(agent = %id, %error, "could not read its questions; answered ones show as waiting");
         }
         if let Err(error) = crate::extensions::devices::restore(&self.store, id, &mut transcript) {
@@ -2246,6 +2369,11 @@ impl Factory {
 
     /// Sends the open panel's content to clients if it changed.
     pub(crate) fn set_view(&self, inner: &mut Inner, view: Option<v1::ExtensionView>) {
+        let panel = |view: &Option<v1::ExtensionView>| view.as_ref().map(|view| view.extension_id.clone());
+        if panel(&view) != panel(&inner.view) {
+            // Another panel: what follows it wakes (the Tasks panel's output).
+            self.wake_loops();
+        }
         if view != inner.view {
             if let Some(view) = &view {
                 self.send(Body::ExtensionView(view.clone()));
@@ -2466,9 +2594,12 @@ impl Factory {
     /// Sends the workspace, and the selected agent's queue if it changed:
     /// every change to a queue is followed by this, for the sidebar's count.
     pub(crate) fn broadcast_workspace(&self, inner: &Inner) {
+        self.activity.send_modify(|count| *count = count.wrapping_add(1));
         let workspace = self.workspace(inner);
         // What newly waits for the person, or answers them, notifies.
         crate::notify::observe(self, inner, &workspace);
+        // A change to the Map is kept for History (#458).
+        self.map_history.observe(self, &workspace);
         self.send(Body::Workspace(workspace));
         let queued = self.queued_of(inner);
         let mut sent = self.queued_sent.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2599,7 +2730,7 @@ impl Factory {
                 status: status.into(),
                 context_tokens: runtime
                     .map_or(0, |runtime| runtime.transcript.as_ref().map_or(runtime.held_tokens, Transcript::context_tokens)),
-                compact_at_tokens: inner.config.compact_at_tokens,
+                compact_at_tokens: inner.config.compact_at(agent),
                 queued_messages: runtime.map_or(0, |runtime| (runtime.queue.len() - runtime.quiet_waiting()) as u32),
                 quiet_waiting: runtime.map_or(0, |runtime| runtime.quiet_waiting() as u32),
                 reads_reports: self.pipes.curator(&agent.id),
@@ -2635,6 +2766,7 @@ impl Factory {
                 usage_wait_until_ms: runtime.and_then(|runtime| runtime.usage_wait.as_ref()).map_or(0, |wait| wait.until_ms),
                 tainted_by_pipes: self.pipes.tainted(&agent.id),
                 quarantined: self.pipes.quarantined(&agent.id),
+                contained: self.pipes.errand_agent(&agent.id),
                 pipe_id: self.pipes.bound_pipe(&agent.id),
                 fallback_model: agent.fallback_model.clone(),
                 notify: crate::notify::settings(self).mode(&agent.id).to_proto().into(),
@@ -2715,8 +2847,11 @@ impl Factory {
             account: self.account.view(&config.account),
             update_error: inner.update_error.clone(),
             update_check: Some(inner.update_check.clone()),
-            keep_awake: Some(self.keep_awake.view()),
+            keep_awake: Some(self.keep_awake.view(&config.claktory_name())),
             backend_service: Some(self.service.view()),
+            // Claktory's browser (#435): unset while it's off here.
+            agent_browser: self.agent_browser.view(self, &config.browser),
+            errands: self.errands.listed(inner),
             diagnostics: Some(crate::diagnostics::view(self)),
             report_schemas: crate::pipes::handoff::schemas(self),
             report_type_rules: Some(crate::pipes::handoff::type_rules()),
@@ -2784,6 +2919,7 @@ impl Factory {
                 sidebar_width: config.display.sidebar_width,
                 panel_width: config.display.panel_width,
                 zoom: config.display.zoom.iter().map(|(device, zoom)| (device.clone(), *zoom)).collect(),
+                file_cache: config.display.file_cache.clone(),
                 user_name: config.user.name.clone(),
                 vault_unlock_minutes: config.vault.unlock_minutes,
                 idle_compaction: config.compaction.idle,
@@ -2949,6 +3085,8 @@ async fn watch(factory: Weak<Factory>) {
         ),
         None => return,
     };
+    // Watched before they're first read, so no change falls between.
+    let mut files = crate::file_watch::FileWatch::new(vec![config_path.clone(), auth_path.clone(), release_path.clone()]);
     let mut config_stamp = stamp(&config_path).await;
     let mut auth_stamp = stamp(&auth_path).await;
     let mut release_stamp = stamp(&release_path).await;
@@ -2965,35 +3103,59 @@ async fn watch(factory: Weak<Factory>) {
         None => return,
     }
     loop {
-        tokio::time::sleep(WATCH_INTERVAL).await;
-        let Some(factory) = factory.upgrade() else { return };
-        let config_now = stamp(&config_path).await;
-        if config_now != config_stamp {
-            config_stamp = config_now;
-            factory.reload_config().await;
-            // An agent taken out of the settings, however (Rivet edits them).
-            crate::extensions::ask::close_for_gone(&factory);
-        }
-        let auth_now = stamp(&auth_path).await;
-        if auth_now != auth_stamp {
-            // A sign-in made elsewhere (`factoryd login`), into the vault.
-            if let Err(error) = factory.models.take_in_sign_ins().await {
-                tracing::warn!(%error, "could not take in the sign-ins in auth.json");
+        let wait = if files.ensure() { WATCH_SAFETY } else { WATCH_INTERVAL };
+        // Looked at once the watches are armed again, and only then waited
+        // on: a change made while they were being armed raises no event,
+        // and would wait for the safety look (Abbacchio 34947).
+        {
+            let Some(factory) = factory.upgrade() else { return };
+            let config_now = stamp(&config_path).await;
+            if config_now != config_stamp {
+                config_stamp = config_now;
+                factory.reload_config().await;
+                // An agent taken out of the settings, however (Rivet edits them).
+                crate::extensions::ask::close_for_gone(&factory);
             }
-            // What was taken in is written there again, or emptied.
-            auth_stamp = stamp(&auth_path).await;
-            factory.refresh_models().await;
-            // Signed in to again, perhaps, which the listing may not show:
-            // waiting agents ask again (friend bug #3). One whose accounts
-            // are all still spent asks nothing.
-            factory.capacity_changed();
+            let auth_now = stamp(&auth_path).await;
+            if auth_now != auth_stamp {
+                // A sign-in made elsewhere (`factoryd login`), into the vault.
+                if let Err(error) = factory.models.take_in_sign_ins().await {
+                    tracing::warn!(%error, "could not take in the sign-ins in auth.json");
+                }
+                // What was taken in is written there again, or emptied.
+                auth_stamp = stamp(&auth_path).await;
+                factory.refresh_models().await;
+                // Signed in to again, perhaps, which the listing may not show:
+                // waiting agents ask again (friend bug #3). One whose accounts
+                // are all still spent asks nothing.
+                factory.capacity_changed();
+            }
+            let release_now = stamp(&release_path).await;
+            if release_now != release_stamp {
+                release_stamp = release_now;
+                factory.refresh_release().await;
+            }
         }
+        tokio::select! {
+            () = files.changed.notified() => {}
+            () = tokio::time::sleep(wait) => {}
+        }
+    }
+}
+
+/// Lists the explorers' folders again every half second while an app is
+/// connected (it's for apps only); with none, waits for one.
+async fn explore(factory: Weak<Factory>) {
+    let Some(mut woken) = factory.upgrade().map(|factory| factory.loops_woken()) else { return };
+    loop {
+        let Some(connected) = factory.upgrade().map(|factory| factory.clients() > 0) else { return };
+        if connected {
+            tokio::time::sleep(WATCH_INTERVAL).await;
+        } else if woken.changed().await.is_err() {
+            return;
+        }
+        let Some(factory) = factory.upgrade() else { return };
         factory.refresh_explorer().await;
-        let release_now = stamp(&release_path).await;
-        if release_now != release_stamp {
-            release_stamp = release_now;
-            factory.refresh_release().await;
-        }
     }
 }
 
@@ -3054,11 +3216,31 @@ impl Factory {
         crate::vault::requests::expire_requests(self, crate::transcript::now_ms() + later_ms);
     }
 
-    /// A stand-in for the lid-closed helper, on a laptop as far as
+    /// A stand-in for the kernel's lid sleep, on a laptop as far as
     /// Claktory knows; for tests.
-    pub fn set_lid_closed_helper(&self, helper: Arc<dyn crate::lid_closed::Helper>) {
-        self.keep_awake.lid.set_helper(helper);
+    pub fn set_lid_closed_clamshell(&self, clamshell: Arc<dyn crate::lid_closed::Clamshell>) {
+        self.keep_awake.lid.set_clamshell(clamshell);
         self.keep_awake.runs_changed();
+    }
+
+    /// Has keeping the Mac awake looked at again now, rather than at its
+    /// next 30-second look; for tests.
+    pub fn keep_awake_changed(&self) {
+        self.keep_awake.runs_changed();
+    }
+
+    /// Before the backend stops: lets a closed lid sleep the Mac again, if
+    /// Claktory kept it from it (#371). The next start would otherwise.
+    pub fn stopping(&self) {
+        self.keep_awake.lid.stop(&self.store);
+        self.write_calls();
+        crate::command_cards::stop_all(self);
+    }
+
+    /// Writes the model calls counted so far (`crate::calls`), as it does a
+    /// minute after the first; for tests that read factory.db themselves.
+    pub fn write_calls(&self) {
+        self.store.write_calls();
     }
 
     /// Makes new vault passphrases cheap to check; for tests.

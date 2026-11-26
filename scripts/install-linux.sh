@@ -55,6 +55,16 @@ refuse() {
 
 [[ "$(uname -s)" == Linux ]] || refuse "this installer is for Linux."
 [[ -f "$RELEASE/factoryd" ]] || fail "$RELEASE isn't a Claktory release: it needs factoryd."
+# Windows, through WSL 2 (#476): what Claktory needs from WSL and the
+# Windows disk under it, checked before anything here changes (claktory-wsl
+# check: unsafe states refuse, with what to do). Releases before it have no
+# claktory-wsl.sh.
+wsl=false
+if [[ -f "$RELEASE/claktory-wsl.sh" ]] && bash "$RELEASE/claktory-wsl.sh" is-wsl; then
+  wsl=true
+  # The online installer checked already, before downloading into ~/.factory.
+  [[ -n "${CLAKTORY_WSL_CHECKED:-}" ]] || bash "$RELEASE/claktory-wsl.sh" preflight || exit $?
+fi
 command -v systemctl >/dev/null || refuse "it needs systemd, to keep Claktory running."
 # systemctl --user needs the user's session; a login over ssh has one.
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -104,6 +114,12 @@ for tool in rg jq; do
   fi
 done
 if [[ -d "$RELEASE/tools/LICENSES" ]]; then rm -rf "$HOME_DIR/tools/LICENSES"; cp -R "$RELEASE/tools/LICENSES" "$HOME_DIR/tools/LICENSES"; fi
+# On WSL, its helper (keep-running, check) beside the backend.
+if $wsl; then
+  cp "$RELEASE/claktory-wsl.sh" "$HOME_DIR/bin/claktory-wsl.new"
+  chmod 755 "$HOME_DIR/bin/claktory-wsl.new"
+  mv -f "$HOME_DIR/bin/claktory-wsl.new" "$HOME_DIR/bin/claktory-wsl"
+fi
 cp "$RELEASE/factoryd" "$BIN-supervisor.new"
 chmod 755 "$BIN-supervisor.new"
 mv -f "$BIN-supervisor.new" "$BIN-supervisor"
@@ -128,9 +144,15 @@ cat >"$UNIT" <<UNIT
 [Unit]
 Description=Claktory
 After=network.target
+# Never give up restarting it (#490): systemd's default stops after 5 starts
+# in 10 seconds, which would leave Claktory down until someone noticed.
+StartLimitIntervalSec=0
 
 [Service]
 ExecStart=$BIN-supervisor supervise
+# Agents, connections and watched files: more than the default 1024 files
+# open (#490).
+LimitNOFILE=65536
 Environment=PATH=$UNIT_PATH
 WorkingDirectory=$HOME
 Restart=always
@@ -223,6 +245,9 @@ link_dir="$HOME/.local/bin"
 if mkdir -p "$link_dir" 2>/dev/null && { [[ -L "$link_dir/factoryd" ]] || [[ ! -e "$link_dir/factoryd" ]]; }; then
   ln -sfn "$BIN" "$link_dir/factoryd"
   cli="$link_dir/factoryd"
+  if $wsl && { [[ -L "$link_dir/claktory-wsl" ]] || [[ ! -e "$link_dir/claktory-wsl" ]]; }; then
+    ln -sfn "$HOME_DIR/bin/claktory-wsl" "$link_dir/claktory-wsl"
+  fi
 fi
 case ":$PATH:" in
   *":$(dirname "$cli"):"*) on_path=true ;;
@@ -230,7 +255,21 @@ case ":$PATH:" in
 esac
 echo "$cli" >"$out/cli"
 
-if loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q yes; then
+if $wsl; then
+  # Lingering starts Claktory when this Linux starts, but Windows starts and
+  # stops the Linux itself: only a Windows task keeps it running, added only
+  # after a yes typed at this terminal (claktory-wsl asks; not offered with
+  # --no-pair, which --yes and --json pass).
+  distro="$("$HOME_DIR/bin/claktory-wsl" distro 2>/dev/null || true)"
+  echo "Claktory ${version:-} is running in this Linux (${distro:-WSL}, on Windows) and starts whenever it starts. Its log: $HOME_DIR/factoryd.log"
+  if keep="$("$HOME_DIR/bin/claktory-wsl" keep-running 2>/dev/null)" && [[ "$keep" == on:* ]]; then
+    echo "Windows starts this Linux when you sign in and keeps it running (claktory-wsl keep-running off removes that)."
+  elif $PAIR; then
+    "$HOME_DIR/bin/claktory-wsl" keep-running on || true
+  else
+    echo "Windows stops this Linux a few seconds after its last window closes, and Claktory with it. To keep it running while you're signed in to Windows, run  claktory-wsl keep-running on  yourself: it asks you first."
+  fi
+elif loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q yes; then
   echo "Claktory ${version:-} is running on this machine and starts with it. Its log: $HOME_DIR/factoryd.log"
 else
   echo "Claktory ${version:-} is running on this machine while you're logged in (see above to keep it running). Its log: $HOME_DIR/factoryd.log"

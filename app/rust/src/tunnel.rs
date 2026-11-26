@@ -191,36 +191,59 @@ pub fn backend_addr(endpoint_id: &str, relays: &[String], addresses: &[String]) 
 /// would hold two connections to the one server, each displacing the other.
 pub const CLAKTORY_RELAY: &str = "https://relay.claktory.com/";
 
-/// A device endpoint with [key], homed on Claktory's relay, with iroh's
-/// address lookup, so a backend whose home relay changed is still found.
+/// A device endpoint with [key], homed on its Claktory's [relays] (#450:
+/// Claktory's relay forwards only to or from a signed-in Claktory, so a
+/// device follows its Claktory to n0's relays while that isn't signed in),
+/// with iroh's address lookup, so a backend whose home relay changed is
+/// still found.
 ///
-/// Homed there rather than on n0's (#388): n0's map makes the device probe
+/// Only those, not n0's whole map (#388): that makes the device probe
 /// every region before it picks one (1 to 1.4 s on a good network against
 /// 0.35 s, app/rust/examples/relay_timing.rs, and far longer on a slow
 /// one). The device's home relay isn't what it dials through: a dial goes
 /// at once through the relay the backend's pairing code names (or the one
-/// the lookup finds), n0's or ours, whatever this map holds.
+/// the lookup finds), whatever this map holds.
 ///
 /// It looks backends up as n0's preset does (pkarr over HTTPS, and DNS),
 /// but never publishes its own address: nothing dials a device, and the
 /// backend reaches it on the connection it made (#413: ~5 KB for every
 /// endpoint made afresh, and again every 5 minutes, on a phone's data).
-pub async fn device_endpoint(key: SecretKey) -> anyhow::Result<Endpoint> {
+pub async fn device_endpoint(key: SecretKey, relays: &[RelayUrl]) -> anyhow::Result<Endpoint> {
     use iroh::address_lookup::{DnsAddressLookup, PkarrResolver};
     Ok(Endpoint::builder(presets::Minimal)
         .address_lookup(PkarrResolver::n0_dns())
         .address_lookup(DnsAddressLookup::n0_dns())
-        .relay_mode(device_relays())
+        .relay_mode(device_relays(relays))
         .secret_key(key)
         .transport_config(device_transport())
         .bind()
         .await?)
 }
 
-/// The device's relays: Claktory's only.
-fn device_relays() -> iroh::RelayMode {
-    let ours: RelayUrl = CLAKTORY_RELAY.parse().expect("Claktory's relay URL");
-    iroh::RelayMode::Custom(iroh::RelayMap::from(ours))
+/// The device's relays: its Claktory's, as its pairing code names them and
+/// then as the Claktory says once connected ([Tunnel::set_relays]);
+/// Claktory's own when there are none (this Mac's own code names none).
+fn device_relays(relays: &[RelayUrl]) -> iroh::RelayMode {
+    if relays.is_empty() {
+        let ours: RelayUrl = CLAKTORY_RELAY.parse().expect("Claktory's relay URL");
+        return iroh::RelayMode::Custom(iroh::RelayMap::from(ours));
+    }
+    iroh::RelayMode::Custom(relays.iter().cloned().collect())
+}
+
+/// The relays among [relays] (URLs as a pairing code or the Workspace
+/// gives them) that are http(s) URLs, in order, each once.
+pub fn relay_urls(relays: &[String]) -> Vec<RelayUrl> {
+    let mut urls: Vec<RelayUrl> = Vec::new();
+    for relay in relays {
+        if let Ok(url) = relay.parse::<RelayUrl>()
+            && matches!(url.scheme(), "https" | "http")
+            && !urls.contains(&url)
+        {
+            urls.push(url);
+        }
+    }
+    urls
 }
 
 /// iroh's QUIC settings, but on Android without segmentation offload
@@ -235,13 +258,40 @@ fn device_relays() -> iroh::RelayMode {
 /// driver handles it either, and a phone's uploads are small, so sending
 /// packet by packet costs nothing that matters. The Mac and the iPhone
 /// keep iroh's defaults (they never use GSO anyway).
+///
+/// And BBR3 in place of Cubic, as the backend sends with (row 129,
+/// crates/factoryd's remote.rs): on a slow mobile link Cubic's bursts
+/// overran the link and what it declared lost and sent again doubled the
+/// bytes, and on a deep queue it fills the queue to seconds of delay, so
+/// a message waits behind an upload. BBR3 paces to the bandwidth it
+/// measures.
 fn device_transport() -> iroh::endpoint::QuicTransportConfig {
     transport_for(cfg!(target_os = "android"))
 }
 
 fn transport_for(android: bool) -> iroh::endpoint::QuicTransportConfig {
-    iroh::endpoint::QuicTransportConfig::builder().enable_segmentation_offload(!android).build()
+    iroh::endpoint::QuicTransportConfig::builder()
+        .enable_segmentation_offload(!android)
+        .congestion_controller_factory(Arc::new(noq_proto::congestion::Bbr3Config::default()))
+        .default_path_keep_alive_interval(PATH_KEEP_ALIVE)
+        .default_path_max_idle_timeout(PATH_IDLE_TIMEOUT)
+        .build()
 }
+
+/// How long a direct path may stay silent before the device gives up on
+/// it, and the connection carries on through the relay, its backup path
+/// (Matt's MacBook on the Studio's LAN, Bruno 36927). iroh's 15 s was
+/// longer than the app waits for a connection that hears nothing (its
+/// ping, ~10 s), so a direct path that went silent always dropped the
+/// whole session, and everything was fetched again. Under the app's wait,
+/// with room for a slow round trip; a working path is kept alive by
+/// [PATH_KEEP_ALIVE], three times within it. The relay path keeps iroh's
+/// own (vendor/iroh).
+pub const PATH_IDLE_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// How often a quiet direct path is checked, so a working one is never
+/// taken for silent ([PATH_IDLE_TIMEOUT]).
+pub const PATH_KEEP_ALIVE: Duration = Duration::from_secs(2);
 
 /// What the tunnel is doing, for the app to show.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -445,7 +495,9 @@ struct Shared {
     connected_at: Mutex<Option<Instant>>,
     /// Follows the current endpoint's home relay.
     relay_watch: Mutex<Option<JoinHandle<()>>>,
-    backend: EndpointAddr,
+    /// Where the backend is: its pairing code's, its relays then as it says
+    /// ([Tunnel::set_relays]).
+    backend: Mutex<EndpointAddr>,
     /// Set once a direct path stalled ([CONFIRM_WITHIN]): dials go through
     /// the backend's relay only, and iroh upgrades the connection to a
     /// direct path it has checked both ways. Cleared when such a dial
@@ -531,7 +583,7 @@ impl Tunnel {
             reconnecting: AsyncMutex::new(()),
             connected_at: Mutex::new(None),
             relay_watch: Mutex::new(None),
-            backend,
+            backend: Mutex::new(backend),
             relay_first: AtomicBool::new(false),
             connection: AsyncMutex::new(None),
             status: Mutex::new(Status::default()),
@@ -574,6 +626,21 @@ impl Tunnel {
     /// The path the app asks for there; nothing else is forwarded.
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// The backend's relays now, as it says once connected (#450: it
+    /// moves between Claktory's relays and n0's as it signs in and out):
+    /// dials go through them from now on, its direct addresses kept, and
+    /// the address lookup still finds it wherever it is. None changes
+    /// nothing.
+    pub fn set_relays(&self, relays: &[RelayUrl]) {
+        if relays.is_empty() {
+            return;
+        }
+        let mut backend = self.shared.backend.lock().unwrap();
+        let direct = backend.ip_addrs().copied().map(iroh::TransportAddr::Ip);
+        let relayed = relays.iter().cloned().map(iroh::TransportAddr::Relay);
+        *backend = EndpointAddr::from_parts(backend.id, direct.chain(relayed).collect::<Vec<_>>());
     }
 
     pub fn status(&self) -> Status {
@@ -944,7 +1011,7 @@ async fn connection(shared: &Arc<Shared>) -> Option<Connection> {
     let mut dialled = dial_within(shared, &endpoint).await;
     if let Dialled::Made(connection) = &dialled
         && !relay_first
-        && shared.backend.relay_urls().next().is_some()
+        && shared.backend().relay_urls().next().is_some()
     {
         match stalled(shared, connection).await {
             Some(false) => {}
@@ -1095,30 +1162,38 @@ impl Shared {
     /// How long the next dial has: [DIAL_TIMEOUTS], by how many to this
     /// backend have timed out in a row.
     fn dial_timeout(&self) -> Duration {
-        let timed_out = DIALS_TIMED_OUT.lock().unwrap().iter().find(|(id, _)| *id == self.backend.id).map_or(0, |(_, n)| *n);
+        let id = self.backend().id;
+        let timed_out = DIALS_TIMED_OUT.lock().unwrap().iter().find(|(known, _)| *known == id).map_or(0, |(_, n)| *n);
         DIAL_TIMEOUTS[timed_out.min(DIAL_TIMEOUTS.len() - 1)]
     }
 
     fn dial_timed_out(&self) {
+        let id = self.backend().id;
         let mut all = DIALS_TIMED_OUT.lock().unwrap();
-        match all.iter_mut().find(|(id, _)| *id == self.backend.id) {
+        match all.iter_mut().find(|(known, _)| *known == id) {
             Some((_, n)) => *n = (*n + 1).min(DIAL_TIMEOUTS.len() - 1),
-            None => all.push((self.backend.id, 1)),
+            None => all.push((id, 1)),
         }
     }
 
     fn dial_made(&self) {
-        DIALS_TIMED_OUT.lock().unwrap().retain(|(id, _)| *id != self.backend.id);
+        let id = self.backend().id;
+        DIALS_TIMED_OUT.lock().unwrap().retain(|(known, _)| *known != id);
     }
 
     /// Where dials go: the backend's pairing code, or only its relay once
     /// a direct path stalled ([Shared::relay_first]).
     fn target(&self) -> EndpointAddr {
+        let backend = self.backend();
         if self.relay_first.load(Ordering::Relaxed) {
-            EndpointAddr::from_parts(self.backend.id, self.backend.relay_urls().cloned().map(iroh::TransportAddr::Relay))
+            EndpointAddr::from_parts(backend.id, backend.relay_urls().cloned().map(iroh::TransportAddr::Relay))
         } else {
-            self.backend.clone()
+            backend
         }
+    }
+
+    fn backend(&self) -> EndpointAddr {
+        self.backend.lock().unwrap().clone()
     }
 
     /// The endpoint made afresh, for a dial that mustn't meet what the
@@ -1317,7 +1392,7 @@ mod tests {
     #[ignore = "needs the network and relay.claktory.com"]
     async fn the_status_says_how_long_the_relay_took_or_why_it_cant_be_reached() {
         let backend = echo_backend().await;
-        let make: MakeEndpoint = Arc::new(|| Box::pin(device_endpoint(SecretKey::generate())));
+        let make: MakeEndpoint = Arc::new(|| Box::pin(device_endpoint(SecretKey::generate(), &[])));
         let tunnel = Tunnel::open_with(make, REBUILD_AFTER, backend.addr()).await.unwrap();
         let begun = Instant::now();
         while !tunnel.status().relay_connected && begun.elapsed() < Duration::from_secs(15) {
@@ -1420,8 +1495,36 @@ mod tests {
 
     #[test]
     fn the_device_homes_on_claktorys_relay_only() {
-        let urls: Vec<RelayUrl> = device_relays().relay_map().urls();
+        let urls: Vec<RelayUrl> = device_relays(&[]).relay_map().urls();
         assert_eq!(urls.iter().map(ToString::to_string).collect::<Vec<_>>(), vec![CLAKTORY_RELAY.to_owned()]);
+    }
+
+    /// #450: a device homes on its Claktory's relays, n0's when it isn't
+    /// signed in, and dials through what it says once connected.
+    #[tokio::test]
+    async fn a_device_follows_its_claktorys_relays() {
+        let n0s = ["https://use1-1.relay.n0.iroh.link./".to_owned(), "https://euc1-1.relay.n0.iroh.link./".to_owned()];
+        let given = relay_urls(&[n0s[0].clone(), "ftp://nope/".into(), "not a url".into(), n0s[1].clone(), n0s[0].clone()]);
+        assert_eq!(given.iter().map(ToString::to_string).collect::<Vec<_>>(), n0s, "http(s) URLs, each once, in order");
+        let mut homed: Vec<String> = device_relays(&given).relay_map().urls::<Vec<RelayUrl>>().iter().map(ToString::to_string).collect();
+        homed.sort();
+        let mut expected = n0s.to_vec();
+        expected.sort();
+        assert_eq!(homed, expected, "n0's, and not Claktory's");
+
+        let backend = echo_backend().await;
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, 9));
+        let code = EndpointAddr::new(backend.id()).with_relay_url(CLAKTORY_RELAY.parse().unwrap()).with_ip_addr(address);
+        let endpoint = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).bind().await.unwrap();
+        let tunnel = Tunnel::open(endpoint, code).await.unwrap();
+        tunnel.set_relays(&given);
+        let now = tunnel.shared.backend();
+        let mut through: Vec<String> = now.relay_urls().map(ToString::to_string).collect();
+        through.sort();
+        assert_eq!(through, expected, "dials go through n0's now");
+        assert_eq!(now.ip_addrs().copied().collect::<Vec<_>>(), [address], "its direct addresses kept");
+        tunnel.set_relays(&[]);
+        assert_eq!(tunnel.shared.backend(), now, "none changes nothing");
     }
 
     /// A backend stand-in on this machine, no relays: echoes every stream.
@@ -1444,7 +1547,9 @@ mod tests {
         tokio::spawn(async move {
             while let Some(incoming) = server.accept().await {
                 tokio::spawn(async move {
-                    let connection = incoming.await.unwrap();
+                    // A dial the device gave up on mid-handshake (its time
+                    // ran out) is the device's to retry, not a failure here.
+                    let Ok(connection) = incoming.await else { return };
                     let compressed = connection.alpn() == ALPN_COMPRESSED;
                     while let Ok((mut send, mut receive)) = connection.accept_bi().await {
                         tokio::spawn(async move {
@@ -1485,13 +1590,28 @@ mod tests {
 
     /// A socket that asked for the tunnel's path, as the app's WebSocket
     /// does: the backend gets (and the echo returns) `GET / HTTP/1.1`.
+    ///
+    /// Asked again, as the app connects again, when a dial ran past the
+    /// short time tests give it ([DIAL_TIMEOUTS]): a machine loaded with
+    /// the whole suite and more can take that for a handshake. The next
+    /// dial has longer, as on a weak link.
     async fn ask(tunnel: &Tunnel) -> TcpStream {
+        for _ in 1..DIAL_TIMEOUTS.len() {
+            if let Some(socket) = try_ask(tunnel).await {
+                return socket;
+            }
+        }
+        try_ask(tunnel).await.expect("the tunnel answers")
+    }
+
+    /// [ask], once: none when the tunnel let the socket go.
+    async fn try_ask(tunnel: &Tunnel) -> Option<TcpStream> {
         let mut socket = TcpStream::connect(("127.0.0.1", tunnel.port())).await.unwrap();
         socket.write_all(format!("GET {} HTTP/1.1\r\n", tunnel.path()).as_bytes()).await.unwrap();
         let mut got = [0u8; 16];
-        tokio::time::timeout(Duration::from_secs(5), socket.read_exact(&mut got)).await.expect("in time").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), socket.read_exact(&mut got)).await.expect("in time").ok()?;
         assert_eq!(&got, b"GET / HTTP/1.1\r\n");
-        socket
+        Some(socket)
     }
 
     #[tokio::test]
@@ -1515,7 +1635,9 @@ mod tests {
         let status = tunnel.status();
         assert_eq!(status.phase, Phase::Connected);
         assert_eq!(status.path, Path::Direct, "same machine, no relays");
-        assert!(matches!(status.reach, Reach::Local | Reach::Lan), "{:?}", status.reach);
+        // This machine's own addresses, whichever answered first: its
+        // Tailscale one too, where it has one.
+        assert!(matches!(status.reach, Reach::Local | Reach::Lan | Reach::Tailnet), "{:?}", status.reach);
         assert!(status.error.is_empty());
 
         // A closed socket ends its stream; the echo ends it back.
@@ -1686,7 +1808,7 @@ mod tests {
     }
 
     #[test]
-    fn android_sends_packet_by_packet_and_other_devices_keep_irohs_defaults() {
+    fn android_sends_packet_by_packet_and_other_devices_keep_irohs_offload() {
         let offload = |config: iroh::endpoint::QuicTransportConfig| {
             let shown = format!("{config:?}");
             if shown.contains("enable_segmentation_offload: false") {
@@ -1698,12 +1820,46 @@ mod tests {
         };
         assert!(!offload(transport_for(true)), "Android: no GSO");
         assert!(offload(transport_for(false)), "elsewhere: iroh's default, GSO allowed");
+        // The congestion controller isn't in what Debug shows: see below.
+        // Apart from it and the paths' keep-alive and idle timeout, iroh's
+        // defaults.
         assert_eq!(
             format!("{:?}", transport_for(false)),
-            format!("{:?}", iroh::endpoint::QuicTransportConfig::default()),
-            "elsewhere exactly iroh's defaults"
+            format!(
+                "{:?}",
+                iroh::endpoint::QuicTransportConfig::builder()
+                    .default_path_keep_alive_interval(PATH_KEEP_ALIVE)
+                    .default_path_max_idle_timeout(PATH_IDLE_TIMEOUT)
+                    .build()
+            ),
+            "elsewhere iroh's defaults otherwise"
         );
+        for config in [transport_for(false), transport_for(true)] {
+            let shown = format!("{config:?}");
+            assert!(shown.contains("default_path_max_idle_timeout: Some(6s)"), "{shown}");
+            assert!(shown.contains("default_path_keep_alive_interval: Some(2s)"), "{shown}");
+        }
         assert_eq!(offload(device_transport()), !cfg!(target_os = "android"));
+    }
+
+    /// Row 129: what a device sends is paced by BBR3, not iroh's Cubic.
+    #[tokio::test]
+    async fn a_device_sends_paced_by_bbr3() {
+        let backend = echo_backend().await;
+        for android in [false, true] {
+            let device = Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::Disabled)
+                .transport_config(transport_for(android))
+                .bind()
+                .await
+                .unwrap();
+            let connection = device.connect(backend.addr(), ALPN).await.unwrap();
+            let path = connection.paths().iter().next().unwrap().id();
+            let controller = connection.congestion_state(path).unwrap().into_any();
+            assert!(controller.downcast::<noq_proto::congestion::Bbr3>().is_ok(), "android: {android}");
+            connection.close(0u32.into(), b"");
+            device.close().await;
+        }
     }
 
     #[tokio::test]
@@ -1721,11 +1877,19 @@ mod tests {
     /// Makes a device endpoint with one key each time, after [delay], and
     /// keeps every one it made.
     fn maker(delay: Duration) -> (MakeEndpoint, Arc<Mutex<Vec<Endpoint>>>) {
+        let (make, made, _begun) = counted_maker(delay);
+        (make, made)
+    }
+
+    /// [maker], and how many makes have begun, counted before [delay].
+    fn counted_maker(delay: Duration) -> (MakeEndpoint, Arc<Mutex<Vec<Endpoint>>>, tokio::sync::watch::Receiver<usize>) {
         let key = parse_key(&generate_key()).unwrap();
         let made = Arc::new(Mutex::new(Vec::<Endpoint>::new()));
+        let (begin, begun) = tokio::sync::watch::channel(0usize);
         let make: MakeEndpoint = Arc::new({
             let made = made.clone();
             move || {
+                begin.send_modify(|begun| *begun += 1);
                 let (key, made) = (key.clone(), made.clone());
                 Box::pin(async move {
                     tokio::time::sleep(delay).await;
@@ -1738,7 +1902,7 @@ mod tests {
                 })
             }
         });
-        (make, made)
+        (make, made, begun)
     }
 
     /// The socket echoes what it's sent.
@@ -1886,13 +2050,21 @@ mod tests {
     #[tokio::test]
     async fn a_reconnect_during_another_joins_it_and_makes_no_second_endpoint() {
         let backend = echo_backend().await;
-        let (make, made) = maker(Duration::from_millis(400));
+        // A make that takes a moment, so it's under way when the retries
+        // come; well within MAKE_TIMEOUT, which a loaded machine's bind
+        // shares.
+        let (make, made, mut begun) = counted_maker(Duration::from_millis(50));
         let tunnel = Arc::new(Tunnel::open_with(make, Duration::ZERO, backend.addr()).await.unwrap());
         let first = tokio::spawn({
             let tunnel = tunnel.clone();
             async move { tunnel.reconnect().await }
         });
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Its rebuild is making the new endpoint (the first make was the
+        // tunnel's own), not merely about to: a fixed wait can't promise
+        // that on a loaded machine. On this runtime's one thread the
+        // retries below then take their turn before it goes on.
+        begun.wait_for(|begun| *begun >= 2).await.unwrap();
+        assert!(made.lock().unwrap().iter().all(Endpoint::is_closed), "the old one closed before");
         // Retries while the first rebuilds: they wait for it, nothing more.
         tokio::join!(tunnel.reconnect(), tunnel.reconnect());
         assert_eq!(made.lock().unwrap().len(), 2, "returned only once the rebuild under way had made its endpoint");
@@ -2110,6 +2282,81 @@ mod tests {
         tunnel.close().await;
     }
 
+    /// Matt's MacBook on the Studio's LAN (Bruno 36927): a direct path that
+    /// goes silent mid-session. iroh keeps the relay as a backup path, but
+    /// only gave up on a silent direct one after 15 s, while the app closes
+    /// a connection that hears nothing for ~10 s: every time, the session
+    /// dropped and started over. Now the connection carries on through the
+    /// relay within a few seconds, the same socket and all.
+    #[tokio::test]
+    async fn a_direct_path_that_goes_silent_mid_session_falls_back_to_the_relay_in_the_same_connection() {
+        // A backend on IPv6 only and a device on IPv4 only, so the one
+        // direct path between them is the switchable one.
+        let (_map, relay, _server) = iroh::test_utils::run_relay_server().await.unwrap();
+        let backend = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Custom(iroh::RelayMap::from(relay.clone())))
+            .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
+            .alpns(vec![ALPN_COMPRESSED.to_vec(), ALPN.to_vec()])
+            .clear_ip_transports()
+            .bind_addr("[::1]:0")
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        serve_echo(&backend);
+        tokio::time::timeout(Duration::from_secs(10), backend.online()).await.expect("the backend reaches the relay");
+        let port = backend.bound_sockets().iter().find(|addr| addr.is_ipv6()).unwrap().port();
+        let (path, on, proxy) = switchable_path(SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port))).await;
+        on.store(true, Ordering::Relaxed);
+        let key = parse_key(&generate_key()).unwrap();
+        let made = Arc::new(AtomicU32::new(0));
+        let make: MakeEndpoint = Arc::new({
+            let (relay, made) = (relay.clone(), made.clone());
+            move || {
+                let (key, relay, made) = (key.clone(), relay.clone(), made.clone());
+                Box::pin(async move {
+                    made.fetch_add(1, Ordering::Relaxed);
+                    Endpoint::builder(presets::Minimal)
+                        .relay_mode(RelayMode::Custom(iroh::RelayMap::from(relay)))
+                        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
+                        .transport_config(device_transport())
+                        .secret_key(key)
+                        .clear_ip_transports()
+                        .bind_addr("127.0.0.1:0")?
+                        .bind()
+                        .await
+                        .map_err(Into::into)
+                })
+            }
+        });
+        let code = EndpointAddr::new(backend.id()).with_relay_url(relay).with_ip_addr(path);
+        let tunnel = Tunnel::open_with(make, REBUILD_AFTER, code).await.unwrap();
+        let mut socket = ask(&tunnel).await;
+        let until = Instant::now() + Duration::from_secs(10);
+        while tunnel.status().path != Path::Direct {
+            assert!(Instant::now() < until, "never direct: {:?}", tunnel.status());
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        echoes(&mut socket, b"direct").await;
+
+        // The LAN path stops carrying anything, mid-session.
+        on.store(false, Ordering::Relaxed);
+        let begun = Instant::now();
+        let message = b"still here";
+        socket.write_all(message).await.unwrap();
+        let mut got = vec![0u8; message.len()];
+        tokio::time::timeout(Duration::from_secs(20), socket.read_exact(&mut got)).await.expect("carried on").unwrap();
+        assert_eq!(&got, message);
+        let took = begun.elapsed();
+        assert!(took < Duration::from_secs(8), "took {took:?}: the app would have closed it");
+        assert_eq!(tunnel.status().path, Path::Relayed);
+        // The same connection: nothing was made again.
+        assert_eq!(made.load(Ordering::Relaxed), 1);
+        echoes(&mut socket, b"and on").await;
+        tunnel.close().await;
+        proxy.abort();
+    }
+
     /// #413: what arrives counts as it arrives, before a whole message is
     /// in or decompressed, so the app can tell a slow link that's
     /// delivering from a dead one.
@@ -2149,7 +2396,11 @@ mod tests {
     async fn switchable_path(backend: SocketAddr) -> (SocketAddr, Arc<AtomicBool>, JoinHandle<()>) {
         use tokio::net::UdpSocket;
         let entry = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        let up = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let up = if backend.is_ipv6() {
+            UdpSocket::bind((std::net::Ipv6Addr::LOCALHOST, 0)).await.unwrap()
+        } else {
+            UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap()
+        };
         let address = entry.local_addr().unwrap();
         let on = Arc::new(AtomicBool::new(false));
         let task = tokio::spawn({

@@ -27,10 +27,40 @@ pub(crate) struct Known {
     pub groups: Vec<Group>,
     /// Paths Factory uses, each with what it is: "Factory's data", a project's name.
     pub paths: Vec<(PathBuf, String)>,
+    /// Percent of one core that counts as a full one: `FULL_CORE`.
+    pub full_core: f32,
 }
+
+/// A process busy in this sample (`BUSY` of a core or more) that no
+/// agent's task or watch, and no command running now, owns (Part 2 #4):
+/// whether it's a stray is judged by its processor time over the hour.
+#[derive(Clone, Debug)]
+pub(crate) struct Busy {
+    /// Its pid and when it started, in seconds: a pid alone may be reused.
+    pub id: (u32, u64),
+    pub name: String,
+    /// Its command line, shortened.
+    pub command: String,
+    /// Percent of one core, since the last sample.
+    pub cpu_percent: f32,
+    /// Processor time it used since it started, all its threads, in ms.
+    pub cpu_ms: u64,
+}
+
+/// The share of one core, in percent, a process uses on average over the
+/// hour for it to count as using a full one: a little under, since even a
+/// runaway loses some to the rest.
+pub(crate) const FULL_CORE: f32 = 90.0;
+/// Percent of one core a process uses in a sample to be watched: a runaway
+/// on a loaded machine still gets that much, and an idle one doesn't.
+const BUSY: f32 = 10.0;
 
 pub(crate) struct Sample {
     pub machine: v1::Machine,
+    /// Busy now, owned by no agent's task.
+    pub busy: Vec<Busy>,
+    /// Every process alive now, by pid and start.
+    pub alive: std::collections::HashSet<(u32, u64)>,
     /// Biggest first.
     pub factory: Vec<v1::ResourceProcess>,
     /// The top `OTHERS` by memory.
@@ -156,8 +186,21 @@ impl Sampler {
             known.groups.iter().map(|group| entry(group.label.clone(), group.kind, &group.agent, group.pgid)).collect();
         let mut commands: Option<v1::ResourceProcess> = None;
         let mut others: HashMap<String, v1::ResourceProcess> = HashMap::new();
+        let mut busy = Vec::new();
+        let mut alive = std::collections::HashSet::with_capacity(processes.len());
         for (pid, process) in processes {
             let pid = pid.as_u32();
+            alive.insert((pid, process.start_time()));
+            // Any process, Factory's own included, but an agent's task's or
+            // watch's (its group) or a command running now: the agent sees those.
+            if process.cpu_usage() >= BUSY.min(known.full_core)
+                && !under_me(pid)
+                && !process_group(pid).is_some_and(|pgid| known.groups.iter().any(|group| group.pgid == pgid))
+            {
+                let name = process.name().to_string_lossy().into_owned();
+                let (id, cpu_percent, cpu_ms) = ((pid, process.start_time()), process.cpu_usage(), process.accumulated_cpu_time());
+                busy.push(Busy { id, name, command: String::new(), cpu_percent, cpu_ms });
+            }
             if pid == me {
                 add(&mut backend, process);
                 continue;
@@ -182,6 +225,18 @@ impl Sampler {
             let name = exe.and_then(bundle).unwrap_or_else(|| process.name().to_string_lossy().into_owned());
             add(others.entry(name.clone()).or_insert_with(|| entry(name, "other", "", pid)), process);
         }
+        if !busy.is_empty() {
+            // Their command lines, read only for them.
+            let pids: Vec<sysinfo::Pid> = busy.iter().map(|busy| sysinfo::Pid::from_u32(busy.id.0)).collect();
+            let kind = ProcessRefreshKind::nothing().with_cmd(UpdateKind::OnlyIfNotSet);
+            self.system.refresh_processes_specifics(ProcessesToUpdate::Some(&pids), false, kind);
+            for busy in &mut busy {
+                if let Some(process) = self.system.process(sysinfo::Pid::from_u32(busy.id.0)) {
+                    let command: Vec<String> = process.cmd().iter().map(|part| part.to_string_lossy().into_owned()).collect();
+                    busy.command = command.join(" ");
+                }
+            }
+        }
         let mut factory: Vec<v1::ResourceProcess> = std::iter::once(backend)
             .chain(supervising)
             .chain(app)
@@ -201,7 +256,7 @@ impl Sampler {
             swap_used: self.system.used_swap(),
             volumes: self.volumes(&known.paths),
         };
-        Sample { machine, factory, others }
+        Sample { machine, busy, alive, factory, others }
     }
 
     /// The volumes `paths` are on, each with what of Factory's it holds.

@@ -157,4 +157,39 @@ void main() {
     expect(find.byType(AgentView), findsOneWidget);
     expect(find.text('Half a thought'), findsOneWidget);
   });
+
+  // Friend bug #38: a Claktory signed out of the person's account (its
+  // sign-in lost to a failing disk) turns away a device that came through
+  // the account; signing it in again lets it back in, so that's what the
+  // device says, with Try again, never "add this device" (a second pairing).
+  testWidgets('turned away by a Claktory signed out of the account, it says '
+      'to sign that in again, and tries again', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final harness = Harness(Workspace(), localBackend: false);
+    harness.connections.use(
+      parsePairingCode('factory://?t=${'b' * 64}&name=desktop&e=${'d' * 64}'),
+    );
+    await harness.show(tester, size: const Size(1200, 800));
+    await pumpFrames(tester);
+    harness.backend.connected.value = false;
+    harness.backend.refused.value =
+        'This Claktory was signed out of your Claktory account, so it '
+        "can't let this device in. Sign it in again in its Settings → "
+        'Account, then try again here.';
+    await pumpFrames(tester);
+    expect(
+      find.text(
+        "desktop was signed out of your Claktory account, so it can't let "
+        'this Mac in. Sign it in again in its Settings → Account, then try '
+        'again.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('To use it again'), findsNothing);
+    await tester.tap(find.text('Try again'));
+    await pumpFrames(tester);
+    expect(harness.backend.refused.value, isNull, reason: 'trying again');
+    expect(tester.takeException(), isNull);
+  });
 }

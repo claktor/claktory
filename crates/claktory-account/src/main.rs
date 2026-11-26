@@ -21,6 +21,8 @@ Usage:
   claktory-account backup --db FILE --to DIR [--keep N]
   claktory-account set-cloudflare-token FILE (the token on standard input)
   claktory-account set-resend-key FILE      (the key on standard input)
+  claktory-account relay-token-pubkey --secrets FILE
+  claktory-account relay-token-account --secrets FILE --db FILE (--email ADDRESS | --account ID)
 
 serve options:
   --listen ADDRESS        where to listen (127.0.0.1:8080)
@@ -82,6 +84,12 @@ wrong.
 
 backup writes a consistent copy of the database to DIR, while it's in use, and
 keeps the newest N copies (14).
+
+relay-token-pubkey prints the public half of the key relay tokens are signed
+with (64 hex), for the relays' key file. It's derived from k_share, so a new
+k_share makes a new one: give the relays both until the old tokens expire
+(7 days). relay-token-account prints the opaque id (`a`, 32 hex) an account's
+relay tokens carry, for the relays' denylist.
 ";
 
 fn main() -> ExitCode {
@@ -101,6 +109,8 @@ fn main() -> ExitCode {
         "backup" => backup(&args),
         "set-resend-key" => set_resend_key(&args),
         "set-cloudflare-token" => set_cloudflare_token(&args),
+        "relay-token-pubkey" => relay_token_pubkey(&args),
+        "relay-token-account" => relay_token_account(&args),
         "help" => {
             print!("{USAGE}");
             Ok(())
@@ -408,6 +418,34 @@ fn check_statement(args: &[String]) -> Result<(), String> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|error| error.to_string())?;
     let statement = runtime.block_on(server::statement::check(url, claktory_account::protocol::ACCOUNT_ROOTS))?;
     println!("{}: the statement holds for its key {}, from {}.", statement.service, statement.key, statement.from);
+    Ok(())
+}
+
+fn relay_token_pubkey(args: &[String]) -> Result<(), String> {
+    let options = Options(args.to_vec());
+    options.check(&["--secrets"], &[])?;
+    let secrets = Secrets::load(&PathBuf::from(options.required("--secrets")?))?;
+    println!("{}", server::relay_token::Keys::derive(&secrets.k_share).public_hex());
+    Ok(())
+}
+
+fn relay_token_account(args: &[String]) -> Result<(), String> {
+    let options = Options(args.to_vec());
+    options.check(&["--secrets", "--db", "--email", "--account"], &[])?;
+    let secrets = Secrets::load(&PathBuf::from(options.required("--secrets")?))?;
+    let account = match (options.value("--email")?, options.value("--account")?) {
+        (Some(email), None) => {
+            let db = PathBuf::from(options.required("--db")?);
+            let conn = rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|error| format!("can't open {}: {error}", db.display()))?;
+            let email = normalize_email(&email).ok_or("that isn't an email address")?;
+            conn.query_row("SELECT id FROM accounts WHERE email = ?1", [&email], |row| row.get::<_, String>(0))
+                .map_err(|_| format!("no account has the email {email}"))?
+        }
+        (None, Some(account)) => account,
+        _ => return Err("give --email or --account".to_owned()),
+    };
+    println!("{}", server::relay_token::Keys::derive(&secrets.k_share).account(&account));
     Ok(())
 }
 

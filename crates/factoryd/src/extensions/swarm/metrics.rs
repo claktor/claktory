@@ -132,13 +132,18 @@ pub(crate) struct Answers {
     pub p90_min: f64,
 }
 
+/// A quiet message (an FYI, a copy) waits by design for its recipient's
+/// next wake, hours sometimes: its clock starts when it's delivered, not
+/// sent, and one never delivered isn't counted (Rivet's finding, #280).
 const Q2: &str = "
-WITH m AS (SELECT agent AS receiver, sender_id AS sender, created, MIN(agent, sender_id) || '|' || MAX(agent, sender_id) AS pair
+WITH m AS (SELECT agent AS receiver, sender_id AS sender, created, CASE WHEN quiet IS NULL THEN created ELSE delivered END AS asked,
+  MIN(agent, sender_id) || '|' || MAX(agent, sender_id) AS pair
   FROM messages WHERE source = 'agent' AND created >= ?1 AND created < ?2
   AND agent IN (SELECT value FROM json_each(?3)) AND sender_id IN (SELECT value FROM json_each(?3))),
-n AS (SELECT receiver, created, LEAD(sender) OVER (PARTITION BY pair ORDER BY created) AS next_sender,
+n AS (SELECT receiver, asked, LEAD(sender) OVER (PARTITION BY pair ORDER BY created) AS next_sender,
   LEAD(created) OVER (PARTITION BY pair ORDER BY created) AS next_created FROM m),
-d AS (SELECT receiver AS responder, next_created - created AS wait FROM n WHERE next_sender = receiver AND next_created - created < 43200000),
+d AS (SELECT receiver AS responder, next_created - asked AS wait FROM n
+  WHERE next_sender = receiver AND next_created - asked >= 0 AND next_created - asked < 43200000),
 k AS (SELECT responder, wait, ROW_NUMBER() OVER (PARTITION BY responder ORDER BY wait) AS i, COUNT(*) OVER (PARTITION BY responder) AS n FROM d)
 SELECT responder, n AS replies, MIN(CASE WHEN i >= 0.5*n THEN wait END) / 60000.0 AS p50_min, MIN(CASE WHEN i >= 0.9*n THEN wait END) / 60000.0 AS p90_min
 FROM k GROUP BY responder ORDER BY p90_min DESC";

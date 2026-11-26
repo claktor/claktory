@@ -598,3 +598,110 @@ struct LinksTests {
     #expect(unknown as? NSObject === FlutterMethodNotImplemented)
   }
 }
+
+@MainActor
+struct KeptFilesTests {
+  /// The files kept from a Claktory on another machine (#446): the folder,
+  /// what was in it, and a file moved in all can't be opened while the
+  /// iPhone is locked.
+  @Test func keptFilesAreProtected() throws {
+    let manager = FileManager.default
+    let root = NSTemporaryDirectory() + "kept-\(UUID())"
+    defer { try? manager.removeItem(atPath: root) }
+    let folder = root + "/files"
+    let claktory = folder + "/abc"
+    try manager.createDirectory(atPath: claktory, withIntermediateDirectories: true)
+    let old = claktory + "/old.json"
+    #expect(manager.createFile(atPath: old, contents: Data("{}".utf8)))
+    // The Simulator reports no class (as DmKeyStore's and InkCache's
+    // checks find): there, none; on an iPhone, completeUnlessOpen.
+    func protected(_ path: String) throws -> Bool {
+      let protection =
+        try manager.attributesOfItem(atPath: path)[.protectionKey] as? FileProtectionType
+      return protection == nil || protection == .completeUnlessOpen
+    }
+
+    try AppDelegate.protectKeptFiles(folder)
+    #expect(try protected(folder))
+    #expect(try protected(claktory))
+    #expect(try protected(old))
+
+    // A copy downloaded elsewhere and moved in keeps its own class until
+    // it's protected too.
+    let moved = claktory + "/video.mp4"
+    let download = root + "/download.mp4"
+    #expect(manager.createFile(
+      atPath: download, contents: Data([1, 2, 3]),
+      attributes: [.protectionKey: FileProtectionType.none]))
+    try manager.moveItem(atPath: download, toPath: moved)
+    try AppDelegate.protectKeptFiles(moved)
+    #expect(try protected(moved))
+
+    // Made where it isn't yet.
+    let fresh = root + "/elsewhere/files"
+    try AppDelegate.protectKeptFiles(fresh)
+    #expect(try protected(fresh))
+  }
+}
+
+/// History's video export (#458 E1): the writer's channel. A bad argument
+/// is an error, never a crash; it writes only to a file it makes itself in
+/// the share folder, and deletes it when an export stops.
+@MainActor
+struct ReplayWriterTests {
+  let channel = "claktory/replay-writer"
+
+  func code(_ reply: Any?) -> String? { (reply as? FlutterError)?.code }
+
+  func frame(_ bytes: Int) -> [String: Any] {
+    ["rgba": FlutterStandardTypedData(bytes: Data(count: bytes))]
+  }
+
+  @Test func refusesBadArguments() async throws {
+    let messenger = FakeMessenger()
+    ReplayWriter.register(with: messenger)
+    #expect(code(await messenger.call(channel, "start")) == "bad")
+    #expect(code(await messenger.call(channel, "start", ["width": "wide"])) == "bad")
+    #expect(code(await messenger.call(channel, "start", ["width": 17, "height": 16, "fps": 30])) == "bad")
+    #expect(code(await messenger.call(channel, "start", ["width": 4000, "height": 16, "fps": 30])) == "limit")
+    #expect(code(await messenger.call(channel, "start", ["width": 32, "height": 32, "fps": 0])) == "bad")
+    #expect(code(await messenger.call(channel, "frame", frame(32 * 32 * 4))) == "none")
+    #expect(code(await messenger.call(channel, "frame", ["rgba": "pixels"])) == "bad")
+    #expect(code(await messenger.call(channel, "finish")) == "none")
+    #expect(await messenger.call(channel, "seek") as? NSObject === FlutterMethodNotImplemented)
+
+    // A frame of the wrong size ends the export, file and folder.
+    let path = try #require(
+      await messenger.call(channel, "start", ["width": 32, "height": 32, "fps": 10]) as? String)
+    #expect(code(await messenger.call(channel, "frame", frame(10))) == "bad")
+    #expect(!FileManager.default.fileExists(atPath: (path as NSString).deletingLastPathComponent))
+    #expect(code(await messenger.call(channel, "frame", frame(32 * 32 * 4))) == "none")
+  }
+
+  @Test func writesOnlyItsOwnFile() async throws {
+    let messenger = FakeMessenger()
+    ReplayWriter.register(with: messenger)
+    let shares = FileManager.default.temporaryDirectory
+      .appendingPathComponent("claktory-share", isDirectory: true).standardizedFileURL.path
+    let path = try #require(
+      await messenger.call(channel, "start", ["width": 32, "height": 32, "fps": 10]) as? String)
+    let url = URL(fileURLWithPath: path)
+    #expect(url.lastPathComponent == "claktory-replay.mp4")
+    #expect(url.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL.path == shares)
+    for _ in 0..<10 {
+      #expect(await messenger.call(channel, "frame", frame(32 * 32 * 4)) == nil)
+    }
+    #expect(await messenger.call(channel, "finish") as? String == path)
+    let asset = AVURLAsset(url: url)
+    let duration = try await asset.load(.duration)
+    #expect(abs(duration.seconds - 1) < 0.01)
+    try FileManager.default.removeItem(at: url.deletingLastPathComponent())
+
+    // Cancelled, nothing stays; a new start is a new folder.
+    let again = try #require(
+      await messenger.call(channel, "start", ["width": 32, "height": 32, "fps": 10]) as? String)
+    #expect(again != path)
+    #expect(await messenger.call(channel, "cancel") == nil)
+    #expect(!FileManager.default.fileExists(atPath: (again as NSString).deletingLastPathComponent))
+  }
+}

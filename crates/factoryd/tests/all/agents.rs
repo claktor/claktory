@@ -103,6 +103,52 @@ async fn a_message_to_an_agent_without_a_usable_model_says_why_it_was_not_sent()
     assert!(entries[3].contains("doesn't offer \"scripted/gone\" any more. Choose another model in this agent's settings."), "{entries:?}");
 }
 
+/// An agent's own threshold (`agents[].compact_at_tokens`) compacts it,
+/// while the others follow everyone's.
+#[tokio::test]
+async fn an_agent_with_its_own_compaction_threshold_compacts_alone() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, _, _) = Client::connect(addr).await;
+    client.ok(create_project("Site", &dir.join("site"))).await;
+    let mut view = View::default();
+    for name in ["Builder", "Writer"] {
+        for event in client.ok(create_agent("site", name, "")).await {
+            view.apply(&event.body.expect("body"));
+        }
+    }
+    // The scripted model reports 1200 tokens of context per reply.
+    let config_path = dir.join("home/config.json");
+    let home = dir.join("home");
+    let mut config = Config::parse(&std::fs::read_to_string(&config_path).expect("read"), &home).expect("parse");
+    config.agent_mut("builder").expect("builder").compact_at_tokens = Some(1_000);
+    let json = config.to_json(&home).expect("json");
+    assert!(json.contains("\"compact_at_tokens\": 1000"), "{json}");
+    std::fs::write(&config_path, &json).expect("write");
+    view.follow(&mut client, |view| view.agent("builder").compact_at_tokens == 1_000).await;
+    assert_eq!(view.agent("writer").compact_at_tokens, 400_000, "the others follow everyone's");
+
+    for agent in ["builder", "writer"] {
+        for text in ["first", "second"] {
+            for event in client.ok(send_message(agent, text)).await {
+                view.apply(&event.body.expect("body"));
+            }
+            view.follow(&mut client, |view| idle(view, agent)).await;
+        }
+    }
+    let compacted = |agent: &str| {
+        let transcript = factoryd::transcript::segment_file_for_test(&dir.join("home/agents").join(agent), 2);
+        transcript.is_some()
+    };
+    assert!(compacted("builder"), "Builder went past its own threshold");
+    assert!(!compacted("writer"), "Writer's is everyone's");
+
+    // Its own threshold must be above 0, like everyone's.
+    config.agent_mut("builder").expect("builder").compact_at_tokens = Some(0);
+    let error = config.validate().expect_err("zero");
+    assert_eq!(error.to_string(), "agent \"builder\": compact_at_tokens must be positive");
+}
+
 #[tokio::test]
 async fn compaction_shows_a_divider_continues_from_the_summary_and_reloads_identically() {
     let dir = temp_dir();
@@ -585,6 +631,7 @@ fn last_shipped_rivet_prompt(current: &str) -> String {
                 && !line.starts_with("- You look after this machine's health")
                 && !line.starts_with("- When Claktory tells you a newer version of a model")
                 && !line.starts_with("- An approved proposal can carry grants")
+                && !line.starts_with("- Proposals from agents say what's needed")
         })
         .collect();
     let approved = " When {{user}} approves an agent's request for a secret, you're told what it needs and why: give it one of the vault's secrets that fits (secrets_grant with request, and aliases when the variable names differ), or, when none fits, ask {{user}} to add one with secrets_collect, which opens a filled-in card in your conversation. Hold these to the same bar: check the request's reason against the agent's work, and give the narrower thing when in doubt.";

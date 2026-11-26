@@ -114,8 +114,9 @@ Future<Harness> _showVideo(
   harness.backend.threads.apply(
     ThreadList(path: _path, versionSha256: 'v1', threads: threads),
   );
-  // Writing the copy is real work on the disk.
-  for (var i = 0; i < 6; i++) {
+  // Writing the copy is real work on the disk, slower on a loaded machine:
+  // until it plays, if it's going to.
+  for (var i = 0; i < 6 || (FakePlayback.made.isEmpty && i < 30); i++) {
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 100)),
     );

@@ -241,6 +241,7 @@ mod tests {
             extensions: Default::default(),
             avatar: Default::default(),
             fallback_model: String::new(),
+            compact_at_tokens: None,
             other: Default::default(),
         }
     }

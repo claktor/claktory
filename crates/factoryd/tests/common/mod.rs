@@ -45,16 +45,9 @@ const WAIT: Duration = Duration::from_secs(60);
 /// macOS starts a process at 256.
 pub fn raise_open_files() {
     static RAISED: std::sync::Once = std::sync::Once::new();
+    // As factoryd raises its own at start (#490).
     RAISED.call_once(|| {
-        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-        // SAFETY: getrlimit and setrlimit only read and write `limit`.
-        unsafe {
-            if libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) == 0 {
-                // macOS refuses more than OPEN_MAX (10240) for the soft limit.
-                limit.rlim_cur = limit.rlim_max.min(10_240);
-                libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit);
-            }
-        }
+        factoryd::open_files::raise();
     });
 }
 
@@ -872,6 +865,24 @@ impl Client {
                 return found;
             }
         }
+    }
+
+    /// Sends a WebSocket ping and waits for its pong, keeping what else
+    /// comes meanwhile.
+    pub async fn ping(&mut self, payload: &'static [u8]) -> Vec<ServerMessage> {
+        self.socket.send(Frame::Ping(payload.into())).await.expect("ping");
+        let mut kept = Vec::new();
+        let pong = async {
+            loop {
+                match self.socket.next().await.expect("server closed the connection").expect("read") {
+                    Frame::Pong(answer) if answer.as_ref() == payload => return,
+                    Frame::Binary(payload) => kept.push(ServerMessage::decode(payload).expect("decode")),
+                    _ => continue,
+                }
+            }
+        };
+        tokio::time::timeout(WAIT, pong).await.expect("timed out waiting for the pong");
+        kept
     }
 
     pub async fn closed(&mut self) -> bool {

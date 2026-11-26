@@ -1,7 +1,8 @@
 import 'package:factory_app/devices.dart' show QrCode;
 import 'package:factory_app/controls.dart' show Button, Field, Select, Toggle;
 import 'package:factory_app/decision.dart';
-import 'package:factory_app/inbox.dart' show InboxView;
+import 'package:factory_app/inbox.dart'
+    show InboxView, NeedsYouKind, needsYouItems;
 import 'package:factory_app/map.dart';
 import 'package:factory_app/map_layout.dart';
 import 'package:factory_app/pipe_timeline.dart' show pipeItemKey;
@@ -888,6 +889,74 @@ void main() {
       expect(harness.last.acceptPipeIdentity.pipeId, 'pipe1');
     });
 
+    testWidgets('another account is in Needs you by itself, whoever asked, '
+        'with the warning and Trust; the pipe counts it (#471 G7)', (
+      tester,
+    ) async {
+      final pipe = _pipe()
+        ..peer.verifiedEmail = 'bo@example.com'
+        ..peer.identityChange =
+            PipeIdentityChange.PIPE_IDENTITY_CHANGE_ACCOUNT_CHANGED
+        ..peer.previousEmail = 'ana@acme.example';
+      // From the pipe's view, Needs you opens in its place.
+      final harness = await show(tester, signedIn([pipe]));
+      expect(pipeWaiting(pipe), 1);
+      await tester.tap(
+        find.descendant(
+          of: find.byType(Sidebar),
+          matching: find.text('Needs you'),
+        ),
+      );
+      await settle(tester);
+      final item = find.text("Ana's Claktory is on another account now");
+      expect(item, findsOneWidget);
+      // Opened, its card, once it has unfolded.
+      await tester.tap(item);
+      await settle(tester);
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.text('Trust this Claktory…'));
+      await settle(tester);
+      await tester.tap(find.text('Trust'));
+      await settle(tester);
+      expect(harness.last.acceptPipeIdentity.pipeId, 'pipe1');
+    });
+
+    test('only another account waits in Needs you: a lapse or a new '
+        'email stays in the header, and a closed pipe waits for nothing', () {
+      Pipe changed(PipeIdentityChange change, {bool closed = false}) =>
+          _pipe(
+              state: closed
+                  ? PipeState.PIPE_STATE_CLOSED
+                  : PipeState.PIPE_STATE_OPEN,
+            )
+            ..peer.identityChange = change
+            ..peer.previousEmail = 'ana@acme.example';
+      List<NeedsYouKind> kinds(Pipe pipe) => [
+        for (final item in needsYouItems(_workspace([pipe]))) item.kind,
+      ];
+      expect(
+        kinds(changed(PipeIdentityChange.PIPE_IDENTITY_CHANGE_ACCOUNT_CHANGED)),
+        [NeedsYouKind.pipeIdentity],
+      );
+      expect(
+        kinds(changed(PipeIdentityChange.PIPE_IDENTITY_CHANGE_LAPSED)),
+        [],
+      );
+      expect(
+        kinds(changed(PipeIdentityChange.PIPE_IDENTITY_CHANGE_EMAIL_CHANGED)),
+        [],
+      );
+      expect(
+        kinds(
+          changed(
+            PipeIdentityChange.PIPE_IDENTITY_CHANGE_ACCOUNT_CHANGED,
+            closed: true,
+          ),
+        ),
+        [],
+      );
+    });
+
     testWidgets('another account with none vouched: "Trust this Claktory?"', (
       tester,
     ) async {
@@ -940,8 +1009,12 @@ void main() {
     final harness = await show(
       tester,
       _workspace([
-        _pipe(state: PipeState.PIPE_STATE_APPROVAL, digits: '4821')
-          ..suggestedLiaisonName = 'Kai',
+        // A new pipe: both reviews off, as the card reads them (#470).
+        _pipe(
+          state: PipeState.PIPE_STATE_APPROVAL,
+          digits: '4821',
+          review: false,
+        )..suggestedLiaisonName = 'Kai',
       ], selected: 'pipe1'),
     );
 
@@ -1051,7 +1124,11 @@ void main() {
     final harness = await show(
       tester,
       _workspace([
-        _pipe(state: PipeState.PIPE_STATE_APPROVAL, digits: '4821'),
+        _pipe(
+          state: PipeState.PIPE_STATE_APPROVAL,
+          digits: '4821',
+          review: false,
+        ),
       ], selected: 'pipe1'),
     );
     expect(
@@ -1076,6 +1153,83 @@ void main() {
     final approve = harness.last.approvePipe;
     expect(approve.reviewIncoming, isTrue);
     expect(approve.reviewOutgoing, isFalse);
+  });
+
+  testWidgets('settings made before approval survive it: the card opens '
+      "from the pipe's members, lead and reviews, and follows them until "
+      'the person changes it (#470)', (tester) async {
+    // Waiting, nothing set yet: the card shows a new pipe's defaults.
+    final harness = await show(
+      tester,
+      _workspace([
+        _pipe(
+          state: PipeState.PIPE_STATE_APPROVAL,
+          digits: '4821',
+          review: false,
+        ),
+      ], selected: 'pipe1'),
+    );
+    // Rivet's settings card approved meanwhile: June and Omar, Omar
+    // leading, June limited to the pipe, Review incoming on.
+    harness.backend.workspace.apply(
+      harness.backend.workspace.workspace.deepCopy()
+        ..pipes.first.memberIds.addAll(['june', 'omar'])
+        ..pipes.first.leadId = 'omar'
+        ..pipes.first.quarantinedIds.add('june')
+        ..pipes.first.reviewIncoming = true,
+    );
+    await settle(tester);
+    await tester.ensureVisible(find.text('Approve'));
+    await tester.tap(find.text('Approve'));
+    await settle(tester);
+    final approve = harness.last.approvePipe;
+    expect(approve.memberIds, unorderedEquals(['june', 'omar']));
+    expect(approve.leadId, 'omar');
+    expect(approve.liaisonName, isEmpty);
+    expect(approve.quarantined.agentIds, ['june']);
+    expect(approve.reviewIncoming, isTrue);
+    expect(approve.reviewOutgoing, isFalse);
+  });
+
+  testWidgets('a change to the settings after the person changed the card '
+      'is read again and said, never approved over (Fugo, #470)', (
+    tester,
+  ) async {
+    final harness = await show(
+      tester,
+      _workspace([
+        _pipe(
+          state: PipeState.PIPE_STATE_APPROVAL,
+          digits: '4821',
+          members: ['june', 'omar'],
+          lead: 'omar',
+          review: false,
+        ),
+      ], selected: 'pipe1'),
+    );
+    final incoming = find.text('Review messages before your agents read them');
+    await tester.ensureVisible(incoming);
+    await tester.tap(incoming);
+    await tester.pump();
+    // Rivet limits June to the pipe meanwhile.
+    harness.backend.workspace.apply(
+      harness.backend.workspace.workspace.deepCopy()
+        ..pipes.first.quarantinedIds.add('june'),
+    );
+    await settle(tester);
+    expect(
+      find.text(
+        "The pipe's settings changed since you started. Check them again.",
+      ),
+      findsOneWidget,
+    );
+    await tester.ensureVisible(find.text('Approve'));
+    await tester.tap(find.text('Approve'));
+    await settle(tester);
+    final approve = harness.last.approvePipe;
+    expect(approve.quarantined.agentIds, ['june']);
+    expect(approve.memberIds, unorderedEquals(['june', 'omar']));
+    expect(approve.reviewIncoming, isFalse);
   });
 
   testWidgets("a join that can't reach the other side says why, since when, "
@@ -1688,6 +1842,97 @@ void main() {
     });
   });
 
+  group("a pipe's liaison uses no other (#414)", () {
+    const held =
+        "Freya is Partners' liaison: it reads that pipe, so it can't use "
+        'another.';
+    const rivetHeld =
+        "Rivet is Launch's liaison: it reads that pipe, so it can't use "
+        'another.';
+
+    Workspace boundary(Pipe pipe) =>
+        _workspace([
+            pipe
+              ..heldAgents.addAll([
+                PipeAgentHeld(agentId: 'freya', reason: held),
+                PipeAgentHeld(agentId: 'rivet', reason: rivetHeld),
+              ]),
+          ], selected: 'pipe1')
+          ..agents.addAll([
+            _agent('freya', 'Freya', role: 'Liaison'),
+            _agent('rivet', 'Rivet', project: ''),
+          ]);
+
+    Future<Harness> settings(WidgetTester tester, Workspace snapshot) async {
+      final harness = await show(tester, snapshot);
+      harness.backend.pipeChat.load(PipeTranscript(pipeId: 'pipe1'));
+      await settle(tester);
+      await tester.tap(find.text('Acme launch').last);
+      await settle(tester);
+      return harness;
+    }
+
+    Finder switchOf(String label) => find.byWidgetPredicate(
+      (widget) => widget is Toggle && widget.label == label,
+    );
+
+    Toggle toggle(WidgetTester tester, String label) =>
+        tester.widget<Toggle>(switchOf(label));
+
+    Future<void> turn(WidgetTester tester, String label) async {
+      await tester.ensureVisible(switchOf(label));
+      await tester.tap(switchOf(label), warnIfMissed: false);
+      await settle(tester);
+    }
+
+    testWidgets("in the settings, another pipe's liaison is off, can't be "
+        'turned on, and says why', (tester) async {
+      final harness = await settings(
+        tester,
+        boundary(_pipe(members: ['june', 'omar'], lead: 'june')),
+      );
+      expect(find.text(held), findsOneWidget);
+      expect(find.text(rivetHeld), findsOneWidget);
+      expect(toggle(tester, 'Freya').onChanged, isNull);
+      await turn(tester, 'Freya');
+      expect(toggle(tester, 'Freya').value, isFalse);
+      // The others are as they were.
+      expect(
+        tester
+            .widget<Select<PipeAccess>>(
+              find.byWidgetPredicate(
+                (widget) =>
+                    widget is Select<PipeAccess> && widget.title == 'Omar',
+              ),
+            )
+            .options
+            .map((option) => option.label),
+        ['Reads and runs commands', 'Limited to the pipe', 'Only sends'],
+      );
+      await tester.ensureVisible(find.text('Save'));
+      await tester.tap(find.text('Save'));
+      await settle(tester);
+      expect(harness.last.updatePipe.hasMembers(), isFalse);
+    });
+
+    testWidgets("approving, another pipe's liaison is off and says why", (
+      tester,
+    ) async {
+      final harness = await show(
+        tester,
+        boundary(_pipe(state: PipeState.PIPE_STATE_APPROVAL, digits: '4821')),
+      );
+      expect(find.text(held), findsOneWidget);
+      expect(toggle(tester, 'Freya').onChanged, isNull);
+      await turn(tester, 'Freya');
+      await turn(tester, 'Omar');
+      await tester.ensureVisible(find.text('Approve'));
+      await tester.tap(find.text('Approve'));
+      await settle(tester);
+      expect(harness.last.approvePipe.memberIds, ['omar']);
+    });
+  });
+
   testWidgets("Needs you's History lists Rivet letting an agent only send, "
       'in Claktory\'s words, and opens the pipe (#414)', (tester) async {
     final now = DateTime.now();
@@ -2169,6 +2414,462 @@ void main() {
       await tester.tap(find.text('Approve'));
       await settle(tester);
       expect(harness.last.approvePipe.leadId, 'omar');
+    });
+  });
+
+  group("an agent's card to approve a pipe (#471 G1)", () {
+    PipeApprovalProposal proposal({
+      List<String> members = const ['june', 'omar'],
+      List<String> canRun = const ['omar'],
+      String lead = 'june',
+      List<String> sendOnly = const [],
+      PipeApprovalBaseline? askedFrom,
+    }) => PipeApprovalProposal(
+      pipeId: 'pipe1',
+      memberIds: members,
+      canRunCommandsIds: canRun,
+      leadId: lead,
+      reviewIncoming: true,
+      reviewOutgoing: false,
+      sendOnlyIds: sendOnly,
+      // The pipe as it was when asked: a new one, nothing set.
+      askedFrom: askedFrom ?? PipeApprovalBaseline(),
+    );
+
+    Transcript conversation(
+      PipeApprovalProposal proposal, {
+      String reason = 'Matt asked me to set it up for Omar.',
+      int updatedMs = 0,
+      String updateReason = '',
+    }) => Transcript(
+      agentId: 'june',
+      entries: [
+        Entry(
+          seq: Int64(9),
+          timestampMs: Int64(1000),
+          askPerson: AskPerson(
+            id: 'ask9',
+            title: 'Approve the pipe Acme launch',
+            state: AskPersonState.ASK_PERSON_STATE_PENDING,
+            actionDescription:
+                'June asks you to approve the pipe "Acme launch", with '
+                'the choices below.',
+            actionReason: reason,
+            pipeApproval: proposal,
+            updatedMs: Int64(updatedMs),
+            updateReason: updateReason,
+          ),
+        ),
+      ],
+    );
+
+    Future<Harness> showCard(
+      WidgetTester tester,
+      PipeApprovalProposal proposal, {
+      Pipe? pipe,
+      List<Agent> more = const [],
+      Transcript? transcript,
+      Size size = const Size(1200, 1400),
+    }) async {
+      final snapshot = _workspace([
+        pipe ??
+            _pipe(
+              state: PipeState.PIPE_STATE_APPROVAL,
+              digits: '4821',
+              review: false,
+            ),
+      ]);
+      snapshot.agents.addAll(more);
+      final harness = Harness(snapshot);
+      harness.backend.transcript.load(transcript ?? conversation(proposal));
+      await harness.show(tester, size: size);
+      await settle(tester);
+      return harness;
+    }
+
+    Future<void> approve(WidgetTester tester) async {
+      await tester.ensureVisible(find.text('Approve'));
+      await tester.tap(find.text('Approve'));
+      await settle(tester);
+    }
+
+    testWidgets('it starts from what the agent proposes, shows the digits '
+        'to compare yourself, and Approve sends exactly that through the '
+        'card', (tester) async {
+      final harness = await showCard(tester, proposal());
+      expect(find.text('Ana wants to connect'), findsOneWidget);
+      expect(
+        find.text(
+          'Compare these with Ana yourself, by voice or in person. '
+          "Don't approve because an agent says they match.",
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Approve only if'), findsNothing);
+      // Claktory's words, then the agent's reason apart, as its.
+      expect(find.text("June's reason"), findsOneWidget);
+      // No Decline here: turning the pipe down stays in the pipe.
+      expect(find.text('Decline'), findsNothing);
+      expect(find.text('Dismiss'), findsOneWidget);
+
+      await approve(tester);
+      final sent = harness.last.approvePipe;
+      expect(sent.pipeId, 'pipe1');
+      expect(sent.approve, isTrue);
+      expect(sent.cardId, 'ask9');
+      expect(sent.memberIds, unorderedEquals(['june', 'omar']));
+      expect(sent.leadId, 'june');
+      expect(sent.liaisonName, '');
+      // June can't run commands: limited to the pipe.
+      expect(sent.quarantined.agentIds, ['june']);
+      expect(sent.reviewIncoming, isTrue);
+      expect(sent.reviewOutgoing, isFalse);
+      expect(sent.sendOnly.agentIds, isEmpty);
+    });
+
+    testWidgets('each choice is the person\'s to change before Approve', (
+      tester,
+    ) async {
+      final harness = await showCard(tester, proposal());
+      // Omar's switch in the card; the sidebar's row comes first.
+      await tester.ensureVisible(find.text('Omar').last);
+      await tester.tap(find.text('Omar').last);
+      await tester.pump();
+      final incoming = find.text(
+        'Review messages before your agents read them',
+      );
+      await tester.ensureVisible(incoming);
+      await tester.tap(incoming);
+      await tester.pump();
+      await approve(tester);
+      final sent = harness.last.approvePipe;
+      expect(sent.memberIds, ['june']);
+      expect(sent.reviewIncoming, isFalse);
+      expect(sent.cardId, 'ask9');
+    });
+
+    testWidgets("Dismiss is the card's, and a comment alone is a reply to "
+        'the agent, the pipe still waiting', (tester) async {
+      final harness = await showCard(tester, proposal());
+      await tester.ensureVisible(find.text('Dismiss'));
+      await tester.tap(find.text('Dismiss'));
+      await settle(tester);
+      expect(harness.last.answerAsk.dismiss, isTrue);
+      expect(harness.last.answerAsk.seq.toInt(), 9);
+      expect(harness.backend.sent.where((m) => m.hasApprovePipe()), isEmpty);
+    });
+
+    testWidgets('a comment typed is a reply to the agent: Submit, nothing '
+        'approved', (tester) async {
+      final harness = await showCard(tester, proposal());
+      final field = find.descendant(
+        of: find.byType(DecisionComment),
+        matching: find.byType(EditableText),
+      );
+      await tester.ensureVisible(find.text('Add a comment'));
+      await tester.tap(find.text('Add a comment'));
+      await tester.pump();
+      await tester.enterText(field, 'Add Kai too');
+      await tester.pump();
+      expect(
+        find.text('The pipe still waits for you. June gets your comment.'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Submit'));
+      await settle(tester);
+      expect(harness.last.answerAsk.reply, isTrue);
+      expect(harness.last.answerAsk.text, 'Add Kai too');
+      expect(harness.backend.sent.where((m) => m.hasApprovePipe()), isEmpty);
+    });
+
+    testWidgets('the agent changing what it proposes is read again and '
+        'said', (tester) async {
+      final harness = await showCard(tester, proposal());
+      harness.backend.transcript.load(
+        conversation(proposal(members: ['omar'], canRun: [], lead: 'omar')),
+      );
+      await settle(tester);
+      expect(
+        find.text('June changed what it proposes. Check it again.'),
+        findsOneWidget,
+      );
+      await approve(tester);
+      final sent = harness.last.approvePipe;
+      expect(sent.memberIds, ['omar']);
+      expect(sent.leadId, 'omar');
+      expect(sent.quarantined.agentIds, ['omar']);
+    });
+
+    // Zucchero's row 535: on a 375 pt phone, the line beside the buttons
+    // goes above them whole, the Verified mark under who; updated before
+    // it's shown, it says so once and asks to check it again.
+    testWidgets('on a phone it fits; updated before it shows, it says so '
+        'once', (tester) async {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await showCard(
+        tester,
+        proposal(),
+        size: const Size(375, 2400),
+        transcript: conversation(
+          proposal(),
+          reason: 'Second try: Kai leads.',
+          updatedMs: now,
+          updateReason: 'Second try: Kai leads.',
+        ),
+      );
+      expect(tester.takeException(), isNull);
+      expect(find.text('Second try: Kai leads.'), findsOneWidget);
+      expect(
+        find.text('June changed what it proposes. Check it again.'),
+        findsOneWidget,
+      );
+      final words = tester.getRect(
+        find.text('June changed what it proposes. Check it again.'),
+      );
+      final approve = tester.getRect(find.text('Approve'));
+      expect(words.bottom, lessThanOrEqualTo(approve.top));
+      expect(words.width, greaterThan(200));
+    });
+
+    testWidgets('a narrowing of the pipe since the agent asked is said, '
+        'and the choice still wider shows it; Approve stays the '
+        "person's (Fugo)", (tester) async {
+      // Asked with Omar in the pipe, able to run commands; limited to the
+      // pipe at once, and Review incoming on, before Matt saw the card.
+      final harness = await showCard(
+        tester,
+        proposal(askedFrom: PipeApprovalBaseline(memberIds: ['omar'])),
+        pipe: _pipe(
+          state: PipeState.PIPE_STATE_APPROVAL,
+          digits: '4821',
+          review: false,
+          members: ['omar'],
+          limited: ['omar'],
+        )..reviewIncoming = true,
+      );
+      expect(
+        find.text(
+          "The pipe's settings changed since June asked. Check them again.",
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Since June asked, Omar was limited to the pipe.'),
+        findsOneWidget,
+      );
+      // The card has Review incoming on already: not wider.
+      expect(
+        find.textContaining('Review incoming was turned on'),
+        findsNothing,
+      );
+      await approve(tester);
+      expect(harness.last.approvePipe.cardId, 'ask9');
+    });
+
+    testWidgets('the pipe as it was asked says nothing changed', (
+      tester,
+    ) async {
+      await showCard(
+        tester,
+        proposal(askedFrom: PipeApprovalBaseline(memberIds: ['omar'])),
+        pipe: _pipe(
+          state: PipeState.PIPE_STATE_APPROVAL,
+          digits: '4821',
+          review: false,
+          members: ['omar'],
+        ),
+      );
+      expect(find.textContaining('since June asked'), findsNothing);
+      expect(find.textContaining('Since June asked'), findsNothing);
+    });
+
+    testWidgets('a narrowing while the card shows is said as it comes', (
+      tester,
+    ) async {
+      final harness = await showCard(tester, proposal());
+      expect(find.textContaining('since June asked'), findsNothing);
+      // Rivet turns the pipe's Review outgoing on at once meanwhile.
+      harness.backend.workspace.apply(
+        harness.backend.workspace.workspace.deepCopy()
+          ..pipes.first.reviewOutgoing = true,
+      );
+      await settle(tester);
+      expect(
+        find.text(
+          "The pipe's settings changed since June asked. Check them again.",
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          'Since June asked, Review outgoing was turned on in the pipe.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('one of another project that only sends is on the card, '
+        'kept as it only sends, never offered as the lead', (tester) async {
+      final harness = await showCard(
+        tester,
+        proposal(sendOnly: ['rivet'], members: ['june', 'rivet']),
+        more: [_agent('rivet', 'Rivet', project: '')],
+      );
+      expect(find.text('Rivet'), findsWidgets);
+      expect(find.text('Only sends'), findsOneWidget);
+      await approve(tester);
+      final sent = harness.last.approvePipe;
+      expect(sent.memberIds, unorderedEquals(['june', 'rivet']));
+      expect(sent.sendOnly.agentIds, ['rivet']);
+      expect(sent.quarantined.agentIds, ['june']);
+    });
+
+    testWidgets("a pipe no longer waiting for approval can't be approved "
+        'from the card; Dismiss can', (tester) async {
+      final harness = await showCard(
+        tester,
+        proposal(),
+        pipe: _pipe(state: PipeState.PIPE_STATE_OPEN),
+      );
+      expect(
+        find.text("That pipe isn't waiting for your approval any more."),
+        findsOneWidget,
+      );
+      expect(find.text('Approve'), findsNothing);
+      await tester.tap(find.text('Dismiss'));
+      await settle(tester);
+      expect(harness.last.answerAsk.dismiss, isTrue);
+    });
+  });
+
+  group("an agent's card to accept a change at a pipe's other end (#471 "
+      'G7)', () {
+    Transcript conversation(PipeIdentityChange change) => Transcript(
+      agentId: 'june',
+      entries: [
+        Entry(
+          seq: Int64(11),
+          timestampMs: Int64(1000),
+          askPerson: AskPerson(
+            id: 'ask11',
+            title: 'Trust the pipe Acme launch again',
+            state: AskPersonState.ASK_PERSON_STATE_PENDING,
+            actionDescription:
+                'June asks you to accept the change on the pipe "Acme '
+                'launch".',
+            actionReason: 'Ana says she moved to her company account.',
+            pipeTrust: PipeTrustProposal(
+              pipeId: 'pipe1',
+              identityChange: change,
+            ),
+          ),
+        ),
+      ],
+    );
+
+    Pipe changed(PipeIdentityChange change) => _pipe()
+      ..peer.verifiedEmail = 'bo@example.com'
+      ..peer.identityChange = change
+      ..peer.previousEmail = 'ana@acme.example';
+
+    Future<Harness> showCard(
+      WidgetTester tester,
+      PipeIdentityChange asked, {
+      Pipe? pipe,
+    }) async {
+      final harness = Harness(_workspace([pipe ?? changed(asked)]));
+      harness.backend.transcript.load(conversation(asked));
+      await harness.show(tester, size: const Size(1200, 1400));
+      await settle(tester);
+      return harness;
+    }
+
+    const account = PipeIdentityChange.PIPE_IDENTITY_CHANGE_ACCOUNT_CHANGED;
+    const email = PipeIdentityChange.PIPE_IDENTITY_CHANGE_EMAIL_CHANGED;
+    const lapsed = PipeIdentityChange.PIPE_IDENTITY_CHANGE_LAPSED;
+
+    testWidgets("another account: who it was and is, from the pipe; "
+        "Claktory's warning, the agent's reason under it; Trust accepts "
+        'through the card, asking nothing more', (tester) async {
+      final harness = await showCard(tester, account);
+      expect(
+        find.text(
+          "This pipe's Claktory is now confirmed as bo@example.com's, not "
+          "ana@acme.example's.",
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Their Claktory now signs in with a different account.'),
+        findsOneWidget,
+      );
+      final warning = find.text(
+        'Check with Ana yourself that this change is theirs.',
+      );
+      expect(warning, findsOneWidget);
+      // The reason, named as June's, under the warning, never above it.
+      final reason = find.text("June's reason");
+      expect(reason, findsOneWidget);
+      expect(
+        tester.getTopLeft(reason).dy,
+        greaterThan(tester.getTopLeft(warning).dy),
+      );
+      await tester.ensureVisible(find.text('Trust'));
+      await tester.tap(find.text('Trust'));
+      await settle(tester);
+      final accepted = harness.last.acceptPipeIdentity;
+      expect(accepted.pipeId, 'pipe1');
+      expect(accepted.cardId, 'ask11');
+    });
+
+    testWidgets('a new email: OK, through the card', (tester) async {
+      final harness = await showCard(tester, email);
+      expect(find.text('Email changed'), findsOneWidget);
+      expect(find.text('Trust'), findsNothing);
+      await tester.ensureVisible(find.text('OK'));
+      await tester.tap(find.text('OK'));
+      await settle(tester);
+      expect(harness.last.acceptPipeIdentity.cardId, 'ask11');
+    });
+
+    testWidgets("a change that isn't the one asked about any more can't be "
+        'accepted from the card; Dismiss can', (tester) async {
+      final harness = await showCard(tester, account, pipe: changed(lapsed));
+      expect(
+        find.text("That change isn't waiting for you any more."),
+        findsOneWidget,
+      );
+      expect(find.text('Trust'), findsNothing);
+      await tester.tap(find.text('Dismiss'));
+      await settle(tester);
+      expect(harness.last.answerAsk.dismiss, isTrue);
+      expect(
+        harness.backend.sent.where((m) => m.hasAcceptPipeIdentity()),
+        isEmpty,
+      );
+    });
+
+    testWidgets('a comment typed is a reply to the agent: Submit, nothing '
+        'accepted', (tester) async {
+      final harness = await showCard(tester, account);
+      await tester.ensureVisible(find.text('Add a comment'));
+      await tester.tap(find.text('Add a comment'));
+      await tester.pump();
+      await tester.enterText(
+        find.descendant(
+          of: find.byType(DecisionComment),
+          matching: find.byType(EditableText),
+        ),
+        'Did she really?',
+      );
+      await tester.pump();
+      await tester.tap(find.text('Submit'));
+      await settle(tester);
+      expect(harness.last.answerAsk.reply, isTrue);
+      expect(
+        harness.backend.sent.where((m) => m.hasAcceptPipeIdentity()),
+        isEmpty,
+      );
     });
   });
 }

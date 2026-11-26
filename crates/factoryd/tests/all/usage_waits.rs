@@ -25,11 +25,14 @@ async fn an_agent_waiting_for_credit_carries_on_when_the_key_is_tried_again() {
     let dir = temp_dir();
     let (base_url, seen) = providers(Arc::new(AtomicI64::new(0))).await;
     let file = dir.join("auth.json");
-    // Out of credit for nearly the hour: tried again in a few seconds.
-    let since = now_ms() - CREDIT_RETRY_MS + 4000;
-    std::fs::write(&file, json!({"openrouter": {"type": "api_key", "key": "sk-or-test", "factoryOutOfCredit": since}}).to_string())
-        .expect("credentials");
-    let factory = Factory::open(crate::common::home(&dir), Arc::new(registry_over(file, &base_url))).await.expect("open");
+    // Out of credit just now: a whole hour to wait, however long a busy
+    // machine takes to start the agent's run (a few seconds left raced it).
+    let out_of_credit = |since: u64| {
+        let credentials = json!({"openrouter": {"type": "api_key", "key": "sk-or-test", "factoryOutOfCredit": since}});
+        std::fs::write(&file, credentials.to_string()).expect("credentials");
+    };
+    out_of_credit(now_ms());
+    let factory = Factory::open(crate::common::home(&dir), Arc::new(registry_over(file.clone(), &base_url))).await.expect("open");
     factory.set_usage_wait_margin(Duration::ZERO);
     let (mut client, mut view) = serve(&factory, &dir).await;
     create(&mut client, &mut view, "Builder", "openrouter/anthropic/claude-opus-4.8", "high").await;
@@ -47,6 +50,14 @@ async fn an_agent_waiting_for_credit_carries_on_when_the_key_is_tried_again() {
         notice.ends_with("Builder will carry on once you add credit or another account. After adding credit, choose Try now."),
         "{notice}"
     );
+
+    // Its hour nearly up: a change to the settings wakes the wait, which
+    // finds the key still out of credit for a few seconds, waits them out
+    // by itself and tries it again.
+    let since = now_ms() - CREDIT_RETRY_MS + 3_000;
+    out_of_credit(since);
+    let nudge = v1::UpdateSettings { user_name: Some("Matt".into()), ..Default::default() };
+    apply_request(&mut client, &mut view, Request::UpdateSettings(nudge)).await;
 
     // The hour is up: it asks again by itself, and the key has credit now.
     until(&mut client, &mut view, "builder answered", |view| {
@@ -156,7 +167,7 @@ async fn a_limit_that_lifts_in_moments_is_waited_out_quietly() {
     let base_url = in_flight_once(4).await;
     let file = dir.join("auth.json");
     std::fs::write(&file, json!({"openrouter": {"type": "api_key", "key": "sk-or-test"}}).to_string()).expect("credentials");
-    let factory = Factory::open(crate::common::home(&dir), Arc::new(registry_over(file, &base_url))).await.expect("open");
+    let factory = Factory::open(crate::common::home(&dir), Arc::new(registry_over(file.clone(), &base_url))).await.expect("open");
     factory.set_usage_wait_margin(Duration::ZERO);
     let (mut client, mut view) = serve(&factory, &dir).await;
     create(&mut client, &mut view, "Builder", "openrouter/anthropic/claude-opus-4.8", "high").await;
@@ -190,7 +201,7 @@ async fn an_agent_that_cant_connect_waits_for_the_network_and_carries_on() {
     let base_url = format!("http://{addr}");
     let file = dir.join("auth.json");
     std::fs::write(&file, json!({"openrouter": {"type": "api_key", "key": "sk-or-test"}}).to_string()).expect("credentials");
-    let factory = Factory::open(crate::common::home(&dir), Arc::new(registry_over(file, &base_url))).await.expect("open");
+    let factory = Factory::open(crate::common::home(&dir), Arc::new(registry_over(file.clone(), &base_url))).await.expect("open");
     factory.set_network_wait(Duration::from_millis(100));
     factory.set_network_up(Some(false));
     let (mut client, mut view) = serve(&factory, &dir).await;
@@ -368,7 +379,7 @@ async fn an_opus_limit_puts_only_opus_agents_to_wait() {
     let mut claude = account("a");
     claude["factoryLabel"] = json!("a@x.com");
     std::fs::write(&file, json!({"anthropic": claude}).to_string()).expect("credentials");
-    let factory = Factory::open(crate::common::home(&dir), Arc::new(registry_over(file, &base_url))).await.expect("open");
+    let factory = Factory::open(crate::common::home(&dir), Arc::new(registry_over(file.clone(), &base_url))).await.expect("open");
     let (mut client, mut view) = serve(&factory, &dir).await;
     let sonnet = factory_agent::providers::catalog::models("anthropic")
         .into_iter()

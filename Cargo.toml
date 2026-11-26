@@ -59,7 +59,8 @@ opt-level = 3
 
 # noq-udp (iroh's UDP), Claktory's copy of 1.5.0 (vendor/README.md): on
 # macOS an answer leaves from the address the device dialled, not the
-# route's (#392). Only this workspace sees it; app/rust keeps crates.io's.
+# route's (#392). app/rust patches with it too, for a Mac app reached at
+# another of its addresses.
 [patch.crates-io]
 noq-udp = { path = "vendor/noq-udp" }
 # iroh, Claktory's copy of 1.5.0 (vendor/README.md), shared with app/rust:
@@ -68,3 +69,13 @@ noq-udp = { path = "vendor/noq-udp" }
 # ping gets at least 3 s. Drop it for the first iroh release with #4523's
 # fix, keeping the ping floor (or iroh-relay's own) if it still has 0.5 s.
 iroh = { path = "vendor/iroh" }
+# iroh-relay, Claktory's copy of 1.5.0 (vendor/README.md): a hook where the
+# server forwards a packet, for claktory-relay's rule (#450). Server code
+# only: the client side, which factoryd builds, is crates.io's as it is.
+iroh-relay = { path = "vendor/iroh-relay" }
+# netwatch (iroh's UDP sockets and network monitor), Claktory's copy of
+# 0.20.2 (vendor/README.md), shared with app/rust: a socket whose rebind
+# failed after a network change tries again at its next send instead of
+# staying closed until a restart (n0-computer/net-tools#200, #490). Drop it
+# for the first netwatch release with that fix.
+netwatch = { path = "vendor/netwatch" }

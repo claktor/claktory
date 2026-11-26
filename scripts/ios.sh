@@ -5,8 +5,9 @@
 #                  [--define KEY=VALUE]…
 #
 # --dev builds Claktory Dev (bundle id com.claktory.app.dev, its own icon and
-# keychain), as scripts/dev.sh does for the Mac; without it, Claktory
-# (com.claktory.app). --run installs it in the booted Simulator, booting an
+# keychain), as scripts/dev.sh does for the Mac; without it, a debug build
+# (com.claktory.app.debug, also shown as Claktory Dev: only testflight.sh's
+# Release build is com.claktory.app, #501). --run installs it in the booted Simulator, booting an
 # iPhone first when none is, and opens it; with --device, in that Simulator
 # instead (its UDID, from `xcrun simctl list devices`), so each agent keeps
 # to its own.
@@ -14,7 +15,7 @@
 # --target builds another entry point than lib/main.dart, such as an
 # integration test, and --define passes it a --dart-define. That's how to
 # run an integration test as Claktory Dev, paired as it already is: `flutter
-# test integration_test/… -d` would build com.claktory.app instead.
+# test integration_test/… -d` would build com.claktory.app.debug instead.
 #
 #   scripts/ios.sh --dev --run --device <UDID> \
 #     --target integration_test/mobile_navigation_test.dart \
@@ -46,10 +47,18 @@ build=(flutter build ios --simulator --debug)
 if [ -n "$target" ]; then build+=("--target=$target"); fi
 
 cd "$root/app"
-if $dev; then build+=(--dart-define=FACTORY_DEV=true); fi
+if $dev; then
+  build+=(--dart-define=FACTORY_DEV=true)
+  # Built as Claktory Dev from the start (its bundle id, so its own keychain
+  # group), with the entitlements that also reach the group its connections
+  # were kept in before #501 (Runner/RunnerDev.entitlements): flutter passes
+  # FLUTTER_XCODE_* to xcodebuild as build settings.
+  export FLUTTER_XCODE_CLAKTORY_BUNDLE_ID=com.claktory.app.dev
+  export FLUTTER_XCODE_CLAKTORY_RUNNER_ENTITLEMENTS=Runner/RunnerDev.entitlements
+fi
 "${build[@]}" ${defines[@]+"${defines[@]}"}
 app="$root/app/build/ios/iphonesimulator/Runner.app"
-id=com.claktory.app
+id=com.claktory.app.debug
 
 if $dev; then
   id=com.claktory.app.dev

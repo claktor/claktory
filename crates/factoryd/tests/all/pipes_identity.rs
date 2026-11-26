@@ -133,7 +133,7 @@ async fn while_this_side_cant_check_nothing_is_verified_and_nothing_changes() {
 }
 
 fn accept(pipe: &str) -> client_message::Body {
-    client_message::Body::AcceptPipeIdentity(v1::AcceptPipeIdentity { pipe_id: pipe.into() })
+    client_message::Body::AcceptPipeIdentity(v1::AcceptPipeIdentity { pipe_id: pipe.into(), ..Default::default() })
 }
 
 /// The real thing, end to end with an account service: this Claktory proves
@@ -160,4 +160,150 @@ async fn the_account_service_vouches_for_the_key_the_pipes_pin() {
     let mut tampered = statement.clone();
     tampered.insert(5, 'x');
     assert!(identity::check_for_test(&factory, &tampered, &endpoint).is_none());
+}
+
+/// What this side presents follows its sign-in at once (Abbacchio's row
+/// 1252): signed out and in again to another account, between two pings,
+/// it never presents the first account's statement, and presents the new
+/// one as soon as the service gives it, not a day later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_sign_in_presents_its_own_statement_at_once() {
+    let dir = crate::common::temp_dir();
+    let service = crate::claktory_account::Instance::start(&dir).await;
+    let (addr, factory) = crate::claktory_account::open(&dir, &service.url).await;
+    let (mut client, _, _) = crate::common::Client::connect(addr).await;
+    let endpoint = identity::endpoint_for_test(&factory);
+    let presented = |factory: &std::sync::Arc<factoryd::factory::Factory>| {
+        let statement = identity::own_for_test(factory).expect("a real statement");
+        identity::check_for_test(factory, &statement, &endpoint).map(|(_, email)| email)
+    };
+    let until = async |factory: &std::sync::Arc<factoryd::factory::Factory>, email: &str| {
+        for _ in 0..200 {
+            if presented(factory).as_deref() == Some(email) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("never presented {email}'s statement; presents {:?}", presented(factory));
+    };
+    crate::claktory_account::sign_in(&mut client, &service, "ana@example.com").await;
+    until(&factory, "ana@example.com").await;
+
+    // Out and in again as another account, with no ping in between.
+    client.ok(client_message::Body::AccountSignOut(v1::AccountSignOut {})).await;
+    crate::claktory_account::sign_in(&mut client, &service, "bo@example.com").await;
+    assert_ne!(presented(&factory).as_deref(), Some("ana@example.com"), "never the other account's");
+    until(&factory, "bo@example.com").await;
+
+    // Signed in again, even to the same account: nothing until the new
+    // sign-in's statement comes (Fugo), then that.
+    client.ok(client_message::Body::AccountSignOut(v1::AccountSignOut {})).await;
+    crate::claktory_account::sign_in(&mut client, &service, "bo@example.com").await;
+    assert_eq!(identity::own_for_test(&factory).as_deref(), Some(""), "the last sign-in's dropped at once");
+    until(&factory, "bo@example.com").await;
+}
+
+/// A statement vouches for the other side only for a while after the
+/// account service made it (Fugo, row 1252: 25 hours for now, an hour
+/// later), however long it says it
+/// lasts: one kept on past a sign-out or another sign-in stops showing the
+/// pipe as verified, and one heard already stale changes nothing.
+#[tokio::test]
+async fn a_statement_vouches_only_while_its_fresh() {
+    let (_dir, factory, mut client, mut view, pipe) = setup(false).await;
+    vouch(&factory, true);
+    let (t, week) = (now(), 7 * 24 * 3600);
+    let hear = |identity: &str| identity::heard_for_test(&factory, &pipe, PEER, identity);
+    view.follow(&mut client, |view| shown(view, &pipe).is_some_and(|pipe| pipe.peer.is_some())).await;
+
+    let fresh = 25 * 3600;
+    // Made before that, though it says it lasts a week: nothing.
+    hear(&statement("a1", "ana@example.com", t - fresh - 1, t + week));
+    apply_request(&mut client, &mut view, crate::pipes::select("lea")).await;
+    assert_eq!(peer_of(&view, &pipe), (false, String::new(), Change::None, String::new()));
+
+    // Made just within it: verified, until it's up.
+    hear(&statement("a1", "ana@example.com", t - fresh + 2, t + week));
+    view.follow(&mut client, |view| peer_of(view, &pipe).0).await;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    apply_request(&mut client, &mut view, crate::pipes::select("lea")).await;
+    assert_eq!(peer_of(&view, &pipe), (false, String::new(), Change::Lapsed, "ana@example.com".into()));
+}
+
+/// Abbacchio's rows 1327 and 1328, Fugo: back to the account the person
+/// accepted, with a statement made after the other account's, the change
+/// clears by itself; one kept from before can't clear it. What came
+/// meanwhile isn't let in but waits for the person. Another account with
+/// nothing presented can't be accepted.
+#[tokio::test]
+async fn back_to_the_accepted_account_clears_the_change_only_with_a_newer_statement() {
+    let (_dir, factory, mut client, mut view, pipe) = setup(false).await;
+    vouch(&factory, true);
+    let (t, week) = (now(), 7 * 24 * 3600);
+    let ana = |iat: i64| statement("a1", "ana@example.com", iat, iat + week);
+    let hear = |identity: &str| identity::heard_for_test(&factory, &pipe, PEER, identity);
+    view.follow(&mut client, |view| shown(view, &pipe).is_some_and(|pipe| pipe.peer.is_some())).await;
+    hear(&ana(t));
+    view.follow(&mut client, |view| peer_of(view, &pipe).0).await;
+
+    // Cyd: held; what comes waits.
+    hear(&statement("c1", "cyd@example.com", t + 10, t + 10 + week));
+    view.follow(&mut client, |view| peer_of(view, &pipe).2 == Change::AccountChanged).await;
+    pipes::receive_for_test(&factory, &pipe, incoming("m1", "FROM-CYD")).expect("received");
+    assert_eq!(state_of(&factory, &pipe, "FROM-CYD"), v1::PipeMessageState::HeldIncoming);
+    let early = pipes::messages_for_test(&factory, &pipe).into_iter().find(|message| message.text == "FROM-CYD").expect("held").seq;
+    // Then another, after more than a page of the pipe (Fugo 37600): every
+    // one held is relabelled, however far back.
+    for n in 0..1001 {
+        pipes::sent_for_test(&factory, &pipe, &format!("filler {n}"), true);
+    }
+    pipes::receive_for_test(&factory, &pipe, incoming("m3", "FROM-CYD")).expect("received");
+
+    // Ana's statements from before Cyd's, or of the same second, replayed:
+    // still held.
+    for iat in [t, t + 9, t + 10] {
+        hear(&ana(iat));
+        apply_request(&mut client, &mut view, crate::pipes::select("lea")).await;
+        assert_eq!(peer_of(&view, &pipe), (false, "cyd@example.com".into(), Change::AccountChanged, "ana@example.com".into()));
+    }
+
+    // Signed out there: another account with nothing presented can't be
+    // accepted (row 1328), and nothing is let in.
+    hear("");
+    view.follow(&mut client, |view| peer_of(view, &pipe).1.is_empty()).await;
+    match apply_request(&mut client, &mut view, accept(&pipe)).await {
+        v1::server_message::Body::Error(error) => {
+            assert_eq!(error.message, "Wait until the other side's Claktory says which account it's signed in to; it doesn't say now.")
+        }
+        other => panic!("not refused: {other:?}"),
+    }
+    assert_eq!(peer_of(&view, &pipe).2, Change::AccountChanged);
+    assert_eq!(state_of(&factory, &pipe, "FROM-CYD"), v1::PipeMessageState::HeldIncoming);
+
+    // Ana again, newly vouched: verified as before, no card or accept
+    // needed; what came from Cyd waits for the person, never let in.
+    hear(&ana(t + 11));
+    view.follow(&mut client, |view| peer_of(view, &pipe).2 == Change::None).await;
+    assert_eq!(peer_of(&view, &pipe), (true, "ana@example.com".into(), Change::None, String::new()));
+    let messages = pipes::messages_for_test(&factory, &pipe);
+    let held = messages.iter().find(|message| message.text == "FROM-CYD").expect("kept");
+    assert_eq!(held.state(), v1::PipeMessageState::HeldIncoming);
+    let meanwhile = "Waiting for you: this came while their Claktory was signed in to a different account. Let it in, or discard it.";
+    assert_eq!(held.note, meanwhile);
+    assert_eq!(identity::kept_for_test(&factory, &pipe, early), Some(("held_incoming".into(), meanwhile.into())));
+    assert!(
+        messages.iter().any(|message| message.text
+            == "The other side's Claktory signs in with the account you accepted again, ana@example.com. What came from it while it was another account waits for you."),
+        "{messages:?}"
+    );
+    // Agents can send again; what comes now goes in.
+    let sent = call(&mut client, &mut view, "lea", "pipe_send", r#"{"text": "hello Ana"}"#).await;
+    assert!(!sent.contains("different account"), "{sent}");
+    pipes::receive_for_test(&factory, &pipe, incoming("m2", "FROM-ANA")).expect("received");
+    assert_eq!(state_of(&factory, &pipe, "FROM-ANA"), v1::PipeMessageState::Received);
+    // The person lets in what came meanwhile.
+    let seq = held.seq;
+    let let_in = v1::DecidePipeMessage { pipe_id: pipe.clone(), seq, allow: true, ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::DecidePipeMessage(let_in)).await;
+    assert_eq!(state_of(&factory, &pipe, "FROM-CYD"), v1::PipeMessageState::Received);
 }

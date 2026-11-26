@@ -24,9 +24,9 @@ regex = '''/(?:Users|home)/[A-Za-z0-9._-]+'''
 keywords = ["/users/", "/home/"]
 
 [[rules.allowlists]]
-description = "Placeholder home folders in tests and docs (mex is the prefix-boundary case beside me: /Users/me must not move /Users/mex; someone and myself are the Android build checks' made-up homes, myself being the literal text Flutter's debug engine carries)"
+description = "Placeholder home folders in tests and docs (mex is the prefix-boundary case beside me: /Users/me must not move /Users/mex; someone and myself are the Android build checks' made-up homes, myself being the literal text Flutter's debug engine carries; a is the app's shared-build test's made-up home, app/test/hook_shared_build_test.dart since 9b5a7d73)"
 regexTarget = "match"
-regexes = ['''^/(?:Users|home)/(?:me|mex|x|you|user|runner|linuxbrew|Shared|someone|myself)$''']
+regexes = ['''^/(?:Users|home)/(?:me|mex|x|a|you|user|runner|linuxbrew|Shared|someone|myself)$''']
 
 [[rules.allowlists]]
 description = "The Map tests' made-up home folder in the fixture's sample paths (workspace, projects, factory.db): not this machine's home, nothing real behind it; new fixtures use /Users/me"
@@ -40,6 +40,14 @@ description = "The vault import card's test fixtures as first committed (e66975c
 condition = "AND"
 commits = ["e66975c869821b1f651e500c8262227aaea3e5c2"]
 paths = ['''^app/test/secrets_test\.dart$''']
+regexTarget = "match"
+regexes = ['''^/Users/matt$''']
+
+[[rules.allowlists]]
+description = "Execute cards' environment test as first committed (b1f8c3ac): a made-up HOME of /Users/matt among factoryd's sample variables in crates/factoryd/src/command_cards.rs, not this machine's home, nothing real behind it. That commit only: it was fixed to /Users/me later (Bruno 37069)"
+condition = "AND"
+commits = ["b1f8c3ac4e1968c4324b8b32f8ae802d9ae863b1"]
+paths = ['''^crates/factoryd/src/command_cards\.rs$''']
 regexTarget = "match"
 regexes = ['''^/Users/matt$''']
 
@@ -83,6 +91,13 @@ commits = ["a11d340e08ed655643f277fdba1677a62a0805e8", "58bd5c9f5540f527e2c84f49
 paths = ['''^crates/factoryd/tests/fixtures/web/(?:ecosia|yahoo)-results\.html$''']
 regexTarget = "secret"
 regexes = ['''^(?:32FD9D46AF889F2B9903ED03CE0B3C|ce0dc535-dc9e-42a0-afe7-a88335a378d4|yQLXq56VlYmlCpsDKUq5-Q|b8de5b4c1b8afc8e080b5914d595c6da)$''']
+
+[[rules.allowlists]]
+description = "The browser runner's wire test (crates/factoryd/src/browser_runner/wire.rs, since 0960b442): a made-up download GUID written in upper case, one of the values the test checks is refused (GUIDs must be lower case); no credential"
+condition = "AND"
+paths = ['''^crates/factoryd/src/browser_runner/wire\.rs$''']
+regexTarget = "secret"
+regexes = ['''^3F1C9A2E-0B6D-4E8F-9A1B-2C3D4E5F6A7B$''']
 
 [[rules.allowlists]]
 description = "Yahoo's result page names a page module, assetKey \"stickyHeaderV2\", which the generic rule reads as a key: a module name, in web search's Yahoo fixture only (#257)"

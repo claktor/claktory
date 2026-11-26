@@ -3,12 +3,16 @@ import 'package:factory_app/map_card.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 
+import 'package:factory_app/history/view.dart' show MapModeSwitch;
 import 'package:flutter/gestures.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
+import 'ipad/as_ipad.dart';
 import 'map_fixture.dart';
+import 'phone_sizes_test.dart' show loadGeist;
 
 /// The Map draws Workspace.map, which the backend computes; the app only
 /// lays it out.
@@ -394,5 +398,43 @@ void main() {
     await pumpFrames(tester);
     expect(harness.page.value, AppPage.agent);
     expect(find.byType(MapView), findsNothing);
+  });
+
+  group('at the largest text', () {
+    // The real font's widths: the test font's squares wrap everything.
+    setUpAll(loadGeist);
+
+    testWidgets("on a wide window, the board keeps its own type size and "
+        "the key's pills their words (Zucchero's row 517)", (tester) async {
+      asIPad();
+      tester.platformDispatcher.textScaleFactorTestValue = 3.12;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      await showMap(tester, size: const Size(1366, 1024));
+      expect(tester.takeException(), isNull);
+      expect(find.byType(MapView), findsOneWidget);
+      // A card on the board: drawn at the size it's laid out for.
+      final kai = chip('Mike').first;
+      expect(
+        MediaQuery.textScalerOf(tester.element(kai)),
+        TextScaler.noScaling,
+      );
+      // The key's pills hold their words whole, at most twice the size.
+      for (final word in ['Now', 'History']) {
+        final words = find.descendant(
+          of: find.byType(MapModeSwitch),
+          matching: find.text(word),
+        );
+        final paragraph = tester.renderObject<RenderParagraph>(words);
+        expect(paragraph.didExceedMaxLines, isFalse, reason: word);
+        final pill = tester.getRect(
+          find.ancestor(of: words, matching: find.byType(AnimatedContainer)),
+        );
+        expect(
+          pill.height,
+          greaterThanOrEqualTo(tester.getSize(words).height),
+          reason: word,
+        );
+      }
+    });
   });
 }

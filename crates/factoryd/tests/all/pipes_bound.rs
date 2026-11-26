@@ -85,7 +85,7 @@ async fn a_liaison_is_bound_to_its_pipe_and_shown_with_it() {
     view.follow(&mut client, |view| {
         view.entries.iter().any(|entry| {
             matches!(&entry.kind, Some(v1::entry::Kind::Event(event))
-            if event.text.starts_with("The person took you out of the pipe \"Website ⇄ Marketing\": you're no longer its liaison")
+            if event.text.starts_with("You were taken out of the pipe \"Website ⇄ Marketing\": you're no longer its liaison")
                 && event.text.contains("Your usual tools and folders are back"))
         })
     })

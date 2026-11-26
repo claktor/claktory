@@ -520,7 +520,8 @@ fn segments(dir: &Path) -> std::io::Result<BTreeMap<u32, PathBuf>> {
 
 /// A segment's messages, and whether it started with a summary.
 fn messages(path: &Path) -> std::io::Result<(Vec<Message>, bool)> {
-    let read = log::read::<Message>(path)?;
+    let mut read = log::read::<Message>(path)?;
+    crate::transcript::load_images(&mut read.messages, path);
     Ok((read.messages, read.compaction.is_some()))
 }
 

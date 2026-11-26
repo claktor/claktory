@@ -159,6 +159,59 @@ async fn the_first_device_through_the_account_is_in_at_once_and_the_next_waits_f
     drop(phone);
 }
 
+/// Friend bug #38: a Claktory signed out of its account (its sign-in lost to
+/// a failing disk, say) tells a device that came through the account to
+/// sign it in again, which lets the device back in as before; and pairing
+/// that device with a code meanwhile, with its key, lists it once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_signed_out_claktory_asks_to_be_signed_in_again_and_a_code_never_pairs_a_device_twice() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let (_factory, mut client, mut view, local) = signed_in(&dir, &instance).await;
+    let account = account_id(&dir);
+    let mac = new_device().await;
+    let (mut laptop, answer) = knock(&local, &mac, "", &assertion(&instance, &account, &mac)).await;
+    let first = welcomed(&mut laptop, answer).await.device_id;
+    drop(laptop);
+
+    apply_request(&mut client, &mut view, Request::AccountSignOut(v1::AccountSignOut {})).await;
+    let (_, answer) = knock(&local, &mac, "", &assertion(&instance, &account, &mac)).await;
+    let (code, reason) = refused(&answer);
+    // Not Unauthorized, which says it was removed: the app would wipe what
+    // it hadn't sent (#446).
+    assert_eq!(code, ErrorCode::SignInRequired);
+    assert!(reason.contains("signed out of your Claktory account") && reason.contains("Sign it in again"), "{reason}");
+    // One it doesn't know still hears how to be added.
+    let stranger = new_device().await;
+    let (_, answer) = knock(&local, &stranger, "", &assertion(&instance, &account, &stranger)).await;
+    assert_eq!(refused(&answer).0, ErrorCode::Unauthorized, "not paired: as before");
+    assert!(refused(&answer).1.contains("with a code"), "{:?}", refused(&answer));
+
+    // Signed in again: in as before, the same device.
+    view.workspace = crate::claktory_account::sign_in(&mut client, &instance, "matt@example.com").await;
+    let (mut laptop, answer) = knock(&local, &mac, "", &assertion(&instance, &account, &mac)).await;
+    assert_eq!(welcomed(&mut laptop, answer).await.device_id, first);
+    drop(laptop);
+
+    // Paired with a code as well (the app keeps its key for this Claktory):
+    // once allowed, it's one device, the new pairing.
+    let made =
+        apply_request(&mut client, &mut view, Request::CreatePairing(v1::CreatePairing { name: "MacBook".into(), host: String::new() }))
+            .await;
+    let Body::PairingCode(made) = made else { panic!("a code, got {made:?}") };
+    let token = crate::remote::parse(&made.code).token;
+    let (mut laptop, answer) = knock(&local, &mac, &token, "").await;
+    let Body::PairingPending(pending) = answer else { panic!("expected it to wait, got {answer:?}") };
+    view.follow(&mut client, |view| remote(view).pending_devices.iter().any(|device| device.device_id == pending.device_id)).await;
+    let number = remote(&view).pending_devices.into_iter().find(|device| device.device_id == pending.device_id).expect("waiting").number;
+    apply_request(&mut client, &mut view, Request::ApproveDevice(v1::ApproveDevice { device_id: pending.device_id.clone(), number })).await;
+    let answer = laptop.receive().await.body.expect("an answer");
+    assert_eq!(welcomed(&mut laptop, answer).await.device_id, pending.device_id);
+    view.follow(&mut client, |view| remote(view).devices.iter().all(|device| device.id != first)).await;
+    let listed: Vec<String> = remote(&view).devices.into_iter().map(|device| device.id).collect();
+    assert_eq!(listed, [pending.device_id], "listed once");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_device_paired_with_a_code_confirms_it_is_the_owners_once() {
     let dir = temp_dir();

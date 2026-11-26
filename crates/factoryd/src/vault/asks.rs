@@ -686,6 +686,22 @@ impl Vault {
         Ok(request(db, id.trim()).optional()?)
     }
 
+    /// Requests for secrets made after `after` (a row's rowid), oldest
+    /// first, at most `limit`: (rowid, the agent that asked, when), for
+    /// History (#458). Nothing of what was asked.
+    pub(crate) fn requests_after(&self, after: i64, limit: usize) -> Vec<(i64, String, i64)> {
+        let inner = self.lock();
+        let Some(db) = &inner.db else { return Vec::new() };
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        crate::store::query(db, "SELECT rowid, agent, created FROM requests WHERE rowid > ?1 ORDER BY rowid LIMIT ?2", [after, limit], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "could not read the requests for secrets");
+            Vec::new()
+        })
+    }
+
     /// Hands back the open requests `admin` held (it's being deleted):
     /// they lose their admin and stop collecting, so the asker's card is
     /// the person's to answer directly again. The changed requests, as

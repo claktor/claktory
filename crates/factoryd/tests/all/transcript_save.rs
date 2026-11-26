@@ -120,8 +120,9 @@ async fn a_conversation_is_saved_a_message_at_a_time_and_reads_back_the_same() {
     same(&dir, &mut transcript).await;
     let lines = std::fs::read_to_string(file(&dir, 2)).expect("read");
     assert!(lines.starts_with(r#"{"compaction":"#), "{lines}");
-    // The model's context still has its images.
-    assert!(lines.contains("SU1BR0U="));
+    // The model's context still has its images: named, their bytes beside
+    // it (`same` read them back).
+    assert!(lines.contains("\"claktory-image:") && !lines.contains("SU1BR0U="), "{lines}");
 }
 
 /// A save a crash cut off: everything before it reads as it was, and the
@@ -202,5 +203,48 @@ async fn while_an_update_is_on_trial_segments_stay_json() {
     trial.store(false, std::sync::atomic::Ordering::Relaxed);
     end(&mut transcript, user("two", 4));
     assert_eq!(file(&dir, 2), dir.join("segment-0002.jsonl"));
+    same(&dir, &mut transcript).await;
+}
+
+/// #454 Part 1 #9: a save writes each image once, as a file beside the
+/// segments, and the segment names it instead of carrying its base64; it
+/// reads back the same, images and all. While an update is on trial,
+/// images stay inline, as the version it would roll back to reads them.
+#[tokio::test]
+async fn images_are_saved_once_as_files_and_read_back_the_same() {
+    use base64::Engine as _;
+    let dir = temp_dir();
+    let shot = |text: &str, bytes: &[u8], at: u64| {
+        let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+        message(json!({
+            "role": "toolResult", "toolCallId": text, "toolName": "read_image", "isError": false, "timestamp": at,
+            "content": [{"type": "image", "data": data, "mimeType": "image/png"}, {"type": "text", "text": text}],
+        }))
+    };
+    let (a, b) = (b"\x89PNG one".as_slice(), b"\x89PNG two".as_slice());
+    let mut transcript = load(&dir).await;
+    end(&mut transcript, user("look", 1));
+    end(&mut transcript, shot("c1", a, 2));
+    end(&mut transcript, shot("c2", a, 3));
+    end(&mut transcript, shot("c3", b, 4));
+    let images = dir.join("segment-images");
+    let mut stored: Vec<Vec<u8>> =
+        std::fs::read_dir(&images).expect("the images' folder").map(|entry| std::fs::read(entry.expect("entry").path()).expect("read")).collect();
+    stored.sort();
+    let mut expected = vec![a.to_vec(), b.to_vec(), b"IMAGE".to_vec()];
+    expected.sort();
+    assert_eq!(stored, expected, "each image once");
+    let text = std::fs::read_to_string(file(&dir, 1)).expect("read");
+    assert_eq!(text.matches("\"claktory-image:").count(), 4, "{text}");
+    assert!(!text.contains(&base64::engine::general_purpose::STANDARD.encode(a)), "{text}");
+    same(&dir, &mut transcript).await;
+
+    // On trial: inline, and still read back the same.
+    let trial = Arc::new(AtomicBool::new(true));
+    transcript.save_old_form(trial.clone());
+    end(&mut transcript, shot("c4", b"\x89PNG three", 5));
+    let text = std::fs::read_to_string(file(&dir, 1)).expect("read");
+    assert!(text.contains(&base64::engine::general_purpose::STANDARD.encode(b"\x89PNG three")), "{text}");
+    assert_eq!(std::fs::read_dir(&images).expect("folder").count(), 3);
     same(&dir, &mut transcript).await;
 }

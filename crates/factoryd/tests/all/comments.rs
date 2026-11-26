@@ -331,7 +331,7 @@ async fn the_persons_drafts_reach_no_agent_until_sent_not_even_through_claktorys
     for sql in ["SELECT body FROM thread_comments", "SELECT quote FROM threads", "SELECT text FROM thread_files"] {
         let query = serde_json::json!({ "sql": sql }).to_string();
         let refused = call(&mut client, &mut view, "writer", &format!("call db_query {query}")).await;
-        assert!(refused.contains("comments on files (threads, thread_), quiet copies (quiet_copies) and ink (ink_, presentations) aren't readable"), "{sql}: {refused}");
+        assert!(refused.contains("comments on files (threads, thread_), quiet copies (quiet_copies), ink (ink_, presentations), the Map's history (map_history) and what commands on cards printed (ask_runs) aren't readable"), "{sql}: {refused}");
         assert!(!refused.contains("Half-formed"), "{refused}");
     }
     let tables = call(&mut client, &mut view, "writer", "call db_schema {}").await;

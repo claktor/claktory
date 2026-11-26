@@ -914,6 +914,10 @@ fn import(factory: &Arc<Factory>, asked: &v1::SecretRequest, request: &v1::Decid
 /// Shows a request as it is now in its agent's conversation.
 pub(crate) fn show(factory: &Factory, request: v1::SecretRequest) {
     let request = fitted(factory, request);
+    if !request.imports.is_empty() && request.state() == v1::SecretRequestState::Pending {
+        // Its files are looked at from now on (`monitor`).
+        factory.wake_loops();
+    }
     let agent = request.agent_id.clone();
     let mut inner = factory.lock();
     let entry = inner
@@ -1129,28 +1133,42 @@ fn expired(since: i64, now: i64) -> bool {
 const IMPORTS_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Checks waiting requests every minute, and the files of waiting imports
-/// every few seconds.
+/// every few seconds while one waits (#454: otherwise it sleeps until the
+/// next minute, woken when an import is asked for).
 pub(crate) async fn monitor(factory: std::sync::Weak<Factory>) {
-    let mut since_expiry = std::time::Duration::ZERO;
+    let Some(mut woken) = factory.upgrade().map(|factory| factory.loops_woken()) else { return };
+    let mut expiry = tokio::time::Instant::now() + CHECK_EVERY;
     // Files can be on a mount that hangs: looked at off this task, one look
     // at a time, so expiry never waits on them.
     let looking = Arc::new(std::sync::atomic::AtomicBool::new(false));
     loop {
-        tokio::time::sleep(IMPORTS_EVERY).await;
+        let Some(files) = factory.upgrade().map(|factory| importing(&factory)) else { return };
+        let to_expiry = expiry.saturating_duration_since(tokio::time::Instant::now());
+        let nap = if files { IMPORTS_EVERY.min(to_expiry) } else { to_expiry };
+        tokio::select! {
+            () = tokio::time::sleep(nap) => {}
+            changed = woken.changed() => if changed.is_err() { return },
+        }
         let Some(factory) = factory.upgrade() else { return };
-        if !looking.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        if importing(&factory) && !looking.swap(true, std::sync::atomic::Ordering::AcqRel) {
             let (factory, looking) = (factory.clone(), looking.clone());
             tokio::task::spawn_blocking(move || {
                 refresh_imports(&factory);
                 looking.store(false, std::sync::atomic::Ordering::Release);
             });
         }
-        since_expiry += IMPORTS_EVERY;
-        if since_expiry >= CHECK_EVERY {
-            since_expiry = std::time::Duration::ZERO;
+        if tokio::time::Instant::now() >= expiry {
+            expiry = tokio::time::Instant::now() + CHECK_EVERY;
             expire_requests(&factory, crate::transcript::now_ms());
         }
     }
+}
+
+/// Whether an import waits for the person, its files to be looked at.
+fn importing(factory: &Factory) -> bool {
+    factory.vault.waiting_requests().is_ok_and(|waiting| {
+        waiting.iter().any(|(asked, _)| !asked.imports.is_empty() && asked.state() == v1::SecretRequestState::Pending)
+    })
 }
 
 /// Shows each waiting import's card again when what's wrong with its files

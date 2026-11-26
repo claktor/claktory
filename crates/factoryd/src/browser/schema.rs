@@ -377,7 +377,12 @@ fn link(value: &str) -> Result<(), &'static str> {
     let rest = value.strip_prefix("https://").or_else(|| value.strip_prefix("http://")).ok_or("a bad link")?;
     let path_at = rest.find('/').unwrap_or(rest.len());
     if rest[path_at..].is_empty() { Ok(()) } else { path(&rest[path_at..]) }?;
-    if value.len() > PATH_MAX || rest[..path_at].is_empty() || value.contains(['?', '#', '@']) || value.chars().any(char::is_control) {
+    // No user info before the host (https://bank.com@evil.com/), nor a
+    // backslash Chrome reads as a slash there (https://evil.com\@bank.com);
+    // an '@' in the path is a page's own (https://www.tiktok.com/@shop,
+    // Ghiaccio 40233, Fugo 40242).
+    let host = &rest[..path_at];
+    if value.len() > PATH_MAX || host.is_empty() || host.contains(['@', '\\']) || value.contains(['?', '#']) || value.chars().any(char::is_control) {
         return Err("a bad link");
     }
     Ok(())
@@ -445,6 +450,21 @@ mod tests {
         let short = Op::Read { limit: 3 };
         assert_eq!(answer(&short, &page("")).unwrap_err(), "text out of bounds");
         assert_eq!(answer(&read(), &"x".repeat(RESULT_MAX + 1)).unwrap_err(), "too big");
+    }
+
+    /// A shop's footer links its TikTok profile, an '@' in another site's
+    /// path: the page reads (Ghiaccio 40233). User info, or a backslash,
+    /// before the host is still refused (Fugo 40242).
+    #[test]
+    fn an_at_sign_is_a_links_only_in_its_path() {
+        for to in ["https://www.tiktok.com/@lakelanduk", "/team/@x", "https://example.com"] {
+            let link = page(&format!(r#","path":{}"#, serde_json::to_string(to).unwrap()));
+            assert!(matches!(answer(&read(), &link), Ok(Answer::Page(_))), "{to}");
+        }
+        for to in ["https://bank.com@evil.com/", "https://a@b.com", "https://evil.com\\@b.com/", "https://evil.com\\b"] {
+            let link = page(&format!(r#","path":{}"#, serde_json::to_string(to).unwrap()));
+            assert_eq!(answer(&read(), &link).unwrap_err(), "a bad link", "{to}");
+        }
     }
 
     #[test]

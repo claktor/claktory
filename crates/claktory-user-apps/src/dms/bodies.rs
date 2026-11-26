@@ -9,6 +9,9 @@
 //!   format 1 is refused from then on.
 //! - **2, end to end** (E2): the sender's own MLS message (an `Envelope`),
 //!   which the worker stores and hands back as it came, and never opens.
+//! - **3, at the home** (#451): the message itself goes through the
+//!   person's home Claktory, never here; only the SHA-256 of its MLS bytes
+//!   is kept, which the person's device matches it by.
 
 use claktory_dm_crypto::envelope::{Envelope, Kind as MlsKind};
 use rusqlite::{Connection, Transaction, params};
@@ -19,6 +22,8 @@ use super::keys::Refused;
 
 /// The sender's MLS message.
 pub const END_TO_END: i64 = 2;
+/// Only the message's digest: the message is at the person's home.
+pub const AT_HOME: i64 = 3;
 /// Text the worker sealed (D2), deleted when end to end began.
 pub const WORKER_SEALED: i64 = 1;
 
@@ -72,6 +77,8 @@ impl Stored {
                 let epoch = envelope.parsed().group.map(|(_, epoch)| epoch);
                 Ok(json!({"envelope": envelope.to_json(), "epoch": epoch}))
             }
+            // Nothing of it here: the device has it from the home.
+            AT_HOME => Ok(json!({})),
             _ => Err(Refused::DoesntOpen),
         }
     }
@@ -80,6 +87,21 @@ impl Stored {
     pub fn size(&self) -> usize {
         self.bytes.len()
     }
+}
+
+/// A digest as a body names it (`proposal_digest`, `draft_digest`): the
+/// SHA-256 of the message's MLS bytes, lowercase hex; kept as its bytes.
+pub fn digest_of(text: &str, what: &str) -> Result<Vec<u8>, Refusal> {
+    let fits = text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    if !fits {
+        return Err(invalid(&format!("{what} is a SHA-256 in lowercase hex.")));
+    }
+    Ok((0..32).map(|at| u8::from_str_radix(&text[at * 2..at * 2 + 2], 16).unwrap_or_default()).collect())
+}
+
+/// What's kept of a message that's at the home: its digest only.
+pub fn at_home() -> Stored {
+    Stored { format: AT_HOME, bytes: Vec::new() }
 }
 
 /// The data key a conversation's D2 bodies were sealed with, forgotten

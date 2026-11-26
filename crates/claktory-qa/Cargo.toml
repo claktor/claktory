@@ -6,6 +6,9 @@ license-file.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64 = "0.23"
+# How providers charge an image (its size, not its bytes), for qa-model's usage.
+factory-agent = { path = "../factory-agent" }
 factory-protocol = { path = "../factory-protocol" }
 # For the settings file a sandbox starts with: Claktory's own defaults.
 factoryd = { path = "../factoryd" }
@@ -21,3 +24,7 @@ tokio-tungstenite = "0.30.0"
 [build-dependencies]
 prost = "0.14.6"
 protox = "0.10.0"
+
+[dev-dependencies]
+# Real images for the usage test.
+image = { version = "0.25", default-features = false, features = ["png"] }

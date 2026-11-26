@@ -24,6 +24,7 @@ import 'input.dart';
 import 'metrics.dart';
 import 'navigation.dart';
 import 'platform_policy.dart';
+import '../protocol/factory/v1/factory.pb.dart' show ViewLeaf;
 import 'presentation.dart' show sheetsPresented;
 
 /// What a phone's pages do for its drawer ([PhoneDrawerHost]): the
@@ -44,6 +45,9 @@ abstract class PhonePages {
 
   /// [PhoneRoutes.showPane].
   bool showPane(String agentId, String paneId);
+
+  /// [PhoneRoutes.pushApp].
+  void showApp(ViewLeaf leaf);
 
   /// The page on top, as Back closes it; null with none.
   PageTarget? get topPage;
@@ -347,6 +351,14 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
     if (pages == null) return false;
     closeDrawer();
     return pages.showPane(agentId, paneId);
+  }
+
+  @override
+  void pushApp(ViewLeaf leaf) {
+    final pages = _pages;
+    if (pages == null) return;
+    closeDrawer();
+    pages.showApp(leaf);
   }
 
   @override
@@ -748,41 +760,74 @@ class _DrawerPanelState extends State<_DrawerPanel> {
                           constraints: BoxConstraints(
                             maxHeight: constraints.maxHeight * _topShare,
                           ),
-                          child: _ScrollingTop(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                ListenableBuilder(
-                                  listenable: backend.workspace,
-                                  builder: (context, _) => _DrawerHeader(
-                                    name: claktoryName(backend),
-                                    backend: backend,
-                                    onClose: widget.onClose,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Flexible(
+                                child: _ScrollingTop(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      ListenableBuilder(
+                                        listenable: backend.workspace,
+                                        builder: (context, _) => _DrawerHeader(
+                                          name: claktoryName(backend),
+                                          backend: backend,
+                                          onClose: widget.onClose,
+                                          connection: !large,
+                                        ),
+                                      ),
+                                      if (rail != null &&
+                                          large &&
+                                          widget.onClaktories != null)
+                                        _ClaktoriesRow(
+                                          onTap: widget.onClaktories!,
+                                        ),
+                                      // The pinned apps, then All apps: nothing without
+                                      // apps. Its chips keep their height, as a tab bar's
+                                      // do, so their words grow only so far.
+                                      MediaQuery.withClampedTextScaling(
+                                        maxScaleFactor: _appStripTextScale,
+                                        child: const AppStrip(),
+                                      ),
+                                      // A new version of the Android app.
+                                      const AndroidUpdateNotice(
+                                        padding: EdgeInsetsDirectional.fromSTEB(
+                                          Space.l,
+                                          Space.xs,
+                                          Space.s,
+                                          Space.xs,
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
-                                if (rail != null &&
-                                    large &&
-                                    widget.onClaktories != null)
-                                  _ClaktoriesRow(onTap: widget.onClaktories!),
-                                // The pinned apps, then All apps: nothing without
-                                // apps. Its chips keep their height, as a tab bar's
-                                // do, so their words grow only so far.
-                                MediaQuery.withClampedTextScaling(
-                                  maxScaleFactor: _appStripTextScale,
-                                  child: const AppStrip(),
-                                ),
-                                // A new version of the Android app.
-                                const AndroidUpdateNotice(
-                                  padding: EdgeInsetsDirectional.fromSTEB(
-                                    Space.l,
-                                    Space.xs,
-                                    Space.s,
-                                    Space.xs,
+                              ),
+                              // At the largest text sizes the top scrolls, and
+                              // how it's connected went under its fold, cut
+                              // short ("last seen 1 min", Zucchero's row 510):
+                              // it stays in sight at the top's foot instead,
+                              // whole, as the name scrolls above it.
+                              if (large)
+                                Padding(
+                                  padding: const EdgeInsetsDirectional.only(
+                                    start: Space.l - Space.xs,
+                                    end: Space.s,
+                                  ),
+                                  child: Align(
+                                    alignment: AlignmentDirectional.centerStart,
+                                    // Two or three lines at most, so the
+                                    // top keeps room for the name.
+                                    child: MediaQuery.withClampedTextScaling(
+                                      maxScaleFactor: 2,
+                                      child: PhoneConnectionWord(backend),
+                                    ),
                                   ),
                                 ),
-                              ],
-                            ),
+                            ],
                           ),
                         ),
                         Padding(
@@ -825,11 +870,16 @@ class _DrawerHeader extends StatelessWidget {
     required this.name,
     required this.backend,
     required this.onClose,
+    this.connection = true,
   });
 
   final String name;
   final Backend backend;
   final VoidCallback onClose;
+
+  /// Whether how it's connected shows here, under the name: not at the
+  /// largest text sizes, where it shows under the drawer's top.
+  final bool connection;
 
   @override
   Widget build(BuildContext context) {
@@ -867,10 +917,11 @@ class _DrawerHeader extends StatelessWidget {
                       maxScaleFactor: 1.6,
                       child: OffAccountMark(claktory: shown, signIn: true),
                     ),
-                  Transform.translate(
-                    offset: const Offset(-Space.xs, 0),
-                    child: PhoneConnectionWord(backend),
-                  ),
+                  if (connection)
+                    Transform.translate(
+                      offset: const Offset(-Space.xs, 0),
+                      child: PhoneConnectionWord(backend),
+                    ),
                 ],
               ),
             ),

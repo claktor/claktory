@@ -37,6 +37,7 @@ import 'mobile/header.dart';
 import 'mobile/metrics.dart';
 import 'mobile/navigation.dart' show PhoneRoute, PhoneRoutes;
 import 'mobile/presentation.dart' show SheetAction, showActions;
+import 'kept.dart';
 import 'mobile/platform_policy.dart';
 import 'people/people_view.dart' show peopleAvailable, showPeople;
 import 'phone.dart' show PhoneProjects;
@@ -207,45 +208,67 @@ class Sidebar extends StatelessWidget {
             ];
             final chats = chatsNewestFirst(workspace);
             // The person's own chats, beside the projects.
-            final chatRows = _Chats(
-              chats: chats,
-              selectedId: page == AppPage.agent ? workspace.selectedChatId : '',
+            final openChat = page == AppPage.agent
+                ? workspace.selectedChatId
+                : '';
+            final chatRows = Kept(
+              inputs: [chats, openChat],
+              builder: (_) => _Chats(chats: chats, selectedId: openChat),
             );
-            final projectsHeading = _SectionHeading(
-              label: 'Projects',
-              open: !workspace.projectsCollapsed,
-              count: workspace.projects.where((p) => !p.archived).length,
-              waiting: waitingIn([
-                for (final agent in workspace.agents)
-                  if (agent.projectId.isNotEmpty &&
-                      archivedProjectOf(workspace, agent) == null)
-                    agent,
-              ]),
-              onToggle: () => fireAndLog(
-                backend.updateSettings(
-                  UpdateSettings(
-                    projectsCollapsed: !workspace.projectsCollapsed,
+            // Each heading the same while what it shows is.
+            final projectCount = workspace.projects
+                .where((p) => !p.archived)
+                .length;
+            final projectsWaiting = waitingIn([
+              for (final agent in workspace.agents)
+                if (agent.projectId.isNotEmpty &&
+                    archivedProjectOf(workspace, agent) == null)
+                  agent,
+            ]);
+            final projectsHeading = Kept(
+              inputs: [
+                workspace.projectsCollapsed,
+                projectCount,
+                projectsWaiting,
+              ],
+              builder: (context) => _SectionHeading(
+                label: 'Projects',
+                open: !workspace.projectsCollapsed,
+                count: projectCount,
+                waiting: projectsWaiting,
+                onToggle: () => fireAndLog(
+                  backend.updateSettings(
+                    UpdateSettings(
+                      projectsCollapsed: !workspace.projectsCollapsed,
+                    ),
                   ),
                 ),
-              ),
-              trailing: _AskRivet(
-                starter: 'Set up a new project for ',
-                fallback: (context, close) => CreateProjectForm(close: close),
-              ),
-            );
-            final chatsHeading = _SectionHeading(
-              label: 'Chats',
-              open: !workspace.chatsCollapsed,
-              count: chats.length,
-              waiting: chats.fold(0, (sum, chat) => sum + chatWaiting(chat)),
-              onToggle: () => fireAndLog(
-                backend.updateSettings(
-                  UpdateSettings(chatsCollapsed: !workspace.chatsCollapsed),
+                trailing: _AskRivet(
+                  starter: 'Set up a new project for ',
+                  fallback: (context, close) => CreateProjectForm(close: close),
                 ),
               ),
-              trailing: _QuietPlus(
-                tip: 'New chat',
-                onTap: () => _Chats.startNew(context),
+            );
+            final chatsWaiting = chats.fold(
+              0,
+              (sum, chat) => sum + chatWaiting(chat),
+            );
+            final chatsHeading = Kept(
+              inputs: [workspace.chatsCollapsed, chats.length, chatsWaiting],
+              builder: (context) => _SectionHeading(
+                label: 'Chats',
+                open: !workspace.chatsCollapsed,
+                count: chats.length,
+                waiting: chatsWaiting,
+                onToggle: () => fireAndLog(
+                  backend.updateSettings(
+                    UpdateSettings(chatsCollapsed: !workspace.chatsCollapsed),
+                  ),
+                ),
+                trailing: _QuietPlus(
+                  tip: 'New chat',
+                  onTap: () => _Chats.startNew(context),
+                ),
               ),
             );
             const inset = EdgeInsets.symmetric(horizontal: Space.s);
@@ -853,22 +876,43 @@ class _Place extends StatelessWidget {
       final children = node.children;
       final open = children.isNotEmpty && !node.agent.collapsed;
       final inset = depth < cap ? (phone ? Space.m : Space.l) : 0.0;
+      final agent = node.agent;
+      final folderId = folderIds.contains(agent.folderId) ? agent.folderId : '';
+      final siblingIds = [for (final sibling in siblings) sibling.agent.id];
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _AgentRow(
-            agent: node.agent,
-            projectId: projectId,
-            folderId: folderIds.contains(node.agent.folderId)
-                ? node.agent.folderId
-                : '',
-            selected: node.agent.id == selectedAgentId,
-            onTap: () => select(node.agent),
-            onReach: () => select(node.agent, reach: true),
-            gutter: gutter && !phone,
-            children: children,
-            siblings: [for (final sibling in siblings) sibling.agent.id],
-            inset: inset,
+          // The same row while nothing it shows changed: another agent's
+          // step builds only that agent's row.
+          Kept(
+            inputs: [
+              agent,
+              // Folded, it speaks for the agents under it; open, it needs
+              // only which they are.
+              agent.collapsed
+                  ? _all(children)
+                  : [for (final child in children) child.agent.id],
+              backend.workspace.agent(agent.leadId),
+              workspace.selectedAgentId,
+              projectId,
+              folderId,
+              selectedAgentId,
+              gutter && !phone,
+              inset,
+              siblingIds,
+            ],
+            builder: (_) => _AgentRow(
+              agent: agent,
+              projectId: projectId,
+              folderId: folderId,
+              selected: agent.id == selectedAgentId,
+              onTap: () => select(agent),
+              onReach: () => select(agent, reach: true),
+              gutter: gutter && !phone,
+              children: children,
+              siblings: siblingIds,
+              inset: inset,
+            ),
           ),
           if (children.isNotEmpty)
             AnimatedSize(
@@ -1108,57 +1152,64 @@ class _FolderGroupState extends State<_FolderGroup> {
     final working = hidden.any(atWork);
     final unseen = hidden.any((agent) => agent.unseen);
     final waiting = waitingIn(hidden);
-    final headingRow = _heading(
-      context,
-      folder,
-      working: working,
-      unseen: unseen,
-      waiting: waiting,
-      hidden: hidden,
-      roots: roots,
-    );
-    final heading = DragTarget<String>(
-      onWillAcceptWithDetails: (details) {
-        final agent = backend.workspace.agent(details.data);
-        return agent != null &&
-            (agent.folderId != folder.id ||
-                agent.projectId != widget.projectId ||
-                agent.parentId.isNotEmpty);
-      },
-      onMove: (details) {
-        final agent = backend.workspace.agent(details.data);
-        if (agent == null) return;
-        _dropSays.value = _sayDrop(
-          backend.workspace.workspace,
-          agent,
-          _toFolder(agent),
+    // The same heading while what it shows is: another agent's step
+    // doesn't build it again.
+    final heading = Kept(
+      inputs: [folder, widget.projectId, widget.order, hidden, roots.isEmpty],
+      builder: (context) {
+        final headingRow = _heading(
+          context,
+          folder,
+          working: working,
+          unseen: unseen,
+          waiting: waiting,
+          hidden: hidden,
+          roots: roots,
+        );
+        return DragTarget<String>(
+          onWillAcceptWithDetails: (details) {
+            final agent = backend.workspace.agent(details.data);
+            return agent != null &&
+                (agent.folderId != folder.id ||
+                    agent.projectId != widget.projectId ||
+                    agent.parentId.isNotEmpty);
+          },
+          onMove: (details) {
+            final agent = backend.workspace.agent(details.data);
+            if (agent == null) return;
+            _dropSays.value = _sayDrop(
+              backend.workspace.workspace,
+              agent,
+              _toFolder(agent),
+            );
+          },
+          onLeave: (_) => _dropSays.value = null,
+          onAcceptWithDetails: (details) {
+            _dropSays.value = null;
+            final agent = backend.workspace.agent(details.data);
+            if (agent != null) _arrangeOrSay(context, agent, _toFolder(agent));
+          },
+          builder: (context, candidates, _) => AnimatedContainer(
+            duration: Motion.fast,
+            curve: Curves.easeOut,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(Radii.control),
+              border: Border.all(
+                color: candidates.isEmpty
+                    ? const Color(0x00000000)
+                    : palette.signal,
+              ),
+            ),
+            child: _SidebarDraggable<_FolderDrag>(
+              data: _FolderDrag(widget.projectId, folder.id),
+              dragAnchorStrategy: pointerDragAnchorStrategy,
+              feedback: _DragFeedback(name: folder.name, palette: palette),
+              childWhenDragging: Opacity(opacity: 0.4, child: headingRow),
+              child: headingRow,
+            ),
+          ),
         );
       },
-      onLeave: (_) => _dropSays.value = null,
-      onAcceptWithDetails: (details) {
-        _dropSays.value = null;
-        final agent = backend.workspace.agent(details.data);
-        if (agent != null) _arrangeOrSay(context, agent, _toFolder(agent));
-      },
-      builder: (context, candidates, _) => AnimatedContainer(
-        duration: Motion.fast,
-        curve: Curves.easeOut,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(Radii.control),
-          border: Border.all(
-            color: candidates.isEmpty
-                ? const Color(0x00000000)
-                : palette.signal,
-          ),
-        ),
-        child: _SidebarDraggable<_FolderDrag>(
-          data: _FolderDrag(widget.projectId, folder.id),
-          dragAnchorStrategy: pointerDragAnchorStrategy,
-          feedback: _DragFeedback(name: folder.name, palette: palette),
-          childWhenDragging: Opacity(opacity: 0.4, child: headingRow),
-          child: headingRow,
-        ),
-      ),
     );
     final hiddenIds = {for (final agent in hidden) agent.id};
     final shown = backend.workspace.workspace.selectedAgentId;
@@ -1513,17 +1564,18 @@ void _projectMenu(BuildContext context, Project project) {
 }
 
 Future<void> _projectActions(BuildContext context, Project project) async {
+  // In a drawer, the phone's Files page; on an iPad's wide layouts, a pane
+  // beside the conversation, as the row's Files button opens (#540).
   final files = PhoneProjects.of(context)?.files;
   final chosen = await showActions<String>(
     context,
     title: project.name,
     actions: [
-      if (files != null)
-        SheetAction(
-          'Files',
-          'files',
-          glyph: (color) => FolderGlyph(color: color),
-        ),
+      SheetAction(
+        'Files',
+        'files',
+        glyph: (color) => FolderGlyph(color: color),
+      ),
       SheetAction(
         'Add an agent',
         'agent',
@@ -1539,7 +1591,7 @@ Future<void> _projectActions(BuildContext context, Project project) async {
   if (!context.mounted) return;
   switch (chosen) {
     case 'files':
-      files?.call(project);
+      openFiles(context, project, phone: files);
     case 'agent':
       _askForAgent(project)._ask(context);
     case 'settings':
@@ -1797,7 +1849,11 @@ class _ProjectSlotState extends State<_ProjectSlot> {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final project = widget.project;
-    final row = _ProjectRow(project: project);
+    // The same row while the project and its Files button are.
+    final row = Kept(
+      inputs: [project, filesShown(context, project.id)],
+      builder: (_) => _ProjectRow(project: project),
+    );
     final header = Semantics(
       customSemanticsActions: {
         const CustomSemanticsAction(label: 'Move up'): ?_step(-1),
@@ -1875,7 +1931,7 @@ _AskRivet _askForAgent(Project project) => _AskRivet(
 );
 
 /// The focused project's name, heading the sidebar, with a Files button on
-/// hover. A click or right click opens its settings (rename, delete); on a
+/// hover (always, with a finger). A click or right click opens its settings (rename, delete); on a
 /// phone, a menu with its Files too.
 class _ProjectHeading extends StatelessWidget {
   const _ProjectHeading({required this.project});
@@ -1913,7 +1969,11 @@ class _ProjectHeading extends StatelessWidget {
           if (isPhoneLayout(context))
             _ProjectMore(project: project)
           else ...[
-            if (hovered || filesShown(context, project.id)) ...[
+            // A finger has no hover: the focused project keeps its Files
+            // button in sight (#540).
+            if (hovered ||
+                touchFirst(context) ||
+                filesShown(context, project.id)) ...[
               _FilesButton(
                 project: project,
                 shown: filesShown(context, project.id),
@@ -3596,20 +3656,9 @@ class _PhoneFooter extends StatelessWidget {
           // provider's limits is used; a touch and hold for more.
           Padding(
             padding: const EdgeInsets.fromLTRB(Space.xs, Space.s, Space.xs, 0),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                TeamActivity(workspace: workspace),
-                const SizedBox(width: Space.xs),
-                Expanded(
-                  child: ProviderUsageCircles(
-                    providers: workspace.providers,
-                    onAdd: canAddProvider
-                        ? () => AppScope.openProviders(context)
-                        : null,
-                  ),
-                ),
-              ],
+            child: _ActivityAndUsage(
+              workspace: workspace,
+              canAddProvider: canAddProvider,
             ),
           ),
           ForwardingsLine(
@@ -3630,6 +3679,32 @@ class _PhoneFooter extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Who's at work, then each account's usage circle and the + to add a
+/// provider, in one row that wraps from its left edge ([ProviderUsageCircles]).
+/// Kept while the providers, the +, and who's at work stay the same.
+class _ActivityAndUsage extends StatelessWidget {
+  const _ActivityAndUsage({
+    required this.workspace,
+    required this.canAddProvider,
+  });
+
+  final Workspace workspace;
+  final bool canAddProvider;
+
+  @override
+  Widget build(BuildContext context) {
+    final (:working, :total) = teamActivity(workspace);
+    return Kept(
+      inputs: [workspace.providers, canAddProvider, working, total],
+      builder: (context) => ProviderUsageCircles(
+        leading: TeamActivity(workspace: workspace),
+        providers: workspace.providers,
+        onAdd: canAddProvider ? () => AppScope.openProviders(context) : null,
       ),
     );
   }
@@ -3748,104 +3823,111 @@ class _Footer extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(Space.s, 0, Space.s, Space.s),
               child: line,
             ),
-          // Who's at work, then how much of each provider's limits is used.
+          // Who's at work, then how much of each provider's limits is used,
+          // wrapping together as accounts multiply.
           Padding(
             padding: const EdgeInsets.fromLTRB(Space.xs, 0, Space.xs, Space.xs),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                TeamActivity(workspace: workspace),
-                const SizedBox(width: Space.xs),
-                Expanded(
-                  child: ProviderUsageCircles(
-                    providers: workspace.providers,
-                    onAdd: canAddProvider
-                        ? () => AppScope.openProviders(context)
-                        : null,
-                  ),
-                ),
-              ],
+            child: _ActivityAndUsage(
+              workspace: workspace,
+              canAddProvider: canAddProvider,
             ),
           ),
-          _FooterButtons(
-            pages: [
-              Glow(
-                store: scope.backend.highlights,
-                matches: (key) => key == 'settings:',
-                child: GlyphButton(
-                  label: 'Settings',
-                  active: AppScope.pageShown(context, AppPage.settings),
-                  onTap: () => AppScope.togglePage(context, AppPage.settings),
-                  glyph: (color) => CogGlyph(color: color),
+          // The same buttons while what they show is: the page shown, and
+          // the open agent's panes, where a page can show beside it.
+          Kept(
+            inputs: [
+              page,
+              scope.backend.workspace.selectedAgent,
+              workspace.selectedPipeId,
+              workspace.selectedChatId,
+              peopleAvailable(workspace),
+            ],
+            builder: (context) => _FooterButtons(
+              pages: [
+                Glow(
+                  store: scope.backend.highlights,
+                  matches: (key) => key == 'settings:',
+                  child: GlyphButton(
+                    label: 'Settings',
+                    active: AppScope.pageShown(context, AppPage.settings),
+                    onTap: () => AppScope.togglePage(context, AppPage.settings),
+                    glyph: (color) => CogGlyph(color: color),
+                  ),
                 ),
-              ),
-              Glow(
-                store: scope.backend.highlights,
-                matches: (key) => key == 'marketplace:',
-                child: GlyphButton(
-                  label: 'Marketplace',
-                  active: AppScope.pageShown(context, AppPage.marketplace),
-                  onTap: () =>
-                      AppScope.togglePage(context, AppPage.marketplace),
-                  glyph: (color) => BagGlyph(color: color),
+                Glow(
+                  store: scope.backend.highlights,
+                  matches: (key) => key == 'marketplace:',
+                  child: GlyphButton(
+                    label: 'Marketplace',
+                    active: AppScope.pageShown(context, AppPage.marketplace),
+                    onTap: () =>
+                        AppScope.togglePage(context, AppPage.marketplace),
+                    glyph: (color) => BagGlyph(color: color),
+                  ),
                 ),
-              ),
-              GlyphButton(
-                label: "What's new",
-                active: AppScope.pageShown(context, AppPage.changelog),
-                onTap: () => AppScope.togglePage(context, AppPage.changelog),
-                glyph: (color) =>
-                    ExtensionGlyph(icon: 'scroll-text', name: '', color: color),
-              ),
-              GlyphButton(
-                label: 'Map',
-                active: AppScope.pageShown(context, AppPage.map),
-                onTap: () => AppScope.togglePage(context, AppPage.map),
-                glyph: (color) =>
-                    ExtensionGlyph(icon: 'network', name: 'Map', color: color),
-              ),
-              GlyphButton(
-                label: 'Usage',
-                active: AppScope.pageShown(context, AppPage.usage),
-                onTap: () => AppScope.togglePage(context, AppPage.usage),
-                glyph: (color) => ExtensionGlyph(
-                  icon: 'chart-column',
-                  name: 'Usage',
-                  color: color,
-                ),
-              ),
-              GlyphButton(
-                label: 'Monitors',
-                active: AppScope.pageShown(context, AppPage.monitors),
-                onTap: () => AppScope.togglePage(context, AppPage.monitors),
-                glyph: (color) => ExtensionGlyph(
-                  icon: 'alarm-clock',
-                  name: 'Monitors',
-                  color: color,
-                ),
-              ),
-              // People, only where the backend offers direct messages (its
-              // preview) until it ships.
-              if (peopleAvailable(workspace))
                 GlyphButton(
-                  label: 'People',
-                  active: false,
-                  onTap: () => showPeople(context),
+                  label: "What's new",
+                  active: AppScope.pageShown(context, AppPage.changelog),
+                  onTap: () => AppScope.togglePage(context, AppPage.changelog),
                   glyph: (color) => ExtensionGlyph(
-                    icon: 'users',
-                    name: 'People',
+                    icon: 'scroll-text',
+                    name: '',
                     color: color,
                   ),
                 ),
-            ],
-            // The person, at the end: their profile is at the top of
-            // Settings.
-            profile: GlyphButton(
-              label: 'Profile',
-              active: false,
-              onTap: () => AppScope.openPage(context, AppPage.settings),
-              glyph: (_) =>
-                  const ExcludeSemantics(child: PersonAvatar(size: 20)),
+                GlyphButton(
+                  label: 'Map',
+                  active: AppScope.pageShown(context, AppPage.map),
+                  onTap: () => AppScope.togglePage(context, AppPage.map),
+                  glyph: (color) => ExtensionGlyph(
+                    icon: 'network',
+                    name: 'Map',
+                    color: color,
+                  ),
+                ),
+                GlyphButton(
+                  label: 'Usage',
+                  active: AppScope.pageShown(context, AppPage.usage),
+                  onTap: () => AppScope.togglePage(context, AppPage.usage),
+                  glyph: (color) => ExtensionGlyph(
+                    icon: 'chart-column',
+                    name: 'Usage',
+                    color: color,
+                  ),
+                ),
+                GlyphButton(
+                  label: 'Monitors',
+                  active: AppScope.pageShown(context, AppPage.monitors),
+                  onTap: () => AppScope.togglePage(context, AppPage.monitors),
+                  glyph: (color) => ExtensionGlyph(
+                    icon: 'alarm-clock',
+                    name: 'Monitors',
+                    color: color,
+                  ),
+                ),
+                // People, only where the backend offers direct messages (its
+                // preview) until it ships.
+                if (peopleAvailable(workspace))
+                  GlyphButton(
+                    label: 'People',
+                    active: false,
+                    onTap: () => showPeople(context),
+                    glyph: (color) => ExtensionGlyph(
+                      icon: 'users',
+                      name: 'People',
+                      color: color,
+                    ),
+                  ),
+              ],
+              // The person, at the end: their profile is at the top of
+              // Settings.
+              profile: GlyphButton(
+                label: 'Profile',
+                active: false,
+                onTap: () => AppScope.openPage(context, AppPage.settings),
+                glyph: (_) =>
+                    const ExcludeSemantics(child: PersonAvatar(size: 20)),
+              ),
             ),
           ),
           // How it's connected, always in sight: which Claktory this is,

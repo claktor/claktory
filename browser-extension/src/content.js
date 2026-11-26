@@ -140,7 +140,10 @@
   const SENSITIVE_ACTION = /\bpay\b|payment|purchase|\bbuy\b|checkout|place order|confirm order|delete account|close account|transfer|send money/i;
   function sensitive(el) {
     if (fileLabel(el)) return 'file picker';
-    if (el.tagName === 'A' && el.hasAttribute('download')) return 'download';
+    // A download link is the person's, except in an errand (#435 R9),
+    // whose reader sets __claktoryDownloads in its own isolated world: a
+    // page's script can't reach that world's globalThis, so can't set it.
+    if (el.tagName === 'A' && el.hasAttribute('download') && !globalThis.__claktoryDownloads) return 'download';
     if (el instanceof HTMLInputElement) {
       const type = (el.type || 'text').toLowerCase();
       if (['password', 'hidden', 'file'].includes(type)) return type;

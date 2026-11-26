@@ -11,6 +11,7 @@ import 'dart:math' as math;
 
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 
 import 'audio.dart';
@@ -54,8 +55,9 @@ class VoiceRecording extends ChangeNotifier {
   /// The time now, for the file's name.
   final DateTime Function() now;
 
-  /// How many loudness samples the waveform keeps: the last few seconds.
-  static const samples = 120;
+  /// How many loudness samples the waveform keeps: the last ten seconds,
+  /// enough for each side of the widest box's ([CenteredWaveform]).
+  static const samples = 200;
 
   var _recording = false;
   var _starting = false;
@@ -333,17 +335,29 @@ class VoiceNoteChip extends StatelessWidget {
   }
 }
 
-/// What shows in the message box's place while recording: a live dot, the
-/// waveform as it's heard, the time, and Cancel.
+/// What shows in the message box's place while recording: a live dot and
+/// the time at the start, Cancel (and [trailing], the box's Send) at the
+/// end, and between them the sound as it's heard, centered on the whole
+/// strip however wide it is ([CenteredWaveform]).
 class RecordingStrip extends StatelessWidget {
   const RecordingStrip({
     super.key,
     required this.voice,
     required this.onCancel,
+    this.trailing,
+    this.shift = 0,
   });
 
   final VoiceRecording voice;
   final VoidCallback onCancel;
+
+  /// How far the center the waveform sits on is from the strip's own: a
+  /// box whose padding is more on one side centers it on the box.
+  final double shift;
+
+  /// After Cancel, at the strip's end: what sends the recording, so the
+  /// waveform centers on the box's whole row, its buttons included.
+  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) {
@@ -352,33 +366,266 @@ class RecordingStrip extends StatelessWidget {
       listenable: voice,
       builder: (context, _) => Semantics(
         label: 'Recording, ${voiceDuration(voice.elapsed)}',
-        child: Row(
-          children: [
-            LiveDot(color: palette.danger),
-            const SizedBox(width: Space.s),
-            Expanded(
-              child: SizedBox(
-                height: 20,
-                child: CustomPaint(
-                  painter: Waveform(voice.levels, color: palette.textMuted),
+        child: CenteredBetween(
+          gap: Space.m,
+          shift: shift,
+          lead: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              LiveDot(color: palette.danger),
+              const SizedBox(width: Space.s),
+              Text(
+                voiceDuration(voice.elapsed),
+                style: TextStyles.caption.copyWith(
+                  color: palette.textMuted,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ],
+          ),
+          middle: ExcludeSemantics(
+            child: SizedBox(
+              height: 24,
+              child: CustomPaint(
+                painter: CenteredWaveform(
+                  voice.levels,
+                  color: palette.textMuted,
                 ),
               ),
             ),
-            const SizedBox(width: Space.s),
-            Text(
-              voiceDuration(voice.elapsed),
-              style: TextStyles.caption.copyWith(
-                color: palette.textMuted,
-                fontFeatures: const [FontFeature.tabularFigures()],
-              ),
-            ),
-            const SizedBox(width: Space.s),
-            Button(label: 'Cancel', onPressed: onCancel),
-          ],
+          ),
+          trail: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Button(label: 'Cancel', onPressed: onCancel),
+              if (trailing case final trailing?) ...[
+                const SizedBox(width: Space.xs),
+                trailing,
+              ],
+            ],
+          ),
         ),
       ),
     );
   }
+}
+
+/// [lead] at the start and [trail] at the end, and [middle] between them
+/// centered on the whole width: as wide as fits the same way on both sides
+/// of the center, [gap] from each, so it sits in the middle however the
+/// two ends differ. Where that would leave it less than half the room
+/// between them (a narrow box, large text), it takes all that room
+/// instead; under 48, it isn't shown.
+/// As tall as the tallest of the three, each centered on that height.
+class CenteredBetween extends MultiChildRenderObjectWidget {
+  CenteredBetween({
+    super.key,
+    required Widget lead,
+    required Widget middle,
+    required Widget trail,
+    this.gap = 0,
+    this.shift = 0,
+  }) : super(children: [lead, middle, trail]);
+
+  final double gap;
+
+  /// Where the center is, from the middle of the width.
+  final double shift;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderCenteredBetween(gap, shift);
+
+  @override
+  void updateRenderObject(BuildContext context, RenderObject renderObject) =>
+      (renderObject as _RenderCenteredBetween)
+        ..gap = gap
+        ..shift = shift;
+}
+
+class _CenteredParent extends ContainerBoxParentData<RenderBox> {}
+
+class _RenderCenteredBetween extends RenderBox
+    with
+        ContainerRenderObjectMixin<RenderBox, _CenteredParent>,
+        RenderBoxContainerDefaultsMixin<RenderBox, _CenteredParent> {
+  _RenderCenteredBetween(this._gap, this._shift);
+
+  /// The least width [CenteredBetween.middle] is shown at.
+  static const least = 48.0;
+
+  double _gap;
+  set gap(double value) {
+    if (value == _gap) return;
+    _gap = value;
+    markNeedsLayout();
+  }
+
+  double _shift;
+  set shift(double value) {
+    if (value == _shift) return;
+    _shift = value;
+    markNeedsLayout();
+  }
+
+  @override
+  void setupParentData(RenderBox child) {
+    if (child.parentData is! _CenteredParent) {
+      child.parentData = _CenteredParent();
+    }
+  }
+
+  List<RenderBox> get _three {
+    final children = <RenderBox>[];
+    var child = firstChild;
+    while (child != null) {
+      children.add(child);
+      child = childAfter(child);
+    }
+    return children;
+  }
+
+  @override
+  double computeMinIntrinsicWidth(double height) {
+    final [lead, _, trail] = _three;
+    return lead.getMinIntrinsicWidth(height) +
+        trail.getMinIntrinsicWidth(height) +
+        _gap;
+  }
+
+  @override
+  double computeMaxIntrinsicWidth(double height) {
+    final [lead, middle, trail] = _three;
+    final side = math.max(
+      lead.getMaxIntrinsicWidth(height),
+      trail.getMaxIntrinsicWidth(height),
+    );
+    return 2 * (side + _gap) + middle.getMaxIntrinsicWidth(height);
+  }
+
+  @override
+  double computeMinIntrinsicHeight(double width) => _three.fold(
+    0,
+    (most, child) => math.max(most, child.getMinIntrinsicHeight(width)),
+  );
+
+  @override
+  double computeMaxIntrinsicHeight(double width) => _three.fold(
+    0,
+    (most, child) => math.max(most, child.getMaxIntrinsicHeight(width)),
+  );
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) {
+    final [lead, middle, trail] = _three;
+    final loose = BoxConstraints(maxWidth: constraints.maxWidth);
+    final height = [
+      lead.getDryLayout(loose).height,
+      middle.getDryLayout(loose.copyWith(minWidth: 0)).height,
+      trail.getDryLayout(loose).height,
+    ].reduce(math.max);
+    return constraints.constrain(Size(constraints.maxWidth, height));
+  }
+
+  @override
+  void performLayout() {
+    final [lead, middle, trail] = _three;
+    final width = constraints.maxWidth;
+    final loose = BoxConstraints(maxWidth: width);
+    lead.layout(loose, parentUsesSize: true);
+    trail.layout(
+      BoxConstraints(maxWidth: math.max(0, width - lead.size.width)),
+      parentUsesSize: true,
+    );
+    // Between the two ends; centered on the whole width when that keeps
+    // at least half of it, else all of it (a narrow box, large text).
+    final from = lead.size.width + _gap;
+    final to = width - trail.size.width - _gap;
+    final center = width / 2 + _shift;
+    final half = math.min(center - from, to - center);
+    final (
+      double start,
+      double middleWidth,
+    ) = half * 2 >= least && half * 2 >= (to - from) / 2
+        ? (center - half, half * 2)
+        : to - from >= least
+        ? (from, to - from)
+        : (center, 0.0);
+    middle.layout(
+      BoxConstraints.tightFor(width: middleWidth),
+      parentUsesSize: true,
+    );
+    final height = constraints.constrainHeight(
+      [
+        lead.size.height,
+        middle.size.height,
+        trail.size.height,
+      ].reduce(math.max),
+    );
+    size = constraints.constrain(Size(width, height));
+    double top(RenderBox child) => (size.height - child.size.height) / 2;
+    (lead.parentData! as _CenteredParent).offset = Offset(0, top(lead));
+    (middle.parentData! as _CenteredParent).offset = Offset(start, top(middle));
+    (trail.parentData! as _CenteredParent).offset = Offset(
+      size.width - trail.size.width,
+      top(trail),
+    );
+  }
+
+  @override
+  void paint(PaintingContext context, Offset offset) =>
+      defaultPaint(context, offset);
+
+  @override
+  bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
+      defaultHitTestChildren(result, position: position);
+}
+
+/// Loudness as bars across the whole width, the newest in the middle and
+/// the moments before spreading out to both sides alike, as ripples do:
+/// fuller and stronger at the center, smaller and fainter toward the ends,
+/// where they fade out. Where it's silent, a row of dots.
+class CenteredWaveform extends CustomPainter {
+  CenteredWaveform(this.levels, {required this.color});
+
+  /// Oldest first, 0 to 1.
+  final List<double> levels;
+  final Color color;
+
+  static const _bar = 2.0;
+  static const _gap = 2.0;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const step = _bar + _gap;
+    final middle = size.height / 2;
+    final center = size.width / 2;
+    // Bars on each side of the one in the middle.
+    final side = ((center - _bar / 2) / step).floor();
+    if (side < 0) return;
+    final paint = Paint()
+      ..strokeWidth = _bar
+      ..strokeCap = StrokeCap.round;
+    for (var away = 0; away <= side; away++) {
+      final index = levels.length - 1 - away;
+      final level = index >= 0 ? levels[index] : 0.0;
+      // 1 in the middle down to nothing at the ends, smoothly.
+      final fade = math.cos(math.pi / 2 * away / (side + 1));
+      final half = math.max(0.75, level * (middle - 1) * (0.35 + 0.65 * fade));
+      paint.color = color.withValues(alpha: color.a * (0.2 + 0.8 * fade));
+      for (final x in {center - away * step, center + away * step}) {
+        canvas.drawLine(
+          Offset(x, middle - half),
+          Offset(x, middle + half),
+          paint,
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(CenteredWaveform old) =>
+      old.levels != levels || old.color != color;
 }
 
 /// Loudness as bars, 2px wide with 2px between, centered on the middle,

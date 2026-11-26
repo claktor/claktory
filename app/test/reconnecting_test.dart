@@ -113,7 +113,9 @@ void main() {
         ),
         matchesSemantics(
           label:
-              "Can't connect to mac-mini. Make sure mac-mini is on, awake "
+              "Can't connect to mac-mini. This "
+              '${size.width < 600 ? 'phone' : 'tablet'} is online, but '
+              "mac-mini doesn't answer. Make sure mac-mini is on, awake "
               'and online, with Claktory open. Tap to try again.',
           hint: reconnectHint,
           isButton: true,

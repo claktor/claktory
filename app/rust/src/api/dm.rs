@@ -38,7 +38,7 @@ use claktory_dm_crypto::certificate::{Leaf, LeafCertificate, LeafKind};
 use claktory_dm_crypto::content::{ByAgent, Content};
 use claktory_dm_crypto::device_list::{DeviceList, Listed, SignedDeviceList};
 use claktory_dm_crypto::envelope::{self, Envelope};
-use claktory_dm_crypto::group::{Group, Incoming, LeafKey, Me};
+use claktory_dm_crypto::group::{Group, Incoming, LeafKey, Me, Window};
 use claktory_dm_crypto::handoff::{self, Offer, OfferFor, Waiting};
 use claktory_dm_crypto::identity::{IdentityKey, IdentityPublic};
 use claktory_dm_crypto::safety::SafetyNumber;
@@ -112,7 +112,12 @@ pub struct DmListed {
 #[derive(Debug, Clone)]
 pub struct DmDeviceList {
     pub version: u64,
+    /// When it was signed, by the signing device's clock (ms).
+    pub created_ms: u64,
     pub leaves: Vec<DmListed>,
+    /// The account's home Claktory (#451): its iroh endpoint id (32 bytes),
+    /// signed with the rest; None while the list names none.
+    pub home: Option<Vec<u8>>,
 }
 
 /// What kind of group.
@@ -220,6 +225,13 @@ pub struct DmPin {
     pub can_send: bool,
     /// The latest device list's version under this key; 0 before any.
     pub device_list_version: u64,
+    /// The key this one replaced at its last change, while there's still
+    /// that key to go back to: what "The numbers don't match" goes back to
+    /// ([DmDevice::undo_key_change], E11-3). None otherwise.
+    pub changed_from: Option<Vec<u8>>,
+    /// This key is one the person said didn't match before, back again:
+    /// the notice says so. Cleared once they verify it.
+    pub mismatched: bool,
 }
 
 /// Two people's safety number: 60 digits in twelve groups, the same on
@@ -251,6 +263,10 @@ pub struct DmGroup {
     /// This device's leaf here carries its current certificate: false
     /// until it moves to the person's new security key ([DmDevice::move_group]).
     pub moved: bool,
+    /// A commit of this device's waits to be merged or given up: one the
+    /// app stopped before it heard of (row 553), settled against the
+    /// worker's log ([DmDevice::take_worker_commit]).
+    pub pending: bool,
 }
 
 /// Which agent wrote a message the person approved.
@@ -299,6 +315,18 @@ impl DmContent {
         })
     }
 
+    /// With the sender's clock [now_ms] inside, as "sent_ms" among the
+    /// extra fields (row 556): shown with the message, never its order.
+    /// One that says already keeps its own.
+    fn sent_at(mut self, now_ms: i64) -> anyhow::Result<DmContent> {
+        let mut content = self.to_content()?;
+        if content.sent_ms().is_none() && now_ms > 0 {
+            content.set_sent_ms(now_ms);
+            self.extra_json = serde_json::Value::Object(content.extra).to_string();
+        }
+        Ok(self)
+    }
+
     fn from_content(content: Content) -> DmContent {
         DmContent {
             kind: content.kind,
@@ -331,6 +359,11 @@ pub struct DmMessage {
     /// said ([content] is then empty): never from anyone's content.
     #[serde(default)]
     pub members: Option<DmMembers>,
+    /// Said by a device its person had taken out by the time this device
+    /// read it (row 561, Fugo): taken in a window, as an online member took
+    /// it then, and shown as from that device.
+    #[serde(default)]
+    pub departed: bool,
 }
 
 /// A leaf in a group, as its certificate says.
@@ -382,6 +415,11 @@ pub struct DmMembers {
     /// says nothing.
     #[serde(default)]
     pub set_up_again: Vec<DmMember>,
+    /// The first devices of an account that had no leaf here before: the
+    /// friend joining ("Ana joined on Pixel", Bruno 33634), still said for
+    /// each leaf (Fugo); not in [added].
+    #[serde(default)]
+    pub joined: Vec<DmMember>,
 }
 
 /// What the person's own devices keep of a conversation, through the self
@@ -412,7 +450,8 @@ pub enum DmOutcome {
     /// A commit under a security key this device hasn't pinned for the
     /// account in [DmProcessed::why] (a rotation, dms-e2ee §2.1): left
     /// unread, the position kept, to take once that account's keys are in
-    /// (never dropped: every commit after it would fail).
+    /// (never dropped: every commit after it would fail). Or, with
+    /// [DmProcessed::behind], something from an epoch past this device's.
     Held,
 }
 
@@ -430,11 +469,34 @@ pub struct DmProcessed {
     /// under a security key [why]'s account replaced (row 654). This
     /// device rejoins the group past it.
     pub replaced: bool,
+    /// Held, from an epoch past this device's (row 551): it missed a commit
+    /// the home never carried (its own, taken by the worker just as the
+    /// app stopped, say). The worker's log has it ([take_worker_commit]);
+    /// then this is taken again. Never passed over unread meanwhile.
+    pub behind: bool,
+    /// Held: a leaf of [why]'s that the device list taken here doesn't
+    /// name (row 561), such as a friend's device added while this one was
+    /// away. Their list is fetched and it's taken again; one still unnamed
+    /// then is refused as before.
+    pub unlisted: bool,
 }
 
 impl DmProcessed {
     fn of(outcome: DmOutcome) -> DmProcessed {
-        DmProcessed { outcome, message: None, epoch: 0, why: String::new(), handshake: false, replaced: false }
+        DmProcessed {
+            outcome,
+            message: None,
+            epoch: 0,
+            why: String::new(),
+            handshake: false,
+            replaced: false,
+            behind: false,
+            unlisted: false,
+        }
+    }
+
+    fn unlisted(account: String, handshake: bool) -> DmProcessed {
+        DmProcessed { why: account, handshake, unlisted: true, ..DmProcessed::of(DmOutcome::Held) }
     }
 
     fn message(message: DmMessage) -> DmProcessed {
@@ -444,6 +506,41 @@ impl DmProcessed {
     fn committed(epoch: u64) -> DmProcessed {
         DmProcessed { epoch, ..DmProcessed::of(DmOutcome::Committed) }
     }
+}
+
+/// One item of a group's feed for [DmDevice::process_window]: its seq,
+/// envelope (JSON) and when it arrived.
+#[derive(Debug, Clone)]
+pub struct DmWindowItem {
+    pub seq: i64,
+    pub envelope: String,
+    pub arrived_ms: i64,
+}
+
+/// How a window ended ([DmDevice::process_window]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DmWindowEnd {
+    /// Closed by the removal: [DmWindowOutcome::processed] is each item
+    /// from the refused commit to the removal, taken; the position is past
+    /// the removal.
+    Closed,
+    /// The items ran out before the removal: nothing changed. Again with
+    /// more, while more commits are to come; else refused as before.
+    Open,
+    /// It can't close ([DmWindowOutcome::why]): nothing changed, and the
+    /// commit stays refused.
+    Aborted,
+    /// No window opens here (not a conversation, or refused for something
+    /// else): nothing changed, refused as before.
+    None,
+}
+
+/// What [DmDevice::process_window] came to.
+#[derive(Debug, Clone)]
+pub struct DmWindowOutcome {
+    pub end: DmWindowEnd,
+    pub why: String,
+    pub processed: Vec<DmProcessed>,
 }
 
 /// A message encrypted here that hasn't come back yet.
@@ -515,6 +612,26 @@ pub struct DmDevice {
 
 const ME: &[&[u8]] = &[b"rows", b"me"];
 const PINS: &[&[u8]] = &[b"rows", b"pins"];
+/// Set once this device read what the worker still held and went over to
+/// its home (#451): the worker's feed is never read again.
+const HOME_DRAINED: &[&[u8]] = &[b"rows", b"home_drained"];
+
+/// Where the home's seqs start (#451): above every worker's.
+const HOME_SEQ_BASE: i64 = 1 << 32;
+
+/// A group's row for where this device is in the worker's feed once it
+/// reads the home ([DmDevice::proposal_seq]).
+struct ProposalPlace(Vec<u8>);
+
+impl ProposalPlace {
+    fn each(&self) -> [&[u8]; 2] {
+        [b"rows", &self.0]
+    }
+}
+
+fn proposal_place(group_id: &[u8]) -> ProposalPlace {
+    ProposalPlace([b"proposal_seq:".as_slice(), group_id].concat())
+}
 
 pub(crate) fn place<'a>(table: &'a [u8], group: &'a [u8], id: &'a [u8], column: &'a [u8]) -> [&'a [u8]; 4] {
     [table, group, id, column]
@@ -752,6 +869,8 @@ impl DmDevice {
                 pins.key_changed(&account_id, *key)?;
             }
             pins.key_changed(&account_id, identity.public())?;
+            // The person's own start-over: what it replaced, for good (L5).
+            pins.retire_previous(&account_id);
             pins.seen(&account_id);
             // Kept with the leaf below, in one transaction.
             state.pins = pins;
@@ -834,9 +953,38 @@ impl DmDevice {
     }
 
     /// On the new device: opens what the scanning device sent ([sealed])
-    /// and becomes the leaf its QR code named. The identity's secret comes
-    /// back for the platform key store.
-    pub fn finish_handoff(&self, handoff: &DmHandoff, sealed: Vec<u8>, now_ms: u64) -> anyhow::Result<DmHandoffDone> {
+    /// and becomes the leaf its QR code named, only when what it gives is
+    /// [account_id]'s identity as their account publishes it
+    /// ([identity_public], from the worker's keys): knowing the QR code's
+    /// secret alone (a photo of it, the clipboard) never plants another
+    /// identity and pins on this device (Melone F3). Either way the offer
+    /// is spent. The identity's secret comes back for the platform key
+    /// store.
+    pub fn finish_handoff_for(
+        &self,
+        handoff: &DmHandoff,
+        sealed: Vec<u8>,
+        now_ms: u64,
+        account_id: String,
+        identity_public: Vec<u8>,
+    ) -> anyhow::Result<DmHandoffDone> {
+        self.open_handoff(handoff, sealed, now_ms, Some((&account_id, &identity_public)))
+    }
+
+    /// [finish_handoff_for] with nothing to compare it with: tests of what
+    /// comes after.
+    #[cfg(test)]
+    pub(crate) fn finish_handoff(&self, handoff: &DmHandoff, sealed: Vec<u8>, now_ms: u64) -> anyhow::Result<DmHandoffDone> {
+        self.open_handoff(handoff, sealed, now_ms, None)
+    }
+
+    fn open_handoff(
+        &self,
+        handoff: &DmHandoff,
+        sealed: Vec<u8>,
+        now_ms: u64,
+        expected: Option<(&str, &[u8])>,
+    ) -> anyhow::Result<DmHandoffDone> {
         let waiting = handoff
             .waiting
             .lock()
@@ -845,6 +993,11 @@ impl DmDevice {
             .ok_or_else(|| anyhow!("this hand-off was used already"))?;
         let (leaf_id, name) = (waiting.offer.device.leaf_id.clone(), waiting.offer.device.name.clone());
         let received = waiting.open(&sealed)?;
+        if let Some((account_id, identity_public)) = expected
+            && (received.account_id != account_id || received.identity.public().0.as_slice() != identity_public)
+        {
+            bail!("this hand-off isn't from the person's account as it's published");
+        }
         let mut state = self.state();
         // The history-transfer key (E8), for 30 minutes.
         self.transfers.keep_receiving(&received.transfer_key);
@@ -889,6 +1042,19 @@ impl DmDevice {
     /// the next one another device puts at that version is taken
     /// (Abbacchio's row 615).
     pub fn sign_device_list(&self, version: u64, created_ms: u64, leaves: Vec<DmListed>) -> anyhow::Result<Vec<u8>> {
+        self.sign_device_list_with_home(version, created_ms, leaves, None)
+    }
+
+    /// [sign_device_list], naming [home] (an iroh endpoint id, 32 bytes) as
+    /// the person's home Claktory (#451); None for none.
+    pub fn sign_device_list_with_home(
+        &self,
+        version: u64,
+        created_ms: u64,
+        leaves: Vec<DmListed>,
+        home: Option<Vec<u8>>,
+    ) -> anyhow::Result<Vec<u8>> {
+        let home = home.map(|home| bytes32(&home)).transpose()?;
         let state = self.state();
         let identity = state.identity.as_ref().ok_or_else(|| anyhow!("this device isn't set up"))?;
         let leaves = leaves
@@ -896,7 +1062,7 @@ impl DmDevice {
             .map(|leaf| Ok(Listed { kind: leaf.kind.into(), leaf_id: leaf.leaf_id, signature_key: bytes32(&leaf.signature_key)? }))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let list = DeviceList { account_id: state.account_id.clone(), version, created_ms, leaves };
-        Ok(list.sign(identity)?.to_bytes()?)
+        Ok(list.sign_with(identity, home)?.to_bytes()?)
     }
 
     fn change_pins(&self, state: &mut State, change: impl FnOnce(&mut Pins) -> Result<(), Error>) -> anyhow::Result<()> {
@@ -971,6 +1137,19 @@ impl DmDevice {
         })
     }
 
+    /// The person compared safety numbers with [account] after its key
+    /// changed and they didn't match (E11-3): the key it changed from
+    /// ([back_to], the pin's `changed_from`) is pinned again, its list,
+    /// version and verified flag with it, and the one that didn't match
+    /// can come back only as another change, which says so.
+    pub fn undo_key_change(&self, account: String, back_to: Vec<u8>) -> anyhow::Result<()> {
+        let back_to = IdentityPublic::from_slice(&back_to)?;
+        if account == self.state().account_id {
+            bail!("the person's own security key changes only through their devices");
+        }
+        self.change_pins(&mut self.state(), |pins| pins.undo_change(&account, &back_to))
+    }
+
     /// The person compared safety numbers with [account], for the key
     /// pinned now.
     pub fn verify(&self, account: String) -> anyhow::Result<()> {
@@ -989,13 +1168,33 @@ impl DmDevice {
         let signed = SignedDeviceList::from_bytes(bytes)?;
         Ok(Some(DmDeviceList {
             version: signed.list.version,
+            created_ms: signed.list.created_ms,
             leaves: signed
                 .list
                 .leaves
                 .iter()
                 .map(|leaf| DmListed { kind: leaf.kind.into(), leaf_id: leaf.leaf_id.clone(), signature_key: leaf.signature_key.to_vec() })
                 .collect(),
+            home: signed.home.map(|home| home.to_vec()),
         }))
+    }
+
+    /// Whether this device went over to its home (#451): it read what the
+    /// worker still held, once, and reads the home only since.
+    #[frb(sync)]
+    pub fn home_drained(&self) -> anyhow::Result<bool> {
+        let _state = self.state();
+        let sealed: Option<Vec<u8>> = self.store.with_tx(|_, tx| {
+            tx.query_row("SELECT value FROM rows WHERE name = ?1", [HOME_DRAINED[1]], |row| row.get(0)).optional().map_err(sql)
+        })?;
+        Ok(sealed.is_some())
+    }
+
+    /// Marks this device as gone over to its home ([home_drained]).
+    pub fn set_home_drained(&self) -> anyhow::Result<()> {
+        let _state = self.state();
+        self.store.with_tx(|_, tx| self.save_row(tx, HOME_DRAINED, b"1"))?;
+        Ok(())
     }
 
     #[frb(sync)]
@@ -1008,6 +1207,8 @@ impl DmDevice {
             changed_unseen: pin.changed_unseen,
             can_send: state.pins.can_send(&account),
             device_list_version: pin.highest_version,
+            changed_from: pin.changed_from.map(|key| key.0.to_vec()),
+            mismatched: pin.mismatched,
         })
     }
 
@@ -1057,6 +1258,25 @@ impl DmDevice {
         let state = self.state();
         let me = state.me.as_ref().ok_or_else(|| anyhow!("this device isn't set up"))?;
         envelope_json(self.store.with_tx(|provider, _| me.last_resort_key_package(provider))?)
+    }
+
+    /// Whether the last resort the worker keeps for this device, whose
+    /// lifetime ends at [last_resort_ends] (seconds since the epoch, the
+    /// worker's GET key-packages; 0 when it doesn't say), is close enough
+    /// to its end at [now_secs] to be replaced now (Melone's F4).
+    #[frb(sync)]
+    pub fn last_resort_due(&self, last_resort_ends: i64, now_secs: i64) -> bool {
+        last_resort_ends != 0 && last_resort_ends <= now_secs.saturating_add(claktory_dm_crypto::group::LAST_RESORT_RENEW as i64)
+    }
+
+    /// Deletes this device's key packages whose lifetime ended by
+    /// [now_secs], their private keys with them (Melone's F4): one never
+    /// used, or a last resort replaced since, opens no Welcome after. How
+    /// many went.
+    pub fn sweep_key_packages(&self, now_secs: i64) -> anyhow::Result<u32> {
+        let now = u64::try_from(now_secs).map_err(|_| anyhow!("a time before 1970"))?;
+        let gone = self.store.with_tx(|provider, _| provider.sweep_key_packages(now))?;
+        Ok(u32::try_from(gone).unwrap_or(u32::MAX))
     }
 
     fn group_row(tx: &Transaction<'_>, group_id: &[u8]) -> Result<Option<(DmGroupKind, i64)>, Error> {
@@ -1132,7 +1352,15 @@ impl DmDevice {
                 extra_json: String::new(),
             },
             arrived_ms,
-            members: Some(DmMembers { added: vec![], removed: vec![], key_changed: vec![], skipped: Some(because), set_up_again: vec![] }),
+            members: Some(DmMembers {
+                added: vec![],
+                removed: vec![],
+                key_changed: vec![],
+                skipped: Some(because),
+                set_up_again: vec![],
+                joined: vec![],
+            }),
+            departed: false,
         };
         self.store.with_tx(|_, tx| self.keep(tx, &group_id, &message))?;
         Ok(())
@@ -1148,7 +1376,8 @@ impl DmDevice {
         let me = state.me.as_ref().ok_or_else(|| anyhow!("this device isn't set up"))?;
         let out = self.store.with_tx(|provider, tx| {
             claktory_dm_crypto::storage::forget_group(tx, &openmls_group_id(&group_id)).map_err(|e| Error::Storage(e.to_string()))?;
-            let (_, out) = Group::rejoin(provider, me, &state.pins, group_kind(&kind)?, &group_id, info.bytes())?;
+            let floor = claktory_dm_crypto::storage::epoch_floor(tx, &group_id)?;
+            let (_, out) = Group::rejoin(provider, me, &state.pins, group_kind(&kind)?, &group_id, info.bytes(), floor)?;
             Self::add_group(tx, &group_id, &kind, seq)?;
             Self::pending_commit(tx, &group_id, &out.commit)?;
             Ok::<_, Error>(out)
@@ -1179,9 +1408,16 @@ impl DmDevice {
     }
 
     /// Adds the leaves of [key_packages] (envelopes' JSON) to [group_id].
-    pub fn add_members(&self, group_id: Vec<u8>, key_packages: Vec<String>) -> anyhow::Result<DmCommit> {
+    /// None when there's nothing to add: every package's key is in the
+    /// group already, or repeated (`Error::NothingToAdd`, told by its kind,
+    /// never its words: Fugo).
+    pub fn add_members(&self, group_id: Vec<u8>, key_packages: Vec<String>) -> anyhow::Result<Option<DmCommit>> {
         let packages = key_packages.iter().map(|package| Ok(read_envelope(package)?.into_bytes())).collect::<anyhow::Result<Vec<_>>>()?;
-        self.change_group(&group_id, |group, provider, me, pins| group.add(provider, me, pins, &packages))
+        match self.change_group(&group_id, |group, provider, me, pins| group.add(provider, me, pins, &packages)) {
+            Ok(commit) => Ok(Some(commit)),
+            Err(error) if matches!(error.downcast_ref::<Error>(), Some(Error::NothingToAdd)) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// Removes the leaves [leaf_ids] from [group_id].
@@ -1376,6 +1612,7 @@ impl DmDevice {
         self.store.with_tx(|_, tx| {
             claktory_dm_crypto::storage::forget_group(tx, &openmls_group_id(&group_id))?;
             tx.execute("DELETE FROM groups WHERE id = ?1", [&group_id]).map_err(sql)?;
+            Self::delete_row(tx, &proposal_place(&group_id).each())?;
             Ok::<_, Error>(())
         })?;
         Ok(())
@@ -1385,15 +1622,15 @@ impl DmDevice {
     pub fn groups(&self) -> anyhow::Result<Vec<DmGroup>> {
         let state = self.state();
         Ok(self.store.with_tx(|provider, tx| {
-            let rows: Vec<(Vec<u8>, String, i64)> = tx
-                .prepare("SELECT id, kind, seq FROM groups ORDER BY id")
+            let rows: Vec<(Vec<u8>, String, i64, bool)> = tx
+                .prepare("SELECT id, kind, seq, EXISTS (SELECT 1 FROM commits WHERE grp = groups.id) FROM groups ORDER BY id")
                 .map_err(sql)?
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
                 .map_err(sql)?
                 .collect::<Result<_, _>>()
                 .map_err(sql)?;
             rows.into_iter()
-                .map(|(group_id, kind, seq)| {
+                .map(|(group_id, kind, seq, pending)| {
                     let kind: DmGroupKind = serde_json::from_str(&kind).map_err(|e| Error::Format(e.to_string()))?;
                     let group = Group::load(provider, group_kind(&kind)?, &group_id)?;
                     let epoch = group.as_ref().map(Group::epoch).unwrap_or(0);
@@ -1401,7 +1638,7 @@ impl DmDevice {
                         (Some(group), Some(me)) => group.holds(me).unwrap_or(true),
                         _ => true,
                     };
-                    Ok(DmGroup { group_id, kind, seq, epoch, moved })
+                    Ok(DmGroup { group_id, kind, seq, epoch, moved, pending })
                 })
                 .collect::<Result<Vec<_>, Error>>()
         })?)
@@ -1416,6 +1653,7 @@ impl DmDevice {
         if id.is_empty() {
             bail!("a message has a retry id");
         }
+        let content = content.sent_at(now_ms)?;
         let encoded = content.to_content()?.encode()?;
         let extra: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&content.extra_json).unwrap_or_default();
         let state = self.state();
@@ -1521,6 +1759,14 @@ impl DmDevice {
             if seq <= position {
                 return Ok(Ok(DmProcessed::of(DmOutcome::Already)));
             }
+            // The first of the home's: where the worker's feed was is kept,
+            // for the proposals that stay there ([take_proposal]).
+            if position < HOME_SEQ_BASE && seq > HOME_SEQ_BASE {
+                let place = proposal_place(&group_id);
+                if self.read_row::<i64>(tx, &place.each())?.is_none() {
+                    self.save_row(tx, &place.each(), &json(&position)?)?;
+                }
+            }
             let advance = |tx: &Transaction<'_>| -> Result<(), Error> {
                 tx.execute("UPDATE groups SET seq = ?2 WHERE id = ?1", params![group_id, seq]).map_err(sql)?;
                 Ok(())
@@ -1560,32 +1806,16 @@ impl DmDevice {
                 return Ok(Ok(DmProcessed { message: line, ..DmProcessed::committed(group.epoch()) }));
             }
             // This device's own message coming back: from what it kept.
-            let own: Option<(String, Vec<u8>)> = tx
-                .query_row("SELECT client_id, value FROM outgoing WHERE grp = ?1 AND digest = ?2", params![group_id, digest], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })
-                .optional()
-                .map_err(sql)?;
-            if let Some((id, sealed)) = own {
-                let pending = self.store.open_row(&place(b"outgoing", &group_id, id.as_bytes(), b"value"), &sealed)?;
-                let pending: Pending = serde_json::from_slice(&pending).map_err(|e| Error::Format(e.to_string()))?;
-                let me = state.me.as_ref().ok_or_else(|| Error::Storage("this device isn't set up".to_owned()))?;
-                let message = DmMessage {
-                    seq,
-                    mine: true,
-                    from_account: me.certificate.leaf.account_id.clone(),
-                    from_leaf: me.certificate.leaf.leaf_id.clone(),
-                    from_kind_device: true,
-                    content: pending.content,
-                    arrived_ms,
-                    members: None,
-                };
-                tx.execute("DELETE FROM outgoing WHERE grp = ?1 AND client_id = ?2", params![group_id, id]).map_err(sql)?;
-                self.take(tx, state, &kind, &group_id, &message)?;
+            if let Some(message) = self.own_message(tx, state, &kind, &group_id, envelope, seq, arrived_ms)? {
                 advance(tx)?;
                 return Ok(Ok(DmProcessed::message(message)));
             }
             let (mut group, _) = Self::load(provider, tx, &group_id)?;
+            // From an epoch past this one: a commit is missing here. Held,
+            // the position kept, until it's in (row 551).
+            if envelope.parsed().group.as_ref().is_some_and(|(_, epoch)| *epoch > group.epoch()) {
+                return Ok(Ok(DmProcessed { handshake, behind: true, epoch: group.epoch(), ..DmProcessed::of(DmOutcome::Held) }));
+            }
             let before = handshake.then(|| snapshot(&group, &state.pins));
             let incoming = match group.process(provider, &state.pins, envelope.bytes()) {
                 Ok(incoming) => incoming,
@@ -1602,11 +1832,23 @@ impl DmDevice {
                 Err(Error::Replaced { account }) if handshake => {
                     return Ok(Ok(DmProcessed { why: account, handshake, replaced: true, ..DmProcessed::of(DmOutcome::Held) }));
                 }
+                // A leaf the list taken here doesn't name: held, the
+                // position kept, for a newer list (row 561; the crate's R5).
+                Err(Error::Unlisted { account }) => return Ok(Ok(DmProcessed::unlisted(account, handshake))),
                 Err(error) if refusal(&error) => return Ok(Err(error.to_string())),
                 Err(error) => return Err(error),
             };
             let processed = match incoming {
-                Incoming::Application { from, content } => match Content::decode(&content) {
+                // Something said in a conversation by a Claktory's leaf:
+                // never shown (#451, Fugo). An agent's message only ever
+                // comes as one of the person's devices sent it, after their
+                // approval; a home can't see who sent what, so the check is
+                // here, from the sender's signed certificate.
+                Incoming::Application { from, .. } if kind.kind == DmGroupType::Conversation && from.kind() == LeafKind::Claktory => {
+                    advance(tx)?;
+                    return Ok(Err("a Claktory's leaf can't say anything in a conversation".to_owned()));
+                }
+                Incoming::Application { from, content, .. } => match Content::decode(&content) {
                     Ok(content) => {
                         let message = DmMessage {
                             seq,
@@ -1617,10 +1859,21 @@ impl DmDevice {
                             content: DmContent::from_content(content),
                             arrived_ms,
                             members: None,
+                            departed: false,
                         };
                         if kind.kind == DmGroupType::SelfGroup && message.content.kind == ROTATION_KIND {
                             let name = from.certificate.leaf.name.clone();
                             self.keep_rotation(tx, state, &group, &message, &name)?;
+                        } else if kind.kind == DmGroupType::Channel
+                            && matches!(
+                                message.content.kind.as_str(),
+                                claktory_dm_crypto::content::kind::PROPOSAL | claktory_dm_crypto::content::kind::AGENT_DRAFT
+                            )
+                        {
+                            // A proposal or an agent's draft, which its
+                            // Claktory sends through the home (#451): kept by
+                            // its digest, which the service's record names.
+                            self.keep_side(tx, &group_id, &digest, &message)?;
                         } else {
                             self.take(tx, state, &kind, &group_id, &message)?;
                         }
@@ -1676,6 +1929,359 @@ impl DmDevice {
         Ok(())
     }
 
+    /// Where this device is in the worker's feed of [group_id] once it
+    /// reads the home (#451): the proposals stay there (a Claktory's own
+    /// Remove, Mista 32950), and the home's commits take them in by
+    /// reference. Before the home, where it is in the feed.
+    #[frb(sync)]
+    pub fn proposal_seq(&self, group_id: Vec<u8>) -> anyhow::Result<i64> {
+        let _state = self.state();
+        Ok(self.store.with_tx(|_, tx| Self::proposal_position(self, tx, &group_id))?)
+    }
+
+    fn proposal_position(&self, tx: &Transaction<'_>, group_id: &[u8]) -> Result<i64, Error> {
+        if let Some(seq) = self.read_row::<i64>(tx, &proposal_place(group_id).each())? {
+            return Ok(seq);
+        }
+        let position = Self::group_row(tx, group_id)?.map(|(_, seq)| seq).unwrap_or(0);
+        Ok(if position < HOME_SEQ_BASE { position } else { 0 })
+    }
+
+    /// The worker's message [seq] in [group_id] once this device reads the
+    /// home: only a proposal is taken (kept for the commit that takes it
+    /// in), anything else is passed over; the worker position moves past
+    /// it either way, but not past a proposal [DmOutcome::Held] (under a
+    /// key not pinned yet). Call in seq order, each before the home's
+    /// commit of its epoch.
+    pub fn take_proposal(&self, group_id: Vec<u8>, seq: i64, envelope: String) -> anyhow::Result<DmProcessed> {
+        let mut guard = self.state();
+        let state = &mut *guard;
+        let parsed = read_envelope(&envelope);
+        let place = proposal_place(&group_id);
+        let outcome = self.store.with_tx(|provider, tx| {
+            if seq <= self.proposal_position(tx, &group_id)? {
+                return Ok(Ok(DmProcessed::of(DmOutcome::Already)));
+            }
+            let advance = |tx: &Transaction<'_>| self.save_row(tx, &place.each(), &json(&seq)?);
+            let envelope = match &parsed {
+                Ok(envelope) if matches!(envelope.parsed().kind, envelope::Kind::Proposal) => envelope,
+                Ok(_) => {
+                    advance(tx)?;
+                    return Ok(Ok(DmProcessed::of(DmOutcome::Already)));
+                }
+                Err(error) => {
+                    advance(tx)?;
+                    return Ok(Err(error.to_string()));
+                }
+            };
+            let (mut group, _) = Self::load(provider, tx, &group_id)?;
+            match group.process(provider, &state.pins, envelope.bytes()) {
+                Ok(Incoming::Proposal) => {
+                    advance(tx)?;
+                    Ok(Ok(DmProcessed { handshake: true, ..DmProcessed::of(DmOutcome::Proposal) }))
+                }
+                Ok(_) => Err(Error::Format("a proposal that wasn't one".to_owned())),
+                Err(Error::UnknownIdentity { account }) => {
+                    Ok(Ok(DmProcessed { why: account, handshake: true, ..DmProcessed::of(DmOutcome::Held) }))
+                }
+                Err(Error::Unlisted { account }) => Ok(Ok(DmProcessed::unlisted(account, true))),
+                Err(error) if refusal(&error) => Ok(Err(error.to_string())),
+                Err(error) => Err(error),
+            }
+        })?;
+        match outcome {
+            Ok(processed) => Ok(processed),
+            Err(why) => {
+                let _ = self.store.with_tx(|_, tx| {
+                    if seq > self.proposal_position(tx, &group_id)? {
+                        self.save_row(tx, &place.each(), &json(&seq)?)?;
+                    }
+                    Ok::<_, Error>(())
+                });
+                Ok(DmProcessed { why, handshake: true, ..DmProcessed::of(DmOutcome::Dropped) })
+            }
+        }
+    }
+
+    /// The worker's commit [seq] in [group_id] once this device reads the
+    /// home, which the home never carried (row 551): this device's own,
+    /// taken by the worker just as the app stopped, is merged; another's
+    /// is taken as the feed takes one, any change of this device's own
+    /// still waiting from before it given up. Anything else is passed over.
+    /// The worker position moves past it, but not past a commit
+    /// [DmOutcome::Held] (under a key not pinned yet); the home's position
+    /// stays. Call in seq order with [take_proposal].
+    pub fn take_worker_commit(&self, group_id: Vec<u8>, seq: i64, envelope: String, arrived_ms: i64) -> anyhow::Result<DmProcessed> {
+        let mut guard = self.state();
+        let state = &mut *guard;
+        let parsed = read_envelope(&envelope);
+        let place = proposal_place(&group_id);
+        let outcome = self.store.with_tx(|provider, tx| {
+            if Self::group_row(tx, &group_id)?.is_none() {
+                return Err(Error::Storage("a group this device isn't in".to_owned()));
+            }
+            if seq <= self.proposal_position(tx, &group_id)? {
+                return Ok(Ok(DmProcessed::of(DmOutcome::Already)));
+            }
+            let advance = |tx: &Transaction<'_>| self.save_row(tx, &place.each(), &json(&seq)?);
+            let envelope = match &parsed {
+                Ok(envelope) if matches!(envelope.parsed().kind, envelope::Kind::Commit) => envelope,
+                Ok(_) => {
+                    advance(tx)?;
+                    return Ok(Ok(DmProcessed::of(DmOutcome::Already)));
+                }
+                Err(error) => {
+                    advance(tx)?;
+                    return Ok(Err(error.to_string()));
+                }
+            };
+            let own_leaf = state.me.as_ref().map(|me| me.certificate.leaf.leaf_id.clone()).unwrap_or_default();
+            let (mut group, _) = Self::load(provider, tx, &group_id)?;
+            // One from before this device's epoch: it has it already.
+            if envelope.parsed().group.as_ref().is_some_and(|(_, epoch)| *epoch < group.epoch()) {
+                advance(tx)?;
+                return Ok(Ok(DmProcessed { epoch: group.epoch(), ..DmProcessed::of(DmOutcome::Already) }));
+            }
+            let before = snapshot(&group, &state.pins);
+            let digest = envelope.digest().to_vec();
+            let pending: Option<Vec<u8>> =
+                tx.query_row("SELECT digest FROM commits WHERE grp = ?1", [&group_id], |row| row.get(0)).optional().map_err(sql)?;
+            let mine = pending.as_deref() == Some(digest.as_slice());
+            if mine {
+                Self::merge_own(provider, tx, &group_id)?;
+            } else {
+                if pending.is_some() {
+                    // Another's came first: this device's own never will.
+                    tx.execute("DELETE FROM commits WHERE grp = ?1", [&group_id]).map_err(sql)?;
+                    group.clear_pending(provider)?;
+                }
+                match group.process(provider, &state.pins, envelope.bytes()) {
+                    Ok(Incoming::Committed { .. }) => {}
+                    // Framed as a commit, read as something else: dropped
+                    // and passed, never stopping the group (Fugo).
+                    Ok(_) => return Ok(Err("a commit that wasn't one".to_owned())),
+                    Err(Error::UnknownIdentity { account }) => {
+                        return Ok(Ok(DmProcessed { why: account, handshake: true, ..DmProcessed::of(DmOutcome::Held) }));
+                    }
+                    Err(Error::Replaced { account }) => {
+                        return Ok(Ok(DmProcessed { why: account, handshake: true, replaced: true, ..DmProcessed::of(DmOutcome::Held) }));
+                    }
+                    Err(Error::Unlisted { account }) => return Ok(Ok(DmProcessed::unlisted(account, true))),
+                    Err(error) if refusal(&error) => return Ok(Err(error.to_string())),
+                    Err(error) => return Err(error),
+                }
+            }
+            advance(tx)?;
+            let (group, _) = Self::load(provider, tx, &group_id)?;
+            let line = self.member_line(
+                tx,
+                &group_id,
+                seq,
+                arrived_ms,
+                mine,
+                &own_leaf,
+                &state.account_id,
+                &listed_ids(&state.pins, &state.account_id),
+                before,
+                snapshot(&group, &state.pins),
+            )?;
+            Ok(Ok(DmProcessed { message: line, handshake: true, ..DmProcessed::committed(group.epoch()) }))
+        })?;
+        match outcome {
+            Ok(processed) => Ok(processed),
+            Err(why) => {
+                let _ = self.store.with_tx(|_, tx| {
+                    if seq > self.proposal_position(tx, &group_id)? {
+                        self.save_row(tx, &place.each(), &json(&seq)?)?;
+                    }
+                    Ok::<_, Error>(())
+                });
+                Ok(DmProcessed { why, handshake: true, ..DmProcessed::of(DmOutcome::Dropped) })
+            }
+        }
+    }
+
+    /// A commit [process] held as [DmProcessed::unlisted] (row 561):
+    /// [items] is it, then what follows it in the group's feed, in order.
+    /// The device it brings in is one its person has since taken off their
+    /// list; if one of their listed devices that was there all along takes
+    /// it out again within [items] (claktory-dm-crypto's window, Fugo's
+    /// rule), everything up to that removal is taken as an online member
+    /// took it, the departed device's messages marked as such. Anything
+    /// else changes nothing here.
+    pub fn process_window(&self, group_id: Vec<u8>, items: Vec<DmWindowItem>) -> anyhow::Result<DmWindowOutcome> {
+        let mut guard = self.state();
+        let state = &mut *guard;
+        let mut envelopes = Vec::with_capacity(items.len());
+        for item in &items {
+            match read_envelope(&item.envelope) {
+                Ok(envelope) => envelopes.push(envelope),
+                Err(error) => {
+                    return Ok(DmWindowOutcome { end: DmWindowEnd::Aborted, why: error.to_string(), processed: vec![] });
+                }
+            }
+        }
+        let bytes: Vec<&[u8]> = envelopes.iter().map(|envelope| envelope.bytes()).collect();
+        let outcome = |end, why: String| Ok(DmWindowOutcome { end, why, processed: vec![] });
+        // What it comes to, and who's in the group after each commit taken
+        // (every leaf, checked or not, since the departed one never passes
+        // the latest list): each tried and rolled back.
+        let tried = |count: usize| -> Result<Result<(Window, Snapshot), Error>, Error> {
+            let mut out = None;
+            let _ = self.store.with_tx(|provider, tx| -> Result<(), Error> {
+                let (mut group, _) = Self::load(provider, tx, &group_id)?;
+                let window = group.process_window(provider, &state.pins, &bytes[..count]);
+                out = Some(window.map(|window| (window, every_leaf(&group))));
+                Err(Error::Storage("tried only".to_owned()))
+            });
+            out.ok_or_else(|| Error::Storage("the window couldn't be tried".to_owned()))
+        };
+        let taken = match tried(bytes.len())? {
+            Err(error) => return outcome(DmWindowEnd::None, error.to_string()),
+            Ok((Window::Open, _)) => return outcome(DmWindowEnd::Open, String::new()),
+            Ok((Window::Aborted { why }, _)) => return outcome(DmWindowEnd::Aborted, why),
+            Ok((Window::Closed { taken }, _)) => taken,
+        };
+        let count = taken.len();
+        let mut after: Vec<Option<Snapshot>> = Vec::with_capacity(count);
+        for (index, windowed) in taken.iter().enumerate() {
+            after.push(match windowed.incoming {
+                Ok(Incoming::Committed { .. }) => match tried(index + 1)? {
+                    Ok((_, snapshot)) => Some(snapshot),
+                    Err(_) => None,
+                },
+                _ => None,
+            });
+        }
+        let own_leaf = state.me.as_ref().map(|me| me.certificate.leaf.leaf_id.clone()).unwrap_or_default();
+        let processed = self.store.with_tx(|provider, tx| -> Result<Vec<DmProcessed>, Error> {
+            let (kind, _) = Self::group_row(tx, &group_id)?.ok_or_else(|| Error::Storage("a group this device isn't in".to_owned()))?;
+            let (mut group, _) = Self::load(provider, tx, &group_id)?;
+            let mut before = every_leaf(&group);
+            let Window::Closed { taken } = group.process_window(provider, &state.pins, &bytes[..count])? else {
+                return Err(Error::Storage("the window didn't close again".to_owned()));
+            };
+            let mut processed = Vec::with_capacity(count);
+            for ((index, windowed), snapshot) in taken.into_iter().enumerate().zip(after) {
+                let item = &items[index];
+                let out = match windowed.incoming {
+                    Ok(Incoming::Committed { epoch }) => {
+                        let mut line = None;
+                        if let Some(snapshot) = snapshot {
+                            let next = snapshot.clone();
+                            line = self.member_line(
+                                tx,
+                                &group_id,
+                                item.seq,
+                                item.arrived_ms,
+                                false,
+                                &own_leaf,
+                                &state.account_id,
+                                &listed_ids(&state.pins, &state.account_id),
+                                std::mem::replace(&mut before, next),
+                                snapshot,
+                            )?;
+                        }
+                        DmProcessed { message: line, handshake: true, ..DmProcessed::committed(epoch) }
+                    }
+                    Ok(Incoming::Proposal) => DmProcessed { handshake: true, ..DmProcessed::of(DmOutcome::Proposal) },
+                    Ok(Incoming::Application { from, content, .. }) => {
+                        if from.kind() == LeafKind::Claktory {
+                            DmProcessed {
+                                why: "a Claktory's leaf can't say anything in a conversation".to_owned(),
+                                ..DmProcessed::of(DmOutcome::Dropped)
+                            }
+                        } else {
+                            match Content::decode(&content) {
+                                Ok(content) => {
+                                    let message = DmMessage {
+                                        seq: item.seq,
+                                        mine: false,
+                                        from_account: from.account().to_owned(),
+                                        from_leaf: from.leaf_id().to_owned(),
+                                        from_kind_device: from.kind() == LeafKind::Device,
+                                        content: DmContent::from_content(content),
+                                        arrived_ms: item.arrived_ms,
+                                        members: None,
+                                        departed: windowed.departed,
+                                    };
+                                    self.take(tx, state, &kind, &group_id, &message)?;
+                                    DmProcessed::message(message)
+                                }
+                                Err(error) => DmProcessed { why: error.to_string(), ..DmProcessed::of(DmOutcome::Dropped) },
+                            }
+                        }
+                    }
+                    // This device's own, which it can't decrypt: from what
+                    // it kept, as [process] takes it.
+                    Err(_) => match self.own_message(tx, state, &kind, &group_id, &envelopes[index], item.seq, item.arrived_ms)? {
+                        Some(message) => DmProcessed::message(message),
+                        None => DmProcessed::of(DmOutcome::Dropped),
+                    },
+                };
+                processed.push(out);
+            }
+            let last = items[count - 1].seq;
+            tx.execute("UPDATE groups SET seq = max(seq, ?2) WHERE id = ?1", params![group_id, last]).map_err(sql)?;
+            Ok(processed)
+        })?;
+        Ok(DmWindowOutcome { end: DmWindowEnd::Closed, why: String::new(), processed })
+    }
+
+    /// This device's own message [envelope] coming back, from what it kept
+    /// when it sealed it: taken, and no longer waiting to go. None when it
+    /// isn't one of its own.
+    #[allow(clippy::too_many_arguments)]
+    fn own_message(
+        &self,
+        tx: &Transaction<'_>,
+        state: &mut State,
+        kind: &DmGroupKind,
+        group_id: &[u8],
+        envelope: &Envelope,
+        seq: i64,
+        arrived_ms: i64,
+    ) -> Result<Option<DmMessage>, Error> {
+        let digest = envelope.digest().to_vec();
+        let own: Option<(String, Vec<u8>)> = tx
+            .query_row("SELECT client_id, value FROM outgoing WHERE grp = ?1 AND digest = ?2", params![group_id, digest], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()
+            .map_err(sql)?;
+        let Some((id, sealed)) = own else { return Ok(None) };
+        let pending = self.store.open_row(&place(b"outgoing", group_id, id.as_bytes(), b"value"), &sealed)?;
+        let pending: Pending = serde_json::from_slice(&pending).map_err(|e| Error::Format(e.to_string()))?;
+        let me = state.me.as_ref().ok_or_else(|| Error::Storage("this device isn't set up".to_owned()))?;
+        let message = DmMessage {
+            seq,
+            mine: true,
+            from_account: me.certificate.leaf.account_id.clone(),
+            from_leaf: me.certificate.leaf.leaf_id.clone(),
+            from_kind_device: true,
+            content: pending.content,
+            arrived_ms,
+            members: None,
+            departed: false,
+        };
+        tx.execute("DELETE FROM outgoing WHERE grp = ?1 AND client_id = ?2", params![group_id, id]).map_err(sql)?;
+        self.take(tx, state, kind, group_id, &message)?;
+        Ok(Some(message))
+    }
+
+    /// Moves where this device is in the worker's feed of [group_id] to
+    /// [seq]: what was there is gone (the worker pruned it).
+    pub fn skip_proposals(&self, group_id: Vec<u8>, seq: i64) -> anyhow::Result<()> {
+        let _state = self.state();
+        self.store.with_tx(|_, tx| {
+            if seq > self.proposal_position(tx, &group_id)? {
+                self.save_row(tx, &proposal_place(&group_id).each(), &json(&seq)?)?;
+            }
+            Ok::<_, Error>(())
+        })?;
+        Ok(())
+    }
+
     fn keep(&self, tx: &Transaction<'_>, group_id: &[u8], message: &DmMessage) -> Result<(), Error> {
         let seq = message.seq.to_be_bytes();
         let sealed = self.store.seal_row(&place(b"history", group_id, &seq, b"value"), &Zeroizing::new(json(message)?))?;
@@ -1693,7 +2299,9 @@ impl DmDevice {
         if kind.kind != DmGroupType::SelfGroup {
             return self.keep(tx, group_id, message);
         }
-        if !message.from_kind_device || message.from_account != state.account_id {
+        // Only from the person's own devices, and never from a message
+        // marked as a departed device's (Fugo 40397): pins are key-bearing.
+        if !message.from_kind_device || message.from_account != state.account_id || message.departed {
             return Ok(());
         }
         let content = &message.content;
@@ -1822,8 +2430,17 @@ impl DmDevice {
         let (set_up_again, added): (Vec<DmMember>, Vec<DmMember>) =
             missing(&after.roster, &before).into_iter().partition(|member| before.has(&member.account, &member.leaf_id));
         let removed = missing(&before.all, &after).into_iter().filter(|member| !after.has(&member.account, &member.leaf_id)).collect();
-        let members = DmMembers { added, removed, key_changed, skipped: None, set_up_again };
-        if members.added.is_empty() && members.removed.is_empty() && members.key_changed.is_empty() && members.set_up_again.is_empty() {
+        // A device of an account with no leaf here before: it joined.
+        let (joined, added): (Vec<DmMember>, Vec<DmMember>) = added
+            .into_iter()
+            .partition(|member| member.kind == DmLeafKind::Device && !before.ids.iter().any(|(account, _)| account == &member.account));
+        let members = DmMembers { added, removed, key_changed, skipped: None, set_up_again, joined };
+        if members.added.is_empty()
+            && members.removed.is_empty()
+            && members.key_changed.is_empty()
+            && members.set_up_again.is_empty()
+            && members.joined.is_empty()
+        {
             return Ok(None);
         }
         let message = DmMessage {
@@ -1841,6 +2458,7 @@ impl DmDevice {
             },
             arrived_ms,
             members: Some(members),
+            departed: false,
         };
         self.keep(tx, group_id, &message)?;
         Ok(Some(message))
@@ -1895,7 +2513,7 @@ impl DmDevice {
                 return serde_json::from_slice(&plain).map_err(|e| Error::Format(e.to_string()));
             }
             let (mut group, _) = Self::load(provider, tx, &group_id)?;
-            let Incoming::Application { from, content } = group.process(provider, &state.pins, envelope.bytes())? else {
+            let Incoming::Application { from, content, .. } = group.process(provider, &state.pins, envelope.bytes())? else {
                 return Err(Error::Refused("not something said".to_owned()));
             };
             let message = DmMessage {
@@ -1907,11 +2525,36 @@ impl DmDevice {
                 content: DmContent::from_content(Content::decode(&content)?),
                 arrived_ms,
                 members: None,
+                departed: false,
             };
             let sealed = self.store.seal_row(&at, &Zeroizing::new(json(&message)?))?;
             tx.execute("INSERT INTO side (grp, digest, value) VALUES (?1, ?2, ?3)", params![group_id, digest, sealed]).map_err(sql)?;
             Ok(message)
         })?)
+    }
+
+    /// The proposal or agent's draft with [digest] (SHA-256 of its MLS
+    /// bytes) that came in the channel [group_id]'s feed; None until it
+    /// has (#451).
+    pub fn side_message(&self, group_id: Vec<u8>, digest: Vec<u8>) -> anyhow::Result<Option<DmMessage>> {
+        let _state = self.state();
+        Ok(self.store.with_tx(|_, tx| {
+            let kept: Option<Vec<u8>> = tx
+                .query_row("SELECT value FROM side WHERE grp = ?1 AND digest = ?2", params![group_id, digest], |row| row.get(0))
+                .optional()
+                .map_err(sql)?;
+            let Some(kept) = kept else { return Ok(None) };
+            let plain = self.store.open_row(&place(b"side", &group_id, &digest, b"value"), &kept)?;
+            Ok::<_, Error>(Some(serde_json::from_slice(&plain).map_err(|e| Error::Format(e.to_string()))?))
+        })?)
+    }
+
+    /// Keeps [message] as [group_id]'s side message [digest], opened.
+    fn keep_side(&self, tx: &Transaction<'_>, group_id: &[u8], digest: &[u8], message: &DmMessage) -> Result<(), Error> {
+        let sealed = self.store.seal_row(&place(b"side", group_id, digest, b"value"), &Zeroizing::new(json(message)?))?;
+        tx.execute("INSERT OR IGNORE INTO side (grp, digest, value) VALUES (?1, ?2, ?3)", params![group_id, digest, sealed])
+            .map_err(sql)?;
+        Ok(())
     }
 
     /// [group_id]'s history, newest last: up to [limit] messages before
@@ -2037,6 +2680,7 @@ impl DmDevice {
     fn rotated_pins(state: &State, identity: IdentityPublic, list: &[u8]) -> Result<Pins, Error> {
         let mut pins = state.pins.clone();
         pins.key_changed(&state.account_id, identity)?;
+        pins.retire_previous(&state.account_id);
         pins.seen(&state.account_id);
         pins.accept_list(&state.account_id, list)?;
         Ok(pins)
@@ -2259,7 +2903,7 @@ impl DmDevice {
         }
         let Ok(identity) = IdentityPublic::from_slice(&identity) else { return Ok(()) };
         let Some(pin) = state.pins.get(&state.account_id) else { return Ok(()) };
-        if pin.identity == identity || pin.retired.contains(&identity) {
+        if pin.identity == identity || pin.replaced(&identity) {
             return Ok(());
         }
         let pending =
@@ -2336,6 +2980,7 @@ impl DmDevice {
 /// (rows 202 and 671, Fugo).
 #[frb(ignore)]
 #[derive(Default)]
+#[derive(Clone)]
 struct Snapshot {
     /// Those that pass the checks, each with its signature key.
     roster: Vec<(DmMember, [u8; 32])>,
@@ -2376,6 +3021,14 @@ fn snapshot(group: &Group, pins: &Pins) -> Snapshot {
         ids: all.iter().map(|(member, _)| (member.account.clone(), member.leaf_id.clone())).collect(),
         all,
     }
+}
+
+/// Who's in [group], every leaf as if it passed: for the lines of a
+/// window (row 561), whose departed device never passes the latest list
+/// yet was there, as an online member saw it.
+fn every_leaf(group: &Group) -> Snapshot {
+    let all = unchecked(group);
+    Snapshot { roster: all.clone(), ids: all.iter().map(|(member, _)| (member.account.clone(), member.leaf_id.clone())).collect(), all }
 }
 
 /// Every leaf of [group] with what its certificate claims, unchecked: for
@@ -2503,6 +3156,28 @@ mod tests {
         DmGroupKind { kind: DmGroupType::Conversation, accounts: vec!["ana".into(), "matt".into()], claktory_id: String::new() }
     }
 
+    /// F4.2: the device's own key packages past their lifetime are deleted,
+    /// never one still in date.
+    #[test]
+    fn key_packages_past_their_lifetime_are_swept() {
+        let dir = folder();
+        let (_phone, ipad) = two(&dir);
+        ipad.key_packages(3).unwrap();
+        ipad.last_resort_key_package().unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        assert_eq!(ipad.sweep_key_packages(now).unwrap(), 0, "all in date");
+        let lifetime = claktory_dm_crypto::group::KEY_PACKAGE_LIFETIME as i64;
+        assert_eq!(ipad.sweep_key_packages(now + lifetime + 3600).unwrap(), 4, "the three and the last resort");
+        assert_eq!(ipad.sweep_key_packages(now + lifetime + 3600).unwrap(), 0, "gone already");
+        assert!(ipad.sweep_key_packages(-1).is_err());
+        let week = 7 * 24 * 60 * 60;
+        assert!(!ipad.last_resort_due(0, now), "the worker doesn't say");
+        assert!(!ipad.last_resort_due(now + week + 60, now));
+        assert!(ipad.last_resort_due(now + week, now));
+        assert!(ipad.last_resort_due(now - 60, now), "past its end");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn two_people_talk_each_message_once_and_in_order() {
         let dir = folder();
@@ -2512,13 +3187,15 @@ mod tests {
         assert_eq!(info.parsed().kind, claktory_dm_crypto::envelope::Kind::GroupInfo);
         assert!(read_envelope(&ipad.last_resort_key_package().unwrap()).is_ok());
         let package = ipad.key_packages(1).unwrap().remove(0);
-        let added = phone.add_members(id.clone(), vec![package]).unwrap();
+        let added = phone.add_members(id.clone(), vec![package]).unwrap().expect("something to add");
         // The worker took the Add at seq 1; it comes back to the phone.
         let back = phone.process(id.clone(), 1, added.commit.clone(), 10).unwrap();
         assert_eq!((back.outcome, back.epoch), (DmOutcome::Committed, 1));
-        // Who came, as a line of its own, from Ana's certificate.
+        // Who came, as a line of its own, from Ana's certificate: her
+        // first device here, so she joined (a later one is added).
         let came = back.message.unwrap().members.unwrap();
-        assert_eq!((came.added[0].account.as_str(), came.added[0].name.as_str()), ("ana", "iPad"));
+        assert_eq!((came.joined[0].account.as_str(), came.joined[0].name.as_str()), ("ana", "iPad"));
+        assert!(came.added.is_empty());
         assert!(came.removed.is_empty());
         assert_eq!(phone.members(id.clone()).unwrap().len(), 2);
         ipad.join_group(id.clone(), chat(), added.welcome.unwrap(), 1).unwrap();
@@ -2531,8 +3208,14 @@ mod tests {
         // At seq 2 for both: Ana reads it, and the phone knows it as its own.
         let heard = ipad.process(id.clone(), 2, said.clone(), 30).unwrap().message.unwrap();
         assert_eq!((heard.from_account.as_str(), heard.mine, heard.content.text.as_deref()), ("matt", false, Some("hi Ana")));
+        // The sender's clock rides inside (row 556), and their own copy says it too.
+        let sent_ms = |message: &DmMessage| -> Option<i64> {
+            serde_json::from_str::<serde_json::Value>(&message.content.extra_json).ok()?.get("sent_ms")?.as_i64()
+        };
+        assert_eq!(sent_ms(&heard), Some(20));
         let mine = phone.process(id.clone(), 2, said.clone(), 30).unwrap().message.unwrap();
         assert!(mine.mine);
+        assert_eq!(sent_ms(&mine), Some(20));
         assert!(phone.unsent().unwrap().is_empty());
         // Again: already.
         assert_eq!(ipad.process(id.clone(), 2, said, 31).unwrap().outcome, DmOutcome::Already);
@@ -2615,7 +3298,7 @@ mod tests {
         assert!(phone.send(id.clone(), text("m1", "ana 1"), 13).is_err());
 
         // Ana's listed iPad is added: it goes, at the new epoch.
-        let added = phone.add_members(id.clone(), vec![ipad.key_packages(1).unwrap().remove(0)]).unwrap();
+        let added = phone.add_members(id.clone(), vec![ipad.key_packages(1).unwrap().remove(0)]).unwrap().expect("something to add");
         phone.process(id.clone(), 2, added.commit.clone(), 14).unwrap();
         tablet.process(id.clone(), 2, added.commit, 14).unwrap();
         ipad.join_group(id.clone(), chat(), added.welcome.unwrap(), 2).unwrap();
@@ -2640,12 +3323,225 @@ mod tests {
     }
 
     #[test]
+    fn a_commit_the_home_never_carried_is_taken_from_the_worker_and_what_waited_for_it_is_read() {
+        // Row 551: Ana accepts Matt, and the worker takes her add at seq 1,
+        // but her app stops before it merges it or hands it to her home.
+        // Matt joins by its Welcome and says something at epoch 1, which
+        // reaches her through her home: held, never passed over, until the
+        // worker's commit is in; then read.
+        let dir = folder();
+        let (phone, ipad) = two(&dir);
+        let id = b"conversation-1".to_vec();
+        ipad.create_group(id.clone(), chat()).unwrap();
+        let added = ipad.add_members(id.clone(), vec![phone.key_packages(1).unwrap().remove(0)]).unwrap().expect("something to add");
+        phone.join_group(id.clone(), chat(), added.welcome.unwrap(), 1).unwrap();
+        assert_eq!(ipad.not_joined(id.clone()).unwrap().map(|waits| waits.account), Some("matt".into()));
+        assert!(ipad.groups().unwrap()[0].pending, "her add waits to be merged");
+
+        let said = phone.send(id.clone(), text("m1", "hi Ana"), 20).unwrap();
+        let first = HOME_SEQ_BASE + 1;
+        let held = ipad.process(id.clone(), first, said.clone(), 30).unwrap();
+        assert_eq!((held.outcome, held.behind, held.epoch), (DmOutcome::Held, true, 0));
+        assert!(ipad.groups().unwrap()[0].seq < first, "the position stays before it");
+
+        // Something other than a commit at the worker is passed over.
+        assert_eq!(ipad.take_worker_commit(id.clone(), 1, said.clone(), 5).unwrap().outcome, DmOutcome::Already);
+        assert_eq!(ipad.proposal_seq(id.clone()).unwrap(), 1);
+        // Her own add, from the worker's log at seq 2 (as if a proposal
+        // came first): merged, Matt in, said as he joined.
+        let taken = ipad.take_worker_commit(id.clone(), 2, added.commit.clone(), 10).unwrap();
+        assert_eq!((taken.outcome, taken.epoch), (DmOutcome::Committed, 1));
+        let came = taken.message.unwrap().members.unwrap();
+        assert_eq!(came.joined[0].account, "matt");
+        assert_eq!(ipad.not_joined(id.clone()).unwrap(), None);
+        assert!(!ipad.groups().unwrap()[0].pending);
+        assert_eq!(ipad.take_worker_commit(id.clone(), 2, added.commit.clone(), 10).unwrap().outcome, DmOutcome::Already);
+
+        let heard = ipad.process(id.clone(), first, said, 31).unwrap().message.unwrap();
+        assert_eq!(heard.content.text.as_deref(), Some("hi Ana"));
+        // The home carrying the same commit later changes nothing.
+        let again = ipad.process(id.clone(), first + 1, added.commit, 32).unwrap();
+        assert_ne!(again.outcome, DmOutcome::Committed);
+        assert_eq!(ipad.groups().unwrap()[0].epoch, 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_friends_device_added_while_away_waits_for_their_list_then_goes_on() {
+        // Row 561: Matt adds his tablet while Ana's iPad is away. Back, her
+        // iPad has his list from before, which doesn't name it: the add is
+        // held, the position kept, never dropped (which made it join again
+        // past everything said meanwhile); once his newer list is in, it's
+        // taken, and what the tablet says reads.
+        let dir = folder();
+        let (phone, ipad) = two(&dir);
+        let id = b"conversation-1".to_vec();
+        phone.create_group(id.clone(), chat()).unwrap();
+        let added = phone.add_members(id.clone(), vec![ipad.key_packages(1).unwrap().remove(0)]).unwrap().expect("something to add");
+        phone.commit_taken(id.clone()).unwrap();
+        ipad.join_group(id.clone(), chat(), added.welcome.unwrap(), 1).unwrap();
+
+        let tablet = device(&dir, "tablet");
+        let handoff = tablet.start_handoff(TABLET.into(), "iPad".into(), "iPadOS".into(), vec![7; 32]).unwrap();
+        tablet.finish_handoff(&handoff, phone.seal_handoff(handoff.qr()).unwrap().sealed, 5).unwrap();
+        let listed = |device: &DmDevice, id: &str| DmListed {
+            kind: DmLeafKind::Device,
+            leaf_id: id.into(),
+            signature_key: device.status().leaf_public,
+        };
+        let list = phone.sign_device_list(2, 6, vec![listed(&phone, "phone"), listed(&tablet, TABLET)]).unwrap();
+        phone.accept_list("matt".into(), list.clone()).unwrap();
+        tablet.accept_list("matt".into(), list.clone()).unwrap();
+        let more = phone.add_members(id.clone(), vec![tablet.key_packages(1).unwrap().remove(0)]).unwrap().expect("something to add");
+        phone.commit_taken(id.clone()).unwrap();
+        tablet.join_group(id.clone(), chat(), more.welcome.unwrap(), 2).unwrap();
+
+        let held = ipad.process(id.clone(), 2, more.commit.clone(), 10).unwrap();
+        assert_eq!((held.outcome, held.unlisted, held.why.as_str()), (DmOutcome::Held, true, "matt"));
+        assert_eq!(ipad.groups().unwrap()[0].seq, 1, "the position stays before it");
+        ipad.accept_list("matt".into(), list).unwrap();
+        let taken = ipad.process(id.clone(), 2, more.commit, 11).unwrap();
+        assert_eq!((taken.outcome, taken.epoch), (DmOutcome::Committed, 2));
+        let said = tablet.send(id.clone(), text("t1", "from the tablet"), 12).unwrap();
+        let heard = ipad.process(id.clone(), 3, said, 13).unwrap().message.unwrap();
+        assert_eq!(heard.content.text.as_deref(), Some("from the tablet"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Ana's iPad in a chat with Matt's phone; Matt's tablet, set up, on his
+    /// list v2 (phone and tablet) as the phone and tablet hold it, and his
+    /// v3 (the phone alone) signed: Ana's iPad holds v1 (row 561).
+    fn away_while_a_device_came_and_went(dir: &std::path::Path) -> (DmDevice, DmDevice, DmDevice, Vec<u8>, Vec<u8>) {
+        let (phone, ipad) = two(dir);
+        let id = b"conversation-1".to_vec();
+        phone.create_group(id.clone(), chat()).unwrap();
+        let added = phone.add_members(id.clone(), vec![ipad.key_packages(1).unwrap().remove(0)]).unwrap().expect("something to add");
+        phone.commit_taken(id.clone()).unwrap();
+        ipad.join_group(id.clone(), chat(), added.welcome.unwrap(), 1).unwrap();
+        let tablet = device(dir, "tablet");
+        let handoff = tablet.start_handoff(TABLET.into(), "Tablet".into(), "iPadOS".into(), vec![7; 32]).unwrap();
+        tablet.finish_handoff(&handoff, phone.seal_handoff(handoff.qr()).unwrap().sealed, 5).unwrap();
+        let listed = |device: &DmDevice, id: &str| DmListed {
+            kind: DmLeafKind::Device,
+            leaf_id: id.into(),
+            signature_key: device.status().leaf_public,
+        };
+        let v2 = phone.sign_device_list(2, 6, vec![listed(&phone, "phone"), listed(&tablet, TABLET)]).unwrap();
+        phone.accept_list("matt".into(), v2.clone()).unwrap();
+        tablet.accept_list("matt".into(), v2).unwrap();
+        let v3 = phone.sign_device_list(3, 7, vec![listed(&phone, "phone")]).unwrap();
+        (phone, ipad, tablet, id, v3)
+    }
+
+    fn item(seq: i64, envelope: String) -> DmWindowItem {
+        DmWindowItem { seq, envelope, arrived_ms: seq * 10 }
+    }
+
+    #[test]
+    fn a_device_that_came_and_went_while_away_is_read_through_its_window() {
+        // Row 561 (Fugo's rule): Matt's tablet joins, says something, and
+        // Matt's phone (there all along, on his latest list) takes it out
+        // again, all while Ana's iPad is away. Back, with Matt's newest list,
+        // which doesn't name the tablet, her iPad holds the add; the window
+        // takes it all, as she'd have seen it online, the tablet's message
+        // marked as from a device since removed.
+        let dir = folder();
+        let (phone, ipad, tablet, id, v3) = away_while_a_device_came_and_went(&dir);
+        let more = phone.add_members(id.clone(), vec![tablet.key_packages(1).unwrap().remove(0)]).unwrap().expect("something to add");
+        phone.commit_taken(id.clone()).unwrap();
+        tablet.join_group(id.clone(), chat(), more.welcome.unwrap(), 2).unwrap();
+        let said = tablet.send(id.clone(), text("t1", "from the tablet"), 12).unwrap();
+        tablet.process(id.clone(), 3, said.clone(), 13).unwrap();
+        phone.process(id.clone(), 3, said.clone(), 13).unwrap();
+        phone.accept_list("matt".into(), v3.clone()).unwrap();
+        let out = phone.remove_members(id.clone(), vec![TABLET.into()]).unwrap();
+        phone.commit_taken(id.clone()).unwrap();
+        let after = phone.send(id.clone(), text("p1", "tablet's gone"), 14).unwrap();
+
+        ipad.accept_list("matt".into(), v3).unwrap();
+        let held = ipad.process(id.clone(), 2, more.commit.clone(), 20).unwrap();
+        assert_eq!((held.outcome, held.unlisted), (DmOutcome::Held, true));
+        // Not there yet: nothing changes.
+        let open = ipad.process_window(id.clone(), vec![item(2, more.commit.clone()), item(3, said.clone())]).unwrap();
+        assert_eq!(open.end, DmWindowEnd::Open);
+        assert!(open.processed.is_empty());
+        assert_eq!(ipad.groups().unwrap()[0].seq, 1);
+
+        let closed = ipad
+            .process_window(id.clone(), vec![item(2, more.commit.clone()), item(3, said), item(4, out.commit.clone())])
+            .unwrap();
+        assert_eq!(closed.end, DmWindowEnd::Closed);
+        let outcomes: Vec<DmOutcome> = closed.processed.iter().map(|p| p.outcome).collect();
+        assert_eq!(outcomes, [DmOutcome::Committed, DmOutcome::Message, DmOutcome::Committed]);
+        let came = closed.processed[0].message.as_ref().unwrap().members.as_ref().unwrap();
+        assert_eq!(came.added[0].name, "Tablet");
+        let heard = closed.processed[1].message.as_ref().unwrap();
+        assert_eq!((heard.content.text.as_deref(), heard.departed), (Some("from the tablet"), true));
+        let went = closed.processed[2].message.as_ref().unwrap().members.as_ref().unwrap();
+        assert_eq!(went.removed[0].name, "Tablet");
+        assert_eq!(ipad.groups().unwrap()[0].seq, 4);
+        // And on, as ever.
+        let next = ipad.process(id.clone(), 5, after, 50).unwrap().message.unwrap();
+        assert_eq!((next.content.text.as_deref(), next.departed), (Some("tablet's gone"), false));
+        let kept: Vec<(Option<String>, bool)> =
+            ipad.history(id.clone(), None, 10).unwrap().into_iter().map(|m| (m.content.text, m.departed)).collect();
+        assert!(kept.contains(&(Some("from the tablet".into()), true)), "{kept:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn no_window_past_what_a_listed_device_never_took_out() {
+        // The tablet is never taken out: the window stays open, then (no
+        // more items) it's refused as before. In a self group none opens.
+        let dir = folder();
+        let (phone, ipad, tablet, id, v3) = away_while_a_device_came_and_went(&dir);
+        let more = phone.add_members(id.clone(), vec![tablet.key_packages(1).unwrap().remove(0)]).unwrap().expect("something to add");
+        phone.commit_taken(id.clone()).unwrap();
+        ipad.accept_list("matt".into(), v3).unwrap();
+        let open = ipad.process_window(id.clone(), vec![item(2, more.commit.clone())]).unwrap();
+        assert_eq!(open.end, DmWindowEnd::Open);
+        assert_eq!(ipad.groups().unwrap()[0].seq, 1);
+        let junk = ipad.process_window(id.clone(), vec![item(2, "not json".into())]).unwrap();
+        assert_eq!(junk.end, DmWindowEnd::Aborted);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// PassOn (Mista cc19e82e7, Fugo's condition 5): after the person's
+    /// home moves, the new home may serve a message again at a new seq.
+    /// Taken once, it's dropped the second time (its key is gone once
+    /// decrypted): one line in the history. The device's own the same.
+    #[test]
+    fn a_message_served_again_at_another_seq_shows_once() {
+        let dir = folder();
+        let (phone, ipad) = two(&dir);
+        let id = b"conversation-1".to_vec();
+        phone.create_group(id.clone(), chat()).unwrap();
+        let added = phone.add_members(id.clone(), vec![ipad.key_packages(1).unwrap().remove(0)]).unwrap().expect("something to add");
+        phone.commit_taken(id.clone()).unwrap();
+        ipad.join_group(id.clone(), chat(), added.welcome.unwrap(), 1).unwrap();
+
+        let said = phone.send(id.clone(), text("m1", "once"), 2).unwrap();
+        assert_eq!(ipad.process(id.clone(), 2, said.clone(), 3).unwrap().outcome, DmOutcome::Message);
+        let again = ipad.process(id.clone(), 7, said.clone(), 4).unwrap();
+        assert_eq!((again.outcome, again.message.is_some()), (DmOutcome::Dropped, false));
+        let heard = ipad.history(id.clone(), None, 50).unwrap();
+        assert_eq!(heard.iter().filter(|m| m.content.text.as_deref() == Some("once")).count(), 1);
+        // The sender's own copy, back twice.
+        assert_eq!(phone.process(id.clone(), 2, said.clone(), 3).unwrap().outcome, DmOutcome::Message);
+        let mine = phone.process(id.clone(), 7, said, 4).unwrap();
+        assert_eq!((mine.outcome, mine.message.is_some()), (DmOutcome::Dropped, false));
+        let kept = phone.history(id.clone(), None, 50).unwrap();
+        assert_eq!(kept.iter().filter(|m| m.content.text.as_deref() == Some("once")).count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn a_bad_message_is_dropped_and_the_group_goes_on() {
         let dir = folder();
         let (phone, ipad) = two(&dir);
         let id = b"conversation-1".to_vec();
         phone.create_group(id.clone(), chat()).unwrap();
-        let added = phone.add_members(id.clone(), vec![ipad.key_packages(1).unwrap().remove(0)]).unwrap();
+        let added = phone.add_members(id.clone(), vec![ipad.key_packages(1).unwrap().remove(0)]).unwrap().expect("something to add");
         phone.commit_taken(id.clone()).unwrap();
         ipad.join_group(id.clone(), chat(), added.welcome.unwrap(), 1).unwrap();
 
@@ -2655,6 +3551,32 @@ mod tests {
         let said = phone.send(id.clone(), text("m1", "still here"), 2).unwrap();
         let heard = ipad.process(id.clone(), 4, said, 3).unwrap().message.unwrap();
         assert_eq!(heard.content.text.as_deref(), Some("still here"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // Melone F3: a hand-off opens only with the identity the person's
+    // account publishes; someone else who knew the QR code's secret can't
+    // plant theirs. The offer is spent either way.
+    #[test]
+    fn a_hand_off_is_taken_only_with_the_published_identity() {
+        let dir = folder();
+        let (phone, _ipad) = two(&dir);
+        let published = phone.status().identity_public.unwrap();
+        let tablet = device(&dir, "tablet");
+        for (account, identity) in [("matt", vec![9; 32]), ("ana", published.clone())] {
+            let handoff = tablet.start_handoff(TABLET.into(), "iPad".into(), "iPadOS".into(), vec![7; 32]).unwrap();
+            let sealed = phone.seal_handoff(handoff.qr()).unwrap();
+            assert!(tablet.finish_handoff_for(&handoff, sealed.sealed.clone(), 5, account.into(), identity).is_err());
+            assert!(!tablet.status().set_up);
+            assert!(tablet.pin("matt".into()).is_none());
+            let spent = tablet.finish_handoff_for(&handoff, sealed.sealed, 5, "matt".into(), published.clone());
+            assert!(spent.is_err(), "spent");
+        }
+        let handoff = tablet.start_handoff(TABLET.into(), "iPad".into(), "iPadOS".into(), vec![7; 32]).unwrap();
+        let sealed = phone.seal_handoff(handoff.qr()).unwrap();
+        let done = tablet.finish_handoff_for(&handoff, sealed.sealed, 5, "matt".into(), published.clone()).unwrap();
+        assert_eq!(done.identity_public, published);
+        assert!(tablet.status().set_up);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2709,11 +3631,28 @@ mod tests {
 
         // Ana's key changes: sending waits until seen, and the mark goes.
         let new_key = dm_public_key(dm_new_secret().unwrap()).unwrap();
-        phone.key_changed("ana".into(), new_key).unwrap();
+        phone.key_changed("ana".into(), new_key.clone()).unwrap();
         let pin = phone.pin("ana".into()).unwrap();
         assert!(pin.changed_unseen && !pin.can_send && !pin.verified);
         phone.seen("ana".into()).unwrap();
         assert!(phone.pin("ana".into()).unwrap().can_send);
+
+        // E11-3: the numbers don't match: back to the key it changed from,
+        // verified as it was; the one that didn't match comes back only as
+        // another change, marked.
+        let real = ipad.status().identity_public.unwrap();
+        let pin = phone.pin("ana".into()).unwrap();
+        assert_eq!(pin.changed_from.as_deref(), Some(real.as_slice()));
+        assert!(phone.undo_key_change("ana".into(), vec![9; 32]).is_err());
+        phone.undo_key_change("ana".into(), real.clone()).unwrap();
+        let pin = phone.pin("ana".into()).unwrap();
+        assert_eq!(pin.identity_public, real);
+        assert!(pin.verified && !pin.changed_unseen && pin.changed_from.is_none() && !pin.mismatched);
+        assert_eq!(pin.device_list_version, 1);
+        phone.key_changed("ana".into(), new_key.clone()).unwrap();
+        let pin = phone.pin("ana".into()).unwrap();
+        assert!(pin.mismatched && pin.changed_unseen && !pin.verified);
+        assert!(phone.undo_key_change("matt".into(), real).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2741,7 +3680,8 @@ mod tests {
         phone.create_group(id.clone(), chat()).unwrap();
         let added = phone
             .add_members(id.clone(), vec![ipad.key_packages(1).unwrap().remove(0), tablet.key_packages(1).unwrap().remove(0)])
-            .unwrap();
+            .unwrap()
+            .expect("something to add");
         phone.process(id.clone(), 1, added.commit.clone(), 10).unwrap();
         ipad.join_group(id.clone(), chat(), added.welcome.clone().unwrap(), 1).unwrap();
 
@@ -2816,16 +3756,17 @@ mod tests {
         }
         let id = b"conversation-1".to_vec();
         phone.create_group(id.clone(), chat()).unwrap();
-        let added = phone.add_members(id.clone(), vec![ipad.key_packages(1).unwrap().remove(0)]).unwrap();
+        let added = phone.add_members(id.clone(), vec![ipad.key_packages(1).unwrap().remove(0)]).unwrap().expect("something to add");
         phone.process(id.clone(), 1, added.commit.clone(), 10).unwrap();
         ipad.join_group(id.clone(), chat(), added.welcome.unwrap(), 1).unwrap();
 
-        let more = ipad.add_members(id.clone(), vec![mini.key_packages(1).unwrap().remove(0)]).unwrap();
+        let more = ipad.add_members(id.clone(), vec![mini.key_packages(1).unwrap().remove(0)]).unwrap().expect("something to add");
         ipad.process(id.clone(), 2, more.commit.clone(), 20).unwrap();
         let line = phone.process(id.clone(), 2, more.commit.clone(), 21).unwrap().message.expect("a line for Ana's device");
         let members = line.members.unwrap();
         let who = |list: &[DmMember]| list.iter().map(|m| (m.account.clone(), m.leaf_id.clone(), m.name.clone())).collect::<Vec<_>>();
         assert_eq!(who(&members.added), [("ana".to_owned(), TABLET.to_owned(), "iPad mini".to_owned())]);
+        assert!(members.joined.is_empty(), "her second device: added, not joined");
         assert!(members.removed.is_empty() && members.set_up_again.is_empty() && members.key_changed.is_empty());
         // Both leaves are in, each under its own account.
         let mut both: Vec<(String, String)> =
@@ -2857,14 +3798,14 @@ mod tests {
         let me = b"self".to_vec();
         let mine = DmGroupKind { kind: DmGroupType::SelfGroup, accounts: vec!["matt".into()], claktory_id: String::new() };
         phone.create_group(me.clone(), mine.clone()).unwrap();
-        let added = phone.add_members(me.clone(), vec![tablet.key_packages(1).unwrap().remove(0)]).unwrap();
+        let added = phone.add_members(me.clone(), vec![tablet.key_packages(1).unwrap().remove(0)]).unwrap().expect("something to add");
         phone.process(me.clone(), 1, added.commit, 1).unwrap();
         tablet.join_group(me.clone(), mine, added.welcome.unwrap(), 1).unwrap();
 
         // A conversation with history on the tablet.
         let chat_id = b"conversation-1".to_vec();
         tablet.create_group(chat_id.clone(), chat()).unwrap();
-        let with_ana = tablet.add_members(chat_id.clone(), vec![ipad.key_packages(1).unwrap().remove(0)]).unwrap();
+        let with_ana = tablet.add_members(chat_id.clone(), vec![ipad.key_packages(1).unwrap().remove(0)]).unwrap().expect("something to add");
         tablet.process(chat_id.clone(), 1, with_ana.commit, 1).unwrap();
         let said = tablet.send(chat_id.clone(), text("t1", "hello"), 2).unwrap();
         tablet.process(chat_id.clone(), 2, said, 2).unwrap();
@@ -2904,8 +3845,75 @@ mod tests {
         // Pins: Bea, met on the phone, is pinned on the tablet too.
         phone.first_contact("bea".into(), dm_public_key(dm_new_secret().unwrap()).unwrap()).unwrap();
         let pins: serde_json::Value = serde_json::from_slice(&phone.export_pins().unwrap()).unwrap();
+        // Never from a message marked as a departed device's (Fugo 40397).
+        let departed = DmMessage {
+            seq: 99,
+            mine: false,
+            from_account: "matt".into(),
+            from_leaf: "phone".into(),
+            from_kind_device: true,
+            content: about("pins", None, serde_json::json!({"pins": pins.clone()})),
+            arrived_ms: 99,
+            members: None,
+            departed: true,
+        };
+        let self_kind = DmGroupKind { kind: DmGroupType::SelfGroup, accounts: vec!["matt".into()], claktory_id: String::new() };
+        {
+            let mut state = tablet.state();
+            tablet.store.with_tx(|_, tx| tablet.take(tx, &mut state, &self_kind, &me, &departed)).unwrap();
+        }
+        assert!(tablet.pin("bea".into()).is_none());
         both(about("pins", None, serde_json::json!({"pins": pins})));
         assert_eq!(tablet.pin("bea".into()).unwrap().identity_public, phone.pin("bea".into()).unwrap().identity_public);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_proposal_in_the_channel_feed_is_kept_by_its_digest() {
+        // #451 (Mista 32507): a Claktory sends its proposals and drafts into
+        // its channel through the home; the service's record names only the
+        // digest of the MLS bytes. Taken from the feed, it's found by that
+        // digest, and isn't the channel's history.
+        let dir = folder();
+        let (phone, _) = two(&dir);
+        let tablet = device(&dir, "tablet");
+        let handoff = tablet.start_handoff(TABLET.into(), "iPad".into(), "iPadOS".into(), vec![7; 32]).unwrap();
+        let sealed = phone.seal_handoff(handoff.qr()).unwrap();
+        tablet.finish_handoff(&handoff, sealed.sealed, 5).unwrap();
+        let listed = |device: &DmDevice, id: &str| DmListed {
+            kind: DmLeafKind::Device,
+            leaf_id: id.into(),
+            signature_key: device.status().leaf_public,
+        };
+        let list = phone.sign_device_list(2, 6, vec![listed(&phone, "phone"), listed(&tablet, TABLET)]).unwrap();
+        phone.accept_list("matt".into(), list.clone()).unwrap();
+        tablet.accept_list("matt".into(), list).unwrap();
+        let id = b"channel-mini".to_vec();
+        let channel = DmGroupKind { kind: DmGroupType::Channel, accounts: vec!["matt".into()], claktory_id: "mini".into() };
+        phone.create_group(id.clone(), channel.clone()).unwrap();
+        let added = phone.add_members(id.clone(), vec![tablet.key_packages(1).unwrap().remove(0)]).unwrap().expect("something to add");
+        phone.process(id.clone(), 1, added.commit, 1).unwrap();
+        tablet.join_group(id.clone(), channel, added.welcome.unwrap(), 1).unwrap();
+
+        let proposal = DmContent {
+            kind: "proposal".into(),
+            client_message_id: "p1".into(),
+            text: Some("proposed".into()),
+            by_agent: None,
+            extra_json: String::new(),
+        };
+        let said = phone.send(id.clone(), proposal, 2).unwrap();
+        let digest = read_envelope(&said).unwrap().digest().to_vec();
+        assert!(tablet.side_message(id.clone(), digest.clone()).unwrap().is_none());
+        let processed = tablet.process(id.clone(), 2, said, 2).unwrap();
+        assert_eq!(processed.outcome, DmOutcome::Message);
+        let kept = tablet.side_message(id.clone(), digest).unwrap().expect("kept by its digest");
+        assert_eq!((kept.content.kind.as_str(), kept.content.text.as_deref()), ("proposal", Some("proposed")));
+        assert!(tablet.history(id.clone(), None, 10).unwrap().iter().all(|message| message.content.kind != "proposal"));
+        // Something else said there is history as before.
+        let note = phone.send(id.clone(), text("n1", "hello"), 3).unwrap();
+        tablet.process(id.clone(), 3, note, 3).unwrap();
+        assert!(tablet.history(id.clone(), None, 10).unwrap().iter().any(|message| message.content.text.as_deref() == Some("hello")));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2915,7 +3923,7 @@ mod tests {
         let (phone, ipad) = two(&dir);
         let id = b"conversation-1".to_vec();
         phone.create_group(id.clone(), chat()).unwrap();
-        let added = phone.add_members(id.clone(), vec![ipad.key_packages(1).unwrap().remove(0)]).unwrap();
+        let added = phone.add_members(id.clone(), vec![ipad.key_packages(1).unwrap().remove(0)]).unwrap().expect("something to add");
         phone.commit_taken(id.clone()).unwrap();
         ipad.join_group(id.clone(), chat(), added.welcome.unwrap(), 1).unwrap();
         // Not through the feed: the side route, decrypted once.
@@ -2923,6 +3931,192 @@ mod tests {
         let first = ipad.open_side(id.clone(), said.clone(), 3).unwrap();
         assert_eq!(first.content.text.as_deref(), Some("proposed"));
         assert_eq!(ipad.open_side(id.clone(), said, 4).unwrap(), first);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn wrap(bytes: Vec<u8>) -> String {
+        Envelope::new(bytes).unwrap().to_json().to_string()
+    }
+
+    /// The MLS group of a Claktory's leaf joined from [welcome] (an
+    /// envelope), with OpenMLS directly, past every check of ours.
+    fn joined(provider: &Provider<'_>, welcome: &str) -> openmls::prelude::MlsGroup {
+        use openmls::prelude::tls_codec::Deserialize as _;
+        use openmls::prelude::*;
+        let welcome = read_envelope(welcome).unwrap().into_bytes();
+        let MlsMessageBodyIn::Welcome(welcome) = MlsMessageIn::tls_deserialize_exact(&welcome).unwrap().extract() else {
+            panic!("not a welcome")
+        };
+        let config =
+            MlsGroupJoinConfig::builder().use_ratchet_tree_extension(true).wire_format_policy(PURE_PLAINTEXT_WIRE_FORMAT_POLICY).build();
+        StagedWelcome::new_from_welcome(provider, &config, welcome, None).unwrap().into_group(provider).unwrap()
+    }
+
+    #[test]
+    fn an_add_of_only_those_in_the_group_already_is_nothing_to_add_by_its_kind() {
+        let dir = folder();
+        let (phone, ipad) = two(&dir);
+        let id = b"conversation-1".to_vec();
+        phone.create_group(id.clone(), chat()).unwrap();
+        let package = ipad.key_packages(1).unwrap().remove(0);
+        let added = phone.add_members(id.clone(), vec![package.clone()]).unwrap().expect("something to add");
+        assert_eq!(phone.process(id.clone(), 1, added.commit, 1).unwrap().outcome, DmOutcome::Committed);
+        // The iPad's key is in the group now: nothing to add, and no
+        // commit waiting, rather than an error told by its words (Fugo).
+        assert!(phone.add_members(id.clone(), vec![package]).unwrap().is_none());
+        // A refusal of another kind is still an error.
+        assert!(phone.add_members(id, vec!["not an envelope".into()]).is_err());
+    }
+
+    /// Matt's phone and Ana's iPad in a conversation (seqs 1 and 2 taken),
+    /// and Matt's Claktory granted it: its store, its leaf and its Welcome.
+    fn claktory_in_a_conversation(dir: &std::path::Path) -> (DmDevice, DmDevice, DmDevice, Me, Vec<u8>, String) {
+        use claktory_dm_crypto::certificate::claktory_leaf_id;
+        let (phone, ipad) = two(dir);
+        let mini = device(dir, "mini");
+        let id = b"conversation-1".to_vec();
+        phone.create_group(id.clone(), chat()).unwrap();
+        let added = phone.add_members(id.clone(), ipad.key_packages(1).unwrap()).unwrap().expect("something to add");
+        assert_eq!(phone.process(id.clone(), 1, added.commit, 1).unwrap().outcome, DmOutcome::Committed);
+        ipad.join_group(id.clone(), chat(), added.welcome.unwrap(), 1).unwrap();
+
+        // The Claktory's leaf, certified and listed by Matt's phone.
+        let key = LeafKey::generate().unwrap();
+        let leaf_id = claktory_leaf_id("mini", 1);
+        let certificate = phone.issue_certificate(DmLeafKind::Claktory, leaf_id.clone(), key.public().to_vec(), "mini".into(), 1).unwrap();
+        let me = Me::new(key, LeafCertificate::from_bytes(&certificate).unwrap()).unwrap();
+        let leaves = vec![
+            DmListed { kind: DmLeafKind::Device, leaf_id: "phone".into(), signature_key: phone.status().leaf_public },
+            DmListed { kind: DmLeafKind::Claktory, leaf_id, signature_key: me.key.public().to_vec() },
+        ];
+        let v2 = phone.sign_device_list(2, 2, leaves).unwrap();
+        phone.accept_list("matt".into(), v2.clone()).unwrap();
+        ipad.accept_list("matt".into(), v2).unwrap();
+        let package = mini.store().with_tx(|provider, _| me.key_package(provider)).unwrap();
+        let granted = phone.add_members(id.clone(), vec![wrap(package)]).unwrap().expect("something to add");
+        for device in [&phone, &ipad] {
+            assert_eq!(device.process(id.clone(), 2, granted.commit.clone(), 2).unwrap().outcome, DmOutcome::Committed);
+        }
+        (phone, ipad, mini, me, id, granted.welcome.unwrap())
+    }
+
+    #[test]
+    fn a_claktorys_leave_from_the_worker_is_taken_before_the_homes_commit_of_it() {
+        // #451 (Mista 32950): once a device reads the home, proposals (a
+        // Claktory's own Remove) stay at the worker. Each is taken from
+        // there, by the worker's own seqs, before the home's commit that
+        // takes it in by reference; that commit doesn't go in without it.
+        use openmls::prelude::tls_codec::Serialize as _;
+        let home = |n: i64| HOME_SEQ_BASE + n;
+        let dir = folder();
+        let (phone, ipad, mini, me, id, welcome) = claktory_in_a_conversation(&dir);
+        assert_eq!(ipad.proposal_seq(id.clone()).unwrap(), 2, "before the home: where it is in the feed");
+
+        // Both go over to the home: the worker's position stays as it was.
+        let said = phone.send(id.clone(), text("m1", "from the home"), 3).unwrap();
+        for device in [&phone, &ipad] {
+            assert!(device.process(id.clone(), home(1), said.clone(), 3).unwrap().message.is_some());
+            assert_eq!(device.proposal_seq(id.clone()).unwrap(), 2);
+        }
+
+        // The Claktory asks to leave, at the worker (its seq 3).
+        let leave = mini
+            .store()
+            .with_tx(|provider, _| -> Result<Vec<u8>, claktory_dm_crypto::Error> {
+                let mut group = joined(provider, &welcome);
+                Ok(group.leave_group(provider, &me.key).unwrap().tls_serialize_detached().unwrap())
+            })
+            .unwrap();
+        // Said before it came (with a proposal waiting, nothing is said
+        // until a commit takes it in).
+        let old = phone.send(id.clone(), text("m2", "old"), 5).unwrap();
+        // Through process, a worker's seq is behind the home's: never taken.
+        assert_eq!(ipad.process(id.clone(), 3, wrap(leave.clone()), 4).unwrap().outcome, DmOutcome::Already);
+        for device in [&phone, &ipad] {
+            assert_eq!(device.take_proposal(id.clone(), 3, wrap(leave.clone())).unwrap().outcome, DmOutcome::Proposal);
+            assert_eq!(device.take_proposal(id.clone(), 3, wrap(leave.clone())).unwrap().outcome, DmOutcome::Already);
+            assert_eq!(device.proposal_seq(id.clone()).unwrap(), 3);
+        }
+        // Anything else still at the worker is passed over, its seq too.
+        assert_eq!(ipad.take_proposal(id.clone(), 4, old).unwrap().outcome, DmOutcome::Already);
+        assert_eq!(ipad.proposal_seq(id.clone()).unwrap(), 4);
+
+        // The phone's next commit takes it in; at the home, the iPad takes
+        // that commit, and the Claktory is out.
+        let commit = phone.update_group(id.clone()).unwrap().commit;
+        assert_eq!(phone.process(id.clone(), home(2), commit.clone(), 6).unwrap().outcome, DmOutcome::Committed);
+        assert_eq!(ipad.process(id.clone(), home(2), commit, 6).unwrap().outcome, DmOutcome::Committed);
+        for device in [&phone, &ipad] {
+            assert!(device.members(id.clone()).unwrap().iter().all(|member| member.kind != DmLeafKind::Claktory));
+        }
+        // Gone with the group.
+        ipad.skip_proposals(id.clone(), 9).unwrap();
+        assert_eq!(ipad.proposal_seq(id.clone()).unwrap(), 9);
+        ipad.forget_group(id.clone()).unwrap();
+        assert_eq!(ipad.proposal_seq(id.clone()).unwrap(), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn something_a_claktory_says_in_a_conversation_is_dropped_and_never_shown() {
+        // #451 (Fugo, Mista 32498): a home can't see who sent a message, so
+        // the friend's device is the check. Matt's Claktory, granted his
+        // conversation with Ana, says something there with OpenMLS
+        // directly, past every check on its own side: Ana's iPad drops it,
+        // and nothing of it shows.
+        use openmls::prelude::tls_codec::Serialize as _;
+        let dir = folder();
+        let (phone, ipad, mini, me, id, welcome) = claktory_in_a_conversation(&dir);
+
+        // It joins from its Welcome and speaks, no check of ours in the way.
+        let content = text("c1", "psst").to_content().unwrap().encode().unwrap();
+        let said = mini
+            .store()
+            .with_tx(|provider, _| -> Result<Vec<u8>, claktory_dm_crypto::Error> {
+                let mut group = joined(provider, &welcome);
+                Ok(group.create_message(provider, &me.key, &content).unwrap().tls_serialize_detached().unwrap())
+            })
+            .unwrap();
+        let processed = ipad.process(id.clone(), 3, wrap(said), 3).unwrap();
+        assert_eq!(processed.outcome, DmOutcome::Dropped);
+        assert!(processed.message.is_none());
+        let shown: Vec<_> = ipad.history(id.clone(), None, 100).unwrap().into_iter().filter_map(|message| message.content.text).collect();
+        assert!(!shown.iter().any(|text| text == "psst"), "{shown:?}");
+        // The conversation goes on.
+        let next = phone.send(id.clone(), text("m1", "still here"), 4).unwrap();
+        assert!(ipad.process(id.clone(), 4, next, 4).unwrap().message.is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_list_names_the_home_and_a_friend_reads_it_and_the_store_keeps_going_over() {
+        // #451: the person's list names their home Claktory, signed with the
+        // rest; a friend reads it from the list they took. A list without
+        // one reads as before. Going over to the home is kept in the store.
+        let dir = folder();
+        let path = dir.join("phone.db").to_string_lossy().into_owned();
+        let (store_key, leaf_key, identity) = (dm_new_secret().unwrap(), dm_new_secret().unwrap(), dm_new_secret().unwrap());
+        let phone = DmDevice::open(path.clone(), store_key.clone(), leaf_key.clone(), None).unwrap().unwrap();
+        let matt = phone.set_up_first(identity.clone(), "matt".into(), "phone".into(), "iPhone".into(), 1).unwrap();
+        let ipad = device(&dir, "ipad");
+        ipad.set_up_first(dm_new_secret().unwrap(), "ana".into(), "ipad".into(), "iPad".into(), 1).unwrap();
+        ipad.first_contact("matt".into(), matt.identity_public).unwrap();
+        ipad.accept_list("matt".into(), matt.device_list).unwrap();
+        assert_eq!(ipad.device_list("matt".into()).unwrap().unwrap().home, None);
+
+        let leaves = phone.device_list("matt".into()).unwrap().unwrap().leaves;
+        assert!(phone.sign_device_list_with_home(2, 2, leaves.clone(), Some(vec![1; 31])).is_err());
+        let homed = phone.sign_device_list_with_home(2, 2, leaves, Some(vec![7; 32])).unwrap();
+        ipad.accept_list("matt".into(), homed).unwrap();
+        let read = ipad.device_list("matt".into()).unwrap().unwrap();
+        assert_eq!((read.version, read.home), (2, Some(vec![7; 32])));
+
+        assert!(!phone.home_drained().unwrap());
+        phone.set_home_drained().unwrap();
+        assert!(phone.home_drained().unwrap());
+        drop(phone);
+        let again = DmDevice::open(path, store_key, leaf_key, Some(identity)).unwrap().unwrap();
+        assert!(again.home_drained().unwrap());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

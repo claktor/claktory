@@ -15,6 +15,7 @@
 //! included) can make, approve or change one: only the person, from the app.
 
 pub(crate) mod agents;
+pub(crate) mod approval_card;
 pub(crate) mod bound;
 pub(crate) mod curator;
 pub(crate) mod groups;
@@ -22,11 +23,13 @@ pub mod handoff;
 pub mod identity;
 pub(crate) mod lead;
 pub(crate) mod quarantine;
+pub(crate) mod sealed;
 pub(crate) mod senders;
 pub(crate) mod share_listener;
 pub mod shares;
 pub(crate) mod spend;
 pub(crate) mod start;
+pub(crate) mod trust_card;
 pub(crate) mod waiting;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -111,6 +114,12 @@ ALTER TABLE pipe_messages ADD COLUMN replied INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE pipe_secret_approvals ADD COLUMN replied INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// The migration that tags a Claktory line announcing a website shared
+/// with this side with that share's id (W2), so the app can open it there.
+pub(crate) const SHARE_LINES: &str = "
+ALTER TABLE pipe_messages ADD COLUMN share TEXT NOT NULL DEFAULT '';
+";
+
 /// A pipe's state, as `v1::PipeState`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -123,6 +132,27 @@ pub(crate) enum State {
     Open,
     Paused,
     Closed,
+}
+
+/// When the loop breaker paused a pipe, and which rule did: a repeated
+/// message, or `LOOP_AFTER` in a row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub(crate) struct Looped {
+    pub at: i64,
+    pub repeat: bool,
+}
+
+impl Looped {
+    /// Why it paused, for a card that asks to continue it: in Claktory's
+    /// words only, never the other side's (an agent reads the card).
+    pub(crate) fn why(looped: Option<Looped>) -> String {
+        match looped {
+            Some(Looped { repeat: true, .. }) => "the agents on both sides repeated the same message".to_owned(),
+            Some(Looped { repeat: false, .. }) => format!("the agents on both sides exchanged {LOOP_AFTER} messages on their own"),
+            None => "the agents on both sides talked on their own too long".to_owned(),
+        }
+    }
 }
 
 /// Why a pipe is paused.
@@ -280,6 +310,11 @@ pub(crate) struct Record {
     pub quiet: u32,
     /// Hashes of the latest agents' messages, to tell repeats.
     pub recent: Vec<u64>,
+    /// The loop breaker's latest pause (`count_for_loop`), which a card to
+    /// continue it is bound to (friend bug #32); None in pipes from before.
+    pub looped: Option<Looped>,
+    /// The other side says its loop breaker paused it (`Pause::Peer`).
+    pub peer_looped: bool,
     pub next_seq: u64,
     /// Members quarantined for it (`quarantine`): the person's choice alone.
     pub quarantined: Vec<String>,
@@ -342,6 +377,15 @@ impl Record {
         self.send_only.iter().any(|id| id == agent)
     }
 
+    /// "Ana's Claktory", else who the other side is: for what its
+    /// Claktory did by itself.
+    pub(crate) fn peer_claktory_owned(&self) -> String {
+        match self.peer.as_ref().map(|peer| peer.owner_name.as_str()).filter(|owner| !owner.is_empty()) {
+            Some(owner) => format!("{owner}'s Claktory"),
+            None => self.peer_who(),
+        }
+    }
+
     pub(crate) fn peer_claktory(&self) -> String {
         self.peer
             .as_ref()
@@ -372,6 +416,8 @@ struct Data {
     waking: BTreeSet<String>,
     /// Curators (`curator`), by id.
     curators: BTreeSet<String>,
+    /// Errand agents (`crate::errands`), by id: contained too.
+    errand_agents: BTreeSet<String>,
     loaded: bool,
 }
 
@@ -430,11 +476,27 @@ impl Pipes {
         self.data().curators.contains(agent)
     }
 
-    /// Whether `agent` is contained: a pipe's liaison or a curator. Either
-    /// has no commands, secrets, web, messaging or apps.
+    /// Whether `agent` is an errand agent (`crate::errands`).
+    pub(crate) fn errand_agent(&self, agent: &str) -> bool {
+        self.data().errand_agents.contains(agent)
+    }
+
+    /// Whether `agent` is contained: a pipe's liaison, a curator or an
+    /// errand agent. Each has no commands, secrets, web, messaging or apps.
     pub(crate) fn contained(&self, agent: &str) -> bool {
         let data = self.data();
-        data.curators.contains(agent) || data.pipes.values().any(|record| record.quarantined.iter().any(|id| id == agent))
+        data.curators.contains(agent)
+            || data.errand_agents.contains(agent)
+            || data.pipes.values().any(|record| record.quarantined.iter().any(|id| id == agent))
+    }
+
+    pub(crate) fn set_errand_agent(&self, agent: &str, errand: bool) {
+        let mut data = self.data();
+        if errand {
+            data.errand_agents.insert(agent.to_owned());
+        } else {
+            data.errand_agents.remove(agent);
+        }
     }
 
     pub(crate) fn set_curator(&self, agent: &str, curator: bool) {
@@ -500,6 +562,10 @@ pub(crate) fn start(factory: &Arc<Factory>) {
         Ok(curators) => data.curators = curators,
         Err(error) => tracing::error!(%error, "could not read the curators"),
     }
+    match crate::errands::load_agents(&factory.store) {
+        Ok(agents) => data.errand_agents = agents,
+        Err(error) => tracing::error!(%error, "could not read the errand agents"),
+    }
     data.loaded = true;
     // Invites expired meanwhile close now; the others when they expire.
     let invites: Vec<String> =
@@ -510,6 +576,7 @@ pub(crate) fn start(factory: &Arc<Factory>) {
     }
     quarantine::upgrade(factory);
     bound::upgrade(factory);
+    sealed::upgrade(factory);
     agents::retired(factory, retired);
     // A pipe with agents and no lead (from before every pipe had one) gets one.
     lead::settle_all(factory);
@@ -581,14 +648,25 @@ fn save(factory: &Factory, record: &Record) {
 
 /// Changes a pipe, keeps it and tells every client; None when it's gone.
 pub(crate) fn change<R>(factory: &Factory, id: &str, edit: impl FnOnce(&mut Record) -> R) -> Option<R> {
-    let (result, record) = {
+    let (result, record, before, was) = {
         let mut data = factory.pipes.data();
         let record = data.pipes.get_mut(id)?;
+        // While it waits for approval, an agent's card to approve it may
+        // turn void (`approval_card`).
+        let before = (record.state == State::Approval).then(|| record.clone());
+        let was = record.state;
         let result = edit(record);
-        (result, record.clone())
+        (result, record.clone(), before, was)
     };
     save(factory, &record);
     factory.broadcast_workspace(&factory.lock());
+    if let Some(before) = before {
+        approval_card::changed(factory, &before, Some(&record));
+    }
+    // A card asking to accept who's at the other end is void once it closes.
+    if was != State::Closed && record.state == State::Closed {
+        trust_card::settle(factory, id, "the pipe was closed");
+    }
     Some(result)
 }
 
@@ -642,6 +720,9 @@ pub(crate) struct Message {
     /// Sent back to its writer by the person's reply (#370): never sent.
     /// The reply is in decision_notes, shown as its note (`for_person`).
     pub replied: bool,
+    /// A Claktory line announcing a website shared with this side: its
+    /// share's id (`line_for_share`); empty otherwise.
+    pub share: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -773,11 +854,12 @@ impl Message {
             state: self.state.to_proto().into(),
             note: self.note.clone(),
             replied: self.replied,
+            share_id: self.share.clone(),
         }
     }
 }
 
-const COLUMNS: &str = "seq, msg_id, created, author, name, role, agent, text, files, state, note, replied";
+const COLUMNS: &str = "seq, msg_id, created, author, name, role, agent, text, files, state, note, replied, share";
 
 fn read_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     let files: String = row.get(8)?;
@@ -794,6 +876,7 @@ fn read_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         state: MessageState::parse(&row.get::<_, String>(9)?),
         note: row.get(10)?,
         replied: row.get(11)?,
+        share: row.get(12)?,
     })
 }
 
@@ -822,7 +905,7 @@ pub(crate) fn add(factory: &Factory, pipe: &str, mut message: Message) -> Option
     }
     let files = serde_json::to_string(&message.files).unwrap_or_else(|_| "[]".to_owned());
     let stored = factory.store.db().execute(
-        &format!("INSERT INTO pipe_messages (pipe, {COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
+        &format!("INSERT INTO pipe_messages (pipe, {COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"),
         params![
             pipe,
             i64::try_from(seq).unwrap_or(i64::MAX),
@@ -836,7 +919,8 @@ pub(crate) fn add(factory: &Factory, pipe: &str, mut message: Message) -> Option
             files,
             message.state.as_str(),
             message.note,
-            message.replied
+            message.replied,
+            message.share
         ],
     );
     if let Err(error) = stored {
@@ -856,6 +940,13 @@ pub(crate) const REVIEW_NOTE: &str = "Waiting for you: let it in, or discard it.
 /// A line from Claktory in the pipe's chat.
 pub(crate) fn line(factory: &Factory, pipe: &str, text: impl Into<String>) {
     add(factory, pipe, Message { text: text.into(), ..Message::default() });
+}
+
+/// The line announcing a website the other side shares with this one
+/// ("Ana shares Dashboard."), tagged with its `share` so the app offers
+/// Open and Copy address on it (W2).
+pub(crate) fn line_for_share(factory: &Factory, pipe: &str, text: impl Into<String>, share: &str) {
+    add(factory, pipe, Message { text: text.into(), share: share.to_owned(), ..Message::default() });
 }
 
 /// Changes a message's state (and note); returns it as it is now.
@@ -959,6 +1050,11 @@ fn messages_from(factory: &Factory, pipe: &str, from: u64, before: u64) -> (Vec<
     })
 }
 
+/// How many of this side's agents' messages wait for the person to send them.
+pub(crate) fn waiting_outgoing(factory: &Factory, pipe: &str) -> u32 {
+    counted(factory, pipe, &[Author::MyAgent], &[MessageState::Held], i64::MAX / 2)
+}
+
 /// How many of the other side's messages wait for the person to let them in.
 pub(crate) fn waiting_incoming(factory: &Factory, pipe: &str) -> u32 {
     counted(factory, pipe, &[Author::TheirAgent, Author::TheirPerson], &[MessageState::HeldIncoming], i64::MAX / 2)
@@ -1027,6 +1123,8 @@ pub(crate) fn view(factory: &Factory, inner: &Inner) -> (Vec<v1::Pipe>, String) 
             let (forward, reports) = handoff::pipe_view(factory, record);
             let (peer_waiting, peer_waiting_until_ms) = waiting::shown(record);
             v1::Pipe {
+                held_agents: sealed::view(&inner.config, &records, record),
+                cant_limit: Vec::new(),
                 peer_waiting,
                 peer_waiting_until_ms,
                 id: record.id.clone(),
@@ -1202,7 +1300,8 @@ fn repeatable(text: &str) -> Option<String> {
 /// Counts a message towards the loop breaker: this side's person's resets
 /// it (the other side's can't: it could claim any message is its
 /// person's); `LOOP_AFTER` others in a row, or a long text `REPEATS` times
-/// among the latest `REPEAT_WINDOW`, pause the pipe.
+/// among the latest `REPEAT_WINDOW`, pause the pipe. Only exchanges count:
+/// a member that only sends never comes here (friend bug #33).
 pub(crate) fn count_for_loop(factory: &Arc<Factory>, pipe: &str, author: Author, text: &str) {
     use std::hash::{Hash, Hasher};
     let tripped = {
@@ -1241,9 +1340,10 @@ pub(crate) fn count_for_loop(factory: &Arc<Factory>, pipe: &str, author: Author,
         let paused = change(factory, pipe, |record| {
             record.state = State::Paused;
             record.paused = Pause::Loop;
+            record.looped = Some(Looped { at: now_ms(), repeat: tripped == Tripped::Repeat });
         });
         if paused.is_some() {
-            if let Err(error) = pipe_link::pause(factory, pipe) {
+            if let Err(error) = pipe_link::pause_looped(factory, pipe) {
                 tracing::warn!(%pipe, %error, "could not tell the other side the pipe paused");
             }
             line(
@@ -1561,6 +1661,11 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
         factory.deliver_event(&agent, text, crate::factory::host_event(summary));
         return Ok(());
     }
+    // From an agent's card (#471 G1): only approving, with the person's
+    // own choices; dismissing or replying is on the card itself.
+    if !request.card_id.trim().is_empty() && (!request.approve || request.reply) {
+        return Err(RequestError::Pipe("Dismiss the card, or reply on it, on the card itself.".to_owned()));
+    }
     if !request.approve {
         pipe_link::close(factory, &record.id);
         close_with(factory, &record.id, "You turned it down.");
@@ -1571,18 +1676,67 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
         }
         return Ok(());
     }
+    choices_checked(factory, &record, request)?;
+    let card = approval_card::claim(factory, &record, request)?;
+    let from = card.as_ref().map(|(_, agent)| factory.agent_name(agent));
+    let approved = approve_as_chosen(factory, &record, request, comment, from.as_deref()).await;
+    if let Some((id, _)) = card {
+        approval_card::settled(factory, id, &record, approved.is_ok());
+    }
+    approved
+}
+
+/// The person's choices on approving `record` (ApprovePipe), checked
+/// before anything is made; an agent's card to approve it is checked the
+/// same (`approval_card`).
+pub(crate) fn choices_checked(factory: &Factory, record: &Record, request: &v1::ApprovePipe) -> Result<(), RequestError> {
+    let send_only = request.send_only.as_ref().map(|chosen| chosen.agent_ids.clone()).unwrap_or_default();
+    let members = checked_members_sending(factory, record, &request.member_ids, &send_only)?;
+    let quarantined = match &request.quarantined {
+        Some(chosen) => checked_members(factory, record, &chosen.agent_ids)?,
+        None => Vec::new(),
+    };
+    if let Some(stray) = quarantined.iter().find(|id| !members.contains(id)) {
+        return Err(RequestError::Pipe(format!("{} isn't one of this pipe's agents.", factory.agent_name(stray))));
+    }
+    let lead = request.lead_id.trim();
+    sealed::check(factory, &record.id, &sealed::Roles { members: &members, lead, bound: "" })?;
+    // A new liaison answers it; else the lead, one of its agents.
+    let liaison = !request.liaison_name.trim().is_empty();
+    if !liaison && lead.is_empty() {
+        return Err(RequestError::Pipe("Choose the agent that answers the pipe, or add a liaison agent.".to_owned()));
+    }
+    if !liaison && !members.iter().any(|id| id == lead) {
+        return Err(RequestError::Pipe("The lead must be one of the pipe's agents.".to_owned()));
+    }
+    checked_send_only(factory, &send_only, &members, &quarantined, if liaison { "" } else { lead }, "")?;
+    Ok(())
+}
+
+/// Approves `record` as the person chose (`approve`), from an agent's card
+/// when `from` names it.
+async fn approve_as_chosen(
+    factory: &Arc<Factory>,
+    record: &Record,
+    request: &v1::ApprovePipe,
+    comment: &str,
+    from: Option<&str>,
+) -> Result<(), RequestError> {
     let send_only_wanted = request.send_only.as_ref().map(|chosen| chosen.agent_ids.clone()).unwrap_or_default();
-    let mut members = checked_members_sending(factory, &record, &request.member_ids, &send_only_wanted)?;
+    let mut members = checked_members_sending(factory, record, &request.member_ids, &send_only_wanted)?;
     let mut quarantined = match &request.quarantined {
-        Some(chosen) => checked_members(factory, &record, &chosen.agent_ids)?,
+        Some(chosen) => checked_members(factory, record, &chosen.agent_ids)?,
         None => Vec::new(),
     };
     if let Some(stray) = quarantined.iter().find(|id| !members.contains(id)) {
         return Err(RequestError::Pipe(format!("{stray} isn't one of this pipe's agents.")));
     }
+    // Before a liaison is made for it: a new one is on no other pipe.
+    let roles = sealed::Roles { members: &members, lead: request.lead_id.trim(), bound: "" };
+    sealed::check(factory, &record.id, &roles)?;
     let mut lead = request.lead_id.trim().to_owned();
     if !request.liaison_name.trim().is_empty() {
-        let liaison = make_liaison(factory, &record, request.liaison_name.trim()).await?;
+        let liaison = make_liaison(factory, record, request.liaison_name.trim()).await?;
         if !members.contains(&liaison) {
             members.push(liaison.clone());
         }
@@ -1628,10 +1782,11 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
     if request.review_outgoing.is_none() {
         review_with_commands(factory, &record.id, &[]);
     }
+    let you = from.map_or_else(|| "You approved it".to_owned(), |agent| format!("You approved it, from {agent}'s card"));
     if opened {
-        line(factory, &record.id, "You approved it, and so did the other side: the pipe is open.");
+        line(factory, &record.id, format!("{you}, and so did the other side: the pipe is open."));
     } else {
-        line(factory, &record.id, format!("You approved it. Waiting for {} to approve it too.", record.peer_who()));
+        line(factory, &record.id, format!("{you}. Waiting for {} to approve it too.", record.peer_who()));
     }
     if !comment.is_empty()
         && let Some(record) = factory.pipes.get(&record.id)
@@ -1878,6 +2033,9 @@ pub(crate) fn update(factory: &Arc<Factory>, request: &v1::UpdatePipe) -> Result
     {
         return Err(RequestError::Pipe("A pipe's limits must allow at least one message.".to_owned()));
     }
+    let bound = if after_members.contains(&record.bound) { record.bound.as_str() } else { "" };
+    let roles = sealed::Roles { members: &after_members, lead: &after_lead, bound };
+    sealed::check(factory, &record.id, &roles)?;
     let review_off = request.review_outgoing == Some(false) && record.review;
     let incoming = request.review_incoming.filter(|review| *review != record.review_incoming);
     let lead_before = lead::effective(&factory.lock().config, &record).unwrap_or_default();
@@ -1992,14 +2150,23 @@ pub(crate) fn set_pipe_state_by(factory: &Arc<Factory>, request: &v1::SetPipeSta
         }
         v1::PipeAction::Resume => {
             if record.state != State::Paused || record.paused == Pause::Peer {
-                let why = if record.paused == Pause::Peer {
+                let why = if record.paused == Pause::Peer && record.peer_looped {
+                    format!(
+                        "{} paused it, because the agents were going back and forth: only they can continue it.",
+                        record.peer_claktory_owned()
+                    )
+                } else if record.paused == Pause::Peer {
                     format!("{} paused it: only they can resume it.", record.peer_who())
                 } else {
                     "This pipe isn't paused.".to_owned()
                 };
                 return Err(RequestError::Pipe(why));
             }
-            pipe_link::resume(factory, &id).map_err(pipe_error)?;
+            if record.paused == Pause::Loop {
+                pipe_link::resume_looped(factory, &id).map_err(pipe_error)?;
+            } else {
+                pipe_link::resume(factory, &id).map_err(pipe_error)?;
+            }
             if record.paused == Pause::Loop {
                 let now = crate::transcript::now_ms();
                 crate::needs_you::pipe_decided(factory, &id, 0, crate::needs_you::PipeDecision::Loop, "", true, "", now);
@@ -2092,12 +2259,17 @@ fn save_selected(factory: &Factory, shown: Option<&str>) {
 }
 
 fn delete(factory: &Factory, id: &str) {
-    {
+    let removed = {
         let mut data = factory.pipes.data();
-        data.pipes.remove(id);
+        let removed = data.pipes.remove(id);
         if data.selected.as_deref() == Some(id) {
             data.selected = None;
         }
+        removed
+    };
+    if let Some(removed) = removed {
+        approval_card::changed(factory, &removed, None);
+        trust_card::settle(factory, id, "the pipe was deleted");
     }
     let db = factory.store.db();
     for statement in ["DELETE FROM pipes WHERE id = ?1", "DELETE FROM pipe_messages WHERE pipe = ?1"] {
@@ -2219,7 +2391,10 @@ pub(crate) fn transmit(factory: &Arc<Factory>, pipe: &str, message: &Message, vi
         return;
     }
     let files = message.files.iter().map(|file| pipe_link::OutFile { name: file.name.clone(), path: file.path.clone() }).collect();
-    let outgoing = Outgoing { msg_id: message.msg_id.clone(), via, text: message.text.clone(), files };
+    // Its writer only sends, as it stands now: the other side's loop
+    // breaker leaves it out too (friend bug #33).
+    let sends_only = matches!(via, Via::Agent { .. }) && factory.pipes.get(pipe).is_some_and(|record| record.sends_only(&message.agent));
+    let outgoing = Outgoing { msg_id: message.msg_id.clone(), via, text: message.text.clone(), files, sends_only };
     match pipe_link::send(factory, pipe, outgoing) {
         Ok(_) => {
             set_state(factory, pipe, message.seq, MessageState::Queued, None);
@@ -2273,7 +2448,9 @@ pub(crate) fn decide_message(factory: &Arc<Factory>, request: &v1::DecidePipeMes
             if record.state != State::Open {
                 return Err(RequestError::Pipe(not_open(&record)));
             }
-            count_for_loop(factory, &record.id, Author::MyAgent, &message.text);
+            if !record.sends_only(&message.agent) {
+                count_for_loop(factory, &record.id, Author::MyAgent, &message.text);
+            }
             transmit(factory, &record.id, &message, Via::Agent { name: message.name.clone(), role: message.role.clone() });
             // The writer hears it went only with a comment.
             if !note.is_empty() {
@@ -2557,7 +2734,12 @@ impl pipe_link::Store for Link {
         if add(factory, pipe, kept).is_none() {
             return Err("It couldn't be kept.".to_owned());
         }
-        count_for_loop(factory, pipe, author, &message.text);
+        // What the other side says an agent that only sends wrote takes no
+        // part in the loop breaker, not even a place among the latest
+        // (friend bug #33; Fugo 33515); a person's counts whatever it says.
+        if !(message.sends_only && author == Author::TheirAgent) {
+            count_for_loop(factory, pipe, author, &message.text);
+        }
         if state == MessageState::Received {
             agents::wake(factory, pipe);
         } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -2587,28 +2769,47 @@ impl pipe_link::Store for Link {
         }
     }
 
-    fn peer_paused(&self, factory: &Arc<Factory>, pipe: &str) {
+    fn peer_paused(&self, factory: &Arc<Factory>, pipe: &str, looped: bool) {
         let paused = change(factory, pipe, |record| {
             if record.state != State::Open {
                 return false;
             }
             record.state = State::Paused;
             record.paused = Pause::Peer;
+            record.peer_looped = looped;
             true
         });
         if paused == Some(true) {
-            let who = factory.pipes.get(pipe).map(|record| record.peer_who()).unwrap_or_default();
-            line(factory, pipe, format!("{who} paused it."));
+            let record = factory.pipes.get(pipe);
+            let who = record.as_ref().map(|record| record.peer_who()).unwrap_or_default();
+            // Their loop breaker, not their person (Abbacchio row 1177):
+            // "Ana's Claktory paused it".
+            let said = if looped {
+                let whose = record.as_ref().map_or(who, Record::peer_claktory_owned);
+                format!("{whose} paused it: the agents were going back and forth on their own.")
+            } else {
+                format!("{who} paused it.")
+            };
+            line(factory, pipe, said);
         }
     }
 
-    fn peer_resumed(&self, factory: &Arc<Factory>, pipe: &str) {
+    fn peer_resumed(&self, factory: &Arc<Factory>, pipe: &str, looped: bool) {
         let resumed = change(factory, pipe, |record| {
             if record.state != State::Paused || record.paused != Pause::Peer {
                 return false;
             }
             record.state = State::Open;
             record.paused = Pause::None;
+            record.peer_looped = false;
+            // Their person continued their loop breaker's pause: this
+            // side's repeats start over too, so the post that waited behind
+            // it doesn't trip it here at once (Abbacchio rows 1193-1195).
+            // Never the count: their word can't lift that bound, which only
+            // this side's person resets (Fugo 33882).
+            if looped {
+                record.recent.clear();
+            }
             true
         });
         if resumed == Some(true) {
@@ -2724,6 +2925,12 @@ pub fn peer_key_for_test(factory: &Arc<Factory>, pipe: &str, endpoint: &str) {
     });
 }
 
+/// Tests: the four digits both people compare, as connecting sets them.
+#[doc(hidden)]
+pub fn digits_for_test(factory: &Arc<Factory>, pipe: &str, digits: &str) {
+    change(factory, pipe, |record| record.digits = digits.to_owned());
+}
+
 /// Tests: the other side refused a message, as the transport says.
 #[doc(hidden)]
 pub fn refused_for_test(factory: &Arc<Factory>, pipe: &str, seq: u64, reason: &str) {
@@ -2739,6 +2946,17 @@ pub fn sent_for_test(factory: &Arc<Factory>, pipe: &str, text: &str, delivered: 
     let message =
         Message { msg_id: random_hex(16), author: Author::Me, name: "Matt".to_owned(), text: text.to_owned(), state, ..Message::default() };
     add(factory, pipe, message).expect("kept").seq
+}
+
+/// Tests: the other side paused the pipe (`true`) or resumed it, as the
+/// transport says.
+#[doc(hidden)]
+pub fn peer_paused_for_test(factory: &Arc<Factory>, pipe: &str, paused: bool) {
+    if paused {
+        pipe_link::Store::peer_paused(&Link, factory, pipe, false);
+    } else {
+        pipe_link::Store::peer_resumed(&Link, factory, pipe, false);
+    }
 }
 
 /// Tests: the other side closed the pipe, as the transport says.
@@ -2762,11 +2980,26 @@ pub fn upgrade_for_test(factory: &Arc<Factory>, pipe: &str) {
     quarantine::upgrade(factory);
 }
 
+/// Tests: `agent` on `pipe` (and limited to it, `limited`) as a Claktory
+/// from before #414's boundary could have it, unchecked.
+#[doc(hidden)]
+pub fn join_unchecked_for_test(factory: &Arc<Factory>, pipe: &str, agent: &str, limited: bool) {
+    change(factory, pipe, |record| {
+        if !record.members.iter().any(|id| id == agent) {
+            record.members.push(agent.to_owned());
+        }
+        if limited {
+            record.quarantined.push(agent.to_owned());
+        }
+    });
+}
+
 /// Tests: what Claktory does with the pipes when it starts again.
 #[doc(hidden)]
 pub fn start_for_test(factory: &Arc<Factory>) {
     quarantine::upgrade(factory);
     bound::upgrade(factory);
+    sealed::upgrade(factory);
     lead::settle_all(factory);
 }
 
@@ -2824,6 +3057,17 @@ pub fn count_for_loop_for_test(factory: &Arc<Factory>, pipe: &str, author: &str,
         other => panic!("no author {other}"),
     };
     count_for_loop(factory, pipe, author, text);
+}
+
+/// Tests: the other side's loop breaker paused the pipe (`true`), or its
+/// person continued that pause, as the transport says.
+#[doc(hidden)]
+pub fn peer_looped_for_test(factory: &Arc<Factory>, pipe: &str, paused: bool) {
+    if paused {
+        pipe_link::Store::peer_paused(&Link, factory, pipe, true);
+    } else {
+        pipe_link::Store::peer_resumed(&Link, factory, pipe, true);
+    }
 }
 
 /// Tests: `agent` has read `key` (`agents::Kind`, such as

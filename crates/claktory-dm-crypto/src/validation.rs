@@ -46,6 +46,12 @@ pub trait Trust {
     fn current(&self, account: &str) -> Option<(IdentityPublic, Option<&SignedDeviceList>)>;
     /// Whether `key` was the account's once and was replaced (L5).
     fn retired(&self, account: &str, key: &IdentityPublic) -> bool;
+    /// Whether the person said `key`'s safety numbers didn't match
+    /// (`Pins::undo_change`): a leaf of any kind under it holds sends until
+    /// it's out (Fugo 41542).
+    fn refused(&self, _account: &str, _key: &IdentityPublic) -> bool {
+        false
+    }
 }
 
 /// A leaf that passed: who it is.
@@ -103,6 +109,19 @@ fn belongs(kind: &GroupKind, certificate: &LeafCertificate) -> Result<(), Error>
 /// The leaf `credential` with MLS signature key `signature_key`, if it's a
 /// member `trust` accepts for a group of `kind`.
 pub fn member(kind: &GroupKind, trust: &impl Trust, credential: &Credential, signature_key: &[u8]) -> Result<Member, Error> {
+    member_tolerating(kind, trust, None, credential, signature_key)
+}
+
+/// `member`, with `tolerated` (a window's leaf, row 561) counting as listed
+/// though the account's latest list doesn't name it: past that one check
+/// only, every other one as before.
+pub(crate) fn member_tolerating(
+    kind: &GroupKind,
+    trust: &impl Trust,
+    tolerated: Option<&LeafCertificate>,
+    credential: &Credential,
+    signature_key: &[u8],
+) -> Result<Member, Error> {
     let certificate = LeafCertificate::from_credential(credential)?;
     if certificate.leaf.signature_key.as_slice() != signature_key {
         return Err(refused("the leaf's key isn't the one its certificate names"));
@@ -117,7 +136,7 @@ pub fn member(kind: &GroupKind, trust: &impl Trust, credential: &Credential, sig
     if identity != certificate.identity {
         return Err(Error::UnknownIdentity { account: account.to_owned() });
     }
-    if !list.is_some_and(|list| list.names(&certificate)) {
+    if !list.is_some_and(|list| list.names(&certificate)) && tolerated != Some(&certificate) {
         return Err(Error::Unlisted { account: account.to_owned() });
     }
     belongs(kind, &certificate)?;
@@ -129,7 +148,18 @@ pub fn member(kind: &GroupKind, trust: &impl Trust, credential: &Credential, sig
 /// conversation (H1): its words reach the friend only as a message the
 /// person's device sent.
 pub fn application(kind: &GroupKind, trust: &impl Trust, credential: &Credential, signature_key: &[u8]) -> Result<Member, Error> {
-    let member = member(kind, trust, credential, signature_key)?;
+    application_tolerating(kind, trust, None, credential, signature_key)
+}
+
+/// `application`, with a window's leaf tolerated as `member_tolerating`.
+pub(crate) fn application_tolerating(
+    kind: &GroupKind,
+    trust: &impl Trust,
+    tolerated: Option<&LeafCertificate>,
+    credential: &Credential,
+    signature_key: &[u8],
+) -> Result<Member, Error> {
+    let member = member_tolerating(kind, trust, tolerated, credential, signature_key)?;
     if matches!(kind, GroupKind::Conversation { .. }) && member.kind() == LeafKind::Claktory {
         return Err(refused("a Claktory doesn't send messages in a conversation"));
     }
@@ -147,6 +177,22 @@ pub fn commit(
     staged: &StagedCommit,
     leaf: &dyn Fn(LeafNodeIndex) -> Option<(Credential, Vec<u8>)>,
 ) -> Result<(), Error> {
+    commit_tolerating(kind, trust, None, sender, credential, staged, leaf)
+}
+
+/// `commit`, with a window's leaf tolerated as `member_tolerating` wherever
+/// a leaf is checked (row 561).
+pub(crate) fn commit_tolerating(
+    kind: &GroupKind,
+    trust: &impl Trust,
+    tolerated: Option<&LeafCertificate>,
+    sender: &Sender,
+    credential: &Credential,
+    staged: &StagedCommit,
+    leaf: &dyn Fn(LeafNodeIndex) -> Option<(Credential, Vec<u8>)>,
+) -> Result<(), Error> {
+    let member =
+        |kind: &GroupKind, trust: &_, credential: &Credential, key: &[u8]| member_tolerating(kind, trust, tolerated, credential, key);
     let conversation = matches!(kind, GroupKind::Conversation { .. });
     // The committer as it is after the commit: its update path's leaf, or
     // the leaf it had.
@@ -157,7 +203,9 @@ pub fn commit(
                 Ok(before) => before,
                 // Under a key its account replaced, a leaf does one thing:
                 // move itself to the new key (dms-e2ee §2.1).
-                Err(error) => return rotated(kind, trust, credential, staged, (&old_credential, &old_key)).map_err(|why| why.unwrap_or(error)),
+                Err(error) => {
+                    return rotated(kind, trust, credential, staged, (&old_credential, &old_key)).map_err(|why| why.unwrap_or(error));
+                }
             };
             if *credential != old_credential {
                 return Err(refused("the commit's credential isn't its sender's"));
@@ -192,7 +240,6 @@ pub fn commit(
             Sender::NewMemberCommit if committer_index.is_none() => committer.clone(),
             _ => return Err(refused("no one outside the group proposes")),
         };
-        let quiet = conversation && proposer.kind() == LeafKind::Claktory;
         // A Claktory's commit in a conversation carries only its own
         // proposals: its Update, or removing itself.
         if conversation && committer.kind() == LeafKind::Claktory && proposer.leaf_id() != committer.leaf_id() {
@@ -229,7 +276,11 @@ pub fn commit(
                             return Err(refused("a rejoining leaf removes only its own earlier one"));
                         }
                     }
-                    Some(_) if quiet && !own => return Err(refused("a Claktory removes only itself")),
+                    // In every kind of group (Melone's F5): a Claktory
+                    // never takes the person's devices out of its channel.
+                    Some(_) if proposer.kind() == LeafKind::Claktory && !own => {
+                        return Err(refused("a Claktory removes only itself"));
+                    }
                     // A device removes only its own person's leaves: Ana's
                     // devices never drop Matt's.
                     Some(_) => {
@@ -277,7 +328,8 @@ fn rotated(
     if staged.queued_proposals().next().is_some() {
         return Err(refuse("a leaf under a replaced key commits only its own move to the new one"));
     }
-    let path = staged.update_path_leaf_node().ok_or_else(|| refuse("a leaf under a replaced key commits only its own move to the new one"))?;
+    let path =
+        staged.update_path_leaf_node().ok_or_else(|| refuse("a leaf under a replaced key commits only its own move to the new one"))?;
     // The new certificate: the account's identity as pinned here now (never
     // one the commit brings, nor another replaced one), and listed.
     let new = member(kind, trust, path.credential(), path.signature_key().as_slice()).map_err(Some)?;
@@ -343,9 +395,11 @@ fn listed_now(trust: &impl Trust, certificate: &LeafCertificate) -> bool {
         list.is_some_and(|list| {
             list.identity == identity
                 && list.list.account_id == leaf.account_id
-                && list.list.leaves.iter().any(|listed| {
-                    listed.kind == leaf.kind && listed.leaf_id == leaf.leaf_id && listed.signature_key == leaf.signature_key
-                })
+                && list
+                    .list
+                    .leaves
+                    .iter()
+                    .any(|listed| listed.kind == leaf.kind && listed.leaf_id == leaf.leaf_id && listed.signature_key == leaf.signature_key)
         })
     })
 }
@@ -447,6 +501,10 @@ impl<T: Trust> Trust for Rejoining<'_, T> {
     fn retired(&self, account: &str, key: &IdentityPublic) -> bool {
         self.trust.retired(account, key) || (account == self.me.leaf.account_id && *key != self.me.identity)
     }
+
+    fn refused(&self, account: &str, key: &IdentityPublic) -> bool {
+        self.trust.refused(account, key)
+    }
 }
 
 /// One account's pin, as an endpoint keeps it.
@@ -459,9 +517,18 @@ pub struct Pin {
     /// The highest list version seen under this identity.
     #[serde(default)]
     pub highest_version: u64,
-    /// Keys this account had before; never accepted again (L5).
+    /// Keys this account had before that a commit proved replaced
+    /// (`Pins::replaced`), or that a device retired as such: never accepted
+    /// again (L5).
     #[serde(default)]
     pub retired: Vec<IdentityPublic>,
+    /// Keys this account had before that the person's devices moved off on
+    /// the service's word alone (`key_changed`): replaced as far as leaves
+    /// go, but one can come back, as an ordinary key change, so a single
+    /// lying answer can't end a conversation for good (Fugo's E11-3). Each
+    /// keeps its list and highest version, so L1 still holds if it does.
+    #[serde(default)]
+    pub previous: Vec<Previous>,
     /// The key changed and the person hasn't seen the notice yet: sending
     /// waits (Fugo 2b).
     #[serde(default)]
@@ -469,6 +536,54 @@ pub struct Pin {
     /// The person compared safety numbers for this key.
     #[serde(default)]
     pub verified: bool,
+    /// The key this one replaced at its last change (`key_changed`), while
+    /// that one is still previous: what "the numbers don't match" goes back
+    /// to (`undo_change`). None after an undo, or once that key is retired.
+    #[serde(default)]
+    pub changed_from: Option<IdentityPublic>,
+    /// This key is one the person said didn't match before (`undo_change`)
+    /// and it came back: the notice says so. Cleared once they verify it.
+    #[serde(default)]
+    pub mismatched: bool,
+    /// Every key the person said didn't match (`undo_change`), previous or
+    /// retired since: a leaf of any kind under one holds sends until it's
+    /// out (`Trust::refused`, Fugo 41542 and 41686). Unioned on import and
+    /// never dropped, unless the person verifies that very key as current.
+    #[serde(default)]
+    pub refused: Vec<IdentityPublic>,
+}
+
+/// A key an account had before, as it was when the person's devices moved
+/// off it (`Pin::previous`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Previous {
+    pub identity: IdentityPublic,
+    #[serde(default)]
+    pub device_list: Option<Vec<u8>>,
+    #[serde(default)]
+    pub highest_version: u64,
+    /// Whether the person had compared safety numbers for it: given back
+    /// only by `undo_change`.
+    #[serde(default)]
+    pub verified: bool,
+    /// The person said its safety numbers didn't match (`undo_change`).
+    #[serde(default)]
+    pub mismatched: bool,
+}
+
+impl Pin {
+    /// Whether `key` is one this account had before, retired for good or
+    /// previous: a leaf under it is a replaced key's.
+    pub fn replaced(&self, key: &IdentityPublic) -> bool {
+        self.retired.contains(key) || self.previous.iter().any(|previous| previous.identity == *key)
+    }
+
+    /// `changed_from` only while there's still that key to go back to.
+    fn settle(&mut self) {
+        if self.changed_from.is_some_and(|key| !self.previous.iter().any(|previous| previous.identity == key)) {
+            self.changed_from = None;
+        }
+    }
 }
 
 /// An endpoint's pins: the identity keys of the person's own account and
@@ -499,7 +614,18 @@ impl Pins {
             None => {
                 self.pins.insert(
                     account.to_owned(),
-                    Pin { identity, device_list: None, highest_version: 0, retired: Vec::new(), changed_unseen: false, verified: false },
+                    Pin {
+                        identity,
+                        device_list: None,
+                        highest_version: 0,
+                        retired: Vec::new(),
+                        previous: Vec::new(),
+                        changed_unseen: false,
+                        verified: false,
+                        changed_from: None,
+                        mismatched: false,
+                        refused: Vec::new(),
+                    },
                 );
                 Ok(())
             }
@@ -531,20 +657,25 @@ impl Pins {
         if held.leaf.account_id != account || !listed.contains(&key.0) || key.0 == served || pin.retired.contains(&key) {
             return Ok(false);
         }
-        let older = self
-            .lists
-            .get(account)
-            .is_some_and(|list| list.identity == pin.identity && held.leaf.created_ms < list.list.created_ms);
+        let older =
+            self.lists.get(account).is_some_and(|list| list.identity == pin.identity && held.leaf.created_ms < list.list.created_ms);
         if !older {
             return Ok(false);
         }
+        // Proven: retired for good, previous or not.
+        pin.previous.retain(|previous| previous.identity != key);
         pin.retired.push(key);
+        pin.settle();
         Ok(true)
     }
 
-    /// `account`'s security key changed to `identity`: the old one is
-    /// retired for good, its device list forgotten, and sending to them
-    /// waits until the person has seen the notice (`seen`).
+    /// `account`'s security key changed to `identity`: the old one becomes
+    /// previous (kept with its list and highest version), and sending to
+    /// them waits until the person has seen the notice (`seen`). A previous
+    /// key may come back the same way, as an ordinary change with its own
+    /// list and version again (L1), so one lying answer from the service
+    /// doesn't end a conversation (Fugo's E11-3); a retired one never does
+    /// (L5).
     pub fn key_changed(&mut self, account: &str, identity: IdentityPublic) -> Result<(), Error> {
         let pin = self.pins.get_mut(account).ok_or_else(|| refused("nothing pinned for this account to change"))?;
         if pin.identity == identity {
@@ -553,14 +684,80 @@ impl Pins {
         if pin.retired.contains(&identity) {
             return Err(refused("that security key was replaced; it's never trusted again"));
         }
-        let old = std::mem::replace(&mut pin.identity, identity);
-        pin.retired.push(old);
-        pin.device_list = None;
-        pin.highest_version = 0;
+        let back = pin.previous.iter().position(|previous| previous.identity == identity).map(|at| pin.previous.remove(at));
+        let left = Previous {
+            identity: pin.identity,
+            device_list: pin.device_list.take(),
+            highest_version: pin.highest_version,
+            verified: pin.verified,
+            mismatched: pin.mismatched,
+        };
+        pin.previous.retain(|previous| previous.identity != left.identity);
+        pin.changed_from = Some(left.identity);
+        pin.previous.push(left);
+        pin.identity = identity;
+        pin.device_list = back.as_ref().and_then(|back| back.device_list.clone());
+        pin.highest_version = back.as_ref().map_or(0, |back| back.highest_version);
+        pin.mismatched = back.as_ref().is_some_and(|back| back.mismatched);
         pin.changed_unseen = true;
         pin.verified = false;
         self.lists.remove(account);
-        Ok(())
+        self.reparse()
+    }
+
+    /// The person compared safety numbers after `account`'s key changed and
+    /// they didn't match: `back_to`, the key the notice said it changed
+    /// from, is pinned again as it was (its list, version and whether it was
+    /// verified), the change counts as seen, and the key refused becomes
+    /// previous, marked as one the person said didn't match, so it can only
+    /// come back as another visible change, which says so (`mismatched`).
+    /// Refused when `back_to` isn't one of the account's previous keys
+    /// (never whichever is last: import orders them its own way);
+    /// `Pin::changed_from` names the one the notice was about.
+    pub fn undo_change(&mut self, account: &str, back_to: &IdentityPublic) -> Result<(), Error> {
+        let pin = self.pins.get_mut(account).ok_or_else(|| refused("nothing pinned for this account"))?;
+        let at = pin
+            .previous
+            .iter()
+            .position(|previous| previous.identity == *back_to)
+            .ok_or_else(|| refused("that isn't an earlier security key to go back to"))?;
+        let back = pin.previous.remove(at);
+        let refused_key = Previous {
+            identity: pin.identity,
+            device_list: pin.device_list.take(),
+            highest_version: pin.highest_version,
+            verified: false,
+            mismatched: true,
+        };
+        pin.identity = back.identity;
+        pin.device_list = back.device_list;
+        pin.highest_version = back.highest_version;
+        pin.verified = back.verified;
+        pin.changed_unseen = false;
+        pin.changed_from = None;
+        pin.mismatched = false;
+        if !pin.refused.contains(&refused_key.identity) {
+            pin.refused.push(refused_key.identity);
+        }
+        pin.previous.retain(|previous| previous.identity != refused_key.identity);
+        pin.previous.push(refused_key);
+        self.lists.remove(account);
+        self.reparse()
+    }
+
+    /// The person's own devices replaced `account`'s keys themselves (a
+    /// start-over, a rotation they made or took from their self group): its
+    /// previous keys are retired for good (L5), never to come back as a
+    /// change the service could steer.
+    pub fn retire_previous(&mut self, account: &str) {
+        if let Some(pin) = self.pins.get_mut(account) {
+            for previous in std::mem::take(&mut pin.previous) {
+                if !pin.retired.contains(&previous.identity) {
+                    pin.retired.push(previous.identity);
+                }
+            }
+            pin.settle();
+        }
     }
 
     /// The person saw that `account`'s key changed.
@@ -577,6 +774,8 @@ impl Pins {
             return Err(refused("that isn't the key pinned now"));
         }
         pin.verified = true;
+        pin.mismatched = false;
+        pin.refused.retain(|key| key != identity);
         Ok(())
     }
 
@@ -591,7 +790,7 @@ impl Pins {
     pub fn accept_list(&mut self, account: &str, bytes: &[u8]) -> Result<(), Error> {
         let list = SignedDeviceList::from_bytes(bytes)?;
         let pin = self.pins.get_mut(account).ok_or_else(|| refused("nothing pinned for this account"))?;
-        if pin.retired.contains(&list.identity) {
+        if pin.replaced(&list.identity) {
             return Err(refused("a device list from a security key that was replaced"));
         }
         if list.identity != pin.identity || list.list.account_id != account {
@@ -614,6 +813,12 @@ impl Pins {
     /// the self group): accounts unknown here are pinned as they are there;
     /// a key known here is kept unless that device moved past it, and keys
     /// either side retired stay retired. Never from the service (M3).
+    ///
+    /// A key that changes here this way shows as any key change does (Fugo
+    /// 40159, Melone's F1): not yet seen, so sending to them waits for the
+    /// person's notice, and not verified. How the other device saw or
+    /// compared it never comes with it, so a forged pins content can't swap
+    /// a friend's key silently.
     pub fn import(&mut self, theirs: &Pins) -> Result<(), Error> {
         for (account, their) in &theirs.pins {
             let pin = match self.pins.get(account) {
@@ -625,10 +830,17 @@ impl Pins {
                         let mut pin = if their.highest_version > ours.highest_version { their.clone() } else { ours.clone() };
                         pin.verified = ours.verified || their.verified;
                         pin.changed_unseen = ours.changed_unseen && their.changed_unseen;
+                        pin.changed_from = ours.changed_from.or(their.changed_from);
+                        pin.mismatched = (ours.mismatched || their.mismatched) && !pin.verified;
                         pin
-                    } else if their.retired.contains(&ours.identity) && !ours.retired.contains(&their.identity) {
-                        // That device saw this key replaced: its newer one wins.
-                        their.clone()
+                    } else if their.replaced(&ours.identity) && !ours.replaced(&their.identity) {
+                        // That device saw this key replaced: its newer one
+                        // wins, as a change the person hasn't seen here.
+                        let mut pin = their.clone();
+                        pin.changed_unseen = true;
+                        pin.verified = false;
+                        pin.changed_from = Some(ours.identity);
+                        pin
                     } else {
                         ours.clone()
                     };
@@ -636,7 +848,31 @@ impl Pins {
                     if retired.contains(&pin.identity) {
                         return Err(refused(format!("your devices disagree about {account}'s security key")));
                     }
+                    // Keys either device moved off, each once (the higher
+                    // version's), never the one pinned now or a retired one.
+                    let mut previous: Vec<Previous> = Vec::new();
+                    for key in ours.previous.iter().chain(&their.previous) {
+                        if key.identity == pin.identity || retired.contains(&key.identity) {
+                            continue;
+                        }
+                        match previous.iter_mut().find(|kept| kept.identity == key.identity) {
+                            Some(kept) => {
+                                let mismatched = kept.mismatched || key.mismatched;
+                                if kept.highest_version < key.highest_version {
+                                    *kept = key.clone();
+                                }
+                                kept.mismatched = mismatched;
+                            }
+                            None => previous.push(key.clone()),
+                        }
+                    }
+                    // Keys the person said didn't match, on either device.
+                    let mut refused = ours.refused.clone();
+                    refused.extend(their.refused.iter().filter(|key| !ours.refused.contains(key)));
                     pin.retired = retired;
+                    pin.previous = previous;
+                    pin.refused = refused;
+                    pin.settle();
                     pin
                 }
             };
@@ -667,7 +903,11 @@ impl Trust for Pins {
     }
 
     fn retired(&self, account: &str, key: &IdentityPublic) -> bool {
-        self.pins.get(account).is_some_and(|pin| pin.retired.contains(key))
+        self.pins.get(account).is_some_and(|pin| pin.replaced(key))
+    }
+
+    fn refused(&self, account: &str, key: &IdentityPublic) -> bool {
+        self.pins.get(account).is_some_and(|pin| pin.refused.contains(key))
     }
 }
 
@@ -727,6 +967,121 @@ mod tests {
         assert!(member(&other, &pins, &mini, &[3; 32]).is_err());
     }
 
+    /// Fugo's E11-3: one lying keys answer moves a device off a friend's
+    /// real key; when the real key comes back, it's an ordinary key change
+    /// (the notice, not verified, sending held), with the list and version
+    /// it had, so L1 still holds. Never a key a held commit proved replaced.
+    #[test]
+    fn a_key_moved_off_on_the_services_word_can_come_back_as_a_change() {
+        let (real, lie) = (IdentityKey::generate().unwrap(), IdentityKey::generate().unwrap());
+        let mut pins = Pins::default();
+        pins.first_contact("bo", real.public()).unwrap();
+        pins.accept_list("bo", &list(&real, "bo", 5, &[(LeafKind::Device, "phone", [2; 32])])).unwrap();
+        pins.verified("bo", &real.public()).unwrap();
+        pins.seen("bo");
+
+        // The lie, taken as a key change; then the real key again.
+        pins.key_changed("bo", lie.public()).unwrap();
+        assert!(pins.retired("bo", &real.public()), "a leaf under the real key is a replaced key's meanwhile");
+        pins.seen("bo");
+        pins.key_changed("bo", real.public()).unwrap();
+        let back = pins.get("bo").unwrap();
+        assert_eq!((back.identity, back.changed_unseen, back.verified), (real.public(), true, false), "an ordinary change");
+        assert!(!pins.can_send("bo"), "sending waits for the notice");
+        assert_eq!(back.highest_version, 5);
+        assert!(back.device_list.is_some() && pins.lists.contains_key("bo"), "its list is back");
+        // L1 as before the lie: older refused, the same taken, newer taken.
+        assert!(pins.accept_list("bo", &list(&real, "bo", 4, &[])).is_err());
+        pins.accept_list("bo", &list(&real, "bo", 5, &[(LeafKind::Device, "phone", [2; 32])])).unwrap();
+        pins.accept_list("bo", &list(&real, "bo", 6, &[])).unwrap();
+        assert!(pins.retired("bo", &lie.public()), "the lie is previous now");
+        assert_eq!(pins.get("bo").unwrap().previous.len(), 1);
+
+        // "The numbers don't match" after a change: the key before is back
+        // as it was, and the refused one is previous.
+        let mut undone = Pins::default();
+        undone.first_contact("bo", real.public()).unwrap();
+        undone.accept_list("bo", &list(&real, "bo", 5, &[(LeafKind::Device, "phone", [2; 32])])).unwrap();
+        undone.verified("bo", &real.public()).unwrap();
+        assert!(undone.undo_change("bo", &real.public()).is_err(), "nothing to go back to");
+        undone.key_changed("bo", lie.public()).unwrap();
+        // Another of the person's devices synced its own earlier key in
+        // meanwhile: the undo goes back to the key the notice named, not
+        // whichever earlier key is last (Fugo 40783).
+        let third = IdentityKey::generate().unwrap();
+        let mut synced = Pins::default();
+        synced.first_contact("bo", third.public()).unwrap();
+        synced.key_changed("bo", lie.public()).unwrap();
+        undone.import(&synced).unwrap();
+        assert_eq!(undone.get("bo").unwrap().previous.last().map(|previous| previous.identity), Some(third.public()));
+        assert!(undone.undo_change("bo", &IdentityKey::generate().unwrap().public()).is_err(), "never a key it didn't have");
+        let changed_from = undone.get("bo").unwrap().changed_from;
+        assert_eq!(changed_from, Some(real.public()), "the key the notice is about, through the sync");
+        undone.undo_change("bo", &changed_from.unwrap()).unwrap();
+        let pin = undone.get("bo").unwrap();
+        assert_eq!((pin.identity, pin.verified, pin.changed_unseen, pin.highest_version), (real.public(), true, false, 5));
+        assert!(undone.can_send("bo") && undone.lists.contains_key("bo"));
+        assert!(pin.retired.is_empty() && pin.replaced(&lie.public()));
+        assert_eq!((pin.changed_from, pin.mismatched), (None, false), "nothing to undo now");
+        // The refused key served again: a visible change that says the
+        // person found it didn't match, until they verify it after all.
+        undone.key_changed("bo", lie.public()).unwrap();
+        let pin = undone.get("bo").unwrap();
+        assert_eq!((pin.mismatched, pin.changed_from, pin.changed_unseen), (true, Some(real.public()), true));
+        let mut synced_again = Pins::default();
+        synced_again.import(&undone).unwrap();
+        assert!(synced_again.get("bo").unwrap().mismatched, "the person's word reaches their other devices");
+        undone.verified("bo", &lie.public()).unwrap();
+        assert!(!undone.get("bo").unwrap().mismatched);
+        undone.undo_change("bo", &real.public()).unwrap();
+
+        // The lie spread to another of the person's devices through the
+        // self group: there too the real key stays previous, never retired,
+        // and comes back the same way (Fugo 40412).
+        let mut lied = Pins::default();
+        lied.first_contact("bo", real.public()).unwrap();
+        lied.key_changed("bo", lie.public()).unwrap();
+        let mut other = Pins::default();
+        other.first_contact("bo", real.public()).unwrap();
+        other.import(&lied).unwrap();
+        let taken = other.get("bo").unwrap();
+        assert_eq!((taken.identity, taken.changed_unseen), (lie.public(), true));
+        assert!(taken.retired.is_empty() && taken.replaced(&real.public()));
+        other.key_changed("bo", real.public()).unwrap();
+        // Two devices each past the other's key keep their own (each takes
+        // the real one back from the service's next honest answer), and
+        // neither retires anything.
+        lied.import(&pins).unwrap();
+        assert_eq!(lied.get("bo").unwrap().identity, lie.public());
+        assert!(lied.get("bo").unwrap().retired.is_empty());
+        lied.key_changed("bo", real.public()).unwrap();
+    }
+
+    /// The other side of E11-3: a key a commit this endpoint holds proves
+    /// replaced (`Pins::replaced`) is retired for good, previous or not
+    /// (L5), and another device's retired keys stay retired here.
+    #[test]
+    fn a_key_proven_replaced_never_comes_back() {
+        let (old, new) = (IdentityKey::generate().unwrap(), IdentityKey::generate().unwrap());
+        let mut pins = Pins::default();
+        pins.first_contact("bo", old.public()).unwrap();
+        pins.key_changed("bo", new.public()).unwrap();
+        let later = DeviceList { account_id: "bo".to_owned(), version: 1, created_ms: 1_763_800_000_000, leaves: Vec::new() };
+        pins.accept_list("bo", &later.sign(&new).unwrap().to_bytes().unwrap()).unwrap();
+        let held = LeafCertificate::issue(&old, leaf(LeafKind::Device, "bo", "phone", [4; 32])).unwrap();
+        assert!(pins.replaced("bo", [9; 32], &[old.public().0], &held).unwrap());
+        let pin = pins.get("bo").unwrap();
+        assert!(pin.retired.contains(&old.public()) && pin.previous.is_empty());
+        assert!(pins.key_changed("bo", old.public()).is_err(), "never again (L5)");
+
+        // Another device that took the proof: here too, for good.
+        let mut other = Pins::default();
+        other.first_contact("bo", old.public()).unwrap();
+        other.import(&pins).unwrap();
+        assert_eq!(other.get("bo").unwrap().identity, new.public());
+        assert!(other.key_changed("bo", old.public()).is_err());
+    }
+
     #[test]
     fn pins_change_only_visibly_and_a_replaced_key_never_comes_back() {
         let (old, new) = (IdentityKey::generate().unwrap(), IdentityKey::generate().unwrap());
@@ -747,9 +1102,9 @@ mod tests {
         pins.seen("ana");
         assert!(pins.can_send("ana"));
         pins.accept_list("ana", &list(&new, "ana", 1, &[])).unwrap();
-        // The old key never again: no list, no pin, no change back (L5).
+        // The old key is previous: no list from it while it isn't pinned, and
+        // a leaf under it counts as a replaced key's.
         assert!(pins.accept_list("ana", &list(&old, "ana", 6, &[])).is_err());
-        assert!(pins.key_changed("ana", old.public()).is_err());
         assert!(pins.retired("ana", &old.public()));
 
         // Pins from another of the person's devices: a newer key wins only
@@ -759,6 +1114,17 @@ mod tests {
         stale.import(&pins).unwrap();
         assert_eq!(stale.get("ana").unwrap().identity, new.public());
         assert!(stale.retired("ana", &old.public()));
+        // A change shown as one here, whatever the other device says it saw
+        // (Fugo 40159): a forged pins content can't swap a key silently.
+        let mut forged = pins.clone();
+        forged.verified("ana", &new.public()).unwrap();
+        let mut here = Pins::default();
+        here.first_contact("ana", old.public()).unwrap();
+        here.verified("ana", &old.public()).unwrap();
+        here.import(&forged).unwrap();
+        let taken = here.get("ana").unwrap();
+        assert_eq!((taken.identity, taken.changed_unseen, taken.verified), (new.public(), true, false));
+        assert!(!here.can_send("ana"), "sending waits for the person's notice");
         let mut fresh = pins.clone();
         let mut behind = Pins::default();
         behind.first_contact("ana", old.public()).unwrap();

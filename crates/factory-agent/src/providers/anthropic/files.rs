@@ -10,8 +10,10 @@
 //! What a request sent never changes later (the prompt cache, AGENTS.md):
 //! an image sent inline to an account stays inline for it, and one sent as
 //! a file stays that file until it expires (after `KEEP_MS`, longer than
-//! any cache lasts). A request Anthropic refuses for a file it names is sent
-//! again once, with those images inline, for good.
+//! any cache lasts). A request Anthropic answers that it hasn't files it
+//! names (a 404 naming them) is sent again once with just those uploaded
+//! again; any other refusal for a file it names, or another after that, is
+//! sent again once with its images inline, for good.
 //!
 //! Which file each image is, per account, is kept in a JSON Lines file
 //! beside the sign-ins, only ever appended to (and written again without
@@ -23,7 +25,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use base64::Engine;
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -105,10 +106,10 @@ pub struct ImageFilesFor {
     pub account: String,
 }
 
-/// An image a request carries: its digest, base64 data and type.
+/// An image a request carries: its digest, data and type.
 pub struct Image<'a> {
     pub digest: &'a str,
-    pub data: &'a str,
+    pub data: &'a crate::types::ImageData,
     pub mime_type: &'a str,
 }
 
@@ -263,12 +264,35 @@ impl ImageFiles {
         (refs, fresh)
     }
 
+    /// Anthropic answered a request naming `refs` on `account` that it
+    /// hasn't some of them (a 404 whose `text` names their ids: another
+    /// conversation let go of the same image, say). Forgets those, so the
+    /// next `refs` uploads them again, keeps the others as they are, and
+    /// gives the digests it forgot: none when `text` names none (#490: one
+    /// lost file sent every image inline, 147 KB a request became 47.7 MB).
+    pub fn lost(&self, account: &str, refs: &HashMap<String, String>, text: &str) -> Vec<String> {
+        let digests: Vec<String> = refs.iter().filter(|(_, id)| names(text, id)).map(|(digest, _)| digest.clone()).collect();
+        let lines: Vec<String> = {
+            let mut state = self.state();
+            digests
+                .iter()
+                .map(|digest| {
+                    let key = (account.to_owned(), digest.clone());
+                    state.entries.remove(&key);
+                    gone(&key)
+                })
+                .collect()
+        };
+        self.append(&lines);
+        digests
+    }
+
     /// Anthropic refused a request naming `refs` on `account`: a file it no
-    /// longer has (another conversation let go of the same image, say), or
-    /// files it won't read from this account. They go inline from now on,
-    /// never uploaded again; and when one was uploaded for that very
-    /// request (`fresh`), it's the account that won't read them, so its new
-    /// images go inline for a while too.
+    /// longer has that `lost` couldn't tell, or files it won't read from
+    /// this account. They go inline from now on, never uploaded again; and
+    /// when one was uploaded for that very request (`fresh`), it's the
+    /// account that won't read them, so its new images go inline for a
+    /// while too.
     pub fn refuse(&self, account: &str, refs: &HashMap<String, String>, fresh: bool) {
         let now = now_ms();
         let lines: Vec<String> = {
@@ -337,6 +361,16 @@ impl ImageFiles {
     }
 }
 
+/// Whether `text` names the file `id`: as a word of its own, so `file_1`
+/// isn't in `file_12`.
+fn names(text: &str, id: &str) -> bool {
+    let word = |character: char| character.is_ascii_alphanumeric() || character == '_' || character == '-';
+    !id.is_empty()
+        && text.match_indices(id).any(|(at, _)| {
+            !text[..at].chars().next_back().is_some_and(word) && !text[at + id.len()..].chars().next().is_some_and(word)
+        })
+}
+
 fn line(key: &Key, entry: &Entry) -> String {
     let id = match &entry.sent {
         Sent::File(id) => Some(id.clone()),
@@ -369,7 +403,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Uploads one image, to expire after `KEEP_MS`; its file id.
 async fn upload(base_url: &str, headers: &[(String, String)], image: &Image<'_>, cancel: &CancellationToken) -> Result<String, Failed> {
-    let bytes = base64::engine::general_purpose::STANDARD.decode(image.data).map_err(|error| Failed::Other(error.to_string()))?;
+    let bytes = image.data.bytes().ok_or_else(|| Failed::Other("the image's data can't be read".to_owned()))?;
     let (mime_type, extension) = (image.mime_type, image.mime_type.trim_start_matches("image/"));
     let boundary = format!("claktory-{}", &image.digest[..image.digest.len().min(32)]);
     let mut body = Vec::with_capacity(bytes.len() + 512);
@@ -417,5 +451,17 @@ pub async fn delete(base_url: &str, headers: &[(String, String)], id: &str) -> R
         Ok(())
     } else {
         Err(format!("{status}: {}", response.text().await.unwrap_or_default().chars().take(200).collect::<String>()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_file_is_named_as_a_word_of_its_own() {
+        assert!(super::names("File not found: file_1", "file_1"));
+        assert!(super::names(r#"{"message": "file_1 not found"}"#, "file_1"));
+        assert!(!super::names("File not found: file_12", "file_1"));
+        assert!(!super::names("File not found: xfile_1", "file_1"));
+        assert!(!super::names("File not found", ""));
     }
 }

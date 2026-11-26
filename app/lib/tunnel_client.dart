@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'loopback_forward.dart';
+import 'network.dart' show deviceNetwork;
 import 'tunnel/api/tunnel.dart' as rust;
 import 'tunnel/api/tunnel.dart'
     show
@@ -64,10 +65,15 @@ abstract interface class Tunnel {
   /// the next socket dials a new connection, and nothing counts as failed.
   Future<void> reconnect();
 
+  /// The relays its Claktory uses now, as its Workspace says (#450): the
+  /// device homes on them from its next endpoint on, and dials through them.
+  void setRelays(List<String> relays);
+
   /// Listens on this device's 127.0.0.1 and ::1 at [port] and forwards
-  /// each connection to that port on the backend's machine (ALPN
+  /// each connection to that port on the backend's machine, or to [target]
+  /// there when given (a website shared over a pipe, #503) (ALPN
   /// claktory-forward/1). Throws [ForwardFailure].
-  Future<PortForward> forwardPort(int port);
+  Future<PortForward> forwardPort(int port, {int? target});
 
   Future<void> close();
 }
@@ -167,9 +173,16 @@ class _RustTunnel implements Tunnel {
   Future<void> reconnect() => _handle.reconnect();
 
   @override
-  Future<PortForward> forwardPort(int port) async {
+  void setRelays(List<String> relays) => _handle.setRelays(relays: relays);
+
+  @override
+  Future<PortForward> forwardPort(int port, {int? target}) async {
     try {
-      return _RustForward(await _handle.forwardPort(port: port));
+      return _RustForward(
+        target == null
+            ? await _handle.forwardPort(port: port)
+            : await _handle.forwardPortTo(port: port, target: target),
+      );
     } on rust.ForwardError catch (error) {
       throw ForwardFailure(switch (error.kind) {
         rust.ForwardErrorKind.portTaken => ForwardProblem.taken,
@@ -217,9 +230,10 @@ String tunnelAdvice(
   String machine, {
   String device = 'Mac',
 }) => switch (status.failure) {
-  TunnelFailure.unreachable =>
-    'Make sure $machine is on, awake and online, with Claktory open. '
-        'Trying again…',
+  TunnelFailure.unreachable => unreachableAdvice(machine),
+  TunnelFailure.offline when !offlineNow(status) =>
+    "This $device is online, but can't reach Claktory's servers. "
+        '${unreachableAdvice(machine)}',
   TunnelFailure.offline =>
     'This $device is offline. Check your internet connection.',
   TunnelFailure.refused =>
@@ -228,6 +242,20 @@ String tunnelAdvice(
   TunnelFailure.other => 'Trying again…',
   TunnelFailure.none => '',
 };
+
+/// What to do about a Claktory on [machine] that doesn't answer.
+String unreachableAdvice(String machine) =>
+    'Make sure $machine is on, awake and online, with Claktory open. '
+    'Trying again…';
+
+/// Whether this device is offline, as far as it knows: the tunnel says so
+/// when it can reach neither its relay nor the machine, but a relay out of
+/// reach doesn't make the device offline, so its own network has the last
+/// word. Before the system has said (or where it can't), the tunnel's word
+/// stands.
+bool offlineNow(TunnelStatus status) =>
+    status.failure == TunnelFailure.offline &&
+    deviceNetwork.value?.satisfied != true;
 
 /// A tunnel's status while nothing's known yet.
 const idleTunnel = TunnelStatus(

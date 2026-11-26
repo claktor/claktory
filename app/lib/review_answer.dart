@@ -16,7 +16,9 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'ask_card.dart' show AskThread;
 import 'backend.dart';
+import 'card_answer.dart' show CardDrafts, cardKey;
 import 'characters/character.dart';
 import 'controls.dart';
 import 'decision.dart' show CommentTyped, SubmitButton;
@@ -24,9 +26,11 @@ import 'dictation.dart';
 import 'identity.dart';
 import 'layout.dart';
 import 'markdown.dart';
+import 'outbox.dart' show connectionLost, decisionWaiting;
 import 'mobile/metrics.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
+import 'state.dart' show TranscriptStore;
 import 'visible_codes.dart' show proseCodes;
 
 /// Whether a review ask waits on the file below: viewers then offer
@@ -77,6 +81,446 @@ void rememberReviewReturn(BuildContext context, String agentId, String path) {
   );
 }
 
+/// How much of each card's talk (its thread's messages) the card showed
+/// when the person pressed its Review, by "agent/seq": sent with the answer
+/// as talk_seen (#492), so an approval from the file is refused only when
+/// the agent replied while it was open. In memory only, as where to come
+/// back to is.
+final _talkSeen = <String, int>{};
+
+/// Notes that [agentId]'s card [seq] showed [talkSeen] messages of its talk
+/// as its Review opened the file: the bars show what came after. It's the
+/// card the bars answer from then ([reviewChosen]).
+void rememberReviewTalk(String agentId, int seq, int talkSeen) {
+  _talkSeen['$agentId/$seq'] = talkSeen;
+  _chosen[agentId] = seq;
+  reviewChosenChanged.value++;
+}
+
+/// The card whose Review the person pressed last, by agent: with two of
+/// its cards waiting on one file, the bar answers that one, never just the
+/// oldest (Abbacchio's row 1312). In memory only, as the talk seen is.
+final _chosen = <String, int>{};
+
+/// The card whose Review was pressed last for [agentId] ([rememberReviewTalk]),
+/// until it's answered: the bars fetch it even once it no longer waits, so
+/// it stays in the bar, held, however the bar came (Abbacchio's row 1359).
+int? reviewChosen(String agentId) => _chosen[agentId];
+
+/// Forgets every card whose Review was pressed, and the talk each showed.
+@visibleForTesting
+void forgetReviewChoices() {
+  _chosen.clear();
+  _talkSeen.clear();
+}
+
+/// Ticks as a card's Review is pressed: the bars look again.
+final reviewChosenChanged = ValueNotifier<int>(0);
+
+/// The card [agentId]'s bar on [path] answers, as [entryOf] has its
+/// entries: the one whose Review was pressed, else the one the bar showed
+/// last ([shown]), while it's undecided; else among [waiting], its seqs
+/// waiting on the person, oldest first, the first pending review of
+/// [path]. So a card a reply (from any device) has wait on its agent stays
+/// in the bar, held ([reviewWaits]) until its agent answers, rather than
+/// the bar falling back to an older card, which an Approve there would
+/// answer (Abbacchio's row 1325). Once it's decided, the bar moves on.
+PendingReview? reviewPick({
+  required String agentId,
+  required String path,
+  required List<int> waiting,
+  required Entry? Function(int seq) entryOf,
+  int? shown,
+}) {
+  PendingReview? on(int seq) {
+    final entry = entryOf(seq);
+    if (entry == null || entry.whichKind() != Entry_Kind.askPerson) {
+      return null;
+    }
+    final ask = entry.askPerson;
+    return ask.reviewPath == path ? (seq: seq, ask: ask) : null;
+  }
+
+  bool pending(PendingReview? review) =>
+      review?.ask.state == AskPersonState.ASK_PERSON_STATE_PENDING;
+
+  final chosen = _chosen[agentId];
+  // Pressed, stopped waiting and not fetched yet: no bar for a moment
+  // rather than an older card's (Abbacchio's row 1359).
+  if (chosen != null && !waiting.contains(chosen) && entryOf(chosen) == null) {
+    return null;
+  }
+  for (final pinned in {chosen, shown}) {
+    if (pinned == null) continue;
+    final held = on(pinned);
+    final ask = held?.ask;
+    // Waiting, replied, or as fetched before it stopped waiting (fetched
+    // again).
+    if (ask != null &&
+        !ask.resolved &&
+        (ask.state == AskPersonState.ASK_PERSON_STATE_PENDING ||
+            (ask.state == AskPersonState.ASK_PERSON_STATE_ANSWERED &&
+                ask.replied))) {
+      return held;
+    }
+  }
+  for (final seq in waiting) {
+    final review = on(seq);
+    if (pending(review)) return review;
+  }
+  return null;
+}
+
+/// Whether [entry], as fetched, may be out of date: it was pending and no
+/// longer waits on the person ([waits]), or the other way round; or it's
+/// the card a bar holds ([shown], not waiting, replied), which its agent
+/// may answer, resolve or take back at any time. Fetched again as the
+/// workspace changes, so a held bar shows the card as it is; one decided
+/// for good isn't fetched again.
+bool reviewStale(Entry entry, {required bool waits, bool shown = false}) {
+  if (!entry.hasAskPerson()) return false;
+  final ask = entry.askPerson;
+  final pending = ask.state == AskPersonState.ASK_PERSON_STATE_PENDING;
+  if (pending != waits) return true;
+  return shown &&
+      !waits &&
+      ask.state == AskPersonState.ASK_PERSON_STATE_ANSWERED &&
+      ask.replied &&
+      !ask.resolved;
+}
+
+/// The seqs a review bar's watch fetches now: what waits on the person
+/// not fetched yet; the card whose Review was pressed ([reviewChosen]) and
+/// the one shown, held while they wait on their agent, even when the bar
+/// came after they stopped waiting (a pane built again, Abbacchio's row
+/// 1359); and those fetched before that are [reviewStale].
+Iterable<int> reviewToFetch({
+  required String agentId,
+  required List<int> waiting,
+  required Map<int, Entry> entries,
+  int? shown,
+}) sync* {
+  final chosen = _chosen[agentId];
+  final pinned = {?chosen, ?shown};
+  for (final seq in {...waiting, ...entries.keys, ...pinned}) {
+    final cached = entries[seq];
+    final waits = waiting.contains(seq);
+    if (cached == null
+        ? waits || pinned.contains(seq)
+        : reviewStale(cached, waits: waits, shown: pinned.contains(seq))) {
+      yield seq;
+    }
+  }
+}
+
+/// Whether [agentId]'s card [seq] waits on the person (Agent.waiting_seqs).
+/// One a reply took out waits on its agent instead: its bar holds, its
+/// buttons off, until the agent answers ([reviewPick]).
+bool reviewWaits(Backend backend, String agentId, int seq) =>
+    backend.workspace
+        .agent(agentId)
+        ?.waitingSeqs
+        .any((each) => each.toInt() == seq) ??
+    false;
+
+/// The cards a review bar showed, to tell when it moved on by itself (the
+/// card it showed closed) to another of its agent's cards on the file,
+/// rather than to one whose Review the person pressed: the bar then says
+/// so, plainly ([ReviewMovedOn]), and its field starts empty, so what's
+/// typed next answers the card it means to (Zucchero's row 513).
+class ReviewMoves {
+  int? _last;
+  int? _moved;
+
+  /// Whether [seq], the card the bar shows now, is one it moved on to by
+  /// itself; until it shows another.
+  bool movedTo(String agentId, int seq) {
+    if (seq != _last) {
+      _moved = _last != null && reviewChosen(agentId) != seq ? seq : null;
+      _last = seq;
+    }
+    return _moved == seq;
+  }
+}
+
+/// Above the question of a card a review bar moved on to by itself
+/// ([ReviewMoves]): the card it showed was closed, this is another.
+class ReviewMovedOn extends StatelessWidget {
+  const ReviewMovedOn({super.key, required this.name});
+
+  final String name;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: Space.xs),
+      child: Semantics(
+        liveRegion: true,
+        child: Text(
+          reviewMovedOn(name),
+          style: TypeScale.of(context).caption
+              .copyWith(color: palette.signal, fontWeight: FontWeight.w600),
+        ),
+      ),
+    );
+  }
+}
+
+/// What [ReviewMovedOn] says.
+String reviewMovedOn(String name) =>
+    'That card was closed. This is another one from $name.';
+
+/// What a held bar says ([reviewWaits]): the person's reply is with its
+/// agent.
+String reviewHeld(AskPerson ask, String name) => ask.replied
+    ? 'You replied. Waiting for $name to answer.'
+    : 'Waiting for $name.';
+
+/// How much of [agentId]'s card [seq]'s talk the person had seen as the
+/// file opened: what the card showed as its Review was pressed, or 0 when
+/// the file was opened some other way, so none of it was seen (Fugo).
+int reviewTalkSeen(String agentId, int seq) => _talkSeen['$agentId/$seq'] ?? 0;
+
+/// What a review bar shows of its card's talk: what was said on it since
+/// the person last saw it ([reviewTalkSeen]), its agent's replies above
+/// all, so "Look at it again" has somewhere to point (Zucchero's row 485).
+/// While a reply waits on its agent (the bar held), that reply last, as
+/// the person's: the thread takes it in only with the agent's answer
+/// (Abbacchio's row 1376).
+List<AskThreadMessage> reviewTalkSince(String agentId, PendingReview review) {
+  final seen = reviewTalkSeen(agentId, review.seq);
+  final ask = review.ask;
+  final thread = ask.thread;
+  final since = seen >= thread.length
+      ? const <AskThreadMessage>[]
+      : thread.sublist(seen);
+  if (ask.state != AskPersonState.ASK_PERSON_STATE_ANSWERED ||
+      !ask.replied ||
+      ask.resolved ||
+      ask.answer.isEmpty) {
+    return since;
+  }
+  return [...since, AskThreadMessage(text: ask.answer, atMs: ask.decidedMs)];
+}
+
+/// The talk since the person last saw the card ([reviewTalkSince]), as the
+/// card shows it ([AskThread]), under the question in a little room of its
+/// own that opens on the newest message; nothing when there's none.
+class ReviewTalk extends StatelessWidget {
+  const ReviewTalk({
+    super.key,
+    required this.agentId,
+    required this.review,
+    required this.agent,
+    required this.name,
+    this.maxHeight = 120,
+  });
+
+  final String agentId;
+  final PendingReview review;
+  final Agent? agent;
+  final String name;
+  final double maxHeight;
+
+  @override
+  Widget build(BuildContext context) {
+    final talk = reviewTalkSince(agentId, review);
+    final follows = reviewFollowsTalk(review.ask, name);
+    if (talk.isEmpty && follows == null) return const SizedBox.shrink();
+    final palette = Palette.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: Space.s),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (talk.isNotEmpty)
+            ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: maxHeight),
+              child: SingleChildScrollView(
+                reverse: true,
+                child: AskThread(thread: talk, agent: agent, name: name),
+              ),
+            ),
+          // What Approve means here, as the card says it (Bruno 37281).
+          if (follows != null) ...[
+            if (talk.isNotEmpty) const SizedBox(height: Space.xs),
+            Text(
+              follows,
+              style: TypeScale.of(context).caption.copyWith(
+                color: palette.textMuted,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// What answering means after a talk on the card (#492), as the card says
+/// it above its buttons: agreeing with where the talk ended, when its
+/// agent's reply came after the card's words last changed
+/// (AskPerson.approve_follows_talk); null otherwise.
+String? reviewFollowsTalk(AskPerson ask, String name) {
+  if (!ask.approveFollowsTalk) return null;
+  return ask.wantsText
+      ? "Your answer follows $name's last reply."
+      : "Approving agrees with $name's last reply.";
+}
+
+/// [agentId]'s entry [seq] as the open conversation holds it, kept up to
+/// date as it changes; null when another agent's conversation is open, or
+/// it isn't among what's held.
+Entry? heldEntry(TranscriptStore transcript, String agentId, int seq) {
+  if (transcript.agentId != agentId) return null;
+  for (var i = transcript.length - 1; i >= 0; i--) {
+    final model = transcript[i];
+    if (model.seq == seq) return model.entry;
+    if (model.seq < seq) break;
+  }
+  return null;
+}
+
+/// The newer of an ask's two copies: the open conversation's ([held]) and
+/// the one fetched ([fetched]), which is newer only when the broadcast of
+/// its change hasn't come yet.
+Entry? newerEntry(Entry? held, Entry? fetched) {
+  if (held == null || fetched == null) return held ?? fetched;
+  if (!held.hasAskPerson() || !fetched.hasAskPerson()) return held;
+  final a = held.askPerson;
+  final b = fetched.askPerson;
+  return b.revision > a.revision ||
+          b.thread.length > a.thread.length ||
+          b.updatedMs > a.updatedMs
+      ? fetched
+      : held;
+}
+
+/// Sends the answer to [review] as its bar shows it: the card's revision
+/// (#428) and all of its talk, which the bar shows past what its card
+/// showed (#492, [ReviewTalk]). Dismiss and a reply decide nothing, so a
+/// card its agent changed meanwhile (a reply on it gives it a new
+/// revision) doesn't stop them (Zucchero's row 485): refused, the card is
+/// fetched again ([refresh]) and they go once more with its latest
+/// revision. An approval or an answer refused so stays refused, for the
+/// person to look at the card again, which [refresh] puts in the bar.
+///
+/// Cut off by the connection, it waits ([onWaiting]: the bar says "Not sent
+/// yet") and goes again by itself once the connection is back, as a card
+/// does (#401; Abbacchio's rows 1298-1301): the first may have got there
+/// meanwhile, and then the Claktory's "already answered" means it went.
+Future<void> sendReview(
+  Backend backend,
+  String agentId,
+  PendingReview review, {
+  required Future<PendingReview?> Function() refresh,
+  String text = '',
+  bool dismiss = false,
+  bool reply = false,
+  List<Attachment> attachments = const [],
+  VoidCallback? onWaiting,
+}) async {
+  var again = false;
+  while (true) {
+    try {
+      await _sendReview(
+        backend,
+        agentId,
+        review,
+        refresh: refresh,
+        text: text,
+        dismiss: dismiss,
+        reply: reply,
+        attachments: attachments,
+      );
+      return;
+    } on RequestFailure catch (failure) {
+      // The one sent before the connection dropped got there.
+      if (again && failure.message.startsWith(alreadyDecided)) return;
+      if (!connectionLost(failure)) rethrow;
+      onWaiting?.call();
+      await _connectedAgain(backend, now: !again);
+      again = true;
+    }
+  }
+}
+
+/// How the Claktory refuses an answer to a card already decided.
+const alreadyDecided = 'This question was already';
+
+/// Once [backend] is connected again: at once when it already is and
+/// [now] (it dropped and came back meanwhile), else at its next connect.
+Future<void> _connectedAgain(Backend backend, {required bool now}) {
+  final connected = backend.connected;
+  if (now && connected.value) return Future.value();
+  final back = Completer<void>();
+  var lost = !connected.value;
+  void changed() {
+    if (!connected.value) {
+      lost = true;
+    } else if (lost && !back.isCompleted) {
+      connected.removeListener(changed);
+      back.complete();
+    }
+  }
+
+  connected.addListener(changed);
+  return back.future;
+}
+
+Future<void> _sendReview(
+  Backend backend,
+  String agentId,
+  PendingReview review, {
+  required Future<PendingReview?> Function() refresh,
+  required String text,
+  required bool dismiss,
+  required bool reply,
+  required List<Attachment> attachments,
+}) async {
+  Future<void> send(AskPerson ask) => backend.answerAsk(
+    agentId,
+    review.seq,
+    text: text,
+    dismiss: dismiss,
+    reply: reply,
+    attachments: attachments,
+    revision: ask.revision,
+    talkSeen: ask.thread.length,
+  );
+  try {
+    await send(review.ask);
+  } on RequestFailure catch (failure) {
+    if (connectionLost(failure)) rethrow;
+    // Fetched again, the bar shows the card as it is now; when that fails
+    // too, what the backend said stands.
+    PendingReview? fresh;
+    try {
+      fresh = await refresh();
+    } on RequestFailure {
+      fresh = null;
+    }
+    if ((dismiss || reply) &&
+        fresh != null &&
+        fresh.seq == review.seq &&
+        fresh.ask.revision != review.ask.revision) {
+      await send(fresh.ask);
+      return;
+    }
+    rethrow;
+  }
+}
+
+/// Why a review's answer didn't go, under its bar: the backend's own
+/// words when it refused it (the card changed, or its agent replied on it
+/// since: Abbacchio's D2), "Couldn't send" only when it didn't get there.
+String reviewFailure(RequestFailure failure) => connectionLost(failure)
+    ? "Couldn't send your answer. Try again."
+    : failure.message;
+
 /// After [agentId]'s review of [path] is answered: its pane closes (and
 /// with it the expanded view), and the person is back where they pressed
 /// Review, when they did.
@@ -89,6 +533,9 @@ Future<void> finishReview(
   final backend = scope.backend;
   final back = _return;
   _return = null;
+  // Answered: what its card showed is spent, and which card was chosen.
+  _talkSeen.removeWhere((key, _) => key.startsWith('$agentId/'));
+  _chosen.remove(agentId);
   final agent = backend.workspace.agent(agentId);
   if (agent != null) {
     final root = layoutOf(agent);
@@ -120,11 +567,17 @@ Future<void> finishReview(
 }
 
 /// The oldest of [agentId]'s asks waiting on [path], as the agent's
-/// waiting entries are fetched: null while none is.
+/// waiting entries are fetched, or as its open conversation holds it,
+/// kept up to date: null while none is.
 class ReviewWatch extends ChangeNotifier {
   ReviewWatch(this.backend, this.agentId, this.path) {
     backend.workspace.addListener(_changed);
+    backend.transcript.revision.addListener(_held);
+    reviewChosenChanged.addListener(_held);
     _fetch();
+    final now = pending;
+    _heard = now?.ask;
+    _shown = now?.seq;
   }
 
   final Backend backend;
@@ -135,41 +588,71 @@ class ReviewWatch extends ChangeNotifier {
   final _fetching = <int>{};
   var _disposed = false;
 
+  /// The ask listeners last heard of: the open conversation changes often
+  /// (its streaming), the ask seldom.
+  AskPerson? _heard;
+
   List<int> get _waiting => [
     for (final seq in backend.workspace.agent(agentId)?.waitingSeqs ?? [])
       seq.toInt(),
   ];
 
-  PendingReview? get pending {
-    for (final seq in _waiting) {
-      final entry = _entries[seq];
-      if (entry == null || entry.whichKind() != Entry_Kind.askPerson) {
-        continue;
-      }
-      final ask = entry.askPerson;
-      if (ask.reviewPath == path &&
-          ask.state == AskPersonState.ASK_PERSON_STATE_PENDING) {
-        return (seq: seq, ask: ask);
-      }
-    }
-    return null;
+  /// The card the bar showed last: it stays, held, while a reply has it
+  /// wait on its agent ([reviewPick]).
+  int? _shown;
+
+  PendingReview? get pending => reviewPick(
+    agentId: agentId,
+    path: path,
+    waiting: _waiting,
+    entryOf: (seq) =>
+        newerEntry(heldEntry(backend.transcript, agentId, seq), _entries[seq]),
+    shown: _shown,
+  );
+
+  /// Fetches [seq] again, as it is now (its agent changed it, say): what
+  /// waits on the file once it's come.
+  Future<PendingReview?> refresh(int seq) async {
+    final entry = await backend.fetchEntry(agentId, seq);
+    if (_disposed) return null;
+    if (entry != null) _entries[seq] = entry;
+    _notify();
+    return pending;
+  }
+
+  void _notify() {
+    final now = pending;
+    _heard = now?.ask;
+    _shown = now?.seq;
+    notifyListeners();
+  }
+
+  void _held() {
+    if (_disposed || identical(pending?.ask, _heard)) return;
+    _notify();
   }
 
   void _changed() {
     if (_disposed) return;
-    notifyListeners();
+    _notify();
     _fetch();
   }
 
   void _fetch() {
-    for (final seq in _waiting) {
-      if (_entries.containsKey(seq) || !_fetching.add(seq)) continue;
+    // What waits, what the bar holds, and what changed since it came.
+    for (final seq in reviewToFetch(
+      agentId: agentId,
+      waiting: _waiting,
+      entries: _entries,
+      shown: _shown,
+    ).toList()) {
+      if (!_fetching.add(seq)) continue;
       unawaited(() async {
         try {
           final entry = await backend.fetchEntry(agentId, seq);
           if (entry != null && !_disposed) {
             _entries[seq] = entry;
-            notifyListeners();
+            _notify();
           }
         } on RequestFailure {
           // Asked again when the workspace next changes.
@@ -184,6 +667,8 @@ class ReviewWatch extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     backend.workspace.removeListener(_changed);
+    backend.transcript.revision.removeListener(_held);
+    reviewChosenChanged.removeListener(_held);
     super.dispose();
   }
 }
@@ -212,6 +697,14 @@ class _ReviewFrameState extends State<ReviewFrame> {
 
   /// The child keeps its state as the bar comes and goes.
   final _childKey = GlobalKey();
+
+  // What's typed in each card's bar is the card's draft ([CardDrafts]): it
+  // stays while the bar goes and comes back (a reply from another device,
+  // Zucchero's row 496), and while the app runs, wherever the card's
+  // reopened (Bruno's Q11).
+
+  /// Whether the bar moved on to its card by itself.
+  final _moves = ReviewMoves();
 
   @override
   void didChangeDependencies() {
@@ -256,6 +749,10 @@ class _ReviewFrameState extends State<ReviewFrame> {
             agentId: widget.agentId,
             path: widget.path,
             review: pending,
+            movedOn: _moves.movedTo(widget.agentId, pending.seq),
+            refresh: () => _watch!.refresh(pending.seq),
+            answer: CardDrafts.of(_watch!.backend)
+                .field(cardKey(widget.agentId, pending.ask.id)),
           ),
         ],
       );
@@ -284,18 +781,32 @@ class ReviewBar extends StatefulWidget {
     required this.agentId,
     required this.path,
     required this.review,
+    required this.refresh,
+    required this.answer,
+    this.movedOn = false,
   });
 
   final String agentId;
   final String path;
   final PendingReview review;
 
+  /// The bar moved on to it by itself, from a card that closed: it says
+  /// so ([ReviewMovedOn]).
+  final bool movedOn;
+
+  /// Fetches the card again, as it is now: after a refusal, the bar shows
+  /// what changed ([sendReview]).
+  final Future<PendingReview?> Function() refresh;
+
+  /// What's typed: the frame's, so it outlasts the bar.
+  final TextEditingController answer;
+
   @override
   State<ReviewBar> createState() => _ReviewBarState();
 }
 
 class _ReviewBarState extends State<ReviewBar> {
-  final _text = TextEditingController();
+  TextEditingController get _text => widget.answer;
   final _focus = FocusNode(debugLabel: 'Review answer');
   var _busy = false;
 
@@ -305,7 +816,6 @@ class _ReviewBarState extends State<ReviewBar> {
 
   @override
   void dispose() {
-    _text.dispose();
     _focus.dispose();
     super.dispose();
   }
@@ -317,6 +827,8 @@ class _ReviewBarState extends State<ReviewBar> {
   Future<void> _answer({required bool dismiss, bool reply = false}) async {
     final text = _text.text.trim();
     if (_busy ||
+        // Held: it waits on its agent (Return, say).
+        !reviewWaits(AppScope.of(context), widget.agentId, widget.review.seq) ||
         (!dismiss && _wantsText && text.isEmpty) ||
         (reply && text.isEmpty)) {
       return;
@@ -326,24 +838,29 @@ class _ReviewBarState extends State<ReviewBar> {
       _failed = null;
     });
     try {
-      await AppScope.of(context).answerAsk(
+      // The card as the bar shows it (#428), and its talk (#492).
+      await sendReview(
+        AppScope.of(context),
         widget.agentId,
-        widget.review.seq,
-        // The card as the person read it (#428).
-        revision: widget.review.ask.revision,
+        widget.review,
+        refresh: widget.refresh,
         text: text,
         dismiss: dismiss,
         reply: reply,
+        // Cut off: "Not sent yet", and it goes once the connection's back.
+        onWaiting: () {
+          if (mounted) setState(() => _failed = decisionWaiting);
+        },
       );
+      // Sent: what was typed went with it.
+      _text.clear();
       if (!mounted) return;
+      // Sent, after waiting for the connection, maybe.
+      setState(() => _failed = null);
       await finishReview(context, widget.agentId, widget.path);
     } on RequestFailure catch (failure) {
       if (mounted) {
-        setState(
-          () => _failed = cardChanged(failure)
-              ? failure.message
-              : "Couldn't send your answer. Try again.",
-        );
+        setState(() => _failed = reviewFailure(failure));
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -361,11 +878,17 @@ class _ReviewBarState extends State<ReviewBar> {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    final agent = AppScope.of(context).workspace.agent(widget.agentId);
+    final backend = AppScope.of(context);
+    final agent = backend.workspace.agent(widget.agentId);
     final name = agent?.name ?? 'The agent';
     final color = agentColor(agent?.color ?? 'slate');
     final ask = widget.review.ask;
     final touch = touchFirst(context);
+    // A reply has it wait on its agent: the bar holds, nothing to send
+    // until the agent answers (Abbacchio's row 1325).
+    final held = !reviewWaits(backend, widget.agentId, widget.review.seq);
+    final off = _busy || held;
+    final note = held && _failed == null ? reviewHeld(ask, name) : _failed;
     return Container(
       padding: EdgeInsets.fromLTRB(
         Space.l,
@@ -399,6 +922,7 @@ class _ReviewBarState extends State<ReviewBar> {
             ],
           ),
           const SizedBox(height: Space.xs),
+          if (widget.movedOn) ReviewMovedOn(name: name),
           // The question; a long one scrolls in its own little room so
           // the file keeps its.
           ConstrainedBox(
@@ -421,6 +945,13 @@ class _ReviewBarState extends State<ReviewBar> {
               ),
             ),
           ),
+          // What was said on its card since the person saw it.
+          ReviewTalk(
+            agentId: widget.agentId,
+            review: widget.review,
+            agent: agent,
+            name: name,
+          ),
           const SizedBox(height: Space.s),
           // Typed or said: the mic puts what's said in, to check before
           // sending; Dismiss and Send step aside while it records.
@@ -430,7 +961,7 @@ class _ReviewBarState extends State<ReviewBar> {
             enabled: !_busy,
             // As the ask's card keeps it: it comes back to either.
             keep: DictationFor(
-              'ask/${widget.agentId}/${ask.id}',
+              cardKey(widget.agentId, ask.id),
               ask.title.isEmpty
                   ? 'Your answer to $name'
                   : 'Your answer to $name: ${ask.title}',
@@ -451,7 +982,7 @@ class _ReviewBarState extends State<ReviewBar> {
                         _Sized(
                           touch: touch,
                           child: SubmitButton(
-                            onPressed: _busy
+                            onPressed: off
                                 ? null
                                 : () => _answer(dismiss: false, reply: true),
                           ),
@@ -461,7 +992,7 @@ class _ReviewBarState extends State<ReviewBar> {
                           touch: touch,
                           child: Button(
                             label: 'Dismiss',
-                            onPressed: _busy
+                            onPressed: off
                                 ? null
                                 : () => _answer(dismiss: true),
                           ),
@@ -472,7 +1003,7 @@ class _ReviewBarState extends State<ReviewBar> {
                           child: Button(
                             label: _wantsText ? 'Send' : 'Approve',
                             primary: true,
-                            onPressed: _busy || (_wantsText && !typed)
+                            onPressed: off || (_wantsText && !typed)
                                 ? null
                                 : () => _answer(dismiss: false),
                           ),
@@ -503,12 +1034,16 @@ class _ReviewBarState extends State<ReviewBar> {
               ),
             ),
           ),
-          if (_failed != null || reviewHasLineComments(widget.path)) ...[
+          if (note != null || reviewHasLineComments(widget.path)) ...[
             const SizedBox(height: Space.xs),
             Text(
-              _failed ?? 'Your comments on lines go to $name with your answer.',
+              note ?? 'Your comments on lines go to $name with your answer.',
               style: type.caption.copyWith(
-                color: _failed != null ? palette.danger : palette.textFaint,
+                color: note == decisionWaiting || (held && _failed == null)
+                    ? palette.textMuted
+                    : note != null
+                    ? palette.danger
+                    : palette.textFaint,
               ),
             ),
           ],

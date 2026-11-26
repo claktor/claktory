@@ -194,6 +194,10 @@ signing_mode() {
 # commands agents build macOS's checks of each new program. Installed once
 # (scripts/install-release.sh), never by an update. Signed ad hoc here;
 # scripts/sign-release.sh signs it with the Developer ID when it can.
+# The reason macOS shows when the backend first asks for Local Network access
+# (macOS 15 and later), which devices on the same network need to reach it
+# directly (#543, Trish's words). Plain text: no & or <, it goes into XML.
+SUPERVISOR_LOCAL_NETWORK_REASON="Lets your phone, iPad and other computers on this network connect to Claktory directly, which is faster."
 make_supervisor_app() {
   local release="$1" version
   local app="$release/supervisor/Claktory Agents.app"
@@ -221,6 +225,7 @@ make_supervisor_app() {
   <key>CFBundleVersion</key><string>${version:-0.0.0}</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
   <key>LSBackgroundOnly</key><true/>
+  <key>NSLocalNetworkUsageDescription</key><string>${SUPERVISOR_LOCAL_NETWORK_REASON}</string>
 </dict>
 </plist>
 PLIST

@@ -56,6 +56,7 @@ const SHIPPED_RIVET_PROMPTS: &[&str] = &[
     "4e315740e5d8c4014539d2972757bf68675bd12488859aca14aa025555bf346f",
     // Approved proposals' grants: review before passing the id.
     "5956a04b1a664ec031dc4c546b0ba7b365f0d19f0b3e4152e6b9ffce2d021d72",
+    "5db56c606e08b97af5b757b7f6b4ceff0cb31f3e27dfa18e3e6e8d6120ab0080",
 ];
 /// Rivet is interactive, so it gets medium effort, the Opus 5.5 default.
 const RIVET_EFFORT: &str = "medium";
@@ -154,6 +155,9 @@ pub struct Config {
     /// The apps installed (`crate::apps`). Only written once there's one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub apps: Vec<crate::apps::AppConfig>,
+    /// Claktory's browser (`crate::browser_host`). Only written once set.
+    #[serde(default, skip_serializing_if = "BrowserConfig::is_default")]
+    pub browser: BrowserConfig,
     /// Settings this version doesn't know, kept and written back as they
     /// were (`Unknown`).
     #[serde(flatten)]
@@ -188,6 +192,29 @@ impl Default for AccountConfig {
 impl AccountConfig {
     fn is_default(&self) -> bool {
         *self == AccountConfig::default()
+    }
+}
+
+/// Claktory's browser (#435): the time zone and languages its pages see,
+/// the person's own (`crate::browser_host::locale`). Empty: not set.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserConfig {
+    /// An IANA name ("Europe/London").
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub time_zone: String,
+    /// BCP 47 tags, the one preferred first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub languages: Vec<String>,
+    /// Settings this version doesn't know, kept and written back as they
+    /// were (`Unknown`).
+    #[serde(flatten)]
+    pub other: Unknown,
+}
+
+impl BrowserConfig {
+    fn is_default(&self) -> bool {
+        *self == BrowserConfig::default()
     }
 }
 
@@ -305,6 +332,11 @@ pub struct DisplayConfig {
     /// from before it.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub zoom: BTreeMap<String, f64>,
+    /// How many bytes of this Claktory's files each device keeps for its
+    /// viewers (#446), by its id as for `zoom`, `FILE_CACHE_MIN` to
+    /// `FILE_CACHE_MAX`; the default (`FILE_CACHE_DEFAULT`) isn't written.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub file_cache: BTreeMap<String, u64>,
     /// Settings this version doesn't know, kept and written back as they
     /// were (`Unknown`).
     #[serde(flatten)]
@@ -314,6 +346,12 @@ pub struct DisplayConfig {
 /// How far a device can zoom the app out and in.
 pub const ZOOM_MIN: f64 = 0.5;
 pub const ZOOM_MAX: f64 = 2.0;
+
+/// How many bytes of files a device keeps for its viewers unless set…
+pub const FILE_CACHE_DEFAULT: u64 = 1_000_000_000;
+/// …and the least and most it can be set to: 100 MB to 100 GB.
+pub const FILE_CACHE_MIN: u64 = 100_000_000;
+pub const FILE_CACHE_MAX: u64 = 100_000_000_000;
 
 /// Panes `show` keeps open besides the conversation, until the person
 /// changes it…
@@ -341,6 +379,11 @@ impl DisplayConfig {
         for (device, zoom) in &self.zoom {
             if !(ZOOM_MIN..=ZOOM_MAX).contains(zoom) {
                 return Err(Invalid::BadDisplay(format!("zoom.{device} must be from {ZOOM_MIN} to {ZOOM_MAX}")));
+            }
+        }
+        for (device, bytes) in &self.file_cache {
+            if !(FILE_CACHE_MIN..=FILE_CACHE_MAX).contains(bytes) {
+                return Err(Invalid::BadDisplay(format!("file_cache.{device} must be from {FILE_CACHE_MIN} to {FILE_CACHE_MAX} bytes")));
             }
         }
         Ok(())
@@ -558,6 +601,10 @@ pub struct AgentConfig {
     /// refusal just ends the step.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub fallback_model: String,
+    /// Its own compaction threshold, in tokens; None (left out) follows
+    /// everyone's, `Config::compact_at_tokens` (`Config::compact_at`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_at_tokens: Option<u64>,
     /// What its message box says when empty; empty for "Message <name>".
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub placeholder: String,
@@ -663,6 +710,7 @@ impl Default for Config {
             extensions: rivet_extensions(),
             avatar: Avatar { shape: "hexagon".to_owned(), face: String::new(), other: Default::default() },
             fallback_model: String::new(),
+            compact_at_tokens: None,
             other: Default::default(),
         };
         Config {
@@ -684,6 +732,7 @@ impl Default for Config {
             prompt_cache: BTreeMap::new(),
             account: AccountConfig::default(),
             apps: Vec::new(),
+            browser: BrowserConfig::default(),
             default_fallback_model: String::new(),
             other: Default::default(),
         }
@@ -718,6 +767,8 @@ pub enum Invalid {
     BadEffort(String),
     #[error("compact_at_tokens must be positive")]
     ZeroCompaction,
+    #[error("agent \"{0}\": compact_at_tokens must be positive")]
+    ZeroAgentCompaction(String),
     #[error("task_alert_hours must be positive")]
     ZeroTaskAlert,
     #[error("remote: {0}")]
@@ -871,6 +922,9 @@ impl Config {
         if self.compact_at_tokens == 0 {
             return Err(Invalid::ZeroCompaction);
         }
+        if let Some(agent) = self.agents.iter().find(|agent| agent.compact_at_tokens == Some(0)) {
+            return Err(Invalid::ZeroAgentCompaction(agent.id.clone()));
+        }
         if self.task_alert_hours == 0 {
             return Err(Invalid::ZeroTaskAlert);
         }
@@ -946,6 +1000,11 @@ impl Config {
 
     pub fn agent(&self, id: &str) -> Option<&AgentConfig> {
         self.agents.iter().find(|agent| agent.id == id)
+    }
+
+    /// When `agent`'s context is compacted: its own threshold, or everyone's.
+    pub fn compact_at(&self, agent: &AgentConfig) -> u64 {
+        agent.compact_at_tokens.unwrap_or(self.compact_at_tokens)
     }
 
     pub fn agent_mut(&mut self, id: &str) -> Option<&mut AgentConfig> {

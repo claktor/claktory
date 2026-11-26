@@ -191,7 +191,7 @@ struct Row {
     conversation: ConversationChange,
     /// PIPE_MEMBER: the agent let send to the pipe, or stopped.
     member: String,
-    /// WITHDRAWN: the agent's reason, cut.
+    /// WITHDRAWN and SECRET_GIVEN_UP: the agent's reason, cut.
     reason: String,
     /// QUESTION, REVIEW and PROPOSAL: how many times its agent changed it (#428).
     updates: u32,
@@ -592,6 +592,7 @@ fn from_factory(
     from_model_changes(db, window, names, found)?;
     from_conversation_changes(db, window, names, found)?;
     from_member_changes(db, window, names, found)?;
+    from_given_up(db, window, names, found)?;
     Ok(())
 }
 
@@ -607,6 +608,19 @@ fn from_member_changes(db: &Connection, window: &Window, names: &HashMap<String,
         row.member = change.agent.clone();
         let subject = names.get(&change.agent).cloned().unwrap_or_default();
         row.searched(&[&subject])
+    });
+    Ok(())
+}
+
+/// The secrets agents gave up on their own (`vault::given_up`): Claktory's
+/// sentence, the agent's reason apart.
+fn from_given_up(db: &Connection, window: &Window, names: &HashMap<String, String>, found: &mut Found) -> rusqlite::Result<()> {
+    let given = crate::vault::given_up::between(db, window.since, window.before, i64::from(MAX_SCAN) + 1)?;
+    found.changes(given, |given| {
+        let mut row = Row::new(Kind::SecretGivenUp, given.id.to_string(), given.agent.clone(), Outcome::Changed, given.at, given.at);
+        row.title = cut(&given.title(names), MAX_TITLE);
+        row.reason = cut(&given.reason, MAX_REPLY);
+        row.searched(&[&given.reason])
     });
     Ok(())
 }
@@ -897,6 +911,11 @@ fn card<'a>(entries: impl DoubleEndedIterator<Item = &'a v1::Entry>, row: &Row) 
             {
                 Vec::new()
             }
+            (Some(Entry::ToolCall(call)), Kind::SecretGivenUp)
+                if crate::vault::given_up::given_up_of(call).as_deref() == Some(row.id.as_str()) =>
+            {
+                Vec::new()
+            }
             (Some(Entry::ToolCall(call)), Kind::Conversation)
                 if crate::fork::history::change_of(call).as_deref() == Some(row.conversation.change.as_str()) =>
             {
@@ -1049,8 +1068,11 @@ impl Factory {
                     app_id: row.app.app,
                     agent_reason: match row.kind {
                         _ if row.outcome == Outcome::Withdrawn => row.reason,
+                        // Closed by its agent as settled in the talk (#496).
+                        _ if row.outcome == Outcome::Resolved => row.reason,
                         Kind::Model => row.model.reason,
                         Kind::Conversation => row.conversation.reason,
+                        Kind::SecretGivenUp => row.reason,
                         _ => row.app.reason,
                     },
                     model_change_id: row.model.change,

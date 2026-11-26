@@ -62,7 +62,64 @@ pub(crate) enum When {
         /// The least time between fires, in ms.
         gap: i64,
     },
+    /// Fires when pipes its agent may see change (friend bug #34): opened,
+    /// closed, paused, resumed, a website shared or stopped, the other
+    /// side online or offline.
+    Pipes {
+        /// Their ids; empty for every pipe its agent may see, then and later.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pipes: Vec<String>,
+        /// The changes it fires on; empty for all of them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        on: Vec<PipeChange>,
+    },
 }
+
+/// A change to a pipe a `pipes` monitor fires on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PipeChange {
+    /// Both people approved it.
+    Opened,
+    Closed,
+    Paused,
+    Resumed,
+    /// A website shared over it, by either side.
+    Shared,
+    Unshared,
+    /// The other Claktory came online, or went offline.
+    Online,
+    Offline,
+}
+
+const PIPE_CHANGES: [PipeChange; 8] = [
+    PipeChange::Opened,
+    PipeChange::Closed,
+    PipeChange::Paused,
+    PipeChange::Resumed,
+    PipeChange::Shared,
+    PipeChange::Unshared,
+    PipeChange::Online,
+    PipeChange::Offline,
+];
+
+impl PipeChange {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            PipeChange::Opened => "opened",
+            PipeChange::Closed => "closed",
+            PipeChange::Paused => "paused",
+            PipeChange::Resumed => "resumed",
+            PipeChange::Shared => "shared",
+            PipeChange::Unshared => "unshared",
+            PipeChange::Online => "online",
+            PipeChange::Offline => "offline",
+        }
+    }
+}
+
+/// Pipes a pipes monitor names at most.
+const MAX_PIPES: usize = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -106,6 +163,7 @@ impl When {
             When::Check { .. } => "check",
             When::Files { .. } => "files",
             When::Watch { .. } => "watch",
+            When::Pipes { .. } => "pipes",
         }
     }
 
@@ -121,7 +179,7 @@ impl When {
             When::Every { every } => Some(at + every),
             When::Cron { cron } => Cron::parse(cron).ok().and_then(|cron| cron.next_after(at)),
             When::Check { every, .. } => Some(at + every),
-            When::Files { .. } | When::Watch { .. } => None,
+            When::Files { .. } | When::Watch { .. } | When::Pipes { .. } => None,
         }
     }
 
@@ -156,6 +214,18 @@ impl When {
                 Some(pattern) => format!("watch `{}` lines matching \"{pattern}\"", short(command)),
                 None => format!("watch `{}`", short(command)),
             },
+            When::Pipes { pipes, on } => {
+                let which = match pipes.as_slice() {
+                    [] => "pipes: any it can see".to_owned(),
+                    [one] => format!("pipe {one}"),
+                    many => format!("pipes {}", many.join(", ")),
+                };
+                if on.is_empty() {
+                    which
+                } else {
+                    format!("{which}, on {}", on.iter().map(|change| change.name()).collect::<Vec<_>>().join(", "))
+                }
+            }
         }
     }
 }
@@ -240,6 +310,9 @@ pub(crate) fn parse(when: &Value, folder: &Path, now: i64) -> Result<(When, Opti
     if fields.get("secrets").is_some_and(|secrets| !secrets.is_null()) {
         return Err("secrets works only with check: a check's command gets them each time it runs.".to_owned());
     }
+    if fields.get("on").is_some_and(|on| !on.is_null()) && fields.get("pipes").is_none() {
+        return Err("on works only with pipes: the changes to a pipe it fires on.".to_owned());
+    }
     if let Some(command) = text("watch")? {
         let gap = match text("gap")? {
             Some(gap) => parse_duration(&gap)?,
@@ -270,6 +343,9 @@ pub(crate) fn parse(when: &Value, folder: &Path, now: i64) -> Result<(When, Opti
         }
         return Ok((When::Files { paths, glob }, None));
     }
+    if let Some(pipes) = fields.get("pipes") {
+        return Ok((pipes_of(pipes, fields.get("on"))?, None));
+    }
     if let Some(cron) = text("cron")? {
         let parsed = Cron::parse(&cron)?;
         let first = parsed.next_after(now).ok_or("That cron schedule never matches.")?;
@@ -290,12 +366,63 @@ pub(crate) fn parse(when: &Value, folder: &Path, now: i64) -> Result<(When, Opti
         (Some(at), None) => parse_time(&at, now)?,
         (None, Some(after)) => now + parse_duration(&after)?,
         (Some(_), Some(_)) => return Err("Give at or in, not both.".to_owned()),
-        (None, None) => return Err("when needs one of: at, in, every, cron, check, files or watch.".to_owned()),
+        (None, None) => return Err("when needs one of: at, in, every, cron, check, files, watch or pipes.".to_owned()),
     };
     if at < now + MIN_TIME {
         return Err(format!("at must be at least 1m from now; got {}.", local(at, now)));
     }
     Ok((When::At { at }, Some(at)))
+}
+
+/// A pipes monitor as the agent wrote it: `pipes`, "*" or a pipe's name
+/// or id, or a list of them, kept as written until `resolve_pipes` turns
+/// them into ids; `on`, a change or a list of them (all when left out).
+fn pipes_of(pipes: &Value, on: Option<&Value>) -> Result<When, String> {
+    let bad = || "pipes must be \"*\" (every pipe you can see), a pipe's name or id, or a list of them.".to_owned();
+    let listed: Vec<&Value> = match pipes {
+        Value::Array(names) => names.iter().collect(),
+        name => vec![name],
+    };
+    let mut names: Vec<String> = Vec::new();
+    for name in listed {
+        let name = name.as_str().map(str::trim).filter(|name| !name.is_empty()).ok_or_else(bad)?;
+        if !names.iter().any(|seen| seen == name) {
+            names.push(name.to_owned());
+        }
+    }
+    if names.is_empty() {
+        return Err(bad());
+    }
+    if names.iter().any(|name| name == "*") {
+        if names.len() > 1 {
+            return Err("pipes is either \"*\" or the pipes you name, not both.".to_owned());
+        }
+        names.clear();
+    }
+    if names.len() > MAX_PIPES {
+        return Err(format!("pipes takes at most {MAX_PIPES} pipes; use \"*\" for all of them."));
+    }
+    let wanted: Vec<&Value> = match on {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(changes)) => changes.iter().collect(),
+        Some(change) => vec![change],
+    };
+    let all = PIPE_CHANGES.iter().map(|change| change.name()).collect::<Vec<_>>().join(", ");
+    let mut on: Vec<PipeChange> = Vec::new();
+    for change in wanted {
+        let name = change.as_str().map(str::trim).unwrap_or_default();
+        let Some(change) = PIPE_CHANGES.iter().find(|known| known.name() == name) else {
+            return Err(format!("on takes {all}, or a list of them; got {change}."));
+        };
+        if !on.contains(change) {
+            on.push(*change);
+        }
+    }
+    on.sort_unstable();
+    if on.len() == PIPE_CHANGES.len() {
+        on.clear();
+    }
+    Ok(When::Pipes { pipes: names, on })
 }
 
 /// "45m", "24h", "1h30m", "30s", "2d", "1w" in ms.
@@ -604,6 +731,32 @@ mod tests {
         assert!(refused(serde_json::json!({"check": "x", "secrets": [1]})).contains("a secret's name or a list of names"));
         let many: Vec<String> = (0..11).map(|n| format!("S{n}")).collect();
         assert!(refused(serde_json::json!({"check": "x", "secrets": many})).contains("at most 10 secrets"));
+    }
+
+    #[test]
+    fn pipes_name_pipes_or_all_and_the_changes_they_fire_on() {
+        let read = |json: Value| parse(&json, Path::new("/"), 0);
+        let all = read(serde_json::json!({"pipes": "*"})).expect("all");
+        assert_eq!(all, (When::Pipes { pipes: Vec::new(), on: Vec::new() }, None));
+        assert_eq!(all.0.describe(0), "pipes: any it can see");
+        assert_eq!(serde_json::to_string(&all.0).unwrap(), r#"{"kind":"pipes"}"#);
+        let (some, _) = read(serde_json::json!({"pipes": ["Launch", " Launch ", "p2"], "on": ["offline", "opened", "opened"]})).expect("some");
+        assert_eq!(some, When::Pipes { pipes: vec!["Launch".into(), "p2".into()], on: vec![PipeChange::Opened, PipeChange::Offline] });
+        assert_eq!(some.describe(0), "pipes Launch, p2, on opened, offline");
+        assert_eq!(serde_json::from_str::<When>(&serde_json::to_string(&some).unwrap()).unwrap(), some);
+        // Every change named is the same as none.
+        let (every, _) =
+            read(serde_json::json!({"pipes": "p1", "on": ["opened", "closed", "paused", "resumed", "shared", "unshared", "online", "offline"]}))
+                .expect("every");
+        assert_eq!(every, When::Pipes { pipes: vec!["p1".into()], on: Vec::new() });
+
+        let refused = |json: Value| read(json).expect_err("refused");
+        assert!(refused(serde_json::json!({"pipes": ""})).starts_with("pipes must be"));
+        assert!(refused(serde_json::json!({"pipes": ["*", "p1"]})).contains("not both"));
+        assert!(refused(serde_json::json!({"pipes": "*", "on": "approved"})).starts_with("on takes opened, closed"));
+        assert!(refused(serde_json::json!({"every": "1h", "on": "opened"})).starts_with("on works only with pipes"));
+        let many: Vec<String> = (0..21).map(|n| format!("p{n}")).collect();
+        assert!(refused(serde_json::json!({"pipes": many})).contains("at most 20"));
     }
 
     #[test]

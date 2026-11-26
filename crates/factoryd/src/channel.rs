@@ -9,7 +9,16 @@
 //! `scripts/release.sh` would: `<home>/releases/<version>/`, then
 //! `releases/latest`. From there everything is as for a local release (see
 //! `update`): the app offers the update and the person decides when.
-//! It never installs anything itself.
+//! It never installs anything itself. A release it downloaded that the
+//! manifest no longer offers (pulled: it names an older one again) is
+//! deleted, so it isn't offered any more (`Channel::withdraw`).
+//!
+//! Replays: each manifest is stamped when it's published (`issued_ms`,
+//! inside what's signed). A backend keeps the newest stamp it accepted per
+//! channel (`ISSUED`) and refuses an older manifest, or an unstamped one
+//! once it has seen a stamped one, so an old signed `latest.json` served
+//! again can neither roll the offer back nor take back a newer release. Only
+//! a stamped manifest newer than the one a release came from withdraws it.
 //!
 //! The manifest's own `url` is the Mac release: the app and the backend. A
 //! Linux backend takes its architecture's entry under `linux` instead: the
@@ -138,6 +147,67 @@ const TAR: &str = if cfg!(target_os = "macos") { "/usr/bin/tar" } else { "tar" }
 /// tarball of the same release, as the manifest named it, for apps paired
 /// from a Mac to update themselves (`crate::app_archive`).
 pub(crate) const APP_SOURCE: &str = "app-source.json";
+/// In a release this channel downloaded: the manifest's address it came
+/// from. Such a release goes again when the channel stops offering it
+/// (`Channel::withdraw`); one built here never does.
+const DOWNLOADED_FROM: &str = "downloaded-from";
+/// In a release `scripts/release.sh` built here: the commit it was built
+/// from. A tarball never has it, so a release without one was downloaded,
+/// by a backend from before `DOWNLOADED_FROM` or by the online installer.
+const BUILT_FROM: &str = "source";
+/// In the home: the newest stamped manifest accepted, by channel address
+/// (`Seen`).
+const ISSUED: &str = "update-channel.json";
+
+/// What `ISSUED` holds.
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct Seen {
+    #[serde(default)]
+    channels: BTreeMap<String, Stamp>,
+}
+
+/// A stamped manifest accepted: its stamp, and its bytes' SHA-256, so the
+/// same manifest read again is told from another stamped the same.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+struct Stamp {
+    issued_ms: u64,
+    sha256: String,
+}
+
+/// The stamps accepted so far; none when the file is missing or unreadable
+/// (unstamped manifests are taken again then, as before stamps).
+fn read_seen(home: &Home) -> Seen {
+    let path = home.root().join(ISSUED);
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+            tracing::warn!(%error, path = %path.display(), "the update channel's stamps couldn't be read; starting again");
+            Seen::default()
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Seen::default(),
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "the update channel's stamps couldn't be read; starting again");
+            Seen::default()
+        }
+    }
+}
+
+/// The newest stamp a manifest from `url` must not go back past: this
+/// address's own, or, for an https address that has none yet, the newest of
+/// any https address's. Every https channel is signed by the same pinned
+/// keys, so a channel that moves (the GitHub organization renamed, say)
+/// carries its floor along instead of starting afresh and taking an older
+/// signed manifest once. A folder's channel (`file://`, the dev Claktory's)
+/// keeps only its own.
+fn floor<'a>(seen: &'a Seen, url: &str) -> Option<&'a Stamp> {
+    if let Some(own) = seen.channels.get(url) {
+        return Some(own);
+    }
+    let https = |address: &str| address.starts_with("https://");
+    if !https(url) {
+        return None;
+    }
+    seen.channels.iter().filter(|(other, _)| https(other)).map(|(_, stamp)| stamp).max_by_key(|stamp| stamp.issued_ms)
+}
 
 /// `latest.json`.
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -164,6 +234,12 @@ pub struct Manifest {
     /// Empty when the release has none.
     #[serde(default)]
     pub linux: BTreeMap<String, Tarball>,
+    /// When it was published, in ms since 1970, as `scripts/publish.sh`
+    /// stamps it (strictly increasing on a channel); None in manifests from
+    /// before stamps. Compared only with other manifests' stamps, never
+    /// with this machine's clock.
+    #[serde(default)]
+    pub issued_ms: Option<u64>,
 }
 
 /// A release's tarball for one platform.
@@ -205,6 +281,10 @@ pub enum ChannelError {
     /// Tried again at the next check (it may be mid-publish).
     #[error("the manifest isn't signed by Claktory's release key: {0}")]
     Unsigned(String),
+    /// The manifest is older than one already accepted from the channel (a
+    /// replay, or a stale cache): nothing in it is used.
+    #[error("the manifest is older than one already read: {0}")]
+    Stale(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -418,9 +498,12 @@ impl Channel {
         let bytes = curl(&self.url, MANIFEST_TIMEOUT_SECONDS, MANIFEST_MAX_BYTES, None).await?;
         self.check_signature(&bytes).await?;
         let manifest = Manifest::parse(&bytes)?;
+        self.admit(&manifest, &bytes)?;
+        self.withdraw(&manifest.version, manifest.issued_ms, VERSION).await;
         let here = latest(&self.home).await.version;
-        // With no release here yet, the one running is what's here.
-        let here = if here.is_empty() && VERSION != "dev" { VERSION.to_owned() } else { here };
+        // With no release here yet, or only older ones (a newer one was
+        // withdrawn), the one running is what's here.
+        let here = if VERSION != "dev" && (here.is_empty() || newer(VERSION, &here)) { VERSION.to_owned() } else { here };
         if !here.is_empty() && !newer(&manifest.version, &here) {
             return Ok(Found::UpToDate);
         }
@@ -438,6 +521,44 @@ impl Channel {
                 Ok(Found::Skipped { version: manifest.version, why })
             }
         }
+    }
+
+    /// Err when the manifest (signed, or from a folder) is older than one
+    /// already accepted from this channel; otherwise keeps its stamp as the
+    /// newest, if it is.
+    fn admit(&self, manifest: &Manifest, bytes: &[u8]) -> Result<(), ChannelError> {
+        use sha2::Digest;
+        let sha256 = crate::encoding::hex(&sha2::Sha256::digest(bytes));
+        let mut seen = read_seen(&self.home);
+        let newest = floor(&seen, &self.url);
+        let stale = match (manifest.issued_ms, newest) {
+            (_, None) => None,
+            (None, Some(_)) => Some("it isn't stamped, and this channel's are"),
+            (Some(issued), Some(newest)) if issued < newest.issued_ms => Some("it was issued before one already read"),
+            (Some(issued), Some(newest)) if issued == newest.issued_ms && sha256 != newest.sha256 => {
+                Some("another manifest was issued at the same time")
+            }
+            _ => None,
+        };
+        if let Some(why) = stale {
+            tracing::warn!(version = %manifest.version, issued_ms = ?manifest.issued_ms, why, "refused a stale update manifest");
+            return Err(ChannelError::Stale(why.to_owned()));
+        }
+        if let Some(issued) = manifest.issued_ms
+            && newest.is_none_or(|newest| issued > newest.issued_ms)
+        {
+            seen.channels.insert(self.url.clone(), Stamp { issued_ms: issued, sha256 });
+            let written = serde_json::to_vec_pretty(&seen)
+                .map_err(std::io::Error::other)
+                .and_then(|json| {
+                    std::fs::create_dir_all(self.home.root())?;
+                    crate::remote::write_private(&self.home.root().join(ISSUED), &json)
+                });
+            if let Err(error) = written {
+                tracing::warn!(%error, "couldn't keep the update channel's newest stamp");
+            }
+        }
+        Ok(())
     }
 
     /// Downloads the release `find` found.
@@ -474,7 +595,7 @@ impl Channel {
         tokio::fs::write(&named, format!("{version}\n")).await?;
         tokio::fs::rename(&named, releases.join("latest")).await?;
         tracing::info!(%version, backend = %manifest.backend, "downloaded a new release");
-        self.prune().await;
+        self.prune(VERSION).await;
         Ok(Checked::Downloaded(version.clone()))
     }
 
@@ -521,12 +642,13 @@ impl Channel {
                 }
             }
             // The helpers beside factoryd (the apps host, the speech host,
-            // the video preview maker), which releases from before them
-            // don't have.
+            // the video preview maker; the WSL helper only in Linux ones),
+            // which releases from before them don't have.
             for name in crate::update::HELPERS {
                 let label = match name {
                     crate::update::APPS_HOST => "apps host",
                     crate::update::SPEECH_HOST => "speech host",
+                    crate::update::WSL_HELPER => "WSL helper",
                     _ => "video preview maker",
                 };
                 let helper = partial.join(name);
@@ -544,13 +666,81 @@ impl Channel {
             tokio::fs::write(partial.join(APP_SOURCE), serde_json::to_vec(&mac).map_err(std::io::Error::other)?).await?;
         }
         tokio::fs::write(partial.join("backend-version"), format!("{}\n", manifest.backend)).await?;
+        // The channel, then the stamp of the manifest it came from (none
+        // before stamps).
+        let stamp = manifest.issued_ms.map(|issued| format!("{issued}\n")).unwrap_or_default();
+        tokio::fs::write(partial.join(DOWNLOADED_FROM), format!("{}\n{stamp}", self.url)).await?;
         Ok(())
     }
 
-    /// Keeps the newest few releases, and always the one `latest` names.
-    async fn prune(&self) {
+    /// Forgets the releases this channel gave that it no longer offers: a
+    /// release pulled after it was downloaded (the manifest, stamped
+    /// `issued` after the one it came from, moved back to `listed`, older
+    /// than it) is deleted, so it's no longer offered, and `releases/latest`
+    /// names the newest release left. Only releases newer than the backend
+    /// `running` go: never the one running, nor the one an update would go
+    /// back to, nor a release built here. An unstamped manifest withdraws
+    /// nothing.
+    async fn withdraw(&self, listed: &str, issued: Option<u64>, running: &str) {
+        let Some(issued) = issued else { return };
+        let releases = self.home.releases();
+        let Ok(mut entries) = tokio::fs::read_dir(&releases).await else { return };
+        let mut left = Vec::new();
+        let mut pulled = Vec::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !plain(&name) || name.starts_with('.') || name.starts_with("latest") || !entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let dir = entry.path();
+            // The stamp of the manifest it came from: none when it came
+            // from an unstamped one, or by an older backend (no mark).
+            let marker = tokio::fs::read_to_string(dir.join(DOWNLOADED_FROM)).await.ok();
+            let came_from = marker.as_deref().and_then(|text| text.lines().nth(1)).and_then(|line| line.trim().parse::<u64>().ok());
+            let downloaded = marker.is_some() || !tokio::fs::try_exists(dir.join(BUILT_FROM)).await.unwrap_or(true);
+            // An unstamped backend ("dev") is older than any release, as `find` takes it.
+            let after_running = name != running && (running == "dev" || newer(&name, running));
+            if downloaded && after_running && newer(&name, listed) && came_from.is_none_or(|stamp| stamp < issued) {
+                pulled.push(name);
+            } else if dir.join("factoryd").is_file() {
+                left.push(name);
+            }
+        }
+        if pulled.is_empty() {
+            return;
+        }
+        // `latest` first, so it never names a release that's gone.
+        let named = tokio::fs::read_to_string(releases.join("latest")).await.unwrap_or_default();
+        if pulled.iter().any(|version| version == named.trim()) {
+            left.sort_unstable_by(|a, b| crate::update::compare_versions(b, a));
+            let renamed = match left.first() {
+                Some(newest) => {
+                    let next = releases.join("latest.new");
+                    match tokio::fs::write(&next, format!("{newest}\n")).await {
+                        Ok(()) => tokio::fs::rename(&next, releases.join("latest")).await,
+                        Err(error) => Err(error),
+                    }
+                }
+                None => tokio::fs::remove_file(releases.join("latest")).await,
+            };
+            if let Err(error) = renamed {
+                tracing::warn!(%error, "could not name the newest release left");
+                return;
+            }
+        }
+        for version in &pulled {
+            tracing::info!(%version, channel = %listed, "the channel no longer offers a release downloaded from it; deleting it");
+            remove_all(&releases.join(version)).await;
+        }
+    }
+
+    /// Keeps the newest few releases, and always the one `latest` names,
+    /// the one `running` (whose helpers a start heals from) and the one a
+    /// rollback would go back to.
+    async fn prune(&self, running: &str) {
         let releases = self.home.releases();
         let named = latest(&self.home).await.version;
+        let rollback = crate::update::rollback_version(&self.home);
         let Ok(mut entries) = tokio::fs::read_dir(&releases).await else { return };
         let mut versions = Vec::new();
         while let Ok(Some(entry)) = entries.next_entry().await {
@@ -560,7 +750,8 @@ impl Channel {
             }
         }
         versions.sort_unstable_by(|a, b| crate::update::compare_versions(b, a));
-        for old in versions.into_iter().skip(KEEP).filter(|version| *version != named) {
+        let kept = |version: &String| *version == named || version == running || rollback.as_ref() == Some(version);
+        for old in versions.into_iter().skip(KEEP).filter(|version| !kept(version)) {
             remove_all(&releases.join(old)).await;
         }
     }
@@ -580,6 +771,27 @@ pub async fn poll(factory: std::sync::Arc<crate::factory::Factory>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_moved_https_channel_keeps_the_newest_stamp_and_a_folders_keeps_its_own() {
+        use super::{Seen, Stamp, floor};
+        let stamp = |issued_ms: u64| Stamp { issued_ms, sha256: format!("{issued_ms}") };
+        let mut seen = Seen::default();
+        let old = "https://github.com/claktor/claktory/releases/latest/download/latest.json";
+        let new = "https://github.com/claktory/claktory/releases/latest/download/latest.json";
+        seen.channels.insert(old.to_owned(), stamp(3000));
+        seen.channels.insert("https://example.com/other/latest.json".to_owned(), stamp(2000));
+        seen.channels.insert("file:///tmp/channel/latest.json".to_owned(), stamp(9000));
+        // A new https address starts at the newest https stamp, never a folder's.
+        assert_eq!(floor(&seen, new), Some(&stamp(3000)));
+        // Its own stamp, once it has one, is what counts.
+        seen.channels.insert(new.to_owned(), stamp(4000));
+        assert_eq!(floor(&seen, new), Some(&stamp(4000)));
+        // A folder's channel keeps only its own, and starts afresh.
+        assert_eq!(floor(&seen, "file:///tmp/channel/latest.json"), Some(&stamp(9000)));
+        assert_eq!(floor(&seen, "file:///tmp/another/latest.json"), None);
+        assert_eq!(floor(&Seen::default(), new), None);
+    }
+
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
 
@@ -679,6 +891,78 @@ mod tests {
             .expect("verify");
         assert!(!pinned.status.success(), "the team requirement refuses it");
         assert!(String::from_utf8_lossy(&pinned.stderr).contains("requirement"), "refused for the requirement, not its syntax");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A release the channel pulled goes only when it's newer than the
+    /// backend running: the running one, and older ones an update would go
+    /// back to, stay even when they came from the channel.
+    #[tokio::test]
+    async fn a_pulled_release_goes_only_when_newer_than_the_one_running() {
+        let dir = std::env::temp_dir().join(format!("factoryd-withdraw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = Home::new(dir.clone());
+        let releases = home.releases();
+        for version in ["v0.1.20", "v0.1.21", "v0.1.22"] {
+            std::fs::create_dir_all(releases.join(version)).expect("release");
+            std::fs::write(releases.join(version).join("factoryd"), "backend").expect("factoryd");
+            std::fs::write(releases.join(version).join(DOWNLOADED_FROM), "file:///channel/latest.json\n").expect("marker");
+        }
+        // One from a manifest stamped after the one that moves back.
+        std::fs::create_dir_all(releases.join("v0.1.23")).expect("release");
+        std::fs::write(releases.join("v0.1.23/factoryd"), "backend").expect("factoryd");
+        std::fs::write(releases.join("v0.1.23").join(DOWNLOADED_FROM), "file:///channel/latest.json\n5\n").expect("marker");
+        std::fs::write(releases.join("latest"), "v0.1.22\n").expect("latest");
+        let channel = Channel::new(home.clone(), "file:///channel/latest.json");
+        let left = || {
+            let mut left: Vec<String> =
+                std::fs::read_dir(&releases).expect("releases").map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned()).collect();
+            left.sort();
+            left
+        };
+
+        // Unstamped: nothing goes.
+        channel.withdraw("v0.1.19", None, "v0.1.21").await;
+        assert_eq!(left(), ["latest", "v0.1.20", "v0.1.21", "v0.1.22", "v0.1.23"]);
+
+        // The channel went back past the one running (v0.1.21): it stays,
+        // and so does the older one, and the one stamped later.
+        channel.withdraw("v0.1.19", Some(2), "v0.1.21").await;
+        assert_eq!(left(), ["latest", "v0.1.20", "v0.1.21", "v0.1.23"]);
+        assert_eq!(latest(&home).await.version, "v0.1.23");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Pruning keeps the newest few, and never the running release's folder
+    /// (a start heals its helpers from it) or the one a rollback goes to.
+    #[tokio::test]
+    async fn pruning_keeps_the_running_release_and_the_rollbacks() {
+        let dir = std::env::temp_dir().join(format!("factoryd-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = Home::new(dir.clone());
+        let releases = home.releases();
+        for version in ["v0.1.27", "v0.1.28", "v0.1.30", "v0.1.32", "v0.1.33", "v0.1.34"] {
+            std::fs::create_dir_all(releases.join(version)).expect("release");
+            std::fs::write(releases.join(version).join("factoryd"), "backend").expect("factoryd");
+        }
+        std::fs::write(releases.join("latest"), "v0.1.34\n").expect("latest");
+        // On trial: v0.1.30 runs, and a rollback would go back to v0.1.28.
+        std::fs::create_dir_all(dir.join("bin")).expect("bin");
+        std::fs::write(home.trial_path(), r#"{"from": "v0.1.28", "to": "v0.1.30", "started": true}"#).expect("trial");
+        let channel = Channel::new(home.clone(), "file:///channel/latest.json");
+        channel.prune("v0.1.30").await;
+        let mut left: Vec<String> =
+            std::fs::read_dir(&releases).expect("releases").map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["latest", "v0.1.28", "v0.1.30", "v0.1.32", "v0.1.33", "v0.1.34"]);
+
+        // Off trial, only the running one is kept beyond the newest three.
+        std::fs::remove_file(home.trial_path()).expect("trial");
+        channel.prune("v0.1.30").await;
+        let mut left: Vec<String> =
+            std::fs::read_dir(&releases).expect("releases").map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        assert_eq!(left, ["latest", "v0.1.30", "v0.1.32", "v0.1.33", "v0.1.34"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

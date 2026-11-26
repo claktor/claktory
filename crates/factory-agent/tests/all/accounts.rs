@@ -1817,6 +1817,103 @@ fn openrouter_spending_limits_are_told_apart_from_its_balance() {
     assert_eq!(spending_limit(403, &permission, None), None);
 }
 
+/// The completion tokens a request to OpenRouter asked for.
+fn asked_tokens(seen: &Seen) -> u64 {
+    let body: Value = serde_json::from_str(&seen.body).unwrap_or_default();
+    body["max_completion_tokens"].as_u64().or_else(|| body["max_tokens"].as_u64()).unwrap_or(0)
+}
+
+/// Friend bug #42: OpenRouter's 402 for a request that costs more than the
+/// key may spend on it ("requires more credits, or fewer max_tokens … can
+/// only afford N") isn't the key out of credit. The request is asked once
+/// more for what the key can afford and goes through; the account is never
+/// marked, so the agent doesn't wait for credit it has.
+#[tokio::test]
+async fn a_request_the_key_cant_afford_whole_asks_for_fewer_tokens_and_marks_nothing() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let server = mock(Arc::new(|seen| {
+        if seen.path.ends_with("/chat/completions") && asked_tokens(seen) > 12_000 {
+            let message = format!("This request requires more credits, or fewer max_tokens. You requested up to {}, but can only afford 12345. To increase, visit https://openrouter.ai/settings/credits and add more credits", asked_tokens(seen));
+            return json_answer(402, Vec::new(), json!({"error": {"code": 402, "message": message, "metadata": {"limit_source": "openrouter_credits"}}}));
+        }
+        openrouter_reply()
+    }))
+    .await;
+    store_accounts(&file, "openrouter", vec![keyed("k1", OR_1)]);
+    let registry = registry(&file, &server.base_url);
+    let (notes, _) = recorder();
+    let mut model = openrouter_model(&server.base_url);
+    model.max_tokens = 64_000;
+
+    assert_eq!(ask(&registry, &notes, &model, StreamOptions::default()).await, Ok("hi".into()));
+    let asked: Vec<u64> = server.seen.lock().iter().filter(|seen| seen.path.ends_with("/chat/completions")).map(asked_tokens).collect();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert!(asked[0] > 12_000 && (2048..=12_345).contains(&asked[1]), "{asked:?}");
+    let accounts = registry.accounts("openrouter").await.expect("accounts");
+    assert!(!accounts[0].out_of_credit, "the key has credit");
+}
+
+/// Friend bug #42: one that's still too costly for the key at fewer tokens
+/// (`weight_exceeds_budget`) fails with Claktory's words, saying the key
+/// still has credit, and leaves the account alone: a cheaper model on the
+/// same key runs at once.
+#[tokio::test]
+async fn a_request_too_costly_even_at_fewer_tokens_fails_without_marking_the_key() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let server = mock(Arc::new(|seen| {
+        let body: Value = serde_json::from_str(&seen.body).unwrap_or_default();
+        if seen.path.ends_with("/chat/completions") && body["model"] == "google/gemini-4-neon" {
+            return json_answer(
+                402,
+                Vec::new(),
+                json!({"error": {"code": 402, "message": "This request's estimated cost exceeds your available budget.", "metadata": {"reason": "weight_exceeds_budget", "limit_source": "openrouter_credits"}}}),
+            );
+        }
+        openrouter_reply()
+    }))
+    .await;
+    store_accounts(&file, "openrouter", vec![keyed("k1", OR_1)]);
+    let registry = registry(&file, &server.base_url);
+    let (notes, _) = recorder();
+    let mut costly = openrouter_model(&server.base_url);
+    costly.id = "google/gemini-4-neon".to_owned();
+    costly.name = "Gemini 4 Neon".to_owned();
+    costly.max_tokens = 64_000;
+
+    let error = ask(&registry, &notes, &costly, StreamOptions::default()).await.expect_err("too costly");
+    assert!(error.starts_with("OpenRouter turned this request down as costing more than the key may spend on it at once: Gemini 4 Neon"), "{error}");
+    assert!(!error.contains("ran out of credit"), "{error}");
+    let asked: Vec<u64> = server.seen.lock().iter().filter(|seen| seen.path.ends_with("/chat/completions")).map(asked_tokens).collect();
+    assert_eq!(asked, [64_000, 16_000], "asked once more for a quarter");
+    let accounts = registry.accounts("openrouter").await.expect("accounts");
+    assert!(!accounts[0].out_of_credit && accounts[0].exhausted_until == 0, "the key isn't marked");
+    // A cheaper model on the same key runs.
+    assert_eq!(ask(&registry, &notes, &openrouter_model(&server.base_url), StreamOptions::default()).await, Ok("hi".into()));
+}
+
+#[test]
+fn openrouter_affordability_is_told_apart_from_running_out() {
+    use factory_agent::accounts::{credit_error, unaffordable};
+    let afford = json!({"error": {"code": 402, "message": "This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 23456. To increase, visit https://openrouter.ai/settings/credits"}}).to_string();
+    assert_eq!(unaffordable(402, &afford), Some(Some(23456)));
+    assert!(!credit_error(402, &afford));
+    let weight = json!({"error": {"code": 402, "message": "Too costly.", "metadata": {"reason": "weight_exceeds_budget", "limit_source": "openrouter_credits"}}}).to_string();
+    assert_eq!(unaffordable(402, &weight), Some(None));
+    assert!(!credit_error(402, &weight));
+    // Out of credit is still that.
+    let balance =
+        json!({"error": {"code": 402, "message": "Insufficient credits.", "metadata": {"limit_source": "openrouter_credits"}}}).to_string();
+    assert_eq!(unaffordable(402, &balance), None);
+    assert!(credit_error(402, &balance));
+    assert_eq!(unaffordable(400, &afford), None);
+    // Nothing affordable at all: out.
+    let none = json!({"error": {"code": 402, "message": "This request requires more credits, or fewer max_tokens. You requested up to 4096 tokens, but can only afford 0."}}).to_string();
+    assert_eq!(unaffordable(402, &none), None);
+    assert!(credit_error(402, &none));
+}
+
 /// Bruno 30083: the accounts' order is a priority, looked at again for
 /// every request. On the third account because the first two are at their
 /// limits, the next request goes back to the first as soon as its limit

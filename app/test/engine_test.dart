@@ -192,7 +192,7 @@ void main() {
       await pumpFrames(tester);
       expect(find.text(stopEngineMessage), findsOneWidget);
       expect(_stops(harness), isEmpty, reason: 'asks first');
-      await tester.tap(find.text('Turn Off'));
+      await tester.tap(find.text('Turn off'));
       await pumpFrames(tester);
       expect(_stops(harness).single.quitting, isFalse);
 

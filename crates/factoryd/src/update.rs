@@ -359,6 +359,12 @@ pub fn on_trial(home: &Home) -> bool {
     read_trial(home).is_some()
 }
 
+/// The backend a rollback would go back to: the one before the update on
+/// trial, if one is.
+pub(crate) fn rollback_version(home: &Home) -> Option<String> {
+    read_trial(home).map(|trial| trial.from).filter(|from| !from.is_empty())
+}
+
 /// For the supervisor, after the backend stopped or couldn't be started:
 /// whether that was an update failing. A trial that hasn't started yet means
 /// the backend stopped to hand over to the update.
@@ -588,6 +594,7 @@ impl Factory {
                 ChannelError::Manifest(_) => "The update server's answer couldn't be read. Try again later.".to_owned(),
                 ChannelError::Unsigned(_) => "The update offered isn't signed by Claktory, so it wasn't downloaded.".to_owned(),
                 ChannelError::Rejected { version, .. } => format!("{version} didn't download correctly, so Claktory didn't keep it."),
+                ChannelError::Stale(_) => "Couldn't check for updates: the answer was older than the last one. Try again later.".to_owned(),
                 ChannelError::Io(error) => format!("Claktory couldn't save the update: {error}."),
             }
         };
@@ -700,6 +707,7 @@ impl Factory {
                 // The supervisor starts the new backend and watches it,
                 // handing it the open vault's key.
                 factory.vault.hand_over(false);
+                factory.store.write_calls();
                 crate::account::analytics::backend_stopped(&factory.home);
                 std::process::exit(0);
             }
@@ -814,9 +822,15 @@ pub const SPEECH_HOST: &str = "claktory-speech";
 /// beside factoryd like the apps host.
 pub const VIDEO_PREVIEW: &str = "claktory-video-preview";
 
+/// The WSL helper (#490, `scripts/claktory-wsl.sh`), in Linux releases from
+/// v0.1.23 on, beside factoryd like the apps host. Mac releases have none.
+pub const WSL_HELPER: &str = "claktory-wsl";
+
 /// The programs a release carries beside factoryd, which updates put in
-/// `<home>/bin` and roll back with it.
-pub const HELPERS: [&str; 3] = [APPS_HOST, SPEECH_HOST, VIDEO_PREVIEW];
+/// `<home>/bin` and roll back with it. A release may lack any of them (one
+/// from before it, or for another system): what's installed then stays as
+/// it is, and nothing is said.
+pub const HELPERS: [&str; 4] = [APPS_HOST, SPEECH_HOST, VIDEO_PREVIEW, WSL_HELPER];
 
 fn helper(home: &Home, name: &str) -> std::path::PathBuf {
     home.root().join("bin").join(name)
@@ -921,8 +935,8 @@ fn put_executable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// Before an update's backend goes in: each helper and tool the release
-/// carries (`claktory-apps`, `claktory-speech`, `claktory-video-preview`;
-/// `tools/rg`, `tools/jq`) replaces the installed one, which is kept (`bin/<name>.previous`,
+/// carries (`claktory-apps`, `claktory-speech`, `claktory-video-preview`,
+/// `claktory-wsl`; `tools/rg`, `tools/jq`) replaces the installed one, which is kept (`bin/<name>.previous`,
 /// `tools/.previous/<name>`) for a roll-back. A release without one leaves
 /// what's there alone, and forgets an older previous copy so a roll-back
 /// doesn't put back one from before.
@@ -1142,6 +1156,37 @@ mod helpers_tests {
 
     fn read(path: &Path) -> Option<String> {
         std::fs::read_to_string(path).ok()
+    }
+
+    /// A Linux release from v0.1.23 on carries the WSL helper, which an
+    /// update by v0.1.22, knowing none, leaves out: the next start puts it
+    /// in. A Mac release has none: nothing is put in or said.
+    #[test]
+    fn the_wsl_helper_goes_in_where_a_release_carries_it_and_nothing_happens_where_it_doesnt() {
+        let (home, dir) = home("wsl");
+        std::fs::write(dir.join("release/factoryd"), "backend 2").expect("release backend");
+        std::fs::write(dir.join("release/claktory-apps"), "host 2").expect("release host");
+        std::fs::write(helper(&home, APPS_HOST), "host 2").expect("host");
+        assert!(heal(&home, &dir.join("release")).is_empty(), "a Mac release, with no WSL helper");
+        assert!(!helper(&home, WSL_HELPER).exists());
+        stage_helpers(&home, &dir.join("release")).expect("staged");
+        assert!(!helper(&home, WSL_HELPER).exists() && !previous_helper(&home, WSL_HELPER).exists());
+
+        std::fs::write(dir.join("release/claktory-wsl"), "wsl 1").expect("release wsl");
+        assert_eq!(heal(&home, &dir.join("release")), [WSL_HELPER]);
+        assert_eq!(read(&helper(&home, WSL_HELPER)).as_deref(), Some("wsl 1"));
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(helper(&home, WSL_HELPER)).expect("meta").permissions().mode() & 0o777, 0o755);
+
+        // The next update replaces it, keeping this one for a roll-back.
+        std::fs::write(home.previous_backend(), "backend 1").expect("previous");
+        std::fs::write(dir.join("release/claktory-wsl"), "wsl 2").expect("release wsl");
+        stage_helpers(&home, &dir.join("release")).expect("staged");
+        assert_eq!(read(&helper(&home, WSL_HELPER)).as_deref(), Some("wsl 2"));
+        assert_eq!(read(&previous_helper(&home, WSL_HELPER)).as_deref(), Some("wsl 1"));
+        restore_helpers(&home).expect("restored");
+        assert_eq!(read(&helper(&home, WSL_HELPER)).as_deref(), Some("wsl 1"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An update made by v0.1.13's backend, which knew no speech host: the

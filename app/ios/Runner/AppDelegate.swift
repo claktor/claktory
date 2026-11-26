@@ -40,6 +40,9 @@ import UniformTypeIdentifiers
     // (app/macos/Runner/Recorder.swift, AudioPlayer.swift).
     Recorder.register(with: messenger)
     AudioPlayer.register(with: messenger)
+    // History's video export, its frames into an MP4, as on the Mac
+    // (app/macos/Runner/ReplayWriter.swift).
+    ReplayWriter.register(with: messenger)
     // The network path, to reconnect the moment it changes, as on the Mac
     // (app/macos/Runner/NetworkPath.swift).
     NetworkPath.register(with: messenger)
@@ -109,6 +112,23 @@ import UniformTypeIdentifiers
         result(Camera.access())
       case "requestCamera":
         Camera.request { result($0) }
+      case "protectKeptFiles":
+        // #446 (Fugo 33088, 33120): the files kept from a Claktory on
+        // another machine can't be opened while the iPhone is locked.
+        guard let path = call.arguments as? String else {
+          result(FlutterError(code: "bad_arguments", message: "a path", details: nil))
+          return
+        }
+        DispatchQueue.global(qos: .utility).async {
+          let failure: FlutterError?
+          do {
+            try Self.protectKeptFiles(path)
+            failure = nil
+          } catch {
+            failure = FlutterError(code: "protect_failed", message: "\(error)", details: nil)
+          }
+          DispatchQueue.main.async { result(failure) }
+        }
       case "openCameraSettings":
         Camera.openSettings()
         result(nil)
@@ -126,10 +146,22 @@ import UniformTypeIdentifiers
         // The share sheet for files the app fetched (lib/share_files.dart,
         // #418): AirDrop, Messages, Save to Files…
         Self.shareFiles(call.arguments as? [String: Any] ?? [:], result)
+      case "localNetwork":
+        // Whether the local network may be reached (LocalNetwork.swift):
+        // asks the person first when they haven't answered.
+        LocalNetworkCheck.check { result($0) }
+      case "openAppSettings":
+        LocalNetworkCheck.openSettings()
+        result(nil)
       case "capabilities":
         // What this device is (Capabilities.swift): the iPad's workbench
         // follows its idiom, never its window's size.
         result(Capabilities.current())
+      case "timeZone":
+        // The device's IANA zone ("Europe/London"), which Flutter can't
+        // read: Claktory's browser takes it from the device that first
+        // opens it (#435).
+        result(TimeZone.current.identifier)
       default: result(FlutterMethodNotImplemented)
       }
     }
@@ -496,5 +528,35 @@ final class Links: NSObject, FlutterSceneLifeCycleDelegate {
   // A link while the app runs (or wakes from the background).
   func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) -> Bool {
     open(URLContexts.map(\.url))
+  }
+}
+
+// The files kept from a Claktory on another machine (#446,
+// app/lib/viewers/file_cache.dart).
+extension AppDelegate {
+  /// Unreadable while the iPhone is locked, though a write in progress
+  /// finishes (Fugo 33120). What's made in a folder later takes its class.
+  static let keptFilesProtection = FileProtectionType.completeUnlessOpen
+
+  /// A folder (made if it isn't there) and everything in it, or one file
+  /// moved in, which keeps the class it was made with.
+  static func protectKeptFiles(_ path: String) throws {
+    let manager = FileManager.default
+    let protection: [FileAttributeKey: Any] = [.protectionKey: keptFilesProtection]
+    var folder: ObjCBool = false
+    if manager.fileExists(atPath: path, isDirectory: &folder), !folder.boolValue {
+      try manager.setAttributes(protection, ofItemAtPath: path)
+      return
+    }
+    try manager.createDirectory(
+      atPath: path, withIntermediateDirectories: true, attributes: protection)
+    try manager.setAttributes(protection, ofItemAtPath: path)
+    // What an earlier version kept there, before the folder had it.
+    if let items = manager.enumerator(atPath: path) {
+      for case let item as String in items {
+        try manager.setAttributes(
+          protection, ofItemAtPath: (path as NSString).appendingPathComponent(item))
+      }
+    }
   }
 }

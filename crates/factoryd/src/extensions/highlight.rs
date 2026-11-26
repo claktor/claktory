@@ -38,16 +38,17 @@ The person sees Claktory in its app. `highlight` makes parts of the app glow for
 - settings, marketplace: the buttons at the bottom of the sidebar (no id)
 Add a short `text` to say what to look at. It changes nothing; use it sparingly.
 
-`show_screen` opens a screen in the app on the device the person is using right now, when you're helping them with it (\"Let's pair your phone\": Settings → Devices): `screen` settings (`id` a section: profile, general, account, providers, secrets, pipes, defaults, voice, devices, resources, display, checklist; none for the top), map, usage, monitors (every agent's monitors), marketplace (`id` a tab: templates, skills, extensions or apps; none for the first), changelog (What's new), agent (`id` an agent's id: its conversation) or agent_settings (`id` an agent's id). It never brings the app forward or opens on a device they aren't using; when nothing opened, tell them where to find it instead. It changes what they see, so open only what they need, when they need it.
+`show_screen` opens a screen in the app on the device the person is using right now, when you're helping them with it (\"Let's pair your phone\": Settings → Devices): `screen` settings (`id` a section: profile, general, account, providers, secrets, pipes, defaults, voice, devices, resources, display, checklist; none for the top), map, usage, monitors (every agent's monitors), marketplace (`id` a tab: templates, skills, extensions or apps; none for the first), changelog (What's new), agent (`id` an agent's id: its conversation), agent_settings (`id` an agent's id), pipe (`id` a pipe's id, as pipes_list gives it: the pipe) or pipe_settings (`id` a pipe's id: its settings). It never brings the app forward or opens on a device they aren't using; when nothing opened, tell them where to find it instead. It changes what they see, so open only what they need, when they need it.
 ";
 
 const DESCRIPTION: &str = "Make parts of the app glow for a moment so the person sees them. targets: [{kind, id}], kind agent, project, checklist_item (\"<agent>#<n>\"), extension (\"<agent>/<extension>\"), settings or marketplace (no id). text: an optional short caption.";
 
 const KINDS: [&str; 6] = ["agent", "project", "checklist_item", "extension", "settings", "marketplace"];
 
-const SCREEN_DESCRIPTION: &str = "Open a screen in the app on the device the person is using now (never another device, never bringing the app forward). screen: settings (id: a section, profile, general, account, providers, secrets, pipes, defaults, voice, devices, resources, display or checklist; none for the top), map, usage, monitors (every agent's monitors), marketplace (id: a tab, templates, skills, extensions or apps; none for the first), changelog, agent (id: an agent's id, its conversation) or agent_settings (id: an agent's id). Says on which device it opened, or that none did.";
+const SCREEN_DESCRIPTION: &str = "Open a screen in the app on the device the person is using now (never another device, never bringing the app forward). screen: settings (id: a section, profile, general, account, providers, secrets, pipes, defaults, voice, devices, resources, display or checklist; none for the top), map, usage, monitors (every agent's monitors), marketplace (id: a tab, templates, skills, extensions or apps; none for the first), changelog, agent (id: an agent's id, its conversation), agent_settings (id: an agent's id), pipe (id: a pipe's id, the pipe) or pipe_settings (id: a pipe's id, its settings); pipes only of your own project, unless you're an admin agent. Says on which device it opened, or that none did.";
 
-const SCREENS: [&str; 8] = ["settings", "map", "usage", "monitors", "marketplace", "changelog", "agent", "agent_settings"];
+const SCREENS: [&str; 10] =
+    ["settings", "map", "usage", "monitors", "marketplace", "changelog", "agent", "agent_settings", "pipe", "pipe_settings"];
 
 /// The sections of Settings an agent can open, as the app names them.
 const SECTIONS: [(&str, &str); 12] = [
@@ -159,7 +160,7 @@ async fn open_screen(factory: &Factory, agent: &str, mut args: ScreenArgs) -> Re
     }
     let (name, person, persons) = {
         let inner = factory.lock();
-        let name = screen_name(factory, &inner.config, &args.screen, &id)?;
+        let name = screen_name(factory, &inner.config, agent, &args.screen, &id)?;
         (name, inner.config.person_capitalized().to_owned(), format!("{}'s", inner.config.person()))
     };
     let call = crate::connectors::random_id();
@@ -198,7 +199,7 @@ async fn open_screen(factory: &Factory, agent: &str, mut args: ScreenArgs) -> Re
 
 /// What the screen is called, as the person finds it ("Settings → Devices",
 /// "Mike's settings"), or an error saying what's wrong with it.
-fn screen_name(factory: &Factory, config: &Config, screen: &str, id: &str) -> Result<String, String> {
+fn screen_name(factory: &Factory, config: &Config, asker: &str, screen: &str, id: &str) -> Result<String, String> {
     let agent = |id: &str| config.agent(id).map(|agent| agent.name.clone()).ok_or_else(|| format!("No agent has the id \"{id}\"."));
     let none = |name: &str| if id.is_empty() { Ok(name.to_owned()) } else { Err(format!("{name} takes no id.")) };
     match screen {
@@ -227,6 +228,19 @@ fn screen_name(factory: &Factory, config: &Config, screen: &str, id: &str) -> Re
         "changelog" => none("What's new"),
         "agent" => Ok(format!("{}'s conversation", agent(id)?)),
         "agent_settings" => Ok(format!("{}'s settings", agent(id)?)),
+        // A pipe (#471 G9, Fugo): only by the name this side gave it, else
+        // its id; one of another project only for an admin agent.
+        "pipe" | "pipe_settings" => {
+            let admin = config.agent(asker).is_some_and(crate::proposals::is_admin);
+            let project = config.agent(asker).and_then(|me| me.project.clone()).unwrap_or_default();
+            let record = factory
+                .pipes
+                .get(id)
+                .filter(|record| admin || record.project == project)
+                .ok_or_else(|| format!("No pipe of yours has the id \"{id}\" (pipes_list gives them)."))?;
+            let called = format!("the pipe {}", crate::pipes::handoff::label(&record).trim_start_matches("pipe "));
+            Ok(if screen == "pipe" { called } else { format!("the settings of {called}") })
+        }
         other => Err(format!("No screen \"{other}\"; use one of {}.", SCREENS.join(", "))),
     }
 }

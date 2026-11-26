@@ -477,49 +477,51 @@ class LidClosedState extends $pb.ProtobufEnum {
   static const LidClosedState LID_CLOSED_OFF =
       LidClosedState._(0, _omitEnumNames ? '' : 'LID_CLOSED_OFF');
 
-  /// Turned on, and the helper waits for the person's approval in System
-  /// Settings → Login Items (the app opens it).
+  /// No longer sent: the root helper it waited for is gone (#371's
+  /// redesign).
   static const LidClosedState LID_CLOSED_NEEDS_APPROVAL =
       LidClosedState._(1, _omitEnumNames ? '' : 'LID_CLOSED_NEEDS_APPROVAL');
 
-  /// Turned on and the helper answers: it holds the Mac awake while agents
-  /// work on power (lid_closed_holding).
+  /// Turned on: Claktory keeps the Mac awake with its lid closed while agents
+  /// work and it's plugged in (lid_closed_holding), and lets it sleep as soon
+  /// as it's unplugged.
   static const LidClosedState LID_CLOSED_ON =
       LidClosedState._(2, _omitEnumNames ? '' : 'LID_CLOSED_ON');
 
-  /// On, and the helper let go: the battery is at 20% or less (it holds again
-  /// at 30% or on power).
+  /// No longer sent: nothing is held on battery at all.
   static const LidClosedState LID_CLOSED_PAUSED_BATTERY =
       LidClosedState._(3, _omitEnumNames ? '' : 'LID_CLOSED_PAUSED_BATTERY');
 
-  /// On, and the helper let go: the Mac is too hot (it holds again 10 minutes
-  /// after it cools down).
+  /// On, and let go: the Mac is too hot (held again 10 minutes after it
+  /// cools down).
   static const LidClosedState LID_CLOSED_PAUSED_HEAT =
       LidClosedState._(4, _omitEnumNames ? '' : 'LID_CLOSED_PAUSED_HEAT');
 
-  /// On, and the helper let go: the lid is closed on battery, as in a bag.
-  /// It holds again once plugged in.
+  /// No longer sent: nothing is held on battery at all.
   static const LidClosedState LID_CLOSED_PAUSED_LID_ON_BATTERY =
       LidClosedState._(
           5, _omitEnumNames ? '' : 'LID_CLOSED_PAUSED_LID_ON_BATTERY');
 
-  /// On, but no helper answers: it isn't installed, it was turned off in
-  /// System Settings, or macOS refused to start it (then Login Items shows it
-  /// switched off until the person switches it on again, even after it's
-  /// installed again). The Mac app registers it again and offers Login Items;
-  /// it never assumes an earlier approval still holds.
+  /// No longer sent (the helper is gone).
   static const LidClosedState LID_CLOSED_MISSING =
       LidClosedState._(6, _omitEnumNames ? '' : 'LID_CLOSED_MISSING');
 
-  /// On, but the helper is from another version of Claktory: the Mac app
-  /// installs it again. factoryd asks it to hold nothing meanwhile.
+  /// No longer sent (the helper is gone).
   static const LidClosedState LID_CLOSED_OUTDATED =
       LidClosedState._(7, _omitEnumNames ? '' : 'LID_CLOSED_OUTDATED');
 
-  /// On, but installing or removing the helper failed: lid_closed_error says
-  /// why.
+  /// On, but macOS refused to keep the lid from sleeping the Mac:
+  /// lid_closed_error says why.
   static const LidClosedState LID_CLOSED_FAILED =
       LidClosedState._(8, _omitEnumNames ? '' : 'LID_CLOSED_FAILED');
+
+  /// The Mac can't sleep with its lid closed although Claktory isn't keeping
+  /// it awake: what Claktory set couldn't be undone, or an old SleepDisabled
+  /// setting is on. Before every other state, and sent whatever
+  /// lid_closed_available says; lid_closed_fix says what fixes it. Needs you
+  /// says so too, with one notification (thread "keep_awake").
+  static const LidClosedState LID_CLOSED_STUCK =
+      LidClosedState._(9, _omitEnumNames ? '' : 'LID_CLOSED_STUCK');
 
   static const $core.List<LidClosedState> values = <LidClosedState>[
     LID_CLOSED_OFF,
@@ -531,10 +533,11 @@ class LidClosedState extends $pb.ProtobufEnum {
     LID_CLOSED_MISSING,
     LID_CLOSED_OUTDATED,
     LID_CLOSED_FAILED,
+    LID_CLOSED_STUCK,
   ];
 
   static final $core.List<LidClosedState?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 8);
+      $pb.ProtobufEnum.$_initByValueList(values, 9);
   static LidClosedState? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -1559,6 +1562,13 @@ class MapNodeKind extends $pb.ProtobufEnum {
   static const MapNodeKind MAP_NODE_KIND_APP =
       MapNodeKind._(7, _omitEnumNames ? '' : 'MAP_NODE_KIND_APP');
 
+  /// A pipe to another Claktory, in History only (the Map draws pipes from
+  /// Workspace.pipes): id "pipe:<id>", parent_id its project's node,
+  /// label its name only when it was named on this side (otherwise "Pipe"),
+  /// detail "Another Claktory". Never anything of the other side's.
+  static const MapNodeKind MAP_NODE_KIND_PIPE =
+      MapNodeKind._(8, _omitEnumNames ? '' : 'MAP_NODE_KIND_PIPE');
+
   static const $core.List<MapNodeKind> values = <MapNodeKind>[
     MAP_NODE_KIND_UNSPECIFIED,
     MAP_NODE_KIND_WORKSPACE,
@@ -1568,10 +1578,11 @@ class MapNodeKind extends $pb.ProtobufEnum {
     MAP_NODE_KIND_SECRET,
     MAP_NODE_KIND_DATA,
     MAP_NODE_KIND_APP,
+    MAP_NODE_KIND_PIPE,
   ];
 
   static final $core.List<MapNodeKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 7);
+      $pb.ProtobufEnum.$_initByValueList(values, 8);
   static MapNodeKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -1615,6 +1626,11 @@ class MapEdgeKind extends $pb.ProtobufEnum {
   static const MapEdgeKind MAP_EDGE_KIND_LEAD =
       MapEdgeKind._(7, _omitEnumNames ? '' : 'MAP_EDGE_KIND_LEAD');
 
+  /// In History only: from an agent to a pipe it's a member of; label
+  /// "Leads" for the pipe's lead.
+  static const MapEdgeKind MAP_EDGE_KIND_PIPE =
+      MapEdgeKind._(8, _omitEnumNames ? '' : 'MAP_EDGE_KIND_PIPE');
+
   static const $core.List<MapEdgeKind> values = <MapEdgeKind>[
     MAP_EDGE_KIND_UNSPECIFIED,
     MAP_EDGE_KIND_MESSAGES,
@@ -1624,14 +1640,143 @@ class MapEdgeKind extends $pb.ProtobufEnum {
     MAP_EDGE_KIND_APP,
     MAP_EDGE_KIND_HEARS,
     MAP_EDGE_KIND_LEAD,
+    MAP_EDGE_KIND_PIPE,
   ];
 
   static final $core.List<MapEdgeKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 7);
+      $pb.ProtobufEnum.$_initByValueList(values, 8);
   static MapEdgeKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const MapEdgeKind._(super.value, super.name);
+}
+
+class HistoryChapterKind extends $pb.ProtobufEnum {
+  static const HistoryChapterKind HISTORY_CHAPTER_KIND_UNSPECIFIED =
+      HistoryChapterKind._(
+          0, _omitEnumNames ? '' : 'HISTORY_CHAPTER_KIND_UNSPECIFIED');
+
+  /// Recording began: from here on History is exact.
+  static const HistoryChapterKind HISTORY_CHAPTER_KIND_RECORDING =
+      HistoryChapterKind._(
+          1, _omitEnumNames ? '' : 'HISTORY_CHAPTER_KIND_RECORDING');
+  static const HistoryChapterKind HISTORY_CHAPTER_KIND_PROJECT =
+      HistoryChapterKind._(
+          2, _omitEnumNames ? '' : 'HISTORY_CHAPTER_KIND_PROJECT');
+
+  /// Agents joined.
+  static const HistoryChapterKind HISTORY_CHAPTER_KIND_AGENTS =
+      HistoryChapterKind._(
+          3, _omitEnumNames ? '' : 'HISTORY_CHAPTER_KIND_AGENTS');
+  static const HistoryChapterKind HISTORY_CHAPTER_KIND_PIPE =
+      HistoryChapterKind._(
+          4, _omitEnumNames ? '' : 'HISTORY_CHAPTER_KIND_PIPE');
+  static const HistoryChapterKind HISTORY_CHAPTER_KIND_APP =
+      HistoryChapterKind._(5, _omitEnumNames ? '' : 'HISTORY_CHAPTER_KIND_APP');
+  static const HistoryChapterKind HISTORY_CHAPTER_KIND_SECRET =
+      HistoryChapterKind._(
+          6, _omitEnumNames ? '' : 'HISTORY_CHAPTER_KIND_SECRET');
+
+  /// A new version of Claktory first ran.
+  static const HistoryChapterKind HISTORY_CHAPTER_KIND_RELEASE =
+      HistoryChapterKind._(
+          7, _omitEnumNames ? '' : 'HISTORY_CHAPTER_KIND_RELEASE');
+
+  /// A checklist goal was done.
+  static const HistoryChapterKind HISTORY_CHAPTER_KIND_GOAL =
+      HistoryChapterKind._(
+          8, _omitEnumNames ? '' : 'HISTORY_CHAPTER_KIND_GOAL');
+
+  /// The busiest hour.
+  static const HistoryChapterKind HISTORY_CHAPTER_KIND_BUSIEST =
+      HistoryChapterKind._(
+          9, _omitEnumNames ? '' : 'HISTORY_CHAPTER_KIND_BUSIEST');
+
+  static const $core.List<HistoryChapterKind> values = <HistoryChapterKind>[
+    HISTORY_CHAPTER_KIND_UNSPECIFIED,
+    HISTORY_CHAPTER_KIND_RECORDING,
+    HISTORY_CHAPTER_KIND_PROJECT,
+    HISTORY_CHAPTER_KIND_AGENTS,
+    HISTORY_CHAPTER_KIND_PIPE,
+    HISTORY_CHAPTER_KIND_APP,
+    HISTORY_CHAPTER_KIND_SECRET,
+    HISTORY_CHAPTER_KIND_RELEASE,
+    HISTORY_CHAPTER_KIND_GOAL,
+    HISTORY_CHAPTER_KIND_BUSIEST,
+  ];
+
+  static final $core.List<HistoryChapterKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 9);
+  static HistoryChapterKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const HistoryChapterKind._(super.value, super.name);
+}
+
+class HistoryEventKind extends $pb.ProtobufEnum {
+  static const HistoryEventKind HISTORY_EVENT_KIND_UNSPECIFIED =
+      HistoryEventKind._(
+          0, _omitEnumNames ? '' : 'HISTORY_EVENT_KIND_UNSPECIFIED');
+
+  /// An agent's message to agents.
+  static const HistoryEventKind HISTORY_EVENT_KIND_AGENT =
+      HistoryEventKind._(1, _omitEnumNames ? '' : 'HISTORY_EVENT_KIND_AGENT');
+
+  /// The person's message to an agent.
+  static const HistoryEventKind HISTORY_EVENT_KIND_PERSON =
+      HistoryEventKind._(2, _omitEnumNames ? '' : 'HISTORY_EVENT_KIND_PERSON');
+
+  /// An agent asks the person: a card, a proposal to Rivet, a secret.
+  static const HistoryEventKind HISTORY_EVENT_KIND_CARD =
+      HistoryEventKind._(3, _omitEnumNames ? '' : 'HISTORY_EVENT_KIND_CARD');
+  static const HistoryEventKind HISTORY_EVENT_KIND_PROPOSAL =
+      HistoryEventKind._(
+          4, _omitEnumNames ? '' : 'HISTORY_EVENT_KIND_PROPOSAL');
+  static const HistoryEventKind HISTORY_EVENT_KIND_SECRET_REQUEST =
+      HistoryEventKind._(
+          5, _omitEnumNames ? '' : 'HISTORY_EVENT_KIND_SECRET_REQUEST');
+
+  /// A pipe's message reaching an agent, and an agent's going out on it.
+  static const HistoryEventKind HISTORY_EVENT_KIND_PIPE_IN =
+      HistoryEventKind._(6, _omitEnumNames ? '' : 'HISTORY_EVENT_KIND_PIPE_IN');
+  static const HistoryEventKind HISTORY_EVENT_KIND_PIPE_OUT =
+      HistoryEventKind._(
+          7, _omitEnumNames ? '' : 'HISTORY_EVENT_KIND_PIPE_OUT');
+
+  /// What wakes an agent: its task ending, its monitor, Claktory itself.
+  static const HistoryEventKind HISTORY_EVENT_KIND_TASK =
+      HistoryEventKind._(8, _omitEnumNames ? '' : 'HISTORY_EVENT_KIND_TASK');
+  static const HistoryEventKind HISTORY_EVENT_KIND_MONITOR =
+      HistoryEventKind._(9, _omitEnumNames ? '' : 'HISTORY_EVENT_KIND_MONITOR');
+  static const HistoryEventKind HISTORY_EVENT_KIND_CLAKTORY =
+      HistoryEventKind._(
+          10, _omitEnumNames ? '' : 'HISTORY_EVENT_KIND_CLAKTORY');
+
+  /// An app's event to an agent (Telegram, say): from the app's node.
+  static const HistoryEventKind HISTORY_EVENT_KIND_APP =
+      HistoryEventKind._(11, _omitEnumNames ? '' : 'HISTORY_EVENT_KIND_APP');
+
+  static const $core.List<HistoryEventKind> values = <HistoryEventKind>[
+    HISTORY_EVENT_KIND_UNSPECIFIED,
+    HISTORY_EVENT_KIND_AGENT,
+    HISTORY_EVENT_KIND_PERSON,
+    HISTORY_EVENT_KIND_CARD,
+    HISTORY_EVENT_KIND_PROPOSAL,
+    HISTORY_EVENT_KIND_SECRET_REQUEST,
+    HISTORY_EVENT_KIND_PIPE_IN,
+    HISTORY_EVENT_KIND_PIPE_OUT,
+    HISTORY_EVENT_KIND_TASK,
+    HISTORY_EVENT_KIND_MONITOR,
+    HISTORY_EVENT_KIND_CLAKTORY,
+    HISTORY_EVENT_KIND_APP,
+  ];
+
+  static final $core.List<HistoryEventKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 11);
+  static HistoryEventKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const HistoryEventKind._(super.value, super.name);
 }
 
 class ConnectorFlowKind extends $pb.ProtobufEnum {
@@ -2274,6 +2419,97 @@ class SecretApprovalState extends $pb.ProtobufEnum {
   const SecretApprovalState._(super.value, super.name);
 }
 
+class CommandWarningKind extends $pb.ProtobufEnum {
+  static const CommandWarningKind COMMAND_WARNING_KIND_UNSPECIFIED =
+      CommandWarningKind._(
+          0, _omitEnumNames ? '' : 'COMMAND_WARNING_KIND_UNSPECIFIED');
+
+  /// sudo, doas.
+  static const CommandWarningKind COMMAND_WARNING_KIND_ADMIN =
+      CommandWarningKind._(
+          1, _omitEnumNames ? '' : 'COMMAND_WARNING_KIND_ADMIN');
+
+  /// ssh, scp, rsync, sftp to another computer (named in the text).
+  static const CommandWarningKind COMMAND_WARNING_KIND_REMOTE =
+      CommandWarningKind._(
+          2, _omitEnumNames ? '' : 'COMMAND_WARNING_KIND_REMOTE');
+
+  /// rm -r, dd, mkfs, diskutil erase or partition, git push --force, git reset --hard.
+  static const CommandWarningKind COMMAND_WARNING_KIND_DESTRUCTIVE =
+      CommandWarningKind._(
+          3, _omitEnumNames ? '' : 'COMMAND_WARNING_KIND_DESTRUCTIVE');
+
+  /// launchctl, systemctl, crontab, schtasks.
+  static const CommandWarningKind COMMAND_WARNING_KIND_SERVICES =
+      CommandWarningKind._(
+          4, _omitEnumNames ? '' : 'COMMAND_WARNING_KIND_SERVICES');
+
+  /// A download run by a shell (curl … | sh).
+  static const CommandWarningKind COMMAND_WARNING_KIND_PIPE_TO_SHELL =
+      CommandWarningKind._(
+          5, _omitEnumNames ? '' : 'COMMAND_WARNING_KIND_PIPE_TO_SHELL');
+
+  /// ~/.factory, ~/.ssh or the keychain (security).
+  static const CommandWarningKind COMMAND_WARNING_KIND_SENSITIVE =
+      CommandWarningKind._(
+          6, _omitEnumNames ? '' : 'COMMAND_WARNING_KIND_SENSITIVE');
+
+  static const $core.List<CommandWarningKind> values = <CommandWarningKind>[
+    COMMAND_WARNING_KIND_UNSPECIFIED,
+    COMMAND_WARNING_KIND_ADMIN,
+    COMMAND_WARNING_KIND_REMOTE,
+    COMMAND_WARNING_KIND_DESTRUCTIVE,
+    COMMAND_WARNING_KIND_SERVICES,
+    COMMAND_WARNING_KIND_PIPE_TO_SHELL,
+    COMMAND_WARNING_KIND_SENSITIVE,
+  ];
+
+  static final $core.List<CommandWarningKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 6);
+  static CommandWarningKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const CommandWarningKind._(super.value, super.name);
+}
+
+class CommandRunState extends $pb.ProtobufEnum {
+  static const CommandRunState COMMAND_RUN_STATE_UNSPECIFIED =
+      CommandRunState._(
+          0, _omitEnumNames ? '' : 'COMMAND_RUN_STATE_UNSPECIFIED');
+  static const CommandRunState COMMAND_RUN_STATE_RUNNING =
+      CommandRunState._(1, _omitEnumNames ? '' : 'COMMAND_RUN_STATE_RUNNING');
+  static const CommandRunState COMMAND_RUN_STATE_EXITED =
+      CommandRunState._(2, _omitEnumNames ? '' : 'COMMAND_RUN_STATE_EXITED');
+
+  /// Stopped at timeout_seconds, with everything it started.
+  static const CommandRunState COMMAND_RUN_STATE_TIMED_OUT =
+      CommandRunState._(3, _omitEnumNames ? '' : 'COMMAND_RUN_STATE_TIMED_OUT');
+  static const CommandRunState COMMAND_RUN_STATE_FAILED_TO_START =
+      CommandRunState._(
+          4, _omitEnumNames ? '' : 'COMMAND_RUN_STATE_FAILED_TO_START');
+
+  /// Claktory stopped while it ran; it's never run again.
+  static const CommandRunState COMMAND_RUN_STATE_INTERRUPTED =
+      CommandRunState._(
+          5, _omitEnumNames ? '' : 'COMMAND_RUN_STATE_INTERRUPTED');
+
+  static const $core.List<CommandRunState> values = <CommandRunState>[
+    COMMAND_RUN_STATE_UNSPECIFIED,
+    COMMAND_RUN_STATE_RUNNING,
+    COMMAND_RUN_STATE_EXITED,
+    COMMAND_RUN_STATE_TIMED_OUT,
+    COMMAND_RUN_STATE_FAILED_TO_START,
+    COMMAND_RUN_STATE_INTERRUPTED,
+  ];
+
+  static final $core.List<CommandRunState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 5);
+  static CommandRunState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const CommandRunState._(super.value, super.name);
+}
+
 /// Where the person answered a card from (AnswerAsk.from, #430): the agent
 /// is told, so it answers them there.
 class AskAnsweredFrom extends $pb.ProtobufEnum {
@@ -2685,6 +2921,15 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
       NeedsYouRecordKind._(
           17, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_PROPOSAL_GRANT');
 
+  /// An agent gave up a secret it had, on its own, with secrets_give_up
+  /// (#449): no card, no approval. Outcome CHANGED, agent_id the agent,
+  /// title Claktory's sentence ("Mista gave up Cloudflare"), agent_reason
+  /// its why. seq is the secrets_give_up call's entry in its conversation.
+  /// Getting it back takes a request, like any other secret.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_SECRET_GIVEN_UP =
+      NeedsYouRecordKind._(
+          18, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_SECRET_GIVEN_UP');
+
   static const $core.List<NeedsYouRecordKind> values = <NeedsYouRecordKind>[
     NEEDS_YOU_RECORD_KIND_UNSPECIFIED,
     NEEDS_YOU_RECORD_KIND_QUESTION,
@@ -2704,10 +2949,11 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
     NEEDS_YOU_RECORD_KIND_CONVERSATION,
     NEEDS_YOU_RECORD_KIND_PIPE_MEMBER,
     NEEDS_YOU_RECORD_KIND_PROPOSAL_GRANT,
+    NEEDS_YOU_RECORD_KIND_SECRET_GIVEN_UP,
   ];
 
   static final $core.List<NeedsYouRecordKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 17);
+      $pb.ProtobufEnum.$_initByValueList(values, 18);
   static NeedsYouRecordKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -2748,7 +2994,8 @@ class NeedsYouOutcome extends $pb.ProtobufEnum {
       NeedsYouOutcome._(8, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_WITHDRAWN');
 
   /// An agent's question talked through on its card and ended with Resolve
-  /// (#430), without a decision.
+  /// (#430), without a decision: by the person, or by its agent closing it as
+  /// settled in the talk (#496; agent_reason holds its words).
   static const NeedsYouOutcome NEEDS_YOU_OUTCOME_RESOLVED =
       NeedsYouOutcome._(9, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_RESOLVED');
 
@@ -2890,6 +3137,326 @@ class PipeReportState extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const PipeReportState._(super.value, super.name);
+}
+
+class DmEntryKind extends $pb.ProtobufEnum {
+  static const DmEntryKind DM_ENTRY_KIND_UNSPECIFIED =
+      DmEntryKind._(0, _omitEnumNames ? '' : 'DM_ENTRY_KIND_UNSPECIFIED');
+  static const DmEntryKind DM_ENTRY_KIND_APPLICATION =
+      DmEntryKind._(1, _omitEnumNames ? '' : 'DM_ENTRY_KIND_APPLICATION');
+  static const DmEntryKind DM_ENTRY_KIND_COMMIT =
+      DmEntryKind._(2, _omitEnumNames ? '' : 'DM_ENTRY_KIND_COMMIT');
+
+  static const $core.List<DmEntryKind> values = <DmEntryKind>[
+    DM_ENTRY_KIND_UNSPECIFIED,
+    DM_ENTRY_KIND_APPLICATION,
+    DM_ENTRY_KIND_COMMIT,
+  ];
+
+  static final $core.List<DmEntryKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static DmEntryKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const DmEntryKind._(super.value, super.name);
+}
+
+class DmSendResult extends $pb.ProtobufEnum {
+  static const DmSendResult DM_SEND_RESULT_UNSPECIFIED =
+      DmSendResult._(0, _omitEnumNames ? '' : 'DM_SEND_RESULT_UNSPECIFIED');
+  static const DmSendResult DM_SEND_RESULT_STORED =
+      DmSendResult._(1, _omitEnumNames ? '' : 'DM_SEND_RESULT_STORED');
+
+  /// The same id and envelope again: the first receipt.
+  static const DmSendResult DM_SEND_RESULT_DUPLICATE =
+      DmSendResult._(2, _omitEnumNames ? '' : 'DM_SEND_RESULT_DUPLICATE');
+
+  /// A future epoch the home has no commit for yet: stored once it has.
+  static const DmSendResult DM_SEND_RESULT_HELD =
+      DmSendResult._(3, _omitEnumNames ? '' : 'DM_SEND_RESULT_HELD');
+
+  /// The friend has no device in the conversation yet.
+  static const DmSendResult DM_SEND_RESULT_WAITING_FOR_FRIEND = DmSendResult._(
+      4, _omitEnumNames ? '' : 'DM_SEND_RESULT_WAITING_FOR_FRIEND');
+
+  /// More than 5 epochs behind: encrypt it again at the current epoch.
+  static const DmSendResult DM_SEND_RESULT_TOO_OLD =
+      DmSendResult._(5, _omitEnumNames ? '' : 'DM_SEND_RESULT_TOO_OLD');
+
+  /// The same id with another envelope: refused.
+  static const DmSendResult DM_SEND_RESULT_CONFLICT =
+      DmSendResult._(6, _omitEnumNames ? '' : 'DM_SEND_RESULT_CONFLICT');
+  static const DmSendResult DM_SEND_RESULT_HOME_FULL =
+      DmSendResult._(7, _omitEnumNames ? '' : 'DM_SEND_RESULT_HOME_FULL');
+  static const DmSendResult DM_SEND_RESULT_RATE_LIMITED =
+      DmSendResult._(8, _omitEnumNames ? '' : 'DM_SEND_RESULT_RATE_LIMITED');
+
+  /// This Claktory doesn't take direct messages (it isn't the home, or the
+  /// preview is off).
+  static const DmSendResult DM_SEND_RESULT_NOT_HOME =
+      DmSendResult._(9, _omitEnumNames ? '' : 'DM_SEND_RESULT_NOT_HOME');
+
+  static const $core.List<DmSendResult> values = <DmSendResult>[
+    DM_SEND_RESULT_UNSPECIFIED,
+    DM_SEND_RESULT_STORED,
+    DM_SEND_RESULT_DUPLICATE,
+    DM_SEND_RESULT_HELD,
+    DM_SEND_RESULT_WAITING_FOR_FRIEND,
+    DM_SEND_RESULT_TOO_OLD,
+    DM_SEND_RESULT_CONFLICT,
+    DM_SEND_RESULT_HOME_FULL,
+    DM_SEND_RESULT_RATE_LIMITED,
+    DM_SEND_RESULT_NOT_HOME,
+  ];
+
+  static final $core.List<DmSendResult?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 9);
+  static DmSendResult? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const DmSendResult._(super.value, super.name);
+}
+
+class DmDeliveryState extends $pb.ProtobufEnum {
+  static const DmDeliveryState DM_DELIVERY_STATE_UNSPECIFIED =
+      DmDeliveryState._(
+          0, _omitEnumNames ? '' : 'DM_DELIVERY_STATE_UNSPECIFIED');
+
+  /// The home has it and is sending it on.
+  static const DmDeliveryState DM_DELIVERY_STATE_HELD_BY_HOME =
+      DmDeliveryState._(
+          1, _omitEnumNames ? '' : 'DM_DELIVERY_STATE_HELD_BY_HOME');
+
+  /// The friend's home took it.
+  static const DmDeliveryState DM_DELIVERY_STATE_DELIVERED =
+      DmDeliveryState._(2, _omitEnumNames ? '' : 'DM_DELIVERY_STATE_DELIVERED');
+
+  /// The friend's home can't be reached.
+  static const DmDeliveryState DM_DELIVERY_STATE_WAITING =
+      DmDeliveryState._(3, _omitEnumNames ? '' : 'DM_DELIVERY_STATE_WAITING');
+
+  /// The friend's home can't read it any more (its epoch moved on more
+  /// than 5): the device encrypts it again, by itself only when members
+  /// were only removed since, otherwise asking the person first.
+  static const DmDeliveryState DM_DELIVERY_STATE_BOUNCED =
+      DmDeliveryState._(4, _omitEnumNames ? '' : 'DM_DELIVERY_STATE_BOUNCED');
+
+  static const $core.List<DmDeliveryState> values = <DmDeliveryState>[
+    DM_DELIVERY_STATE_UNSPECIFIED,
+    DM_DELIVERY_STATE_HELD_BY_HOME,
+    DM_DELIVERY_STATE_DELIVERED,
+    DM_DELIVERY_STATE_WAITING,
+    DM_DELIVERY_STATE_BOUNCED,
+  ];
+
+  static final $core.List<DmDeliveryState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 4);
+  static DmDeliveryState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const DmDeliveryState._(super.value, super.name);
+}
+
+class AgentBrowserState extends $pb.ProtobufEnum {
+  static const AgentBrowserState AGENT_BROWSER_STATE_UNSPECIFIED =
+      AgentBrowserState._(
+          0, _omitEnumNames ? '' : 'AGENT_BROWSER_STATE_UNSPECIFIED');
+
+  /// Not running. The profile is kept.
+  static const AgentBrowserState AGENT_BROWSER_STATE_OFF =
+      AgentBrowserState._(1, _omitEnumNames ? '' : 'AGENT_BROWSER_STATE_OFF');
+  static const AgentBrowserState AGENT_BROWSER_STATE_STARTING =
+      AgentBrowserState._(
+          2, _omitEnumNames ? '' : 'AGENT_BROWSER_STATE_STARTING');
+
+  /// Running with no one using it, closing by itself at warm_until_ms.
+  static const AgentBrowserState AGENT_BROWSER_STATE_WARM =
+      AgentBrowserState._(3, _omitEnumNames ? '' : 'AGENT_BROWSER_STATE_WARM');
+
+  /// An errand's agent drives it. The view is view-only.
+  static const AgentBrowserState AGENT_BROWSER_STATE_DRIVEN =
+      AgentBrowserState._(
+          4, _omitEnumNames ? '' : 'AGENT_BROWSER_STATE_DRIVEN');
+
+  /// An errand handed it to the person (a handoff card waits): Chrome runs
+  /// with no automation, the agent can't read or act, and the watching
+  /// connection's input counts.
+  static const AgentBrowserState AGENT_BROWSER_STATE_PERSONS_TURN =
+      AgentBrowserState._(
+          5, _omitEnumNames ? '' : 'AGENT_BROWSER_STATE_PERSONS_TURN');
+
+  /// The person took it from the errand's agent (TakeOverAgentBrowser): the
+  /// agent is paused until HandBackAgentBrowser.
+  static const AgentBrowserState AGENT_BROWSER_STATE_TAKEN_OVER =
+      AgentBrowserState._(
+          6, _omitEnumNames ? '' : 'AGENT_BROWSER_STATE_TAKEN_OVER');
+
+  /// The person opened it with no errand (OpenAgentBrowser): theirs to use.
+  static const AgentBrowserState AGENT_BROWSER_STATE_BROWSING =
+      AgentBrowserState._(
+          7, _omitEnumNames ? '' : 'AGENT_BROWSER_STATE_BROWSING');
+  static const AgentBrowserState AGENT_BROWSER_STATE_STOPPING =
+      AgentBrowserState._(
+          8, _omitEnumNames ? '' : 'AGENT_BROWSER_STATE_STOPPING');
+
+  /// It can't run on this computer: setup says why.
+  static const AgentBrowserState AGENT_BROWSER_STATE_UNAVAILABLE =
+      AgentBrowserState._(
+          9, _omitEnumNames ? '' : 'AGENT_BROWSER_STATE_UNAVAILABLE');
+
+  static const $core.List<AgentBrowserState> values = <AgentBrowserState>[
+    AGENT_BROWSER_STATE_UNSPECIFIED,
+    AGENT_BROWSER_STATE_OFF,
+    AGENT_BROWSER_STATE_STARTING,
+    AGENT_BROWSER_STATE_WARM,
+    AGENT_BROWSER_STATE_DRIVEN,
+    AGENT_BROWSER_STATE_PERSONS_TURN,
+    AGENT_BROWSER_STATE_TAKEN_OVER,
+    AGENT_BROWSER_STATE_BROWSING,
+    AGENT_BROWSER_STATE_STOPPING,
+    AGENT_BROWSER_STATE_UNAVAILABLE,
+  ];
+
+  static final $core.List<AgentBrowserState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 9);
+  static AgentBrowserState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const AgentBrowserState._(super.value, super.name);
+}
+
+class ErrandState extends $pb.ProtobufEnum {
+  static const ErrandState ERRAND_STATE_UNSPECIFIED =
+      ErrandState._(0, _omitEnumNames ? '' : 'ERRAND_STATE_UNSPECIFIED');
+
+  /// Its agent drives the browser.
+  static const ErrandState ERRAND_STATE_RUNNING =
+      ErrandState._(1, _omitEnumNames ? '' : 'ERRAND_STATE_RUNNING');
+
+  /// Handed to the person: a handoff card waits.
+  static const ErrandState ERRAND_STATE_PERSONS_TURN =
+      ErrandState._(2, _omitEnumNames ? '' : 'ERRAND_STATE_PERSONS_TURN');
+
+  /// The person took the browser over; the agent waits.
+  static const ErrandState ERRAND_STATE_TAKEN_OVER =
+      ErrandState._(3, _omitEnumNames ? '' : 'ERRAND_STATE_TAKEN_OVER');
+
+  /// Its agent finished it.
+  static const ErrandState ERRAND_STATE_DONE =
+      ErrandState._(4, _omitEnumNames ? '' : 'ERRAND_STATE_DONE');
+
+  /// The person stopped it (StopAgentBrowser, Delete browser data).
+  static const ErrandState ERRAND_STATE_STOPPED =
+      ErrandState._(5, _omitEnumNames ? '' : 'ERRAND_STATE_STOPPED');
+
+  /// The person answered a handoff with Can't do this.
+  static const ErrandState ERRAND_STATE_CANCELLED =
+      ErrandState._(6, _omitEnumNames ? '' : 'ERRAND_STATE_CANCELLED');
+
+  /// The browser ended under it (it couldn't start, or closed).
+  static const ErrandState ERRAND_STATE_FAILED =
+      ErrandState._(7, _omitEnumNames ? '' : 'ERRAND_STATE_FAILED');
+
+  static const $core.List<ErrandState> values = <ErrandState>[
+    ERRAND_STATE_UNSPECIFIED,
+    ERRAND_STATE_RUNNING,
+    ERRAND_STATE_PERSONS_TURN,
+    ERRAND_STATE_TAKEN_OVER,
+    ERRAND_STATE_DONE,
+    ERRAND_STATE_STOPPED,
+    ERRAND_STATE_CANCELLED,
+    ERRAND_STATE_FAILED,
+  ];
+
+  static final $core.List<ErrandState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 7);
+  static ErrandState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ErrandState._(super.value, super.name);
+}
+
+class ErrandHandoffKind extends $pb.ProtobufEnum {
+  static const ErrandHandoffKind ERRAND_HANDOFF_KIND_UNSPECIFIED =
+      ErrandHandoffKind._(
+          0, _omitEnumNames ? '' : 'ERRAND_HANDOFF_KIND_UNSPECIFIED');
+  static const ErrandHandoffKind ERRAND_HANDOFF_KIND_PAYMENT =
+      ErrandHandoffKind._(
+          1, _omitEnumNames ? '' : 'ERRAND_HANDOFF_KIND_PAYMENT');
+
+  /// An identity check ("Verify it's you", a document).
+  static const ErrandHandoffKind ERRAND_HANDOFF_KIND_IDENTITY =
+      ErrandHandoffKind._(
+          2, _omitEnumNames ? '' : 'ERRAND_HANDOFF_KIND_IDENTITY');
+
+  /// A code sent by text message or email.
+  static const ErrandHandoffKind ERRAND_HANDOFF_KIND_CODE =
+      ErrandHandoffKind._(3, _omitEnumNames ? '' : 'ERRAND_HANDOFF_KIND_CODE');
+
+  /// Accepting an agreement or terms.
+  static const ErrandHandoffKind ERRAND_HANDOFF_KIND_AGREEMENT =
+      ErrandHandoffKind._(
+          4, _omitEnumNames ? '' : 'ERRAND_HANDOFF_KIND_AGREEMENT');
+  static const ErrandHandoffKind ERRAND_HANDOFF_KIND_CAPTCHA =
+      ErrandHandoffKind._(
+          5, _omitEnumNames ? '' : 'ERRAND_HANDOFF_KIND_CAPTCHA');
+
+  /// Signing in to a site: Chrome restarts with no automation first.
+  static const ErrandHandoffKind ERRAND_HANDOFF_KIND_SIGN_IN =
+      ErrandHandoffKind._(
+          6, _omitEnumNames ? '' : 'ERRAND_HANDOFF_KIND_SIGN_IN');
+
+  /// Anything else, such as a site outside the errand's.
+  static const ErrandHandoffKind ERRAND_HANDOFF_KIND_OTHER =
+      ErrandHandoffKind._(7, _omitEnumNames ? '' : 'ERRAND_HANDOFF_KIND_OTHER');
+
+  static const $core.List<ErrandHandoffKind> values = <ErrandHandoffKind>[
+    ERRAND_HANDOFF_KIND_UNSPECIFIED,
+    ERRAND_HANDOFF_KIND_PAYMENT,
+    ERRAND_HANDOFF_KIND_IDENTITY,
+    ERRAND_HANDOFF_KIND_CODE,
+    ERRAND_HANDOFF_KIND_AGREEMENT,
+    ERRAND_HANDOFF_KIND_CAPTCHA,
+    ERRAND_HANDOFF_KIND_SIGN_IN,
+    ERRAND_HANDOFF_KIND_OTHER,
+  ];
+
+  static final $core.List<ErrandHandoffKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 7);
+  static ErrandHandoffKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ErrandHandoffKind._(super.value, super.name);
+}
+
+class AgentBrowserPointerKind extends $pb.ProtobufEnum {
+  static const AgentBrowserPointerKind AGENT_BROWSER_POINTER_KIND_UNSPECIFIED =
+      AgentBrowserPointerKind._(
+          0, _omitEnumNames ? '' : 'AGENT_BROWSER_POINTER_KIND_UNSPECIFIED');
+  static const AgentBrowserPointerKind AGENT_BROWSER_POINTER_KIND_MOVE =
+      AgentBrowserPointerKind._(
+          1, _omitEnumNames ? '' : 'AGENT_BROWSER_POINTER_KIND_MOVE');
+  static const AgentBrowserPointerKind AGENT_BROWSER_POINTER_KIND_DOWN =
+      AgentBrowserPointerKind._(
+          2, _omitEnumNames ? '' : 'AGENT_BROWSER_POINTER_KIND_DOWN');
+  static const AgentBrowserPointerKind AGENT_BROWSER_POINTER_KIND_UP =
+      AgentBrowserPointerKind._(
+          3, _omitEnumNames ? '' : 'AGENT_BROWSER_POINTER_KIND_UP');
+
+  static const $core.List<AgentBrowserPointerKind> values =
+      <AgentBrowserPointerKind>[
+    AGENT_BROWSER_POINTER_KIND_UNSPECIFIED,
+    AGENT_BROWSER_POINTER_KIND_MOVE,
+    AGENT_BROWSER_POINTER_KIND_DOWN,
+    AGENT_BROWSER_POINTER_KIND_UP,
+  ];
+
+  static final $core.List<AgentBrowserPointerKind?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 3);
+  static AgentBrowserPointerKind? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const AgentBrowserPointerKind._(super.value, super.name);
 }
 
 const $core.bool _omitEnumNames =

@@ -139,6 +139,34 @@ fn short_runs_and_slow_answers_at_low_load_are_coordination() {
 }
 
 #[test]
+fn a_quiet_message_waits_for_its_wake_not_for_an_answer() {
+    let records = records();
+    let db = records.store.db();
+    let team = team(&[("trish", "UX Writer"), ("pm", "Lead")]);
+    // FYIs sent quietly, delivered at Trish's next wake 90 minutes on, each
+    // answered 2 minutes after it was read.
+    for i in 0..6 {
+        let sent = END - 11 * HOUR_MS + i * 100 * MIN;
+        db.execute(
+            "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created, quiet, delivered) VALUES ('trish', 'agent', 'pm', 'pm', '', '', ?1, 1, ?2)",
+            params![sent, sent + 90 * MIN],
+        )
+        .expect("quiet");
+        message(&db, "trish", "pm", sent + 92 * MIN);
+    }
+    // One never delivered: not counted, whatever she sends next.
+    db.execute(
+        "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created, quiet) VALUES ('trish', 'agent', 'pm', 'pm', '', '', ?1, 1)",
+        [END - 30 * MIN],
+    )
+    .expect("waiting");
+    message(&db, "trish", "pm", END - 5 * MIN);
+    let answers = super::metrics::answers(&db, &team, super::metrics::Window::ending(END, 12.0)).expect("answers");
+    let trish = answers.iter().find(|answers| answers.agent == "trish").expect("trish");
+    assert_eq!((trish.replies, trish.p90_min), (6, 2.0));
+}
+
+#[test]
 fn a_saturated_role_slow_to_answer_with_work_ready_needs_capacity() {
     let records = records();
     let db = records.store.db();

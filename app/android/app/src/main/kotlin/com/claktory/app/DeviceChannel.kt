@@ -18,7 +18,8 @@ import java.util.concurrent.Executors
 /**
  * factory/device, as on the iPhone (ios/Runner/AppDelegate.swift): what
  * this phone keeps (connections, drafts) and what it is (capabilities),
- * and which build of the app is installed (appVersionCode).
+ * which build of the app is installed (appVersionCode), and its time
+ * zone's IANA name (timeZone: "Europe/London", for Claktory's browser).
  * The stores read and write off the main thread, one call at a time, and
  * answer on it. The attach menu and its pickers are [AttachmentPicker]'s,
  * the camera's permission [CameraAccess]'s, QR codes [QrCodes]', web
@@ -58,6 +59,7 @@ class DeviceChannel(
                 null
             }
             "capabilities" -> result.success(capabilities(context.resources.configuration))
+            "timeZone" -> result.success(timeZone())
             "appVersionCode" -> try {
                 result.success(appVersionCode(context))
             } catch (error: Exception) {
@@ -111,6 +113,9 @@ class DeviceChannel(
     }
 
     companion object {
+        /** The phone's time zone as its IANA name ("Europe/London"), never an offset (#435). */
+        fun timeZone(): String = java.util.TimeZone.getDefault().id
+
         /**
          * The installed app's versionCode, as Android has it (MAJOR×10,000,000
          * + MINOR×100,000 + PATCH×100 + REBUILD for a release; DESIGN.md §6),

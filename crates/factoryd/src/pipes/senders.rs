@@ -101,6 +101,10 @@ pub(crate) fn set(factory: &Arc<Factory>, by: &str, pipe: &str, agent: &str, sen
     if send {
         // Any agent but a curator, in the pipe's project or not.
         checked_members_sending(factory, &record, &[agent.to_owned()], &[agent.to_owned()]).map_err(|error| refused(&error))?;
+        // One that reads another pipe uses no other (#414's boundary).
+        let members = [agent.to_owned()];
+        let roles = super::sealed::Roles { members: &members, lead: "", bound: "" };
+        super::sealed::check(factory, pipe, &roles).map_err(|error| refused(&error))?;
     }
     let pipe_called = called(&record);
     // Checked again as it changes, so nothing in between slips past.

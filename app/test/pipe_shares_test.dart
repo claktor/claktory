@@ -7,9 +7,14 @@
 // 127.0.0.1), Copy address and Hide; and a pipe moved into or out of a
 // group with shares, or a group deleted, saying what that changes.
 import 'package:factory_app/connections.dart' show parsePairingCode;
+import 'package:factory_app/controls.dart' show Button;
+import 'package:factory_app/devices.dart' show thisDeviceKind;
+import 'package:factory_app/loopback_forward.dart';
 import 'package:factory_app/pipe_shares.dart';
+import 'package:factory_app/pipes.dart' show pipeColor;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -37,6 +42,7 @@ PipeShare _theirs({
   bool live = true,
   bool hidden = false,
   String problem = '',
+  bool unopened = false,
 }) => PipeShare(
   id: 's1',
   name: 'Dashboard',
@@ -47,6 +53,7 @@ PipeShare _theirs({
   listenerProblem: problem,
   address: 'http://s-abc.localhost:3000/',
   fallbackAddress: 'http://127.0.0.1:3000/',
+  unopened: unopened,
 );
 
 PipeShare _mine({
@@ -100,10 +107,11 @@ Future<Harness> _show(
   WidgetTester tester,
   Workspace workspace, {
   Size size = const Size(1200, 1000),
+  List<PipeMessage> messages = const [],
 }) async {
   final harness = Harness(workspace);
   harness.backend.pipeChat.load(
-    PipeTranscript(pipeId: workspace.selectedPipeId),
+    PipeTranscript(pipeId: workspace.selectedPipeId, messages: messages),
   );
   await harness.show(tester, size: size);
   await settle(tester);
@@ -168,6 +176,80 @@ void main() {
       );
     });
 
+    // Squalo's W2: one not opened yet stands out, in the pipe card's wash
+    // and border, until it is.
+    testWidgets('not opened yet, it stands out until it is', (tester) async {
+      final harness = await _show(
+        tester,
+        _workspace(shares: [_theirs(unopened: true)], selected: 'p3'),
+      );
+      BoxDecoration? decoration() =>
+          tester
+                  .widget<Container>(
+                    find
+                        .ancestor(
+                          of: find.text('Ana shares Dashboard'),
+                          matching: find.byType(Container),
+                        )
+                        .first,
+                  )
+                  .decoration
+              as BoxDecoration?;
+      expect(decoration()?.color, pipeColor.withValues(alpha: 0.06));
+      harness.backend.workspace.apply(
+        _workspace(shares: [_theirs()], selected: 'p3'),
+      );
+      await settle(tester);
+      expect(decoration()?.color, isNull);
+    });
+
+    // W2: the chat's line announcing it has Open and Copy address too,
+    // while the share lasts; then it's a plain line.
+    group("the chat's line announcing it", () {
+      final announced = PipeMessage(
+        seq: Int64(1),
+        timestampMs: Int64(
+          DateTime(2026, 11, 25, 14, 2).millisecondsSinceEpoch,
+        ),
+        author: PipeAuthor(kind: PipeAuthorKind.PIPE_AUTHOR_KIND_CLAKTORY),
+        text: 'Ana shares Dashboard.',
+        shareId: 's1',
+      );
+      Finder onLine(Finder finder) =>
+          find.descendant(of: find.byType(ShareAnnouncement), matching: finder);
+
+      testWidgets('opens it and copies its address', (tester) async {
+        final copied = watchClipboard(tester);
+        final harness = await _show(
+          tester,
+          _workspace(shares: [_theirs()], selected: 'p3'),
+          messages: [announced],
+        );
+        expect(onLine(find.textContaining('Ana shares Dashboard.')), findsOne);
+        await tester.tap(onLine(find.text('Open')));
+        await settle(tester);
+        expect(harness.last.openPipeShare.shareId, 's1');
+        expect(opened.single.toString(), startsWith('http://s-abc.localhost'));
+        await tester.tap(onLine(find.text('Copy address')));
+        await tester.pump();
+        expect(copied, ['http://s-abc.localhost:3000/']);
+        await tester.pump(const Duration(seconds: 3));
+      });
+
+      testWidgets('hidden or ended, the line alone', (tester) async {
+        final harness = await _show(
+          tester,
+          _workspace(shares: [_theirs(hidden: true)], selected: 'p3'),
+          messages: [announced],
+        );
+        expect(onLine(find.text('Open')), findsNothing);
+        harness.backend.workspace.apply(_workspace(selected: 'p3'));
+        await settle(tester);
+        expect(onLine(find.textContaining('Ana shares Dashboard.')), findsOne);
+        expect(onLine(find.text('Open')), findsNothing);
+      });
+    });
+
     testWidgets('Copy address copies it; Hide hides it', (tester) async {
       final copied = watchClipboard(tester);
       final harness = await _show(
@@ -223,26 +305,168 @@ void main() {
       expect(find.byType(ReceivedShare), findsNothing);
     });
 
-    testWidgets('showing a Claktory elsewhere, it says where it opens', (
-      tester,
-    ) async {
-      final harness = await _show(
+    // #503 (Matt's MacBook paired to his Mac Studio): a computer showing a
+    // Claktory on another machine opens it through that one, from a port of
+    // its own, at the share's own host; a phone says it can't yet.
+    group('showing a Claktory elsewhere', () {
+      Future<Harness> elsewhere(
+        WidgetTester tester, {
+        Set<int> taken = const {},
+      }) async {
+        final harness = await _show(
+          tester,
+          _workspace(shares: [_theirs()], selected: 'p3'),
+        );
+        harness.backend.forwarded = (port) async {
+          if (taken.contains(port)) {
+            throw const ForwardFailure(ForwardProblem.taken);
+          }
+          return _Forward(port);
+        };
+        harness.backend.connectTo(
+          parsePairingCode('factory://?t=${'c' * 64}&e=${'a' * 64}&name=mac'),
+        );
+        harness.backend.workspace.apply(
+          _workspace(shares: [_theirs()], selected: 'p3'),
+        );
+        await settle(tester);
+        return harness;
+      }
+
+      testWidgets('on a Mac, Open forwards it from a port of its own, to the '
+          "share's there, and opens its own host at that port", (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        final own = sharePortFor('s1');
+        final harness = await elsewhere(tester, taken: {own});
+        expect(find.text('http://s-abc.localhost:3000/'), findsNothing);
+        await tester.tap(find.text('Open'));
+        await settle(tester);
+        expect(harness.last.openPipeShare.shareId, 's1');
+        // Its own port was taken here: the next.
+        expect(harness.backend.forwardedPorts, [own, own + 1]);
+        expect(harness.backend.forwardedTargets.last, 3000);
+        expect(
+          opened.single.toString(),
+          'http://s-abc.localhost:${own + 1}/__claktory_open?k=once',
+        );
+        // The address here says so, and Copy address copies it.
+        expect(find.text('http://s-abc.localhost:${own + 1}/'), findsOneWidget);
+        final copied = watchClipboard(tester);
+        await tester.tap(find.text('Copy address'));
+        await tester.pump();
+        expect(copied, ['http://s-abc.localhost:${own + 1}/']);
+        await tester.pump(const Duration(seconds: 3));
+        // Opened again, the same forward.
+        await tester.tap(find.text('Open'));
+        await settle(tester);
+        expect(harness.backend.forwardedPorts, [own, own + 1]);
+        expect(opened, hasLength(2));
+      });
+
+      testWidgets('on a Mac, Copy address before any Open serves and forwards '
+          'it first', (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        final harness = await elsewhere(tester);
+        final copied = watchClipboard(tester);
+        await tester.tap(find.text('Copy address'));
+        await settle(tester);
+        expect(harness.last.openPipeShare.shareId, 's1');
+        expect(copied, ['http://s-abc.localhost:${sharePortFor('s1')}/']);
+        expect(opened, isEmpty);
+      });
+
+      testWidgets('in Safari, at 127.0.0.1 and the port here', (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        defaultBrowserIsSafari = () async => true;
+        await elsewhere(tester);
+        await tester.tap(find.text('Open'));
+        await settle(tester);
+        expect(
+          opened.single.toString(),
+          'http://127.0.0.1:${sharePortFor('s1')}/__claktory_open?k=once',
+        );
+      });
+
+      // Abbacchio's row 1350: cut off, it names the Claktory, not "the
+      // backend", and the line goes once it's connected again.
+      testWidgets("offline, Open says it can't reach the Claktory, and the "
+          'line goes once it is back', (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        final harness = await elsewhere(tester);
+        harness.backend.workspace.apply(
+          _workspace(shares: [_theirs()], selected: 'p3')
+            ..settings = Settings(name: 'Studio'),
+        );
+        await settle(tester);
+        harness.backend
+          ..refuse = 'Not connected to the backend.'
+          ..connected.value = false;
+        await tester.tap(find.text('Open'));
+        await settle(tester);
+        expect(find.text("Can't reach Studio right now."), findsOneWidget);
+        expect(find.textContaining('backend'), findsNothing);
+        harness.backend
+          ..refuse = null
+          ..connected.value = true;
+        await settle(tester);
+        expect(find.text("Can't reach Studio right now."), findsNothing);
+      });
+
+      testWidgets("a refusal that isn't the connection's stays after a "
+          'reconnect', (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        final harness = await elsewhere(tester);
+        harness.backend.refuse = 'The share ended.';
+        await tester.tap(find.text('Open'));
+        await settle(tester);
+        expect(find.text('The share ended.'), findsOneWidget);
+        harness.backend.connected.value = false;
+        await tester.pump();
+        harness.backend.connected.value = true;
+        await settle(tester);
+        expect(find.text('The share ended.'), findsOneWidget);
+      });
+
+      testWidgets("an old Claktory can't forward: it says so", (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        final harness = await elsewhere(tester);
+        harness.backend.forwarded = (_) async =>
+            throw const ForwardFailure(ForwardProblem.unsupported);
+        await tester.tap(find.text('Open'));
+        await settle(tester);
+        expect(opened, isEmpty);
+        expect(
+          find.textContaining('needs an update before this Mac can open it'),
+          // Once: the share's line and Open's failure are the same words.
+          findsOneWidget,
+        );
+      });
+
+      testWidgets("on a phone it says it can't open it there yet", (
         tester,
-        _workspace(shares: [_theirs()], selected: 'p3'),
-      );
-      harness.backend.connectTo(
-        parsePairingCode('factory://?t=${'c' * 64}&e=${'a' * 64}&name=mac'),
-      );
-      harness.backend.workspace.apply(
-        _workspace(shares: [_theirs()], selected: 'p3'),
-      );
-      await settle(tester);
-      expect(
-        find.text('Open it on the computer your Claktory runs on.'),
-        findsOneWidget,
-      );
-      expect(find.text('Open'), findsNothing);
-      expect(find.text('Hide'), findsOneWidget);
+      ) async {
+        final harness = await elsewhere(tester);
+        expect(
+          find.text(
+            'Opening shared websites on this $thisDeviceKind isn’t available '
+            'yet. Open it on a computer connected to your Claktory.',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          tester.widget<Button>(find.widgetWithText(Button, 'Open')).onPressed,
+          isNull,
+        );
+        expect(find.text('Copy address'), findsNothing);
+        expect(find.text('Hide'), findsOneWidget);
+        expect(harness.backend.forwardedPorts, isEmpty);
+      });
     });
 
     testWidgets('on a phone it fits', (tester) async {
@@ -254,6 +478,48 @@ void main() {
       expect(find.text('Ana shares Dashboard'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
+
+    // Abbacchio's row 1374: 27 websites shared (the most kept is 32) never
+    // push the chat and its box out of reach; they scroll in their room.
+    for (final (device, size) in [
+      ('a Mac', const Size(1200, 860)),
+      ('a phone', const Size(390, 844)),
+    ]) {
+      testWidgets('many shared on $device: they scroll, and the box stays', (
+        tester,
+      ) async {
+        final shares = [
+          for (var i = 0; i < 27; i++)
+            _theirs()
+              ..id = 's$i'
+              ..name = 'Site ${8830 + i}'
+              ..unopened = i.isEven,
+        ];
+        await _show(
+          tester,
+          _workspace(shares: shares, selected: 'p3'),
+          size: size,
+        );
+        expect(tester.takeException(), isNull);
+        final box = find.byType(EditableText).last;
+        expect(box, findsOneWidget);
+        expect(tester.getBottomLeft(box).dy, lessThanOrEqualTo(size.height));
+        final strip = find.byType(PipeSharesStrip);
+        expect(
+          tester.getSize(strip).height,
+          lessThanOrEqualTo(size.height * sharesStripShare),
+        );
+        // The last one is reached by scrolling the strip.
+        final last = find.text('Ana shares Site 8856');
+        await tester.dragUntilVisible(
+          last,
+          find.descendant(of: strip, matching: find.byType(Scrollable)),
+          const Offset(0, -200),
+        );
+        await settle(tester);
+        expect(tester.getTopLeft(last).dy, lessThan(size.height));
+      });
+    }
   });
 
   group("a pipe's settings", () {
@@ -314,6 +580,50 @@ void main() {
       expect(find.text('Show'), findsOneWidget);
     });
 
+    // Squalo's W3: from a MacBook showing a Claktory on a Mac Studio, the
+    // port shared is the Mac Studio's, and every sentence says so.
+    testWidgets("from a computer showing a Claktory elsewhere, the sentences "
+        "name the computer whose port it is", (tester) async {
+      final harness = await settings(tester, []);
+      harness.backend.connectTo(
+        parsePairingCode('factory://?t=${'c' * 64}&e=${'a' * 64}&name=mac'),
+      );
+      harness.backend.workspace.apply(
+        _workspace(selected: 'p3')..settings = Settings(name: 'Studio'),
+      );
+      await settle(tester);
+      expect(
+        find.text('Share a website on Studio, such as a dashboard, with Ana.'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Share a website…'));
+      await settle(tester);
+      expect(
+        find.text(
+          'A website on Studio, such as a dashboard, that people on '
+          'your pipes open in their own browser.',
+        ),
+        findsOneWidget,
+      );
+      harness.backend.pipeSharePort = (port) =>
+          PipeSharePort(port: port, listening: false);
+      await tester.enterText(_field(0), '3000');
+      await tester.pump(const Duration(milliseconds: 500));
+      await settle(tester);
+      expect(
+        find.text(
+          'People on these pipes can use everything Studio serves on '
+          'port 3000.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Nothing on Studio answers on port 3000'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('this computer'), findsNothing);
+    });
+
     testWidgets('Share a website… asks the port, the name and the pipes, '
         'says what it lets them do, and shares', (tester) async {
       final harness = await settings(tester, []);
@@ -361,6 +671,26 @@ void main() {
       expect(share.pipeIds.toSet(), {'p3', 'p5'});
       expect(share.groupId, isEmpty);
       expect(find.text('Share a website'), findsNothing);
+    });
+
+    testWidgets('a port something answers on says what, so it is the one '
+        'meant', (tester) async {
+      final harness = await settings(tester, []);
+      await tester.tap(find.text('Share a website…'));
+      await settle(tester);
+      harness.backend.pipeSharePort = (port) => PipeSharePort(
+        port: port,
+        listening: true,
+        program: 'node',
+        pid: 4121,
+      );
+      await tester.enterText(_field(0), '3000');
+      await tester.pump(const Duration(milliseconds: 500));
+      await settle(tester);
+      expect(
+        find.text('node (process 4121) answers on port 3000 on this computer.'),
+        findsOneWidget,
+      );
     });
 
     testWidgets("a port the Claktory won't share says why, and Share waits", (
@@ -497,4 +827,20 @@ void main() {
       );
     });
   });
+}
+
+class _Forward implements PortForward {
+  _Forward(this.port);
+
+  @override
+  final int port;
+
+  @override
+  int get connections => 0;
+
+  @override
+  String get lastError => '';
+
+  @override
+  Future<void> stop() async {}
 }

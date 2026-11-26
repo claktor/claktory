@@ -1,0 +1,36 @@
+# Claktory's browser (#435): its user, claktory-browser, may not reach this
+# machine or the local network by any protocol (Landlock limits only TCP, and
+# Chrome's Local Network Access policy only a page's own requests).
+# Matched positively: a packet with no socket (a reset, an ICMP reply) has no
+# owner, so "skuid != browser accept" would let it fall through to the rejects
+# and break the machine's own traffic (spike finding).
+table inet claktory_browser {
+  # The resolvers in /etc/resolv.conf, filled in at each load by
+  # /usr/local/sbin/claktory-browser-nft (port 53 only).
+  set dns4 { type ipv4_addr; }
+  set dns6 { type ipv6_addr; }
+
+  chain out {
+    type filter hook output priority 0; policy accept;
+    meta skuid "claktory-browser" jump browser
+  }
+  chain browser {
+    # Replies on connections others opened to it; new ones are judged below.
+    ct state established,related accept
+    # DNS through the machine's resolvers only.
+    ip daddr 127.0.0.53 meta l4proto { tcp, udp } th dport 53 accept
+    ip daddr @dns4 meta l4proto { tcp, udp } th dport 53 accept
+    ip6 daddr @dns6 meta l4proto { tcp, udp } th dport 53 accept
+    # This machine, whatever its addresses (finding 12: its own public one too).
+    fib daddr type local jump no
+    oifname "lo" jump no
+    ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4 } jump no
+    # NAT64 and 6to4 carry IPv4 addresses inside (Fugo).
+    ip6 daddr { ::/128, ::1, ::ffff:0:0/96, 64:ff9b::/96, 64:ff9b:1::/48, 2002::/16, fc00::/7, fe80::/10, ff00::/8 } jump no
+  }
+  # A reset, not an ICMP error: Chrome fails at once instead of retrying.
+  chain no {
+    meta l4proto tcp reject with tcp reset
+    reject
+  }
+}

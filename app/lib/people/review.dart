@@ -31,6 +31,7 @@ class DmProposal {
     this.envelope = '',
     this.epoch = 0,
     this.clientMessageId = '',
+    this.proposalDigest = '',
   });
 
   factory DmProposal.fromJson(Map<String, Object?> json) {
@@ -53,6 +54,8 @@ class DmProposal {
       expiresMs: _int(json, 'expires_ms'),
       envelope: json['envelope'] == null ? '' : jsonEncode(json['envelope']),
       epoch: _int(json, 'epoch'),
+      proposalDigest: _text(json, 'proposal_digest'),
+      clientMessageId: _text(json, 'client_message_id'),
     );
   }
 
@@ -80,7 +83,12 @@ class DmProposal {
     expiresMs: expiresMs,
     envelope: envelope,
     epoch: epoch,
-    clientMessageId: clientMessageId,
+    // The service's (Mista 32744): what the home knows it by; the sealed
+    // one's before the service listed it.
+    clientMessageId: this.clientMessageId.isEmpty
+        ? clientMessageId
+        : this.clientMessageId,
+    proposalDigest: proposalDigest,
   );
 
   final String id;
@@ -116,11 +124,19 @@ class DmProposal {
   /// approving it sends goes by it.
   final String clientMessageId;
 
+  /// The service's word for which channel message it is (#451): SHA-256,
+  /// lowercase hex, of its MLS bytes. Opened only from the message this
+  /// device took from its channel under that digest, from that Claktory's
+  /// leaf, so the word is checked by what it opens.
+  final String proposalDigest;
+
   bool get pending => state == 'pending';
 
   /// What approving it names: SHA-256, lowercase hex, of the envelope's
-  /// bytes as this device fetched and opened them.
+  /// bytes as this device fetched and opened them; through the home, the
+  /// digest it was found and opened by.
   String get digest {
+    if (envelope.isEmpty) return proposalDigest;
     final json = jsonDecode(envelope) as Map<String, Object?>;
     final bytes = json['bytes'] as String? ?? '';
     return sha256
@@ -142,6 +158,7 @@ class DmAgentDraft {
     this.updatedMs = 0,
     this.conversationId = '',
     this.envelope = '',
+    this.draftDigest = '',
   });
 
   factory DmAgentDraft.fromJson(Map<String, Object?> json) {
@@ -161,6 +178,7 @@ class DmAgentDraft {
       updatedMs: _int(json, 'updated_ms'),
       conversationId: _text(json, 'conversation_id'),
       envelope: json['envelope'] == null ? '' : jsonEncode(json['envelope']),
+      draftDigest: _text(json, 'draft_digest'),
     );
   }
 
@@ -178,6 +196,7 @@ class DmAgentDraft {
     updatedMs: updatedMs,
     conversationId: conversationId,
     envelope: envelope,
+    draftDigest: draftDigest,
   );
 
   final String id;
@@ -195,6 +214,10 @@ class DmAgentDraft {
 
   /// Sealed in the Claktory's channel: an envelope's JSON.
   final String envelope;
+
+  /// Through the home (#451), no [envelope]: which channel message it is,
+  /// SHA-256 lowercase hex of its MLS bytes.
+  final String draftDigest;
 }
 
 /// Whether [rune] changes how text reads without showing itself: controls

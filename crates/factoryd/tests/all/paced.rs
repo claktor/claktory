@@ -128,3 +128,35 @@ async fn what_a_model_writes_reaches_a_device_on_another_machine_whole_and_in_or
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_message_of_the_persons_comes_with_what_it_did_to_its_agent() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut mac, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut mac, &mut view, create_agent("", "Ops", "")).await;
+    let (mut phone, mut held) = phone(addr).await;
+    phone.ok(client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "ops".into() })).await;
+    let reply = phone.request(crate::common::send_message("ops", "hello there")).await;
+    for event in &reply.events {
+        applied(&mut held, event.body.as_ref());
+    }
+    // The agent took it: when the message shows in its conversation, the
+    // phone holds no Workspace that still has it waiting, where the run's
+    // start was held a second behind the answer's.
+    let started = Instant::now();
+    loop {
+        let message = phone.receive().await;
+        if applied(&mut held, message.body.as_ref()) {
+            continue;
+        }
+        if let Some(Body::Entry(v1::EntryUpdate { entry: Some(entry), .. })) = &message.body
+            && matches!(entry.kind, Some(v1::entry::Kind::User(_)))
+        {
+            break;
+        }
+    }
+    let ops = held.agents.iter().find(|agent| agent.id == "ops").expect("ops");
+    assert_eq!(ops.queued_messages, 0, "still waiting {:?} after the answer", started.elapsed());
+}

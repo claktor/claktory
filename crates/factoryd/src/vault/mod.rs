@@ -20,6 +20,7 @@ pub(crate) mod crypto;
 pub(crate) mod dm;
 pub(crate) mod env;
 pub(crate) mod generate;
+pub(crate) mod given_up;
 pub mod handoff;
 pub(crate) mod import;
 pub mod memory;
@@ -1057,6 +1058,36 @@ impl Vault {
         Self::log(db, &id, &name, "revoke", agent, "", by)?;
         inner.state = None;
         Ok(name)
+    }
+
+    /// The secret `agent` holds named `name` (any case): its id and name.
+    /// Read from the grants as they are, without checking them, so an agent
+    /// can give one up while the vault is locked too; None for a name it
+    /// doesn't hold, whether or not the vault has it.
+    pub(crate) fn held(&self, agent: &str, name: &str) -> Result<Option<(String, String)>, VaultError> {
+        let inner = self.lock();
+        let Some(db) = &inner.db else { return Ok(None) };
+        Ok(db
+            .query_row(
+                "SELECT secrets.id, secrets.name FROM grants JOIN secrets ON secrets.id = grants.secret
+                 WHERE grants.agent = ?1 AND secrets.name = ?2 COLLATE NOCASE ORDER BY secrets.name = ?2 DESC LIMIT 1",
+                [agent, name.trim()],
+                crate::store::row2,
+            )
+            .optional()?)
+    }
+
+    /// The names of the secrets `agent` holds, as `held` reads them.
+    pub(crate) fn held_names(&self, agent: &str) -> Vec<String> {
+        let inner = self.lock();
+        let Some(db) = &inner.db else { return Vec::new() };
+        query(
+            db,
+            "SELECT secrets.name FROM grants JOIN secrets ON secrets.id = grants.secret WHERE grants.agent = ?1 ORDER BY secrets.name COLLATE NOCASE",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap_or_default()
     }
 
     /// Takes every grant from an agent that's gone. Returns the secrets'

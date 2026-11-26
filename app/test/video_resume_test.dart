@@ -30,6 +30,15 @@ Future<void> _loading(WidgetTester tester) async {
   await settle(tester);
 }
 
+/// Until the preview plays, with Show original beside it: the disk takes
+/// its time on a loaded machine.
+Future<void> _previewPlaying(WidgetTester tester) async {
+  for (var i = 0; i < 30; i++) {
+    await _loading(tester);
+    if (find.textContaining('Show original').evaluate().isNotEmpty) return;
+  }
+}
+
 void main() {
   setUp(() {
     FakePlayback.made.clear();
@@ -119,7 +128,7 @@ void main() {
       );
     await harness.show(tester);
     tester.view.physicalSize = const Size(2000, 900);
-    await _loading(tester);
+    await _previewPlaying(tester);
     expect(FakePlayback.made.last.opened, contains('-preview-'));
 
     // The original, till the connection goes at its eleventh megabyte and
@@ -181,7 +190,7 @@ void main() {
       );
     await harness.show(tester);
     tester.view.physicalSize = const Size(2000, 900);
-    await _loading(tester);
+    await _previewPlaying(tester);
     harness.backend.holdRead = (request) async {
       if (request.previewWidth == 0 && request.offset >= 10 * _mb) {
         throw const RequestFailure('The disk is unreadable.');
@@ -227,7 +236,7 @@ void main() {
       );
     await harness.show(tester);
     tester.view.physicalSize = const Size(2000, 900);
-    await _loading(tester);
+    await _previewPlaying(tester);
     final preview = FakePlayback.made.single;
     await preview.seek(12);
     await tester.tap(find.textContaining('Show original'));

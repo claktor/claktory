@@ -319,6 +319,7 @@ fn tell_person(factory: &Factory, config: &Config, what: String) {
         seq: 0,
         device_id: String::new(),
         waits: String::new(),
+        share_id: String::new(),
     };
     let delivered = crate::notify::deliver(factory, config, &settings, note);
     tracing::info!(?delivered, "told the person about a newer model itself: no admin agent can take it");

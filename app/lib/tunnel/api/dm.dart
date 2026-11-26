@@ -7,9 +7,9 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `add_group`, `apply_view`, `become_leaf`, `bytes32`, `change_group`, `change_pins`, `commit`, `committed`, `delete_row`, `envelope_json`, `from_content`, `group_kind`, `group_row`, `has`, `holds`, `json`, `keep_rotation`, `keep`, `listed_ids`, `load`, `member_line`, `merge_own`, `message`, `not_joined`, `note_removed`, `of`, `openmls_group_id`, `pending_commit`, `place`, `read_envelope`, `read_row`, `read_view`, `recertify`, `refusal`, `roster`, `rotated_pins`, `safety`, `save_pins`, `save_row`, `set_up`, `snapshot`, `sql`, `state`, `store`, `take`, `to_content`, `unchecked`, `view_name`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Kept`, `PendingRow`, `Pending`, `Snapshot`, `State`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `try_from`
+// These functions are ignored because they are not marked as `pub`: `add_group`, `apply_view`, `become_leaf`, `bytes32`, `change_group`, `change_pins`, `commit`, `committed`, `delete_row`, `each`, `envelope_json`, `every_leaf`, `from_content`, `group_kind`, `group_row`, `has`, `holds`, `json`, `keep_rotation`, `keep_side`, `keep`, `listed_ids`, `load`, `member_line`, `merge_own`, `message`, `not_joined`, `note_removed`, `of`, `open_handoff`, `openmls_group_id`, `own_message`, `pending_commit`, `place`, `proposal_place`, `proposal_position`, `read_envelope`, `read_row`, `read_view`, `recertify`, `refusal`, `roster`, `rotated_pins`, `safety`, `save_pins`, `save_row`, `sent_at`, `set_up`, `snapshot`, `sql`, `state`, `store`, `take`, `to_content`, `unchecked`, `unlisted`, `view_name`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Kept`, `PendingRow`, `Pending`, `ProposalPlace`, `Snapshot`, `State`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `try_from`
 // These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`
 
 /// 32 new random bytes: a key for the platform key store (the identity,
@@ -34,7 +34,10 @@ abstract class DmDevice implements RustOpaqueInterface {
   });
 
   /// Adds the leaves of [key_packages] (envelopes' JSON) to [group_id].
-  Future<DmCommit> addMembers({
+  /// None when there's nothing to add: every package's key is in the
+  /// group already, or repeated (`Error::NothingToAdd`, told by its kind,
+  /// never its words: Fugo).
+  Future<DmCommit?> addMembers({
     required List<int> groupId,
     required List<String> keyPackages,
   });
@@ -87,12 +90,19 @@ abstract class DmDevice implements RustOpaqueInterface {
   Future<Uint8List> exportPins();
 
   /// On the new device: opens what the scanning device sent ([sealed])
-  /// and becomes the leaf its QR code named. The identity's secret comes
-  /// back for the platform key store.
-  Future<DmHandoffDone> finishHandoff({
+  /// and becomes the leaf its QR code named, only when what it gives is
+  /// [account_id]'s identity as their account publishes it
+  /// ([identity_public], from the worker's keys): knowing the QR code's
+  /// secret alone (a photo of it, the clipboard) never plants another
+  /// identity and pins on this device (Melone F3). Either way the offer
+  /// is spent. The identity's secret comes back for the platform key
+  /// store.
+  Future<DmHandoffDone> finishHandoffFor({
     required DmHandoff handoff,
     required List<int> sealed,
     required BigInt nowMs,
+    required String accountId,
+    required List<int> identityPublic,
   });
 
   /// The worker took the new key: this device takes it too, with its
@@ -130,6 +140,10 @@ abstract class DmDevice implements RustOpaqueInterface {
     required int limit,
   });
 
+  /// Whether this device went over to its home (#451): it read what the
+  /// worker still held, once, and reads the home only since.
+  bool homeDrained();
+
   /// Pins from another of the person's own devices (never the service).
   Future<void> importPins({required List<int> exported});
 
@@ -160,6 +174,15 @@ abstract class DmDevice implements RustOpaqueInterface {
 
   /// [count] one-time key packages for the worker's supply.
   Future<List<String>> keyPackages({required int count});
+
+  /// Whether the last resort the worker keeps for this device, whose
+  /// lifetime ends at [last_resort_ends] (seconds since the epoch, the
+  /// worker's GET key-packages; 0 when it doesn't say), is close enough
+  /// to its end at [now_secs] to be replaced now (Melone's F4).
+  bool lastResortDue({
+    required PlatformInt64 lastResortEnds,
+    required PlatformInt64 nowSecs,
+  });
 
   /// The last-resort key package, which the worker hands out again once
   /// the one-time ones are gone.
@@ -266,6 +289,25 @@ abstract class DmDevice implements RustOpaqueInterface {
     required PlatformInt64 arrivedMs,
   });
 
+  /// A commit [process] held as [DmProcessed::unlisted] (row 561):
+  /// [items] is it, then what follows it in the group's feed, in order.
+  /// The device it brings in is one its person has since taken off their
+  /// list; if one of their listed devices that was there all along takes
+  /// it out again within [items] (claktory-dm-crypto's window, Fugo's
+  /// rule), everything up to that removal is taken as an online member
+  /// took it, the departed device's messages marked as such. Anything
+  /// else changes nothing here.
+  Future<DmWindowOutcome> processWindow({
+    required List<int> groupId,
+    required List<DmWindowItem> items,
+  });
+
+  /// Where this device is in the worker's feed of [group_id] once it
+  /// reads the home (#451): the proposals stay there (a Claktory's own
+  /// Remove, Mista 32950), and the home's commits take them in by
+  /// reference. Before the home, where it is in the feed.
+  PlatformInt64 proposalSeq({required List<int> groupId});
+
   /// The device whose former install holds [group_id] (row 202): its
   /// name, when what [waiting_for] waits for is a reinstall; None
   /// otherwise.
@@ -352,6 +394,9 @@ abstract class DmDevice implements RustOpaqueInterface {
     required PlatformInt64 nowMs,
   });
 
+  /// Marks this device as gone over to its home ([home_drained]).
+  Future<void> setHomeDrained();
+
   /// Sets up the person's first device: [identity_key] is a new identity
   /// (kept in the platform key store first), this device is
   /// [leaf_id] ("its account key") called [name], and the device list
@@ -385,6 +430,14 @@ abstract class DmDevice implements RustOpaqueInterface {
     required BigInt nowMs,
   });
 
+  /// The proposal or agent's draft with [digest] (SHA-256 of its MLS
+  /// bytes) that came in the channel [group_id]'s feed; None until it
+  /// has (#451).
+  Future<DmMessage?> sideMessage({
+    required List<int> groupId,
+    required List<int> digest,
+  });
+
   /// The person's device list at [version] (one more than the last),
   /// signed. Not pinned here: that's [accept_list] once the worker took
   /// it, so a list it refused (or never heard) never counts as seen, and
@@ -396,9 +449,25 @@ abstract class DmDevice implements RustOpaqueInterface {
     required List<DmListed> leaves,
   });
 
+  /// [sign_device_list], naming [home] (an iroh endpoint id, 32 bytes) as
+  /// the person's home Claktory (#451); None for none.
+  Future<Uint8List> signDeviceListWithHome({
+    required BigInt version,
+    required BigInt createdMs,
+    required List<DmListed> leaves,
+    Uint8List? home,
+  });
+
   /// Gives up on the feed's message [seq] in [group_id], held until now
   /// ([DmOutcome::Held]): the position moves past it.
   Future<void> skip({required List<int> groupId, required PlatformInt64 seq});
+
+  /// Moves where this device is in the worker's feed of [group_id] to
+  /// [seq]: what was there is gone (the worker pruned it).
+  Future<void> skipProposals({
+    required List<int> groupId,
+    required PlatformInt64 seq,
+  });
 
   /// Starts adding this device, [leaf_id] (its account key) called
   /// [name] on [platform], reachable for history at the iroh endpoint
@@ -413,6 +482,24 @@ abstract class DmDevice implements RustOpaqueInterface {
 
   DmStatus status();
 
+  /// Deletes this device's key packages whose lifetime ended by
+  /// [now_secs], their private keys with them (Melone's F4): one never
+  /// used, or a last resort replaced since, opens no Welcome after. How
+  /// many went.
+  Future<int> sweepKeyPackages({required PlatformInt64 nowSecs});
+
+  /// The worker's message [seq] in [group_id] once this device reads the
+  /// home: only a proposal is taken (kept for the commit that takes it
+  /// in), anything else is passed over; the worker position moves past
+  /// it either way, but not past a proposal [DmOutcome::Held] (under a
+  /// key not pinned yet). Call in seq order, each before the home's
+  /// commit of its epoch.
+  Future<DmProcessed> takeProposal({
+    required List<int> groupId,
+    required PlatformInt64 seq,
+    required String envelope,
+  });
+
   /// Takes the new key ([identity_key], from [DmDevice::open_rotation],
   /// in the key store already) with the bundle [sealed]'s pins: this
   /// device's leaf certified under it, the old key retired. Gives the new
@@ -420,6 +507,31 @@ abstract class DmDevice implements RustOpaqueInterface {
   Future<Uint8List> takeRotation({
     required List<int> identityKey,
     required List<int> sealed,
+  });
+
+  /// The worker's commit [seq] in [group_id] once this device reads the
+  /// home, which the home never carried (row 551): this device's own,
+  /// taken by the worker just as the app stopped, is merged; another's
+  /// is taken as the feed takes one, any change of this device's own
+  /// still waiting from before it given up. Anything else is passed over.
+  /// The worker position moves past it, but not past a commit
+  /// [DmOutcome::Held] (under a key not pinned yet); the home's position
+  /// stays. Call in seq order with [take_proposal].
+  Future<DmProcessed> takeWorkerCommit({
+    required List<int> groupId,
+    required PlatformInt64 seq,
+    required String envelope,
+    required PlatformInt64 arrivedMs,
+  });
+
+  /// The person compared safety numbers with [account] after its key
+  /// changed and they didn't match (E11-3): the key it changed from
+  /// ([back_to], the pin's `changed_from`) is pinned again, its list,
+  /// version and verified flag with it, and the one that didn't match
+  /// can come back only as another change, which says so.
+  Future<void> undoKeyChange({
+    required String account,
+    required List<int> backTo,
   });
 
   /// What was encrypted here and hasn't come back: to send again, as it is.
@@ -548,12 +660,25 @@ class DmContent {
 /// An account's device list, as this device last took it.
 class DmDeviceList {
   final BigInt version;
+
+  /// When it was signed, by the signing device's clock (ms).
+  final BigInt createdMs;
   final List<DmListed> leaves;
 
-  const DmDeviceList({required this.version, required this.leaves});
+  /// The account's home Claktory (#451): its iroh endpoint id (32 bytes),
+  /// signed with the rest; None while the list names none.
+  final Uint8List? home;
+
+  const DmDeviceList({
+    required this.version,
+    required this.createdMs,
+    required this.leaves,
+    this.home,
+  });
 
   @override
-  int get hashCode => version.hashCode ^ leaves.hashCode;
+  int get hashCode =>
+      version.hashCode ^ createdMs.hashCode ^ leaves.hashCode ^ home.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -561,7 +686,9 @@ class DmDeviceList {
       other is DmDeviceList &&
           runtimeType == other.runtimeType &&
           version == other.version &&
-          leaves == other.leaves;
+          createdMs == other.createdMs &&
+          leaves == other.leaves &&
+          home == other.home;
 }
 
 /// A group this device is in.
@@ -577,12 +704,18 @@ class DmGroup {
   /// until it moves to the person's new security key ([DmDevice::move_group]).
   final bool moved;
 
+  /// A commit of this device's waits to be merged or given up: one the
+  /// app stopped before it heard of (row 553), settled against the
+  /// worker's log ([DmDevice::take_worker_commit]).
+  final bool pending;
+
   const DmGroup({
     required this.groupId,
     required this.kind,
     required this.seq,
     required this.epoch,
     required this.moved,
+    required this.pending,
   });
 
   @override
@@ -591,7 +724,8 @@ class DmGroup {
       kind.hashCode ^
       seq.hashCode ^
       epoch.hashCode ^
-      moved.hashCode;
+      moved.hashCode ^
+      pending.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -602,7 +736,8 @@ class DmGroup {
           kind == other.kind &&
           seq == other.seq &&
           epoch == other.epoch &&
-          moved == other.moved;
+          moved == other.moved &&
+          pending == other.pending;
 }
 
 /// Which group, from the person's own records (the worker's group list as
@@ -850,12 +985,18 @@ class DmMembers {
   /// says nothing.
   final List<DmMember> setUpAgain;
 
+  /// The first devices of an account that had no leaf here before: the
+  /// friend joining ("Ana joined on Pixel", Bruno 33634), still said for
+  /// each leaf (Fugo); not in [added].
+  final List<DmMember> joined;
+
   const DmMembers({
     required this.added,
     required this.removed,
     required this.keyChanged,
     this.skipped,
     required this.setUpAgain,
+    required this.joined,
   });
 
   @override
@@ -864,7 +1005,8 @@ class DmMembers {
       removed.hashCode ^
       keyChanged.hashCode ^
       skipped.hashCode ^
-      setUpAgain.hashCode;
+      setUpAgain.hashCode ^
+      joined.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -875,7 +1017,8 @@ class DmMembers {
           removed == other.removed &&
           keyChanged == other.keyChanged &&
           skipped == other.skipped &&
-          setUpAgain == other.setUpAgain;
+          setUpAgain == other.setUpAgain &&
+          joined == other.joined;
 }
 
 /// A message in a group's history, as this device keeps it.
@@ -896,6 +1039,11 @@ class DmMessage {
   /// said ([content] is then empty): never from anyone's content.
   final DmMembers? members;
 
+  /// Said by a device its person had taken out by the time this device
+  /// read it (row 561, Fugo): taken in a window, as an online member took
+  /// it then, and shown as from that device.
+  final bool departed;
+
   const DmMessage({
     required this.seq,
     required this.mine,
@@ -905,6 +1053,7 @@ class DmMessage {
     required this.content,
     required this.arrivedMs,
     this.members,
+    required this.departed,
   });
 
   @override
@@ -916,7 +1065,8 @@ class DmMessage {
       fromKindDevice.hashCode ^
       content.hashCode ^
       arrivedMs.hashCode ^
-      members.hashCode;
+      members.hashCode ^
+      departed.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -930,7 +1080,8 @@ class DmMessage {
           fromKindDevice == other.fromKindDevice &&
           content == other.content &&
           arrivedMs == other.arrivedMs &&
-          members == other.members;
+          members == other.members &&
+          departed == other.departed;
 }
 
 /// What one message from the feed was.
@@ -954,7 +1105,8 @@ enum DmOutcome {
   /// A commit under a security key this device hasn't pinned for the
   /// account in [DmProcessed::why] (a rotation, dms-e2ee §2.1): left
   /// unread, the position kept, to take once that account's keys are in
-  /// (never dropped: every commit after it would fail).
+  /// (never dropped: every commit after it would fail). Or, with
+  /// [DmProcessed::behind], something from an epoch past this device's.
   held,
 }
 
@@ -1001,12 +1153,23 @@ class DmPin {
   /// The latest device list's version under this key; 0 before any.
   final BigInt deviceListVersion;
 
+  /// The key this one replaced at its last change, while there's still
+  /// that key to go back to: what "The numbers don't match" goes back to
+  /// ([DmDevice::undo_key_change], E11-3). None otherwise.
+  final Uint8List? changedFrom;
+
+  /// This key is one the person said didn't match before, back again:
+  /// the notice says so. Cleared once they verify it.
+  final bool mismatched;
+
   const DmPin({
     required this.identityPublic,
     required this.verified,
     required this.changedUnseen,
     required this.canSend,
     required this.deviceListVersion,
+    this.changedFrom,
+    required this.mismatched,
   });
 
   @override
@@ -1015,7 +1178,9 @@ class DmPin {
       verified.hashCode ^
       changedUnseen.hashCode ^
       canSend.hashCode ^
-      deviceListVersion.hashCode;
+      deviceListVersion.hashCode ^
+      changedFrom.hashCode ^
+      mismatched.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1026,7 +1191,9 @@ class DmPin {
           verified == other.verified &&
           changedUnseen == other.changedUnseen &&
           canSend == other.canSend &&
-          deviceListVersion == other.deviceListVersion;
+          deviceListVersion == other.deviceListVersion &&
+          changedFrom == other.changedFrom &&
+          mismatched == other.mismatched;
 }
 
 /// One message from the feed, processed.
@@ -1045,6 +1212,18 @@ class DmProcessed {
   /// device rejoins the group past it.
   final bool replaced;
 
+  /// Held, from an epoch past this device's (row 551): it missed a commit
+  /// the home never carried (its own, taken by the worker just as the
+  /// app stopped, say). The worker's log has it ([take_worker_commit]);
+  /// then this is taken again. Never passed over unread meanwhile.
+  final bool behind;
+
+  /// Held: a leaf of [why]'s that the device list taken here doesn't
+  /// name (row 561), such as a friend's device added while this one was
+  /// away. Their list is fetched and it's taken again; one still unnamed
+  /// then is refused as before.
+  final bool unlisted;
+
   const DmProcessed({
     required this.outcome,
     this.message,
@@ -1052,6 +1231,8 @@ class DmProcessed {
     required this.why,
     required this.handshake,
     required this.replaced,
+    required this.behind,
+    required this.unlisted,
   });
 
   @override
@@ -1061,7 +1242,9 @@ class DmProcessed {
       epoch.hashCode ^
       why.hashCode ^
       handshake.hashCode ^
-      replaced.hashCode;
+      replaced.hashCode ^
+      behind.hashCode ^
+      unlisted.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1073,7 +1256,9 @@ class DmProcessed {
           epoch == other.epoch &&
           why == other.why &&
           handshake == other.handshake &&
-          replaced == other.replaced;
+          replaced == other.replaced &&
+          behind == other.behind &&
+          unlisted == other.unlisted;
 }
 
 /// A removal the person confirmed (Remove…, or Lock out with a new
@@ -1342,4 +1527,75 @@ class DmView {
           draftMs == other.draftMs &&
           readSeq == other.readSeq &&
           deletedSeq == other.deletedSeq;
+}
+
+/// How a window ended ([DmDevice::process_window]).
+enum DmWindowEnd {
+  /// Closed by the removal: [DmWindowOutcome::processed] is each item
+  /// from the refused commit to the removal, taken; the position is past
+  /// the removal.
+  closed,
+
+  /// The items ran out before the removal: nothing changed. Again with
+  /// more, while more commits are to come; else refused as before.
+  open,
+
+  /// It can't close ([DmWindowOutcome::why]): nothing changed, and the
+  /// commit stays refused.
+  aborted,
+
+  /// No window opens here (not a conversation, or refused for something
+  /// else): nothing changed, refused as before.
+  none,
+}
+
+/// One item of a group's feed for [DmDevice::process_window]: its seq,
+/// envelope (JSON) and when it arrived.
+class DmWindowItem {
+  final PlatformInt64 seq;
+  final String envelope;
+  final PlatformInt64 arrivedMs;
+
+  const DmWindowItem({
+    required this.seq,
+    required this.envelope,
+    required this.arrivedMs,
+  });
+
+  @override
+  int get hashCode => seq.hashCode ^ envelope.hashCode ^ arrivedMs.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DmWindowItem &&
+          runtimeType == other.runtimeType &&
+          seq == other.seq &&
+          envelope == other.envelope &&
+          arrivedMs == other.arrivedMs;
+}
+
+/// What [DmDevice::process_window] came to.
+class DmWindowOutcome {
+  final DmWindowEnd end;
+  final String why;
+  final List<DmProcessed> processed;
+
+  const DmWindowOutcome({
+    required this.end,
+    required this.why,
+    required this.processed,
+  });
+
+  @override
+  int get hashCode => end.hashCode ^ why.hashCode ^ processed.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DmWindowOutcome &&
+          runtimeType == other.runtimeType &&
+          end == other.end &&
+          why == other.why &&
+          processed == other.processed;
 }

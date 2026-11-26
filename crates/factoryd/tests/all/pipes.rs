@@ -56,6 +56,7 @@ pub(crate) fn incoming(id: &str, text: &str) -> Incoming {
         text: text.into(),
         files: Vec::new(),
         sent_at_ms: 0,
+        sends_only: false,
     }
 }
 

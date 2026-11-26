@@ -11,9 +11,12 @@ pub mod handoffs;
 pub mod identity;
 pub mod keys;
 pub mod leaves;
+#[cfg(feature = "qa-lies")]
+pub mod lies;
 pub mod messages;
 pub mod reports;
 pub mod review;
+pub mod space;
 pub mod sync;
 
 #[cfg(test)]

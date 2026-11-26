@@ -13,7 +13,7 @@ import 'changelog.dart';
 import 'chats.dart' show ChatView, selectedChat;
 import 'compatibility.dart';
 import 'connect_step.dart';
-import 'connection.dart' show Connection;
+import 'connection.dart' show Connection, Link;
 import 'engine.dart' show WhenAppQuitsStep, asksWhenAppQuits;
 import 'devices.dart' show FactoryChooser, thisDeviceKind;
 import 'map.dart';
@@ -22,6 +22,7 @@ import 'pairing.dart';
 import 'marketplace.dart';
 import 'account.dart';
 import 'model_step.dart';
+import 'kept.dart';
 import 'mobile/back.dart' show BackHandle, CallbackBackToken, PhoneBack;
 import 'mobile/presentation.dart' show SheetOverlay;
 import 'move.dart' show BackendMove, MoveGate;
@@ -392,8 +393,24 @@ class _ShellState extends State<Shell> {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         if (railView != null) part(railView),
-                        part(behind(Sidebar(width: sidebar))),
-                        part(behind(ExtensionBar(agent: agent))),
+                        // The sidebar follows the Workspace on its own; the
+                        // bar is the same while its agent is.
+                        part(
+                          behind(
+                            Kept(
+                              inputs: [sidebar],
+                              builder: (_) => Sidebar(width: sidebar),
+                            ),
+                          ),
+                        ),
+                        part(
+                          behind(
+                            Kept(
+                              inputs: [agent, workspace.extensions],
+                              builder: (_) => ExtensionBar(agent: agent),
+                            ),
+                          ),
+                        ),
                         Expanded(child: aboveKeyboard(part(content))),
                         if (pane != null) aboveKeyboard(part(behind(pane))),
                       ],
@@ -666,7 +683,8 @@ class _PageBackState extends State<_PageBack> {
 bool turnedAway(Backend backend) =>
     backend.refused.value != null && !backend.connected.value;
 
-/// What shows with no agent chosen: "Connecting…", how to start when
+/// What shows with no agent chosen: "Connecting…" (or "Can't connect",
+/// as the drawer says, with Reconnect), how to start when
 /// there are no agents, or "Select an agent", with signing in when no
 /// model can run.
 class NoAgentView extends StatelessWidget {
@@ -680,6 +698,8 @@ class NoAgentView extends StatelessWidget {
         backend.workspace,
         backend.connected,
         backend.refused,
+        // The drawer's "Can't connect" shows here too (row 480).
+        Connection.of(backend),
       ]),
       builder: (context, _) {
         final workspace = backend.workspace.workspace;
@@ -688,6 +708,23 @@ class NoAgentView extends StatelessWidget {
         // the way to another Claktory (Zucchero's row 220).
         if (turnedAway(backend)) {
           final connection = Connection(backend);
+          final machine = connection.machine ?? 'This Claktory';
+          // Signed out of the person's account (its sign-in lost to a
+          // failing disk, say: friend bug #38), it lets this device in
+          // again once it's signed in: a new code would pair it twice. As
+          // factoryd's `remote::SIGNED_OUT` says it.
+          const signedOut = 'was signed out of your Claktory account';
+          if (backend.refused.value?.contains(signedOut) ?? false) {
+            return _EmptyState(
+              title: connection.line,
+              body:
+                  '$machine was signed out of your Claktory account, so it '
+                  "can't let this $thisDeviceKind in. Sign it in again in its "
+                  'Settings → Account, then try again.',
+              action: 'Try again',
+              onAction: backend.retry,
+            );
+          }
           return _EmptyState(
             title: connection.line,
             // The app's own words, not the tunnel's (Trish).
@@ -704,6 +741,17 @@ class NoAgentView extends StatelessWidget {
         // Until this Claktory's workspace is here, nothing is known about
         // it: an empty one isn't "no agents yet".
         if (!backend.connected.value || !backend.workspace.received) {
+          // Once it says it can't connect, the pane says so too, not
+          // "Connecting…" behind the drawer's "Can't connect" (row 480).
+          final connection = Connection(backend);
+          if (connection.link == Link.failing) {
+            return _EmptyState(
+              title: connection.line,
+              body: connection.stillTrying,
+              action: 'Reconnect',
+              onAction: backend.reconnectNow,
+            );
+          }
           return const _EmptyState(title: 'Connecting…');
         }
         final signIn = workspace.models.isEmpty;

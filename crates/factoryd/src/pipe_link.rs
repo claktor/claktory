@@ -14,22 +14,22 @@
 //! `set_store`; until it does, nothing arrives.
 
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-use iroh::endpoint::{ConnectError, ConnectingError, Connection, ConnectionError, RecvStream, SendStream};
-use iroh::{EndpointAddr, EndpointId, RelayUrl, SecretKey, Signature};
+use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::{EndpointId, SecretKey, Signature};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 
 use crate::locking::lock;
 use crate::encoding::{hex, same, unhex};
 use crate::factory::Factory;
+use crate::iroh_link::{DialError, here, peer_addresses, peer_relays, turned_away};
 use crate::transcript::now_ms;
 
 /// The pipes' protocol on the tunnel's endpoint, apart from the devices'.
@@ -98,6 +98,9 @@ pub struct Outgoing {
     pub via: Via,
     pub text: String,
     pub files: Vec<OutFile>,
+    /// From a member that only sends (#414): the peer's loop breaker leaves
+    /// it out (friend bug #33). Kept in the signed frame as it was queued.
+    pub sends_only: bool,
 }
 
 /// A file that came with a message: its name as the peer gave it (not
@@ -121,6 +124,9 @@ pub struct Incoming {
     pub files: Vec<InFile>,
     /// When the peer sent it, by its clock, in ms since 1970.
     pub sent_at_ms: i64,
+    /// The peer says an agent that only sends wrote it (friend bug #33): its
+    /// word, honoured only to leave the message out of the loop breaker.
+    pub sends_only: bool,
 }
 
 /// Whether the peer can be reached, as last seen. Cached: cheap to read.
@@ -221,8 +227,12 @@ pub trait Store: Send + Sync {
     fn delivered(&self, factory: &Arc<Factory>, pipe: &str, msg_id: &str);
     /// The peer refused a message of this side's.
     fn refused(&self, factory: &Arc<Factory>, pipe: &str, msg_id: &str, reason: &str);
-    fn peer_paused(&self, factory: &Arc<Factory>, pipe: &str);
-    fn peer_resumed(&self, factory: &Arc<Factory>, pipe: &str);
+    /// The peer paused the pipe: its loop breaker did, it says (`looped`),
+    /// or its person.
+    fn peer_paused(&self, factory: &Arc<Factory>, pipe: &str, looped: bool);
+    /// The peer resumed the pipe; `looped`: continuing its loop breaker's
+    /// pause, it says.
+    fn peer_resumed(&self, factory: &Arc<Factory>, pipe: &str, looped: bool);
     /// The peer closed the pipe (or turned it away before approving): it's
     /// unpinned and its queue dropped already.
     fn peer_closed(&self, factory: &Arc<Factory>, pipe: &str);
@@ -326,12 +336,7 @@ pub fn set_dial(timeout: Duration) {
 const ANSWER: Duration = Duration::from_secs(30);
 /// How often an idle link checks that its peer is there.
 const PING: Duration = Duration::from_secs(20);
-/// The longest wait between tries to reach a peer. Long, since each try at
-/// a peer that's away sends ~46 KB for nothing (Polpo's pipe-redial.md): a
-/// frame from the peer, or something queued for it, wakes the worker anyway.
-const MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
-/// The first wait after a try fails, which then doubles.
-const FIRST_BACKOFF: Duration = Duration::from_secs(1);
+use crate::iroh_link::{FIRST_BACKOFF, MAX_BACKOFF};
 /// How long a closed pipe keeps trying to tell its peer.
 const CLOSE_TRIES: i64 = 7 * 24 * 60 * 60 * 1000;
 /// Files that came with messages and weren't moved are deleted after this.
@@ -387,6 +392,11 @@ pub(crate) struct State {
 
 impl State {
     /// Whether remote access must stay on for pipes.
+    /// Until when an invitation this side made can be used (ms; 0 for none).
+    pub(crate) fn invite_until(&self) -> i64 {
+        self.admits.invite_until.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn wants_tunnel(&self, now: i64) -> bool {
         self.active.load(Ordering::Relaxed) > 0
             || self.joining.load(Ordering::Relaxed) > 0
@@ -589,6 +599,16 @@ struct Payload {
     /// receiving side uses for its own address when it's free there.
     #[serde(skip_serializing_if = "Option::is_none")]
     port: Option<u16>,
+    /// message: written by a member that only sends (friend bug #33);
+    /// absent otherwise, so a frame is what a Claktory from before sent.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    sends_only: bool,
+    /// pause: the sender's loop breaker paused it, not its person; resume:
+    /// its person continued such a pause, so this side's repeats start over
+    /// too (never its count). Absent otherwise. Its word, for the pause's
+    /// line and the repeats alone.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    looped: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -667,37 +687,65 @@ fn frame(key: &SecretKey, payload: &Payload, files: &[Vec<u8>]) -> Vec<u8> {
     out
 }
 
+/// Why a frame wasn't read: the stream failed before it arrived whole
+/// (`Io`: no answer, so its sender tries again on its usual schedule), or
+/// it arrived and isn't one to take (`Bad`: answered "bad"). Friend bug
+/// #32: an answer of "bad" to a website's offer reads as a Claktory from
+/// before, which ended that share there for good, so a dropped stream
+/// mustn't get it (Fugo 35687).
+#[derive(Debug)]
+enum Unread {
+    Io(String),
+    Bad(String),
+}
+
+impl std::fmt::Display for Unread {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Unread::Io(why) | Unread::Bad(why) => formatter.write_str(why),
+        }
+    }
+}
+
+fn io(error: impl std::fmt::Display) -> Unread {
+    Unread::Io(error.to_string())
+}
+
+fn bad(why: impl Into<String>) -> Unread {
+    Unread::Bad(why.into())
+}
+
 /// Reads a frame's payload from `peer`, checking its signature and sizes;
 /// its files follow, read by `read_files` once the payload is allowed.
 /// `first`: its first byte, read already (`serve`).
-async fn read_payload(receive: &mut RecvStream, peer: &EndpointId, first: u8) -> Result<Payload, String> {
+async fn read_payload(receive: &mut RecvStream, peer: &EndpointId, first: u8) -> Result<Payload, Unread> {
     let mut rest = [0_u8; 3];
-    receive.read_exact(&mut rest).await.map_err(|error| error.to_string())?;
+    receive.read_exact(&mut rest).await.map_err(io)?;
     let length = u32::from_be_bytes([first, rest[0], rest[1], rest[2]]) as usize;
     if length > MAX_PAYLOAD {
-        return Err("too large".to_owned());
+        return Err(bad("too large"));
     }
     let mut body = vec![0; length];
-    receive.read_exact(&mut body).await.map_err(|error| error.to_string())?;
+    receive.read_exact(&mut body).await.map_err(io)?;
     let mut signature = [0_u8; 64];
-    receive.read_exact(&mut signature).await.map_err(|error| error.to_string())?;
-    peer.verify(&[LABEL, &body].concat(), &Signature::from_bytes(&signature)).map_err(|_| "a bad signature".to_owned())?;
-    let payload: Payload = serde_json::from_slice(&body).map_err(|error| error.to_string())?;
+    receive.read_exact(&mut signature).await.map_err(io)?;
+    peer.verify(&[LABEL, &body].concat(), &Signature::from_bytes(&signature)).map_err(|_| bad("a bad signature"))?;
+    let payload: Payload = serde_json::from_slice(&body).map_err(|error| bad(error.to_string()))?;
     let total: u64 = payload.files.iter().map(|file| file.size).sum();
     if payload.files.len() > MAX_FILES || total > MAX_FILE || payload.text.len() > MAX_TEXT {
-        return Err("too large".to_owned());
+        return Err(bad("too large"));
     }
     Ok(payload)
 }
 
 /// Reads the files the payload lists, checking each against its sha256.
-async fn read_files(receive: &mut RecvStream, payload: &Payload) -> Result<Vec<Vec<u8>>, String> {
+async fn read_files(receive: &mut RecvStream, payload: &Payload) -> Result<Vec<Vec<u8>>, Unread> {
     let mut files = Vec::with_capacity(payload.files.len());
     for meta in &payload.files {
-        let mut bytes = vec![0; usize::try_from(meta.size).map_err(|error| error.to_string())?];
-        receive.read_exact(&mut bytes).await.map_err(|error| error.to_string())?;
+        let mut bytes = vec![0; usize::try_from(meta.size).map_err(|error| bad(error.to_string()))?];
+        receive.read_exact(&mut bytes).await.map_err(io)?;
         if hex(&Sha256::digest(&bytes)) != meta.sha256 {
-            return Err("a file that doesn't match".to_owned());
+            return Err(bad("a file that doesn't match"));
         }
         files.push(bytes);
     }
@@ -715,15 +763,15 @@ async fn read_frame(
     peer: &EndpointId,
     pinned: bool,
     first: u8,
-) -> Result<(Payload, Vec<Vec<u8>>), String> {
+) -> Result<(Payload, Vec<Vec<u8>>), Unread> {
     let payload = read_payload(receive, peer, first).await?;
     if !pinned && (payload.kind != KIND_JOIN || !payload.files.is_empty()) {
-        return Err("not a pipe's peer".to_owned());
+        return Err(bad("not a pipe's peer"));
     }
     if !payload.files.is_empty() {
-        let factory = factory.upgrade().ok_or("shutting down")?;
+        let factory = factory.upgrade().ok_or_else(|| Unread::Io("shutting down".to_owned()))?;
         if !by_wire(&factory, &payload.wire).is_some_and(|link| link.peer == peer.to_string()) {
-            return Err("a frame for a pipe that isn't its".to_owned());
+            return Err(bad("a frame for a pipe that isn't its"));
         }
     }
     let files = read_files(receive, &payload).await?;
@@ -731,11 +779,7 @@ async fn read_frame(
 }
 
 async fn write_reply(send: &mut SendStream, reply: &Reply) -> std::io::Result<()> {
-    let body = serde_json::to_vec(reply).unwrap_or_default();
-    send.write_u32(u32::try_from(body.len()).unwrap_or(u32::MAX)).await?;
-    send.write_all(&body).await?;
-    send.finish().map_err(std::io::Error::other)?;
-    Ok(())
+    crate::iroh_link::write_json(send, reply).await
 }
 
 /// Sends a frame on a stream of its own; the peer's reply. A ping on a
@@ -744,110 +788,13 @@ async fn write_reply(send: &mut SendStream, reply: &Reply) -> std::io::Result<()
 const PING_ANSWER: Duration = Duration::from_secs(10);
 
 async fn exchange(connection: &Connection, frame: &[u8], patience: Duration) -> Result<Reply, String> {
-    let talk = async {
-        let (mut send, mut receive) = connection.open_bi().await.map_err(|error| error.to_string())?;
-        send.write_all(frame).await.map_err(|error| error.to_string())?;
-        send.finish().map_err(|error| error.to_string())?;
-        let length = receive.read_u32().await.map_err(|error| error.to_string())? as usize;
-        if length > MAX_REPLY {
-            return Err("a reply too large".to_owned());
-        }
-        let mut body = vec![0; length];
-        receive.read_exact(&mut body).await.map_err(|error| error.to_string())?;
-        serde_json::from_slice(&body).map_err(|error| error.to_string())
-    };
-    // More time for more bytes: a megabyte a second at least.
-    let time = patience + Duration::from_secs(frame.len() as u64 / 1_000_000);
-    tokio::time::timeout(time, talk).await.map_err(|_| "no answer in time".to_owned())?
+    crate::iroh_link::exchange(connection, frame, patience, MAX_REPLY).await
 }
 
-/// Why a dial didn't connect.
-#[derive(Debug)]
-enum DialError {
-    /// The peer's gate turned this Claktory's key away (`turned_away`).
-    TurnedAway,
-    Failed(String),
-}
-
-impl std::fmt::Display for DialError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DialError::TurnedAway => f.write_str("it turned the code away"),
-            DialError::Failed(why) => f.write_str(why),
-        }
-    }
-}
-
-/// Whether the peer's gate closed `error`'s connection, refusing this key
-/// (`remote::REFUSED`).
-fn turned_away(error: &ConnectionError) -> bool {
-    matches!(error, ConnectionError::ApplicationClosed(close) if close.error_code == crate::remote::REFUSED.into())
-}
-
-/// Dials `peer` at what it's known by.
+/// Dials `peer` on the pipes' ALPN at what it's known by.
 async fn dial(factory: &Arc<Factory>, peer: &str, relays: &[String], addresses: &[String]) -> Result<Connection, DialError> {
-    let failed = |why: &str| DialError::Failed(why.to_owned());
-    let endpoint = factory.remote_endpoint().ok_or_else(|| failed("remote access isn't running"))?;
-    let id: EndpointId = peer.parse().map_err(|_| failed("a bad key"))?;
-    let mut addr = EndpointAddr::new(id);
-    for relay in relays {
-        if let Ok(url) = relay.parse::<RelayUrl>() {
-            addr = addr.with_relay_url(url);
-        }
-    }
-    for address in addresses {
-        if let Ok(address) = address.parse::<SocketAddr>() {
-            addr = addr.with_ip_addr(address);
-        }
-    }
-    let connecting = endpoint.connect(addr, ALPN_PIPE);
-    match tokio::time::timeout(Duration::from_millis(DIAL_MS.load(Ordering::Relaxed)), connecting).await {
-        Ok(Ok(connection)) => Ok(connection),
-        Ok(Err(
-            ConnectError::Connection { source, .. }
-            | ConnectError::Connecting { source: ConnectingError::ConnectionError { source, .. }, .. },
-        )) if turned_away(&source) => Err(DialError::TurnedAway),
-        Ok(Err(error)) => Err(DialError::Failed(format!("{error:#}"))),
-        Err(_) => Err(failed("no answer in time")),
-    }
-}
-
-/// The relays a peer may point this Claktory at: https only. The tunnel
-/// is end to end, so a relay never reads pipe traffic; the rule is about
-/// where the dial goes: an http relay URL could point it at any host the
-/// peer names, this machine's own network included. What the person
-/// pasted (an invite code's relays) is taken as it is.
-fn peer_relays(relays: Vec<String>) -> Vec<String> {
-    relays.into_iter().filter(|relay| relay.parse::<RelayUrl>().is_ok_and(|url| url.scheme() == "https")).collect()
-}
-
-/// The addresses a peer may point this Claktory at: never loopback,
-/// link-local or unspecified, which would aim its dials at its own
-/// machine or network segment. An invite code's addresses, pasted
-/// by the person, are taken as they are.
-fn peer_addresses(addresses: Vec<String>) -> Vec<String> {
-    addresses.into_iter().filter(|address| address.parse::<SocketAddr>().is_ok_and(|address| dialable(address.ip()))).collect()
-}
-
-fn dialable(ip: IpAddr) -> bool {
-    // An IPv4 address mapped into IPv6 ([::ffff:127.0.0.1]) is judged as
-    // its IPv4 self.
-    let ip = ip.to_canonical();
-    match ip {
-        IpAddr::V4(ip) => !(ip.is_loopback() || ip.is_link_local() || ip.is_unspecified() || ip.is_broadcast()),
-        IpAddr::V6(ip) => !(ip.is_loopback() || ip.is_unspecified() || (ip.segments()[0] & 0xffc0) == 0xfe80),
-    }
-}
-
-/// Where this Claktory is reached now, for its peers.
-fn here(factory: &Factory) -> (Vec<String>, Vec<String>) {
-    match factory.remote_endpoint() {
-        Some(endpoint) => {
-            let (relays, addresses) = factory.reached_at(&endpoint);
-            (relays, addresses.iter().map(ToString::to_string).collect())
-        }
-        None => (Vec::new(), Vec::new()),
-    }
+    let timeout = Duration::from_millis(DIAL_MS.load(Ordering::Relaxed));
+    crate::iroh_link::dial(factory, peer, ALPN_PIPE, relays, addresses, timeout).await
 }
 
 fn random_hex() -> Result<String, PipeError> {
@@ -1263,6 +1210,7 @@ pub fn send(factory: &Arc<Factory>, pipe: &str, message: Outgoing) -> Result<u64
             text: message.text,
             files: metas,
             sent_at: now_ms(),
+            sends_only: message.sends_only,
             ..Payload::default()
         };
         let bytes = frame(key, &payload, &files);
@@ -1291,13 +1239,32 @@ pub fn send(factory: &Arc<Factory>, pipe: &str, message: Outgoing) -> Result<u64
 
 /// Nothing goes either way until `resume`; the peer is told.
 pub fn pause(factory: &Arc<Factory>, pipe: &str) -> Result<(), PipeError> {
-    control(factory, pipe, KIND_PAUSE, |link| link.paused = true)?;
+    pause_saying(factory, pipe, false)
+}
+
+/// `pause`, by the loop breaker: the peer is told so, to say why.
+pub fn pause_looped(factory: &Arc<Factory>, pipe: &str) -> Result<(), PipeError> {
+    pause_saying(factory, pipe, true)
+}
+
+fn pause_saying(factory: &Arc<Factory>, pipe: &str, looped: bool) -> Result<(), PipeError> {
+    control_saying(factory, pipe, KIND_PAUSE, |link| link.paused = true, "", |payload| payload.looped = looped)?;
     crate::pipes::shares::paused(factory, pipe);
     Ok(())
 }
 
 pub fn resume(factory: &Arc<Factory>, pipe: &str) -> Result<(), PipeError> {
-    control(factory, pipe, KIND_RESUME, |link| link.paused = false)?;
+    resume_saying(factory, pipe, false)
+}
+
+/// `resume`, continuing a pause by the loop breaker: the peer starts its
+/// repeats over too, so what waited behind the pause doesn't trip it there.
+pub fn resume_looped(factory: &Arc<Factory>, pipe: &str) -> Result<(), PipeError> {
+    resume_saying(factory, pipe, true)
+}
+
+fn resume_saying(factory: &Arc<Factory>, pipe: &str, looped: bool) -> Result<(), PipeError> {
+    control_saying(factory, pipe, KIND_RESUME, |link| link.paused = false, "", |payload| payload.looped = looped)?;
     crate::pipes::shares::resumed(factory, pipe);
     Ok(())
 }
@@ -1321,6 +1288,20 @@ pub(crate) fn share(factory: &Arc<Factory>, pipe: &str, id: &str, offer: Option<
 #[doc(hidden)]
 pub fn repin_for_test(factory: &Factory, pipe: &str, key: &str) {
     factory.store.db().execute("UPDATE pipe_links SET peer = ?2 WHERE pipe = ?1", params![pipe, key]).expect("repinned");
+}
+
+/// Tests: `pipe` has a link whose peer is pinned to `key`, both people
+/// having approved it, as if it had been joined.
+#[doc(hidden)]
+pub fn pin_for_test(factory: &Factory, pipe: &str, key: &str) {
+    factory
+        .store
+        .db()
+        .execute(
+            "INSERT OR REPLACE INTO pipe_links (pipe, wire, inviter, mine, peer, approved, peer_approved) VALUES (?1, ?1, 1, '', ?2, 1, 1)",
+            params![pipe, key],
+        )
+        .expect("pinned");
 }
 
 /// The key pinned for `pipe`'s peer, while it has one and isn't closed.
@@ -1737,7 +1718,11 @@ async fn answer(
     let read = tokio::time::timeout(patience, read_frame(&factory, &mut receive, &peer, pinned, first)).await;
     let (payload, files) = match read {
         Ok(Ok(read)) => read,
-        Ok(Err(error)) => {
+        Ok(Err(Unread::Io(error))) => {
+            tracing::info!(endpoint = %peer, %error, "a pipe's frame didn't arrive whole; not answered");
+            return Ok(());
+        }
+        Ok(Err(Unread::Bad(error))) => {
             tracing::warn!(endpoint = %peer, %error, "turned away a pipe's frame");
             return write_reply(&mut send, &Reply::code("bad")).await;
         }
@@ -1862,8 +1847,8 @@ async fn received(factory: &Arc<Factory>, peer: &str, payload: Payload, files: V
                 if let Some(store) = store() {
                     match payload.kind.as_str() {
                         KIND_APPROVE => store.peer_approved(factory, &pipe),
-                        KIND_PAUSE => store.peer_paused(factory, &pipe),
-                        _ => store.peer_resumed(factory, &pipe),
+                        KIND_PAUSE => store.peer_paused(factory, &pipe, payload.looped),
+                        _ => store.peer_resumed(factory, &pipe, payload.looped),
                     }
                 }
                 match payload.kind.as_str() {
@@ -1912,6 +1897,7 @@ async fn received(factory: &Arc<Factory>, peer: &str, payload: Payload, files: V
                     text: payload.text,
                     files,
                     sent_at_ms: payload.sent_at,
+                    sends_only: payload.sends_only,
                 };
                 let outcome = store.received(factory, &pipe, message);
                 link.received_seq = payload.seq as i64;
@@ -2023,6 +2009,31 @@ fn clear_old(root: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Friend bug #33 (Fugo 33515): the mark goes only on a message from a
+    /// member that only sends; any other frame is what a Claktory from
+    /// before sent, byte for byte, and one from before reads as unmarked.
+    #[test]
+    fn a_message_is_marked_sender_only_only_when_it_is() {
+        let message = |sends_only: bool| Payload {
+            v: 1,
+            kind: KIND_MESSAGE.to_owned(),
+            via: Some(Via::Agent { name: "Rivet".into(), role: String::new() }),
+            text: "Release notes".into(),
+            sends_only,
+            ..Payload::default()
+        };
+        let plain = serde_json::to_string(&message(false)).expect("json");
+        assert!(!plain.contains("sends_only"), "{plain}");
+        let marked = serde_json::to_string(&message(true)).expect("json");
+        assert!(marked.contains("\"sends_only\":true"), "{marked}");
+        assert!(serde_json::from_str::<Payload>(&marked).expect("read").sends_only);
+        assert!(!serde_json::from_str::<Payload>(&plain).expect("read").sends_only);
+        // The same for a pause by the loop breaker (Abbacchio row 1177).
+        let pause = |looped: bool| Payload { v: 1, kind: KIND_PAUSE.to_owned(), looped, ..Payload::default() };
+        assert!(!serde_json::to_string(&pause(false)).expect("json").contains("looped"));
+        assert!(serde_json::to_string(&pause(true)).expect("json").contains("\"looped\":true"));
+    }
 
     // The established-link paths (a dial or exchange that fails) call
     // `offline`; two Factories in one test process always find each

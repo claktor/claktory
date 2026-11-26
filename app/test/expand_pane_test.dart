@@ -131,6 +131,27 @@ void main() {
     );
   });
 
+  testWidgets('a pane expanded after the panes all closed shows (D1: '
+      "Review's file was a blank until a relaunch)", (tester) async {
+    final harness = await _show(tester);
+    // Every pane closed: the conversation alone.
+    final alone = snapshot(layout: beside());
+    alone.agents.last.clearLayout();
+    await harness.apply(tester, alone);
+    await settle(tester);
+    expect(find.byKey(const ValueKey('pane-v1')), findsNothing);
+    // Review opens the file again, expanded.
+    final reviewing = snapshot(layout: beside());
+    reviewing.agents.last.layoutFocus = 'v1';
+    await harness.apply(tester, reviewing);
+    await settle(tester);
+    expect(_expanded, findsOneWidget);
+    expect(
+      find.descendant(of: _expanded, matching: find.text('fn main() {')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('a pane an agent opens meanwhile waits behind, and says so', (
     tester,
   ) async {

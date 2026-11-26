@@ -19,6 +19,7 @@
 		74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74858FAE1ED2DC5600515810 /* AppDelegate.swift */; };
 		7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */; };
 		7884E8692EC3CC0700C636F3 /* Scanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E86A2EC3CC0400C636F3 /* Scanner.swift */; };
+		7884E86B2EC3CC0700C636F3 /* LocalNetwork.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E86C2EC3CC0400C636F3 /* LocalNetwork.swift */; };
 		7884E8692EC3CC0700C63800 /* BackgroundGrace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E86A2EC3CC0400C63800 /* BackgroundGrace.swift */; };
 		7884E8692EC3CC0700C63711 /* Capabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E86A2EC3CC0400C63712 /* Capabilities.swift */; };
 		7884E8812EC3CC0700C63731 /* CommandMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8822EC3CC0400C63732 /* CommandMenu.swift */; };
@@ -31,6 +32,7 @@
 		1A2B3C4D5E6F708100000020 /* InkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F708200000020 /* InkTests.swift */; };
 		7884E8712EC3CC0700C636F5 /* VideoPlayers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8722EC3CC0400C636F6 /* VideoPlayers.swift */; };
 		7884E8752EC3CC0700C636F9 /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8762EC3CC0400C636FA /* AudioPlayer.swift */; };
+		C814977F159903C7BAD2C449 /* ReplayWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD0549AE90D9A8388309E58D /* ReplayWriter.swift */; };
 		7884E8752EC3CC0700C63721 /* ConnectionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8762EC3CC0400C63722 /* ConnectionStore.swift */; };
 		7884E8752EC3CC0700C63701 /* NetworkPath.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8762EC3CC0400C63702 /* NetworkPath.swift */; };
 		7884E8772EC3CC0700C63721 /* SecretClipboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8782EC3CC0400C63722 /* SecretClipboard.swift */; };
@@ -102,6 +104,7 @@
 		74858FAE1ED2DC5600515810 /* AppDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		7884E86A2EC3CC0400C636F3 /* Scanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Scanner.swift; sourceTree = "<group>"; };
+		7884E86C2EC3CC0400C636F3 /* LocalNetwork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalNetwork.swift; sourceTree = "<group>"; };
 		7884E86A2EC3CC0400C63800 /* BackgroundGrace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundGrace.swift; sourceTree = "<group>"; };
 		7884E86A2EC3CC0400C63712 /* Capabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Capabilities.swift; sourceTree = "<group>"; };
 		7884E8822EC3CC0400C63732 /* CommandMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandMenu.swift; sourceTree = "<group>"; };
@@ -114,6 +117,7 @@
 		1A2B3C4D5E6F708200000020 /* InkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InkTests.swift; sourceTree = "<group>"; };
 		7884E8722EC3CC0400C636F6 /* VideoPlayers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = VideoPlayers.swift; path = ../../macos/Runner/VideoPlayers.swift; sourceTree = "<group>"; };
 		7884E8762EC3CC0400C636FA /* AudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AudioPlayer.swift; path = ../../macos/Runner/AudioPlayer.swift; sourceTree = "<group>"; };
+		FD0549AE90D9A8388309E58D /* ReplayWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ReplayWriter.swift; path = ../../macos/Runner/ReplayWriter.swift; sourceTree = "<group>"; };
 		7884E8762EC3CC0400C63722 /* ConnectionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ConnectionStore.swift; path = ../../macos/Runner/ConnectionStore.swift; sourceTree = "<group>"; };
 		7884E8762EC3CC0400C63702 /* NetworkPath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = NetworkPath.swift; path = ../../macos/Runner/NetworkPath.swift; sourceTree = "<group>"; };
 		7884E8782EC3CC0400C63722 /* SecretClipboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SecretClipboard.swift; path = ../../macos/Runner/SecretClipboard.swift; sourceTree = "<group>"; };
@@ -216,6 +220,7 @@
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				7884E86A2EC3CC0400C636F3 /* Scanner.swift */,
+				7884E86C2EC3CC0400C636F3 /* LocalNetwork.swift */,
 				7884E86A2EC3CC0400C63800 /* BackgroundGrace.swift */,
 				7884E86A2EC3CC0400C63712 /* Capabilities.swift */,
 				7884E8822EC3CC0400C63732 /* CommandMenu.swift */,
@@ -227,6 +232,7 @@
 				1A2B3C4D5E6F708200000005 /* InkCache.swift */,
 				7884E8722EC3CC0400C636F6 /* VideoPlayers.swift */,
 				7884E8762EC3CC0400C636FA /* AudioPlayer.swift */,
+				FD0549AE90D9A8388309E58D /* ReplayWriter.swift */,
 				7884E8762EC3CC0400C63722 /* ConnectionStore.swift */,
 				7884E8762EC3CC0400C63702 /* NetworkPath.swift */,
 				7884E8782EC3CC0400C63722 /* SecretClipboard.swift */,
@@ -439,6 +445,7 @@
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
 				7884E8692EC3CC0700C636F3 /* Scanner.swift in Sources */,
+				7884E86B2EC3CC0700C636F3 /* LocalNetwork.swift in Sources */,
 				7884E8692EC3CC0700C63800 /* BackgroundGrace.swift in Sources */,
 				7884E8692EC3CC0700C63711 /* Capabilities.swift in Sources */,
 				7884E8812EC3CC0700C63731 /* CommandMenu.swift in Sources */,
@@ -450,6 +457,7 @@
 				1A2B3C4D5E6F708100000005 /* InkCache.swift in Sources */,
 				7884E8712EC3CC0700C636F5 /* VideoPlayers.swift in Sources */,
 				7884E8752EC3CC0700C636F9 /* AudioPlayer.swift in Sources */,
+				C814977F159903C7BAD2C449 /* ReplayWriter.swift in Sources */,
 				7884E8752EC3CC0700C63721 /* ConnectionStore.swift in Sources */,
 				7884E8752EC3CC0700C63701 /* NetworkPath.swift in Sources */,
 				7884E8772EC3CC0700C63721 /* SecretClipboard.swift in Sources */,
@@ -511,7 +519,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
-				PRODUCT_BUNDLE_IDENTIFIER = com.claktory.app.NotificationService;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(CLAKTORY_BUNDLE_ID).NotificationService";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
@@ -536,7 +544,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
-				PRODUCT_BUNDLE_IDENTIFIER = com.claktory.app.NotificationService;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(CLAKTORY_BUNDLE_ID).NotificationService";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
@@ -561,7 +569,7 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = "$(FLUTTER_BUILD_NAME)";
-				PRODUCT_BUNDLE_IDENTIFIER = com.claktory.app.NotificationService;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(CLAKTORY_BUNDLE_ID).NotificationService";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				SWIFT_COMPILATION_MODE = wholemodule;
@@ -627,9 +635,9 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = "$(CLAKTORY_APP_ICON)";
 				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements;
+				CODE_SIGN_ENTITLEMENTS = "$(CLAKTORY_RUNNER_ENTITLEMENTS)";
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
 				DEVELOPMENT_TEAM = V6DZCUF8HJ;
 				ENABLE_BITCODE = NO;
@@ -638,7 +646,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.claktory.app;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(CLAKTORY_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
@@ -810,9 +818,9 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 9740EEB21CF90195004384FC /* Debug.xcconfig */;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = "$(CLAKTORY_APP_ICON)";
 				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements;
+				CODE_SIGN_ENTITLEMENTS = "$(CLAKTORY_RUNNER_ENTITLEMENTS)";
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
 				DEVELOPMENT_TEAM = V6DZCUF8HJ;
 				ENABLE_BITCODE = NO;
@@ -821,7 +829,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.claktory.app;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(CLAKTORY_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -834,9 +842,9 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = "$(CLAKTORY_APP_ICON)";
 				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements;
+				CODE_SIGN_ENTITLEMENTS = "$(CLAKTORY_RUNNER_ENTITLEMENTS)";
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
 				DEVELOPMENT_TEAM = V6DZCUF8HJ;
 				ENABLE_BITCODE = NO;
@@ -845,7 +853,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.claktory.app;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(CLAKTORY_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;

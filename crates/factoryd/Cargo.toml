@@ -42,6 +42,8 @@ ignore = "0.4.34"
 # The private tunnel (remote.rs): pinned, the same as the app's (app/rust); ring, as the
 # process default, and no portmapper, so Factory never asks the router to open a port.
 iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
+# The congestion controllers iroh's QUIC offers (row 129); iroh's own version.
+noq-proto = { version = "=1.5.0", default-features = false }
 # Phone-sized previews of images (previews.rs, #379): decoded and resized
 # here (already linked through factory-agent), encoded as WebP by libwebp,
 # built from its source.
@@ -49,9 +51,15 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 libwebp-sys = "0.14"
 jiff = "1"
 libc = "0.2"
+# The settings, sign-in and release files watched for changes (factory.rs
+# `watch`) instead of read every half second: kqueue on macOS (FSEvents would
+# see every write below ~/.factory, builds included), inotify on Linux.
+notify = { version = "9", default-features = false, features = ["macos_kqueue"] }
 pdf-extract = "0.12"
 png = "0.18"
 primp = "2"
+# Errands' sites are never a whole domain ending ("co.uk"): errands/mod.rs.
+psl = "2"
 prost = "0.14.6"
 pulldown-cmark = { version = "0.13.6", default-features = false }
 # `factoryd pair` shows the code as a QR code in the terminal; no image formats.
@@ -90,6 +98,17 @@ zeroize = "1.9"
 zstd = "0.14"
 toml = "1.2.1"
 
+# Claktory's browser runner (browser_runner, #435): its private screen, an X
+# client (capture, input, the clipboard and the screen's size); pure Rust,
+# without allow-unsafe-code, which would link libxcb and break the static
+# Linux build.
+x11rb = { version = "0.14", features = ["shm", "damage", "xtest", "randr", "xfixes"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The browser runner's fence around Chrome (browser_runner/landlock.rs):
+# folders, TCP ports and, from ABI 6, scopes.
+landlock = "0.4.8"
+
 [build-dependencies]
 # The lid-closed helper's XPC client (native/lid_xpc.c, #371), on macOS.
 cc = "1"
@@ -99,6 +118,9 @@ cc = "1"
 # claktory-qa's sandboxes (factory-agent's qa-provider; scripts/qa.sh builds
 # with it, a release can't).
 qa-provider = ["factory-agent/qa-provider"]
+# QA only (E11 row 6): a Claktory that claims another's account when told
+# to (src/qa_lies.rs); a release build refuses it (scripts/check-qa-lies.sh).
+qa-lies = []
 
 [dev-dependencies]
 # A local account service to sign in at (tests/all/account.rs).
@@ -112,3 +134,5 @@ tokio-rustls = "0.26"
 # tests/all/remote.rs: relays and an address lookup on this machine, for the
 # tunnel's default relay and devices paired while n0's were the default.
 iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring", "fast-apple-datapath", "test-utils"] }
+# tests/all/remote.rs: a relay that notes the token each client shows (#450).
+iroh-relay = { version = "=1.5.0", default-features = false, features = ["server"] }

@@ -135,8 +135,27 @@ impl Factory {
     pub(crate) fn resume(self: &Arc<Self>) -> Result<(), rusqlite::Error> {
         let interrupted = self.store.interrupted_runs()?;
         let mut waiting = self.store.waiting()?;
+        // Background tasks the restart ended while nothing watched them (the
+        // computer's restart, a Linux shut down): none starts again, and
+        // each agent is told of its own once, all in one note (friend bug
+        // #44). The others are watched until they end, as before.
+        let mut lost: BTreeMap<String, Vec<(Task, Finished)>> = BTreeMap::new();
+        let mut watched = Vec::new();
+        for (agent, task) in self.store.running_tasks()? {
+            if task.lost() {
+                let kept = task.clone();
+                let done = task.lost_end(&self.redaction);
+                if let Err(error) = self.store.end_task(&agent, &done) {
+                    tracing::error!(%agent, task = %done.id, %error, "could not record the end of a background task");
+                }
+                lost.entry(agent).or_default().push((kept, done));
+            } else {
+                watched.push((agent, task));
+            }
+        }
         let mut agents: BTreeSet<String> = interrupted.keys().cloned().collect();
         agents.extend(waiting.keys().cloned());
+        agents.extend(lost.keys().cloned());
         let mut inner = self.lock();
         let mut resuming = Vec::new();
         for id in agents {
@@ -145,10 +164,22 @@ impl Factory {
                 self.settle(&messages, Outcome::Dropped);
                 continue;
             }
+            let ended = lost.remove(&id);
+            let note = match (interrupted.get(&id), ended) {
+                (Some((stopped_on, started)), ended) => {
+                    let rebooted = factory_agent::tools::bash::started_before_boot(u64::try_from(*started).unwrap_or(0));
+                    let (mut text, event) = resume_note(stopped_on, rebooted);
+                    if let Some(ended) = ended {
+                        text.push_str("\n\n");
+                        text.push_str(&lost_note(&ended));
+                    }
+                    Some((text, event))
+                }
+                (None, Some(ended)) => Some((lost_note(&ended), host_event(lost_summary(&ended)))),
+                (None, None) => None,
+            };
             let mut queue = Vec::with_capacity(messages.len() + 1);
-            if let Some((stopped_on, started)) = interrupted.get(&id) {
-                let rebooted = factory_agent::tools::bash::started_before_boot(u64::try_from(*started).unwrap_or(0));
-                let (text, event) = resume_note(stopped_on, rebooted);
+            if let Some((text, event)) = note {
                 let mut note = Queued::event(text, event);
                 note.id = self.store.add_message(&id, &note)?;
                 queue.push(note);
@@ -170,7 +201,7 @@ impl Factory {
                 tokio::spawn(factory.clone().run(id));
             }
         });
-        for (agent, task) in self.store.running_tasks()? {
+        for (agent, task) in watched {
             let factory = Arc::downgrade(self);
             let redaction = self.redaction.clone();
             tokio::spawn(async move {
@@ -199,6 +230,79 @@ fn resume_note(stopped_on: &str, rebooted: bool) -> (String, factory_agent::Even
     );
     let event = host_event(summary);
     (text, event)
+}
+
+/// The most of a lost task's command its note shows, in characters.
+const COMMAND_SHOWN: usize = 2000;
+
+/// Whether the computer's restart ended any of `ended`.
+fn rebooted(ended: &[(Task, Finished)]) -> bool {
+    ended.iter().any(|(task, _)| factory_agent::tools::bash::started_before_boot(task.started))
+}
+
+/// The line Claktory's event shows for an agent's tasks a restart ended.
+fn lost_summary(ended: &[(Task, Finished)]) -> String {
+    let tasks = if ended.len() == 1 { "a background task".to_owned() } else { format!("{} background tasks", ended.len()) };
+    if rebooted(ended) {
+        format!("The computer restarted, which ended {tasks}")
+    } else {
+        let tasks = if ended.len() == 1 { "A background task".to_owned() } else { format!("{} background tasks", ended.len()) };
+        format!("{tasks} ended while Claktory was stopped")
+    }
+}
+
+/// What an agent is told of its background tasks a restart ended: each
+/// task's command as given, the folder it ran in, when it started, how
+/// long it ran as far as its log shows, and its log; that none started
+/// again, and to start again only what's still needed (friend bug #44).
+fn lost_note(ended: &[(Task, Finished)]) -> String {
+    let one = ended.len() == 1;
+    let mut text = if rebooted(ended) {
+        let these = if one { "the background task" } else { "these background tasks" };
+        format!("The computer restarted, which ended {these} you were running.")
+    } else {
+        let these = if one { "The background task" } else { "These background tasks" };
+        format!("{these} you were running ended while Claktory was stopped, without recording how.")
+    };
+    let them = if one { "it" } else { "them" };
+    text.push_str(&format!(
+        " Claktory started none of {them} again. Start one again only if your work still needs it and it isn't stale (a server or a watcher for work that's finished, or has moved on, is). What each printed is in its log."
+    ));
+    for (task, done) in ended {
+        let started = i64::try_from(task.started).unwrap_or(0);
+        let mut line = format!("\n- {}", done.id);
+        if started > 0 {
+            line.push_str(&format!(", started {}", crate::transcript::local_time(started, "%a %-d %b at %H:%M")));
+        }
+        if !task.folder.as_os_str().is_empty() {
+            line.push_str(&format!(" in {}", task.folder.display()));
+        }
+        // How long it ran, as far as its log shows: its last output.
+        let last = std::fs::metadata(&task.log).and_then(|metadata| metadata.modified()).ok();
+        let last = last.and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok()).map(|at| at.as_millis() as i64);
+        match last.filter(|last| started > 0 && *last > started) {
+            Some(last) => line.push_str(&format!(
+                ", its last output {} after it started",
+                factory_agent::tools::bash::took((last - started) as f64 / 1000.0)
+            )),
+            None => line.push_str(", with no output"),
+        }
+        line.push_str(&format!(". Log: {}", task.log.display()));
+        let whole = task.command.trim_end();
+        let command: String = whole.chars().take(COMMAND_SHOWN).collect();
+        let more = if command.len() < whole.len() { " …" } else { "" };
+        if command.contains('\n') {
+            line.push_str("\n  Command:");
+            for part in command.lines() {
+                line.push_str(&format!("\n    {part}"));
+            }
+            line.push_str(more);
+        } else {
+            line.push_str(&format!("\n  Command: {command}{more}"));
+        }
+        text.push_str(&line);
+    }
+    text
 }
 
 /// What Factories before the store kept in runs.json.

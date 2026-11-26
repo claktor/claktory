@@ -50,6 +50,7 @@ struct Send {
 }
 
 fn send(transaction: &Transaction<'_>, account: &str, from: &str, removed: &[String], send: Send, now_ms: i64) -> Result<Value, Refusal> {
+    super::space::guard()?;
     let sealed = unb64(&send.sealed, "sealed")?;
     if sealed.is_empty() || sealed.len() > SEALED_MOST {
         return Err(invalid(&format!("A hand-off is at most {} KiB sealed.", SEALED_MOST / 1024)));

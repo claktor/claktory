@@ -4,6 +4,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 
+import '../protocol/factory/v1/factory.pb.dart' show DmDeliveryState;
 import '../tunnel/api/dm.dart' as dm;
 import '../user_apps/session.dart';
 import 'contacts.dart';
@@ -141,6 +142,10 @@ class DmMessage {
     this.byAgent = false,
     this.clientMessageId = '',
     this.members,
+    this.fromLeaf = '',
+    this.resends = '',
+    this.sentMs = 0,
+    this.departed = false,
   });
 
   /// From this device's history: [me] is the person's account.
@@ -153,7 +158,26 @@ class DmMessage {
     agentName: kept.content.byAgent?.name ?? '',
     clientMessageId: kept.content.clientMessageId,
     members: kept.members,
+    fromLeaf: kept.fromLeaf,
+    resends: switch (_extra(kept.content.extraJson)) {
+      {'resends': final String id} => id,
+      _ => '',
+    },
+    sentMs: switch (_extra(kept.content.extraJson)) {
+      {'sent_ms': final int ms} when ms > 0 => ms,
+      _ => 0,
+    },
+    departed: kept.departed,
   );
+
+  static Object? _extra(String extra) {
+    if (extra.isEmpty) return null;
+    try {
+      return jsonDecode(extra);
+    } on FormatException {
+      return null;
+    }
+  }
 
   final int seq;
 
@@ -172,6 +196,73 @@ class DmMessage {
 
   /// Who came and went with a commit, instead of something said.
   final dm.DmMembers? members;
+
+  /// Which device (or Claktory) of its account said it.
+  final String fromLeaf;
+
+  /// The person's earlier message this sends again, by its id, after the
+  /// friend's Claktory couldn't read that one (#451); empty for others.
+  final String resends;
+
+  /// When its sender says they sent it, by their own clock (row 556); 0
+  /// when it doesn't say. Only shown, never its place: that's
+  /// [acceptedMs], when the person's own home took it, which a friend
+  /// can't set.
+  final int sentMs;
+
+  /// From a device its person has since taken off their list, read only
+  /// because one of their devices that was there all along took it out
+  /// again (row 561): said under it.
+  final bool departed;
+
+  /// The time it shows: when it was sent, unless that's unknown or later
+  /// than it arrived (a clock ahead), then when it arrived.
+  int get shownMs => sentMs > 0 && sentMs <= acceptedMs ? sentMs : acceptedMs;
+
+  /// When it arrived, said too once that's more than [arrivedLateAfter]
+  /// past when it was sent; null otherwise.
+  int? get arrivedLate =>
+      sentMs > 0 &&
+          sentMs <= acceptedMs &&
+          acceptedMs - sentMs > arrivedLateAfter.inMilliseconds
+      ? acceptedMs
+      : null;
+}
+
+/// How much later than it was sent a message must arrive for its arrival
+/// time to show too (Bruno, row 556).
+const arrivedLateAfter = Duration(minutes: 5);
+
+/// How the person's own message is getting on past their home Claktory
+/// (#451), as the home says.
+enum DmDelivered {
+  /// Taken by their home; nothing more known yet.
+  sent,
+
+  /// The friend's Claktory took it.
+  delivered,
+
+  /// The friend's Claktory isn't reachable; it goes once it is.
+  notYet,
+
+  /// The friend's Claktory turns the person's away (row 567: it isn't
+  /// their home any more, or doesn't know the person's yet); it goes once
+  /// it takes it.
+  notTaking,
+
+  /// The friend's Claktory couldn't read it (their conversation moved on
+  /// since); the person is asked whether to send it again.
+  askResend,
+
+  /// Sent again, as a new message, after it bounced.
+  resent,
+
+  /// Bounced, and being sent again by itself from this device, which sent
+  /// it.
+  resending,
+
+  /// Bounced, sent from another of the person's devices, which decides.
+  bounced,
 }
 
 /// A page of what changed since a cursor.
@@ -231,18 +322,15 @@ class ChatApi {
       DmProposal.fromJson(item),
   ];
 
-  /// Sends [proposal] as its agent's message: [envelope], what this device
-  /// opened sealed again in the conversation's group, with the revision and
-  /// the digest of exactly what it opened. `409 changed`
-  /// ([UserAppProblem.stale]) when it changed since; `409 epoch` when the
-  /// group moved on; `410 unsendable` ([UserAppProblem.gone]) when it can't
-  /// be sent any more.
-  Future<void> approve(DmProposal proposal, String envelope) =>
-      session.post('$_dms/proposals/${proposal.id}/approve', {
-        'revision': proposal.revision,
-        'proposal_digest': proposal.digest,
-        'envelope': jsonDecode(envelope),
-      });
+  /// Approves [proposal], with the revision and the digest of exactly
+  /// what this device opened; the device sends it after (#451, Mista
+  /// 32507). `409 changed` ([UserAppProblem.stale]) when it changed since;
+  /// `410 unsendable` ([UserAppProblem.gone]) when it can't be sent any
+  /// more.
+  Future<void> approve(DmProposal proposal) => session.post(
+    '$_dms/proposals/${proposal.id}/approve',
+    {'revision': proposal.revision, 'proposal_digest': proposal.digest},
+  );
 
   /// Declines [proposal]: it's never sent.
   Future<void> decline(DmProposal proposal) =>
@@ -296,6 +384,12 @@ enum OutgoingState {
   /// The service refused it, and why ([OutgoingMessage.problem]); for an
   /// ended conversation, nothing more can be sent.
   refused,
+
+  /// Kept on this device until the person's home Claktory takes it, and
+  /// why ([OutgoingMessage.problem]: `unreachable` or `notHome`, the home
+  /// isn't there; `homeFull`; `rateLimited`; `behind`): it goes by itself
+  /// (#451).
+  waiting,
 }
 
 /// A message written here that hasn't come back in the feed yet: kept
@@ -306,10 +400,14 @@ class OutgoingMessage {
     required this.text,
     this.state = OutgoingState.sending,
     this.problem = '',
+    this.agentName = '',
   });
 
   final String clientId;
   final String text;
+
+  /// An agent's message the person approved (#451): that agent's name.
+  final String agentName;
   OutgoingState state;
   String problem;
 }
@@ -377,6 +475,14 @@ class ChatThread extends ChangeNotifier {
   /// Proposals and drafts being decided, by id.
   final deciding = <String>{};
 
+  /// Agents' proposals and drafts the service lists here whose message
+  /// hasn't come from their Claktory through the home yet (#451): never
+  /// shown as text until it has, only that something is on its way.
+  var arriving = 0;
+  var _proposalsArriving = 0;
+  var _draftsArriving = 0;
+  List<DmProposal> _listed = const [];
+
   /// Puts text the person chose (Edit) into their box.
   void Function(String text)? onUse;
 
@@ -416,9 +522,22 @@ class ChatThread extends ChangeNotifier {
   /// nothing is sent to them until they have (Fugo 2b).
   bool get keyChanged => e2ee.pin(friend)?.changedUnseen ?? false;
 
+  /// The friend's key now is one the person said didn't match before
+  /// (Verify's The numbers don't match, E11-3): its note says so.
+  bool get keyMismatched => e2ee.pin(friend)?.mismatched ?? false;
+
+  /// The key the service gives for the friend now is one this device
+  /// refused (E11-3): the chat says their key changed.
+  bool get keyRefused => e2ee.keyRefused.contains(friend);
+
   /// The feed waits at a commit under a security key this device doesn't
   /// have yet: nothing after it is read until it does.
   bool get held => group.isNotEmpty && e2ee.held.containsKey(group);
+
+  /// The feed waits at a message from past this device's place in the
+  /// chat, until what it missed comes (row 551): nothing is passed over
+  /// unread meanwhile.
+  bool get behind => group.isNotEmpty && e2ee.behind.containsKey(group);
 
   /// Held a day or more: Join again is offered (Fugo).
   bool get heldLong => held && e2ee.heldLong(group);
@@ -524,11 +643,13 @@ class ChatThread extends ChangeNotifier {
             OutgoingMessage(
               clientId: unsent.clientMessageId,
               text: unsent.content.text ?? '',
-              state:
-                  e2ee.sending[unsent.clientMessageId]?.state ==
-                      DmSendState.unknown
-                  ? OutgoingState.unknown
-                  : OutgoingState.sending,
+              agentName: unsent.content.byAgent?.name ?? '',
+              state: switch (e2ee.sending[unsent.clientMessageId]?.state) {
+                DmSendState.unknown => OutgoingState.unknown,
+                DmSendState.waiting => OutgoingState.waiting,
+                _ => OutgoingState.sending,
+              },
+              problem: e2ee.sending[unsent.clientMessageId]?.problem ?? '',
             ),
         for (final MapEntry(:key, :value) in e2ee.sending.entries)
           if (value.group == group && value.state == DmSendState.refused)
@@ -546,7 +667,12 @@ class ChatThread extends ChangeNotifier {
   /// service's changes to this conversation, its proposals and drafts.
   Future<void> follow() async {
     _moves ??= e2ee.groupChanges.listen((moved) {
-      if (moved == group) unawaited(_refresh());
+      if (moved == group) {
+        unawaited(_refresh());
+      } else if (arriving > 0 && e2ee.groups[moved]?.kind == 'channel') {
+        // A Claktory's channel moved: what was on its way may be here.
+        unawaited(_arrived());
+      }
     });
     _events ??= e2ee.events.listen((event) => unawaited(_apply(event)));
     e2ee.addListener(_engineChanged);
@@ -629,18 +755,49 @@ class ChatThread extends ChangeNotifier {
   /// this device opened it; one that doesn't open (or names another
   /// conversation inside) isn't shown.
   Future<void> _proposals(List<DmProposal> all) async {
+    _listed = all;
     final opened = <DmProposal>[];
+    var waiting = 0;
     for (final proposal in all) {
       if (!proposal.pending || proposal.conversationId != conversation.id) {
         continue;
       }
-      if (await e2ee.openProposal(proposal) case final open?) opened.add(open);
+      if (await e2ee.openProposal(proposal) case final open?) {
+        opened.add(open);
+      } else if (await _onItsWay(
+        proposal.envelope,
+        proposal.claktoryId,
+        proposal.proposalDigest,
+      )) {
+        waiting++;
+      }
     }
     proposals
       ..clear()
       ..addAll(opened)
       ..sort((a, b) => a.createdMs.compareTo(b.createdMs));
+    _proposalsArriving = waiting;
+    arriving = _proposalsArriving + _draftsArriving;
     _changed();
+  }
+
+  /// Whether a record with no message here yet names one its Claktory is
+  /// still sending through the home (#451); one that came and didn't open
+  /// isn't shown at all.
+  Future<bool> _onItsWay(
+    String envelope,
+    String claktory,
+    String digest,
+  ) async =>
+      envelope.isEmpty &&
+      digest.isNotEmpty &&
+      !await e2ee.sideArrived(claktory, digest);
+
+  /// A channel moved while something was on its way: what's listed is
+  /// opened again.
+  Future<void> _arrived() async {
+    if (_proposalsArriving > 0) await _proposals(_listed);
+    if (_draftsArriving > 0) await _readAgentDrafts();
   }
 
   Future<void> _readProposals() async {
@@ -654,13 +811,25 @@ class ChatThread extends ChangeNotifier {
   Future<void> _readAgentDrafts() async {
     try {
       final drafts = await api.agentDrafts(conversation.id);
-      final opened = [
-        for (final draft in drafts)
-          ?await e2ee.openAgentDraft(draft, conversation.id),
-      ];
+      final opened = <DmAgentDraft>[];
+      var waiting = 0;
+      for (final draft in drafts) {
+        if (await e2ee.openAgentDraft(draft, conversation.id)
+            case final open?) {
+          opened.add(open);
+        } else if (await _onItsWay(
+          draft.envelope,
+          draft.claktoryId,
+          draft.draftDigest,
+        )) {
+          waiting++;
+        }
+      }
       agentDrafts
         ..clear()
         ..addAll(opened);
+      _draftsArriving = waiting;
+      arriving = _proposalsArriving + _draftsArriving;
       _changed();
     } on UserAppError {
       // The next change reads them again.
@@ -677,27 +846,19 @@ class ChatThread extends ChangeNotifier {
     _changed();
     final group = this.group;
     try {
-      // Sealed once; sealed again only when the group moved on first.
-      var envelope = await e2ee.sealApproved(group, proposal);
-      try {
-        await api.approve(proposal, envelope);
-      } on UserAppError catch (error) {
-        if (error.problem != UserAppProblem.epoch) rethrow;
-        envelope = await e2ee.sealApproved(group, proposal, again: true);
-        await api.approve(proposal, envelope);
-      }
+      // Approved first; then sealed here and sent through the home, kept
+      // until it took it (#451).
+      await api.approve(proposal);
       proposals.removeWhere((each) => each.id == proposal.id);
+      _changed();
+      await e2ee.sendApproved(group, proposal);
+      await _refresh();
     } on UserAppError catch (error) {
       reviewProblem = switch (error.problem) {
         UserAppProblem.stale => 'changed',
         UserAppProblem.gone => 'unsendable',
         _ => error.problem.name,
       };
-      // Known not sent: what was sealed for it goes.
-      if (error.problem != UserAppProblem.unreachable &&
-          error.problem != UserAppProblem.unavailable) {
-        await e2ee.dropApproved(group, proposal);
-      }
       if (error.problem == UserAppProblem.gone) {
         proposals.removeWhere((each) => each.id == proposal.id);
       }
@@ -859,6 +1020,70 @@ class ChatThread extends ChangeNotifier {
     await e2ee.discard(group, message.clientId);
   }
 
+  /// Where the person's own [message] stands past their home (#451), and
+  /// for [DmDelivered.notYet] since when the friend's Claktory has been
+  /// out of reach (0 when it isn't known).
+  ({DmDelivered state, int sinceMs}) delivered(DmMessage message) {
+    final id = message.clientMessageId;
+    if (id.isNotEmpty &&
+        messages.any((each) => each.mine && each.resends == id)) {
+      return (state: DmDelivered.resent, sinceMs: 0);
+    }
+    final delivery = id.isEmpty ? null : e2ee.delivery(id);
+    switch (delivery?.state) {
+      case DmDeliveryState.DM_DELIVERY_STATE_DELIVERED:
+        return (state: DmDelivered.delivered, sinceMs: 0);
+      case DmDeliveryState.DM_DELIVERY_STATE_BOUNCED:
+        if (e2ee.askResend.contains(id)) {
+          return (state: DmDelivered.askResend, sinceMs: 0);
+        }
+        // Only the device that sent it sends it again (Fugo).
+        return (
+          state: message.fromLeaf == e2ee.leafId
+              ? DmDelivered.resending
+              : DmDelivered.bounced,
+          sinceMs: 0,
+        );
+      default:
+        // Not delivered yet: the friend's Claktory out of reach, as the
+        // home says of it (Mista 32614: not a delivery of its own). Only
+        // the home's word: another Claktory of the person's doesn't send
+        // (Zucchero's row 567).
+        final home = e2ee.homeIsHere ? e2ee.homeState : null;
+        // Sent before this Claktory became the home (row 595): an earlier
+        // home sent it on, and only that one knew whether it arrived, so
+        // it's said as sent, never as not delivered (Mista 41960).
+        final since = home?.homeSinceMs.toInt() ?? 0;
+        if (since > 0 && message.shownMs < since) {
+          return (state: DmDelivered.sent, sinceMs: 0);
+        }
+        final peer = home?.peers
+            .where((each) => each.accountId == friend)
+            .firstOrNull;
+        // Only what came after it was last reachable can't have reached
+        // it: one before may have, before a restart lost its delivery.
+        final last = peer?.lastReachableMs.toInt() ?? 0;
+        if (peer != null &&
+            !peer.reachable &&
+            (last == 0 || message.acceptedMs > last)) {
+          return (
+            state: peer.refused == dmTurnedAway
+                ? DmDelivered.notTaking
+                : DmDelivered.notYet,
+            sinceMs: peer.lastReachableMs.toInt(),
+          );
+        }
+        return (state: DmDelivered.sent, sinceMs: 0);
+    }
+  }
+
+  /// The person says yes to sending [message] again, after the friend's
+  /// Claktory couldn't read it.
+  Future<void> resend(DmMessage message) async {
+    await e2ee.resend(group, message.clientMessageId);
+    await _refresh();
+  }
+
   /// The person saw that the friend's security key changed: sending goes
   /// on.
   Future<void> keySeen() async {
@@ -872,6 +1097,7 @@ class ChatThread extends ChangeNotifier {
     if (loaded && !writable) {
       proposals.clear();
       agentDrafts.clear();
+      arriving = _proposalsArriving = _draftsArriving = 0;
     }
     if (!_closed) notifyListeners();
   }

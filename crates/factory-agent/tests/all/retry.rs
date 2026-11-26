@@ -249,3 +249,151 @@ async fn stopping_a_wait_ends_the_run_as_aborted() {
     let [aborted] = assistants(&agent.state.messages)[..] else { panic!("{:?}", agent.state.messages) };
     assert_eq!(aborted.stop_reason, StopReason::Aborted);
 }
+
+/// A wait for the provider (#490) that records why it waited and ends at
+/// once (Ok), or gives up with `give_up` from the `n`-th wait on.
+fn provider_waits(give_up: Option<(usize, &'static str)>) -> (factory_agent::WaitProvider, Arc<Mutex<Vec<String>>>) {
+    let (wait, seen, _) = provider_waits_asked(give_up);
+    (wait, seen)
+}
+
+/// `provider_waits`, with how long each wait was asked to last at least.
+type Asked = Arc<Mutex<Vec<Option<u64>>>>;
+fn provider_waits_asked(give_up: Option<(usize, &'static str)>) -> (factory_agent::WaitProvider, Arc<Mutex<Vec<String>>>, Asked) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let asked: Asked = Arc::default();
+    let (recorded, recorded_asked) = (seen.clone(), asked.clone());
+    let wait: factory_agent::WaitProvider = Arc::new(move |why, at_least| {
+        recorded_asked.lock().push(at_least);
+        let mut recorded = recorded.lock();
+        recorded.push(why);
+        let answer = match give_up {
+            Some((from, said)) if recorded.len() >= from => Err(Some(said.to_owned())),
+            _ => Ok(()),
+        };
+        Box::pin(async move { answer })
+    });
+    (wait, seen, asked)
+}
+
+/// #490: past the quick retries, a provider that keeps failing in a way
+/// that passes is waited for, each wait followed by one request (no quick
+/// retries again), until it answers.
+#[tokio::test(start_paused = true)]
+async fn a_failing_provider_is_waited_for_until_it_answers() {
+    let (stream, requests) = flaky(&["529 Overloaded"; 6]);
+    let mut agent = agent(stream);
+    let (wait, waited) = provider_waits(None);
+    agent.wait_provider_with(wait);
+    let events = collect(&mut agent);
+    agent.prompt("hello").await.unwrap();
+    assert_eq!(requests.lock().len(), 7);
+    assert_eq!(*waited.lock(), vec!["529 Overloaded".to_owned(); 4]);
+    assert_eq!(retries(&events.lock()), [(1, 1000), (2, 2000)]);
+    let [answer] = assistants(&agent.state.messages)[..] else { panic!("{:?}", agent.state.messages) };
+    assert_eq!(answer.stop_reason, StopReason::Stop);
+    assert_eq!(agent.state.error_message, None);
+}
+
+/// A wait that gives up ends the run with what it said; a failure that
+/// won't pass (a refused key, a refused request) is never waited for.
+#[tokio::test(start_paused = true)]
+async fn a_provider_wait_that_gives_up_ends_the_run_and_lasting_failures_are_not_waited_for() {
+    let (stream, requests) = flaky(&["503 Service Unavailable"; 10]);
+    let mut gives_up = agent(stream);
+    let (wait, waited) = provider_waits(Some((2, "OpenRouter kept failing to answer for 12 hours.")));
+    gives_up.wait_provider_with(wait);
+    gives_up.prompt("hello").await.unwrap();
+    assert_eq!((requests.lock().len(), waited.lock().len()), (4, 2));
+    assert_eq!(gives_up.state.error_message.as_deref(), Some("OpenRouter kept failing to answer for 12 hours."));
+
+    for (failure, attempts) in [("401 invalid api key", 1), ("400 Invalid request: max_tokens 500 is too many", 3)] {
+        let (stream, requests) = flaky(Box::leak(Box::new([failure; 3])));
+        let mut agent = agent(stream);
+        let (wait, waited) = provider_waits(None);
+        agent.wait_provider_with(wait);
+        agent.prompt("hello").await.unwrap();
+        assert_eq!((requests.lock().len(), waited.lock().len()), (attempts, 0), "{failure}");
+        assert_eq!(agent.state.error_message.as_deref(), Some(failure));
+    }
+}
+
+/// An answer whose stream ends with no terminal event (the connection cut
+/// mid-answer) is a failure that passes: retried, not the end of the run.
+#[tokio::test(start_paused = true)]
+async fn an_answer_cut_off_mid_stream_is_retried() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let asked = count.clone();
+    let stream: StreamFn = Arc::new(move |model, _context, _options| {
+        let attempt = asked.fetch_add(1, Ordering::SeqCst);
+        let message = reply(model, vec![AssistantPart::Text { text: format!("attempt {attempt}"), text_signature: None }]);
+        let (sink, stream) = event_stream();
+        sink.push(StreamEvent::Start { partial: message.clone() });
+        if attempt > 0 {
+            sink.push(StreamEvent::Done { reason: StopReason::Stop, message });
+        }
+        Ok(stream)
+    });
+    let mut agent = agent(stream);
+    let events = collect(&mut agent);
+    agent.prompt("hello").await.unwrap();
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    assert_eq!(retries(&events.lock()), [(1, 1000)]);
+    let [answer] = assistants(&agent.state.messages)[..] else { panic!("{:?}", agent.state.messages) };
+    assert_eq!(
+        (answer.stop_reason, answer.content.clone()),
+        (StopReason::Stop, vec![AssistantPart::Text { text: "attempt 1".into(), text_signature: None }])
+    );
+}
+
+/// A failure whose answer said how long to wait (Retry-After) is retried no
+/// sooner, the quick retries and the long wait alike, at most 15 minutes
+/// (Abbacchio's row 1249).
+#[tokio::test(start_paused = true)]
+async fn retry_after_holds_retries_and_waits_back() {
+    for (after, held) in [(60_000, 60_000), (3_600_000, 900_000)] {
+        let count = Arc::new(AtomicUsize::new(0));
+        let asked_count = count.clone();
+        let stream: StreamFn = Arc::new(move |model, _context, _options| {
+            let attempt = asked_count.fetch_add(1, Ordering::SeqCst);
+            let mut message = reply(model, vec![AssistantPart::Text { text: format!("attempt {attempt}"), text_signature: None }]);
+            let (sink, stream) = event_stream();
+            sink.push(StreamEvent::Start { partial: message.clone() });
+            if attempt < 4 {
+                message.stop_reason = StopReason::Error;
+                message.error_message = Some("429 Too Many Requests".into());
+                message.extra.insert(factory_agent::accounts::RETRY_AFTER.into(), serde_json::json!(after));
+                sink.push(StreamEvent::Error { reason: StopReason::Error, error: message });
+            } else {
+                sink.push(StreamEvent::Done { reason: StopReason::Stop, message });
+            }
+            Ok(stream)
+        });
+        let mut agent = agent(stream);
+        let (wait, waited, asked) = provider_waits_asked(None);
+        agent.wait_provider_with(wait);
+        let events = collect(&mut agent);
+        agent.prompt("hello").await.unwrap();
+        assert_eq!(retries(&events.lock()), [(1, held), (2, held)], "{after}");
+        assert_eq!(waited.lock().len(), 2);
+        assert_eq!(*asked.lock(), [Some(after), Some(after)], "the wait is told what the provider asked; it caps it itself");
+        assert_eq!(agent.state.error_message, None);
+    }
+}
+
+#[test]
+fn retry_after_reads_seconds_and_dates() {
+    let header = |value: &str| {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::RETRY_AFTER, value.parse().unwrap());
+        factory_agent::accounts::retry_after_header(&headers)
+    };
+    assert_eq!(header("60"), Some(60_000));
+    assert_eq!(header(" 2 "), Some(2_000));
+    assert_eq!(header("soon"), None);
+    assert_eq!(header("Wed, 21 Oct 2015 07:28:00 GMT"), Some(0), "a date past");
+    let later = httpdate::fmt_http_date(std::time::SystemTime::now() + Duration::from_secs(120));
+    let ms = header(&later).expect("a date");
+    assert!((115_000..=120_000).contains(&ms), "{ms}");
+    assert_eq!(factory_agent::accounts::retry_after_header(&http::HeaderMap::new()), None);
+}

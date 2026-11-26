@@ -53,6 +53,36 @@ void main() {
     expect(e2ee.setup, DmSetup.unavailable);
   });
 
+  // Melone F3: someone who learned a new device's code (a photo of it)
+  // can't plant their identity on it; only the identity the person's
+  // account publishes is taken, and the code is spent.
+  test("a hand-off with an identity the account doesn't publish is "
+      'refused', () async {
+    final worker = FakeWorker();
+    final phone = FakeEndpoint(worker, 'matt', 'phone');
+    await phone.e2ee.start();
+    await phone.e2ee.setUpFirst();
+    final stranger = FakeEndpoint(worker, 'eve', 'evephone');
+    await stranger.e2ee.start();
+    await stranger.e2ee.setUpFirst();
+    final ipad = FakeEndpoint(worker, 'matt', 'ipad');
+    await ipad.e2ee.start();
+    final code = await ipad.e2ee.offerThisDevice(platform: 'iPad');
+    final forged = await stranger.e2ee.scanned(code!);
+    await stranger.e2ee.routes.handOff(forged.leafId, forged.sealed);
+    await ipad.e2ee.takeHandoff();
+    expect(ipad.e2ee.setup, DmSetup.addThisDevice);
+    expect(ipad.e2ee.earlierCodeSpent, isTrue);
+    expect(ipad.device.setUp, isFalse);
+    expect(worker.handoffs.values.expand((each) => each), isEmpty);
+
+    // The person's own phone, with a new code: taken.
+    await ipad.e2ee.offerThisDevice(platform: 'iPad');
+    await phone.e2ee.addDevice(await phone.e2ee.scanned(ipad.e2ee.offer!));
+    await ipad.e2ee.takeHandoff();
+    expect(ipad.e2ee.setup, DmSetup.ready);
+  });
+
   test(
     'the first device makes its keys, its list and the self group',
     () async {
@@ -78,6 +108,44 @@ void main() {
       expect(ipad.e2ee.setup, DmSetup.addThisDevice);
     },
   );
+
+  // Melone's F4.2: a last resort near the end of its thirty days is
+  // replaced, and the device's own packages past their lifetime go, whenever
+  // it makes some; one well in date is left alone.
+  test('a last resort a week from its end is replaced, and old packages '
+      'swept; one well in date is left', () async {
+    final worker = FakeWorker();
+    final phone = await _ready(worker, 'matt', 'phone');
+    const day = 24 * 60 * 60;
+    final nowSecs = phone.now ~/ 1000;
+    phone.device.swept.clear();
+    worker.lastResortEnds['matt/phone'] = nowSecs + 20 * day;
+    worker.log.clear();
+    await phone.e2ee.sync();
+    expect(worker.log, isNot(contains('POST key-packages')));
+    expect(phone.device.swept, isEmpty);
+
+    worker.lastResortEnds['matt/phone'] = nowSecs + 6 * day;
+    await phone.e2ee.sync();
+    expect(
+      worker.log.where((each) => each == 'POST key-packages'),
+      hasLength(1),
+    );
+    expect(phone.device.swept, [nowSecs]);
+    expect(worker.lastResort['matt/phone'], isNotNull);
+    // Only the last resort: the one-time ones were plenty.
+    expect(worker.packages['matt/phone'], hasLength(dmKeyPackages));
+
+    // The worker has none: one is made.
+    worker.lastResort.remove('matt/phone');
+    worker.log.clear();
+    await phone.e2ee.sync();
+    expect(
+      worker.log.where((each) => each == 'POST key-packages'),
+      hasLength(1),
+    );
+    expect(worker.lastResort['matt/phone'], isNotNull);
+  });
 
   test('opened again over keys it kept: ready, its chat goes on', () async {
     // The key store hands keys over as views nothing may change, as the
@@ -555,6 +623,65 @@ void main() {
     }
   });
 
+  group("a Claktory off the person's list (Fugo)", () {
+    Future<(FakeWorker, FakeEndpoint, String)> withClaktory() async {
+      final worker = FakeWorker();
+      final phone = await _ready(worker, 'matt', 'phone');
+      phone.e2ee.claktory = FakeClaktoryLink(
+        worker,
+        'matt',
+        leafId: 'mac-mini#1',
+      );
+      await phone.e2ee.sync();
+      final channel = phone.e2ee.groups.values
+          .singleWhere((each) => each.kind == 'channel')
+          .groupId;
+      expect(await _leafIds(phone, channel), contains('mac-mini#1'));
+      // The app shows another Claktory now: this one isn't linked again.
+      phone.e2ee.claktory = null;
+      return (worker, phone, channel);
+    }
+
+    test(
+      'a removal that stopped after the list changed is finished at the '
+      'next sync: out of its channel by a commit, nothing signed out',
+      () async {
+        final (worker, phone, channel) = await withClaktory();
+        worker.refuse = (route) => route == 'POST groups/$channel/commits'
+            ? const AccountServiceUnreachable('offline')
+            : null;
+        await expectLater(
+          phone.e2ee.removeDevice('mac-mini#1'),
+          throwsA(anything),
+        );
+        expect(
+          phone.device
+              .deviceList(account: 'matt')!
+              .leaves
+              .map((each) => each.leafId),
+          isNot(contains('mac-mini#1')),
+        );
+        expect(await _leafIds(phone, channel), contains('mac-mini#1'));
+
+        worker.refuse = null;
+        final signOuts = worker.log.where((l) => l.contains('devices/remove'));
+        await phone.e2ee.sync();
+        expect(await _leafIds(phone, channel), isNot(contains('mac-mini#1')));
+        expect(worker.log.where((l) => l.contains('devices/remove')), signOuts);
+        // Not a device: nothing for Your devices to finish.
+        expect(await phone.e2ee.notFullyRemoved(), isEmpty);
+        expect(phone.e2ee.removal, isNull);
+      },
+    );
+
+    test('a listed Claktory is never swept', () async {
+      final (_, phone, channel) = await withClaktory();
+      await phone.e2ee.sync();
+      await phone.e2ee.sync();
+      expect(await _leafIds(phone, channel), contains('mac-mini#1'));
+    });
+  });
+
   group('signing out of the Claktory account (row 671)', () {
     Future<(FakeEndpoint, FakeEndpoint, DmServerGroup)> twoOfMatts(
       FakeWorker worker,
@@ -796,6 +923,86 @@ void main() {
       expect(a.e2ee.sending['m1']!.problem, 'waitingForFriend');
     });
 
+    test(
+      'two packages claimed for one leaf: it is added once (Ghiaccio)',
+      () async {
+        final worker = FakeWorker();
+        final (a, _, _) = await people(
+          worker,
+          route: (call) => (method, path, [body]) async {
+            final answer = await call(method, path, body);
+            if (path.endsWith('/key-packages/claim') &&
+                body?['account_id'] == 'matt') {
+              final packages = answer['key_packages']! as List;
+              return {
+                ...answer,
+                'key_packages': [...packages, ...packages],
+              };
+            }
+            return answer;
+          },
+        );
+        final chat = (await a.e2ee.conversationGroup('v1', 1, 'matt'))!;
+        expect(
+          await _leaves(a, chat.groupId),
+          unorderedEquals(['a', 'b', 'c']),
+        );
+        expect(a.e2ee.joining, isEmpty);
+      },
+    );
+
+    test('added while it joins by itself (Mista, row 1150): his device joins '
+        'from its Welcome, never by a commit of its own that would put its '
+        'leaf in twice', () async {
+      final worker = FakeWorker();
+      final a = await _ready(worker, 'ana', 'a');
+      FakeEndpoint? her;
+      var race = false;
+      final posted = <String>[];
+      final b = FakeEndpoint(
+        worker,
+        'matt',
+        'b',
+        route: (call) => (method, path, [body]) async {
+          if (method == 'POST') posted.add(path);
+          if (race && method == 'GET' && path.contains('group-info')) {
+            // Its sync listed the conversation and found no Welcome; her
+            // add (and its Welcome) lands before it reads the GroupInfo.
+            race = false;
+            await her!.e2ee.sync();
+          }
+          return call(method, path, body);
+        },
+      );
+      her = a;
+      await b.e2ee.start();
+      await b.e2ee.setUpFirst();
+      final packages = worker.packages.remove('matt/b');
+      final lastResort = worker.lastResort.remove('matt/b');
+      final chat = (await a.e2ee.conversationGroup('v1', 1, 'matt'))!;
+      expect(a.e2ee.joining, {chat.groupId: 'matt'});
+      worker.packages['matt/b'] = packages!;
+      worker.lastResort['matt/b'] = lastResort!;
+      a.now += FakeEndpoint.retryAfter.inMilliseconds * 2;
+
+      race = true;
+      posted.clear();
+      await b.e2ee.sync();
+      expect(race, isFalse, reason: 'the race was run');
+      expect(a.e2ee.joining, isEmpty);
+      expect(
+        posted.where((path) => path.contains('/groups/${chat.groupId}/')),
+        isEmpty,
+        reason: 'no commit of its own',
+      );
+      expect(await _leaves(b, chat.groupId), ['a', 'b']);
+      expect(worker.welcomes['matt/b'] ?? const [], isEmpty);
+
+      await a.e2ee.say(chat.groupId, _text('m1', 'ana 1'));
+      await b.e2ee.sync();
+      expect(await texts(b, chat.groupId), ['ana 1']);
+    });
+
     test('the worker refusing it (409 waiting_for_friend): never sent, said '
         'as waiting', () async {
       final worker = FakeWorker();
@@ -909,6 +1116,198 @@ void main() {
       worker.grants.clear();
       await phone.e2ee.grantsChanged();
       expect(await _leaves(phone, chat.groupId), ['phone', 'pixel']);
+    });
+
+    // Row 606 (Zucchero, Bruno 42425): a friend first met after the
+    // person's Claktory was enrolled is pinned there too, so its home can
+    // take that friend's new home; and once a launch, every pin.
+    test('a friend met after the Claktory was enrolled: their pin goes to '
+        'its channel at the next sync, and every pin once a launch', () async {
+      final worker = FakeWorker();
+      final phone = await _ready(worker, 'matt', 'phone');
+      phone.e2ee.claktory = FakeClaktoryLink(worker, 'matt');
+      await phone.e2ee.sync();
+      await phone.e2ee.sync();
+      final channel = phone.e2ee.groups.values.singleWhere(
+        (each) => each.kind == 'channel',
+      );
+      List<String> pinsSaid() => [
+        for (final item in worker.mailboxOf(channel.groupId))
+          if (item['kind'] == 'application')
+            if ((readFake(jsonEncode(item['envelope']))['c']!
+                    as Map<String, Object?>)
+                case final content when content['kind'] == 'pins')
+              content['extra']! as String,
+      ];
+      final before = pinsSaid().length;
+      await phone.e2ee.sync();
+      expect(pinsSaid(), hasLength(before), reason: 'nothing new to say');
+
+      await _ready(worker, 'ana', 'pixel');
+      await phone.e2ee.conversationGroup('v1', 3, 'ana');
+      await phone.e2ee.sync();
+      expect(pinsSaid(), hasLength(before + 1));
+      expect(pinsSaid().last, contains('"ana"'));
+      await phone.e2ee.sync();
+      expect(pinsSaid(), hasLength(before + 1));
+
+      // Opened again: once, for friends met before a build that said so.
+      final again = phone.relaunch();
+      await again.start();
+      again.claktory = FakeClaktoryLink(worker, 'matt');
+      await again.sync();
+      expect(pinsSaid(), hasLength(before + 2));
+    });
+
+    // Melone F2.2: a device that joins a conversation again takes the
+    // members its GroupInfo gives, which may hold a Claktory whose grant
+    // was taken back; it's taken out against the grants as they are now
+    // before anything is sent there, not only at the next read of them.
+    test('joined again: a Claktory no longer granted goes before the '
+        'first send', () async {
+      final worker = FakeWorker();
+      final phone = await _ready(worker, 'matt', 'phone');
+      await _ready(worker, 'ana', 'pixel');
+      phone.e2ee.claktory = FakeClaktoryLink(worker, 'matt');
+      final chat = (await phone.e2ee.conversationGroup('v1', 3, 'ana'))!;
+      worker.grants.add({
+        'app': 'dms',
+        'claktory_id': 'mini',
+        'resources': [
+          {'kind': 'conversation', 'id': 'v1'},
+        ],
+      });
+      await phone.e2ee.grantsChanged();
+      expect(await _leaves(phone, chat.groupId), contains('mini#1'));
+
+      // Taken back elsewhere: this device's grants as last read still have
+      // it, for up to a minute. It falls out of the group and joins again.
+      worker.grants.clear();
+      await phone.device.forgetGroup(groupId: chat.id);
+      await phone.e2ee.sync();
+      expect(
+        await _leaves(phone, chat.groupId),
+        unorderedEquals(['phone', 'pixel']),
+      );
+    });
+
+    test('joined again, the grants unreadable: nothing is sent until '
+        "they're read", () async {
+      final worker = FakeWorker();
+      var grantsFail = false;
+      final phone = FakeEndpoint(
+        worker,
+        'matt',
+        'phone',
+        route: (call) => (method, path, [body]) {
+          if (grantsFail && method == 'GET' && path.contains('grants')) {
+            throw StateError('offline');
+          }
+          return call(method, path, body);
+        },
+      );
+      await phone.e2ee.start();
+      await phone.e2ee.setUpFirst();
+      await _ready(worker, 'ana', 'pixel');
+      final chat = (await phone.e2ee.conversationGroup('v1', 3, 'ana'))!;
+      await phone.e2ee.sync();
+      grantsFail = true;
+      await phone.device.forgetGroup(groupId: chat.id);
+      await phone.e2ee.sync();
+      await phone.e2ee.say(
+        chat.groupId,
+        DmContent(
+          kind: 'text',
+          clientMessageId: 'm1',
+          text: 'hi',
+          extraJson: '',
+        ),
+      );
+      expect(phone.e2ee.sending['m1']!.state, DmSendState.refused);
+      grantsFail = false;
+      await phone.e2ee.say(
+        chat.groupId,
+        DmContent(
+          kind: 'text',
+          clientMessageId: 'm2',
+          text: 'hi',
+          extraJson: '',
+        ),
+      );
+      expect(phone.e2ee.sending['m2']!.state, isNot(DmSendState.refused));
+    });
+
+    // Fugo 40934: a group not known here can't be checked, so nothing goes;
+    // and the check is kept only in memory, so after a relaunch a rejoined
+    // conversation is sent to only once its grants are read.
+    test('a conversation the device has but this list of groups no longer '
+        'names: nothing is sent', () async {
+      final worker = FakeWorker();
+      final phone = await _ready(worker, 'matt', 'phone');
+      await _ready(worker, 'ana', 'pixel');
+      final chat = (await phone.e2ee.conversationGroup('v1', 3, 'ana'))!;
+      await phone.e2ee.sync();
+      phone.e2ee.groups.remove(chat.groupId);
+      await phone.e2ee.say(
+        chat.groupId,
+        DmContent(
+          kind: 'text',
+          clientMessageId: 'm1',
+          text: 'hi',
+          extraJson: '',
+        ),
+      );
+      expect(phone.e2ee.sending['m1']!.state, DmSendState.refused);
+    });
+
+    test('joined again, then the app quit before the check: after the '
+        'launch nothing goes until the grants are read', () async {
+      final worker = FakeWorker();
+      var grantsFail = false;
+      final phone = FakeEndpoint(
+        worker,
+        'matt',
+        'phone',
+        route: (call) => (method, path, [body]) {
+          if (grantsFail && method == 'GET' && path.contains('grants')) {
+            throw StateError('offline');
+          }
+          return call(method, path, body);
+        },
+      );
+      await phone.e2ee.start();
+      await phone.e2ee.setUpFirst();
+      await _ready(worker, 'ana', 'pixel');
+      phone.e2ee.claktory = FakeClaktoryLink(worker, 'matt');
+      final chat = (await phone.e2ee.conversationGroup('v1', 3, 'ana'))!;
+      worker.grants.add({
+        'app': 'dms',
+        'claktory_id': 'mini',
+        'resources': [
+          {'kind': 'conversation', 'id': 'v1'},
+        ],
+      });
+      await phone.e2ee.grantsChanged();
+      expect(await _leaves(phone, chat.groupId), contains('mini#1'));
+
+      // Taken back; joined again while the grants can't be read.
+      worker.grants.clear();
+      grantsFail = true;
+      await phone.device.forgetGroup(groupId: chat.id);
+      await phone.e2ee.sync();
+      expect(await _leaves(phone, chat.groupId), contains('mini#1'));
+
+      final again = phone.relaunch();
+      await again.start();
+      await again.sync();
+      DmContent text(String id) =>
+          DmContent(kind: 'text', clientMessageId: id, text: id, extraJson: '');
+      await again.say(chat.groupId, text('m1'));
+      expect(again.sending['m1']!.state, DmSendState.refused);
+      grantsFail = false;
+      await again.say(chat.groupId, text('m2'));
+      expect(again.sending['m2']!.state, isNot(DmSendState.refused));
+      expect(await _leaves(phone, chat.groupId), isNot(contains('mini#1')));
     });
 
     test('one taken off the list and ungranted goes, though it no longer '
@@ -1882,6 +2281,71 @@ void main() {
       expect(w.worker.keys['matt']!['identity_key'], isNot(old));
     });
 
+    // E11-6 (Fugo 41048): with a Lock out under way and waiting for a
+    // fresh sign-in, locking out another device takes it off the list and
+    // out of every group at once; the new key, which it was handed, is made
+    // again without it once signed in.
+    test('a second Lock out while the first waits for a sign-in: off the '
+        'list and out first, then a key it never had', () async {
+      final w = await world();
+      w.worker.staleSignIn.add('matt/phone');
+      expect(
+        await w.phone.e2ee.changeKey(remove: ['mac'], keep: ['ipad']),
+        DmKeyChange.signInAgain,
+      );
+      final first = (await w.phone.device.rotation())!;
+      expect(first.kept, contains('ipad'));
+      expect(w.phone.e2ee.removalStop, DmKeyChange.signInAgain);
+
+      expect(
+        await w.phone.e2ee.changeKey(remove: ['ipad'], keep: const []),
+        DmKeyChange.signInAgain,
+      );
+      expect(
+        w.phone.device.lists['matt']!.leaves.map((each) => each.leafId),
+        isNot(contains('ipad')),
+      );
+      for (final group in w.phone.e2ee.groups.values) {
+        expect(await _leafIds(w.phone, group.groupId), isNot(contains('ipad')));
+      }
+      expect(w.worker.signedOut['matt'], contains('ipad'));
+
+      w.worker.staleSignIn.clear();
+      expect(await w.phone.e2ee.finishRemoval(), isNull);
+      expect(
+        w.worker.keys['matt']!['identity_key'],
+        isNot(dmB64(first.identityPublic)),
+      );
+      expect(w.phone.e2ee.removalStop, isNull);
+    });
+
+    // Fugo 41322: the key under way already went to the worker, and a
+    // device it was handed is locked out now: finished, then changed again
+    // at once, so the device locked out never holds the key that stays.
+    test('a key the worker already has, handed to a device locked out now: '
+        'changed again at once', () async {
+      final w = await world();
+      final old = w.worker.keys['matt']!['identity_key'];
+      w.worker.staleSignIn.add('matt/phone');
+      expect(
+        await w.phone.e2ee.changeKey(remove: ['mac'], keep: ['ipad']),
+        DmKeyChange.signInAgain,
+      );
+      final first = (await w.phone.device.rotation())!;
+      // As if it went through and the answer was lost.
+      w.worker.keys['matt']!['identity_key'] = dmB64(first.identityPublic);
+      w.worker.staleSignIn.clear();
+      expect(
+        await w.phone.e2ee.changeKey(remove: ['ipad'], keep: const []),
+        isNull,
+        reason: w.phone.e2ee.problem,
+      );
+      final now = w.worker.keys['matt']!['identity_key'];
+      expect(now, isNot(old));
+      expect(now, isNot(dmB64(first.identityPublic)));
+      expect(w.phone.e2ee.removal, isNull);
+    });
+
     test('an add code works once, and never again once its device is '
         'removed (row 612)', () async {
       final w = await world();
@@ -2113,6 +2577,144 @@ void main() {
     test('joining again past only commits says nothing', () async {
       final (:ana, :group, held: _) = await heldThenSaid(0);
       expect(skippedLines(await ana.e2ee.history(group)), isEmpty);
+    });
+  });
+
+  group('a device that came and went while away (row 561)', () {
+    // Matt and Ana; while Ana's device is away, Matt adds a tablet that
+    // says something, then (if [removed]) his phone takes it out again.
+    // By then his list no longer names it.
+    Future<({FakeWorker worker, FakeEndpoint ana, String chat, int held})>
+    away({required bool removed}) async {
+      final worker = FakeWorker();
+      final phone = await _ready(worker, 'matt', 'phone');
+      final ana = await _ready(worker, 'ana', 'pixel');
+      final chat = (await phone.e2ee.conversationGroup('v1', 3, 'ana'))!;
+      await ana.e2ee.sync();
+      final group = chat.groupId;
+      // The worker's GroupInfo stays the one to join again from.
+      final epoch = worker.epochOf(group);
+      ana.device.unlisted.add('matt/tablet');
+      final held = worker.deliver(
+        group,
+        fakeEnvelope({
+          't': 'commit',
+          'g': group,
+          'epoch': epoch,
+          'from': 'matt/phone',
+          'members': ['matt/phone', 'ana/pixel', 'matt/tablet'],
+        }),
+        advance: false,
+      );
+      worker.deliver(
+        group,
+        FakeDmDevice.claktorySays(
+          group,
+          'matt/tablet',
+          _text('t1', 'from the tablet'),
+          epoch: epoch + 1,
+        ),
+      );
+      if (removed) {
+        worker.deliver(
+          group,
+          fakeEnvelope({
+            't': 'commit',
+            'g': group,
+            'epoch': epoch + 1,
+            'from': 'matt/phone',
+            'members': ['matt/phone', 'ana/pixel'],
+          }),
+          advance: false,
+        );
+        worker.deliver(
+          group,
+          FakeDmDevice.claktorySays(
+            group,
+            'matt/phone',
+            _text('p1', 'from the phone'),
+            epoch: epoch + 2,
+          ),
+        );
+      }
+      return (worker: worker, ana: ana, chat: group, held: held);
+    }
+
+    test('taken out again by a device that was there all along: read, its '
+        'messages marked', () async {
+      final (:worker, :ana, :chat, :held) = await away(removed: true);
+      await ana.e2ee.sync();
+      // One window, from the refused commit on.
+      expect(ana.device.windows, hasLength(1));
+      expect(ana.device.windows.single.first.seq, held);
+      final history = await ana.e2ee.history(chat);
+      expect(
+        [
+          for (final message in history)
+            if (message.content.text case final text?) (text, message.departed),
+        ],
+        [('from the tablet', true), ('from the phone', false)],
+      );
+      // Never joined again, and nothing said it couldn't read anything.
+      expect(worker.log, isNot(contains('GET groups/$chat/group-info')));
+      expect([
+        for (final message in history)
+          if (message.members?.skipped != null) message,
+      ], isEmpty);
+      expect(ana.e2ee.behind, isEmpty);
+    });
+
+    test('the worker past it: held until the removal comes, then '
+        'read', () async {
+      final (:worker, :ana, :chat, held: _) = await away(removed: false);
+      // Two commits on, which the feed doesn't have yet.
+      worker
+        ..advance(chat)
+        ..advance(chat);
+      await ana.e2ee.sync();
+      expect(ana.e2ee.behind.keys, [chat]);
+      expect(worker.log, isNot(contains('GET groups/$chat/group-info')));
+      final epoch = worker.epochOf(chat) - 2;
+      worker.deliver(
+        chat,
+        fakeEnvelope({
+          't': 'commit',
+          'g': chat,
+          'epoch': epoch + 1,
+          'from': 'matt/phone',
+          'members': ['matt/phone', 'ana/pixel'],
+        }),
+        advance: false,
+      );
+      await ana.e2ee.sync();
+      expect(ana.e2ee.behind, isEmpty);
+      expect(ana.device.windows, hasLength(2));
+      expect(
+        [
+          for (final message in await ana.e2ee.history(chat))
+            if (message.content.text case final text?) (text, message.departed),
+        ],
+        [('from the tablet', true)],
+      );
+      expect(worker.log, isNot(contains('GET groups/$chat/group-info')));
+    });
+
+    test('never taken out: refused as before, and the chat says around '
+        'what', () async {
+      final (:worker, :ana, :chat, held: _) = await away(removed: false);
+      await ana.e2ee.sync();
+      expect(ana.device.windows, hasLength(1));
+      expect(worker.log, contains('GET groups/$chat/group-info'));
+      final history = await ana.e2ee.history(chat);
+      expect(
+        history.where((each) => each.content.text == 'from the tablet'),
+        isEmpty,
+      );
+      expect(
+        [for (final message in history) ?message.members?.skipped],
+        ['device:matt'],
+      );
+      expect(ana.e2ee.behind, isEmpty);
     });
   });
 }

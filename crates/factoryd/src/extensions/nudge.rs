@@ -41,13 +41,50 @@ struct Situation {
     owners: Vec<(String, Option<i64>)>,
 }
 
-/// Checks every agent now and then, for as long as Factory runs.
+/// The longest the checks sleep while nothing happens: they still look
+/// then, for check-ins and waits that come due on the clock.
+const QUIET: Duration = Duration::from_secs(30);
+
+/// Checks every agent now and then, for as long as Factory runs: every
+/// `nudge_after / 2` (at most 2 s) while something happens and for
+/// `nudge_after` after (an agent that stopped is reminded then); with
+/// nothing happening, at the next change, a parked item's time, or half a
+/// minute at most (#454).
 pub(crate) async fn monitor(factory: Weak<Factory>) {
     let mut reminded: HashMap<String, Situation> = HashMap::new();
     let mut checked_in: HashMap<String, i64> = HashMap::new();
+    let Some((mut woken, mut activity)) = factory.upgrade().map(|factory| (factory.loops_woken(), factory.activity())) else { return };
+    // Claktory starting counts as something happening.
+    let mut happened = tokio::time::Instant::now();
     loop {
-        let Some(after) = factory.upgrade().map(|factory| factory.nudge_after()) else { return };
-        tokio::time::sleep((after / 2).clamp(Duration::from_millis(50), Duration::from_secs(2))).await;
+        let Some((after, minute, parked)) =
+            factory.upgrade().map(|factory| (factory.nudge_after(), factory.nudge_minute(), next_parked(&factory)))
+        else {
+            return;
+        };
+        let often = (after / 2).clamp(Duration::from_millis(50), Duration::from_secs(2));
+        if happened.elapsed() <= after + often {
+            tokio::time::sleep(often).await;
+            if activity.has_changed().unwrap_or(false) {
+                activity.borrow_and_update();
+                happened = tokio::time::Instant::now();
+            }
+        } else {
+            let mut nap = (Duration::from_millis(u64::try_from(minute).unwrap_or(0)) / 2).clamp(often, QUIET);
+            if let Some(at) = parked {
+                nap = nap.min(Duration::from_millis(u64::try_from(at - now_ms()).unwrap_or(0)));
+            }
+            tokio::select! {
+                () = tokio::time::sleep(nap) => {}
+                changed = activity.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                    happened = tokio::time::Instant::now();
+                }
+                changed = woken.changed() => if changed.is_err() { return },
+            }
+        }
         let Some(factory) = factory.upgrade() else { return };
         if let Err(error) = check(&factory, after, &mut reminded) {
             tracing::error!(%error, "could not check for agents to remind");
@@ -62,6 +99,12 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
             tracing::error!(%error, "could not check the checklist's waits");
         }
     }
+}
+
+/// When the next parked item opens again (`checklist::check_waits`), if any.
+fn next_parked(factory: &Factory) -> Option<i64> {
+    let db = factory.store.db();
+    db.query_row("SELECT MIN(retry_at) FROM checklist_items WHERE status = 'parked'", [], |row| row.get::<_, Option<i64>>(0)).ok().flatten()
 }
 
 /// The periodic check-in: each idle agent whose `nudge_every` is set, with

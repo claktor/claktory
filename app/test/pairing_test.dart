@@ -222,8 +222,15 @@ void main() {
     expect(find.text('factoryd allow d9 --number 0427'), findsNothing);
     await tester.tap(find.text('No screen on Studio?'));
     await pumpFrames(tester);
-    expect(find.text('No screen on Studio? Run this there:'), findsOneWidget);
+    expect(
+      find.text('No screen on Studio? Run this in a terminal there:'),
+      findsOneWidget,
+    );
     expect(find.text('factoryd allow d9 --number 0427'), findsOneWidget);
+    expect(
+      find.text('Over SSH, connect with ssh -t so it runs in a terminal.'),
+      findsOneWidget,
+    );
     await tester.tap(find.text('Copy'));
     await pumpFrames(tester);
     expect(find.text('Copied'), findsOneWidget);

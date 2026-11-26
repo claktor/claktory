@@ -230,6 +230,48 @@ String readoutTime(DateTime time) {
   return time.hour == 0 && time.minute == 0 ? day : '$day ${_clock(time)}';
 }
 
+/// [text] as it fits on one line [width] wide in [style]: whole, or its
+/// longest start that fits with "…", spaces before the "…" left out
+/// ("3–5…", never "3–5 …"); "…" alone when not even a letter fits.
+String cutText(
+  String text,
+  TextStyle style,
+  double width,
+  TextScaler scaler,
+  TextDirection direction,
+) {
+  final painter = TextPainter(
+    textScaler: scaler,
+    textDirection: direction,
+    maxLines: 1,
+  );
+  bool fits(String candidate) {
+    painter
+      ..text = TextSpan(text: candidate, style: style)
+      ..layout();
+    return painter.width <= width + 0.01;
+  }
+
+  try {
+    if (fits(text)) return text;
+    final letters = text.characters.toList();
+    String cut(int n) => '${letters.take(n).join().trimRight()}…';
+    var low = 0;
+    var high = letters.length;
+    while (low < high) {
+      final mid = (low + high + 1) ~/ 2;
+      if (fits(cut(mid))) {
+        low = mid;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return cut(low);
+  } finally {
+    painter.dispose();
+  }
+}
+
 /// The least a pie's legend keeps beside its donut: a few words.
 const _leastLegend = 96.0;
 
@@ -2950,10 +2992,20 @@ typedef AppTableColumn = ({int index, String title, String format});
 /// [maxTableRows], then how many more. Scrolls sideways when it's wider
 /// than its place.
 class AppTableView extends StatelessWidget {
-  const AppTableView({super.key, required this.table, this.columns});
+  const AppTableView({
+    super.key,
+    required this.table,
+    this.columns,
+    this.height,
+  });
 
   /// Null when the data isn't a table.
   final AppTable? table;
+
+  /// The whole table's height, as Grafana's table panel fills its place:
+  /// its heading stays and its rows scroll inside, and fewer rows leave room
+  /// under them. As tall as its rows when null.
+  final double? height;
 
   /// The columns shown, in order; every column, titled by its name, when
   /// null.
@@ -3063,17 +3115,37 @@ class AppTableView extends StatelessWidget {
     // word), and their long cells end in "…", as Grafana's do; numbers
     // and times keep their width. Past that it scrolls sideways.
     final least = scaler.scale(_leastTextColumn);
+    // A letter and "…" at the text size: the least a text column keeps.
+    final letter = measured('A…', bodyStyle('text')).ceilToDouble();
     return LayoutBuilder(
       builder: (context, constraints) {
+        // Never more than the text columns' share of what the numbers and
+        // times leave, so a cut cell shows its "…" and the numbers stay on
+        // screen, as Grafana's columns share a phone's width; down to a
+        // letter and "…", past which the table scrolls.
+        var whole = 0.0;
+        var texts = 0;
+        for (var c = 0; c < shown.length; c++) {
+          if (shown[c].format == 'text') {
+            texts++;
+          } else {
+            whole += natural[c];
+          }
+        }
+        final share = texts == 0 ? 0.0 : (constraints.maxWidth - whole) / texts;
         final widths = _fitColumns(natural, [
           for (var c = 0; c < shown.length; c++)
             shown[c].format == 'text'
-                // Never wider than the place: a cut cell shows its "…".
-                ? [
+                ? math.min(
                     natural[c],
-                    math.max(heads[c], (c == 0 ? 0 : Space.m) + least),
-                    constraints.maxWidth,
-                  ].reduce(math.min)
+                    math.max(
+                      (c == 0 ? 0 : Space.m) + letter,
+                      math.min(
+                        math.max(heads[c], (c == 0 ? 0 : Space.m) + least),
+                        share,
+                      ),
+                    ),
+                  )
                 : null,
         ], constraints.maxWidth);
         return _table(
@@ -3094,6 +3166,23 @@ class AppTableView extends StatelessWidget {
     );
   }
 
+  static double _textWidth(
+    String text,
+    TextStyle style,
+    TextScaler scaler,
+    TextDirection direction,
+  ) {
+    final painter = TextPainter(
+      text: TextSpan(text: text, style: style),
+      textScaler: scaler,
+      textDirection: direction,
+      maxLines: 1,
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width;
+  }
+
   /// The least a text column gives way to, at the normal text size.
   static const _leastTextColumn = 96.0;
 
@@ -3106,7 +3195,8 @@ class AppTableView extends StatelessWidget {
     double room,
   ) {
     final total = natural.fold(0.0, (sum, w) => sum + w);
-    if (!room.isFinite || total <= room) return natural;
+    if (!room.isFinite || natural.isEmpty) return natural;
+    if (total <= room) return _spread(natural, room);
     double at(double level) => [
       for (var c = 0; c < natural.length; c++)
         switch (floor[c]) {
@@ -3133,6 +3223,31 @@ class AppTableView extends StatelessWidget {
     ];
   }
 
+  /// Columns narrower than [room] in all spread across it, as Grafana's
+  /// share a panel's width: the narrow ones grow to one width, the wide
+  /// ones keep theirs, and the last ends at [room]'s edge.
+  static List<double> _spread(List<double> natural, double room) {
+    double at(double level) =>
+        natural.fold(0.0, (sum, w) => sum + math.max(w, level));
+    var low = 0.0;
+    var high = room;
+    for (var k = 0; k < 40; k++) {
+      final mid = (low + high) / 2;
+      if (at(mid) > room) {
+        high = mid;
+      } else {
+        low = mid;
+      }
+    }
+    final widths = [for (final w in natural) math.max(w, low)];
+    // The last takes what rounding leaves, so it meets the edge exactly.
+    final before = widths
+        .take(widths.length - 1)
+        .fold(0.0, (sum, w) => sum + w);
+    widths[widths.length - 1] = math.max(natural.last, room - before);
+    return widths;
+  }
+
   Widget _table(
     BuildContext context, {
     required List<AppTableColumn> shown,
@@ -3148,72 +3263,188 @@ class AppTableView extends StatelessWidget {
     required TextStyle caption,
   }) {
     final palette = Palette.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      spacing: Space.xs,
+    final scaler = MediaQuery.textScalerOf(context);
+    final direction = Directionality.of(context);
+    // The room for words in column [c]: its width less its gap.
+    double room(int c) => widths[c] - (c == 0 ? 0 : Space.m);
+    // A heading wraps between words while its longest fits, else keeps
+    // one line cut with "…": never broken mid-word.
+    Widget heading(int c) {
+      final title = shown[c].title;
+      final words = title.split(RegExp(r'\s+'));
+      final fits = words.every(
+        (word) => _textWidth(word, headStyle, scaler, direction) <= room(c),
+      );
+      return Text(
+        fits ? title : cutText(title, headStyle, room(c), scaler, direction),
+        semanticsLabel: fits ? null : title,
+        maxLines: fits ? null : 1,
+        textAlign: shown[c].format == 'number'
+            ? TextAlign.end
+            : TextAlign.start,
+        style: headStyle,
+      );
+    }
+
+    Widget body(String text, int c) {
+      final style = bodyStyle(shown[c].format);
+      if (widths[c] >= natural[c]) return Text(text, style: style);
+      final cut = cutText(text, style, room(c), scaler, direction);
+      return Text(
+        cut,
+        semanticsLabel: cut == text ? null : text,
+        style: style,
+        maxLines: 1,
+        softWrap: false,
+        overflow: TextOverflow.clip,
+      );
+    }
+
+    final head = TableRow(
       children: [
-        SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: Table(
-            columnWidths: {
-              for (final (c, width) in widths.indexed)
-                c: FixedColumnWidth(width),
-            },
-            defaultVerticalAlignment: TableCellVerticalAlignment.middle,
-            border: TableBorder(
-              horizontalInside: BorderSide(color: palette.hairline),
-            ),
-            children: [
-              TableRow(
-                children: [
-                  for (var c = 0; c < shown.length; c++)
-                    Semantics(
-                      header: true,
-                      child: padded(
-                        Text(
-                          shown[c].title,
-                          textAlign: shown[c].format == 'number'
-                              ? TextAlign.end
-                              : TextAlign.start,
-                          style: headStyle,
-                        ),
-                        c,
-                        end: shown[c].format == 'number',
-                      ),
-                    ),
-                ],
-              ),
-              for (final row in cells)
-                TableRow(
-                  children: [
-                    for (var c = 0; c < shown.length; c++)
-                      padded(
-                        Text(
-                          row[c],
-                          style: bodyStyle(shown[c].format),
-                          maxLines: widths[c] < natural[c] ? 1 : null,
-                          overflow: widths[c] < natural[c]
-                              ? TextOverflow.ellipsis
-                              : null,
-                        ),
-                        c,
-                        end: shown[c].format == 'number',
-                      ),
-                  ],
-                ),
-            ],
-          ),
-        ),
-        if (rows.isEmpty) Text('Nothing to show.', style: caption),
-        if (left > 0 || more)
-          Text(
-            left > 0
-                ? 'and ${fullNumber(left.toDouble())}${more ? '+' : ''} more'
-                : 'and more',
-            style: caption,
+        for (var c = 0; c < shown.length; c++)
+          Semantics(
+            header: true,
+            child: padded(heading(c), c, end: shown[c].format == 'number'),
           ),
       ],
     );
+    final lines = [
+      for (final row in cells)
+        TableRow(
+          children: [
+            for (var c = 0; c < shown.length; c++)
+              padded(body(row[c], c), c, end: shown[c].format == 'number'),
+          ],
+        ),
+    ];
+    final line = BorderSide(color: palette.hairline);
+    Table grid(List<TableRow> children, TableBorder border) => Table(
+      columnWidths: {
+        for (final (c, width) in widths.indexed) c: FixedColumnWidth(width),
+      },
+      defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+      border: border,
+      children: children,
+    );
+    final notes = [
+      if (rows.isEmpty) Text('Nothing to show.', style: caption),
+      if (left > 0 || more)
+        Text(
+          left > 0
+              ? 'and ${fullNumber(left.toDouble())}${more ? '+' : ''} more'
+              : 'and more',
+          style: caption,
+        ),
+    ];
+    final height = this.height;
+    if (height == null) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        spacing: Space.xs,
+        children: [
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: grid([head, ...lines], TableBorder(horizontalInside: line)),
+          ),
+          ...notes,
+        ],
+      );
+    }
+    // A height: the heading stays and the rows scroll under it, the two
+    // sharing their columns' widths (and sideways scrolling); the notes
+    // under them, all within the height.
+    return SizedBox(
+      height: height,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        spacing: Space.xs,
+        children: [
+          Flexible(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  grid(
+                    [head],
+                    TableBorder(bottom: lines.isEmpty ? BorderSide.none : line),
+                  ),
+                  Flexible(
+                    child: _HandOn(
+                      child: SingleChildScrollView(
+                        // No bounce at its ends: a drag past them goes on
+                        // to the page.
+                        physics: const ClampingScrollPhysics(),
+                        child: grid(lines, TableBorder(horizontalInside: line)),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          ...notes,
+        ],
+      ),
+    );
   }
+}
+
+/// Around a scroll inside the page (a table's rows): a drag that goes past
+/// its end carries on scrolling the page, and lets it glide on when let go,
+/// as a scroll in a scroll does on iOS. Flutter's scrolls don't hand on by
+/// themselves, so a phone's page would stay put under a finger on the rows.
+class _HandOn extends StatefulWidget {
+  const _HandOn({required this.child});
+
+  /// A vertical scroll with clamping physics, which tells of a drag past
+  /// its ends.
+  final Widget child;
+
+  @override
+  State<_HandOn> createState() => _HandOnState();
+}
+
+class _HandOnState extends State<_HandOn> {
+  /// Whether this drag has scrolled the page.
+  bool _handed = false;
+
+  ScrollPosition? get _page =>
+      Scrollable.maybeOf(context, axis: Axis.vertical)?.position;
+
+  bool _on(ScrollNotification note) {
+    if (note.depth != 0 || note.metrics.axis != Axis.vertical) return false;
+    switch (note) {
+      case ScrollStartNotification():
+        _handed = false;
+      case OverscrollNotification(:final overscroll, dragDetails: _?):
+        final page = _page;
+        if (page == null || !page.hasContentDimensions) break;
+        final to = (page.pixels + overscroll).clamp(
+          page.minScrollExtent,
+          page.maxScrollExtent,
+        );
+        if (to != page.pixels) {
+          page.jumpTo(to);
+          _handed = true;
+        }
+      case ScrollEndNotification(:final dragDetails?) when _handed:
+        _handed = false;
+        if (_page case final ScrollPositionWithSingleContext page) {
+          page.goBallistic(-(dragDetails.primaryVelocity ?? 0));
+        }
+      default:
+    }
+    return false;
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      NotificationListener<ScrollNotification>(
+        onNotification: _on,
+        child: widget.child,
+      );
 }

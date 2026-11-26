@@ -175,13 +175,25 @@ class _PairingWaitViewState extends State<PairingWaitView> {
                         const SizedBox(height: Space.xl),
                         if (_commandShown) ...[
                           Text(
-                            'No screen on $machine? Run this there:',
+                            'No screen on $machine? Run this in a terminal '
+                            'there:',
                             style: TextStyles.body.copyWith(
                               color: palette.textMuted,
                             ),
                           ),
                           const SizedBox(height: Space.s),
                           AllowCommand(allowCommand(wait)),
+                          // Without a terminal (ssh without -t), a
+                          // Claktory that has devices refuses it (Matt's
+                          // case, Fugo's ruling 35297).
+                          const SizedBox(height: Space.s),
+                          Text(
+                            'Over SSH, connect with ssh -t so it runs in a '
+                            'terminal.',
+                            style: TextStyles.body.copyWith(
+                              color: palette.textMuted,
+                            ),
+                          ),
                         ] else
                           Align(
                             alignment: AlignmentDirectional.centerStart,

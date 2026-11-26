@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::clock::now_ms;
 use crate::compaction::{COMPACTION_PROMPT, Reason, extract_summary, latest_context_tokens, summary_message};
 use crate::errors::Error;
-use crate::guard::{ResponsePolicy, guard_responses, recoverable_response};
+use crate::guard::{ResponsePolicy, guard_responses, lasting_outage, recoverable_response};
 use crate::reasoning::{coalesce_history, coalesce_reasoning};
 use crate::schema::validate_tool_arguments;
 use crate::secrets::Secrets;
@@ -69,6 +69,17 @@ pub type WaitOut = Arc<dyn Fn(Option<u64>, String) -> BoxFuture<bool> + Send + S
 /// in place of the error when there's something better.
 pub type WaitNetwork = Arc<dyn Fn(String) -> BoxFuture<Result<(), Option<String>>> + Send + Sync>;
 
+/// How an agent waits out its provider when its answers keep failing in a
+/// way that passes (an overload, a 5xx, a rate limit that isn't the
+/// account's usage, an answer cut short), after the quick retries (#490):
+/// as `WaitNetwork`, the text being the error, with how long the provider
+/// asked to wait at least (its Retry-After, ms) when it said.
+pub type WaitProvider = Arc<dyn Fn(String, Option<u64>) -> BoxFuture<Result<(), Option<String>>> + Send + Sync>;
+
+/// The longest a provider's Retry-After holds a quick retry back: the
+/// longest wait for a provider (#490).
+const RETRY_AFTER_MOST_MS: u64 = 15 * 60 * 1000;
+
 /// Whether a failed response is the connection rather than the provider's
 /// answer: no network, a dropped connection, a request that timed out.
 fn connection_lost(error: &str) -> bool {
@@ -78,6 +89,9 @@ fn connection_lost(error: &str) -> bool {
     });
     LOST.is_match(error.trim())
 }
+
+/// The failure of an answer whose stream ended without one.
+const STREAM_CUT: &str = "The model's answer stream ended without a terminal response";
 
 /// What a new context starts with: its system prompt and tools.
 pub struct NewContext {
@@ -219,6 +233,7 @@ pub struct Agent {
     secrets: Option<Secrets>,
     wait_out: Option<WaitOut>,
     wait_network: Option<WaitNetwork>,
+    wait_provider: Option<WaitProvider>,
     listeners: Vec<Listener>,
     active: AbortHandle,
     detaching: DetachHandle,
@@ -274,6 +289,7 @@ impl Agent {
             secrets: options.secrets,
             wait_out: None,
             wait_network: None,
+            wait_provider: None,
             listeners: Vec::new(),
             active: AbortHandle::default(),
             detaching: DetachHandle::default(),
@@ -297,6 +313,12 @@ impl Agent {
     /// of failing after the quick retries.
     pub fn wait_network_with(&mut self, wait: WaitNetwork) {
         self.wait_network = Some(wait);
+    }
+
+    /// Lets the agent wait out its provider's passing failures, instead of
+    /// failing after the quick retries.
+    pub fn wait_provider_with(&mut self, wait: WaitProvider) {
+        self.wait_provider = Some(wait);
     }
 
     pub fn abort_handle(&self) -> AbortHandle {
@@ -374,8 +396,13 @@ impl Agent {
             }
             _ => {}
         }
-        for listener in &self.listeners {
-            listener(event.clone()).await?;
+        // The last listener gets the event itself: a streamed piece carries
+        // the whole message so far, twice (#454).
+        if let Some((last, others)) = self.listeners.split_last() {
+            for listener in others {
+                listener(event.clone()).await?;
+            }
+            last(event).await?;
         }
         Ok(())
     }
@@ -547,8 +574,11 @@ impl Agent {
     /// How long to wait before sending a failed request again, if its failure is transient and retries remain.
     fn retry_delay(&self, response: &AssistantMessage, attempt: u32, token: &CancellationToken) -> Option<Duration> {
         let transient = response.stop_reason == StopReason::Error && response.error_message.as_deref().is_some_and(recoverable_response);
+        // At least as long as the provider asked (Retry-After), up to the
+        // longest wait for a provider.
+        let asked = crate::accounts::retry_after(response).unwrap_or(0).min(RETRY_AFTER_MOST_MS);
         (transient && attempt <= self.policy.max_recoveries && !token.is_cancelled())
-            .then(|| Duration::from_millis(self.policy.retry_delay_ms * u64::from(attempt)))
+            .then(|| Duration::from_millis((self.policy.retry_delay_ms * u64::from(attempt)).max(asked)))
     }
 
     /// Waits out `response`'s failure when it's for want of an account with
@@ -580,8 +610,10 @@ impl Agent {
         let mut model = self.state.model.clone();
         // It waited for the network this step: a request that still can't
         // connect goes back to waiting without the quick retries, which
-        // were tried before the first wait.
+        // were tried before the first wait. The same for a provider whose
+        // answers still fail.
         let mut offline = false;
+        let mut provider_down = false;
         loop {
             let mut message = self.stream_assistant_response(&model, context, token).await?;
             attempt += 1;
@@ -628,27 +660,46 @@ impl Agent {
                 attempt = 0;
                 continue;
             }
-            let lost = message.stop_reason == StopReason::Error && message.error_message.as_deref().is_some_and(connection_lost);
-            let retry = if offline && lost { None } else { self.retry_delay(&message, attempt, token) };
+            let failed = if message.stop_reason == StopReason::Error { message.error_message.as_deref() } else { None };
+            let lost = failed.is_some_and(connection_lost);
+            // A failure that passes, not the connection's: an overload, a
+            // server error, a rate limit, an answer cut short (#490).
+            // A refusal for the account's usage or credit isn't one: that
+            // waits on the account (`wait_out`), or fails.
+            let passing = !lost && failed.is_some_and(lasting_outage) && crate::accounts::none_left(&message).is_none();
+            let retry = if (offline && lost) || (provider_down && passing) { None } else { self.retry_delay(&message, attempt, token) };
             let Some(delay) = retry else {
                 // Still no connection after the quick retries: wait for the
-                // network, then ask again (#364 O2).
-                if let Some(wait) = self.wait_network.clone()
+                // network, then ask again (#364 O2). Still failing: wait out
+                // the provider, then ask again (#490).
+                let asked = crate::accounts::retry_after(&message);
+                let wait: Option<WaitProvider> = if lost {
+                    self.wait_network.clone().map(|wait| -> WaitProvider { Arc::new(move |why, _| wait(why)) })
+                } else if passing {
+                    self.wait_provider.clone()
+                } else {
+                    None
+                };
+                if let Some(wait) = wait
                     && model.id == self.state.model.id
-                    && lost
                     && !token.is_cancelled()
                 {
                     context.pop();
                     self.emit(AgentEvent::Waiting { message: assistant(message.clone()), until_ms: None }).await?;
                     let why = message.error_message.clone().unwrap_or_default();
                     let waited = tokio::select! {
-                        waited = wait(why) => waited,
+                        waited = wait(why, asked) => waited,
                         () = token.cancelled() => return Err(Error::Aborted),
                     };
                     match waited {
                         Ok(()) => {
-                            tracing::info!("waited for the network");
-                            offline = true;
+                            if lost {
+                                tracing::info!("waited for the network");
+                                offline = true;
+                            } else {
+                                tracing::info!("waited out the provider");
+                                provider_down = true;
+                            }
                             attempt = 0;
                             self.take_inbox(context, produced).await?;
                             model = self.state.model.clone();
@@ -820,19 +871,36 @@ impl Agent {
                     }
                     return Ok(message);
                 }
+                // The context's message stays the start's until the end
+                // replaces it: nothing reads it before. So each piece copies
+                // the message so far once, not twice (#454).
                 event => {
                     if added {
                         let partial = event.message().clone();
-                        if let Some(last) = context.last_mut() {
-                            *last = assistant(partial.clone());
-                        }
                         self.emit(AgentEvent::MessageUpdate { message: assistant(partial), assistant_message_event: Box::new(event) })
                             .await?;
                     }
                 }
             }
         }
-        Err(Error::Other("stream ended without a terminal response".into()))
+        // It ended without an answer or an error: a failed answer, retried
+        // and waited out as a provider's passing failure (#490).
+        let started = match context.last() {
+            Some(Message::Assistant(started)) if added => Some(started.clone()),
+            _ => None,
+        };
+        let mut message = started.unwrap_or_else(|| crate::stream::pending_message(model));
+        message.stop_reason = StopReason::Error;
+        message.error_message = Some(STREAM_CUT.into());
+        if added {
+            if let Some(last) = context.last_mut() {
+                *last = assistant(message.clone());
+            }
+        } else {
+            context.push(assistant(message.clone()));
+            self.emit(AgentEvent::MessageStart { message: assistant(message.clone()) }).await?;
+        }
+        Ok(message)
     }
 
     async fn run_tool_calls(&mut self, calls: &[Call], token: &CancellationToken, truncated: bool) -> Result<(Vec<Message>, bool), Error> {

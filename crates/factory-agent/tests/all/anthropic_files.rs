@@ -1,7 +1,8 @@
 //! #382: an image read since goes to Anthropic once, as a file, and every
 //! later request names it; what a request sent never changes after (an
 //! image sent inline stays inline), a file Anthropic lost is uploaded again
-//! with one retry, and an account whose uploads are refused goes inline.
+//! with one retry, the others staying files, and an account whose uploads
+//! are refused goes inline.
 
 use std::sync::Arc;
 
@@ -41,7 +42,7 @@ fn model(server: &Server) -> Model {
 
 fn image(bytes: &[u8], digest: Option<&str>) -> ToolResultPart {
     ToolResultPart::Image {
-        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        data: base64::engine::general_purpose::STANDARD.encode(bytes).into(),
         mime_type: "image/png".into(),
         digest: digest.map(str::to_owned),
     }
@@ -146,12 +147,91 @@ async fn another_account_gets_its_own_upload() {
     assert_eq!((sources(&requests[1].body), sources(&requests[3].body)), (vec![json!("file_a")], vec![json!("file_b")]));
 }
 
+fn not_found(message: &str) -> Served {
+    served_json(404, json!({"type": "error", "error": {"type": "not_found_error", "message": message}}))
+}
+
 #[tokio::test]
-async fn a_file_anthropic_no_longer_has_sends_the_image_inline_once_and_for_good() {
-    // Another conversation with the same image let go of it, say.
+async fn a_lost_file_is_uploaded_again_and_the_others_stay_files() {
+    // Another conversation with the same image let go of it, say (#490:
+    // all three went inline for good, and every request after was 47.7 MB).
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join("anthropic-files.jsonl");
+    let files = Arc::new(ImageFiles::new(Some(path.clone())));
+    let served = vec![uploaded("file_1"), uploaded("file_2"), uploaded("file_3"), hello(), not_found("File not found: file_2"), uploaded("file_4"), hello(), hello(), hello()];
+    let server = serve(served).await;
+    let shots = || vec![image(b"one", Some("d1")), image(b"two", Some("d2")), image(b"three", Some("d3"))];
+    ask(&server, context(shots()), options(&files, "anthropic/1")).await;
+    ask(&server, context(shots()), options(&files, "anthropic/1")).await;
+    ask(&server, context(shots()), options(&files, "anthropic/1")).await;
+    // After a restart, the same files.
+    ask(&server, context(shots()), options(&Arc::new(ImageFiles::new(Some(path))), "anthropic/1")).await;
+    let requests = server.requests.lock().clone();
+    assert_eq!(
+        paths(&server),
+        [
+            "POST /v1/files",
+            "POST /v1/files",
+            "POST /v1/files",
+            "POST /v1/messages",
+            "POST /v1/messages",
+            "POST /v1/files",
+            "POST /v1/messages",
+            "POST /v1/messages",
+            "POST /v1/messages"
+        ]
+    );
+    assert!(requests[5].raw.contains("\r\n\r\ntwo\r\n"), "the lost one is uploaded again: {}", requests[5].raw);
+    let sent: Vec<Vec<Value>> = [3, 4, 6, 7, 8].iter().map(|index| sources(&requests[*index].body)).collect();
+    let before = vec![json!("file_1"), json!("file_2"), json!("file_3")];
+    let after = vec![json!("file_1"), json!("file_4"), json!("file_3")];
+    assert_eq!(sent, [before.clone(), before, after.clone(), after.clone(), after]);
+}
+
+#[tokio::test]
+async fn each_lost_file_named_in_turn_is_uploaded_again_once() {
     let files = Arc::new(ImageFiles::new(None));
-    let lost = served_json(404, json!({"type": "error", "error": {"type": "not_found_error", "message": "File not found: file_1"}}));
-    let server = serve(vec![uploaded("file_1"), hello(), lost, hello(), uploaded("file_2"), hello()]).await;
+    let served = vec![
+        uploaded("file_1"),
+        uploaded("file_2"),
+        hello(),
+        not_found("File not found: file_1"),
+        uploaded("file_3"),
+        not_found("File not found: file_2"),
+        uploaded("file_4"),
+        hello(),
+    ];
+    let server = serve(served).await;
+    let shots = || vec![image(b"one", Some("d1")), image(b"two", Some("d2"))];
+    ask(&server, context(shots()), options(&files, "anthropic/1")).await;
+    ask(&server, context(shots()), options(&files, "anthropic/1")).await;
+    let requests = server.requests.lock().clone();
+    assert_eq!(requests.len(), 8, "{:?}", paths(&server));
+    assert_eq!(sources(&requests[5].body), [json!("file_3"), json!("file_2")]);
+    assert_eq!(sources(&requests[7].body), [json!("file_3"), json!("file_4")]);
+}
+
+#[tokio::test]
+async fn a_file_lost_again_right_after_its_upload_sends_the_images_inline_for_good() {
+    let files = Arc::new(ImageFiles::new(None));
+    let served =
+        vec![uploaded("file_1"), hello(), not_found("File not found: file_1"), uploaded("file_2"), not_found("File not found: file_2"), hello(), hello()];
+    let server = serve(served).await;
+    let shot = || image(b"shot", Some("d1"));
+    ask(&server, context(vec![shot()]), options(&files, "anthropic/1")).await;
+    ask(&server, context(vec![shot()]), options(&files, "anthropic/1")).await;
+    // No loop: inline from then on, and the account's new images too.
+    ask(&server, context(vec![shot(), image(b"next", Some("d2"))]), options(&files, "anthropic/1")).await;
+    let requests = server.requests.lock().clone();
+    assert_eq!(requests.len(), 7, "{:?}", paths(&server));
+    assert_eq!(sources(&requests[5].body), [json!("inline")]);
+    assert_eq!(sources(&requests[6].body), [json!("inline"), json!("inline")]);
+}
+
+#[tokio::test]
+async fn a_file_refusal_naming_no_file_sends_the_image_inline_once_and_for_good() {
+    let files = Arc::new(ImageFiles::new(None));
+    let server = serve(vec![uploaded("file_1"), hello(), not_found("File not found"), hello(), uploaded("file_2"), hello()]).await;
     let shot = || image(b"shot", Some("d1"));
     ask(&server, context(vec![shot()]), options(&files, "anthropic/1")).await;
     ask(&server, context(vec![shot()]), options(&files, "anthropic/1")).await;

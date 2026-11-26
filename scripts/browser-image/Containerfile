@@ -1,0 +1,12 @@
+# Claktory's browser on Mac (#435), one release's image: the base (its
+# digest in base.txt) plus that release's runner, the linux-aarch64 static
+# factoryd, and the entrypoint. Built by scripts/browser-image.sh release.
+ARG BASE
+FROM ${BASE}
+ARG VERSION
+COPY --chmod=0755 runner /opt/claktory-browser/runner
+COPY --chmod=0755 entry.sh /usr/local/sbin/claktory-browser-entry
+LABEL org.opencontainers.image.source=https://github.com/claktor/claktory \
+      org.opencontainers.image.version=${VERSION} \
+      org.opencontainers.image.description="Claktory's agent browser"
+ENTRYPOINT ["/usr/local/sbin/claktory-browser-entry"]

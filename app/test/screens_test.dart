@@ -3,6 +3,7 @@ import 'package:factory_app/layout.dart' show leaves;
 import 'package:factory_app/map.dart';
 import 'package:factory_app/marketplace.dart';
 import 'package:factory_app/monitors_overview.dart';
+import 'package:factory_app/pipes.dart' show PipeSettingsForm;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/screens.dart';
 import 'package:factory_app/settings_view.dart';
@@ -151,6 +152,45 @@ void main() {
     harness.backend.screenRequested(request('agent', 'gone'));
     expect(answer(harness).opened, isFalse);
     harness.backend.screenRequested(request('tasks'));
+    expect(answer(harness).opened, isFalse);
+  });
+
+  testWidgets('a pipe opens, and its settings (#471 G9)', (tester) async {
+    final harness = await showMac(tester);
+    harness.backend.workspace.apply(
+      harness.backend.workspace.workspace.deepCopy()
+        ..pipes.add(
+          Pipe(
+            id: 'pipe1',
+            name: 'Website',
+            projectId: 'p1',
+            state: PipeState.PIPE_STATE_OPEN,
+          ),
+        ),
+    );
+    await settle(tester);
+    await touch(tester);
+    harness.backend.screenRequested(request('pipe', 'pipe1'));
+    await settle(tester);
+    expect(answer(harness).opened, isTrue);
+    expect(
+      harness.backend.sent.any((m) => m.selectPipe.pipeId == 'pipe1'),
+      isTrue,
+    );
+
+    harness.backend.screenRequested(request('pipe_settings', 'pipe1'));
+    await settle(tester);
+    expect(answer(harness).opened, isTrue);
+    expect(find.byType(PipeSettingsForm), findsOneWidget);
+    // Asked again while it's up: it stays the one form.
+    harness.backend.screenRequested(request('pipe_settings', 'pipe1'));
+    await settle(tester);
+    expect(find.byType(PipeSettingsForm), findsOneWidget);
+
+    // A pipe this Claktory doesn't have.
+    harness.backend.screenRequested(request('pipe', 'gone'));
+    expect(answer(harness).opened, isFalse);
+    harness.backend.screenRequested(request('pipe_settings', 'gone'));
     expect(answer(harness).opened, isFalse);
   });
 

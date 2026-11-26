@@ -169,3 +169,31 @@ async fn agents_open_a_screen_in_the_app_the_person_is_using() {
     }
     assert!(asked.lock().expect("asked").is_empty());
 }
+
+/// #471 G9: an agent opens a pipe, or its settings, named only as this side
+/// named it; another project's pipe only for an admin agent.
+#[tokio::test]
+async fn agents_open_a_pipe_of_their_project() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_project("Other", &dir.join("other"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Lead", "")).await;
+    let on = v1::ExtensionChange { id: "highlight".into(), enabled: Some(true), ..Default::default() };
+    let turn_on = v1::UpdateAgent { agent_id: "lead".into(), extension: Some(on), ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(turn_on)).await;
+    apply_request(&mut client, &mut view, select("lead")).await;
+    let website = factoryd::pipes::open_for_test(&factory, "site", "Website", &["lead"], "lead", false);
+    let elsewhere = factoryd::pipes::open_for_test(&factory, "other", "Elsewhere", &[], "", false);
+
+    let said = call(&mut client, &mut view, "lead", &format!(r#"call show_screen {{"screen":"pipe","id":"{website}"}}"#)).await;
+    assert!(said.ends_with("Tell them where to find it instead: the pipe \"Website\"."), "{said}");
+    let said = call(&mut client, &mut view, "lead", &format!(r#"call show_screen {{"screen":"pipe_settings","id":"{website}"}}"#)).await;
+    assert!(said.ends_with("Tell them where to find it instead: the settings of the pipe \"Website\"."), "{said}");
+    for id in [elsewhere.as_str(), "nope"] {
+        let said = call(&mut client, &mut view, "lead", &format!(r#"call show_screen {{"screen":"pipe","id":"{id}"}}"#)).await;
+        assert!(said.contains(&format!("No pipe of yours has the id \"{id}\"")), "{said}");
+    }
+}

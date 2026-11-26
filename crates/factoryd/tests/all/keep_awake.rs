@@ -40,73 +40,84 @@ async fn keeping_the_mac_awake_is_on_for_a_desktop_asked_for_a_laptop_and_the_an
     assert!(kept.on && kept.answered, "{kept:?}");
 }
 
-/// A stand-in for the lid-closed helper: answers as told, and keeps what
-/// it was asked.
+/// A stand-in for the kernel's lid sleep: does as told, and keeps what it
+/// was asked.
 #[derive(Default)]
-struct Helper {
-    answering: std::sync::atomic::AtomicBool,
-    asked: std::sync::Mutex<Vec<factoryd::lid_closed::Op>>,
+struct Clamshell {
+    /// The bit, as set.
+    bit: std::sync::atomic::AtomicBool,
+    asked: std::sync::Mutex<Vec<bool>>,
+    refuses: std::sync::atomic::AtomicBool,
 }
 
-impl factoryd::lid_closed::Helper for Helper {
-    fn call(&self, op: factoryd::lid_closed::Op) -> Option<factoryd::lid_closed::Answer> {
-        self.asked.lock().expect("lock").push(op);
-        self.answering.load(std::sync::atomic::Ordering::Relaxed).then_some(factoryd::lid_closed::Answer {
-            contract: 1,
-            version: 1,
-            holding: op == factoryd::lid_closed::Op::Hold,
-            ..Default::default()
-        })
+impl factoryd::lid_closed::Clamshell for Clamshell {
+    fn keep_awake(&self, on: bool) -> Result<(), String> {
+        self.asked.lock().expect("lock").push(on);
+        if self.refuses.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("refused".into());
+        }
+        self.bit.store(on, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+    fn sleep_disabled(&self) -> Option<bool> {
+        Some(false)
+    }
+    fn hot(&self) -> bool {
+        false
     }
 }
 
-fn lid(on: bool, registration: v1::LidClosedRegistration) -> Request {
-    Request::SetLidClosed(v1::SetLidClosed { on, registration: registration.into(), error: String::new() })
+fn lid(on: bool) -> Request {
+    Request::SetLidClosed(v1::SetLidClosed { on, ..Default::default() })
 }
 
-/// #371: off by default; turned on from this Mac's app, it holds the Mac
-/// awake through the helper only while agents work, and lets go when they
-/// stop or it's turned off.
+/// #371: off by default; turned on from this Mac's app, it keeps a closed
+/// lid from sleeping the Mac only while agents work, and lets go when they
+/// stop or it's turned off; a bit it can't clear says the Mac can't sleep,
+/// and Needs you says so.
 #[tokio::test]
-async fn the_lid_closed_helper_holds_only_while_agents_work_and_it_is_on() {
+async fn the_lid_is_kept_from_sleeping_the_mac_only_while_agents_work_and_it_is_on() {
+    use std::sync::atomic::Ordering::Relaxed;
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
     let first = keep_awake(&view);
     assert_eq!(first.lid_closed(), v1::LidClosedState::LidClosedOff, "{first:?}");
-    if !first.lid_closed_available {
-        let refused = apply_request(&mut client, &mut view, lid(true, v1::LidClosedRegistration::Enabled)).await;
-        assert!(matches!(refused, Body::Error(ref error) if error.message.starts_with("Only a laptop")), "{refused:?}");
-    }
+    assert!(!first.lid_closed_available, "never in a test's home, as never in Claktory Dev");
+    let refused = apply_request(&mut client, &mut view, lid(true)).await;
+    assert!(matches!(refused, Body::Error(ref error) if error.message.starts_with("Only a laptop")), "{refused:?}");
 
-    let helper = std::sync::Arc::new(Helper::default());
-    factory.set_lid_closed_helper(helper.clone());
-    // Waiting for approval: nothing answers yet.
-    apply_request(&mut client, &mut view, lid(true, v1::LidClosedRegistration::RequiresApproval)).await;
-    view.follow(&mut client, |view| keep_awake(view).lid_closed() == v1::LidClosedState::LidClosedNeedsApproval).await;
-    // Approved: it answers, and holds only while Rivet works.
-    helper.answering.store(true, std::sync::atomic::Ordering::Relaxed);
-    apply_request(&mut client, &mut view, lid(true, v1::LidClosedRegistration::Enabled)).await;
+    let clamshell = std::sync::Arc::new(Clamshell::default());
+    factory.set_lid_closed_clamshell(clamshell.clone());
+    assert!(matches!(apply_request(&mut client, &mut view, lid(true)).await, Body::Ack(_)));
     view.follow(&mut client, |view| keep_awake(view).lid_closed() == v1::LidClosedState::LidClosedOn).await;
-    assert!(!keep_awake(&view).lid_closed_holding, "no agent works");
+    assert!(!keep_awake(&view).lid_closed_holding && clamshell.asked.lock().expect("lock").is_empty(), "no agent works");
     // A reply that never comes: Ops works until stopped.
     apply_request(&mut client, &mut view, create_agent("", "Ops", "")).await;
     apply_request(&mut client, &mut view, send_message("ops", "hang")).await;
     view.follow(&mut client, |view| keep_awake(view).lid_closed_holding).await;
+    assert!(clamshell.bit.load(Relaxed));
     apply_request(&mut client, &mut view, Request::StopAgent(v1::StopAgent { agent_id: "ops".into() })).await;
     view.follow(&mut client, |view| view.agent("ops").status() == v1::AgentStatus::Idle && !keep_awake(view).lid_closed_holding).await;
-    let asked = helper.asked.lock().expect("lock").clone();
-    use factoryd::lid_closed::Op;
-    assert!(asked.contains(&Op::Hold) && asked.last() == Some(&Op::Release), "held while Ops worked, then let go: {asked:?}");
+    assert!(!clamshell.bit.load(Relaxed), "cleared when the work stopped");
 
-    // Off, from anywhere: off it is, and nothing more is held.
-    apply_request(&mut client, &mut view, lid(false, v1::LidClosedRegistration::NotRegistered)).await;
+    // A clear the kernel refuses: the Mac can't sleep, whatever the setting
+    // says, with what fixes it, and Needs you notes it.
+    apply_request(&mut client, &mut view, send_message("ops", "hang")).await;
+    view.follow(&mut client, |view| keep_awake(view).lid_closed_holding).await;
+    clamshell.refuses.store(true, Relaxed);
+    apply_request(&mut client, &mut view, lid(false)).await;
+    view.follow(&mut client, |view| keep_awake(view).lid_closed() == v1::LidClosedState::LidClosedStuck).await;
+    // Named, as Needs you shows it on every device.
+    let fix = keep_awake(&view).lid_closed_fix;
+    assert!(fix.starts_with("Restart ") && fix.ends_with(" to let it sleep with the lid closed.") && !fix.contains("this Mac"), "{fix}");
+    // Cleared at a later look: it can sleep again, and it's off.
+    clamshell.refuses.store(false, Relaxed);
+    factory.keep_awake_changed();
     view.follow(&mut client, |view| keep_awake(view).lid_closed() == v1::LidClosedState::LidClosedOff).await;
-    let before = helper.asked.lock().expect("lock").len();
-    apply_request(&mut client, &mut view, send_message("ops", "again")).await;
-    view.follow(&mut client, |view| view.agent("ops").status() == v1::AgentStatus::Idle && view.agent("ops").queued_messages == 0).await;
-    assert!(!helper.asked.lock().expect("lock")[before..].contains(&Op::Hold), "off holds nothing");
+    assert!(!clamshell.bit.load(Relaxed));
+    apply_request(&mut client, &mut view, Request::StopAgent(v1::StopAgent { agent_id: "ops".into() })).await;
 }
 
 /// #371 (Fugo, 23585): turning it on is taken only from a connection
@@ -117,7 +128,7 @@ async fn the_lid_closed_helper_holds_only_while_agents_work_and_it_is_on() {
 async fn only_this_macs_own_app_turns_the_lid_closed_setting_on_over_either_way_in() {
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
-    factory.set_lid_closed_helper(std::sync::Arc::new(Helper::default()));
+    factory.set_lid_closed_clamshell(std::sync::Arc::new(Clamshell::default()));
 
     // This Mac's app through the tunnel, with the local pairing code.
     let local = crate::remote::parse(&crate::remote::local_pairing(&dir).await);
@@ -138,19 +149,19 @@ async fn only_this_macs_own_app_turns_the_lid_closed_setting_on_over_either_way_
 
     // A paired device: refused on, even though it connects from this machine.
     let (mut phone, _) = crate::remote::another_device(addr, "Phone").await;
-    match phone.request(lid(true, v1::LidClosedRegistration::Enabled)).await.body {
+    match phone.request(lid(true)).await.body {
         Body::Error(error) => assert_eq!(error.message, "Turn it on from the Mac."),
         other => panic!("expected the refusal, got {other:?}"),
     }
 
     // The Mac app over the tunnel: on.
-    assert!(matches!(apply_request(&mut mac, &mut view, lid(true, v1::LidClosedRegistration::Enabled)).await, Body::Ack(_)));
+    assert!(matches!(apply_request(&mut mac, &mut view, lid(true)).await, Body::Ack(_)));
     view.follow(&mut mac, |view| keep_awake(view).lid_closed() != v1::LidClosedState::LidClosedOff).await;
     // The paired device may turn it off.
-    phone.ok(lid(false, v1::LidClosedRegistration::Unknown)).await;
+    phone.ok(lid(false)).await;
     view.follow(&mut mac, |view| keep_awake(view).lid_closed() == v1::LidClosedState::LidClosedOff).await;
     // And the loopback port's client, this Mac's too, turns it on again.
     let (mut script, workspace, _) = Client::connect(addr).await;
     let mut seen = View { workspace, ..View::default() };
-    assert!(matches!(apply_request(&mut script, &mut seen, lid(true, v1::LidClosedRegistration::Enabled)).await, Body::Ack(_)));
+    assert!(matches!(apply_request(&mut script, &mut seen, lid(true)).await, Body::Ack(_)));
 }

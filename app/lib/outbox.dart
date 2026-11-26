@@ -165,6 +165,11 @@ class Outbox extends ChangeNotifier {
   /// The most sent in one chunk.
   static const chunk = 1024 * 1024;
 
+  /// A message or its files are still on their way, including time spent
+  /// reading files and waiting for the final acknowledgement. Failed or
+  /// disconnected messages wait for a retry; they are not an active send.
+  bool get sending => _messages.any((message) => !message.failed);
+
   /// [agentId]'s, oldest first.
   List<Outgoing> of(String agentId) => [
     for (final message in _messages)

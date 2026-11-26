@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
@@ -233,10 +234,29 @@ class RenderTimeFoot extends RenderBox
     );
     final caret = paragraph.getOffsetForCaret(end, Rect.zero);
     final height = paragraph.getFullHeightForCaret(end);
+    // How far the last line reaches on screen, which isn't where its text
+    // ends logically when it changes direction: a run the person reversed
+    // (U+202E) would otherwise run under the time (Sale).
+    var dx = caret.dx;
+    // Each box the height of its line, so runs in another font (Hebrew or
+    // Arabic from a fallback font, taller or shorter) are on it too (Sale,
+    // row 123).
+    final boxes = paragraph.getBoxesForSelection(
+      TextSelection(baseOffset: 0, extentOffset: end.offset),
+      boxHeightStyle: ui.BoxHeightStyle.max,
+    );
+    if (boxes.isNotEmpty) {
+      // The last line: whatever reaches below the top of its lowest box.
+      final top = boxes.map((box) => box.top).reduce(math.max);
+      final line = boxes.where((box) => box.bottom > top + 1);
+      dx = _textDirection == TextDirection.ltr
+          ? line.map((box) => box.right).reduce(math.max)
+          : line.map((box) => box.left).reduce(math.min);
+    }
     final transform = paragraph.getTransformTo(_content);
     final corner = MatrixUtils.transformPoint(
       transform,
-      Offset(caret.dx, caret.dy + height),
+      Offset(dx, caret.dy + height),
     );
     return (corner.dx, corner.dy);
   }

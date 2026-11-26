@@ -45,6 +45,18 @@ class Sight {
     _channel.setMethodCallHandler(null);
   }
 
+  /// The person's pointer is over the window, so it's on screen, whatever
+  /// the Mac last said: its report goes stale (flutter#155977), and a
+  /// window uncovered while another app is in front can stay "unseen"
+  /// until it's clicked (friend bugs #31 and #40). The Mac is told, so it
+  /// says so again once the window really is covered.
+  static void pointed() {
+    if (shown.value) return;
+    shown.value = true;
+    if (!_started) return;
+    _channel.invokeMethod<Object?>('seen').catchError((Object _) => null);
+  }
+
   static void _take(Object? state) {
     if (state is! Map) return;
     if (state['shown'] case final bool value) shown.value = value;
@@ -55,7 +67,8 @@ class Sight {
 /// Stops everything below that moves by itself while no one can see the
 /// window ([TickerMode], which the working waves, the characters, the caret
 /// and every animation follow), and passes the Mac's Reduce motion on as
-/// [MediaQueryData.disableAnimations].
+/// [MediaQueryData.disableAnimations]. The pointer moving over the window
+/// counts as seen ([Sight.pointed]).
 class SightScope extends StatelessWidget {
   const SightScope({super.key, required this.child});
 
@@ -77,6 +90,14 @@ class SightScope extends StatelessWidget {
         ),
       );
     },
-    child: child,
+    // Seen by the pointer, never taking it: everything below gets it as
+    // before.
+    child: Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerHover: (_) => Sight.pointed(),
+      onPointerDown: (_) => Sight.pointed(),
+      onPointerSignal: (_) => Sight.pointed(),
+      child: child,
+    ),
   );
 }

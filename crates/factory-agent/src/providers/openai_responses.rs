@@ -8,8 +8,8 @@ use crate::providers::{push, set_response_id, set_stop_reason, tool_text, toolca
 use crate::stream::{EventSink, LlmContext};
 use crate::tools::ToolSpec;
 use crate::types::{
-    AssistantMessage, AssistantPart, Cost, Message, Model, StopReason, StreamEvent, ToolResultMessage, ToolResultPart, Usage, UserContent,
-    UserMessage, UserPart,
+    AssistantMessage, AssistantPart, Cost, IMAGE_GONE, ImageData, Message, Model, StopReason, StreamEvent, ToolResultMessage, ToolResultPart,
+    Usage, UserContent, UserMessage, UserPart,
 };
 use crate::usage::calculate_cost;
 
@@ -271,8 +271,13 @@ fn parse_text_signature(signature: Option<&str>) -> Option<(String, Option<Strin
     Some((signature.to_owned(), None))
 }
 
-fn responses_image(data: &str, mime_type: &str) -> Value {
-    json!({"type": "input_image", "detail": "auto", "image_url": format!("data:{mime_type};base64,{data}")})
+/// An image inline, its base64 read now when it's a file; what's said in
+/// its place when that can't be read.
+fn responses_image(data: &ImageData, mime_type: &str) -> Value {
+    match data.base64() {
+        Some(data) => json!({"type": "input_image", "detail": "auto", "image_url": format!("data:{mime_type};base64,{data}")}),
+        None => json!({"type": "input_text", "text": IMAGE_GONE}),
+    }
 }
 
 fn tool_result_output(model: &Model, content: &[ToolResultPart]) -> Value {
@@ -313,8 +318,13 @@ pub(super) enum UserMessageDialect {
     Chat,
 }
 
-pub(super) fn chat_image(data: &str, mime_type: &str) -> Value {
-    json!({"type": "image_url", "image_url": {"url": format!("data:{mime_type};base64,{data}")}})
+/// An image inline, its base64 read now when it's a file; what's said in
+/// its place when that can't be read.
+pub(super) fn chat_image(data: &ImageData, mime_type: &str) -> Value {
+    match data.base64() {
+        Some(data) => json!({"type": "image_url", "image_url": {"url": format!("data:{mime_type};base64,{data}")}}),
+        None => json!({"type": "text", "text": IMAGE_GONE}),
+    }
 }
 
 pub(super) fn user_message(user: &UserMessage, dialect: UserMessageDialect) -> Option<Value> {

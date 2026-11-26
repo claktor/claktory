@@ -651,6 +651,54 @@ pub struct EndpointsSet {
     pub count: usize,
 }
 
+/// `POST /v1/relay/token` (#450): a token for Claktory's relays, bound to
+/// the Claktory's endpoint `endpoint_id` (64 hex characters).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RelayTokenRequest {
+    pub endpoint_id: String,
+}
+
+/// A relay token and when it stops working (unix seconds). The Claktory
+/// gives it to Claktory's relays as `Authorization: Bearer <token>`; it
+/// fetches another before it's within 3 days of `expires_at`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RelayToken {
+    pub token: String,
+    pub expires_at: i64,
+}
+
+/// How long a relay token works, in seconds.
+pub const RELAY_TOKEN_LIFETIME: i64 = 7 * 86_400;
+/// What a relay token's signature covers before its payload, so the key
+/// never signs anything another protocol could take for its own.
+pub const RELAY_TOKEN_CONTEXT: &[u8] = b"claktory-relay-token-v1\0";
+
+/// A relay token's payload, exactly as it's signed: JSON with `v` 1, the
+/// endpoint `e` (64 lower-case hex), the opaque account `a` (32 lower-case
+/// hex), and when it was made and stops working, in unix seconds.
+pub fn relay_token_payload(endpoint: &str, account: &str, issued: i64, expires: i64) -> String {
+    format!(r#"{{"v":1,"e":"{endpoint}","a":"{account}","iat":{issued},"exp":{expires}}}"#)
+}
+
+/// A relay token: base64url(payload) "." base64url(Ed25519 signature of
+/// `RELAY_TOKEN_CONTEXT` and the payload's bytes), unpadded.
+pub fn sign_relay_token(key: &SigningKey, payload: &[u8]) -> String {
+    let mut message = RELAY_TOKEN_CONTEXT.to_vec();
+    message.extend_from_slice(payload);
+    format!("{}.{}", b64(payload), b64(key.sign(&message).to_bytes()))
+}
+
+/// A relay token's payload, if `key` signed it (its fields unchecked).
+pub fn open_relay_token(key: &VerifyingKey, token: &str) -> Option<Vec<u8>> {
+    let (payload, signature) = token.split_once('.')?;
+    let (payload, signature) = (unb64(payload)?, unb64(signature)?);
+    let signature = Signature::from_slice(&signature).ok()?;
+    let mut message = RELAY_TOKEN_CONTEXT.to_vec();
+    message.extend_from_slice(&payload);
+    key.verify_strict(&message, &signature).ok()?;
+    Some(payload)
+}
+
 /// `POST /v1/move`, signed with the old token and key: the moved Claktory's new ones.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MoveRequest {
@@ -712,6 +760,30 @@ pub struct DeviceSignInStart {
     pub name: String,
     pub platform: String,
     pub version: String,
+}
+
+/// `POST /v1/devices/vouch` (#529), signed by a signed-in Claktory: it
+/// vouches for the app on its own computer, which then signs in as a device
+/// with the code it's given, no email sent.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeviceVouch {
+    /// The app's account key (Ed25519 public, base64url), as sign-in/start's:
+    /// the code works only for it.
+    pub account_key: String,
+    /// The device's name: "Matt's MacBook Pro".
+    pub name: String,
+    pub platform: String,
+    pub version: String,
+}
+
+/// The answer to `POST /v1/devices/vouch`: what the app gives
+/// sign-in/verify, signed by the key vouched for. The code works once,
+/// for `expires_in` seconds.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DeviceVouched {
+    pub request_id: String,
+    pub code: String,
+    pub expires_in: i64,
 }
 
 /// `POST /v1/devices/sign-in/verify`, signed by the account key that started it.

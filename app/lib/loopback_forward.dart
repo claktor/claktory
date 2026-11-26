@@ -118,6 +118,7 @@ class LoopbackForwards extends ChangeNotifier {
   LoopbackForwards({
     required this.remote,
     required this.forward,
+    this.forwardTo,
     this.lifetime = const Duration(minutes: 10),
   });
 
@@ -127,6 +128,10 @@ class LoopbackForwards extends ChangeNotifier {
 
   /// Forwards one port (throws [ForwardFailure]).
   final Future<PortForward> Function(int port) forward;
+
+  /// Forwards a port of this device to another, `target`, on the Claktory's
+  /// machine (throws [ForwardFailure]): for websites shared over pipes.
+  final Future<PortForward> Function(int port, int target)? forwardTo;
 
   /// How long a flow's ports are forwarded at most.
   final Duration lifetime;
@@ -198,11 +203,117 @@ class LoopbackForwards extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Stops every flow's forwards.
-  Future<void> stopAll() async {
+  /// Stops every flow's forwards (the sidebar's Stop); shared websites'
+  /// stay.
+  Future<void> stopFlows() async {
     for (final flow in [..._flows]) {
       await stop(flow);
     }
+  }
+
+  /// Stops everything forwarded: the flows' ports and the shared websites'
+  /// (the tunnel closed, or the Claktory was forgotten).
+  Future<void> stopAll() async {
+    await stopFlows();
+    for (final id in [..._shares.keys]) {
+      await _stopShare(id);
+    }
+    _shareProblems.clear();
+  }
+
+  // Websites a pipe's peer shares, opened on this device (#503). Each is
+  // forwarded from a port of this device's own to the share's port on the
+  // Claktory's machine, for as long as the share lasts there (not for
+  // [lifetime]): a page left open keeps working, and so does a bookmark,
+  // since the port here is the same each time ([sharePortFor]).
+
+  final _shares = <String, ({int target, PortForward forward})>{};
+  final _shareStarts = <String, Future<int>>{};
+  final _shareProblems = <String, ForwardFailure>{};
+
+  /// The port [shareId] is forwarded from on this device; null while it
+  /// isn't.
+  int? sharePort(String shareId) => _shares[shareId]?.forward.port;
+
+  /// Why [shareId] couldn't be forwarded the last time it was tried; null
+  /// when it could, or wasn't tried.
+  ForwardFailure? shareProblem(String shareId) => _shareProblems[shareId];
+
+  /// Forwards website [shareId] to [target] on the Claktory's machine,
+  /// unless it is already; the port here it's at. Throws [ForwardFailure]:
+  /// [ForwardProblem.taken] when no port near its own is free here.
+  Future<int> forwardShare(String shareId, int target) {
+    final current = _shares[shareId];
+    if (current != null && current.target == target) {
+      return Future.value(current.forward.port);
+    }
+    return _shareStarts[shareId] ??= _startShare(shareId, target).whenComplete(
+      () {
+        // Not `=> remove(…)`: whenComplete would wait for the future that
+        // returns, this one.
+        _shareStarts.remove(shareId);
+      },
+    );
+  }
+
+  Future<int> _startShare(String shareId, int target) async {
+    final forwardTo = this.forwardTo;
+    if (forwardTo == null) {
+      throw const ForwardFailure(ForwardProblem.unsupported);
+    }
+    await _stopShare(shareId);
+    final first = sharePortFor(shareId);
+    try {
+      for (var i = 0; i < _shareTries; i++) {
+        final port =
+            _sharePortsFrom + (first - _sharePortsFrom + i) % _sharePorts;
+        try {
+          final forward = await forwardTo(port, target);
+          _shares[shareId] = (target: target, forward: forward);
+          _shareProblems.remove(shareId);
+          notifyListeners();
+          return port;
+        } on ForwardFailure catch (failure) {
+          if (failure.problem != ForwardProblem.taken) rethrow;
+        }
+      }
+      throw const ForwardFailure(ForwardProblem.taken);
+    } on ForwardFailure catch (failure) {
+      _log('could not forward share $shareId: $failure');
+      _shareProblems[shareId] = failure;
+      notifyListeners();
+      rethrow;
+    }
+  }
+
+  /// Forwards exactly the shares in [wanted] (each id with its port on the
+  /// Claktory's machine): the others stop, and those not forwarded yet
+  /// start, quietly ([shareProblem] says why one couldn't).
+  Future<void> keepShares(Map<String, int> wanted) async {
+    if (!remote()) wanted = const {};
+    for (final MapEntry(key: id, value: forwarded) in [..._shares.entries]) {
+      if (wanted[id] != forwarded.target) await _stopShare(id);
+    }
+    _shareProblems.removeWhere((id, _) => !wanted.containsKey(id));
+    for (final MapEntry(key: id, value: target) in wanted.entries) {
+      if (_shares.containsKey(id) || _shareStarts.containsKey(id)) continue;
+      // Only a passing failure is tried again with each Workspace; Open
+      // tries the others again.
+      final problem = _shareProblems[id]?.problem;
+      if (problem != null && problem != ForwardProblem.failed) continue;
+      try {
+        await forwardShare(id, target);
+      } on ForwardFailure {
+        // Said by shareProblem; tried again with the next Workspace.
+      }
+    }
+  }
+
+  Future<void> _stopShare(String shareId) async {
+    final forwarded = _shares.remove(shareId);
+    if (forwarded == null) return;
+    await forwarded.forward.stop();
+    notifyListeners();
   }
 
   void _expire(Forwarding flow) {
@@ -248,6 +359,10 @@ class LoopbackForwards extends ChangeNotifier {
       unawaited(forward.stop());
     }
     _ports.clear();
+    for (final forwarded in _shares.values) {
+      unawaited(forwarded.forward.stop());
+    }
+    _shares.clear();
     super.dispose();
   }
 }
@@ -414,7 +529,7 @@ class ForwardingsLine extends StatelessWidget {
               ),
             ),
             Pressable(
-              onTap: () => unawaited(forwards.stopAll()),
+              onTap: () => unawaited(forwards.stopFlows()),
               builder: (context, hovered) => Text(
                 'Stop',
                 style: TextStyles.caption.copyWith(
@@ -471,6 +586,50 @@ String? forwardingProblem(
   }
   final error = forwards.lastError(forwarding);
   return error.isEmpty ? null : error;
+}
+
+/// Whether this device can't open a website shared over a pipe from a
+/// Claktory on another machine yet: a phone or a tablet, whose browser
+/// takes the front, leaving the app (and what it forwards) behind.
+bool get cantOpenSharesHere => switch (defaultTargetPlatform) {
+  TargetPlatform.iOS || TargetPlatform.android => true,
+  _ => false,
+};
+
+/// Whether this device is a phone or tablet: it forwards only the shares
+/// opened on it, never all of them in the background, and has no use for a
+/// copied address, which works only while Claktory is up.
+bool get sharesOnTouchDevice => switch (defaultTargetPlatform) {
+  TargetPlatform.iOS || TargetPlatform.android => true,
+  _ => false,
+};
+
+/// Where a shared website's port on this device is looked for: the same
+/// number for the same share each time, so its address here, and a
+/// bookmark of it, keep working; away from the ports programs usually take
+/// (3000, 5173, 8080…), so it never takes one from the person's own.
+const _sharePortsFrom = 20000;
+const _sharePorts = 10000;
+
+/// How many ports on from its own a share tries before giving up.
+const _shareTries = 20;
+
+/// The port a shared website is first tried at on this device: between
+/// 20000 and 29999, from its id (FNV-1a).
+int sharePortFor(String shareId) {
+  var hash = 0x811c9dc5;
+  for (final unit in shareId.codeUnits) {
+    hash = ((hash ^ unit) * 0x01000193) & 0xffffffff;
+  }
+  return _sharePortsFrom + hash % _sharePorts;
+}
+
+/// [address] with its port [port]: a share's address as this device opens
+/// it.
+String withPort(String address, int port) {
+  final uri = Uri.tryParse(address);
+  if (uri == null || !uri.hasAuthority) return address;
+  return uri.replace(port: port).toString();
 }
 
 void _log(String message) => developer.log(message, name: 'factory.forward');

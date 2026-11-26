@@ -1555,8 +1555,42 @@ String describeWhen(Object? when) {
     return 'when $files change';
   }
   if (spec['watch'] != null) return 'when ${_string(spec['watch'])} prints';
+  if (spec['pipes'] != null) return _pipesWhen(spec['pipes'], spec['on']);
   return '';
 }
+
+/// A pipes monitor's `when` (friend bug #34): which pipes ("*", a name or
+/// id, or a list) and on which changes (all when left out), in words:
+/// "when pipe Website opens or closes", "when any pipe changes".
+String _pipesWhen(Object? pipes, Object? on) {
+  final named = [
+    for (final pipe in pipes is List ? pipes : [pipes])
+      if (_string(pipe).trim() case final name when name.isNotEmpty)
+        if (name != '*') name,
+  ];
+  final any = named.isEmpty || _list(pipes).contains('*') || pipes == '*';
+  final which = any ? 'any pipe' : 'pipe ${_or(named)}';
+  final changes = [
+    for (final change in on is List ? on : [?on])
+      switch (_string(change)) {
+        'opened' => 'opens',
+        'closed' => 'closes',
+        'paused' => 'is paused',
+        'resumed' => 'is resumed',
+        'shared' => 'has a website shared',
+        'unshared' => 'has a website stopped',
+        'online' => 'comes online',
+        'offline' => 'goes offline',
+        final other => other,
+      },
+  ];
+  return 'when $which ${changes.isEmpty ? 'changes' : _or(changes)}';
+}
+
+/// "a", "a or b", "a, b or c".
+String _or(List<String> items) => items.length < 2
+    ? items.join()
+    : '${items.sublist(0, items.length - 1).join(', ')} or ${items.last}';
 
 /// Monitor [index] of [call]: its name and when it fires.
 ({String name, String schedule, String agent}) _monitor(

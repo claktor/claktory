@@ -119,7 +119,14 @@ pub(super) fn catalog(component: &str) -> Option<Props> {
             ("decimals", super::Kind::Chart(Kind::Whole(0, 10)), false),
             ("height", super::Kind::Chart(Kind::Range(60.0, 480.0)), false),
         ],
-        "Table" => &[("data", TABLE, true), ("columns", COLUMNS, false)],
+        "Table" => &[
+            ("data", TABLE, true),
+            ("columns", COLUMNS, false),
+            // The whole table's height, as Grafana's table panel fills its
+            // place: its heading stays and its rows scroll inside. Left out,
+            // as tall as its rows.
+            ("height", super::Kind::Chart(Kind::Range(120.0, 480.0)), false),
+        ],
         // A world map, as Grafana's geomap with a country lookup: a dot at
         // each country (ISO 3166-1 alpha-2 or alpha-3 in `location`; the
         // first text column when left out) sized and colored by `value`
@@ -151,7 +158,7 @@ pub(super) fn catalog(component: &str) -> Option<Props> {
 /// Charts app may set for a newer catalog than this one, after a roll-back
 /// say. What's left out never reaches a device; known keys are still checked.
 pub(super) fn lenient(component: &str) -> bool {
-    matches!(component, "Chart" | "Stat" | "Row" | "Map")
+    matches!(component, "Chart" | "Stat" | "Row" | "Map" | "Table")
 }
 
 /// Rules across a component's properties, once each property is checked on
@@ -313,6 +320,9 @@ mod tests {
             {"id": "named", "component": "Stat", "label": {"@path": "/l"}, "value": "n/a", "spark": {"@path": "/s"}},
             {"id": "table", "component": "Table", "data": {"@path": "/usage"},
              "columns": [{"name": "day", "format": "time"}, {"name": "tokens", "title": "Tokens", "format": "number"}]},
+            {"id": "tall_title", "component": "Text", "text": "Countries", "variant": "title"},
+            {"id": "tall", "component": "Table", "data": rows, "height": 120},
+            {"id": "taller", "component": "Table", "data": rows, "height": 480},
         ]}});
         apply(&mut content, good).unwrap();
         let styled = json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [
@@ -405,6 +415,9 @@ mod tests {
             (json!({"id": "s", "component": "Stat", "label": "x", "value": 1, "spark": ["a"]}), "at most 200 numbers"),
             (json!({"id": "t", "component": "Table", "data": rows, "columns": [{"name": "day", "format": "date"}]}), "one of text"),
             (json!({"id": "t", "component": "Table", "data": rows, "columns": [{"title": "Day"}]}), "this is a string"),
+            (json!({"id": "t", "component": "Table", "data": rows, "height": 100}), "from 120 to 480"),
+            (json!({"id": "t", "component": "Table", "data": rows, "height": 481}), "from 120 to 480"),
+            (json!({"id": "t", "component": "Table", "data": rows, "height": {"@path": "/h"}}), "from 120 to 480"),
         ] {
             let error = apply(&mut content, component(wrong.clone())).unwrap_err();
             assert!(error.contains(why), "{wrong}: {error}");
@@ -459,13 +472,15 @@ mod tests {
         let chart = json!({"id": "chart", "component": "Chart", "kind": "timeseries", "data": rows, "lineWidth": 2, "glow": true, "gradient": {"x": 1}});
         let stat = json!({"id": "stat", "component": "Stat", "label": "Runs", "value": 3, "textMode": "auto", "percentChange": {"x": 1}});
         let row = json!({"id": "row", "component": "Row", "children": ["chart", "stat"], "stackBelow": 768, "wrap": "x"});
-        let message = json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [row, chart, stat]}});
+        let table = json!({"id": "table", "component": "Table", "data": rows, "height": 200, "zebra": true});
+        let message = json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [row, chart, stat, table]}});
         let Ok(Applied::Changed(sent)) = apply(&mut content, message) else { panic!("applied") };
         let sent: Value = serde_json::from_str(&sent).unwrap();
         let kept = json!([
             {"id": "row", "component": "Row", "children": ["chart", "stat"], "stackBelow": 768},
             {"id": "chart", "component": "Chart", "kind": "timeseries", "data": rows, "lineWidth": 2},
             {"id": "stat", "component": "Stat", "label": "Runs", "value": 3},
+            {"id": "table", "component": "Table", "data": rows, "height": 200},
         ]);
         assert_eq!(sent, json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": kept}}), "devices get what was kept");
         let snapshot: Value = serde_json::from_str(&content.snapshot(S)).unwrap();
@@ -474,7 +489,7 @@ mod tests {
             assert!(components.contains(component), "{component} in {components:?}");
         }
         let text = snapshot.to_string();
-        for key in ["glow", "gradient", "textMode", "percentChange", "wrap"] {
+        for key in ["glow", "gradient", "textMode", "percentChange", "wrap", "zebra"] {
             assert!(!text.contains(key), "{key} never reaches a device");
         }
 
@@ -482,7 +497,7 @@ mod tests {
         let plain = json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [{"id": "stat", "component": "Stat", "label": "Runs", "value": 4}]}});
         assert_eq!(apply(&mut content, plain.clone()), Ok(Applied::Changed(plain.to_string())));
 
-        // Leaving out is only for plain keys on those three: known keys are
+        // Leaving out is only for plain keys on those: known keys are
         // still checked, required ones still needed, and "@" keys and every
         // other component's unknown keys still refused, changing nothing.
         let component = |component: Value| json!({"version": "1.0", "updateComponents": {"surfaceId": S, "components": [component]}});
@@ -496,7 +511,7 @@ mod tests {
             (json!({"id": "r", "component": "Row", "children": [], "@foo": 1}), "has no property \"@foo\""),
             (json!({"id": "c", "component": "Column", "children": [], "stackBelow": 768}), "has no property \"stackBelow\""),
             (json!({"id": "t", "component": "Text", "text": "a", "theme": "dark"}), "has no property \"theme\""),
-            (json!({"id": "t", "component": "Table", "data": rows, "zebra": true}), "has no property \"zebra\""),
+            (json!({"id": "t", "component": "Table", "data": rows, "@zebra": true}), "has no property \"@zebra\""),
         ] {
             let before = content.snapshot(S);
             let error = apply(&mut content, component(wrong.clone())).unwrap_err();

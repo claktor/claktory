@@ -402,7 +402,8 @@ fn now(factory: &Factory) -> String {
     }
     text.push('\n');
 
-    let awake = factory.keep_awake.view();
+    let machine = factory.lock().config.claktory_name();
+    let awake = factory.keep_awake.view(&machine);
     if awake.available {
         let _ = write!(text, "Keep this Mac awake while agents work: {}", on_off(awake.on));
         if awake.laptop && !awake.answered {

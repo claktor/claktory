@@ -11,8 +11,21 @@ import '../decision.dart' show SubmitButton, commentTyped;
 import '../dictation.dart';
 import '../identity.dart';
 import '../protocol/factory/v1/factory.pb.dart';
+import '../outbox.dart' show decisionWaiting;
+import '../card_answer.dart' show CardDrafts, cardKey;
 import '../review_answer.dart'
-    show PendingReview, ReviewAnswering, ReviewWatch, finishReview;
+    show
+        PendingReview,
+        ReviewAnswering,
+        ReviewMovedOn,
+        ReviewMoves,
+        ReviewTalk,
+        ReviewWatch,
+        finishReview,
+        reviewFailure,
+        reviewHeld,
+        reviewWaits,
+        sendReview;
 import '../scope.dart';
 import '../visible_codes.dart' show proseCodes;
 import 'drawer.dart' show largeText;
@@ -55,15 +68,30 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
   /// The question waiting on the file, as the agent's entries come.
   ReviewWatch? _watch;
 
-  final _answer = TextEditingController();
+  /// What's typed, each card's own draft ([CardDrafts]): a card closed
+  /// while the bar held it leaves its words with it, never in the next
+  /// card's field, where they'd answer the wrong question (Zucchero's row
+  /// 513); kept while the app runs, wherever the card's reopened (Bruno's
+  /// Q11).
+  final _answers = <TextEditingController>{};
+
+  TextEditingController _answerFor(PendingReview ask) {
+    final field = CardDrafts.of(_watch!.backend)
+        .field(cardKey(widget.agentId, ask.ask.id));
+    if (_answers.add(field)) field.addListener(_changed);
+    return field;
+  }
+
   final _focus = FocusNode();
+
+  /// Whether the bar moved on to its card by itself.
+  final _moves = ReviewMoves();
   var _busy = false;
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    _answer.addListener(_changed);
   }
 
   void _changed() {
@@ -99,7 +127,10 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
   @override
   void dispose() {
     _watch?.dispose();
-    _answer.dispose();
+    // The drafts are the cards': they stay.
+    for (final answer in _answers) {
+      answer.removeListener(_changed);
+    }
     _focus.dispose();
     super.dispose();
   }
@@ -109,22 +140,31 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
   /// which carries out nothing. A failure keeps the words and says so
   /// under the field.
   Future<void> _send(PendingReview ask, {bool dismiss = false}) async {
-    final text = _answer.text.trim();
-    if (_busy || !dismiss && ask.ask.wantsText && text.isEmpty) return;
+    final answer = _answerFor(ask);
+    final text = answer.text.trim();
+    if (_busy || _held(ask) || !dismiss && ask.ask.wantsText && text.isEmpty) {
+      return;
+    }
     final reply = !dismiss && !ask.ask.wantsText && text.isNotEmpty;
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
-      await _watch!.backend.answerAsk(
+      final watch = _watch!;
+      // The card as the bar shows it (#428), and its talk (#492).
+      await sendReview(
+        watch.backend,
         widget.agentId,
-        ask.seq,
+        ask,
+        refresh: () => watch.refresh(ask.seq),
         text: text,
         dismiss: dismiss,
         reply: reply,
-        // The card as the person read it (#428).
-        revision: ask.ask.revision,
+        // Cut off: "Not sent yet", and it goes once the connection's back.
+        onWaiting: () {
+          if (mounted) setState(() => _error = decisionWaiting);
+        },
       );
     } on RequestFailure catch (failure) {
       unawaited(Haptics.warning());
@@ -132,9 +172,7 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
         setState(() {
           _busy = false;
           // Its agent changed it meanwhile: the bar shows the new one.
-          _error = cardChanged(failure)
-              ? failure.message
-              : "Couldn't send your answer. Try again.";
+          _error = reviewFailure(failure);
         });
       }
       return;
@@ -142,11 +180,21 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
     unawaited(dismiss ? Haptics.light() : Haptics.success());
     if (!mounted) return;
     _focus.unfocus();
-    _answer.clear();
-    setState(() => _busy = false);
+    answer.clear();
+    setState(() {
+      _busy = false;
+      _error = null;
+    });
     // Its pane closes, everywhere, and this page with it; back where the
     // person pressed Review.
     await finishReview(context, widget.agentId, widget.path);
+  }
+
+  /// A reply has [ask] wait on its agent: the bar holds, nothing to send
+  /// until the agent answers (Abbacchio's row 1325).
+  bool _held(PendingReview ask) {
+    final backend = _watch?.backend;
+    return backend == null || !reviewWaits(backend, widget.agentId, ask.seq);
   }
 
   @override
@@ -182,35 +230,38 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     final name = agent.name;
-    final typed = commentTyped(_answer);
+    final answer = _answerFor(ask);
+    final typed = commentTyped(answer);
     // Approve with nothing typed, unless the question wants words: then
     // Send, faint until there are some. A comment typed on one that
     // doesn't is a reply: Submit alone, Dismiss gone with Approve.
     final replying = typed && !ask.ask.wantsText;
+    final held = _held(ask);
+    final off = _busy || held;
     final send = replying
-        ? SubmitButton(onPressed: _busy ? null : () => unawaited(_send(ask)))
+        ? SubmitButton(onPressed: off ? null : () => unawaited(_send(ask)))
         : Button(
             label: ask.ask.wantsText ? 'Send' : 'Approve',
             primary: true,
-            onPressed: _busy || ask.ask.wantsText && !typed
+            onPressed: off || ask.ask.wantsText && !typed
                 ? null
                 : () => unawaited(_send(ask)),
           );
     final dismiss = Button(
       label: 'Dismiss',
-      onPressed: _busy ? null : () => unawaited(_send(ask, dismiss: true)),
+      onPressed: off ? null : () => unawaited(_send(ask, dismiss: true)),
     );
     final field = Semantics(
       hint: 'Return sends it to $name.',
       child: TextField(
-        controller: _answer,
+        controller: answer,
         focusNode: _focus,
         placeholder: 'Your answer to $name',
         kind: InputKind.message,
         textInputAction: TextInputAction.send,
         // Return with nothing typed does nothing: Approve is its button.
         onSubmitted: (_) {
-          if (_answer.text.trim().isEmpty) {
+          if (answer.text.trim().isEmpty) {
             _focus.requestFocus();
             return;
           }
@@ -283,6 +334,10 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
                       ],
                     ],
                   ),
+                if (_moves.movedTo(widget.agentId, ask.seq)) ...[
+                  const SizedBox(height: Space.xs),
+                  ReviewMovedOn(name: name),
+                ],
                 if (ask.ask.title.isNotEmpty) ...[
                   if (!stacked) const SizedBox(height: Space.xs),
                   // The agent's words: what reorders them shows by its code
@@ -304,11 +359,20 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
                     overflow: TextOverflow.ellipsis,
                     style: type.secondary.copyWith(color: palette.textMuted),
                   ),
+                // What was said on its card since the person saw it, the
+                // newest showing: so "Look at it again" shows what changed.
+                ReviewTalk(
+                  agentId: widget.agentId,
+                  review: ask,
+                  agent: agent,
+                  name: name,
+                  maxHeight: stacked ? 72 : 96,
+                ),
                 const SizedBox(height: Space.s),
                 // Or said: the mic puts what's said in, to check first.
                 if (stacked) ...[
                   Dictation(
-                    controller: _answer,
+                    controller: answer,
                     focusNode: _focus,
                     enabled: !_busy,
                     child: field,
@@ -325,7 +389,7 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
                   ),
                 ] else
                   Dictation(
-                    controller: _answer,
+                    controller: answer,
                     focusNode: _focus,
                     enabled: !_busy,
                     // The answer's button last, under the thumb.
@@ -339,11 +403,16 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
                     style: type.caption.copyWith(color: palette.textFaint),
                   ),
                 ],
-                if (_error case final error?) ...[
+                if (_error ?? (held ? reviewHeld(ask.ask, name) : null)
+                    case final error?) ...[
                   const SizedBox(height: Space.xs),
                   Text(
                     error,
-                    style: type.secondary.copyWith(color: palette.danger),
+                    style: type.secondary.copyWith(
+                      color: error == decisionWaiting || _error == null
+                          ? palette.textMuted
+                          : palette.danger,
+                    ),
                   ),
                 ],
               ],

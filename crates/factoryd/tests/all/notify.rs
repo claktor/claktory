@@ -271,8 +271,10 @@ async fn a_change_sets_only_its_own_settings() {
 
     // Two devices at once, each with its own switch.
     let (mut other, _, _) = Client::connect(addr).await;
-    let (first, second) =
-        tokio::join!(client.request(change(|change| change.replies = Some(false))), other.request(change(|change| change.desktop_replies = Some(true))));
+    let (first, second) = tokio::join!(
+        client.request(change(|change| change.replies = Some(false))),
+        other.request(change(|change| change.desktop_replies = Some(true)))
+    );
     assert!(matches!(first.body, Body::Ack(_)) && matches!(second.body, Body::Ack(_)), "{:?} {:?}", first.body, second.body);
     let (_client, workspace, _) = Client::connect(addr).await;
     assert_eq!(shown(&workspace), v1::NotificationSettings { replies: false, desktop_replies: true, ..expected.clone() });
@@ -328,7 +330,10 @@ async fn an_agent_that_read_a_web_page_never_puts_its_words_in_a_notification() 
     factoryd::pipes::receive_for_test(&factory, &pipe, incoming("m2", MARKER)).expect("received");
     let held = client.wait_for(notified).await;
     assert_eq!(held.kind(), NotifyKind::NeedsYou);
-    assert_eq!((held.title.as_str(), held.body.as_str()), ("Website ⇄ Marketing", "A message in Website ⇄ Marketing waits for your review"));
+    assert_eq!(
+        (held.title.as_str(), held.body.as_str()),
+        ("Website ⇄ Marketing", "A message in Website ⇄ Marketing waits for your review")
+    );
     assert_eq!(held.pipe_id, pipe);
     assert!(!format!("{held:?}").contains("MARKER") && !format!("{held:?}").contains("Ana"), "{held:?}");
 
@@ -494,4 +499,59 @@ async fn a_registered_device_gets_pushes_sealed_with_its_key_while_it_isnt_in_us
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     panic!("the handle wasn't forgotten");
+}
+
+/// Friend bug #36: when the disk turns read-only, the person hears it on
+/// every device, from what was saved while it worked: a push to each
+/// registered device, with a counter saved ahead (none used twice, after a
+/// restart or by an older version), and the connected apps.
+#[tokio::test]
+async fn a_disk_that_cant_be_written_is_told_to_every_device_without_saving_anything() {
+    use std::os::unix::fs::PermissionsExt;
+    let relay = relay().await;
+    let (dir, factory, mut client, mut view) = setup(v1::DeviceKind::Desktop).await;
+    apply_request(&mut client, &mut view, settings(|settings| settings.relay = relay.url.clone())).await;
+    let key = [7u8; 32];
+    let register = client_message::Body::RegisterNotifications(v1::RegisterNotifications {
+        handle: URL_SAFE_NO_PAD.encode([3u8; 32]),
+        key: key.to_vec(),
+        platform: v1::PushPlatform::Apns.into(),
+    });
+    assert!(matches!(apply_request(&mut client, &mut view, register).await, Body::Ack(_)));
+    // Counters are saved ahead from the start.
+    let kept = || -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(dir.join("home/remote/notifications.json")).expect("notifications.json")).expect("JSON")
+    };
+    assert_eq!(kept()["local"]["ctr"], 64, "{}", kept());
+
+    // Nothing can be written any more.
+    let remote = dir.join("home/remote");
+    std::fs::set_permissions(&remote, std::fs::Permissions::from_mode(0o500)).expect("read-only");
+    let pushed = factoryd::disk::tell(&factory, factoryd::disk::Fault::ReadOnly);
+    std::fs::set_permissions(&remote, std::fs::Permissions::from_mode(0o700)).expect("writable");
+    assert_eq!(pushed, 1);
+    let push = relay.next(1).await;
+    let (_, payload) = open(&key, &push);
+    assert_eq!((payload["kind"].as_str(), payload["ctr"].as_u64()), (Some("alert"), Some(1)));
+    assert!(payload["title"].as_str().is_some_and(|title| title.ends_with("can't save anything")), "{payload}");
+    assert!(payload["body"].as_str().is_some_and(|body| body.contains("read-only")), "{payload}");
+    assert_eq!(push["urgency"], "urgent");
+    let told = client
+        .wait_for(|body| match body {
+            Body::Notify(notify) if notify.collapse == "disk" => Some(notify.clone()),
+            _ => None,
+        })
+        .await;
+    assert!(told.urgent && told.kind() == NotifyKind::Alert, "{told:?}");
+    assert_eq!(kept()["local"]["ctr"], 64, "nothing saved");
+
+    // The next push, as after a restart, starts past what was saved ahead.
+    client.ok(client_message::Body::SendTestNotification(v1::SendTestNotification {})).await;
+    let (_, payload) = open(&key, &relay.next(2).await);
+    assert_eq!(payload["ctr"], 2, "on from memory");
+    factoryd::notify::forget_registrations_for_test(&factory);
+    client.ok(client_message::Body::SendTestNotification(v1::SendTestNotification {})).await;
+    let (_, payload) = open(&key, &relay.next(3).await);
+    assert_eq!(payload["ctr"], 65, "read again: past every counter saved ahead");
+    assert_eq!(kept()["local"]["ctr"], 128);
 }

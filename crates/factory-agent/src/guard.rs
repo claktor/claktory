@@ -28,16 +28,27 @@ impl Default for ResponsePolicy {
 }
 
 static TERMINAL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)quota|usage limit|out of credit|out of budget|billing|insufficient|unauthori[sz]ed|invalid api key|authentication")
+    Regex::new(r"(?i)quota|usage limit|out of credit|out of budget|billing|insufficient|unauthori[sz]ed|invalid api key|authentication|invalid_grant|invalid_client|refresh_token_(?:reused|expired|invalidated)|app_session_terminated")
         .unwrap_or_else(|_| unreachable!())
 });
 static RECOVERABLE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^Response guard:|websocket (error|closed|idle timeout)|socket hang up|connection (reset|closed|error)|request timed out|error decoding response body|error reading a body from connection|stream ended unexpectedly|ECONNRESET|ETIMEDOUT|fetch failed|operation was aborted|overloaded|temporarily unavailable|service unavailable|internal server error|provider finish_reason: (?:error|network_error)|upstream idle timeout|\b(?:429|500|502|503|504)\b")
+    Regex::new(r"(?i)^Response guard:|websocket (error|closed|idle timeout)|socket hang up|connection (reset|closed|error)|request timed out|error decoding response body|error reading a body from connection|stream ended unexpectedly|ECONNRESET|ETIMEDOUT|fetch failed|operation was aborted|overloaded|temporarily unavailable|service unavailable|internal server error|provider finish_reason: (?:error|network_error)|upstream idle timeout|\b(?:429|500|502|503|504|529)\b|stream (?:ended|closed)|without a terminal response|OAuth refresh failed")
         .unwrap_or_else(|_| unreachable!())
 });
 
 pub fn recoverable_response(reason: &str) -> bool {
     !TERMINAL.is_match(reason) && RECOVERABLE.is_match(reason)
+}
+
+/// A failure worth waiting out at length (#490): one that passes, unless the
+/// provider refused the request as it is (its text starts with a 4xx status
+/// other than 408, 409 or 429), which no wait changes, whatever number its
+/// text mentions.
+pub fn lasting_outage(reason: &str) -> bool {
+    let status = reason.trim_start().get(..3).filter(|code| code.bytes().all(|byte| byte.is_ascii_digit()));
+    let refused = status.is_some_and(|code| code.starts_with('4') && !matches!(code, "408" | "409" | "429"))
+        && !reason.trim_start()[3..].starts_with(|c: char| c.is_ascii_digit());
+    recoverable_response(reason) && !refused
 }
 
 /// Observe raw JSON before a permissive partial-JSON parser can salvage a broken call.

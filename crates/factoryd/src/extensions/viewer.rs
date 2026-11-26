@@ -20,7 +20,7 @@ use prost::Message as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Extension, Manifest, PromptSection, factory_tool};
+use super::{Extension, Manifest, PromptSection, agent_handler, live, tool};
 use crate::config::AgentConfig;
 use crate::factory::{Factory, Inner, RequestError};
 use crate::store::Store;
@@ -36,7 +36,7 @@ static MANIFEST: Manifest = Manifest {
     options: &[],
 };
 
-const SHOW: &str = "Show the person a file in the app, in a pane beside your conversation: text (code, Markdown, logs, CSV…), an image, a video (MP4 or QuickTime) or a PDF. Use it instead of opening apps such as Preview or a browser on this machine: the person may be using Claktory from another device. path: absolute, or relative to your working folder. kind: \"text\", \"image\", \"video\" or \"pdf\", inferred when left out. A file already open isn't opened twice; showing it again counts as opening it now. The person sets how many panes can be open beside your conversation (Settings → Display): past that, show replaces the pane opened longest ago (never the one they expanded to fill the window), and its result says which. Returns at once.";
+const SHOW: &str = "Show the person a file in the app, in a pane beside your conversation: text (code, Markdown, logs, CSV…), an image, a video (MP4 or QuickTime) or a PDF. Use it instead of opening apps such as Preview or a browser on this machine: the person may be using Claktory from another device. It doesn't send them the file: a report or file they asked to be sent, shown or notified of goes as ask_person with review, which waits in their Needs you; show only adds it beside your conversation. path: absolute, or relative to your working folder. kind: \"text\", \"image\", \"video\" or \"pdf\", inferred when left out. A file already open isn't opened twice; showing it again counts as opening it now. The person sets how many panes can be open beside your conversation (Settings → Display): past that, show replaces the pane opened longest ago (never the one they expanded to fill the window), and its result says which. Returns at once.";
 
 pub(crate) const SCHEMA: &str = "
 -- How each agent's main area is laid out (the Viewer extension): its
@@ -534,6 +534,8 @@ fn store_layout(factory: &Factory, agent: &str, root: Option<v1::ViewNode>, focu
     }
     // Panes it no longer has leave where each device was reading.
     crate::presentation::layout_changed(factory, agent);
+    // The files shown are watched (`annotations::monitor`).
+    factory.wake_loops();
     factory.broadcast_workspace(&factory.lock());
     Ok(())
 }
@@ -724,6 +726,9 @@ struct ShowArgs {
     kind: Option<String>,
 }
 
+/// How long show waits for a file to open and its first bytes to be read.
+const SHOW_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The show tool: opens the file in the agent's layout for the person. Its
 /// details: the file's `path` and `kind`, and the `pane` (of `agent`'s
 /// layout) it's in.
@@ -742,6 +747,12 @@ fn show(factory: &Factory, agent: &str, args: Value) -> Result<ToolResult, Strin
     let path = expand(asked);
     let path = if path.is_absolute() { path } else { folder.join(path) };
     let path = std::fs::canonicalize(&path).unwrap_or(path);
+    // Only a file: opening a named pipe, a socket or a device would hold
+    // the agent's step (and Stop with it) until something wrote to it
+    // (row 1322). Finding out doesn't open it.
+    if std::fs::metadata(&path).is_ok_and(|metadata| !metadata.is_file() && !metadata.is_dir()) {
+        return Err(format!("{} isn't a file the app can show: it's a named pipe, a socket or a device.", path.display()));
+    }
     let content = read(&path.display().to_string(), 0, 4096, false);
     if !content.error.is_empty() {
         let stop = if content.error.ends_with('.') { "" } else { "." };
@@ -845,7 +856,23 @@ impl Extension for Viewer {
             "properties": {"path": {"type": "string"}, "kind": {"type": "string", "enum": KINDS}},
             "additionalProperties": false,
         });
-        vec![factory_tool(factory, agent, "show", "Show a file", SHOW, parameters, show)]
+        // Opened on a thread of its own, so a file that never answers (a
+        // drive that's gone, say) holds up neither Claktory nor Stop, and
+        // the agent hears about it after a while (row 1322).
+        let handler = agent_handler(factory, agent, |factory, agent, args| async move {
+            let factory = live(factory)?;
+            let asked = args.get("path").and_then(Value::as_str).unwrap_or_default().trim().to_owned();
+            let opened = tokio::task::spawn_blocking(move || show(&factory, &agent, args));
+            match tokio::time::timeout(SHOW_WAIT, opened).await {
+                Ok(Ok(shown)) => shown.map_err(factory_agent::Error::Other),
+                Ok(Err(error)) => Err(factory_agent::Error::Other(format!("Couldn't show {asked}: {error}"))),
+                Err(_) => Err(factory_agent::Error::Other(format!(
+                    "{asked} didn't open within {} seconds, so it isn't shown: is it on a drive or server that isn't answering?",
+                    SHOW_WAIT.as_secs()
+                ))),
+            }
+        });
+        vec![tool("show", "Show a file", SHOW, parameters, handler)]
     }
 
     fn owns_tool(&self, name: &str) -> bool {

@@ -89,6 +89,13 @@ pub fn redirect_port(redirect: &str, path: &str) -> u16 {
         .unwrap_or_else(|| panic!("redirect {redirect}"))
 }
 
+fn gunzip(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(bytes).read_to_end(&mut out).expect("a gzip body");
+    out
+}
+
 fn content_length(headers: &[(String, String)]) -> usize {
     headers.iter().find(|(name, _)| name == "content-length").and_then(|(_, value)| value.parse().ok()).unwrap_or(0)
 }
@@ -132,8 +139,11 @@ pub async fn serve(responses: Vec<Served>) -> Server {
                 }
             };
             let body_end = body_start + content_length(&request.headers);
-            let body = serde_json::from_slice(&raw[body_start..body_end]).unwrap_or(Value::Null);
-            let raw = String::from_utf8_lossy(&raw[body_start..body_end]).into_owned();
+            // A gzip-compressed body is read as the provider reads it.
+            let gzip = request.headers.iter().any(|(name, value)| name == "content-encoding" && value == "gzip");
+            let bytes = if gzip { gunzip(&raw[body_start..body_end]) } else { raw[body_start..body_end].to_vec() };
+            let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            let raw = String::from_utf8_lossy(&bytes).into_owned();
             recorded.lock().push(Recorded { body, raw, ..request });
             let served = responses.next().or_else(|| last.clone()).expect("a response to serve");
             last = Some(served.clone());

@@ -13,6 +13,7 @@
 //   address, Hide.
 // - What moving a pipe into or out of a group changes in what it gets.
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -20,15 +21,18 @@ import 'package:flutter/widgets.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'backend.dart';
+import 'claktory_identity.dart' show claktoryName;
 import 'controls.dart';
+import 'devices.dart' show thisDeviceKind;
 import 'forms.dart' show FormFrame;
 import 'identity.dart';
+import 'loopback_forward.dart';
 import 'mobile/input.dart' show InputKind;
 import 'mobile/lines.dart' show ActionLine;
 import 'mobile/metrics.dart' show TypeScale;
 import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'pipe_groups.dart' show pipeGroupsIn;
-import 'pipes.dart' show pipePeerName, pipesIn;
+import 'pipes.dart' show pipeColor, pipePeerName, pipesIn;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'visible_codes.dart' show visibleCodes;
@@ -48,10 +52,18 @@ List<PipeShare> groupShares(Workspace workspace, String groupId) => [
 ];
 
 /// Claktory's one warning, under what's shared: what the people on the
-/// pipes get, naming the port, since another program can take it later.
-String shareWarning(String port) =>
-    'People on these pipes can use everything this computer serves on '
+/// pipes get, naming the port, since another program can take it later,
+/// and the [computer] it's on ([shareComputer]).
+String shareWarning(String port, {String computer = 'this computer'}) =>
+    'People on these pipes can use everything $computer serves on '
     'port $port.';
+
+/// The computer whose ports a website is shared from, as the sentences
+/// about sharing name it (Squalo's W3): "this computer" when the app runs
+/// there; else its Claktory's name as the app shows it ("Studio"), so the
+/// person on a MacBook connected to it never reads it as the MacBook.
+String shareComputer(Backend backend) =>
+    backend.forwards.remote() ? claktoryName(backend) : 'this computer';
 
 /// What moving [pipe] into [groupId] ("" for out of any) changes in the
 /// shares it gets, a sentence for each way; null when nothing.
@@ -289,6 +301,7 @@ class _ShareWebsiteFormState extends State<ShareWebsiteForm> {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     final workspace = AppScope.of(context).workspace.workspace;
+    final computer = shareComputer(AppScope.of(context));
     final groups = pipeGroupsIn(workspace, _projectId);
     final open = _open(workspace);
     final check = _check;
@@ -297,7 +310,7 @@ class _ShareWebsiteFormState extends State<ShareWebsiteForm> {
     return FormFrame(
       title: 'Share a website',
       body:
-          'A website on this computer, such as a dashboard, that people on '
+          'A website on $computer, such as a dashboard, that people on '
           'your pipes open in their own browser.',
       error: _error,
       submitLabel: 'Share',
@@ -334,8 +347,20 @@ class _ShareWebsiteFormState extends State<ShareWebsiteForm> {
                 Padding(
                   padding: const EdgeInsets.only(top: Space.xs + 2),
                   child: Text(
-                    'Nothing on this computer answers on port ${check.port} '
+                    'Nothing on $computer answers on port ${check.port} '
                     'yet. You can share it now and start it later.',
+                    style: caption.copyWith(color: palette.textMuted),
+                  ),
+                )
+              // What answers there, so the person sees it's the program
+              // they mean (Squalo's W3), on the computer named.
+              else if (check != null && check.program.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: Space.xs + 2),
+                  child: Text(
+                    '${visibleCodes(check.program)}'
+                    '${check.pid > 0 ? ' (process ${check.pid})' : ''} '
+                    'answers on port ${check.port} on $computer.',
                     style: caption.copyWith(color: palette.textMuted),
                   ),
                 ),
@@ -402,7 +427,10 @@ class _ShareWebsiteFormState extends State<ShareWebsiteForm> {
             borderRadius: BorderRadius.circular(Radii.control),
           ),
           child: Text(
-            shareWarning(port == null ? '…' : '$port'),
+            shareWarning(
+              port == null ? '…' : '$port',
+              computer: shareComputer(AppScope.of(context)),
+            ),
             style: type.body.copyWith(color: palette.text),
           ),
         ),
@@ -500,7 +528,8 @@ class PipeSharesField extends StatelessWidget {
     return Field(
       label: 'Shared websites',
       note: shares.isEmpty
-          ? 'Share a website on this computer, such as a dashboard, with '
+          ? 'Share a website on ${shareComputer(AppScope.of(context))}, '
+                'such as a dashboard, with '
                 '${pipePeerName(pipe)}.'
           : null,
       child: Column(
@@ -602,15 +631,35 @@ class PipeSharesStrip extends StatelessWidget {
         if (!share.mine && !share.hidden) share,
     ];
     if (shares.isEmpty) return const SizedBox.shrink();
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        for (final share in shares)
-          ReceivedShare(key: ValueKey(share.id), pipe: pipe, share: share),
-      ],
+    // At most [sharesStripShare] of the window's height, then it scrolls,
+    // so however many it shares, the chat and its box stay in reach
+    // (Abbacchio's row 1374): the row cut at its foot says there's more.
+    return ConstrainedBox(
+      constraints: BoxConstraints(
+        maxHeight: math.max(
+          sharesStripLeast,
+          MediaQuery.sizeOf(context).height * sharesStripShare,
+        ),
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (final share in shares)
+              ReceivedShare(key: ValueKey(share.id), pipe: pipe, share: share),
+          ],
+        ),
+      ),
     );
   }
 }
+
+/// The most of the window's height the received shares under a pipe's
+/// header take before they scroll.
+const sharesStripShare = 0.3;
+
+/// ...and never less than this, in a short window.
+const sharesStripLeast = 96.0;
 
 /// Whether this Mac's browser is Safari, which can't open *.localhost
 /// addresses; tests replace it.
@@ -645,7 +694,13 @@ class ReceivedShare extends StatefulWidget {
   State<ReceivedShare> createState() => _ReceivedShareState();
 }
 
-class _ReceivedShareState extends State<ReceivedShare> {
+/// Opening a website the other side shares, and copying its address: the
+/// share under the pipe's header and the chat's line announcing it (W2)
+/// do it alike.
+mixin _ShareOpening<W extends StatefulWidget> on State<W> {
+  /// The share it opens.
+  PipeShare get _share;
+
   /// Whether the browser is Safari, once known: then it opens at
   /// 127.0.0.1.
   var _safari = false;
@@ -654,11 +709,17 @@ class _ReceivedShareState extends State<ReceivedShare> {
   Timer? _copiedTimer;
   String? _error;
 
+  /// Whether [_error] is the connection's: it goes once the Claktory is
+  /// connected again (Abbacchio's row 1350).
+  var _offline = false;
+
   /// Asks the browser again when the app comes back to the front: the
   /// person may have chosen another in System Settings meanwhile.
   late final _lifecycle = AppLifecycleListener(
     onResume: () => unawaited(_askBrowser()),
   );
+
+  Backend? _backend;
 
   @override
   void initState() {
@@ -668,10 +729,54 @@ class _ReceivedShareState extends State<ReceivedShare> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final backend = AppScope.of(context);
+    if (identical(backend, _backend)) return;
+    _backend?.connected.removeListener(_connectedChanged);
+    backend.connected.addListener(_connectedChanged);
+    _backend = backend;
+  }
+
+  @override
   void dispose() {
+    _backend?.connected.removeListener(_connectedChanged);
     _lifecycle.dispose();
     _copiedTimer?.cancel();
     super.dispose();
+  }
+
+  void _connectedChanged() {
+    if (_offline && _backend!.connected.value && mounted) {
+      setState(() {
+        _offline = false;
+        _error = null;
+      });
+    }
+  }
+
+  /// A refused or lost request, for the person: while the connection is
+  /// down, the Claktory by its name, never "the backend"; it goes once
+  /// it's back.
+  void _failed(RequestFailure failure) {
+    if (!mounted) return;
+    final backend = AppScope.of(context);
+    final offline =
+        !backend.connected.value ||
+        failure.message == 'Not connected to the backend.' ||
+        failure.message == 'Connection lost.';
+    setState(() {
+      _offline = offline;
+      _error = offline
+          ? "Can't reach ${claktoryName(backend)} right now."
+          : failure.message;
+    });
+  }
+
+  /// [error] in place of any before, not the connection's.
+  void _show(String? error) {
+    _offline = false;
+    _error = error;
   }
 
   /// Whether the browser is Safari now, kept for the address shown.
@@ -681,38 +786,96 @@ class _ReceivedShareState extends State<ReceivedShare> {
     return safari;
   }
 
-  /// The address this Mac's browser opens it at.
-  String get _address {
-    final share = widget.share;
-    return _safari && share.fallbackAddress.isNotEmpty
+  /// The address this device's browser opens it at: on a computer showing
+  /// a Claktory on another machine, at the port this device forwards it
+  /// from (#503); null there while it isn't forwarded.
+  String? _address(LoopbackForwards forwards) {
+    final share = _share;
+    final address = _safari && share.fallbackAddress.isNotEmpty
         ? share.fallbackAddress
         : share.address;
+    if (!forwards.remote()) return address;
+    final port = forwards.sharePort(share.id);
+    return port == null ? null : withPort(address, port);
+  }
+
+  /// Has the Claktory serve it (its listener starts at the first Open)
+  /// and, from another machine, this device forward it; the address to
+  /// open, its one-time code in it.
+  Future<String> _serve(Backend backend) async {
+    final safari = await _askBrowser();
+    final opened = await backend.openPipeShare(_share.id);
+    final url = safari && opened.fallbackUrl.isNotEmpty
+        ? opened.fallbackUrl
+        : opened.url;
+    if (!backend.forwards.remote()) return url;
+    // Through the tunnel, from a port of this device's own to the share's
+    // there: the share's own host, at this device's port (Fugo 35888).
+    final port = await backend.forwards.forwardShare(
+      _share.id,
+      Uri.parse(opened.url).port,
+    );
+    return withPort(url, port);
   }
 
   Future<void> _open() async {
     setState(() {
       _busy = true;
-      _error = null;
+      _show(null);
     });
     try {
-      final backend = AppScope.of(context);
-      final safari = await _askBrowser();
-      final opened = await backend.openPipeShare(widget.share.id);
-      final url = safari && opened.fallbackUrl.isNotEmpty
-          ? opened.fallbackUrl
-          : opened.url;
+      final url = await _serve(AppScope.of(context));
       if (!await openSharePage(Uri.parse(url)) && mounted) {
-        setState(() => _error = "Your browser didn't open. Try again.");
+        setState(() => _show("Your browser didn't open. Try again."));
       }
     } on RequestFailure catch (failure) {
-      if (mounted) setState(() => _error = failure.message);
+      _failed(failure);
+    } on ForwardFailure catch (failure) {
+      if (mounted) setState(() => _show(_forwardProblem(failure)));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
+  /// Why this device can't forward it, for the person.
+  String _forwardProblem(ForwardFailure failure) {
+    final machine = claktoryName(AppScope.of(context));
+    return switch (failure.problem) {
+      ForwardProblem.taken =>
+        'No port is free for it on this $thisDeviceKind. Quit an app you '
+            "don't need, then try again.",
+      ForwardProblem.unsupported =>
+        '$machine needs an update before this $thisDeviceKind can open it.',
+      ForwardProblem.failed =>
+        failure.message.isEmpty
+            ? "Can't reach $machine right now. Try again."
+            : failure.message,
+    };
+  }
+
   Future<void> _copy() async {
-    await Clipboard.setData(ClipboardData(text: _address));
+    final backend = AppScope.of(context);
+    var address = _address(backend.forwards);
+    if (address == null) {
+      // Not forwarded here yet: served and forwarded first, so the address
+      // copied works on this device.
+      setState(() {
+        _busy = true;
+        _show(null);
+      });
+      try {
+        await _serve(backend);
+        if (mounted) address = _address(backend.forwards);
+      } on RequestFailure catch (failure) {
+        _failed(failure);
+      } on ForwardFailure catch (failure) {
+        if (mounted) setState(() => _show(_forwardProblem(failure)));
+      } finally {
+        if (mounted) setState(() => _busy = false);
+      }
+      if (address == null) return;
+    }
+    await Clipboard.setData(ClipboardData(text: address));
     if (!mounted) return;
     setState(() => _copied = true);
     _copiedTimer?.cancel();
@@ -720,39 +883,76 @@ class _ReceivedShareState extends State<ReceivedShare> {
       if (mounted) setState(() => _copied = false);
     });
   }
+}
+
+class _ReceivedShareState extends State<ReceivedShare>
+    with _ShareOpening<ReceivedShare> {
+  @override
+  PipeShare get _share => widget.share;
 
   @override
   Widget build(BuildContext context) {
+    final forwards = AppScope.of(context).forwards;
+    return ListenableBuilder(
+      listenable: forwards,
+      builder: (context, _) => _build(context, forwards),
+    );
+  }
+
+  Widget _build(BuildContext context, LoopbackForwards forwards) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     final backend = AppScope.of(context);
     final share = widget.share;
-    // Opened only on the computer the Claktory runs on, for now: its
-    // address is that computer's.
-    final here = !backend.forwards.remote();
+    // On a computer showing a Claktory on another machine it opens through
+    // this one (#503); a phone or tablet can't yet: its browser would take
+    // the front, leaving the app behind.
+    final away = forwards.remote() && cantOpenSharesHere;
+    final address = _address(forwards);
+    final forwardProblem = forwards.shareProblem(share.id);
     final problem = share.listenerProblem;
     final (String line, Color color) = !share.live
         ? ('Waits while the pipe is paused.', palette.textMuted)
-        : !here
-        ? ('Open it on the computer your Claktory runs on.', palette.textMuted)
+        : away
+        ? (
+            'Opening shared websites on this $thisDeviceKind isn’t available '
+                'yet. Open it on a computer connected to your Claktory.',
+            palette.textMuted,
+          )
         : problem.isNotEmpty
         ? (problem, palette.danger)
+        : forwardProblem != null
+        ? (_forwardProblem(forwardProblem), palette.danger)
+        : address == null
+        ? ('', palette.textMuted)
         : (
             _safari
-                ? '${visibleCodes(_address)} (Safari can’t open the usual '
+                ? '${visibleCodes(address)} (Safari can’t open the usual '
                       'address)'
-                : visibleCodes(_address),
+                : visibleCodes(address),
             palette.textMuted,
           );
-    final usable = share.live && here;
+    final usable = share.live && !away;
+    // Not opened yet from this Claktory (W2): it stands out, in the pipe
+    // card's wash and border, until it is.
+    final fresh = share.unopened && share.live;
     return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: Space.xl,
+      margin: fresh
+          ? const EdgeInsets.fromLTRB(Space.l, Space.s, Space.l, Space.s)
+          : EdgeInsets.zero,
+      padding: EdgeInsets.symmetric(
+        horizontal: fresh ? Space.l : Space.xl,
         vertical: Space.m,
       ),
-      decoration: BoxDecoration(
-        border: Border(bottom: BorderSide(color: palette.hairline)),
-      ),
+      decoration: fresh
+          ? BoxDecoration(
+              color: pipeColor.withValues(alpha: 0.06),
+              border: Border.all(color: pipeColor.withValues(alpha: 0.55)),
+              borderRadius: BorderRadius.circular(Radii.panel),
+            )
+          : BoxDecoration(
+              border: Border(bottom: BorderSide(color: palette.hairline)),
+            ),
       child: ActionLine(
         lead: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -768,7 +968,11 @@ class _ReceivedShareState extends State<ReceivedShare> {
             ),
             if (line.isNotEmpty)
               Text(line, style: type.caption.copyWith(color: color)),
-            if (_error case final error?)
+            // Said once: Open's failure is often the forward's problem the
+            // line already says (Abbacchio, row 1360).
+            // Said once: Open's failure is often the forward's problem the
+            // line already says (Abbacchio, row 1360).
+            if (_error case final error? when error != line)
               Text(error, style: type.caption.copyWith(color: palette.danger)),
           ],
         ),
@@ -777,17 +981,16 @@ class _ReceivedShareState extends State<ReceivedShare> {
           runSpacing: Space.xs,
           alignment: WrapAlignment.end,
           children: [
-            if (here) ...[
-              Button(
-                label: 'Open',
-                primary: true,
-                onPressed: usable && !_busy ? _open : null,
-              ),
+            Button(
+              label: 'Open',
+              primary: true,
+              onPressed: usable && !_busy ? _open : null,
+            ),
+            if (!away)
               Button(
                 label: _copied ? 'Copied' : 'Copy address',
-                onPressed: usable ? _copy : null,
+                onPressed: usable && !_busy ? _copy : null,
               ),
-            ],
             Button(
               label: 'Hide',
               onPressed: () =>
@@ -796,6 +999,106 @@ class _ReceivedShareState extends State<ReceivedShare> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// The pipe chat's line announcing a website the other side shares (W2,
+/// PipeMessage.share_id): Claktory's [line], then Open and Copy address,
+/// as under the pipe's header, while the share lasts and isn't hidden;
+/// once it's gone, the line alone.
+class ShareAnnouncement extends StatelessWidget {
+  const ShareAnnouncement({
+    super.key,
+    required this.shareId,
+    required this.line,
+  });
+
+  final String shareId;
+  final Widget line;
+
+  @override
+  Widget build(BuildContext context) {
+    final store = AppScope.of(context).workspace;
+    return ListenableBuilder(
+      listenable: store,
+      builder: (context, _) {
+        final share = store.workspace.pipeShares
+            .where((share) => share.id == shareId)
+            .firstOrNull;
+        if (share == null || share.mine || share.hidden || !share.live) {
+          return line;
+        }
+        return _AnnouncedShare(
+          key: ValueKey(share.id),
+          share: share,
+          line: line,
+        );
+      },
+    );
+  }
+}
+
+class _AnnouncedShare extends StatefulWidget {
+  const _AnnouncedShare({super.key, required this.share, required this.line});
+
+  final PipeShare share;
+  final Widget line;
+
+  @override
+  State<_AnnouncedShare> createState() => _AnnouncedShareState();
+}
+
+class _AnnouncedShareState extends State<_AnnouncedShare>
+    with _ShareOpening<_AnnouncedShare> {
+  @override
+  PipeShare get _share => widget.share;
+
+  @override
+  Widget build(BuildContext context) {
+    final forwards = AppScope.of(context).forwards;
+    return ListenableBuilder(
+      listenable: forwards,
+      builder: (context, _) {
+        final palette = Palette.of(context);
+        // An iPhone or iPad showing a Claktory elsewhere can't open it yet:
+        // the line alone (the share under the header says why).
+        if (forwards.remote() && cantOpenSharesHere) return widget.line;
+        final touch = forwards.remote() && sharesOnTouchDevice;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            widget.line,
+            const SizedBox(height: Space.xs),
+            Wrap(
+              spacing: Space.xs,
+              runSpacing: Space.xs,
+              alignment: WrapAlignment.center,
+              children: [
+                Button(
+                  label: 'Open',
+                  primary: true,
+                  onPressed: _busy ? null : _open,
+                ),
+                if (!touch)
+                  Button(
+                    label: _copied ? 'Copied' : 'Copy address',
+                    onPressed: _busy ? null : _copy,
+                  ),
+              ],
+            ),
+            if (_error case final error?)
+              Padding(
+                padding: const EdgeInsets.only(top: Space.xs),
+                child: Text(
+                  error,
+                  textAlign: TextAlign.center,
+                  style: TextStyles.caption.copyWith(color: palette.danger),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 }

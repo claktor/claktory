@@ -16,6 +16,7 @@
 // page's latest layer of the version shown, loaded into the native view as
 // the iPad loads it ([_PdfInk]), and again as it's saved anywhere.
 import 'dart:async';
+import 'dart:io';
 
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
@@ -37,6 +38,7 @@ import '../mobile/metrics.dart' show TypeScale;
 import '../paced.dart' show FilePreviews;
 import '../resources.dart' show formatBytes;
 import '../scope.dart';
+import 'file_cache.dart';
 import 'loading_progress.dart';
 import 'previews.dart';
 import 'registry.dart';
@@ -113,6 +115,7 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
     _find.dispose();
     _generation++;
     _drop();
+    _hold(null);
     super.dispose();
   }
 
@@ -146,6 +149,7 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
           final params = await _fetch(backend, claktory, generation);
           if (params == null || !mounted || generation != _generation) return;
           _show(params);
+          _hold(_fetched);
           return;
         } on _Changed {
           if (attempt >= 2) {
@@ -199,13 +203,36 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
       }
     }
 
+    // From a Claktory on another machine, the copies this device keeps
+    // (#446); else the render cache.
+    final cache = FileCache.of(backend);
+    _fetched = null;
     // What it is first (its size and version), so one already in the
     // render cache isn't brought over the link again.
-    final first = await backend.readFile(path, maxBytes: 1);
+    final FileContent first;
+    try {
+      first = await backend.readFile(path, maxBytes: 1);
+    } on RequestFailure {
+      // Offline: the copy kept here, saying it may be out of date.
+      final kept = await cache?.find(path, originalVariant);
+      if (stale()) return null;
+      if (cache == null || kept == null || !kept.file.existsSync()) rethrow;
+      await cache.touch(kept);
+      if (stale()) return null;
+      _fetched = (cache: cache, file: kept.file);
+      setState(() {
+        file = kept.content.deepCopy();
+        showingUnchecked = true;
+      });
+      return _paramsFor(claktory, kept.content, kept.file.path);
+    }
     if (stale()) return null;
     // What the header and FileLoading compare a change with, without the
     // bytes.
-    setState(() => file = first.deepCopy()..data = const []);
+    setState(() {
+      file = first.deepCopy()..data = const [];
+      showingUnchecked = false;
+    });
     if (first.error.isNotEmpty) return null;
     final size = first.size.toInt();
     final sha = first.sha256;
@@ -215,11 +242,23 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
       );
     }
     final name = path.split('/').last;
-    var cached = await InkRenderCache.lookup(
-      backend: claktory,
-      sha256: sha,
-      name: name,
-    );
+    String? cached;
+    if (cache != null) {
+      final kept = await cache.find(path, originalVariant);
+      if (kept != null && kept.sha256 == sha && kept.file.existsSync()) {
+        await cache.touch(kept);
+        cached = kept.file.path;
+        _fetched = (cache: cache, file: kept.file);
+      } else if (kept != null) {
+        await cache.drop(path);
+      }
+    } else {
+      cached = await InkRenderCache.lookup(
+        backend: claktory,
+        sha256: sha,
+        name: name,
+      );
+    }
     if (stale()) return null;
     // A big one on a phone, or on a slow link: its pages as images at
     // once, while the PDF comes behind them.
@@ -246,11 +285,21 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
       unawaited(pages.want(_page?.page ?? 1));
     }
     if (cached == null) {
-      final writer = await InkRenderCache.begin(
-        backend: claktory,
-        sha256: sha,
-        name: name,
-      );
+      final writer = cache != null
+          ? null
+          : await InkRenderCache.begin(
+              backend: claktory,
+              sha256: sha,
+              name: name,
+            );
+      // Kept on this device: written here first, then moved in.
+      final temp = cache == null
+          ? null
+          : File(
+              '${Directory.systemTemp.path}/claktory-'
+              '${sha.substring(0, sha.length.clamp(0, 16))}-$name',
+            );
+      final sink = temp?.openWrite();
       try {
         var offset = 0;
         while (offset < size) {
@@ -275,15 +324,55 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
               'on.',
             );
           }
-          await writer.append(Uint8List.fromList(chunk.data));
+          if (writer != null) {
+            await writer.append(Uint8List.fromList(chunk.data));
+          } else {
+            sink!.add(chunk.data);
+          }
           offset += chunk.data.length;
         }
-        cached = await writer.finish();
+        if (writer != null) {
+          cached = await writer.finish();
+        } else {
+          await sink!.close();
+          final kept = await cache!.adopt(
+            path,
+            originalVariant,
+            first.deepCopy()..data = const [],
+            temp!,
+          );
+          // Not kept (it can't be moved in): read from where it was
+          // written, in the temporary folder the system clears.
+          cached = kept?.file.path ?? temp.path;
+          if (kept != null) _fetched = (cache: cache, file: kept.file);
+        }
       } catch (_) {
-        await writer.cancel().catchError((Object _) {});
+        await writer?.cancel().catchError((Object _) {});
+        if (sink != null) {
+          await sink.close().catchError((Object _) {});
+          await temp!.delete().catchError((Object _) => temp);
+        }
         rethrow;
       }
     }
+    return _paramsFor(claktory, first, cached);
+  }
+
+  /// The copy this device keeps that [_fetch] found or made (#446): held
+  /// while the surface shows it.
+  ({FileCache cache, File file})? _fetched;
+  ({FileCache cache, File file})? _held;
+
+  void _hold(({FileCache cache, File file})? next) {
+    if (next != null) next.cache.hold(next.file);
+    final was = _held;
+    _held = next;
+    if (was != null) was.cache.release(was.file);
+  }
+
+  /// The surface's params for [first]'s version, its bytes at [cached].
+  InkParams _paramsFor(String claktory, FileContent first, String cached) {
+    final sha = first.sha256;
     return InkParams(
       leafId: 'pdf:$path',
       surface: InkSurfaceKind.pdf,
@@ -292,7 +381,7 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
         path: path,
         sha256: sha,
         mime: first.mime,
-        size: size,
+        size: first.size.toInt(),
       ),
       document: InkDocument.file(file: cached, sha256: sha),
       persistence: 'online',

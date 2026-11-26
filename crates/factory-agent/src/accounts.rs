@@ -31,6 +31,34 @@ pub fn usage_limit_claim(message: &AssistantMessage) -> Option<&str> {
     message.extra.get(USAGE_LIMIT)?.get("claim")?.as_str()
 }
 
+/// The key a provider sets in a failed response's `extra` when the answer
+/// said how long to wait before asking again (Retry-After): ms.
+pub const RETRY_AFTER: &str = "retryAfterMs";
+
+/// How long a Retry-After header asks to wait, in ms: seconds, or an HTTP
+/// date (none when it's past).
+pub fn retry_after_header(headers: &http::HeaderMap) -> Option<u64> {
+    let value = headers.get(http::header::RETRY_AFTER)?.to_str().ok()?.trim();
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(seconds.saturating_mul(1000));
+    }
+    let at = httpdate::parse_http_date(value).ok()?;
+    let at = u64::try_from(at.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis()).ok()?;
+    Some(at.saturating_sub(now_ms()))
+}
+
+/// Marks `output` with the wait its answer's Retry-After asks for, if any.
+pub fn mark_retry_after(output: &mut AssistantMessage, headers: &http::HeaderMap) {
+    if let Some(ms) = retry_after_header(headers) {
+        output.extra.insert(RETRY_AFTER.into(), json!(ms));
+    }
+}
+
+/// The wait a failed response's Retry-After asked for, in ms.
+pub fn retry_after(message: &AssistantMessage) -> Option<u64> {
+    message.extra.get(RETRY_AFTER)?.as_u64()
+}
+
 /// The key a failed response's `extra` has when none of the provider's
 /// accounts can take a request now: `{"until": <ms since 1970>}`, when the
 /// first to reset does, or `{"until": null}` when none resets by itself (out
@@ -80,8 +108,12 @@ pub fn out_of_credit(message: &AssistantMessage) -> bool {
 
 /// Whether a provider's error body says the key ran out of credit:
 /// Anthropic's "credit balance is too low", OpenAI's `insufficient_quota`,
-/// OpenRouter's 402 (insufficient credits).
+/// OpenRouter's 402 (insufficient credits). Never one that says only this
+/// request costs more than the key may spend at once (`unaffordable`).
 pub fn credit_error(status: u16, body: &str) -> bool {
+    if unaffordable(status, body).is_some() {
+        return false;
+    }
     let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
     let error = &parsed["error"];
     let code = error["code"].as_str().or_else(|| error["type"].as_str()).unwrap_or_default();
@@ -91,6 +123,34 @@ pub fn credit_error(status: u16, body: &str) -> bool {
         || message.contains("credit balance is too low")
         || message.contains("insufficient credits")
         || message.contains("requires more credits")
+}
+
+/// Whether an OpenRouter 402 says this one request costs more than the key
+/// may spend on it, rather than that the key has nothing left (friend bug
+/// #42): its words "requires more credits, or fewer max_tokens … can only
+/// afford N", or `metadata.reason` "weight_exceeds_budget" (the request's
+/// estimate, input plus `max_tokens` at the model's price, is more than
+/// the key's in-flight budget). An expensive model with a long
+/// conversation meets it while a cheaper one on the same key runs. Some
+/// with the completion tokens the key can afford, when said; None for
+/// anything else, "can only afford 0" included (the key is out).
+pub fn unaffordable(status: u16, body: &str) -> Option<Option<u64>> {
+    if status != 402 {
+        return None;
+    }
+    let parsed: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+    let error = &parsed["error"];
+    let message = error["message"].as_str().unwrap_or(body).to_ascii_lowercase();
+    let affordable = message
+        .split_once("can only afford")
+        .and_then(|(_, after)| after.trim_start().split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|digits| digits.parse::<u64>().ok());
+    // Nothing at all it can afford: the key is out.
+    if affordable == Some(0) {
+        return None;
+    }
+    let weight = error["metadata"]["reason"].as_str() == Some("weight_exceeds_budget");
+    (weight || affordable.is_some() || message.contains("fewer max_tokens")).then_some(affordable)
 }
 
 /// How long a key whose in-flight spending is full is skipped when

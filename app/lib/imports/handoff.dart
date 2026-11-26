@@ -245,7 +245,9 @@ class ImportHandoff extends ChangeNotifier {
   }
 
   /// Starts it, or after a failure, carries on from where it stopped.
-  Future<void> run() async {
+  Future<void> run() => _backend.holding(_run);
+
+  Future<void> _run() async {
     if (_state == HandoffState.done || _state == HandoffState.cancelled) {
       return;
     }

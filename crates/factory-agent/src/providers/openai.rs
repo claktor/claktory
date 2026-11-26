@@ -138,6 +138,7 @@ async fn request(
     let response = send_request(builder, options).await?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
+        crate::accounts::mark_retry_after(output, response.headers());
         let body = response_text(response).await;
         if crate::accounts::credit_error(status, &body) {
             crate::accounts::mark_out_of_credit(output);

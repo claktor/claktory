@@ -19,7 +19,8 @@ import '../resources.dart' show formatBytes;
 import '../review_answer.dart' show ReviewAnswering;
 import '../scope.dart';
 import '../selection.dart';
-import '../paced.dart' show FilePreviews, PreviewBox;
+import '../paced.dart' show FilePreviews, PreviewBox, lostWhileReading;
+import 'file_cache.dart';
 import 'loading_progress.dart';
 import 'preview_badge.dart';
 import 'previews.dart';
@@ -205,8 +206,12 @@ class _VideoViewerState extends State<VideoViewer>
 
   VideoPlayback? _playback;
 
-  /// The copy on this device being played, deleted when the pane closes.
+  /// The copy on this device being played, deleted when the pane closes
+  /// unless it's one this device keeps (#446)…
   File? _copy;
+
+  /// …in this, which keeps it until let go.
+  FileCache? _copyKeptIn;
 
   /// The copy of the version that stopped part way, carried on from when
   /// it's read again (#375), and whether it's the preview's (#379);
@@ -273,9 +278,15 @@ class _VideoViewerState extends State<VideoViewer>
     unawaited(_playback?.dispose());
     _playback = null;
     final copy = _copy;
+    final keptIn = _copyKeptIn;
     _copy = null;
+    _copyKeptIn = null;
     _playing = null;
-    if (copy != null) unawaited(copy.delete().catchError((_) => copy));
+    if (copy != null && keptIn != null) {
+      keptIn.release(copy);
+    } else if (copy != null) {
+      unawaited(copy.delete().catchError((_) => copy));
+    }
   }
 
   /// The pointer is over the frame (for its Comment button).
@@ -335,6 +346,7 @@ class _VideoViewerState extends State<VideoViewer>
           setState(() {
             _problem = null;
             failure = null;
+            showingUnchecked = false;
           });
           return;
         }
@@ -345,9 +357,32 @@ class _VideoViewerState extends State<VideoViewer>
         return;
       }
     }
+    // Kept on this device and still the file (#446): played from there,
+    // the original if it's here, else the preview made for this screen.
+    final cache = FileCache.of(backend);
+    if (cache != null) {
+      final found = await cache.lookup(backend, path, [
+        originalVariant,
+        if (!wantOriginal) previewVariant(previewScreen()),
+      ]);
+      if (!mounted || generation != _generation) return;
+      if (found != null && found.kept.file.existsSync()) {
+        _dropPartial();
+        _size = found.kept.content.size.toInt();
+        _noPreview = false;
+        return _start(
+          found.kept.file,
+          found.kept.content,
+          preview: found.kept.content.isPreview,
+          keptIn: cache,
+          unchecked: !found.current,
+        );
+      }
+    }
     setState(() {
       _problem = null;
-      _received = 0;
+      // Carrying on from a part read before: how far it got stays shown.
+      if (_partial == null) _received = 0;
     });
     try {
       // Progress as each piece comes, not each range (#375): its size
@@ -511,40 +546,82 @@ class _VideoViewerState extends State<VideoViewer>
         return;
       }
       _partial = null;
-      final playback = newVideoPlayback();
-      // Where it was, when it's the same version (the original in place
-      // of its preview); a new version starts at its beginning.
-      final was = _playing?.sha256 == first.sha256
-          ? _playback?.state.value.position
-          : null;
-      _close();
-      _copy = copy;
-      _playing = first.sha256.isEmpty
+      // As the first piece said it, a preview or not.
+      final whole = first.deepCopy()
+        ..data = const []
+        ..clearOffset()
+        ..clearTruncated();
+      // Kept on this device for next time (#446), unless it's more than
+      // this Claktory keeps: then it's this pane's, as before.
+      final kept = cache == null
           ? null
-          : (sha256: first.sha256, preview: preview != null);
-      _playback = playback;
-      setState(() {
-        // As the first piece said it, a preview or not.
-        file = first.deepCopy()
-          ..data = const []
-          ..clearOffset()
-          ..clearTruncated();
-        failure = null;
-        originalLoad = const OriginalNotLoaded();
-      });
-      playback.state.addListener(_playbackChanged);
-      await playback.open(copy.path);
-      if (was != null && was > 0) await playback.seek(was);
-      if (!mounted) return;
-      final comments = this.comments;
-      if (comments != null && first.sha256.isNotEmpty) {
-        comments.show(kind: 'video', text: '', version: first.sha256);
+          : await cache.adopt(
+              path,
+              preview != null ? previewVariant(preview) : originalVariant,
+              whole,
+              copy,
+            );
+      if (kept != null) cache!.hold(kept.file);
+      if (!mounted || generation != _generation) {
+        if (kept != null) cache!.release(kept.file);
+        return;
       }
+      await _start(
+        kept?.file ?? copy,
+        whole,
+        preview: preview != null,
+        keptIn: kept == null ? null : cache,
+      );
+      if (kept != null) cache!.release(kept.file);
     } on RequestFailure catch (error) {
       if (_replacing) return _originalFailed(error);
       if (mounted) setState(() => failure = error.message);
     } on FileSystemException catch (error) {
       _fail("Couldn't load the video: ${error.message}");
+    }
+  }
+
+  /// Plays [copy], [first]'s version (a preview or not), in place of
+  /// what played; a copy this device keeps ([keptIn]) is held while it
+  /// plays, and [unchecked] when it couldn't be checked against the file.
+  Future<void> _start(
+    File copy,
+    FileContent first, {
+    required bool preview,
+    FileCache? keptIn,
+    bool unchecked = false,
+  }) async {
+    keptIn?.hold(copy);
+    final playback = newVideoPlayback();
+    // Where it was, when it's the same version (the original in place
+    // of its preview); a new version starts at its beginning.
+    final was = _playing?.sha256 == first.sha256
+        ? _playback?.state.value.position
+        : null;
+    _close();
+    _copy = copy;
+    _copyKeptIn = keptIn;
+    _playing = first.sha256.isEmpty
+        ? null
+        : (sha256: first.sha256, preview: preview);
+    _playback = playback;
+    setState(() {
+      file = first.deepCopy()
+        ..data = const []
+        ..clearOffset()
+        ..clearTruncated();
+      failure = null;
+      _problem = null;
+      showingUnchecked = unchecked;
+      originalLoad = const OriginalNotLoaded();
+    });
+    playback.state.addListener(_playbackChanged);
+    await playback.open(copy.path);
+    if (was != null && was > 0) await playback.seek(was);
+    if (!mounted) return;
+    final comments = this.comments;
+    if (comments != null && first.sha256.isNotEmpty) {
+      comments.show(kind: 'video', text: '', version: first.sha256);
     }
   }
 
@@ -702,8 +779,14 @@ class _VideoViewerState extends State<VideoViewer>
         // says so, and Try again reads it again (#375).
         // Lost with the connection, it's read again once that's back
         // (FileLoading): till then it waits, rather than saying it failed.
-        (failure != null && AppScope.of(context).connected.value
-            ? _Failed(text: failure!, path: path, onRetry: reload)
+        // Given up on after the drop, it says so offline too; lost a
+        // moment before the connection says it's down, it waits all the
+        // same (Zucchero's row 588).
+        (failure != null &&
+                (failure == lostWhileReading ||
+                    AppScope.of(context).connected.value &&
+                        !lostWithConnection(failure))
+            ? _Failed(text: failure!, path: failurePath, onRetry: reload)
             : null);
     final Widget body;
     if (problem != null) {

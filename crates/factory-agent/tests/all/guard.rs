@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use factory_agent::errors::Error;
-use factory_agent::guard::{ResponsePolicy, guard_responses, recoverable_response};
+use factory_agent::guard::{ResponsePolicy, guard_responses, lasting_outage, recoverable_response};
 use factory_agent::stream::{LlmContext, StreamFn, StreamOptions, event_stream};
 use factory_agent::types::{AssistantMessage, AssistantPart, Model, ModelCost, StopReason, StreamEvent, Usage};
 use parking_lot::Mutex;
@@ -234,5 +234,34 @@ fn the_recovery_predicate_recognizes_transport_failures_and_keeps_terminal_error
         "error decoding response body: invalid API key",
     ] {
         assert!(!recoverable_response(reason), "{reason}");
+    }
+}
+
+/// #490: what an agent waits out at length, past the quick retries, and what
+/// still fails at once.
+#[test]
+fn outages_are_waited_out_and_refused_requests_are_not() {
+    for reason in [
+        "529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
+        "500 Internal server error",
+        "502 Bad Gateway",
+        "503 Service Unavailable",
+        "429 Too Many Requests",
+        "Anthropic stream ended before message_stop",
+        "OpenAI Responses stream ended before a terminal response event",
+        "The model's answer stream ended without a terminal response",
+        "OAuth refresh failed for anthropic: error sending request for url (https://console.anthropic.com/v1/oauth/token)",
+    ] {
+        assert!(recoverable_response(reason) && lasting_outage(reason), "{reason}");
+    }
+    for reason in [
+        "400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"max_tokens: 500 is too many\"}}",
+        "413 Request too large; retry in 500 ms",
+        "400 prompt is too long: 205000 tokens > 200000 maximum",
+        "OAuth refresh failed for anthropic: invalid_grant",
+        "OAuth refresh failed for openai-codex: refresh_token_reused",
+        "401 unauthorized",
+    ] {
+        assert!(!lasting_outage(reason), "{reason}");
     }
 }

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use factory_agent::{AgentEvent, Message};
 use factory_protocol::v1;
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
 
 use crate::factory::{Factory, RequestError};
 use crate::transcript::now_ms;
@@ -46,7 +46,7 @@ fn clamp(value: u64) -> i64 {
 
 /// Counts the model call `event` ends for agent `agent` (named `name`): an
 /// answer, or a compaction's summary (on `agent_model`, "provider/model").
-pub(crate) fn record(db: &Connection, agent: &str, name: &str, agent_model: &str, event: &AgentEvent) {
+pub(crate) fn record(calls: &crate::calls::Calls, agent: &str, name: &str, agent_model: &str, event: &AgentEvent) {
     let (provider, model, account, usage) = match event {
         AgentEvent::MessageEnd { message: Message::Assistant(answer) } => (
             answer.provider.as_str(),
@@ -61,28 +61,13 @@ pub(crate) fn record(db: &Connection, agent: &str, name: &str, agent_model: &str
         _ => return,
     };
     let hour = now_ms() / HOUR_MS * 3600;
-    let result = db.execute(
-        "INSERT INTO agent_usage (hour, provider, model, account, agent, agent_name, requests, input, output, cache_read, cache_write)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?9, ?10)
-         ON CONFLICT (hour, provider, model, account, agent) DO UPDATE SET agent_name = excluded.agent_name,
-             requests = requests + 1, input = input + excluded.input, output = output + excluded.output,
-             cache_read = cache_read + excluded.cache_read, cache_write = cache_write + excluded.cache_write",
-        params![
-            hour,
-            provider,
-            model,
-            account,
-            agent,
-            name,
-            clamp(usage.input),
-            clamp(usage.output),
-            clamp(usage.cache_read),
-            clamp(usage.cache_write)
-        ],
-    );
-    if let Err(error) = result {
-        tracing::warn!(%error, "could not count a model call for the Usage pane");
-    }
+    let tokens = crate::calls::Tokens {
+        input: clamp(usage.input),
+        output: clamp(usage.output),
+        cache_read: clamp(usage.cache_read),
+        cache_write: clamp(usage.cache_write),
+    };
+    calls.agent((hour, provider, model, account, agent), name, tokens);
 }
 
 fn number(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
@@ -264,6 +249,7 @@ impl Factory {
             .iter()
             .flat_map(|provider| provider.accounts.iter().map(|account| ((provider.id.clone(), account.id.clone()), account.label.clone())))
             .collect();
+        self.store.write_calls();
         report(&self.store.db(), request, now_ms(), &labels)
     }
 }
@@ -271,6 +257,7 @@ impl Factory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::params;
 
     fn db() -> Connection {
         let db = Connection::open_in_memory().expect("db");

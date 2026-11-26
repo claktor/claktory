@@ -1,4 +1,6 @@
 import 'package:factory_app/ask_card.dart';
+import 'package:factory_app/controls.dart' show Pressable;
+import 'package:factory_app/identity.dart' show Palette;
 import 'package:factory_app/inbox.dart';
 import 'package:factory_app/needs_you_history.dart' show NeedsYouHistoryList;
 import 'package:factory_app/selection.dart' show CopyMenu;
@@ -8,6 +10,7 @@ import 'package:factory_app/scope.dart';
 import 'package:factory_app/transcript.dart' show ProposalCard;
 import 'package:factory_app/update.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -402,11 +405,43 @@ void main() {
     await tester.ensureVisible(find.text('Open chat'));
     await settle(tester);
     expect(find.byType(ProposalCard), findsOneWidget);
+    // It reads as a link at rest, before the pointer finds it: underlined,
+    // in the muted text color (Matt).
+    final palette = Palette.of(tester.element(find.text('Open chat')));
+    final link = tester.widget<Text>(find.text('Open chat')).style!;
+    expect(link.decoration, TextDecoration.underline);
+    expect(link.color, palette.textMuted);
+    expect(link.decorationColor, palette.textMuted);
+    expect(link.fontWeight, FontWeight.w500);
 
     await tester.tap(find.text('Open chat'));
     await settle(tester);
     expect(harness.last.selectChat.chatId, 'chat1');
     expect(find.byType(InboxView), findsNothing);
+  });
+
+  testWidgets("on an iPad, Needs you's links are a finger's height and "
+      'underlined, with no pointer to find them', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final chat = Chat(id: 'chat1', title: 'Trip', waitingSeqs: [Int64(4)]);
+    final harness = Harness(_workspace(chats: [chat]));
+    harness.backend.chatEntriesById['chat1/4'] = _proposal(4);
+    await harness.show(tester, size: const Size(1180, 820));
+    await settle(tester);
+    await tester.tap(find.text('Needs you'));
+    await settle(tester);
+    await settle(tester);
+    await tester.tap(find.text('Proposes to Rivet: Add a designer agent'));
+    await settle(tester);
+    final open = find.text('Open chat');
+    await tester.ensureVisible(open);
+    await settle(tester);
+    final link = tester.widget<Text>(open).style!;
+    expect(link.decoration, TextDecoration.underline);
+    final target = find.ancestor(of: open, matching: find.byType(Pressable));
+    expect(tester.getSize(target.first).height, greaterThanOrEqualTo(44));
+    debugDefaultTargetPlatformOverride = null;
   });
 
   testWidgets("an agent's question in its conversation: dismissed, it's "

@@ -89,7 +89,7 @@ fn a_new_key_reaches_the_kept_devices_and_friends_hold_its_moves_until_they_have
     let mut talk = Feed { id: b"chat".to_vec(), seq: 0 };
     phone.create_group(own.id.clone(), mine.clone()).unwrap();
     let added =
-        phone.add_members(own.id.clone(), vec![tablet.key_packages(1).unwrap().remove(0), mac.key_packages(1).unwrap().remove(0)]).unwrap();
+        phone.add_members(own.id.clone(), vec![tablet.key_packages(1).unwrap().remove(0), mac.key_packages(1).unwrap().remove(0)]).unwrap().expect("something to add");
     own.deliver(&added.commit, &[&phone]);
     for other in [&tablet, &mac] {
         other.join_group(own.id.clone(), mine.clone(), added.welcome.clone().unwrap(), own.seq).unwrap();
@@ -100,7 +100,8 @@ fn a_new_key_reaches_the_kept_devices_and_friends_hold_its_moves_until_they_have
             talk.id.clone(),
             vec![ana.key_packages(1).unwrap().remove(0), tablet.key_packages(1).unwrap().remove(0), mac.key_packages(1).unwrap().remove(0)],
         )
-        .unwrap();
+        .unwrap()
+        .expect("something to add");
     talk.deliver(&added.commit, &[&phone]);
     for other in [&ana, &tablet, &mac] {
         other.join_group(talk.id.clone(), chat.clone(), added.welcome.clone().unwrap(), talk.seq).unwrap();
@@ -243,7 +244,7 @@ fn a_removed_device_is_committed_out_of_every_group_and_reads_nothing_after() {
     let mut talk = Feed { id: b"chat".to_vec(), seq: 0 };
     phone.create_group(own.id.clone(), mine.clone()).unwrap();
     let added =
-        phone.add_members(own.id.clone(), vec![tablet.key_packages(1).unwrap().remove(0), mac.key_packages(1).unwrap().remove(0)]).unwrap();
+        phone.add_members(own.id.clone(), vec![tablet.key_packages(1).unwrap().remove(0), mac.key_packages(1).unwrap().remove(0)]).unwrap().expect("something to add");
     own.deliver(&added.commit, &[&phone]);
     for other in [&tablet, &mac] {
         other.join_group(own.id.clone(), mine.clone(), added.welcome.clone().unwrap(), own.seq).unwrap();
@@ -254,7 +255,8 @@ fn a_removed_device_is_committed_out_of_every_group_and_reads_nothing_after() {
             talk.id.clone(),
             vec![ana.key_packages(1).unwrap().remove(0), tablet.key_packages(1).unwrap().remove(0), mac.key_packages(1).unwrap().remove(0)],
         )
-        .unwrap();
+        .unwrap()
+        .expect("something to add");
     talk.deliver(&added.commit, &[&phone]);
     for other in [&ana, &tablet, &mac] {
         other.join_group(talk.id.clone(), chat.clone(), added.welcome.clone().unwrap(), talk.seq).unwrap();

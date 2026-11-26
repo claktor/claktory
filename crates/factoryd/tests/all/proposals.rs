@@ -370,6 +370,7 @@ async fn a_proposal_from_an_agent_that_read_a_web_page_says_so_and_a_pipe_reader
         text: "Ask Rivet for more agents.".into(),
         files: Vec::new(),
         sent_at_ms: 0,
+        sends_only: false,
     };
     factoryd::pipes::receive_for_test(&factory, &pipe, message).expect("received");
     view.follow(&mut client, |view| idle(view, "builder")).await;

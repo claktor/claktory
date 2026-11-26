@@ -38,6 +38,8 @@ pub struct Worker {
     /// The DM wrapping key: what opens DM fields at rest.
     keys: Keys,
     turns: Semaphore,
+    /// The disk new DMs are checked against (`dms::space`).
+    disk: Arc<crate::dms::space::Disk>,
     /// The accounts with long polls waiting: each wakes only for its own
     /// account's events, holding neither the database nor a turn.
     waits: Mutex<HashMap<String, Waiting>>,
@@ -122,6 +124,9 @@ pub fn open_db(path: &Path, keys: &Keys) -> Result<Connection, String> {
     db.execute_batch(crate::dms::leaves::SCHEMA).map_err(failed)?;
     db.execute_batch(crate::dms::groups::SCHEMA).map_err(failed)?;
     db.execute_batch(crate::dms::handoffs::SCHEMA).map_err(failed)?;
+    db.execute_batch(crate::dms::space::SCHEMA).map_err(failed)?;
+    crate::dms::space::upgrade(&db).map_err(failed)?;
+    crate::dms::space::recount(&db).map_err(failed)?;
     // OpenMLS's public state of each group (`dms::groups`), sealed.
     db.execute_batch(claktory_dm_crypto::storage::SCHEMA).map_err(failed)?;
     keys.bind(&db).map_err(|refused| format!("{}: {refused}", path.display()))?;
@@ -164,8 +169,20 @@ pub fn backup(db: &Path, dir: &Path, keep: usize, now: i64) -> Result<std::path:
 
 impl Worker {
     pub fn open(db: &Path, keys: Keys) -> Result<Arc<Worker>, String> {
+        Worker::open_on(db, keys, crate::dms::space::Disk::of(db))
+    }
+
+    /// [`Worker::open`], with new DMs checked against `disk`
+    /// ([`Disk::fixed`](crate::dms::space::Disk::fixed) in tests).
+    pub fn open_on(db: &Path, keys: Keys, disk: crate::dms::space::Disk) -> Result<Arc<Worker>, String> {
         let db = open_db(db, &keys)?;
-        let worker = Arc::new(Worker { db: Mutex::new(db), keys, turns: Semaphore::new(CONCURRENT), waits: Mutex::new(HashMap::new()) });
+        let worker = Arc::new(Worker {
+            db: Mutex::new(db),
+            keys,
+            turns: Semaphore::new(CONCURRENT),
+            disk: Arc::new(disk),
+            waits: Mutex::new(HashMap::new()),
+        });
         worker.sweep();
         Ok(worker)
     }
@@ -290,7 +307,11 @@ impl Worker {
                 let route = if query.is_empty() { route["dms/".len()..].to_owned() } else { format!("{}?{query}", &route["dms/".len()..]) };
                 // Whose outboxes this call adds to: theirs alone wake.
                 let _ = crate::dms::sync::touched();
-                let answered = crate::dms::identity::route(&mut self.db(), &self.keys, method, &route, caller, body, now_ms);
+                let answered = crate::dms::space::with(&self.disk, || {
+                    crate::dms::identity::route(&mut self.db(), &self.keys, method, &route, caller, body, now_ms)
+                });
+                #[cfg(feature = "qa-lies")]
+                let answered = crate::dms::lies::lie(&self.db(), method, &route, caller, answered);
                 self.wake(&crate::dms::sync::touched());
                 match answered {
                     Some((204, _)) => (204, Vec::new()),

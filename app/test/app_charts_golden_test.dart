@@ -1137,16 +1137,20 @@ void main() {
   // and "…", and at the largest the name takes a line of its own above
   // the others, as Grafana's title does (Zucchero row 381, Scolippi
   // 31336).
-  for (final (scale, filters) in [
-    (1.0, 1),
-    (1.6, 1),
-    (2.0, 1),
-    (2.5, 1),
-    (3.1, 1),
-    (3.1, 2),
+  // At 375 too, as the SE 3rd generation is: one letter doesn't say where
+  // you are, so a line holds only while each keeps three (Scolippi 32633).
+  // Letters, not spaces: "30 …" keeps two (Scolippi 32704).
+  for (final (width, scale, filters, title, span) in [
+    for (final width in [320.0, 375.0])
+      for (final scale in [1.0, 1.6, 2.0, 2.35, 3.12])
+        (width, scale, 1, 'Claktory usage', '7 days'),
+    (320.0, 3.12, 2, 'Claktory usage', '7 days'),
+    (320.0, 1.0, 1, 'Agents at work', '30 days'),
+    (375.0, 3.12, 1, 'Claktory', '30 days'),
   ]) {
-    testWidgets("a dashboard's bar on an SE at text ×$scale with $filters "
-        'variable(s): every button keeps a letter', (tester) async {
+    testWidgets("a dashboard's bar ${width.toInt()} wide at text ×$scale, "
+        '"$title", "$span" and $filters variable(s): every button keeps '
+        'three letters', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       debugDeviceCapabilities = DeviceCapabilities(idiom: Idiom.phone);
       addTearDown(() {
@@ -1183,8 +1187,11 @@ void main() {
         {'id': '${id}_t', 'component': 'Text', 'text': text},
         {'id': '${id}_i', 'component': 'Icon', 'name': 'chevron-down'},
       ]);
-      final variables = ['Agent: All', 'Fruit: Apples'].take(filters);
-      await _show(tester, width: 320, [
+      final variables = [
+        if (title == 'Claktory usage') 'Agent: All' else 'Filters (2)',
+        'Fruit: Apples',
+      ].take(filters);
+      await _show(tester, width: width, [
         {
           'id': 'root',
           'component': 'Column',
@@ -1204,12 +1211,12 @@ void main() {
           {
             'id': 'name_t',
             'component': 'Text',
-            'text': 'Claktory usage',
+            'text': title,
             'variant': 'heading',
           },
           {'id': 'name_i', 'component': 'Icon', 'name': 'chevron-down'},
         ]),
-        ...menu('range', '7 days'),
+        ...menu('range', span),
         for (final (k, text) in variables.indexed) ...menu('v$k', text),
         ...button('more', [
           {'id': 'more_i', 'component': 'Icon', 'name': 'ellipsis'},
@@ -1219,41 +1226,46 @@ void main() {
       Rect button$(Finder of) => tester.getRect(
         find.ancestor(of: of, matching: find.byType(Pressable)).first,
       );
-      final labels = ['Claktory usage', '7 days', ...variables];
+      final labels = [title, span, ...variables];
       for (final text in labels) {
         final paragraph = tester.renderObject<RenderParagraph>(
           find.descendant(of: find.text(text), matching: find.byType(RichText)),
         );
-        // Room for a letter and "…" at its size, or its words whole.
-        final least = TextPainter(
-          text: TextSpan(text: 'A…', style: paragraph.text.style),
-          textScaler: paragraph.textScaler,
-          textDirection: TextDirection.ltr,
-        )..layout();
+        // Three letters before its "…", or its words whole.
+        final shown = paragraph.didExceedMaxLines
+            ? paragraph
+                  .getPositionForOffset(
+                    Offset(paragraph.size.width, paragraph.size.height / 2),
+                  )
+                  .offset
+            : text.length;
+        final letters = text
+            .substring(0, shown)
+            .replaceAll(RegExp(r'\s'), '')
+            .length;
         expect(
-          paragraph.size.width,
-          greaterThanOrEqualTo(least.width - 0.5),
+          letters,
+          greaterThanOrEqualTo(math.min(3, text.replaceAll(' ', '').length)),
           reason: '$text at ×$scale',
         );
-        least.dispose();
         final rect = button$(find.text(text));
         expect(rect.left, greaterThanOrEqualTo(0), reason: text);
-        expect(rect.right, lessThanOrEqualTo(320), reason: text);
+        expect(rect.right, lessThanOrEqualTo(width), reason: text);
       }
       final more = button$(
         find.byWidgetPredicate(
           (w) => w is ExtensionGlyph && w.icon == 'ellipsis',
         ),
       );
-      expect(more.right, lessThanOrEqualTo(320));
-      final name = button$(find.text('Claktory usage'));
-      final range = button$(find.text('7 days'));
-      if (scale == 1.0) {
+      expect(more.right, lessThanOrEqualTo(width));
+      final name = button$(find.text(title));
+      final range = button$(find.text(span));
+      if (scale == 1.0 && width == 320 && title == 'Claktory usage') {
         // One line; "Clak…" as before, the others whole.
         expect(range.center.dy, moreOrLessEquals(name.center.dy, epsilon: 1));
         final paragraph = tester.renderObject<RenderParagraph>(
           find.descendant(
-            of: find.text('Claktory usage'),
+            of: find.text(title),
             matching: find.byType(RichText),
           ),
         );
@@ -1280,7 +1292,7 @@ void main() {
           );
         }
       }
-      if (scale == 3.1) {
+      if (scale > 2) {
         // The name on its own line, the others under it.
         expect(range.top, greaterThanOrEqualTo(name.bottom));
         expect(more.top, greaterThanOrEqualTo(name.bottom));

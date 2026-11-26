@@ -37,8 +37,8 @@
 		C0EC71002B3C4D5E6F700031 /* Setup.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700032 /* Setup.swift */; };
 		C0EC71002B3C4D5E6F700041 /* Recorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700042 /* Recorder.swift */; };
 		C0EC71002B3C4D5E6F700043 /* AudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700044 /* AudioPlayer.swift */; };
+		4539F6FBE8B82CEEA47E226C /* ReplayWriter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 992F06E6E652D2ECCDDB6341 /* ReplayWriter.swift */; };
 		C0EC71002B3C4D5E6F700053 /* NetworkPath.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700054 /* NetworkPath.swift */; };
-		C0EC71002B3C4D5E6F7000A0 /* LidHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F7000A1 /* LidHelper.swift */; };
 		C0EC71002B3C4D5E6F700091 /* SecretClipboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700092 /* SecretClipboard.swift */; };
 		C0EC71002B3C4D5E6F700093 /* DmKeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700094 /* DmKeys.swift */; };
 		C0EC71002B3C4D5E6F700061 /* SetupLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0EC71002B3C4D5E6F700062 /* SetupLink.swift */; };
@@ -101,8 +101,8 @@
 		C0EC71002B3C4D5E6F700032 /* Setup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Setup.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700042 /* Recorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Recorder.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700044 /* AudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPlayer.swift; sourceTree = "<group>"; };
+		992F06E6E652D2ECCDDB6341 /* ReplayWriter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayWriter.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700054 /* NetworkPath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkPath.swift; sourceTree = "<group>"; };
-		C0EC71002B3C4D5E6F7000A1 /* LidHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LidHelper.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700092 /* SecretClipboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretClipboard.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700094 /* DmKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DmKeys.swift; sourceTree = "<group>"; };
 		C0EC71002B3C4D5E6F700062 /* SetupLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupLink.swift; sourceTree = "<group>"; };
@@ -218,8 +218,8 @@
 				C0EC71002B3C4D5E6F700032 /* Setup.swift */,
 				C0EC71002B3C4D5E6F700042 /* Recorder.swift */,
 				C0EC71002B3C4D5E6F700044 /* AudioPlayer.swift */,
+				992F06E6E652D2ECCDDB6341 /* ReplayWriter.swift */,
 				C0EC71002B3C4D5E6F700054 /* NetworkPath.swift */,
-				C0EC71002B3C4D5E6F7000A1 /* LidHelper.swift */,
 				C0EC71002B3C4D5E6F700092 /* SecretClipboard.swift */,
 				C0EC71002B3C4D5E6F700094 /* DmKeys.swift */,
 				C0EC71002B3C4D5E6F700062 /* SetupLink.swift */,
@@ -378,7 +378,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "echo \"$PRODUCT_NAME.app\" > \"$PROJECT_DIR\"/Flutter/ephemeral/.app_filename && \"$FLUTTER_ROOT\"/packages/flutter_tools/bin/macos_assemble.sh embed\n";
+			shellScript = "echo \"$PRODUCT_NAME.app\" > \"$PROJECT_DIR\"/Flutter/ephemeral/.app_filename && \"$FLUTTER_ROOT\"/packages/flutter_tools/bin/macos_assemble.sh embed\n# The name people see (#501): Claktory only in a Release build, Claktory Dev in\n# any other (Configs/*.xcconfig, CLAKTORY_NAME).\nprintf '/* Written by the build: CLAKTORY_NAME. */\\nCFBundleName = \"%s\";\\nCFBundleDisplayName = \"%s\";\\n' \"$CLAKTORY_NAME\" \"$CLAKTORY_NAME\" > \"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/en.lproj/InfoPlist.strings\"\n";
 		};
 		33CC111E2044C6BF0003C045 /* ShellScript */ = {
 			isa = PBXShellScriptBuildPhase;
@@ -425,8 +425,8 @@
 				C0EC71002B3C4D5E6F700031 /* Setup.swift in Sources */,
 				C0EC71002B3C4D5E6F700041 /* Recorder.swift in Sources */,
 				C0EC71002B3C4D5E6F700043 /* AudioPlayer.swift in Sources */,
+				4539F6FBE8B82CEEA47E226C /* ReplayWriter.swift in Sources */,
 				C0EC71002B3C4D5E6F700053 /* NetworkPath.swift in Sources */,
-				C0EC71002B3C4D5E6F7000A0 /* LidHelper.swift in Sources */,
 				C0EC71002B3C4D5E6F700091 /* SecretClipboard.swift in Sources */,
 				C0EC71002B3C4D5E6F700093 /* DmKeys.swift in Sources */,
 				C0EC71002B3C4D5E6F700061 /* SetupLink.swift in Sources */,
@@ -572,7 +572,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 33E5194F232828860026EE4D /* AppInfo.xcconfig */;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = "$(CLAKTORY_APP_ICON)";
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = Runner/DebugProfile.entitlements;
 				CODE_SIGN_STYLE = Automatic;
@@ -704,7 +704,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 33E5194F232828860026EE4D /* AppInfo.xcconfig */;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = "$(CLAKTORY_APP_ICON)";
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = Runner/DebugProfile.entitlements;
 				CODE_SIGN_STYLE = Automatic;
@@ -724,7 +724,7 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 33E5194F232828860026EE4D /* AppInfo.xcconfig */;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = "$(CLAKTORY_APP_ICON)";
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = Runner/Release.entitlements;
 				CODE_SIGN_STYLE = Automatic;

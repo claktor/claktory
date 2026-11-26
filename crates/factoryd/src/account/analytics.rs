@@ -83,7 +83,8 @@ fn valid_name(name: &str) -> bool {
 
 /// Counts a model call that `event` ends: an answer, or a compaction's
 /// summary (by `agent_model`, "provider/model"). `run`: the agent's run.
-pub(crate) fn record(db: &Connection, run: Option<i64>, agent_model: &str, event: &AgentEvent) {
+/// Written with the others (`crate::calls`).
+pub(crate) fn record(calls: &crate::calls::Calls, run: Option<i64>, agent_model: &str, event: &AgentEvent) {
     let (provider, model, usage) = match event {
         AgentEvent::MessageEnd { message: Message::Assistant(answer) } => (answer.provider.as_str(), answer.model.as_str(), &answer.usage),
         AgentEvent::Compacted { usage, .. } => {
@@ -94,21 +95,15 @@ pub(crate) fn record(db: &Connection, run: Option<i64>, agent_model: &str, event
     };
     let now = crate::transcript::now_ms();
     let hour = now / 1000 / HOUR * HOUR;
-    let result = db
-        .execute(
-            "INSERT INTO model_usage (hour, provider, model, requests, input, output, cache_read, cache_write)
-             VALUES (?1, ?2, ?3, 1, ?4, ?5, ?6, ?7)
-             ON CONFLICT (hour, provider, model) DO UPDATE SET requests = requests + 1, input = input + excluded.input,
-                 output = output + excluded.output, cache_read = cache_read + excluded.cache_read,
-                 cache_write = cache_write + excluded.cache_write",
-            params![hour, provider, model, clamp(usage.input), clamp(usage.output), clamp(usage.cache_read), clamp(usage.cache_write)],
-        )
-        .and_then(|_| match run {
-            Some(run) => db.execute("UPDATE runs SET last_call = ?2 WHERE id = ?1", params![run, now]),
-            None => Ok(0),
-        });
-    if let Err(error) = result {
-        tracing::warn!(%error, "could not count a model call");
+    let tokens = crate::calls::Tokens {
+        input: clamp(usage.input),
+        output: clamp(usage.output),
+        cache_read: clamp(usage.cache_read),
+        cache_write: clamp(usage.cache_write),
+    };
+    calls.model(hour, provider, model, tokens);
+    if let Some(run) = run {
+        calls.last_call(run, now);
     }
 }
 

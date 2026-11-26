@@ -18,6 +18,7 @@ import 'find.dart' show ClearOfFindBar, FindSessions, findShortcut;
 import 'forms.dart';
 import 'identity.dart';
 import 'inbox.dart' show NeedsYouChip;
+import 'kept.dart';
 import 'message_box.dart';
 import 'mobile/agent_marks.dart';
 import 'mobile/header.dart';
@@ -103,11 +104,53 @@ class _AgentViewState extends State<AgentView> {
     );
   }
 
+  /// The conversation: the same widget while the agent is, so another
+  /// agent's step (several a second while a team works) doesn't build
+  /// every message in view again. It follows the conversation itself on
+  /// its own.
+  Widget _conversationOf(Agent agent, Backend backend) {
+    final transcript = backend.transcript;
+    return Kept(
+      inputs: [agent],
+      builder: (_) => ListenableBuilder(
+        listenable: Listenable.merge([
+          transcript,
+          backend.queued,
+          backend.outbox,
+        ]),
+        builder: (context, _) {
+          if (transcript.agentId != agent.id) {
+            return const SizedBox.shrink();
+          }
+          // Nothing said yet: what the agent is for, and how to start.
+          if (transcript.length == 0 &&
+              backend.queued.of(agent.id).isEmpty &&
+              backend.outbox.of(agent.id).isEmpty &&
+              !_working) {
+            return EmptyConversation(agent: agent);
+          }
+          return TranscriptView(
+            key: ValueKey(transcript.loads),
+            transcript: transcript,
+            working: _working,
+            follow: _follow,
+            queued: backend.queued,
+            outbox: backend.outbox,
+            loadEarlier: () => backend.loadEarlier(agent.id),
+            agentId: agent.id,
+            reveal: backend.reveal,
+            loadFrom: (seq) => backend.loadFrom(agent.id, seq),
+          );
+        },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final backend = AppScope.of(context);
-    final transcript = backend.transcript;
     final agent = widget.agent;
+    final workspace = backend.workspace.workspace;
     // The conversation: one of the agent's panes. On a phone the message
     // box takes at most 30% of what's in view above the keyboard.
     final chat = LayoutBuilder(
@@ -130,37 +173,7 @@ class _AgentViewState extends State<AgentView> {
                 // Following a message to its sender can be undone with Back.
                 open: (id) =>
                     AppScope.scope(context).history.follow(agent.id, id),
-                child: ListenableBuilder(
-                  listenable: Listenable.merge([
-                    transcript,
-                    backend.queued,
-                    backend.outbox,
-                  ]),
-                  builder: (context, _) {
-                    if (transcript.agentId != agent.id) {
-                      return const SizedBox.shrink();
-                    }
-                    // Nothing said yet: what the agent is for, and how to start.
-                    if (transcript.length == 0 &&
-                        backend.queued.of(agent.id).isEmpty &&
-                        backend.outbox.of(agent.id).isEmpty &&
-                        !_working) {
-                      return EmptyConversation(agent: agent);
-                    }
-                    return TranscriptView(
-                      key: ValueKey(transcript.loads),
-                      transcript: transcript,
-                      working: _working,
-                      follow: _follow,
-                      queued: backend.queued,
-                      outbox: backend.outbox,
-                      loadEarlier: () => backend.loadEarlier(agent.id),
-                      agentId: agent.id,
-                      reveal: backend.reveal,
-                      loadFrom: (seq) => backend.loadFrom(agent.id, seq),
-                    );
-                  },
-                ),
+                child: _conversationOf(agent, backend),
               ),
             ),
           ),
@@ -182,12 +195,21 @@ class _AgentViewState extends State<AgentView> {
                     )
                   : const SizedBox.shrink(),
             ),
-            MessageBox(
-              target: AgentMessageTarget(agent, backend),
-              onSent: () => _follow.value++,
-              maxFieldHeight: constraints.maxHeight.isFinite
-                  ? constraints.maxHeight * 0.3
-                  : null,
+            // The same box while what it shows from the Workspace is.
+            Kept(
+              inputs: [
+                agent,
+                workspace.models.isEmpty,
+                workspace.speechModel,
+                constraints.maxHeight,
+              ],
+              builder: (_) => MessageBox(
+                target: AgentMessageTarget(agent, backend),
+                onSent: () => _follow.value++,
+                maxFieldHeight: constraints.maxHeight.isFinite
+                    ? constraints.maxHeight * 0.3
+                    : null,
+              ),
             ),
           ]),
         ],
@@ -229,15 +251,23 @@ class _AgentViewState extends State<AgentView> {
                   onMenu: widget.onMenu,
                   onMore: widget.onMore,
                 )
-              : _Header(
-                  agent: agent,
-                  // The conversation's find, below the header.
-                  onFind: () => FindSessions.instance
-                      .within(
-                        context,
-                        only: (target) => target is ConversationFind,
-                      )
-                      ?.open(),
+              : Kept(
+                  inputs: [
+                    agent,
+                    backend.workspace.model(agent.model),
+                    workspace.models.isEmpty,
+                    workspace.pipes,
+                  ],
+                  builder: (_) => _Header(
+                    agent: agent,
+                    // The conversation's find, below the header.
+                    onFind: () => FindSessions.instance
+                        .within(
+                          context,
+                          only: (target) => target is ConversationFind,
+                        )
+                        ?.open(),
+                  ),
                 ),
           // A phone shows one pane at a time: the conversation is the
           // screen, and its viewers open from "…".
@@ -553,7 +583,8 @@ class _BackChip extends StatelessWidget {
     final scope = AppScope.scope(context);
     final history = scope.history;
     return ListenableBuilder(
-      listenable: history,
+      // The Workspace too, for the name of the agent it goes back to.
+      listenable: Listenable.merge([history, scope.backend.workspace]),
       builder: (context, _) {
         final id = history.back;
         final target = id == null || id == current

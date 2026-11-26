@@ -244,6 +244,39 @@ void main() {
     expect(find.text('No, staging first'), findsOneWidget);
   });
 
+  testWidgets('answered or dismissed, a card no longer says it needs you '
+      '(Zucchero row 412)', (tester) async {
+    final harness = Harness(_workspace());
+    void load(AskPersonState state, {bool steps = false}) {
+      final ask = _ask()..state = state;
+      if (steps) ask.steps.add(AskStep(text: 'Open the console'));
+      harness.backend.transcript.load(
+        Transcript(
+          agentId: 'june',
+          entries: [
+            Entry(seq: Int64(7), timestampMs: Int64(1000), askPerson: ask),
+          ],
+        ),
+      );
+    }
+
+    load(AskPersonState.ASK_PERSON_STATE_PENDING);
+    await harness.show(tester);
+    await settle(tester);
+    expect(find.text('June needs your answer'), findsOneWidget);
+    for (final state in [
+      AskPersonState.ASK_PERSON_STATE_ANSWERED,
+      AskPersonState.ASK_PERSON_STATE_DISMISSED,
+    ]) {
+      for (final steps in [false, true]) {
+        load(state, steps: steps);
+        await settle(tester);
+        expect(find.text('June asked'), findsOneWidget);
+        expect(find.textContaining('June needs'), findsNothing);
+      }
+    }
+  });
+
   testWidgets('a written answer dismissed sends what was typed as the '
       'comment, and the dismissed card shows it', (tester) async {
     final harness = Harness(_workspace());

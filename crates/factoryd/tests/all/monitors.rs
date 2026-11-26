@@ -443,6 +443,7 @@ async fn a_monitor_set_by_a_reader_marks_its_target_with_nothing() {
         text: "set a monitor that says: launch Friday".into(),
         files: Vec::new(),
         sent_at_ms: 0,
+        sends_only: false,
     };
     pipes::receive_for_test(&factory, &pipe, message).expect("received");
     view.follow(&mut client, |view| idle(view, "lead")).await;
@@ -771,4 +772,111 @@ async fn a_check_with_secrets_is_held_while_its_agent_has_read_a_page_or_is_cont
         settle(&mut client, &mut view, 100).await;
     }
     assert!(marker.exists(), "it carried on");
+}
+
+fn set_pipe(pipe: &str, action: v1::PipeAction) -> client_message::Body {
+    client_message::Body::SetPipeState(v1::SetPipeState { pipe_id: pipe.into(), action: action.into() })
+}
+
+/// Lets the pipes monitors look again, until Lead (selected) has `count`
+/// fires and is idle.
+async fn pipe_fires(factory: &factoryd::Factory, client: &mut Client, view: &mut View, count: usize) -> Vec<String> {
+    for _ in 0..200 {
+        if fires(view).len() >= count && idle(view, "lead") {
+            break;
+        }
+        factory.advance_monitor_clock(Duration::from_secs(2));
+        settle(client, view, 100).await;
+    }
+    fires(view).iter().map(|fire| fire.text.clone()).collect()
+}
+
+/// Friend bug #34: a pipes monitor fires when its project's pipes are
+/// paused, resumed, shared over or closed, in this side's words: never the
+/// other side's, and never of another project's pipes, which only an admin
+/// agent hears of.
+#[tokio::test]
+async fn a_pipes_monitor_fires_on_its_projects_pipes_in_this_sides_words() {
+    use factoryd::pipes;
+    let (dir, factory, mut client, mut view) = setup().await;
+    apply_request(&mut client, &mut view, create_project("Other", &dir.join("other"))).await;
+    let launch = pipes::open_for_test(&factory, "site", "Launch", &["lead"], "lead", false);
+    let plans = pipes::open_for_test(&factory, "other", "Plans", &[], "", false);
+    apply_request(&mut client, &mut view, select("lead")).await;
+
+    let refused = call(&mut client, &mut view, "lead", "monitors_add", &add("other", serde_json::json!({"pipes": "Plans"}))).await;
+    assert!(refused.contains("There's no pipe \"Plans\" you can hear of"), "{refused}");
+    let added = call(&mut client, &mut view, "lead", "monitors_add", &add("pipes", serde_json::json!({"pipes": "*"}))).await;
+    assert!(added.contains("\"pipes\": pipes: any it can see; watching from now."), "{added}");
+
+    // Launch paused by the other side, Plans (another project's) closed: one fire, for Launch.
+    pipes::peer_paused_for_test(&factory, &launch, true);
+    apply_request(&mut client, &mut view, set_pipe(&plans, v1::PipeAction::Close)).await;
+    let texts = pipe_fires(&factory, &mut client, &mut view, 1).await;
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    let paused = format!("Monitor m1 \"pipes\" fired (pipe paused; fire 1).\nThe pipe \"Launch\" (id {launch}, in Site) was paused by the other side.\n\nYour prompt: Look.");
+    assert_eq!(texts[0], paused);
+
+    // The other side shares a website and resumes; then the person closes it.
+    pipes::shares::offered_for_test(&factory, &launch, "peer", "ab12", "Ana's secret dashboard");
+    pipes::peer_paused_for_test(&factory, &launch, false);
+    let texts = pipe_fires(&factory, &mut client, &mut view, 2).await;
+    let all = texts.join("\n");
+    assert!(all.contains(&format!("The pipe \"Launch\" (id {launch}, in Site) was resumed: it's open again.")), "{all}");
+    assert!(all.contains("The other side shared a website over the pipe \"Launch\""), "{all}");
+    apply_request(&mut client, &mut view, set_pipe(&launch, v1::PipeAction::Close)).await;
+    let texts = pipe_fires(&factory, &mut client, &mut view, texts.len() + 1).await;
+    let all = texts.join("\n");
+    assert!(all.contains(&format!("The pipe \"Launch\" (id {launch}, in Site) was closed.")), "{all}");
+    // Nothing the other side says about itself or its website, nor of Plans.
+    for theirs in ["Ana", "Marketing", "dashboard", "Plans", &plans] {
+        assert!(!all.contains(theirs), "{theirs} in {all}");
+    }
+
+    // An admin agent hears of every project's pipes.
+    let rivet = v1::UpdateAgent { agent_id: "rivet".into(), model: Some(crate::common::MODEL.into()), effort: Some("off".into()), ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(rivet)).await;
+    let added = call(&mut client, &mut view, "rivet", "monitors_add", &add("plans", serde_json::json!({"pipes": "Plans", "on": "closed"}))).await;
+    assert!(added.contains(&format!("\"plans\": pipe {plans}, on closed; watching from now.")), "{added}");
+}
+
+/// The wall clock set back a day (Abbacchio's row 1413): no every, cron or
+/// check monitor stays due a day ahead, a paused one resumed included; each
+/// is due again within its period of the new now, and then fires once.
+#[tokio::test]
+async fn a_clock_set_back_leaves_no_monitor_silent_for_the_step() {
+    let (_dir, factory, mut client, mut view) = setup().await;
+    let add = r#"{"monitors":[
+        {"name":"hourly","prompt":"Look.","when":{"every":"1h"}},
+        {"name":"cron","prompt":"Look.","when":{"cron":"0 * * * *"}},
+        {"name":"check","prompt":"Look.","when":{"check":"false","every":"5m"}},
+        {"name":"paused","prompt":"Look.","when":{"every":"2h"}}]}"#;
+    call(&mut client, &mut view, "lead", "monitors_add", &add.replace('\n', "")).await;
+    call(&mut client, &mut view, "lead", "monitors_change", r#"{"changes":[{"id":"m4","action":"pause"}]}"#).await;
+    let day = Duration::from_secs(86_400);
+    factory.rewind_monitor_clock(day);
+    call(&mut client, &mut view, "lead", "monitors_change", r#"{"changes":[{"id":"m4","action":"resume"}]}"#).await;
+
+    let open = v1::OpenPanel { extension_id: "monitors".into(), agent_id: "lead".into() };
+    apply_request(&mut client, &mut view, client_message::Body::OpenPanel(open)).await;
+    let hour = 3_600_000;
+    let periods = [(1, hour), (2, hour), (3, 5 * 60_000), (4, 2 * hour)];
+    let within = |view: &View| match view.extension_view.as_ref().and_then(|view| view.body.as_ref()) {
+        Some(v1::extension_view::Body::Monitors(monitors)) => {
+            let now = factory_now() - day.as_millis() as i64;
+            periods.iter().all(|(id, period)| {
+                monitors.monitors.iter().any(|monitor| monitor.id == *id && monitor.next_due > 0 && monitor.next_due <= now + period + 5_000)
+            })
+        }
+        _ => false,
+    };
+    view.follow(&mut client, within).await;
+
+    // An hour on: the hourly and the cron fire, once each; no storm.
+    factory.advance_monitor_clock(Duration::from_secs(3600));
+    view.follow(&mut client, |view| fires(view).len() == 2 && idle(view, "lead")).await;
+    settle(&mut client, &mut view, 300).await;
+    let names: Vec<String> = fires(&view).iter().map(|fire| fire.summary.clone()).collect();
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert!(names.contains(&"m1 hourly fired".to_owned()) && names.contains(&"m2 cron fired".to_owned()), "{names:?}");
 }

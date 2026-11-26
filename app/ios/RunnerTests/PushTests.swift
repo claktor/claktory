@@ -265,7 +265,10 @@ struct PushTests {
   @Test func theKeychainKeepsAKeyInTheSharedGroup() throws {
     let store = KeychainPushKeys()
     let group = try #require(store.group)
-    #expect(group.hasSuffix(".com.claktory.app.notifications"))
+    // The build's own group (CLAKTORY_PUSH_GROUP): Release's, or a Debug
+    // or Profile build's, never one the other builds use (#501).
+    let groups = [".com.claktory.app.notifications", ".com.claktory.app.debug.notifications"]
+    #expect(groups.contains { group.hasSuffix($0) })
     let id = "test-\(UUID().uuidString)"
     defer { store.remove(id) }
     var key = PushKey(key: Data(repeating: 3, count: 32))

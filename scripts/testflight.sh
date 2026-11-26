@@ -240,8 +240,12 @@ python3 "$root/scripts/check-macho.py" "$app_dir" ||
 # the archive ad hoc with the project's entitlements, its build variables
 # filled in, and an App Store build's aps-environment; the export re-signs
 # all of it with the distribution certificate and keeps them.
+# The push keys' keychain group, the Release build's (app/ios/Flutter/
+# Release.xcconfig, CLAKTORY_PUSH_GROUP): where the shipped app keeps them.
+push_group=com.claktory.app.notifications
 entitlements() { # SOURCE BUNDLE_ID OUT
-  sed -e "s/\$(AppIdentifierPrefix)/$CLAKTORY_TEAM_ID./g" -e "s/\$(PRODUCT_BUNDLE_IDENTIFIER)/$2/g" "$1" >"$3"
+  sed -e "s/\$(AppIdentifierPrefix)/$CLAKTORY_TEAM_ID./g" -e "s/\$(PRODUCT_BUNDLE_IDENTIFIER)/$2/g" \
+    -e "s/\$(CLAKTORY_PUSH_GROUP)/$push_group/g" "$1" >"$3"
   if /usr/libexec/PlistBuddy -c 'Print :aps-environment' "$3" >/dev/null 2>&1; then
     /usr/libexec/PlistBuddy -c 'Set :aps-environment production' "$3"
   fi

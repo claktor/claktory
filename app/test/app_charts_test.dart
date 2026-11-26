@@ -10,6 +10,7 @@ import 'package:factory_app/app_views/charts.dart';
 import 'package:factory_app/app_views/transport.dart';
 import 'package:factory_app/controls.dart' show ExtensionGlyph, Pressable;
 import 'package:factory_app/identity.dart';
+import 'package:factory_app/mobile/device.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart' as pb;
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/gestures.dart';
@@ -47,6 +48,11 @@ final _tokens = _table(
       ['2026-11-$day', 'a2', 500 * day],
     ],
   ],
+);
+
+/// A dashboard's row of panels side by side.
+final _evenRow = find.byWidgetPredicate(
+  (widget) => widget.runtimeType.toString() == '_EvenRow',
 );
 
 final _workspace = pb.Workspace()
@@ -474,7 +480,10 @@ void main() {
     RenderParagraph paragraph(String text) => tester.renderObject(
       find.descendant(of: find.text(text), matching: find.byType(RichText)),
     );
-    expect(paragraph(long).didExceedMaxLines, isTrue);
+    final cut = _cut(tester, long).data!;
+    expect(cut, endsWith('…'));
+    expect(long, startsWith(cut.substring(0, cut.length - 1)));
+    expect(paragraph(cut).didExceedMaxLines, isFalse);
     expect(paragraph('Home').didExceedMaxLines, isFalse);
     expect(paragraph('1,234,567').didExceedMaxLines, isFalse);
     // The table fits: its numbers end inside the screen, nothing to scroll.
@@ -523,12 +532,73 @@ void main() {
       size: const Size(320, 844),
     );
     expect(tester.takeException(), isNull);
-    final cell = tester.getRect(find.text(long));
+    final cell = tester.getRect(find.text(_cut(tester, long).data!));
     final place = tester.getRect(find.byType(AppTableView));
     expect(cell.right, lessThanOrEqualTo(place.right + 0.5));
   });
 
-  testWidgets('a narrow table keeps its cells whole', (tester) async {
+  testWidgets("at the largest text a text column leaves the numbers' room: "
+      'they stay on screen, the text cut (Scolippi 32633, Zucchero rows '
+      '437–440)', (tester) async {
+    tester.platformDispatcher.textScaleFactorTestValue = 3.12;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    await _show(
+      tester,
+      [
+        _root(['users']),
+        {
+          'id': 'users',
+          'component': 'Table',
+          'data': {'@path': '/users'},
+          'columns': [
+            {'name': 'size', 'title': 'Claktories', 'format': 'text'},
+            {'name': 'users', 'title': 'Users', 'format': 'number'},
+          ],
+        },
+      ],
+      {
+        'users': _table(
+          ['size', 'users'],
+          [
+            ['1 Claktory', 7],
+            ['3–5 Claktories', 1],
+            ['6+ Claktories', 1],
+          ],
+        ),
+      },
+      // The test's font is wide: 560 is about an SE's 375 in the app's.
+      size: const Size(560, 844),
+    );
+    expect(tester.takeException(), isNull);
+    final place = tester.getRect(find.byType(AppTableView));
+    expect(
+      tester.getRect(find.text('7')).right,
+      lessThanOrEqualTo(place.right + 0.5),
+    );
+    // Cut with "…" right after a letter, never after a space ("3–5…"),
+    // the whole words read out.
+    for (final whole in ['3–5 Claktories', '6+ Claktories']) {
+      final cut = _cut(tester, whole).data!;
+      expect(cut, endsWith('…'), reason: whole);
+      expect(cut, isNot(endsWith(' …')), reason: whole);
+    }
+    // The heading isn't broken mid-word: one line, cut, or whole words.
+    final heading = tester.widget<Text>(
+      find.byWidgetPredicate(
+        (w) =>
+            w is Text &&
+            (w.data == 'Claktories' || w.semanticsLabel == 'Claktories'),
+      ),
+    );
+    expect(heading.maxLines, 1);
+    expect(heading.data, endsWith('…'));
+    expect(heading.semanticsLabel, 'Claktories');
+  });
+
+  testWidgets('a narrow table keeps its cells whole and spreads its columns '
+      "across its place, as Grafana's share a panel's width (Scolippi #14)", (
+    tester,
+  ) async {
     await _show(
       tester,
       [
@@ -549,6 +619,248 @@ void main() {
       },
     );
     expect(tester.widget<Text>(find.text('Home')).maxLines, isNull);
+    final table = tester.getRect(find.byType(AppTableView));
+    expect(table.width, greaterThan(1000));
+    // The number at the right edge, the words at the left, the two
+    // columns half each.
+    expect(tester.getRect(find.text('12')).right, closeTo(table.right, 0.5));
+    expect(tester.getRect(find.text('views')).right, closeTo(table.right, 0.5));
+    expect(tester.getRect(find.text('Home')).left, table.left);
+    final widths = tester
+        .widget<Table>(find.byType(Table))
+        .columnWidths!
+        .values
+        .map((w) => (w as FixedColumnWidth).value)
+        .toList();
+    expect(widths[0], closeTo(table.width / 2, 0.5));
+    expect(widths.fold(0.0, (sum, w) => sum + w), closeTo(table.width, 0.01));
+  });
+
+  testWidgets('a table with a height fills it, as a Grafana table panel '
+      'does: its heading stays and its rows scroll inside; a few rows '
+      'leave room under them (Zucchero row 454)', (tester) async {
+    await _show(
+      tester,
+      [
+        _root(['many', 'few', 'plain']),
+        {
+          'id': 'many',
+          'component': 'Table',
+          'data': {'@path': '/many'},
+          'height': 200,
+        },
+        {
+          'id': 'few',
+          'component': 'Table',
+          'data': {'@path': '/few'},
+          'height': 300,
+        },
+        {
+          'id': 'plain',
+          'component': 'Table',
+          'data': {'@path': '/few'},
+        },
+      ],
+      {
+        'many': _table(
+          ['country', 'users'],
+          [
+            for (var i = 1; i <= 30; i++) ['Country $i', 100 - i],
+          ],
+        ),
+        'few': _table(
+          ['place', 'visits'],
+          [
+            ['Finland', 1],
+            ['Brazil', 1],
+          ],
+        ),
+      },
+      size: const Size(393, 1400),
+    );
+    final tables = find.byType(AppTableView);
+    expect(tester.getSize(tables.at(0)).height, 200);
+    expect(tester.getSize(tables.at(1)).height, 300);
+    // Without one, as tall as its rows.
+    expect(tester.getSize(tables.at(2)).height, lessThan(150));
+    final many = tester.getRect(tables.at(0));
+    final heading = find.text('country');
+    final headingAt = tester.getRect(heading).top;
+    final last = find.text('Country 30');
+    expect(tester.getRect(last).top, greaterThan(many.bottom));
+    // Scrolled inside: the last row comes up within the table, under its
+    // heading, which stays.
+    await tester.drag(find.text('Country 3'), const Offset(0, -2000));
+    await tester.pumpAndSettle();
+    expect(tester.getRect(heading).top, headingAt);
+    expect(tester.getRect(last).bottom, lessThanOrEqualTo(many.bottom));
+    expect(
+      tester.getRect(find.text('Country 3')).top,
+      lessThan(tester.getRect(heading).bottom),
+    );
+    expect(tester.getRect(tables.at(0)), many);
+    // A few rows at the top of their place, the room under them.
+    final few = tester.getRect(tables.at(1));
+    expect(
+      tester.getRect(find.text('Brazil').first).bottom,
+      lessThan(few.top + 120),
+    );
+  });
+
+  testWidgets('a drag past the end of a table that scrolls inside goes on '
+      'to scroll the page, as on iOS (Zucchero row 467)', (tester) async {
+    await _show(
+      tester,
+      [
+        _root(['many', 'more']),
+        {
+          'id': 'many',
+          'component': 'Table',
+          'data': {'@path': '/many'},
+          'height': 200,
+        },
+        {
+          'id': 'more',
+          'component': 'Table',
+          'data': {'@path': '/many'},
+          'height': 480,
+        },
+      ],
+      {
+        'many': _table(
+          ['country', 'users'],
+          [
+            for (var i = 1; i <= 40; i++) ['Row $i', 100 - i],
+          ],
+        ),
+      },
+      size: const Size(393, 500),
+    );
+    final page = tester.state<ScrollableState>(find.byType(Scrollable).first);
+    expect(page.position.maxScrollExtent, greaterThan(100));
+    // Within the table: only the table scrolls.
+    await tester.drag(find.text('Row 3').first, const Offset(0, -200));
+    await tester.pumpAndSettle();
+    expect(page.position.pixels, 0);
+    // Past its end: the page carries on.
+    await tester.drag(find.text('Row 8').first, const Offset(0, -3000));
+    await tester.pumpAndSettle();
+    expect(page.position.pixels, greaterThan(100));
+    expect(
+      tester.getRect(find.text('Row 40').first).bottom,
+      lessThanOrEqualTo(tester.getRect(find.byType(AppTableView).first).bottom),
+    );
+  });
+
+  testWidgets("a panel's title over a table or an error draws as a chart's "
+      'label, as near what it titles, so their headings line up; a Column '
+      'without one keeps its spacing (Scolippi T6)', (tester) async {
+    final semantics = tester.ensureSemantics();
+    await _show(
+      tester,
+      [
+        _root(['row', 'plain']),
+        {
+          'id': 'row',
+          'component': 'Row',
+          'align': 'start',
+          'children': ['chart', 'table', 'error'],
+          'stackBelow': 768,
+        },
+        {'id': 'chart', 'component': 'Card', 'child': 'chart_b', 'weight': 4},
+        {
+          'id': 'chart_b',
+          'component': 'Chart',
+          'kind': 'bars',
+          'label': 'Runs',
+          'data': {'@path': '/t'},
+          'height': 200,
+        },
+        {'id': 'table', 'component': 'Card', 'child': 'table_c', 'weight': 4},
+        {
+          'id': 'table_c',
+          'component': 'Column',
+          'children': ['table_t', 'table_b'],
+        },
+        {
+          'id': 'table_t',
+          'component': 'Text',
+          'text': 'Countries',
+          'variant': 'title',
+        },
+        {
+          'id': 'table_b',
+          'component': 'Table',
+          'data': {'@path': '/t'},
+          'height': 200,
+        },
+        {'id': 'error', 'component': 'Card', 'child': 'error_c', 'weight': 4},
+        {
+          'id': 'error_c',
+          'component': 'Column',
+          'children': ['error_t', 'error_b'],
+        },
+        {
+          'id': 'error_t',
+          'component': 'Text',
+          'text': 'Agents',
+          'variant': 'title',
+        },
+        {'id': 'error_b', 'component': 'Text', 'text': "Couldn't load."},
+        {
+          'id': 'plain',
+          'component': 'Column',
+          'children': ['one', 'two'],
+        },
+        {'id': 'one', 'component': 'Text', 'text': 'One line'},
+        {'id': 'two', 'component': 'Text', 'text': 'Another'},
+      ],
+      {
+        't': _table(
+          ['day', 'runs'],
+          [
+            ['Mon', 3],
+            ['Tue', 5],
+          ],
+        ),
+      },
+    );
+    final label = tester.widget<Text>(find.text('Runs').first);
+    for (final title in ['Countries', 'Agents']) {
+      final text = tester.widget<Text>(find.text(title));
+      expect(text.style, label.style, reason: title);
+      expect(text.maxLines, 2, reason: title);
+      expect(
+        tester.getSemantics(find.text(title)).flagsCollection.isHeader,
+        isTrue,
+      );
+    }
+    // Level: each title at its card's top, the table's heading as near
+    // under its title as the chart's plot is under its label.
+    final runs = tester.getRect(find.text('Runs').first);
+    final countries = tester.getRect(find.text('Countries'));
+    expect(countries.top, runs.top);
+    final chart = tester.getRect(
+      find.descendant(
+        of: find.byType(AppChart),
+        matching: find.byType(BarChart),
+      ),
+    );
+    final table = tester.getRect(find.byType(AppTableView));
+    expect(table.top - countries.bottom, Space.xs);
+    expect(chart.top - runs.bottom, Space.xs);
+    expect(
+      tester.getRect(find.text("Couldn't load.")).top -
+          tester.getRect(find.text('Agents')).bottom,
+      Space.xs,
+    );
+    // Without a title, a Column's own spacing.
+    expect(
+      tester.getRect(find.text('Another')).top -
+          tester.getRect(find.text('One line')).bottom,
+      Space.s,
+    );
+    semantics.dispose();
   });
 
   testWidgets("data that isn't a table, or no rows, says so", (tester) async {
@@ -2288,9 +2600,9 @@ void main() {
       {'id': 'note', 'component': 'Text', 'text': 'A line of the page'},
     ];
 
-    // The test's font is wide: 560 is about an SE's 320 in the app's (the
+    // The test's font is wide: 620 is about an SE's 320 in the app's (the
     // SE itself, in Geist, is in app_charts_golden_test).
-    for (final (width, scale) in [(700.0, 1.0), (560.0, 1.0), (900.0, 2.0)]) {
+    for (final (width, scale) in [(700.0, 1.0), (620.0, 1.0), (1100.0, 2.0)]) {
       testWidgets('one line at $width wide, text ×$scale: the name gives way, '
           '••• stays at the end', (tester) async {
         debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
@@ -2415,6 +2727,72 @@ void main() {
         );
       });
     }
+
+    testWidgets("on a phone the ••• takes taps a finger's target around it, "
+        'nothing moving, the button beside it keeping its own (Zucchero '
+        'row 444)', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      debugDeviceCapabilities = DeviceCapabilities(idiom: Idiom.phone);
+      addTearDown(() {
+        debugDefaultTargetPlatformOverride = null;
+        debugDeviceCapabilities = null;
+      });
+      final transport = await _show(
+        tester,
+        bar('Costs'),
+        null,
+        size: const Size(393, 844),
+      );
+      expect(tester.takeException(), isNull);
+      final more = tester.getRect(
+        find
+            .ancestor(
+              of: find.byWidgetPredicate(
+                (w) => w is ExtensionGlyph && w.icon == 'ellipsis',
+              ),
+              matching: find.byType(Pressable),
+            )
+            .first,
+      );
+      final filters = tester.getRect(
+        find
+            .ancestor(
+              of: find.text('Filters (2)'),
+              matching: find.byType(Pressable),
+            )
+            .first,
+      );
+      // Drawn as before: narrower than a finger, at the page's edge.
+      expect(more.width, lessThan(44));
+      Object? which() =>
+          (transport.actions.last.$2['action']! as Map)['context'];
+      // Past its end, in the page's edge.
+      await tester.tapAt(Offset(more.right + 7, more.center.dy));
+      await tester.pump();
+      expect(transport.actions, hasLength(1));
+      expect(which(), {'which': 'more'});
+      // In the gap before it.
+      await tester.tapAt(Offset(more.left - 3, more.center.dy));
+      await tester.pump();
+      expect(transport.actions, hasLength(2));
+      expect(which(), {'which': 'more'});
+      // The button beside it keeps its taps to its very end.
+      await tester.tapAt(Offset(filters.right - 1, filters.center.dy));
+      await tester.pump();
+      expect(which(), {'which': 'filters'});
+      // Far off, nothing.
+      await tester.tapAt(Offset(more.right + 40, more.center.dy));
+      await tester.pump();
+      expect(transport.actions, hasLength(3));
+      // In the margin beside anything else (a line of the page, a button
+      // that isn't the bar's): nothing.
+      final note = tester.getRect(find.text('A line of the page'));
+      await tester.tapAt(Offset(note.left - 7, note.center.dy));
+      await tester.tapAt(Offset(more.right + 7, note.center.dy));
+      await tester.pump();
+      expect(transport.actions, hasLength(3));
+      expect(tester.takeException(), isNull);
+    });
 
     testWidgets('a short name keeps its words, the rest of the line '
         'empty before the others', (tester) async {
@@ -2578,8 +2956,56 @@ void main() {
       final b = rect(tester, 'Panel B');
       expect(a.top, b.top, reason: 'side by side');
       // A quarter each, the gap the other half.
-      final row = tester.getRect(find.byType(Row).first);
+      final row = tester.getRect(_evenRow.first);
       expect(b.left - row.left, closeTo((row.width - 16) / 4 + 8, 2));
+    });
+
+    testWidgets('side by side, every panel is as tall as the tallest, as '
+        "Grafana's grid lines up panels of one height; one under another, "
+        'each keeps its own (Zucchero row 467)', (tester) async {
+      final panels = [
+        _root(['row']),
+        {
+          'id': 'row',
+          'component': 'Row',
+          'align': 'start',
+          'children': ['a', 'b'],
+          'stackBelow': 768,
+        },
+        {'id': 'a', 'component': 'Card', 'child': 'a_t', 'weight': 8},
+        {'id': 'a_t', 'component': 'Text', 'text': 'Map'},
+        {'id': 'b', 'component': 'Card', 'child': 'b_col', 'weight': 4},
+        {
+          'id': 'b_col',
+          'component': 'Column',
+          'children': ['b1', 'b2', 'b3'],
+        },
+        {'id': 'b1', 'component': 'Text', 'text': 'Netherlands'},
+        {'id': 'b2', 'component': 'Text', 'text': 'United States'},
+        {'id': 'b3', 'component': 'Text', 'text': 'Iceland'},
+      ];
+      Rect card(String text) => tester.getRect(
+        find
+            .ancestor(of: find.text(text), matching: find.byType(Container))
+            .first,
+      );
+      await _show(tester, panels, null, size: const Size(1024, 800));
+      final map = card('Map');
+      final list = card('Netherlands');
+      expect(list.height, greaterThan(60), reason: 'three lines');
+      expect(map.top, list.top);
+      expect(map.height, list.height, reason: 'as tall as the tallest');
+      // Each its weight's share, 8 between.
+      expect(map.width, closeTo(2 * list.width, 0.5));
+      expect(list.left - map.right, closeTo(8, 0.5));
+      // Its words at the top, the room under them.
+      expect(
+        tester.getRect(find.text('Map')).top - card('Map').top,
+        Space.m + 1,
+        reason: 'its padding inside its hairline',
+      );
+      await _show(tester, panels, null, size: const Size(390, 800));
+      expect(card('Map').height, lessThan(card('Netherlands').height));
     });
 
     testWidgets('it grows with the text size', (tester) async {
@@ -3084,3 +3510,9 @@ void main() {
     });
   });
 }
+
+/// A table cell cut to fit: its Text, whose words end in "…" and whose
+/// whole words are read out.
+Text _cut(WidgetTester tester, String whole) => tester.widget<Text>(
+  find.byWidgetPredicate((w) => w is Text && w.semanticsLabel == whole),
+);

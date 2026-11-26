@@ -59,10 +59,10 @@ const PROMPT: &str = "## Monitors
 
 Use monitors for scheduled jobs and reminders, once or on repeat: say, check production logs every 6 hours and alert only when something's wrong. For that, prefer a check whose command finds the problem, so you wake only when there is one. A check fires once unless told otherwise, so for a job that runs on, use \"fire_on\": \"changed\" with a command that prints the problems (the latest matching lines, such as grep ERROR app.log | tail -5), or \"repeat\": true with one that looks only at what's new since $FACTORY_MONITOR_LAST_FIRED, so each new problem fires it again. When it fires with a reminder for the person, or a problem they should know about, tell them with notify_person if you have it, not only in your conversation: they may be away. Use every or cron when the work needs you each time.
 
-A monitor wakes you later with a prompt you write: at a time (at), on an interval since its last fire (every), on a cron schedule (cron), when a command you run periodically succeeds, fails, matches or changes (check), when files change (files), or when a long-running command prints lines (watch). Monitors last until done or cancelled, across restarts and compactions. Each fire arrives as an event from the monitor with your prompt and what happened, so write the prompt so it makes sense on its own. Every fire makes you read your whole context again, so use the slowest schedule that works and prefer check, files or watch to polling on a short interval. Background tasks already wake you when they end; don't add monitors for them. Cancel monitors you no longer need.
+A monitor wakes you later with a prompt you write: at a time (at), on an interval since its last fire (every), on a cron schedule (cron), when a command you run periodically succeeds, fails, matches or changes (check), when files change (files), when a long-running command prints lines (watch), or when pipes change (pipes): opened, closed, paused, resumed, a website shared or stopped, the other side online or offline; never read Claktory's own files for that. Monitors last until done or cancelled, across restarts and compactions. Each fire arrives as an event from the monitor with your prompt and what happened, so write the prompt so it makes sense on its own. Every fire makes you read your whole context again, so use the slowest schedule that works and prefer check, files, watch or pipes to polling on a short interval. Background tasks already wake you when they end; don't add monitors for them. Cancel monitors you no longer need.
 ";
 
-const ADD: &str = "Add monitors, all or none. Each: name (short), prompt (what to do when it fires; self-contained), when, and optionally until (a time), max_fires, idle_only (wait until you're not working; default true for at/every/cron), agent (set it for another agent you can message). when is one of: {\"at\": \"2026-11-19 09:00\"} or {\"in\": \"45m\"}; {\"every\": \"24h\", \"start\"?: time}; {\"cron\": \"0 9 * * 1-5\"} (local time); {\"check\": \"<command>\", \"every\": \"5m\", \"fire_on\": \"success|failure|match|changed\", \"match\"?: regex, \"repeat\"?: true (each time it becomes true again) or \"always\" (at every check it holds), \"secrets\"?: [names] (your own monitors only: secrets of yours the command gets as with bash's secrets, never ones that ask each time; only a fire shows their output, values hidden)} (the command gets $FACTORY_MONITOR_LAST_FIRED: unix seconds of the last fire, or of when it was added); {\"files\": [paths], \"glob\"?: \"*.rs\"}; {\"watch\": \"<long-running command>\", \"match\"?: regex, \"gap\"?: \"30s\"}. Commands run in your folder.";
+const ADD: &str = "Add monitors, all or none. Each: name (short), prompt (what to do when it fires; self-contained), when, and optionally until (a time), max_fires, idle_only (wait until you're not working; default true for at/every/cron), agent (set it for another agent you can message). when is one of: {\"at\": \"2026-11-19 09:00\"} or {\"in\": \"45m\"}; {\"every\": \"24h\", \"start\"?: time}; {\"cron\": \"0 9 * * 1-5\"} (local time); {\"check\": \"<command>\", \"every\": \"5m\", \"fire_on\": \"success|failure|match|changed\", \"match\"?: regex, \"repeat\"?: true (each time it becomes true again) or \"always\" (at every check it holds), \"secrets\"?: [names] (your own monitors only: secrets of yours the command gets as with bash's secrets, never ones that ask each time; only a fire shows their output, values hidden)} (the command gets $FACTORY_MONITOR_LAST_FIRED: unix seconds of the last fire, or of when it was added); {\"files\": [paths], \"glob\"?: \"*.rs\"}; {\"watch\": \"<long-running command>\", \"match\"?: regex, \"gap\"?: \"30s\"}; {\"pipes\": \"*\" or a pipe's name or id, or a list, \"on\"?: [opened, closed, paused, resumed, shared, unshared, online, offline] (all if left out)} (pipes its agent may hear of: every pipe for an admin agent, else its own project's). Commands run in your folder.";
 const LIST: &str = "Your monitors, one line each, and what else can wake you. all: monitors that ended in the last 7 days too. agent: another agent's, if you can message it.";
 const CHANGE: &str = "Change monitors: changes is a list of {id (\"m3\"), action: pause, resume, cancel or fire (fire now, to try the prompt)}, and agent for another agent's.";
 
@@ -198,6 +198,13 @@ pub(crate) struct Cursor {
     /// What's carried includes a fire that should have been its last.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub last_after_carry: bool,
+    /// A pipes monitor's pipes as it last saw them, by id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipes: Option<std::collections::BTreeMap<String, run::PipeSeen>>,
+    /// When it last looked at them (ms since 1970): a pipe made since that
+    /// shows up open was opened meanwhile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipes_seen_at: Option<i64>,
 }
 
 /// A monitor as it is now.
@@ -641,6 +648,8 @@ fn add_monitors(factory: &Arc<Factory>, asker: &str, wanted: Vec<AddOne>) -> Res
         return Err("monitors is empty; give at least one {name, prompt, when}.".to_owned());
     }
     let now = factory.monitors.now();
+    // Outside Factory's lock, as other readers of the pipes do.
+    let pipes = factory.pipes.all();
     // Nothing the creator read reaches the monitor's agent (#346): its
     // `taint` column stays, NULL from then on.
     let mut new = Vec::new();
@@ -660,7 +669,10 @@ fn add_monitors(factory: &Arc<Factory>, asker: &str, wanted: Vec<AddOne>) -> Res
                 return Err(fail(format!("prompt must be 1 to {MAX_PROMPT} characters; got {}.", prompt.chars().count())));
             }
             let folder = crate::runner::places(&factory.home, &inner.config, config, &[]).folder;
-            let (when, next_due) = when::parse(&one.when, &folder, now).map_err(fail)?;
+            let (mut when, next_due) = when::parse(&one.when, &folder, now).map_err(fail)?;
+            if let When::Pipes { pipes: names, .. } = &mut when {
+                *names = resolve_pipes(&pipes, &inner.config, asker, config, names).map_err(fail)?;
+            }
             if let When::Check { secrets, .. } = &when
                 && !secrets.is_empty()
                 && agent != asker
@@ -720,7 +732,7 @@ fn add_monitors(factory: &Arc<Factory>, asker: &str, wanted: Vec<AddOne>) -> Res
         let first = match (&monitor.when, monitor.next_due) {
             (When::Check { .. }, _) => "; first check now".to_owned(),
             (_, Some(due)) => format!("; first fire {}", when::local(due, now)),
-            (When::Files { .. }, _) => "; watching from now".to_owned(),
+            (When::Files { .. } | When::Pipes { .. }, _) => "; watching from now".to_owned(),
             _ => "; starting it now".to_owned(),
         };
         let schedule = monitor.when.describe(now);
@@ -733,6 +745,54 @@ fn add_monitors(factory: &Arc<Factory>, asker: &str, wanted: Vec<AddOne>) -> Res
     }
     refresh_view(factory);
     Ok(ToolResult::text(lines.join("\n"), json!({"monitors": added})))
+}
+
+/// The pipes a pipes monitor names, as ids: each by its id or by the name
+/// the person gave it, among those its agent may hear of, and whoever sets
+/// it too (an admin agent, every pipe; another, its own project's).
+fn resolve_pipes(
+    pipes: &[crate::pipes::Record],
+    config: &Config,
+    asker: &str,
+    agent: &AgentConfig,
+    names: &[String],
+) -> Result<Vec<String>, String> {
+    let hears = |who: &AgentConfig, record: &crate::pipes::Record| {
+        run::sees_pipe(crate::proposals::is_admin(who), who.project.as_deref(), record)
+    };
+    let visible: Vec<&crate::pipes::Record> = pipes
+        .iter()
+        .filter(|record| {
+            hears(agent, record)
+                && (asker.is_empty() || asker == agent.id || config.agent(asker).is_some_and(|asker| hears(asker, record)))
+        })
+        .collect();
+    let mut ids: Vec<String> = Vec::new();
+    for name in names {
+        let found: Vec<&&crate::pipes::Record> = match visible.iter().find(|record| &record.id == name) {
+            Some(record) => vec![record],
+            None => visible
+                .iter()
+                .filter(|record| record.named_here.unwrap_or(record.peer.is_none()) && record.name.eq_ignore_ascii_case(name))
+                .collect(),
+        };
+        match found.as_slice() {
+            [record] => {
+                if !ids.contains(&record.id) {
+                    ids.push(record.id.clone());
+                }
+            }
+            [] => {
+                let whom = if asker == agent.id { "you".to_owned() } else { agent.id.clone() };
+                return Err(format!(
+                    "There's no pipe \"{name}\" {whom} can hear of: name a pipe by the name {} gave it or by its id, or \"*\" for all of them. An agent hears of its own project's pipes; an admin agent, of every pipe.",
+                    config.person()
+                ));
+            }
+            _ => return Err(format!("More than one pipe is called \"{name}\": name it by its id.")),
+        }
+    }
+    Ok(ids)
 }
 
 #[derive(Deserialize)]
@@ -926,6 +986,10 @@ pub(crate) fn change(factory: &Arc<Factory>, agent: &str, actor: &str, changes: 
                 }
                 if matches!(monitor.when, When::Check { .. }) {
                     monitor.next_due = Some(now);
+                }
+                // Nor further off than a period from now (a clock set back).
+                if let Some(due) = run::capped(&monitor, now) {
+                    monitor.next_due = Some(due);
                 }
             }
         }

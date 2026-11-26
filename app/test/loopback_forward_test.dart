@@ -28,6 +28,9 @@ class FakeForward implements PortForward {
 
   var stopped = false;
 
+  /// The port on the Claktory's machine it goes to.
+  int? target;
+
   @override
   Future<void> stop() async => stopped = true;
 }
@@ -48,6 +51,14 @@ class Forwarder {
         throw const ForwardFailure(ForwardProblem.taken);
       }
       final forward = FakeForward(port);
+      made.add(forward);
+      return forward;
+    },
+    forwardTo: (port, target) async {
+      if (taken.contains(port)) {
+        throw const ForwardFailure(ForwardProblem.taken);
+      }
+      final forward = FakeForward(port)..target = target;
       made.add(forward);
       return forward;
     },
@@ -254,6 +265,84 @@ void main() {
         },
       );
       expect(events.last, 'opened anyway');
+    });
+  });
+
+  // #503: websites shared over pipes, forwarded from a port of this
+  // device's own for as long as the share lasts.
+  group('shared websites', () {
+    test('a share has a port of its own here, the same each time, away '
+        "from programs' usual ones", () {
+      final port = sharePortFor('s1');
+      expect(port, inInclusiveRange(20000, 29999));
+      expect(sharePortFor('s1'), port);
+      expect(sharePortFor('s2'), isNot(port));
+      expect(
+        withPort('http://s-abc.localhost:3000/__claktory_open?k=x', port),
+        'http://s-abc.localhost:$port/__claktory_open?k=x',
+      );
+    });
+
+    test('forwarded once, to its port there, the next port here when its '
+        'own is taken; it outlives the flows and their Stop', () async {
+      final own = sharePortFor('s1');
+      final forwarder = Forwarder(taken: {own});
+      final forwards = forwarder.forwards;
+      expect(await forwards.forwardShare('s1', 3000), own + 1);
+      expect(await forwards.forwardShare('s1', 3000), own + 1);
+      expect(forwarder.made, hasLength(1));
+      expect(forwarder.made.single.target, 3000);
+      expect(forwards.sharePort('s1'), own + 1);
+      await forwards.stopFlows();
+      expect(forwarder.made.single.stopped, isFalse);
+      expect(forwards.active, isEmpty, reason: "not one of the sidebar's");
+      await forwards.stopAll();
+      expect(forwarder.made.single.stopped, isTrue);
+      expect(forwards.sharePort('s1'), isNull);
+    });
+
+    test('kept to the shares wanted: new ones start, gone ones stop, one '
+        'whose port there moved starts again', () async {
+      final forwarder = Forwarder();
+      final forwards = forwarder.forwards;
+      await forwards.keepShares({'s1': 3000, 's2': 5173});
+      expect(forwards.sharePort('s1'), sharePortFor('s1'));
+      expect(forwards.sharePort('s2'), sharePortFor('s2'));
+      expect(forwarder.made, hasLength(2));
+      await forwards.keepShares({'s1': 3001});
+      expect(forwarder.made[0].stopped, isTrue);
+      expect(forwarder.made[1].stopped, isTrue);
+      expect(forwarder.made.last.target, 3001);
+      expect(forwards.sharePort('s2'), isNull);
+      await forwards.keepShares({});
+      expect(forwarder.made.last.stopped, isTrue);
+    });
+
+    test('this Claktory on this machine: nothing to forward', () async {
+      final forwarder = Forwarder(remote: false);
+      await forwarder.forwards.keepShares({'s1': 3000});
+      expect(forwarder.made, isEmpty);
+    });
+
+    test('no port free near its own: taken, said once tried', () async {
+      final own = sharePortFor('s1');
+      final forwarder = Forwarder(
+        taken: {for (var i = 0; i < 20; i++) own + i},
+      );
+      await expectLater(
+        forwarder.forwards.forwardShare('s1', 3000),
+        throwsA(
+          isA<ForwardFailure>().having(
+            (failure) => failure.problem,
+            'problem',
+            ForwardProblem.taken,
+          ),
+        ),
+      );
+      expect(
+        forwarder.forwards.shareProblem('s1')?.problem,
+        ForwardProblem.taken,
+      );
     });
   });
 

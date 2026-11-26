@@ -9,10 +9,15 @@
 //! test run of a large crate; cargo still finds everything fresh without
 //! them. Then, when the place's caches together still take more than the
 //! budget (`resources.build_cache_gb`, 25 GB unless changed), it clears
-//! them, largest first, until it's under: each is moved aside at once and
-//! deleted in the background. The agents that work there hear of it: one
-//! working now after its current step, an idle one at its next run (the
-//! stale objects go unannounced: nothing rebuilds).
+//! them until it's under. First it trims Rust's targets, largest first:
+//! their incremental state (`<profile>/incremental`, most of a target) and
+//! test binaries a newer build of the same test replaced. The next build
+//! takes longer than a warm one but far less than a cold one (#454). Only
+//! when that isn't enough does it clear whole caches, largest first. Each
+//! is moved aside at once and deleted in the background. The agents that
+//! work there hear of a cache cleared: one working now after its current
+//! step, an idle one at its next run (the stale objects and a trim go
+//! unannounced: nothing starts cold).
 //!
 //! Only folders known to be build caches are ever touched: a `target/` next
 //! to a Cargo.toml, a Flutter `build/` or `.dart_tool/` next to a
@@ -24,9 +29,11 @@
 //! running a tool call, or with a background task or watch running, a cache
 //! written in the last few minutes, or a Rust build holding its lock. An
 //! agent that's working but between steps (waiting on its model) doesn't
-//! hold it: busy agents are seldom idle, and their caches grow most. The
-//! last checks and the clearing itself happen under Factory's lock, which a
-//! tool call's start takes before the tool runs, so none starts in between.
+//! hold it for a trim: busy agents are seldom idle, and their caches grow
+//! most. A whole cache waits until its agents are idle, since its next
+//! build is cold. The last checks, the trim and the clearing itself happen
+//! under Factory's lock, which a tool call's start takes before the tool
+//! runs, so none starts in between.
 //!
 //! The dev Claktory (`~/.factory-dev`) looks only inside its own data
 //! folder: its agents' checkouts and its projects there. A project folder
@@ -69,6 +76,10 @@ const RECENT: Duration = Duration::from_secs(5 * 60);
 
 /// Rust's object files older than this are left over from earlier builds.
 const STALE_OBJECTS: Duration = Duration::from_secs(3 * 3600);
+
+/// A test binary a newer build of the same test replaced is no longer run
+/// once it's this old: a busy checkout makes gigabytes of them within hours.
+const SUPERSEDED: Duration = Duration::from_secs(15 * 60);
 
 /// How long one sweep may walk.
 const SWEEP_BUDGET: Duration = Duration::from_secs(300);
@@ -248,11 +259,9 @@ fn cargo_locked(dir: &Path) -> bool {
     false
 }
 
-/// Deletes the object files Rust builds leave in a target folder's `deps`
-/// (`<profile>/deps`, `<triple>/<profile>/deps`) that are older than
-/// `STALE_OBJECTS`; returns how many and their bytes.
-fn sweep_objects(target: &Path) -> (usize, u64) {
-    let Some(stale) = SystemTime::now().checked_sub(STALE_OBJECTS) else { return (0, 0) };
+/// The folders of a target that may be a profile's (`debug`, `release`,
+/// `<triple>/debug`…): its folders, and theirs.
+fn profiles(target: &Path) -> Vec<PathBuf> {
     let subdirs = |dir: &Path| -> Vec<PathBuf> {
         std::fs::read_dir(dir)
             .map(|entries| {
@@ -264,13 +273,22 @@ fn sweep_objects(target: &Path) -> (usize, u64) {
             })
             .unwrap_or_default()
     };
-    let mut deps = Vec::new();
+    let mut profiles = Vec::new();
     for dir in subdirs(target) {
-        deps.push(dir.join("deps"));
-        deps.extend(subdirs(&dir).into_iter().map(|profile| profile.join("deps")));
+        profiles.extend(subdirs(&dir));
+        profiles.push(dir);
     }
+    profiles.sort();
+    profiles
+}
+
+/// Deletes the object files Rust builds leave in a target folder's `deps`
+/// (`<profile>/deps`, `<triple>/<profile>/deps`) that are older than
+/// `STALE_OBJECTS`; returns how many and their bytes.
+fn sweep_objects(target: &Path) -> (usize, u64) {
+    let Some(stale) = SystemTime::now().checked_sub(STALE_OBJECTS) else { return (0, 0) };
     let (mut count, mut bytes) = (0, 0);
-    for dir in deps {
+    for dir in profiles(target).into_iter().map(|profile| profile.join("deps")) {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.filter_map(Result::ok) {
             let name = entry.file_name();
@@ -289,6 +307,74 @@ fn sweep_objects(target: &Path) -> (usize, u64) {
         }
     }
     (count, bytes)
+}
+
+/// Whether `dir` is a Rust build's target folder.
+fn rust_target(dir: &Path) -> bool {
+    dir.join(".rustc_info.json").is_file() || profiles(dir).iter().any(|profile| profile.join(".fingerprint").is_dir())
+}
+
+/// What a trim of a Rust target takes away, with what each takes: its
+/// profiles' incremental state, and the executables in their `deps` (test
+/// binaries, mostly) that a newer build of the same name replaced and that
+/// are older than `SUPERSEDED`. The newest of each name stays, so the
+/// tests built last run without linking again. None of it makes the next
+/// build a cold one.
+fn trimmable(target: &Path, deadline: Instant) -> Vec<(PathBuf, u64)> {
+    let Some(stale) = SystemTime::now().checked_sub(SUPERSEDED) else { return Vec::new() };
+    let mut found = Vec::new();
+    for profile in profiles(target) {
+        let incremental = profile.join("incremental");
+        if std::fs::symlink_metadata(&incremental).is_ok_and(|metadata| metadata.is_dir()) {
+            let size = measure(&incremental, deadline).bytes;
+            found.push((incremental, size));
+        }
+        let Ok(entries) = std::fs::read_dir(profile.join("deps")) else { continue };
+        // By name (`all` of `all-0123456789abcdef`): the executables, newest first.
+        let mut builds: HashMap<String, Vec<(SystemTime, PathBuf, u64)>> = HashMap::new();
+        for entry in entries.filter_map(Result::ok) {
+            let file = entry.file_name();
+            let file = file.to_string_lossy();
+            let Some((name, hash)) = file.rsplit_once('-') else { continue };
+            if file.contains('.') || hash.len() != 16 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else { continue };
+            if !metadata.is_file() || metadata.mode() & 0o111 == 0 {
+                continue;
+            }
+            let Ok(modified) = metadata.modified() else { continue };
+            builds.entry(name.to_owned()).or_default().push((modified, entry.path(), metadata.blocks() * 512));
+        }
+        for mut versions in builds.into_values() {
+            versions.sort_by_key(|version| std::cmp::Reverse(version.0));
+            found.extend(versions.into_iter().skip(1).filter(|(modified, ..)| *modified < stale).map(|(_, path, bytes)| (path, bytes)));
+        }
+    }
+    found
+}
+
+/// Takes away what `trimmable` found in `target`: a folder is moved aside
+/// and deleted in the background, a file deleted. Returns the bytes freed.
+fn trim(factory: &Factory, target: &Path, found: &[(PathBuf, u64)]) -> u64 {
+    let mut freed = 0;
+    for (path, bytes) in found {
+        // Its folder keeps its time: what a trim takes isn't a build
+        // writing there (`in_use`, `written_lately`).
+        let parent = path.parent().and_then(|parent| Some((parent, std::fs::metadata(parent).ok()?.modified().ok()?)));
+        let gone = if path.is_dir() { move_aside(factory, path, target) } else { std::fs::remove_file(path) };
+        if let Some((parent, modified)) = parent
+            && let Err(error) = std::fs::File::open(parent).and_then(|folder| folder.set_modified(modified))
+        {
+            tracing::warn!(path = %parent.display(), %error, "could not keep a trimmed folder's time");
+        }
+        match gone {
+            Ok(()) => freed += bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(path = %path.display(), %error, "could not trim a build cache"),
+        }
+    }
+    freed
 }
 
 fn gb(bytes: u64) -> String {
@@ -413,13 +499,21 @@ fn written_lately(dir: &Path) -> bool {
 /// Moves the cache aside at once and deletes it in the background: into
 /// `<home>/trash`, or beside it when that's on another volume.
 fn clear(factory: &Factory, cache: &Path) -> std::io::Result<()> {
+    move_aside(factory, cache, cache)
+}
+
+/// Moves `path` aside at once and deletes it in the background: into
+/// `<home>/trash`, or beside `cache` (where a sweep finds what a restart
+/// left) when that's on another volume.
+fn move_aside(factory: &Factory, path: &Path, cache: &Path) -> std::io::Result<()> {
+    static MOVED: AtomicU64 = AtomicU64::new(0);
     let trash = factory.home.root().join("trash");
     std::fs::create_dir_all(&trash)?;
-    let name = cache.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    let stamp = format!("{}-{name}", now_ms());
-    let same_volume = std::fs::metadata(&trash).ok().zip(std::fs::metadata(cache).ok()).is_some_and(|(a, b)| a.dev() == b.dev());
+    let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    let stamp = format!("{}-{}-{name}", now_ms(), MOVED.fetch_add(1, Ordering::Relaxed));
+    let same_volume = std::fs::metadata(&trash).ok().zip(std::fs::metadata(path).ok()).is_some_and(|(a, b)| a.dev() == b.dev());
     let aside = if same_volume { trash.join(stamp) } else { cache.with_file_name(format!("{TRASH_PREFIX}{stamp}")) };
-    std::fs::rename(cache, &aside)?;
+    std::fs::rename(path, &aside)?;
     delete_later(aside);
     Ok(())
 }
@@ -478,9 +572,9 @@ pub(crate) fn take_note(factory: &Factory, agent: &str) -> Option<Queued> {
     Some(note)
 }
 
-/// Looks at every place once: measures its caches and clears those of a
-/// place over the budget while nothing works there (its agents may be
-/// between steps).
+/// Looks at every place once: measures its caches and, for a place over the
+/// budget, trims its Rust targets while nothing works there (its agents may
+/// be between steps), then clears whole caches while its agents are idle.
 pub(crate) fn sweep(factory: &Arc<Factory>) {
     let budget_gb = factory.lock().config.resources.build_cache_gb;
     let deadline = Instant::now() + SWEEP_BUDGET;
@@ -523,6 +617,50 @@ pub(crate) fn sweep(factory: &Arc<Factory>) {
             let tasks = occupied(factory);
             if let Some(agent) = workers.iter().find(|agent| tasks.contains(*agent)) {
                 tracing::info!(place = %place.path.display(), %agent, total, "build caches over budget; left while an agent's task or watch runs");
+                continue;
+            }
+            // Trims first, largest first: the next build isn't a cold one.
+            for cache in &mut place.caches {
+                if total <= budget {
+                    break;
+                }
+                if in_use(cache) || !rust_target(&cache.path) {
+                    continue;
+                }
+                let found = trimmable(&cache.path, deadline);
+                if found.is_empty() {
+                    continue;
+                }
+                // The last checks, and the trim, under the lock a tool
+                // call's start waits for, as for clearing below.
+                let inner = factory.lock();
+                if let Some(agent) = workers.iter().find(|agent| mid_tool(&inner, agent)) {
+                    tracing::info!(place = %place.path.display(), %agent, total, "build caches over budget; left while an agent runs a tool");
+                    break;
+                }
+                if written_lately(&cache.path) || cargo_locked(&cache.path) {
+                    continue;
+                }
+                let freed = trim(factory, &cache.path, &found);
+                drop(inner);
+                if freed > 0 {
+                    tracing::info!(cache = %cache.path.display(), bytes = cache.bytes, freed, budget, "trimmed a build cache over budget");
+                    cache.bytes = cache.bytes.saturating_sub(freed);
+                    total = total.saturating_sub(freed);
+                }
+            }
+            if total <= budget {
+                place.caches.sort_by_key(|cache| std::cmp::Reverse(cache.bytes));
+                continue;
+            }
+            // Whole caches only while the place's agents are idle: the next
+            // build there is cold.
+            if let Some(agent) = {
+                let inner = factory.lock();
+                workers.iter().find(|agent| inner.agents.get(agent.as_str()).is_some_and(|runtime| runtime.running)).cloned()
+            } {
+                tracing::info!(place = %place.path.display(), %agent, total, "build caches over budget after a trim; left while an agent works");
+                place.caches.sort_by_key(|cache| std::cmp::Reverse(cache.bytes));
                 continue;
             }
             let mut kept = Vec::new();
@@ -589,7 +727,7 @@ pub(crate) fn clear_on_request(factory: &Factory, path: &str) -> Result<String, 
     let workers = workers(factory, &place);
     let busy = working(factory);
     if let Some(agent) = workers.iter().find(|agent| busy.contains(*agent)) {
-        let name = factory.lock().config.agent(agent).map_or_else(|| agent.clone(), |agent| agent.name.clone());
+        let name = factory.agent_name(agent);
         return Err(format!("{name} is working there now; clear it once {name} is idle."));
     }
     let cache = measure(path, Instant::now() + SWEEP_BUDGET);
@@ -712,6 +850,44 @@ mod tests {
         assert_eq!(sweep_objects(&target).0, 2);
         let left: Vec<bool> = files.iter().map(|path| path.exists()).collect();
         assert_eq!(left, [false, true, false, true, true], "old objects in deps go; libraries, incremental state and new objects stay");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_trim_takes_incremental_state_and_superseded_binaries_only() {
+        let root = dir("trim");
+        let target = root.join("target");
+        let old = SystemTime::now() - Duration::from_secs(3600);
+        let lately = SystemTime::now() - Duration::from_secs(60);
+        let executable = |file: &str, modified: SystemTime| {
+            let path = target.join(file);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(&path, b"binary").expect("write");
+            std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).expect("mode");
+            std::fs::File::options().write(true).open(&path).expect("open").set_modified(modified).expect("age");
+            path
+        };
+        for file in ["debug/incremental/all-1/s-1/x.o", "aarch64-apple-darwin/release/incremental/x-2/s-2/y.o", "debug/deps/libx-0123456789abcdef.rlib"] {
+            let path = target.join(file);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(path, b"x").expect("write");
+        }
+        // Three builds of the tests: the newest stays, the oldest goes, and
+        // the one replaced lately stays too.
+        let oldest = executable("debug/deps/all-0000000000000001", old - Duration::from_secs(60));
+        let recent = executable("debug/deps/all-0000000000000002", lately);
+        let newest = executable("debug/deps/all-0000000000000003", SystemTime::now());
+        // The only build of its name: stays, however old.
+        let only = executable("debug/deps/factoryd-0000000000000004", old);
+        assert!(!rust_target(&target), "no sign of Rust yet");
+        std::fs::write(target.join(".rustc_info.json"), "{}").expect("rustc info");
+        assert!(rust_target(&target));
+
+        let found: Vec<PathBuf> = trimmable(&target, Instant::now() + SWEEP_BUDGET).into_iter().map(|(path, _)| path).collect();
+        let mut found: Vec<String> = found.iter().map(|path| path.strip_prefix(&target).expect("inside").display().to_string()).collect();
+        found.sort();
+        assert_eq!(found, ["aarch64-apple-darwin/release/incremental", "debug/deps/all-0000000000000001", "debug/incremental"]);
+        assert!(oldest.exists() && recent.exists() && newest.exists() && only.exists(), "only found, nothing deleted");
         let _ = std::fs::remove_dir_all(&root);
     }
 

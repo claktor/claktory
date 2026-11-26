@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Installs Factory on a Mac, or its backend on a Linux machine, from its
-# published releases, with no checkout, Rust or Flutter needed:
+# Installs Factory on a Mac, or its backend on a Linux machine (Windows too,
+# in WSL 2), from its published releases, with no checkout, Rust or Flutter
+# needed:
 #
 #   curl -fsSL <channel>/install.sh | bash
 #
@@ -233,7 +234,10 @@ main() {
     return
   fi
   mkdir -p "$work/release"
-  tar -xzf "$work/download" -C "$work/release"
+  # On a Mac, the system's tar, as the updater uses: the Mac tarball is xz
+  # (#454), which it reads by content despite -z; a GNU tar earlier in the
+  # PATH wouldn't. Linux tarballs stay gzip.
+  if [[ "$os" == Linux ]]; then tar -xzf "$work/download" -C "$work/release"; else /usr/bin/tar -xzf "$work/download" -C "$work/release"; fi
   if [[ "$os" == Linux ]]; then
     [[ -f "$work/release/factoryd" && -f "$work/release/install-linux.sh" ]] || fail "the release is incomplete."
   else
@@ -245,6 +249,19 @@ main() {
     fi
   fi
   echo "$backend" >"$work/release/backend-version"
+  # Windows, through WSL 2 (#476): the release's own checks of WSL and the
+  # Windows disk under it, before anything goes into ~/.factory. Unsafe states
+  # stop here with what to do; notes are passed on.
+  if [[ "$os" == Linux && -z "$download_only" && -f "$work/release/claktory-wsl.sh" ]] && bash "$work/release/claktory-wsl.sh" is-wsl; then
+    local wsl_out wsl_status=0
+    wsl_out="$(bash "$work/release/claktory-wsl.sh" preflight 2>&1)" || wsl_status=$?
+    if ((wsl_status != 0)); then
+      [[ "$(wc -l <<<"$wsl_out")" -le 1 ]] || say "$(sed '$d' <<<"$wsl_out")"
+      stop unsupported 3 "$(tail -n 1 <<<"$wsl_out")"
+    fi
+    [[ -z "$wsl_out" ]] || say "$wsl_out"
+    export CLAKTORY_WSL_CHECKED=1
+  fi
 
   local releases="$HOME/.factory/releases"
   [[ -n "$download_only" ]] && releases="$download_only"

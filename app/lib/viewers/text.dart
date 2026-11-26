@@ -15,6 +15,7 @@ import '../pane_chrome.dart';
 import '../protocol/factory/v1/factory.pb.dart';
 import '../resources.dart' show formatBytes;
 import '../selection.dart';
+import 'markdown_media.dart';
 import 'registry.dart';
 
 /// A text file: monospace with line numbers, or Markdown formatted with a
@@ -47,9 +48,22 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
     go: (key, nth) => _hook.go?.call(key, nth),
   );
 
+  /// Counts up each time the file is read again (Reload, or it changed):
+  /// its pictures and videos (#540) are checked again with it, since a
+  /// picture rewritten beside it is no file of a pane (Abbacchio's row
+  /// 1447).
+  final _mediaReloads = ValueNotifier(0);
+
+  @override
+  Future<void> reload() {
+    _mediaReloads.value++;
+    return super.reload();
+  }
+
   @override
   void dispose() {
     _find.dispose();
+    _mediaReloads.dispose();
     super.dispose();
   }
 
@@ -173,6 +187,8 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
               ],
         child: formatted
             ? _FormattedText(
+                path: path,
+                mediaReloads: _mediaReloads,
                 text: _text,
                 version: file.sha256,
                 note: note,
@@ -572,6 +588,8 @@ mixin _Blocks<T extends StatefulWidget> on State<T> {
 /// line breaks) and threads' passages are highlighted where they are.
 class _FormattedText extends StatefulWidget {
   const _FormattedText({
+    required this.path,
+    required this.mediaReloads,
     required this.text,
     required this.version,
     required this.note,
@@ -580,6 +598,11 @@ class _FormattedText extends StatefulWidget {
     required this.hook,
   });
 
+  /// The file's path, where its pictures and videos are found (#540).
+  final String path;
+
+  /// Ticks when the file is read again, for its pictures and videos.
+  final Listenable mediaReloads;
   final String text;
   final String version;
   final String? note;
@@ -794,8 +817,14 @@ class _FormattedTextState extends State<_FormattedText>
             // Its blocks are found in and marked, commented on or not.
             ValueListenableBuilder(
               valueListenable: widget.find.marks,
-              builder: (context, _, _) =>
-                  Markdown(widget.text, textBlock: _block),
+              builder: (context, _, _) => Markdown(
+                widget.text,
+                textBlock: _block,
+                files: FileMarkdownMedia(
+                  widget.path,
+                  reloads: widget.mediaReloads,
+                ),
+              ),
             ),
             if (note != null) _CutNote(note),
           ],

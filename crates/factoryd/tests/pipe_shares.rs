@@ -21,6 +21,8 @@ struct Side {
     factory: Arc<Factory>,
     client: Client,
     view: View,
+    /// The notifications it was sent, as `until` saw them.
+    notes: Vec<v1::Notify>,
 }
 
 /// A Claktory with a project, its tunnel quick and its relay dead, so
@@ -35,7 +37,7 @@ async fn claktory(dir: &Path, project: &str, agent: &str) -> Side {
     apply_request(&mut client, &mut view, Request::SetRemoteAccess(relays)).await;
     apply_request(&mut client, &mut view, create_project(project, &dir.join("work"))).await;
     apply_request(&mut client, &mut view, create_agent(&project.to_lowercase(), agent, "")).await;
-    Side { factory, client, view }
+    Side { factory, client, view, notes: Vec::new() }
 }
 
 impl Side {
@@ -48,7 +50,22 @@ impl Side {
     }
 
     async fn until(&mut self, done: impl Fn(&View) -> bool) {
-        let wait = self.view.follow(&mut self.client, &done);
+        self.until_with(|view, _| done(view)).await;
+    }
+
+    /// Until `done` holds of the view and the notifications sent so far.
+    async fn until_with(&mut self, done: impl Fn(&View, &[v1::Notify]) -> bool) {
+        let wait = async {
+            while !done(&self.view, &self.notes) {
+                let message = self.client.receive().await;
+                if let Some(body) = &message.body {
+                    if let Body::Notify(notify) = body {
+                        self.notes.push(notify.clone());
+                    }
+                    self.view.apply(body);
+                }
+            }
+        };
         tokio::time::timeout(Duration::from_secs(20), wait).await.expect("it got there");
     }
 
@@ -224,6 +241,38 @@ async fn the_other_side_opens_it_in_a_browser_at_its_own_address() {
     assert!(matches!(a.request(Request::SharePipeWebsite(share)).await, Body::Ack(_)));
     b.until(|view| view.workspace.pipe_shares.iter().any(|share| !share.mine && share.live && !share.address.is_empty())).await;
     let theirs = b.shares().into_iter().find(|share| !share.mine).expect("B's");
+    // W2: B's person is told once, and it stands out until it's opened.
+    // Never with its name, the other side's words, on a lock screen.
+    b.until_with(|_, notes| notes.iter().any(|note| !note.share_id.is_empty())).await;
+    let shared: Vec<&v1::Notify> = b.notes.iter().filter(|note| !note.share_id.is_empty()).collect();
+    assert_eq!(shared.len(), 1, "{:?}", b.notes);
+    assert_eq!((shared[0].pipe_id.as_str(), shared[0].share_id.as_str()), (b.pipe().id.as_str(), theirs.id.as_str()));
+    assert_eq!(shared[0].kind(), v1::NotifyKind::NeedsYou);
+    assert_eq!((shared[0].title.as_str(), shared[0].body.as_str()), ("Launch", "Launch shares a website with you"));
+    assert!(!format!("{:?}", shared[0]).contains("Dashboard"), "{:?}", shared[0]);
+    assert!(theirs.unopened);
+    // The chat's line announcing it says which share it is, for Open on it;
+    // no other line does.
+    let lines = pipes::messages_for_test(&b.factory, &b.pipe().id);
+    let announced: Vec<&v1::PipeMessage> = lines.iter().filter(|line| !line.share_id.is_empty()).collect();
+    assert_eq!(announced.len(), 1, "{lines:?}");
+    assert!(announced[0].text.ends_with("shares Dashboard."), "{:?}", announced[0]);
+    assert_eq!(announced[0].share_id, theirs.id);
+
+    // W3: the form says which program listens on the port shared.
+    let check = v1::CheckPipeSharePort { port: u32::from(port) };
+    let Body::PipeSharePort(checked) = a.request(Request::CheckPipeSharePort(check)).await else { panic!("no answer") };
+    assert_eq!(checked.pid, std::process::id(), "{checked:?}");
+    assert!(!checked.program.is_empty() && !checked.program.contains('/'), "{checked:?}");
+    // Shared with that pipe already: the form says so, and once is enough
+    // (row 1340).
+    assert_eq!(checked.shared_pipe_ids, [a.pipe().id], "{checked:?}");
+    let again = v1::SharePipeWebsite { port: u32::from(port), name: "Dashboard".into(), pipe_ids: vec![a.pipe().id], ..Default::default() };
+    match a.request(Request::SharePipeWebsite(again)).await {
+        Body::Error(error) => assert!(error.message.contains(&format!("Dashboard on port {port} is shared with")) && error.message.ends_with("already."), "{}", error.message),
+        other => panic!("shared twice: {other:?}"),
+    }
+    assert_eq!(a.shares().iter().filter(|share| share.mine).count(), 1);
 
     // Its address is its own, known before Open; nothing listens until then.
     let host = theirs.address.strip_prefix("http://").and_then(|rest| rest.strip_suffix('/')).expect("an address").to_owned();
@@ -241,7 +290,7 @@ async fn the_other_side_opens_it_in_a_browser_at_its_own_address() {
     let Body::PipeShareOpened(opened) = b.request(Request::OpenPipeShare(open)).await else { panic!("not opened") };
     assert!(opened.url.starts_with(&format!("http://{host}/__claktory_open?k=")), "{}", opened.url);
     assert!(opened.fallback_url.starts_with(&format!("http://{at}/__claktory_open?k=")), "{}", opened.fallback_url);
-    b.until(|view| view.workspace.pipe_shares.iter().any(|share| share.id == theirs.id && share.listening)).await;
+    b.until(|view| view.workspace.pipe_shares.iter().any(|share| share.id == theirs.id && share.listening && !share.unopened)).await;
     let path = opened.url.split_once(&host).expect("its path").1.to_owned();
     let (status, head, _) = browse(&at, &host, &path, "").await.expect("answered");
     assert_eq!(status, 303, "{head}");
@@ -257,6 +306,11 @@ async fn the_other_side_opens_it_in_a_browser_at_its_own_address() {
     // Without it, or under another name, nothing reaches A.
     assert_eq!(browse(&at, &host, "/", "").await.expect("answered").0, 403);
     assert_eq!(browse(&at, &format!("evil.example:{local}"), "/", &key).await.expect("answered").0, 421);
+    // W1: a paired device's browser, through a forward at a port of its
+    // own, reaches it under the same host, with the same key.
+    let forwarded = host.replace(&format!(":{local}"), ":24567");
+    let (status, _, body) = browse(&at, &forwarded, "/", &key).await.expect("answered");
+    assert_eq!((status, body.as_str()), (200, format!("hello from A; host={forwarded}; cookie=").as_str()));
 
     // Hidden, and shown again: the person's choice, kept here.
     let hide = |hidden| Request::HidePipeShare(v1::HidePipeShare { share_id: theirs.id.clone(), hidden });
@@ -297,6 +351,9 @@ async fn the_other_side_opens_it_in_a_browser_at_its_own_address() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert_eq!(answered.map(|(status, ..)| status), Ok(200));
+
+    // Told once: never again for the same share, paused and resumed.
+    assert_eq!(b.notes.iter().filter(|note| !note.share_id.is_empty()).count(), 1, "{:?}", b.notes);
 
     // A port B opens a website at can't be shared back from B.
     let check = v1::CheckPipeSharePort { port: local.parse().expect("a number") };
@@ -340,6 +397,10 @@ async fn a_shared_website_reaches_the_other_side_while_its_pipe_is_open() {
 
     // Its bytes go both ways through the pipe.
     assert_eq!(through(&b, &theirs.id, "hello").await.as_deref(), Ok("hello"));
+    // A's agents read that B opened it (#502): when, never what went through.
+    let listed = pipes::shares::listing_for_test(&a.factory, &a_pipe).join("\n");
+    assert!(listed.contains("; active; the other side opened it first "), "{listed}");
+    assert!(!listed.contains("hello"), "{listed}");
 
     // A pause cuts a live stream at once and refuses new ones.
     let (mut send, mut receive) = pipes::shares::stream_for_test(&b.factory, &theirs.id).await.expect("a stream");

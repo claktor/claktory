@@ -2,13 +2,17 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart' show sha256;
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart' show ValueNotifier;
 
 import 'package:factory_app/device_account.dart';
 import 'package:factory_app/people/dm_keys.dart';
+import 'package:factory_app/people/dm_home.dart';
 import 'package:factory_app/people/e2ee.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart'
     show DmLeafOffer;
+import 'package:factory_app/protocol/factory/v1/factory.pb.dart' as pb;
 import 'package:factory_app/tunnel/api/dm.dart';
 import 'package:factory_app/tunnel/api/dm_transfer.dart';
 import 'package:factory_app/user_apps/session.dart';
@@ -55,8 +59,15 @@ class _Group {
 /// The worker's end-to-end routes, for any number of [as] callers.
 class FakeWorker {
   final keys = <String, Map<String, Object?>>{};
+
+  /// When the worker takes what comes next, if set: else its seq.
+  int? acceptAt;
   final packages = <String, List<String>>{};
   final lastResort = <String, String>{};
+
+  /// When each leaf's last resort's lifetime ends (seconds), as GET
+  /// key-packages says; none (0) unless a test sets it.
+  final lastResortEnds = <String, int>{};
   final _groups = <String, _Group>{};
   final welcomes = <String, List<Map<String, Object?>>>{};
   final handoffs = <String, List<Map<String, Object?>>>{};
@@ -90,6 +101,13 @@ class FakeWorker {
   var _welcomeId = 0;
 
   int epochOf(String group) => _groups[group]!.epoch;
+
+  /// Moves [group]'s epoch on, as a commit not in its feed yet would.
+  void advance(String group) => _groups[group]!.epoch++;
+
+  /// Lists [accounts] as [group]'s, as a service that lies would.
+  void listAccounts(String group, List<String> accounts) =>
+      _groups[group]!.accounts = accounts;
   List<Map<String, Object?>> mailboxOf(String group) => _groups[group]!.mailbox;
 
   /// Adds [envelope] to [group]'s mailbox as another member would; a
@@ -100,13 +118,30 @@ class FakeWorker {
     final seq = known.mailbox.length + 1;
     known.mailbox.add({
       'seq': seq,
-      'kind': body['t'] == 'commit' ? 'commit' : 'application',
+      'kind': switch (body['t']) {
+        'commit' => 'commit',
+        'proposal' => 'proposal',
+        _ => 'application',
+      },
       'envelope': jsonDecode(envelope),
-      'accepted_ms': seq,
+      'accepted_ms': acceptAt ?? seq,
       'epoch': body['epoch'],
     });
     if (body['t'] == 'commit' && advance) known.epoch++;
     return seq;
+  }
+
+  /// The outbox's changes, as `/sync` follows them: a cursor is how many
+  /// came before it.
+  final syncEvents = <Map<String, Object?>>[];
+  Completer<void>? _syncMoved;
+
+  /// Adds [event] ({'kind': 'keys', 'account_id': 'ana'}, say) to the
+  /// outbox: a held `/sync` answers with it.
+  void post(Map<String, Object?> event) {
+    syncEvents.add(event);
+    _syncMoved?.complete();
+    _syncMoved = null;
   }
 
   SignedCall as(String account, String leaf) => (method, path, [body]) async {
@@ -116,6 +151,20 @@ class FakeWorker {
     if (refuse?.call(route) case final Exception error) throw error;
     if (signedOut[account]?.contains(leaf) ?? false) {
       _refuse(401, 'unauthorized');
+    }
+    if (route == 'GET sync') {
+      final since = uri.queryParameters['since'];
+      if (since == null) return {'cursor': '${syncEvents.length}'};
+      final from = int.parse(since);
+      if (from >= syncEvents.length &&
+          uri.queryParameters.containsKey('wait')) {
+        await (_syncMoved ??= Completer()).future;
+      }
+      return {
+        'events': syncEvents.sublist(from),
+        'next_cursor': '${syncEvents.length}',
+        'has_more': false,
+      };
     }
     return _answer(account, leaf, route, uri, body ?? const {});
   };
@@ -206,10 +255,15 @@ class FakeWorker {
         }
         if (body['last_resort'] case final last?) {
           lastResort['$account/$leaf'] = jsonEncode(last);
+          lastResortEnds.remove('$account/$leaf');
         }
         return {'remaining': mine.length, 'last_resort': true};
       case ('GET', ['key-packages']):
-        return {'remaining': packages['$account/$leaf']?.length ?? 0};
+        return {
+          'remaining': packages['$account/$leaf']?.length ?? 0,
+          'last_resort': lastResort.containsKey('$account/$leaf'),
+          'last_resort_ends': lastResortEnds['$account/$leaf'] ?? 0,
+        };
       case ('POST', ['key-packages', 'claim']):
         final whose = body['account_id']! as String;
         final only = body['leaf_ids'] as List?;
@@ -426,6 +480,12 @@ class _Here {
   /// This device's leaf is under the person's current key here.
   bool moved = true;
   bool pendingMove = false;
+
+  /// Once this device reads the home (#451): where it is in the worker's
+  /// feed, null for where it was before, and the proposals taken there
+  /// (their 'p'), which a commit naming them in 'takes' needs.
+  int? proposalSeq;
+  final proposals = <String>{};
 }
 
 /// The app's Rust DmDevice, in memory.
@@ -496,6 +556,7 @@ class FakeDmDevice implements DmDevice {
     pins[accountId] = _pin(identity!);
     lists[accountId] = DmDeviceList(
       version: BigInt.one,
+      createdMs: nowMs,
       leaves: [_listed(leafId, leafKey)],
     );
     return DmSetUp(
@@ -587,10 +648,12 @@ class FakeDmDevice implements DmDevice {
     utf8.encode(
       jsonEncode({
         'version': list.version.toInt(),
+        'created': list.createdMs.toInt(),
         'leaves': [
           for (final leaf in list.leaves)
             {'leaf': leaf.leafId, 'key': dmB64(leaf.signatureKey)},
         ],
+        if (list.home case final home?) 'home': dmB64(home),
       }),
     ),
   );
@@ -629,8 +692,35 @@ class FakeDmDevice implements DmDevice {
   }) async {
     // Signed only: pinned once the worker takes it ([acceptList]), as the
     // Rust (row 615).
-    return _listBytes(DmDeviceList(version: version, leaves: leaves));
+    return _listBytes(
+      DmDeviceList(version: version, createdMs: createdMs, leaves: leaves),
+    );
   }
+
+  @override
+  Future<Uint8List> signDeviceListWithHome({
+    required BigInt version,
+    required BigInt createdMs,
+    required List<DmListed> leaves,
+    Uint8List? home,
+  }) async => _listBytes(
+    DmDeviceList(
+      version: version,
+      createdMs: createdMs,
+      leaves: leaves,
+      home: home,
+    ),
+  );
+
+  /// Whether this device went over to its home (#451): a new one has
+  /// nothing at the worker to read first.
+  var drained = false;
+
+  @override
+  bool homeDrained() => drained;
+
+  @override
+  Future<void> setHomeDrained() async => drained = true;
 
   @override
   Future<DmHandoff> startHandoff({
@@ -664,6 +754,8 @@ class FakeDmDevice implements DmDevice {
             'account': account,
             'identity': dmB64(identity!),
             'for': leaf,
+            // Sealed to that code's own keys: no other code opens it.
+            'code': offer['n'],
           }),
         ),
       ),
@@ -677,14 +769,23 @@ class FakeDmDevice implements DmDevice {
   }
 
   @override
-  Future<DmHandoffDone> finishHandoff({
+  Future<DmHandoffDone> finishHandoffFor({
     required DmHandoff handoff,
     required List<int> sealed,
     required BigInt nowMs,
+    required String accountId,
+    required List<int> identityPublic,
   }) async {
     final offer = jsonDecode(handoff.qr()) as Map<String, Object?>;
     final body = jsonDecode(utf8.decode(sealed)) as Map<String, Object?>;
-    if (body['for'] != offer['leaf']) throw StateError("doesn't open");
+    if (body['for'] != offer['leaf'] || body['code'] != offer['n']) {
+      throw StateError("doesn't open");
+    }
+    // As the crate's: only the identity the account publishes (Melone F3).
+    if (body['account'] != accountId ||
+        !listEqualsInts(dmUnb64(body['identity']! as String), identityPublic)) {
+      throw StateError("isn't the account's published identity");
+    }
     setUp = true;
     account = body['account']! as String;
     leaf = offer['leaf']! as String;
@@ -787,14 +888,42 @@ class FakeDmDevice implements DmDevice {
     );
   }
 
-  DmPin _pin(Uint8List key, {bool changed = false, bool verified = false}) =>
-      DmPin(
-        identityPublic: key,
-        verified: verified,
-        changedUnseen: changed,
-        canSend: !changed,
-        deviceListVersion: BigInt.one,
-      );
+  DmPin _pin(
+    Uint8List key, {
+    bool changed = false,
+    bool verified = false,
+    Uint8List? changedFrom,
+    bool mismatched = false,
+  }) => DmPin(
+    identityPublic: key,
+    verified: verified,
+    changedUnseen: changed,
+    canSend: !changed,
+    deviceListVersion: BigInt.one,
+    changedFrom: changedFrom,
+    mismatched: mismatched,
+  );
+
+  /// Each account's keys moved off by a change, as they were (base64 →
+  /// pin), and the ones the person said didn't match: as the crate's
+  /// `previous` (E11-3).
+  final _previous = <String, Map<String, DmPin>>{};
+  final _mismatched = <String, Set<String>>{};
+
+  @override
+  Future<void> undoKeyChange({
+    required String account,
+    required List<int> backTo,
+  }) async {
+    final back = _previous[account]?.remove(dmB64(backTo));
+    final now = pins[account];
+    if (back == null || now == null) {
+      throw StateError("that isn't an earlier security key to go back to");
+    }
+    (_mismatched[account] ??= {}).add(dmB64(now.identityPublic));
+    _previous[account]![dmB64(now.identityPublic)] = now;
+    pins[account] = _pin(back.identityPublic, verified: back.verified);
+  }
 
   @override
   DmPin? pin({required String account}) => pins[account];
@@ -835,9 +964,31 @@ class FakeDmDevice implements DmDevice {
     required String account,
     required List<int> identityPublic,
   }) async {
+    // One this device won't take, as the crate refuses a key replaced for
+    // good (E11-3).
+    if (refusedKeys.contains(dmB64(identityPublic))) {
+      throw StateError('this key was replaced');
+    }
     keyChangedFor.add(account);
-    pins[account] = _pin(Uint8List.fromList(identityPublic), changed: true);
+    final before = pins[account];
+    final key = Uint8List.fromList(identityPublic);
+    if (before != null) {
+      (_previous[account] ??= {})[dmB64(before.identityPublic)] = before;
+    }
+    _previous[account]?.remove(dmB64(key));
+    pins[account] = _pin(
+      key,
+      changed: true,
+      changedFrom: before?.identityPublic,
+      mismatched: _mismatched[account]?.contains(dmB64(key)) ?? false,
+    );
   }
+
+  /// Keys (base64) [keyChanged] refuses.
+  final refusedKeys = <String>{};
+
+  /// While set, [send] fails with it, as something unforeseen would.
+  Object? sendFails;
 
   /// Accounts whose key changed here: their leaves the new list doesn't
   /// name are dead (row 630), as are this device's own account's after it
@@ -951,12 +1102,26 @@ class FakeDmDevice implements DmDevice {
   }
 
   @override
-  Future<void> seen({required String account}) async =>
-      pins[account] = _pin(pins[account]!.identityPublic);
+  Future<void> seen({required String account}) async {
+    final now = pins[account]!;
+    pins[account] = _pin(
+      now.identityPublic,
+      verified: now.verified,
+      changedFrom: now.changedFrom,
+      mismatched: now.mismatched,
+    );
+  }
 
   @override
-  Future<void> verify({required String account}) async =>
-      pins[account] = _pin(pins[account]!.identityPublic, verified: true);
+  Future<void> verify({required String account}) async {
+    final now = pins[account]!;
+    _mismatched[account]?.remove(dmB64(now.identityPublic));
+    pins[account] = _pin(
+      now.identityPublic,
+      verified: true,
+      changedFrom: now.changedFrom,
+    );
+  }
 
   @override
   Future<void> acceptList({
@@ -968,6 +1133,7 @@ class FakeDmDevice implements DmDevice {
       account,
       DmDeviceList(
         version: BigInt.from(json['version']! as int),
+        createdMs: BigInt.from(json['created'] as int? ?? 0),
         leaves: [
           for (final leaf in json['leaves']! as List)
             _listed(
@@ -975,6 +1141,10 @@ class FakeDmDevice implements DmDevice {
               dmUnb64(leaf['key']! as String),
             ),
         ],
+        home: switch (json['home']) {
+          final String home => dmUnb64(home),
+          _ => null,
+        },
       ),
     );
   }
@@ -993,6 +1163,19 @@ class FakeDmDevice implements DmDevice {
   @override
   Future<String> lastResortKeyPackage() async =>
       fakeEnvelope({'t': 'kp', 'member': _member(), 'n': 0});
+
+  /// When [sweepKeyPackages] ran, in seconds.
+  final swept = <int>[];
+
+  @override
+  bool lastResortDue({required int lastResortEnds, required int nowSecs}) =>
+      lastResortEnds != 0 && lastResortEnds <= nowSecs + 7 * 24 * 60 * 60;
+
+  @override
+  Future<int> sweepKeyPackages({required int nowSecs}) async {
+    swept.add(nowSecs);
+    return 0;
+  }
 
   String _info(String group, int epoch, List<String> members) => fakeEnvelope({
     't': 'info',
@@ -1017,6 +1200,101 @@ class FakeDmDevice implements DmDevice {
     final id = dmB64(groupId);
     _groups.remove(id);
     _history.remove(id);
+  }
+
+  /// Every takeProposal call's outcome, for tests.
+  final takenProposals = <DmProcessed>[];
+
+  @override
+  int proposalSeq({required List<int> groupId}) {
+    final here = _groups[dmB64(groupId)];
+    if (here == null) return 0;
+    return here.proposalSeq ?? (here.seq <= dmHomeSeqBase ? here.seq : 0);
+  }
+
+  @override
+  Future<DmProcessed> takeProposal({
+    required List<int> groupId,
+    required int seq,
+    required String envelope,
+  }) async {
+    final here = _groups[dmB64(groupId)]!;
+    DmProcessed out(DmOutcome outcome) {
+      final processed = DmProcessed(
+        outcome: outcome,
+        epoch: BigInt.from(here.epoch),
+        why: '',
+        handshake: true,
+        replaced: false,
+        behind: false,
+        unlisted: false,
+      );
+      takenProposals.add(processed);
+      return processed;
+    }
+
+    if (seq <= proposalSeq(groupId: groupId)) return out(DmOutcome.already);
+    here.proposalSeq = seq;
+    final body = readFake(envelope);
+    if (body['t'] != 'proposal') return out(DmOutcome.already);
+    if (body['epoch'] != here.epoch) return out(DmOutcome.dropped);
+    here.proposals.add(body['p']! as String);
+    return out(DmOutcome.proposal);
+  }
+
+  /// Every takeWorkerCommit call's outcome, for tests.
+  final takenWorkerCommits = <DmProcessed>[];
+
+  @override
+  Future<DmProcessed> takeWorkerCommit({
+    required List<int> groupId,
+    required int seq,
+    required String envelope,
+    required int arrivedMs,
+  }) async {
+    final here = _groups[dmB64(groupId)]!;
+    DmProcessed out(DmOutcome outcome) {
+      final processed = DmProcessed(
+        outcome: outcome,
+        epoch: BigInt.from(here.epoch),
+        why: '',
+        handshake: true,
+        replaced: false,
+        behind: false,
+        unlisted: false,
+      );
+      takenWorkerCommits.add(processed);
+      return processed;
+    }
+
+    if (seq <= proposalSeq(groupId: groupId)) return out(DmOutcome.already);
+    here.proposalSeq = seq;
+    final body = readFake(envelope);
+    if (body['t'] != 'commit') return out(DmOutcome.already);
+    if (envelope == here.pending) {
+      here
+        ..epoch = here.pendingEpoch
+        ..members = here.pendingMembers
+        ..pending = null;
+      return out(DmOutcome.committed);
+    }
+    if (body['epoch'] != here.epoch) return out(DmOutcome.already);
+    // One the checks refuse: dropped, passed.
+    if (body['bad'] == true) return out(DmOutcome.dropped);
+    here
+      ..pending = null
+      ..epoch += 1
+      ..members = [for (final m in body['members']! as List) m as String];
+    return out(DmOutcome.committed);
+  }
+
+  @override
+  Future<void> skipProposals({
+    required List<int> groupId,
+    required int seq,
+  }) async {
+    final here = _groups[dmB64(groupId)]!;
+    if (seq > proposalSeq(groupId: groupId)) here.proposalSeq = seq;
   }
 
   @override
@@ -1048,6 +1326,7 @@ class FakeDmDevice implements DmDevice {
     _history.putIfAbsent(dmB64(groupId), () => [])
       ..add(
         DmMessage(
+          departed: false,
           seq: seq,
           mine: false,
           fromAccount: '',
@@ -1060,6 +1339,7 @@ class FakeDmDevice implements DmDevice {
           ),
           arrivedMs: arrivedMs,
           members: DmMembers(
+            joined: const [],
             setUpAgain: const [],
             added: const [],
             removed: const [],
@@ -1103,15 +1383,22 @@ class FakeDmDevice implements DmDevice {
   }
 
   @override
-  Future<DmCommit> addMembers({
+  Future<DmCommit?> addMembers({
     required List<int> groupId,
     required List<String> keyPackages,
   }) async {
     final id = dmB64(groupId);
     final here = _groups[id]!;
-    final added = [
-      for (final package in keyPackages) readFake(package)['member']! as String,
-    ];
+    // As Group::add: one in the group already, or repeated, is left out;
+    // none left is nothing to add.
+    final added = <String>[];
+    for (final package in keyPackages) {
+      final member = readFake(package)['member']! as String;
+      if (!here.members.contains(member) && !added.contains(member)) {
+        added.add(member);
+      }
+    }
+    if (added.isEmpty) return null;
     // As Group::add: each against its account's list as this device took
     // it (Fugo, row 676).
     for (final member in added) {
@@ -1157,6 +1444,7 @@ class FakeDmDevice implements DmDevice {
         seq: value.seq,
         epoch: BigInt.from(value.epoch),
         moved: value.moved,
+        pending: value.pending != null,
       ),
   ];
 
@@ -1168,6 +1456,7 @@ class FakeDmDevice implements DmDevice {
   }) async {
     final id = dmB64(groupId);
     final here = _groups[id]!;
+    if (sendFails case final error?) throw error;
     if (here.kind.kind == DmGroupType.conversation) {
       for (final account in here.kind.accounts) {
         if (pins[account]?.canSend == false) throw StateError('key changed');
@@ -1178,6 +1467,20 @@ class FakeDmDevice implements DmDevice {
     }
     if (_outgoing[content.clientMessageId] case final kept?) {
       return kept.envelope;
+    }
+    // The sender's clock inside, as the Rust puts it (row 556).
+    final extra = content.extraJson.trim().isEmpty
+        ? <String, Object?>{}
+        : jsonDecode(content.extraJson) as Map<String, Object?>;
+    if (nowMs > 0 && !extra.containsKey('sent_ms')) {
+      extra['sent_ms'] = nowMs;
+      content = DmContent(
+        kind: content.kind,
+        clientMessageId: content.clientMessageId,
+        text: content.text,
+        byAgent: content.byAgent,
+        extraJson: jsonEncode(extra),
+      );
     }
     final envelope = fakeEnvelope({
       't': 'app',
@@ -1312,6 +1615,7 @@ class FakeDmDevice implements DmDevice {
       DmOutcome outcome, {
       DmMessage? message,
       bool handshake = false,
+      bool behind = false,
     }) {
       final processed = DmProcessed(
         outcome: outcome,
@@ -1320,6 +1624,8 @@ class FakeDmDevice implements DmDevice {
         why: '',
         handshake: handshake,
         replaced: false,
+        behind: behind,
+        unlisted: false,
       );
       this.processed.add(processed);
       return processed;
@@ -1329,6 +1635,14 @@ class FakeDmDevice implements DmDevice {
     final before = here.seq;
     here.seq = seq;
     final body = readFake(envelope);
+    // From an epoch past this one, as the Rust holds it (row 551).
+    if ((body['epoch'] as int? ?? 0) > here.epoch &&
+        envelope != here.pending &&
+        !here.removed &&
+        !_outgoing.values.any((each) => each.envelope == envelope)) {
+      here.seq = before;
+      return out(DmOutcome.held, handshake: body['t'] != 'app', behind: true);
+    }
     if (body['t'] == 'commit') {
       if (envelope == here.pending) {
         here
@@ -1342,6 +1656,28 @@ class FakeDmDevice implements DmDevice {
       if (body['epoch'] != here.epoch) {
         return out(DmOutcome.dropped, handshake: true);
       }
+      // One that takes in proposals by reference: only with them here.
+      final takes = [for (final p in body['takes'] as List? ?? const []) p];
+      if (!takes.every(here.proposals.contains)) {
+        return out(DmOutcome.dropped, handshake: true);
+      }
+      // A leaf its account's newest list here doesn't name (row 561):
+      // held, the position kept.
+      if (_unlistedIn(here, body) case final leaf?) {
+        here.seq = before;
+        final held = DmProcessed(
+          outcome: DmOutcome.held,
+          epoch: BigInt.from(here.epoch),
+          why: leaf.split('/').first,
+          handshake: true,
+          replaced: false,
+          behind: false,
+          unlisted: true,
+        );
+        processed.add(held);
+        return held;
+      }
+      here.proposals.clear();
       // A move: its leaf under a key this device hasn't pinned is held,
       // the position kept.
       if (body['id'] case final String key) {
@@ -1354,6 +1690,8 @@ class FakeDmDevice implements DmDevice {
             why: whose,
             handshake: true,
             replaced: retiredHere[whose]?.contains(key) ?? false,
+            behind: false,
+            unlisted: false,
           );
           processed.add(held);
           return held;
@@ -1364,6 +1702,7 @@ class FakeDmDevice implements DmDevice {
             ..epoch += 1
             ..members = [for (final m in body['members']! as List) m as String];
           final line = DmMessage(
+            departed: false,
             seq: seq,
             mine: false,
             fromAccount: '',
@@ -1376,6 +1715,7 @@ class FakeDmDevice implements DmDevice {
             ),
             arrivedMs: arrivedMs,
             members: DmMembers(
+              joined: const [],
               setUpAgain: const [],
               added: const [],
               removed: const [],
@@ -1402,6 +1742,7 @@ class FakeDmDevice implements DmDevice {
     final content = _fromJson(body['c']! as Map<String, Object?>);
     if (own != null) _outgoing.remove(own.key);
     final message = DmMessage(
+      departed: false,
       seq: seq,
       mine: own != null,
       fromAccount: from.split('/').first,
@@ -1415,10 +1756,116 @@ class FakeDmDevice implements DmDevice {
       if (content.kind == 'rotation' && own == null) {
         _keepRotation(here, from, content);
       }
+    } else if (here.kind.kind == DmGroupType.channel &&
+        (content.kind == 'proposal' || content.kind == 'agent_draft')) {
+      // Kept by its digest, as the Rust keeps it (#451).
+      final leafId = from.split('/').last;
+      _sideKept['$id/${sha256.convert(dmBytesOf(envelope))}'] = DmMessage(
+        departed: false,
+        seq: seq,
+        mine: false,
+        fromAccount: from.split('/').first,
+        fromLeaf: leafId,
+        fromKindDevice: claktoryOf(leafId) == null,
+        content: content,
+        arrivedMs: arrivedMs,
+      );
     } else {
       _history.putIfAbsent(id, () => []).add(message);
     }
     return out(DmOutcome.message, message: message);
+  }
+
+  /// Leaves ("account/leaf") their account's newest list here doesn't
+  /// name (row 561): a commit bringing one in is held as unlisted.
+  final unlisted = <String>{};
+
+  String? _unlistedIn(_Here here, Map<String, Object?> commit) => [
+    for (final member in commit['members'] as List? ?? const [])
+      if (!here.members.contains(member) && unlisted.contains(member))
+        member as String,
+  ].firstOrNull;
+
+  /// Every processWindow call's items, for tests.
+  final windows = <List<DmWindowItem>>[];
+
+  /// The window as the crate keeps it (row 561): [items] opens with a
+  /// commit held as unlisted; a later commit, by a member there before
+  /// it, that takes its leaf out again closes it, and everything up to
+  /// that is taken, the departed leaf's messages marked.
+  @override
+  Future<DmWindowOutcome> processWindow({
+    required List<int> groupId,
+    required List<DmWindowItem> items,
+  }) async {
+    windows.add(items);
+    final id = dmB64(groupId);
+    final here = _groups[id]!;
+    DmWindowOutcome end(DmWindowEnd end, [String why = '']) =>
+        DmWindowOutcome(end: end, why: why, processed: const []);
+    if (here.kind.kind != DmGroupType.conversation) {
+      return end(DmWindowEnd.none, 'not a conversation');
+    }
+    final leaf = _unlistedIn(here, readFake(items.first.envelope));
+    if (leaf == null) return end(DmWindowEnd.none, 'not unlisted');
+    var close = -1;
+    for (var i = 1; i < items.length && close < 0; i++) {
+      final body = readFake(items[i].envelope);
+      if (body['t'] != 'commit') continue;
+      if ((body['members']! as List).contains(leaf)) continue;
+      final from = body['from'] as String?;
+      if (from == null || from == leaf || !here.members.contains(from)) {
+        return end(DmWindowEnd.aborted, 'not by a member there all along');
+      }
+      close = i;
+    }
+    if (close < 0) return end(DmWindowEnd.open);
+    unlisted.remove(leaf);
+    final taken = <DmProcessed>[];
+    try {
+      for (final item in items.take(close + 1)) {
+        final each = await process(
+          groupId: groupId,
+          seq: item.seq,
+          envelope: item.envelope,
+          arrivedMs: item.arrivedMs,
+        );
+        final message = each.message;
+        if (message == null ||
+            '${message.fromAccount}/${message.fromLeaf}' != leaf) {
+          taken.add(each);
+          continue;
+        }
+        final departed = DmMessage(
+          departed: true,
+          seq: message.seq,
+          mine: message.mine,
+          fromAccount: message.fromAccount,
+          fromLeaf: message.fromLeaf,
+          fromKindDevice: message.fromKindDevice,
+          content: message.content,
+          arrivedMs: message.arrivedMs,
+          members: message.members,
+        );
+        final history = _history[id]!;
+        history[history.lastIndexOf(message)] = departed;
+        taken.add(
+          DmProcessed(
+            outcome: each.outcome,
+            message: departed,
+            epoch: each.epoch,
+            why: each.why,
+            handshake: each.handshake,
+            replaced: each.replaced,
+            behind: each.behind,
+            unlisted: each.unlisted,
+          ),
+        );
+      }
+    } finally {
+      unlisted.add(leaf);
+    }
+    return DmWindowOutcome(end: DmWindowEnd.closed, why: '', processed: taken);
   }
 
   // Lost or stolen (R4): the rotation, as the Rust keeps it.
@@ -1453,6 +1900,7 @@ class FakeDmDevice implements DmDevice {
     }
     final list = DmDeviceList(
       version: BigInt.one,
+      createdMs: nowMs,
       leaves: [
         for (final each in lists[account]!.leaves)
           if (each.leafId == leaf || kept.contains(each.leafId)) each,
@@ -1506,6 +1954,7 @@ class FakeDmDevice implements DmDevice {
       account,
       DmDeviceList(
         version: BigInt.from(json['version']! as int),
+        createdMs: BigInt.from(json['created'] as int? ?? 0),
         leaves: [
           for (final each in json['leaves']! as List)
             _listed(
@@ -1640,6 +2089,23 @@ class FakeDmDevice implements DmDevice {
 
   final _keyLines = <String>{};
 
+  /// Puts [message] in [group]'s history, as if it had come (a line
+  /// saying who joined, say).
+  void keep(String group, DmMessage message) =>
+      _history.putIfAbsent(group, () => []).add(message);
+
+  /// Proposals and drafts taken from a channel's feed, by group and digest.
+  final _sideKept = <String, DmMessage>{};
+
+  @override
+  Future<DmMessage?> sideMessage({
+    required List<int> groupId,
+    required List<int> digest,
+  }) async => _sideKept['${dmB64(groupId)}/${_hex(digest)}'];
+
+  static String _hex(List<int> bytes) =>
+      bytes.map((each) => each.toRadixString(16).padLeft(2, '0')).join();
+
   /// Envelopes opened outside the feed (proposals, agent drafts).
   final openedSide = <String>[];
 
@@ -1657,6 +2123,7 @@ class FakeDmDevice implements DmDevice {
     openedSide.add(envelope);
     final from = body['from']! as String;
     return DmMessage(
+      departed: false,
       seq: 0,
       mine: false,
       fromAccount: from.split('/').first,
@@ -1789,41 +2256,46 @@ class FakeEndpoint {
   }) : keys = FakeDmKeys() {
     device = FakeDmDevice(utf8.encode(leaf));
     final call = worker.as(account, leaf);
-    _make = () => E2ee(
-      session: UserAppsSession(
-        DeviceAccount(key: 'k', email: '$account@example.com'),
-        nonce: () => 'n',
-        call: route?.call(call) ?? call,
-      ),
-      keys: keys,
-      open:
-          ({
-            required String path,
-            required List<int> storeKey,
-            required List<int> leafKey,
-            Uint8List? identityKey,
-          }) async {
-            storeKept = true;
-            return device;
-          },
-      newSecret: () async => Uint8List.fromList(List.filled(32, ++_secrets)),
-      removeStore: (_) async {
-        storeKept = false;
-        device.forget();
-      },
-      storeExists: (_) async => storeKept,
-      whoAmI: () async =>
-          (accountId: account, name: name ?? leaf, deviceKey: leaf),
-      nowMs: () => now,
-      newId: () => '$leaf-${++_ids}',
-      bindTransfer: () async {
-        final transfer = FakeTransfer(transfers.length + 1);
-        transfers.add(transfer);
-        return transfer;
-      },
-      admitTransfer: (_) async => admit,
-      retryAfter: retryAfter,
-    );
+    _make = () =>
+        E2ee(
+            session: UserAppsSession(
+              DeviceAccount(key: 'k', email: '$account@example.com'),
+              nonce: () => 'n',
+              call: route?.call(call) ?? call,
+            ),
+            keys: keys,
+            open:
+                ({
+                  required String path,
+                  required List<int> storeKey,
+                  required List<int> leafKey,
+                  Uint8List? identityKey,
+                }) async {
+                  storeKept = true;
+                  return device;
+                },
+            newSecret: () async =>
+                Uint8List.fromList(List.filled(32, ++_secrets)),
+            removeStore: (_) async {
+              storeKept = false;
+              device.forget();
+            },
+            storeExists: (_) async => storeKept,
+            whoAmI: () async =>
+                (accountId: account, name: name ?? leaf, deviceKey: leaf),
+            nowMs: () => now,
+            newId: () => '$leaf-${++_ids}',
+            bindTransfer: () async {
+              final transfer = FakeTransfer(transfers.length + 1);
+              transfers.add(transfer);
+              return transfer;
+            },
+            admitTransfer: (_) async => admit,
+            retryAfter: retryAfter,
+          )
+          // The Claktory shown is the person's own: the account's word on it
+          // is dm_home_test's (Fugo 40182).
+          ..ungatedForTests = true;
     e2ee = _make();
   }
 
@@ -1913,4 +2385,223 @@ class FakeClaktoryLink implements DmClaktoryLink {
         ),
     ];
   }
+}
+
+/// The person's home Claktory as the app's link to it (#451, Mista's H3):
+/// a log per group numbered from 2^32 + 1, receipts, a feed pushed to the
+/// device following it, deliveries the test says, and routes. What the
+/// person says (not commits, which go to the worker themselves) reaches
+/// [worker] too, as their friend's home would pass it on; what others say
+/// comes in with [pull].
+class FakeHome implements DmHomeLink {
+  FakeHome(this.worker);
+
+  final FakeWorker worker;
+
+  @override
+  final ValueNotifier<bool> connected = ValueNotifier(true);
+
+  /// Whether the person's list makes it their home: NOT_HOME otherwise.
+  var isHome = true;
+
+  /// When it became the person's home (row 595); 0 for not said.
+  var homeSinceMs = 0;
+  var endpointId = List<int>.filled(32, 5);
+
+  final _feeds = StreamController<pb.DmFeed>.broadcast();
+  final _homes = StreamController<pb.DmHome>.broadcast();
+  final sends = <pb.DmSend>[];
+  final follows = <pb.DmFollow>[];
+  final acks = <pb.DmAck>[];
+  final routesSaid = <List<pb.DmRoute>>[];
+  final peers = <pb.DmPeer>[];
+
+  /// Answers the next send with this instead of storing it.
+  pb.DmSendResult? answer;
+  var retryAfterMs = 0;
+
+  final _log = <String, List<pb.DmEntry>>{};
+  final _receipts = <String, pb.DmReceipt>{};
+  final _taken = <String>{};
+  final _pulled = <String, int>{};
+  var _following = false;
+
+  @override
+  Stream<pb.DmFeed> get feeds => _feeds.stream;
+
+  @override
+  Stream<pb.DmHome> get homes => _homes.stream;
+
+  /// [group]'s log here.
+  List<pb.DmEntry> logOf(String group) => _log[group] ?? const [];
+
+  pb.DmEntry _keep(
+    String group,
+    List<int> bytes, {
+    bool fromMe = false,
+    String clientId = '',
+  }) {
+    final body = readFake(dmEnvelopeOf(bytes));
+    final log = _log.putIfAbsent(group, () => []);
+    final entry = pb.DmEntry(
+      groupId: dmUnb64(group),
+      seq: dmSeq(dmHomeSeqBase + log.length + 1),
+      kind: body['t'] == 'commit'
+          ? pb.DmEntryKind.DM_ENTRY_KIND_COMMIT
+          : pb.DmEntryKind.DM_ENTRY_KIND_APPLICATION,
+      epoch: Int64((body['epoch'] as int?) ?? 0),
+      envelope: bytes,
+      acceptedMs: Int64(log.length + 1),
+      fromMe: fromMe,
+      clientMessageId: clientId,
+    );
+    log.add(entry);
+    _taken.add(dmB64(bytes));
+    return entry;
+  }
+
+  void _push(String group, List<pb.DmEntry> entries) {
+    if (!_following) return;
+    _feeds.add(pb.DmFeed(entries: entries, groups: [_state(group)]));
+  }
+
+  pb.DmGroupState _state(String group) => pb.DmGroupState(
+    groupId: dmUnb64(group),
+    lastSeq: dmSeq(dmHomeSeqBase + logOf(group).length),
+    behind: letGo.contains(group),
+  );
+
+  /// Groups this home says it let go of past the follower's cursor, until
+  /// it follows from within what the home has (row 582).
+  final letGo = <String>{};
+
+  /// Says what it has of [group] now, with nothing new.
+  void sayState(String group) => _push(group, const []);
+
+  @override
+  Future<pb.DmReceipt> send(pb.DmSend send) async {
+    if (!connected.value) throw StateError('not connected');
+    sends.add(send);
+    final group = dmB64(send.groupId);
+    pb.DmReceipt receipt(pb.DmSendResult result, [int seq = 0]) => pb.DmReceipt(
+      groupId: send.groupId,
+      clientMessageId: send.clientMessageId,
+      seq: dmSeq(seq),
+      result: result,
+      retryAfterMs: Int64(retryAfterMs),
+    );
+    if (answer case final once?) {
+      answer = null;
+      return receipt(once);
+    }
+    if (!isHome) return receipt(pb.DmSendResult.DM_SEND_RESULT_NOT_HOME);
+    final id = send.clientMessageId;
+    if (_receipts[id] case final first? when id.isNotEmpty) {
+      return first.deepCopy()
+        ..result = pb.DmSendResult.DM_SEND_RESULT_DUPLICATE;
+    }
+    final entry = _keep(group, send.envelope, fromMe: true, clientId: id);
+    // On to the friend: through their home, as the worker stands in here.
+    if (entry.kind == pb.DmEntryKind.DM_ENTRY_KIND_APPLICATION) {
+      worker.deliver(group, dmEnvelopeOf(send.envelope));
+      _pulled[group] = worker.mailboxOf(group).length;
+    }
+    final stored = receipt(
+      pb.DmSendResult.DM_SEND_RESULT_STORED,
+      entry.seq.toInt(),
+    );
+    if (id.isNotEmpty) _receipts[id] = stored;
+    _push(group, [entry]);
+    return stored;
+  }
+
+  /// What's at the worker for [group] so far never comes here: a commit
+  /// no one handed this home (row 551).
+  void passOver(String group) =>
+      _pulled[group] = worker.mailboxOf(group).length;
+
+  /// What others said in [group] at the worker comes in, as from the
+  /// friend's home or claktory.com; what came from here is there already.
+  void pull(String group) {
+    final mailbox = worker.mailboxOf(group);
+    final entries = <pb.DmEntry>[];
+    for (final item in mailbox.skip(_pulled[group] ?? 0)) {
+      // Proposals stay at the worker (Mista 32950).
+      if (item['kind'] == 'proposal') continue;
+      final bytes = dmBytesOf(jsonEncode(item['envelope']));
+      if (_taken.contains(dmB64(bytes))) continue;
+      entries.add(_keep(group, bytes));
+    }
+    _pulled[group] = mailbox.length;
+    if (entries.isNotEmpty) _push(group, entries);
+  }
+
+  /// How the person's message [clientId] is getting on past here.
+  void deliver(
+    String group,
+    String clientId,
+    pb.DmDeliveryState state, {
+    int atMs = 0,
+    int epoch = 0,
+    String account = '',
+  }) => _feeds.add(
+    pb.DmFeed(
+      deliveries: [
+        pb.DmDelivery(
+          groupId: dmUnb64(group),
+          clientMessageId: clientId,
+          state: state,
+          atMs: Int64(atMs),
+          epoch: Int64(epoch),
+          accountId: account,
+        ),
+      ],
+    ),
+  );
+
+  @override
+  Future<void> follow(pb.DmFollow follow) async {
+    if (!connected.value) throw StateError('not connected');
+    follows.add(follow);
+    _following = true;
+    final after = {
+      for (final cursor in follow.cursors)
+        dmB64(cursor.groupId): cursor.seq.toInt(),
+    };
+    for (final MapEntry(:key, :value) in after.entries) {
+      if (value <= dmHomeSeqBase + logOf(key).length) letGo.remove(key);
+    }
+    for (final MapEntry(:key, :value) in _log.entries) {
+      final from = after[key] ?? 0;
+      _push(key, [
+        for (final entry in value)
+          if (entry.seq.toInt() > from) entry,
+      ]);
+    }
+  }
+
+  @override
+  Future<void> ack(pb.DmAck ack) async => acks.add(ack);
+
+  pb.DmHome get state => pb.DmHome(
+    isHome: isHome,
+    endpointId: endpointId,
+    peers: peers,
+    homeSinceMs: Int64(homeSinceMs),
+  );
+
+  @override
+  Future<pb.DmHome> routes(pb.DmRoutes routes) async {
+    if (!connected.value) throw StateError('not connected');
+    routesSaid.add(routes.routes);
+    final answered = state;
+    await holdRoutes?.future;
+    return answered;
+  }
+
+  /// While set, its answers to routes wait for it: a slow connection.
+  Completer<void>? holdRoutes;
+
+  /// The home's state changed (a friend's home went out of reach).
+  void said() => _homes.add(state);
 }

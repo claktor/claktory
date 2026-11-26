@@ -26,6 +26,7 @@ import 'identity.dart' show touchFirst;
 import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'mobile/share.dart' show globalRectOf;
 import 'scope.dart';
+import 'viewers/file_cache.dart' show FileCache, originalVariant;
 import 'viewers/loading_progress.dart';
 
 export 'mobile/share.dart' show globalRectOf;
@@ -101,6 +102,15 @@ bool get canShareFiles =>
     (defaultTargetPlatform == TargetPlatform.iOS ||
         defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.macOS);
+
+/// Whether this device saves files straight to its Downloads folder, with
+/// Download beside Share… (Matt, Bruno 41308): the Mac. A phone or iPad
+/// saves with Share… → Save to Files.
+bool get canDownloadFiles =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+
+/// The label of the action that saves a file to Downloads.
+const downloadLabel = 'Download';
 
 /// The label of the action that shares one file, or [count] of them.
 String shareLabel([int count = 1]) =>
@@ -196,6 +206,236 @@ Future<bool> shareFiles(
   }
 }
 
+/// Fetches [paths] from the Claktory as Share… does ([shareFiles]: in
+/// pieces, with progress, Cancel and Try again), saves them to this Mac's
+/// Downloads folder, each under its own name ("name 2.png" beside one
+/// already there), and says where they went, with Show in Finder. The
+/// files saved; null when cancelled. For a viewer's header, and any
+/// file's right click or long press (a picture in a Markdown file, say).
+Future<List<File>?> downloadFiles(
+  BuildContext context,
+  List<String> paths,
+) async {
+  if (paths.isEmpty || !canDownloadFiles) return null;
+  await _sweep(cutShort: const Duration(hours: 1));
+  if (!context.mounted) return null;
+  final folder = Directory(
+    '${_shares.path}/${DateTime.now().microsecondsSinceEpoch}-'
+    '${math.Random().nextInt(1 << 30)}',
+  );
+  List<File>? saved;
+  final runs = <Future<void>>[];
+  try {
+    await showModal(
+      context,
+      (context, close) => _Downloading(
+        paths: paths,
+        folder: folder,
+        runs: runs,
+        onSaved: (files) => saved = files,
+        onClose: close,
+      ),
+    );
+    return saved;
+  } finally {
+    // What was fetched is in Downloads now, or not wanted: nothing stays
+    // here, and again once a fetch Cancel cut short has stopped.
+    unawaited(_delete(folder));
+    unawaited(Future.wait(runs).then((_) => _delete(folder), onError: (_) {}));
+  }
+}
+
+/// This device's Downloads folder.
+Directory get _downloads =>
+    debugDownloadsFolder ??
+    Directory('${Platform.environment['HOME'] ?? ''}/Downloads');
+
+/// A test's own Downloads folder in place of the device's.
+@visibleForTesting
+Directory? debugDownloadsFolder;
+
+/// [name] in [folder], or "name 2.ext", "name 3.ext"… beside what's there.
+File _freeName(Directory folder, String name) {
+  final dot = name.lastIndexOf('.');
+  final stem = dot > 0 ? name.substring(0, dot) : name;
+  final extension = dot > 0 ? name.substring(dot) : '';
+  var file = File('${folder.path}/$name');
+  for (var n = 2; file.existsSync() || Link(file.path).existsSync(); n++) {
+    file = File('${folder.path}/$stem $n$extension');
+  }
+  return file;
+}
+
+/// Moves [fetched] into Downloads, each under a free name.
+Future<List<File>> _intoDownloads(List<_Fetched> fetched) async {
+  final downloads = _downloads;
+  await downloads.create(recursive: true);
+  final saved = <File>[];
+  for (final item in fetched) {
+    final to = _freeName(downloads, item.file.uri.pathSegments.last);
+    try {
+      saved.add(await item.file.rename(to.path));
+    } on FileSystemException {
+      // On another volume: copied there instead.
+      saved.add(await item.file.copy(to.path));
+    }
+  }
+  return saved;
+}
+
+/// Shows [files] in the Finder, selected; a test's own in its place.
+@visibleForTesting
+Future<void> Function(List<File> files) showInFinder = _showInFinder;
+
+Future<void> _showInFinder(List<File> files) async {
+  try {
+    await Process.run('open', ['-R', for (final file in files) file.path]);
+  } on ProcessException {
+    // No Finder to show them in: they're in Downloads all the same.
+  }
+}
+
+/// Downloading [paths]: fetched as a share is ([_Fetching]), moved into
+/// Downloads, then where they went, with Show in Finder and Done.
+class _Downloading extends StatefulWidget {
+  const _Downloading({
+    required this.paths,
+    required this.folder,
+    required this.runs,
+    required this.onSaved,
+    required this.onClose,
+  });
+
+  final List<String> paths;
+  final Directory folder;
+  final List<Future<void>> runs;
+  final ValueChanged<List<File>> onSaved;
+  final VoidCallback onClose;
+
+  @override
+  State<_Downloading> createState() => _DownloadingState();
+}
+
+class _DownloadingState extends State<_Downloading> {
+  List<_Fetched>? _fetched;
+  List<File>? _saved;
+  String? _error;
+
+  Future<void> _move(List<_Fetched> fetched) async {
+    setState(() {
+      _fetched = fetched;
+      _error = null;
+    });
+    try {
+      final saved = await _intoDownloads(fetched);
+      widget.onSaved(saved);
+      if (mounted) setState(() => _saved = saved);
+    } on FileSystemException catch (error) {
+      if (!mounted) return;
+      setState(() {
+        // macOS asks once whether Claktory may use Downloads: told no.
+        _error = error.osError?.errorCode == 1
+            ? "Claktory isn't allowed to save to your Downloads folder. "
+                  'Allow it in System Settings → Privacy & Security → Files '
+                  'and Folders, then try again.'
+            : "Couldn't save it to Downloads: ${error.message}";
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final paths = widget.paths;
+    final fetched = _fetched;
+    final saved = _saved;
+    if (fetched == null) {
+      return _Fetching(
+        verb: downloadLabel,
+        paths: paths,
+        folder: widget.folder,
+        runs: widget.runs,
+        onDone: _move,
+        onCancel: widget.onClose,
+      );
+    }
+    if (saved == null) {
+      return FormFrame(
+        title: paths.length > 1
+            ? 'Download ${paths.length} files'
+            : 'Download ${shareName(paths.single)}',
+        fields: const [],
+        error: _error,
+        submitLabel: 'Try again',
+        onSubmit: _error == null ? null : () => _move(fetched),
+        onCancel: widget.onClose,
+      );
+    }
+    final name = saved.length == 1 ? saved.single.uri.pathSegments.last : '';
+    return FormFrame(
+      title: 'Downloaded',
+      body: saved.length == 1
+          ? '$name is in your Downloads folder.'
+          : '${saved.length} files are in your Downloads folder.',
+      fields: const [],
+      error: null,
+      submitLabel: 'Show in Finder',
+      onSubmit: () {
+        unawaited(showInFinder(saved));
+        widget.onClose();
+      },
+      cancelLabel: 'Done',
+      onCancel: widget.onClose,
+    );
+  }
+}
+
+/// Shares [file], made on this device in a folder of its own in the
+/// shares folder (History's video, which the Runner's writer makes there:
+/// app/macos/Runner/ReplayWriter.swift), with the share sheet pointing at
+/// [from]. As a fetched share: kept [_keep] once sent somewhere, else its
+/// folder goes at once. A file anywhere else is shared but never deleted
+/// here. True once it was sent somewhere.
+Future<bool> shareMadeFile(
+  File file, {
+  required String mime,
+  Rect? from,
+}) async {
+  final folder = file.parent;
+  bool ours;
+  try {
+    ours =
+        folder.parent.resolveSymbolicLinksSync() ==
+        _shares.resolveSymbolicLinksSync();
+  } on FileSystemException {
+    ours = false;
+  }
+  var sent = false;
+  try {
+    if (!canShareFiles) return false;
+    sent =
+        await _device.invokeMethod<bool>('shareFiles', {
+          'paths': [file.path],
+          'mimes': [mime],
+          if (from != null)
+            'rect': [from.left, from.top, from.width, from.height],
+        }) ??
+        false;
+    return sent;
+  } on MissingPluginException {
+    return false;
+  } on PlatformException {
+    return false;
+  } finally {
+    if (ours) {
+      if (sent) {
+        await _markSent(folder);
+      } else {
+        unawaited(_delete(folder));
+      }
+    }
+  }
+}
+
 /// Shares [paths] from [context]'s widget, the sheet pointing at it.
 Future<bool> shareFrom(BuildContext context, List<String> paths) =>
     shareFiles(context, paths, from: globalRectOf(context));
@@ -262,6 +502,7 @@ typedef _Fetched = ({File file, String mime});
 /// why, and Try again carries on from where it stopped.
 class _Fetching extends StatefulWidget {
   const _Fetching({
+    this.verb = 'Share',
     required this.paths,
     required this.folder,
     required this.runs,
@@ -269,6 +510,8 @@ class _Fetching extends StatefulWidget {
     required this.onCancel,
   });
 
+  /// What it's fetched for, in its title: "Share", "Download".
+  final String verb;
   final List<String> paths;
   final Directory folder;
 
@@ -391,6 +634,25 @@ class _FetchingState extends State<_Fetching> {
     final path = widget.paths[_index];
     final file = _file;
     await file.parent.create(recursive: true);
+    // Kept on this device and still the file (#446): from there.
+    if (_written == 0) {
+      final found = await FileCache.of(_backend)
+          ?.lookup(_backend, path, [originalVariant]);
+      if (_cancelled || !mounted) return;
+      if (found != null && found.current) {
+        try {
+          await found.kept.file.copy(file.path);
+          setState(() {
+            _size = _written = _received = found.kept.bytes;
+            _sha256 = found.kept.sha256;
+            _mime = found.kept.content.mime;
+          });
+          return;
+        } on FileSystemException {
+          // Gone meanwhile: read it.
+        }
+      }
+    }
     final sink = file.openWrite(
       mode: _written == 0 ? FileMode.write : FileMode.append,
     );
@@ -457,8 +719,8 @@ class _FetchingState extends State<_Fetching> {
     final many = paths.length > 1;
     return FormFrame(
       title: many
-          ? 'Share ${paths.length} files'
-          : 'Share ${_name(paths.single)}',
+          ? '${widget.verb} ${paths.length} files'
+          : '${widget.verb} ${_name(paths.single)}',
       body: many ? 'File ${index + 1} of ${paths.length}' : null,
       fields: [
         // Failed before anything came (offline from the start): only the

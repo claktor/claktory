@@ -7,7 +7,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Claktory</string>
+	<string>$(CLAKTORY_NAME)</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -15,7 +15,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>Claktory</string>
+	<string>$(CLAKTORY_NAME)</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -44,7 +44,7 @@
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>ClaktoryPushKeychainGroup</key>
-	<string>$(AppIdentifierPrefix)com.claktory.app.notifications</string>
+	<string>$(AppIdentifierPrefix)$(CLAKTORY_PUSH_GROUP)</string>
 	<!-- Export compliance: Claktory uses only standard encryption (TLS and
 	     the platform's own), no proprietary algorithms, so it's exempt from
 	     export documentation, and the App Store leaves France out until the
@@ -59,7 +59,11 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Scan the code from your Claktory to connect this iPhone to it.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Connect straight to your Claktory when it's on the same network as this iPhone, for a faster connection.</string>
+	<string>Connects directly to your Claktory when it's on the same network, which is faster.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_claktory-check._tcp</string>
+	</array>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Speak your messages and answers to your agents. Claktory turns them into text.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>

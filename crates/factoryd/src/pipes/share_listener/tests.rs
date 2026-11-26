@@ -126,14 +126,33 @@ async fn only_the_shares_own_host_with_its_key_reaches_the_sharer() {
 
     // Another name for this computer (DNS rebinding), or none of the
     // share's: refused before anything else.
-    for host in [format!("evil.example:{}", share.port), format!("localhost:{}", share.port), "s-test.localhost:1".to_owned()] {
+    let refused = [
+        format!("evil.example:{}", share.port),
+        format!("localhost:{}", share.port),
+        format!("s-testx.localhost:{}", share.port),
+        format!("x.s-test.localhost:{}", share.port),
+        "s-test.localhost".to_owned(),
+        "s-test.localhost:0".to_owned(),
+        "s-test.localhost:080".to_owned(),
+        "s-test.localhost:65536".to_owned(),
+        "s-test.localhost:+80".to_owned(),
+        "s-test.localhost:".to_owned(),
+        "127.0.0.1".to_owned(),
+        format!("[::1]:{}", share.port),
+    ];
+    for host in refused {
         assert_eq!(get(share.port, &host, "/", None).await.0, 421, "{host}");
     }
+    // W4: each refusal says which it is.
+    let (_, _, body) = get(share.port, &format!("localhost:{}", share.port), "/callback", None).await;
+    assert!(body.contains(&format!("This page went to localhost:{}, which isn't part of the shared website", share.port)), "{body}");
+    let (_, _, body) = send(share.port, "GET", &own, "/", None, &[("Sec-Fetch-Site", "cross-site")]).await;
+    assert!(body.contains("not from a link on another site"), "{body}");
     // The right host without the key: Claktory's own page, and nothing
     // reaches the sharer.
     let (status, _, body) = get(share.port, &own, "/", None).await;
     assert_eq!(status, 403);
-    assert!(body.contains("Open this website from Claktory."), "{body}");
+    assert!(body.contains("This website opens only from Claktory. Choose Open on it in Claktory"), "{body}");
     assert_eq!(get(share.port, &own, "/", Some("claktory_s_test=guessed")).await.0, 403);
     assert_eq!(share.streams.load(Ordering::SeqCst), 0);
 
@@ -247,6 +266,46 @@ async fn another_sites_pages_never_reach_the_share_even_with_its_key() {
     let own = format!("http://{fallback}");
     assert_eq!(send(share.port, "POST", &fallback, "/act", Some(&key), &[("Origin", &own), ("Sec-Fetch-Site", "same-origin")]).await.0, 200);
     assert_eq!(send(share.port, "GET", &fallback, "/", Some(&key), &[("Sec-Fetch-Site", "none")]).await.0, 200);
+    assert_eq!(upgrade(share.port, &fallback, Some(&key), b"hi").await.0, 101);
+}
+
+/// W1: a device showing this Claktory from another machine forwards a
+/// port of its own to the share's, and its browser names that port: the
+/// same share, with the same checks, its Host passed on as it came.
+#[tokio::test]
+async fn a_devices_forwarded_port_opens_the_same_share_with_the_same_checks() {
+    let share = listen().await;
+    let forwarded = 24_567_u16;
+    assert_ne!(forwarded, share.port);
+    let own = format!("s-test.localhost:{forwarded}");
+    assert_eq!(get(share.port, &own, "/", None).await.0, 403, "the key, as ever");
+    let key = open(&share, &own).await;
+    let (status, _, body) = get(share.port, &own, "/page", Some(&key)).await;
+    assert_eq!((status, body.as_str()), (200, format!("host={own}\ncookie=\npath=/page").as_str()));
+    // Its own pages, at the forwarded port; never another port's.
+    let page = format!("http://{own}");
+    assert_eq!(send(share.port, "POST", &own, "/act", Some(&key), &[("Origin", &page)]).await.0, 200);
+    let here = format!("http://s-test.localhost:{}", share.port);
+    assert_eq!(send(share.port, "POST", &own, "/act", Some(&key), &[("Origin", &here)]).await.0, 403);
+    assert_eq!(upgrade(share.port, &own, Some(&key), b"hi").await.0, 101);
+    // Safari's, at the forwarded port: the website's own cookies only.
+    let fallback = format!("127.0.0.1:{forwarded}");
+    let key = open(&share, &fallback).await;
+    let (_, _, body) = get(share.port, &fallback, "/", Some(&format!("{key}; session=the-devices-own"))).await;
+    assert_eq!(body, format!("host={fallback}\ncookie=\npath=/"));
+    // A phone's fallback is this address (Fugo 38931): every other port
+    // of its 127.0.0.1 is another site, refused with the key, and its own
+    // pages get through. The forward passes Host and Origin on untouched.
+    let streams = share.streams.load(Ordering::SeqCst);
+    let elsewhere = format!("http://127.0.0.1:{}", forwarded + 1);
+    assert_eq!(send(share.port, "POST", &fallback, "/act", Some(&key), &[("Origin", &elsewhere)]).await.0, 403);
+    assert_eq!(upgrade_from(share.port, &fallback, Some(&elsewhere), Some(&key), b"hi").await.0, 403);
+    assert_eq!(upgrade_from(share.port, &fallback, None, Some(&key), b"hi").await.0, 403);
+    assert_eq!(send(share.port, "GET", &fallback, "/", Some(&key), &[("Sec-Fetch-Site", "same-site")]).await.0, 403);
+    assert_eq!(send(share.port, "GET", &fallback, "/", Some(&key), &[("Sec-Fetch-Site", "cross-site")]).await.0, 403);
+    assert_eq!(share.streams.load(Ordering::SeqCst), streams, "nothing reached the sharer");
+    let page = format!("http://{fallback}");
+    assert_eq!(send(share.port, "POST", &fallback, "/act", Some(&key), &[("Origin", &page)]).await.0, 200);
     assert_eq!(upgrade(share.port, &fallback, Some(&key), b"hi").await.0, 101);
 }
 

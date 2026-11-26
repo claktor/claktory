@@ -7,6 +7,12 @@
 //! The version is scoped to the identity key that signs it (Fugo L1): it
 //! starts again at 1 when the key rotates, and versions are only ever
 //! compared under one key (`validation::Pins`).
+//!
+//! A list can also name the person's home Claktory (#451): the iroh endpoint
+//! id of the Claktory that keeps their direct messages, signed with the
+//! rest, so friends' homes deliver only where the person's own devices said.
+//! A list with a home is format 2; one without is format 1, byte for byte
+//! as before, so lists made before read as they did.
 
 use tls_codec::{Deserialize as _, Serialize as _, TlsDeserialize, TlsSerialize, TlsSize, VLBytes};
 
@@ -15,6 +21,8 @@ use crate::certificate::{LeafCertificate, LeafKind, MAX_ACCOUNT_ID, MAX_LEAF_ID}
 use crate::identity::{IdentityKey, IdentityPublic, Purpose};
 
 const VERSION: u8 = 1;
+/// Format 2: format 1 with the home's endpoint id after the leaves.
+const WITH_HOME: u8 = 2;
 /// The most leaves one person has: devices and Claktories together.
 pub const MAX_LEAVES: usize = 64;
 
@@ -58,11 +66,26 @@ struct Wire {
     signature: [u8; 64],
 }
 
+#[derive(Debug, Clone, PartialEq, TlsSerialize, TlsDeserialize, TlsSize)]
+struct HomeBody {
+    body: Body,
+    home: [u8; 32],
+}
+
+#[derive(Debug, Clone, PartialEq, TlsSerialize, TlsDeserialize, TlsSize)]
+struct HomeWire {
+    body: HomeBody,
+    signature: [u8; 64],
+}
+
 /// A device list as its identity signed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedDeviceList {
     pub list: DeviceList,
     pub identity: IdentityPublic,
+    /// The person's home Claktory: its iroh endpoint id, if the list names
+    /// one.
+    pub home: Option<[u8; 32]>,
     signature: [u8; 64],
 }
 
@@ -96,9 +119,9 @@ impl DeviceList {
         Ok(())
     }
 
-    fn body(&self, identity: IdentityPublic) -> Body {
+    fn body(&self, identity: IdentityPublic, format: u8) -> Body {
         Body {
-            format: VERSION,
+            format,
             account_id: self.account_id.as_bytes().to_vec().into(),
             identity: identity.0,
             version: self.version,
@@ -117,12 +140,27 @@ impl DeviceList {
 
     /// The person's identity signs this list.
     pub fn sign(self, identity: &IdentityKey) -> Result<SignedDeviceList, Error> {
+        self.sign_with(identity, None)
+    }
+
+    /// The person's identity signs this list, naming `home` (the home
+    /// Claktory's iroh endpoint id) when given.
+    pub fn sign_with(self, identity: &IdentityKey, home: Option<[u8; 32]>) -> Result<SignedDeviceList, Error> {
         self.check()?;
         let public = identity.public();
-        let body = self.body(public).tls_serialize_detached().map_err(|error| Error::Format(error.to_string()))?;
-        let signature = identity.sign(Purpose::DeviceList, &body);
-        Ok(SignedDeviceList { list: self, identity: public, signature })
+        let signed = signed_bytes(&self, public, home)?;
+        let signature = identity.sign(Purpose::DeviceList, &signed);
+        Ok(SignedDeviceList { list: self, identity: public, home, signature })
     }
+}
+
+/// What the identity signs: the body, and the home in format 2.
+fn signed_bytes(list: &DeviceList, identity: IdentityPublic, home: Option<[u8; 32]>) -> Result<Vec<u8>, Error> {
+    let written = match home {
+        None => list.body(identity, VERSION).tls_serialize_detached(),
+        Some(home) => HomeBody { body: list.body(identity, WITH_HOME), home }.tls_serialize_detached(),
+    };
+    written.map_err(|error| Error::Format(error.to_string()))
 }
 
 fn text(bytes: &VLBytes) -> Result<String, Error> {
@@ -131,18 +169,32 @@ fn text(bytes: &VLBytes) -> Result<String, Error> {
 
 impl SignedDeviceList {
     pub fn to_bytes(&self) -> Result<Vec<u8>, Error> {
-        Wire { body: self.list.body(self.identity), signature: self.signature }
-            .tls_serialize_detached()
-            .map_err(|error| Error::Format(error.to_string()))
+        let written = match self.home {
+            None => Wire { body: self.list.body(self.identity, VERSION), signature: self.signature }.tls_serialize_detached(),
+            Some(home) => HomeWire { body: HomeBody { body: self.list.body(self.identity, WITH_HOME), home }, signature: self.signature }
+                .tls_serialize_detached(),
+        };
+        written.map_err(|error| Error::Format(error.to_string()))
     }
 
     /// Reads a list, all of `bytes`, checking its form and that the
     /// identity inside signed it. Whether that identity is the account's
     /// pinned one is `validation`'s.
     pub fn from_bytes(bytes: &[u8]) -> Result<SignedDeviceList, Error> {
-        let wire = Wire::tls_deserialize_exact(bytes).map_err(|_| Error::Format("not a device list".to_owned()))?;
-        let body = &wire.body;
-        if body.format != VERSION {
+        let not = || Error::Format("not a device list".to_owned());
+        let (body, home, signature) = match bytes.first() {
+            Some(&WITH_HOME) => {
+                let wire = HomeWire::tls_deserialize_exact(bytes).map_err(|_| not())?;
+                (wire.body.body, Some(wire.body.home), wire.signature)
+            }
+            _ => {
+                let wire = Wire::tls_deserialize_exact(bytes).map_err(|_| not())?;
+                (wire.body, None, wire.signature)
+            }
+        };
+        let body = &body;
+        let expected = if home.is_some() { WITH_HOME } else { VERSION };
+        if body.format != expected {
             return Err(Error::Format(format!("device list format {}", body.format)));
         }
         let mut leaves = Vec::with_capacity(body.leaves.len());
@@ -157,9 +209,9 @@ impl SignedDeviceList {
         let list = DeviceList { account_id: text(&body.account_id)?, version: body.version, created_ms: body.created_ms, leaves };
         list.check()?;
         let identity = IdentityPublic::from_slice(&body.identity)?;
-        let signed = body.tls_serialize_detached().map_err(|error| Error::Format(error.to_string()))?;
-        identity.verify(Purpose::DeviceList, &signed, &wire.signature)?;
-        Ok(SignedDeviceList { list, identity, signature: wire.signature })
+        let signed = signed_bytes(&list, identity, home)?;
+        identity.verify(Purpose::DeviceList, &signed, &signature)?;
+        Ok(SignedDeviceList { list, identity, home, signature })
     }
 
     /// Whether the list names the certificate's leaf, signed by the same
@@ -222,5 +274,41 @@ mod tests {
             ],
         };
         assert!(twice.sign(&identity).is_err());
+    }
+
+    #[test]
+    fn a_list_names_its_home_under_the_same_signature_and_one_without_reads_as_before() {
+        let identity = IdentityKey::generate().unwrap();
+        let list = || DeviceList {
+            account_id: "acct-1".to_owned(),
+            version: 2,
+            created_ms: 5,
+            leaves: vec![Listed { kind: LeafKind::Claktory, leaf_id: "mac".to_owned(), signature_key: [3; 32] }],
+        };
+        // Without a home: format 1, as every list before it.
+        let plain = list().sign(&identity).unwrap();
+        let bytes = plain.to_bytes().unwrap();
+        assert_eq!((bytes[0], plain.home), (1, None));
+        assert_eq!(SignedDeviceList::from_bytes(&bytes).unwrap(), plain);
+
+        // With one: format 2, read back with it.
+        let homed = list().sign_with(&identity, Some([7; 32])).unwrap();
+        let bytes = homed.to_bytes().unwrap();
+        assert_eq!(bytes[0], 2);
+        let read = SignedDeviceList::from_bytes(&bytes).unwrap();
+        assert_eq!((read.home, &read), (Some([7; 32]), &homed));
+
+        // The home is signed: another one, or none, doesn't verify.
+        let at = bytes.len() - 64 - 1;
+        let mut moved = bytes.clone();
+        moved[at] ^= 1;
+        assert!(SignedDeviceList::from_bytes(&moved).is_err(), "another home");
+        let mut dropped = bytes[..at - 31].to_vec();
+        dropped[0] = 1;
+        dropped.extend_from_slice(&bytes[at + 1..]);
+        assert!(SignedDeviceList::from_bytes(&dropped).is_err(), "the home cut out");
+        let mut relabelled = plain.to_bytes().unwrap();
+        relabelled[0] = 2;
+        assert!(SignedDeviceList::from_bytes(&relabelled).is_err(), "format 1 read as 2");
     }
 }

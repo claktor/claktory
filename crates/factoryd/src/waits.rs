@@ -17,6 +17,12 @@
 //! while it keeps failing. It waits for as long as the network is down (a
 //! night, say); only a provider that can't be reached for an hour while the
 //! network works ends the run.
+//!
+//! A run whose provider keeps answering with an error that passes (#490:
+//! overloaded, a server error, too many requests, an answer cut off) waits
+//! for the provider too: after the quick retries, it asks again after 30 s,
+//! then twice as long each time, up to 15 min, for as long as 12 hours.
+//! A message from the person, Try now or Stop ends the wait sooner.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -51,6 +57,17 @@ const BRIEF_MS: u64 = 2 * 60 * 1000;
 /// How long a provider can't be reached while the network works before
 /// the run gives up, in ms (an hour; tests make it shorter).
 pub(crate) const NETWORK_GIVE_UP_MS: i64 = 60 * 60 * 1000;
+/// The least a wait for a provider that keeps failing lasts, doubling with
+/// each one in a row up to 30 times as long (30 s to 15 min; ms, tests make
+/// it shorter).
+pub(crate) const PROVIDER_LEAST_MS: u64 = 30_000;
+/// The longest a provider's Retry-After holds a wait back (15 min), however
+/// short tests make the waits.
+const PROVIDER_ASKED_MOST: Duration = Duration::from_secs(15 * 60);
+const PROVIDER_MOST_TIMES: u32 = 30;
+/// How long a provider can keep failing before the run gives up, in ms (12
+/// hours; tests make it shorter).
+pub(crate) const PROVIDER_GIVE_UP_MS: i64 = 12 * 60 * 60 * 1000;
 
 /// What an agent waits for, while it does: shown with it in the app.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -108,7 +125,103 @@ pub(crate) fn wait_network(factory: Weak<Factory>, id: String, epoch: u64) -> fa
     })
 }
 
+/// The agent's wait for its provider: what its run calls when the
+/// provider's answers keep failing in a way that passes (see
+/// `factory_agent::WaitProvider`).
+pub(crate) fn wait_provider(factory: Weak<Factory>, id: String, epoch: u64) -> factory_agent::WaitProvider {
+    Arc::new(move |why, asked| {
+        let (factory, id) = (factory.clone(), id.clone());
+        Box::pin(async move {
+            let Some(factory) = factory.upgrade() else { return Err(None) };
+            factory.wait_provider(&id, epoch, why, asked).await
+        })
+    })
+}
+
 impl Factory {
+    /// Waits for a provider whose answers keep failing (#490): 30 s, twice
+    /// as long with each wait in a row up to 15 min, and at least as long as
+    /// the provider asked (`asked`, its Retry-After in ms, within the 15
+    /// min), or sooner when something changes (Try now, a message). Once it
+    /// has failed for 12 hours, the run fails, saying so in place of the
+    /// provider's error.
+    async fn wait_provider(self: Arc<Self>, id: &str, epoch: u64, why: String, asked: Option<u64>) -> Result<(), Option<String>> {
+        let changed = self.capacity.clone();
+        let changed = changed.notified();
+        tokio::pin!(changed);
+        changed.as_mut().enable();
+        let model_and_name = {
+            let inner = self.lock();
+            inner.config.agent(id).map(|agent| (agent.model.clone(), agent.name.clone())).or_else(|| self.chats.model_and_name(id))
+        };
+        let Some((model, name)) = model_and_name else { return Err(None) };
+        let provider = model.split_once('/').map_or(model.as_str(), |(provider, _)| provider).to_owned();
+        let now = crate::transcript::now_ms();
+        let give_up = self.provider_give_up_ms.load(Ordering::Relaxed);
+        let least = Duration::from_millis(self.provider_wait_ms.load(Ordering::Relaxed));
+        let (waits, wait) = {
+            let mut inner = self.lock();
+            let provider_name =
+                inner.providers.iter().find(|known| known.id == provider).map_or(provider.clone(), |known| known.name.clone());
+            let noun = factory_agent::accounts::account_noun(&provider, &provider_name);
+            let Some(runtime) = inner.agents.get_mut(id).filter(|runtime| runtime.epoch == epoch) else { return Err(None) };
+            if runtime.idle {
+                return Err(None);
+            }
+            if runtime.provider_since == 0 {
+                runtime.provider_since = now;
+            }
+            runtime.provider_waits += 1;
+            let waits = runtime.provider_waits;
+            if now - runtime.provider_since >= give_up {
+                (runtime.provider_since, runtime.provider_waits) = (0, 0);
+                tracing::warn!(agent = %id, %why, "the provider kept failing for 12 hours: the run ends");
+                // Said in place of the provider's error: one notice for the stop.
+                return Err(Some(format!("{noun} kept failing to answer for 12 hours. {name} stopped; send a message to carry on.")));
+            }
+            let most = least.saturating_mul(PROVIDER_MOST_TIMES);
+            let asked = Duration::from_millis(asked.unwrap_or(0)).min(PROVIDER_ASKED_MOST);
+            let wait = least.saturating_mul(1 << (waits - 1).min(10)).min(most).max(asked);
+            runtime.usage_wait = Some(UsageWait {
+                text: format!("Waiting for {noun} to answer again…"),
+                until_ms: now.saturating_add(i64::try_from(wait.as_millis()).unwrap_or(i64::MAX)),
+                switchable: false,
+                provider: provider.clone(),
+            });
+            // Said once per outage, not on each try.
+            if waits == 1
+                && let Some(transcript) = runtime.transcript.as_mut()
+            {
+                let entry = transcript.notice(
+                    format!("{noun} is having trouble answering. {name} keeps trying by itself and carries on once it answers."),
+                    NoticeLevel::Info,
+                );
+                self.send_change(&inner, id, crate::transcript::Change::Entry(entry));
+            }
+            self.broadcast_workspace(&inner);
+            (waits, wait)
+        };
+        let _clear = Clear { factory: self.clone(), id: id.to_owned(), epoch };
+        tracing::info!(agent = %id, %why, waits, wait_ms = wait.as_millis(), "waiting for the provider to answer again");
+        tokio::select! {
+            () = tokio::time::sleep(wait) => {}
+            () = changed => {}
+        }
+        Ok(())
+    }
+
+    /// How long a provider can keep failing before the run gives up (12
+    /// hours); tests make it shorter.
+    pub fn set_provider_give_up(&self, after: Duration) {
+        self.provider_give_up_ms.store(i64::try_from(after.as_millis()).unwrap_or(i64::MAX), Ordering::Relaxed);
+    }
+
+    /// The least a wait for a failing provider lasts (30 s, doubling with
+    /// each in a row up to 30 times that); tests make it shorter.
+    pub fn set_provider_wait(&self, least: Duration) {
+        self.provider_wait_ms.store(u64::try_from(least.as_millis()).unwrap_or(u64::MAX), Ordering::Relaxed);
+    }
+
     /// Waits for the network (#364 O2): until names resolve again, and at
     /// least a while that grows with each wait in a row, or sooner when
     /// something changes (Try now, a message). However long the network is

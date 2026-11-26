@@ -6,12 +6,19 @@
 // closes.
 import 'dart:async';
 
+import 'package:factory_app/backend.dart' show RequestFailure;
 import 'package:factory_app/controls.dart' show Pressable;
 import 'package:factory_app/dictation.dart';
 import 'package:factory_app/ipad/document_review.dart';
 import 'package:factory_app/ipad/ink_surface.dart';
+import 'package:factory_app/outbox.dart' show decisionWaiting;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart'
-    show SetLayout, SpeechModel, SpeechModelState;
+    show
+        AskPersonState,
+        AskThreadMessage,
+        SetLayout,
+        SpeechModel,
+        SpeechModelState;
 import 'package:factory_app/recorder.dart';
 import 'package:factory_app/voice.dart' show voiceMessagesOn;
 import 'package:fixnum/fixnum.dart';
@@ -19,6 +26,7 @@ import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:protobuf/protobuf.dart' show GeneratedMessageGenericExtensions;
 
 import '../harness.dart' show Harness;
 import '../voice_test.dart' show FakeRecorder, io;
@@ -632,6 +640,9 @@ void main() {
       expect(answer.text, isEmpty);
       expect(answer.dismiss, isFalse);
       expect(answer.reply, isFalse);
+      // Opened from the file, not its card: no talk seen (#492).
+      expect(answer.hasTalkSeen(), isTrue);
+      expect(answer.talkSeen, 0);
     });
 
     testWidgets('an agent that wants words: Send waits for them', (
@@ -668,10 +679,8 @@ void main() {
       await tester.pump();
       await tester.tap(find.text('Submit'));
       await settle(tester);
-      expect(
-        find.text("Couldn't send your answer. Try again."),
-        findsOneWidget,
-      );
+      // Cut off: it waits, and goes once the connection's back.
+      expect(find.text(decisionWaiting), findsOneWidget);
       expect(tester.widget<EditableText>(_field).controller.text, 'The second');
       expect(sentOf(harness, (m) => m.hasSetLayout()), isEmpty);
     });
@@ -699,6 +708,164 @@ void main() {
         expect(sentOf(harness, (m) => m.hasSetLayout()), isEmpty);
       },
     );
+  });
+
+  group('a card its agent replied on while the PDF was open (row 485)', () {
+    const changed = 'This card changed. Look at it again.';
+
+    Future<Harness> stale(WidgetTester tester) async {
+      final harness = await showDocument(
+        tester,
+        ask: (ask) => ask.revision = 1,
+      );
+      // Builder replied on the card meanwhile: only its latest revision is
+      // taken.
+      final replied = harness.backend.entriesById['a1/7']!.deepCopy();
+      replied.askPerson
+        ..revision = 2
+        ..thread.add(
+          AskThreadMessage(fromAgent: true, text: 'Page 3 is the summary.'),
+        );
+      harness.backend.entriesById['a1/7'] = replied;
+      harness.backend.onSend = (m) {
+        if (m.hasAnswerAsk() && m.answerAsk.revision != 2) {
+          throw const RequestFailure(changed);
+        }
+      };
+      return harness;
+    }
+
+    testWidgets('Dismiss goes with its latest revision, the drawings with '
+        'it, uploaded once', (tester) async {
+      asIPad();
+      final native = DocumentNative();
+      final harness = await stale(tester);
+      await native.drew(2, 4);
+      await settle(tester);
+      await tester.tap(find.text('Dismiss'));
+      await settle(tester);
+      final answers = [
+        for (final m in sentOf(harness, (m) => m.hasAnswerAsk())) m.answerAsk,
+      ];
+      expect([for (final a in answers) a.revision], [1, 2]);
+      expect(answers.last.dismiss, isTrue);
+      expect(
+        [for (final a in answers.last.attachments) a.name],
+        ['paper-p2.png'],
+      );
+      expect(sentOf(harness, (m) => m.hasStartUpload()), hasLength(1));
+      expect(find.text(changed), findsNothing);
+    });
+
+    testWidgets('Approve is refused, and the bar shows the reply; approved '
+        'again, it goes', (tester) async {
+      asIPad();
+      DocumentNative();
+      final harness = await stale(tester);
+      await tester.tap(find.text('Approve'));
+      await settle(tester);
+      expect(find.text(changed), findsOneWidget);
+      expect(
+        find.textContaining('Page 3 is the summary.', findRichText: true),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Approve'));
+      await settle(tester);
+      final last = sentOf(harness, (m) => m.hasAnswerAsk()).last.answerAsk;
+      expect((last.revision, last.talkSeen, last.dismiss), (2, 1, false));
+    });
+  });
+
+  testWidgets("replied on from another device, the bar keeps the card, held, "
+      "rather than an older one; back with what's typed and the drawings "
+      "once its agent answers (Abbacchio's row 1325)", (tester) async {
+    asIPad();
+    final native = DocumentNative();
+    final harness = await showDocument(tester, ask: (ask) => ask.revision = 1);
+    await native.drew(2, 4);
+    await tester.enterText(_field, 'Half done');
+    await settle(tester);
+    Future<void> waiting(bool waits) async {
+      final workspace = harness.backend.workspace.workspace.deepCopy();
+      final agent = workspace.agents.firstWhere((agent) => agent.id == 'a1');
+      agent.waitingSeqs.clear();
+      if (waits) agent.waitingSeqs.add(Int64(7));
+      await harness.apply(tester, workspace);
+      await settle(tester);
+    }
+
+    final asked = harness.backend.entriesById['a1/7']!;
+    harness.backend.entriesById['a1/7'] = asked.deepCopy()
+      ..askPerson.state = AskPersonState.ASK_PERSON_STATE_ANSWERED
+      ..askPerson.replied = true
+      ..askPerson.answer = 'From the Mac';
+    await waiting(false);
+    expect(find.byKey(const ValueKey('document-review')), findsOneWidget);
+    expect(
+      find.text('You replied. Waiting for Builder to answer.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const ValueKey('review-send')));
+    await settle(tester);
+    expect(sentOf(harness, (m) => m.hasAnswerAsk()), isEmpty);
+    // Builder answers on it: it waits again, at a new revision.
+    harness.backend.entriesById['a1/7'] = asked.deepCopy()
+      ..askPerson.revision = 2;
+    await waiting(true);
+    expect(
+      find.text('You replied. Waiting for Builder to answer.'),
+      findsNothing,
+    );
+    expect(tester.widget<EditableText>(_field).controller.text, 'Half done');
+    await tester.tap(find.byKey(const ValueKey('review-send')));
+    await settle(tester);
+    final answer = sentOf(harness, (m) => m.hasAnswerAsk()).last.answerAsk;
+    expect((answer.revision, answer.text), (2, 'Half done'));
+    expect([for (final a in answer.attachments) a.name], ['paper-p2.png']);
+  });
+
+  testWidgets("closed while held, the bar moves on to the next card saying "
+      "so, its field empty (Zucchero's row 513)", (tester) async {
+    asIPad();
+    DocumentNative();
+    final harness = await showDocument(tester, ask: (ask) => ask.revision = 1);
+    final asked = harness.backend.entriesById['a1/7']!;
+    harness.backend.entriesById['a1/8'] = asked.deepCopy()
+      ..seq = Int64(8)
+      ..askPerson.id = 'q8'
+      ..askPerson.title = 'And the appendix';
+    Future<void> waiting(List<int> seqs) async {
+      final workspace = harness.backend.workspace.workspace.deepCopy();
+      final agent = workspace.agents.firstWhere((agent) => agent.id == 'a1');
+      agent.waitingSeqs
+        ..clear()
+        ..addAll([for (final seq in seqs) Int64(seq)]);
+      await harness.apply(tester, workspace);
+      await settle(tester);
+    }
+
+    await waiting([7, 8]);
+    await tester.enterText(_field, 'Draft for the first');
+    await settle(tester);
+    harness.backend.entriesById['a1/7'] = asked.deepCopy()
+      ..askPerson.state = AskPersonState.ASK_PERSON_STATE_ANSWERED
+      ..askPerson.replied = true;
+    await waiting([8]);
+    expect(
+      find.text('You replied. Waiting for Builder to answer.'),
+      findsOneWidget,
+    );
+    harness.backend.entriesById['a1/7'] = asked.deepCopy()
+      ..askPerson.state = AskPersonState.ASK_PERSON_STATE_ANSWERED
+      ..askPerson.replied = true
+      ..askPerson.resolved = true;
+    await waiting([8]);
+    expect(find.text('And the appendix'), findsOneWidget);
+    expect(
+      find.text('That card was closed. This is another one from Builder.'),
+      findsOneWidget,
+    );
+    expect(tester.widget<EditableText>(_field).controller.text, isEmpty);
   });
 
   group('answering by voice', () {

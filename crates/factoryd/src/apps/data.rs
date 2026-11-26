@@ -403,6 +403,8 @@ fn answer(error: DataError, message: impl Into<String>) -> wire::DataAnswer {
 /// An app's query (data-query): its source looked up and its grant checked
 /// now, then run read only.
 pub(crate) async fn query(factory: &Arc<Factory>, asked: wire::DataQuery) -> wire::DataAnswer {
+    // Model calls counted are read with the rest (`crate::calls`).
+    factory.store.write_calls();
     let Some(manifest) = factory.apps.manifest(&asked.app_id) else {
         return answer(DataError::UnknownSource, "");
     };

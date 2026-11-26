@@ -138,8 +138,7 @@ async fn a_newer_published_release_is_downloaded_and_offered() {
 async fn an_older_release_than_the_one_here_is_left_alone() {
     let dir = temp_dir();
     let releases = home(&dir).releases();
-    std::fs::create_dir_all(releases.join("2026.11.21-0900")).expect("release");
-    std::fs::write(releases.join("2026.11.21-0900/factoryd"), "local").expect("factoryd");
+    built_here(&dir, "2026.11.21-0900");
     std::fs::write(releases.join("latest"), "2026.11.21-0900\n").expect("latest");
     let url = publish(&dir, "2026.11.20-1012", &tarball(&dir, "2026.11.20-1012"), None);
     assert_eq!(Channel::new(home(&dir), url).check().await.expect("check"), Checked::UpToDate);
@@ -229,6 +228,234 @@ async fn only_the_newest_three_releases_are_kept() {
     let url = publish(&dir, "2026.11.20-1012", &tarball(&dir, "2026.11.20-1012"), None);
     assert_eq!(Channel::new(home(&dir), url).check().await.expect("check"), Checked::Downloaded("2026.11.20-1012".into()));
     assert_eq!(release_files(&dir), ["2026.11.18-0900", "2026.11.19-0900", "2026.11.20-1012", "latest"]);
+}
+
+/// A release built here, as `scripts/release.sh` leaves it (with the
+/// commit it was built from).
+fn built_here(dir: &Path, version: &str) {
+    let release = home(dir).releases().join(version);
+    std::fs::create_dir_all(&release).expect("release");
+    std::fs::write(release.join("factoryd"), format!("backend {version}")).expect("factoryd");
+    std::fs::write(release.join("source"), "0123abcd\n").expect("source");
+}
+
+/// Stamps the channel's manifest in `dir` as `scripts/publish.sh` does
+/// (`issued_ms`), and returns its bytes.
+fn stamp(dir: &Path, issued_ms: u64) -> Vec<u8> {
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("latest.json")).expect("manifest")).expect("json");
+    manifest["issued_ms"] = issued_ms.into();
+    write_manifest(dir, &manifest);
+    std::fs::read(dir.join("latest.json")).expect("manifest")
+}
+
+/// Publishes `version` in the channel in `dir`, stamped `issued_ms`.
+fn publish_stamped(dir: &Path, version: &str, issued_ms: u64) -> Vec<u8> {
+    publish(dir, version, &tarball(dir, version), None);
+    stamp(dir, issued_ms)
+}
+
+/// Serves `bytes` as the channel's manifest again (a replay).
+fn serve(dir: &Path, bytes: &[u8]) {
+    std::fs::write(dir.join("latest.json"), bytes).expect("manifest");
+}
+
+fn stale(checked: Result<Checked, ChannelError>) -> bool {
+    matches!(checked, Err(ChannelError::Stale(_)))
+}
+
+/// #456: a release pulled from the channel after it was downloaded (a
+/// newer manifest moved back) is deleted and no longer offered; releases
+/// built here stay.
+#[tokio::test]
+async fn a_release_the_channel_pulled_is_deleted_and_no_longer_offered() {
+    let dir = temp_dir();
+    let releases = home(&dir).releases();
+    built_here(&dir, "v0.1.9");
+    std::fs::write(releases.join("latest"), "v0.1.9\n").expect("latest");
+    let url = publish(&dir, "v0.1.10", &tarball(&dir, "v0.1.10"), None);
+    stamp(&dir, 1000);
+    let mut channel = Channel::new(home(&dir), url.clone());
+    assert_eq!(channel.check().await.expect("check"), Checked::Downloaded("v0.1.10".into()));
+    assert_eq!(std::fs::read_to_string(releases.join("v0.1.10/downloaded-from")).expect("marked"), format!("{url}\n1000\n"));
+    // While the channel offers it, it stays.
+    assert_eq!(channel.check().await.expect("check"), Checked::UpToDate);
+    assert_eq!(release_files(&dir), ["latest", "v0.1.10", "v0.1.9"]);
+
+    // Then: a newer one built here, and one an older backend downloaded
+    // (no mark, but not built here either).
+    built_here(&dir, "v0.1.11");
+    std::fs::create_dir_all(releases.join("v0.1.12")).expect("release");
+    std::fs::write(releases.join("v0.1.12/factoryd"), "backend v0.1.12").expect("factoryd");
+    std::fs::write(releases.join("latest"), "v0.1.12\n").expect("latest");
+
+    // The channel moves back to v0.1.9, in a newer manifest: what it gave
+    // and no longer offers goes, and `latest` names the newest release left.
+    publish_stamped(&dir, "v0.1.9", 2000);
+    assert_eq!(channel.check().await.expect("check"), Checked::UpToDate);
+    assert_eq!(release_files(&dir), ["latest", "v0.1.11", "v0.1.9"]);
+    assert_eq!(latest(&dir), "v0.1.11");
+}
+
+/// #478: an old signed manifest served again is refused, so it can neither
+/// roll the offer back nor take back a newer release; a newer one can.
+#[tokio::test]
+async fn a_replayed_manifest_is_refused_and_withdraws_nothing() {
+    let dir = temp_dir();
+    let releases = home(&dir).releases();
+    built_here(&dir, "v0.1.9");
+    std::fs::write(releases.join("latest"), "v0.1.9\n").expect("latest");
+    let url = publish(&dir, "v0.1.10", &tarball(&dir, "v0.1.10"), None);
+    let first = stamp(&dir, 1000);
+    let mut channel = Channel::new(home(&dir), url.clone());
+    assert_eq!(channel.check().await.expect("check"), Checked::Downloaded("v0.1.10".into()));
+    let between = publish_stamped(&dir, "v0.1.9", 2000);
+    let newest = publish_stamped(&dir, "v0.1.11", 3000);
+    // 2000 was published between, and 3000 replaced it before a check.
+    assert_eq!(channel.check().await.expect("check"), Checked::Downloaded("v0.1.11".into()));
+    let everything = ["latest", "v0.1.10", "v0.1.11", "v0.1.9"];
+    assert_eq!(release_files(&dir), everything);
+
+    // Replays: the first manifest, and one stamped between that moved back.
+    serve(&dir, &first);
+    assert!(stale(channel.check().await));
+    serve(&dir, &between);
+    assert!(stale(channel.check().await));
+    // Unstamped, once the channel's are.
+    publish(&dir, "v0.1.9", &tarball(&dir, "v0.1.9"), None);
+    assert!(stale(channel.check().await));
+    // Another manifest with the newest one's stamp.
+    publish_stamped(&dir, "v0.1.9", 3000);
+    assert!(stale(channel.check().await));
+    assert_eq!(release_files(&dir), everything);
+    assert_eq!(latest(&dir), "v0.1.11");
+
+    // The newest one read again is fine.
+    serve(&dir, &newest);
+    assert_eq!(channel.check().await.expect("the same manifest"), Checked::UpToDate);
+
+    // After a restart, still refused.
+    let mut channel = Channel::new(home(&dir), url.clone());
+    serve(&dir, &between);
+    assert!(stale(channel.check().await));
+    assert_eq!(release_files(&dir), everything);
+
+    // A newer manifest that moves back withdraws both: their manifests are
+    // older than it.
+    publish_stamped(&dir, "v0.1.9", 4000);
+    assert_eq!(channel.check().await.expect("check"), Checked::UpToDate);
+    assert_eq!(release_files(&dir), ["latest", "v0.1.9"]);
+    assert_eq!(latest(&dir), "v0.1.9");
+
+    // Another channel starts afresh.
+    let other = temp_dir();
+    let other_url = publish(&other, "v0.1.9", &tarball(&other, "v0.1.9"), None);
+    assert_eq!(Channel::new(home(&dir), other_url).check().await.expect("another channel"), Checked::UpToDate);
+}
+
+/// `scripts/publish.sh --repoint`: the older release's own manifest, only
+/// stamped anew, takes the newer release back; the newer one's manifest
+/// served again afterwards is refused.
+#[tokio::test]
+async fn a_repointed_manifest_takes_the_newer_release_back() {
+    let dir = temp_dir();
+    let url = publish(&dir, "v0.1.20", &tarball(&dir, "v0.1.20"), None);
+    let v1 = stamp(&dir, 1000);
+    let mut channel = Channel::new(home(&dir), url);
+    assert_eq!(channel.check().await.expect("check"), Checked::Downloaded("v0.1.20".into()));
+    let v2 = publish_stamped(&dir, "v0.1.21", 2000);
+    assert_eq!(channel.check().await.expect("check"), Checked::Downloaded("v0.1.21".into()));
+
+    let mut repointed: serde_json::Value = serde_json::from_slice(&v1).expect("json");
+    repointed["issued_ms"] = 3000.into();
+    write_manifest(&dir, &repointed);
+    assert_eq!(channel.check().await.expect("repointed"), Checked::UpToDate, "nothing new offered");
+    assert_eq!(release_files(&dir), ["latest", "v0.1.20"]);
+    assert_eq!(latest(&dir), "v0.1.20");
+
+    serve(&dir, &v2);
+    assert!(stale(channel.check().await));
+    serve(&dir, &v1);
+    assert!(stale(channel.check().await));
+    assert_eq!(release_files(&dir), ["latest", "v0.1.20"]);
+}
+
+/// Before stamps: an unstamped manifest is taken as before, but never takes
+/// a release back.
+#[tokio::test]
+async fn an_unstamped_manifest_is_offered_but_withdraws_nothing() {
+    let dir = temp_dir();
+    let url = publish(&dir, "v0.1.10", &tarball(&dir, "v0.1.10"), None);
+    let mut channel = Channel::new(home(&dir), url);
+    assert_eq!(channel.check().await.expect("check"), Checked::Downloaded("v0.1.10".into()));
+    assert_eq!(release_files(&dir), ["latest", "v0.1.10"]);
+    publish(&dir, "v0.1.9", &tarball(&dir, "v0.1.9"), None);
+    assert_eq!(channel.check().await.expect("check"), Checked::UpToDate);
+    assert_eq!(release_files(&dir), ["latest", "v0.1.10"]);
+    assert_eq!(latest(&dir), "v0.1.10");
+}
+
+/// The newest stamp is kept in a file of its own; one that can't be read
+/// counts as none seen, never as a reason to refuse every manifest.
+#[tokio::test]
+async fn a_damaged_stamp_file_starts_again() {
+    let dir = temp_dir();
+    let url = publish(&dir, "v0.1.10", &tarball(&dir, "v0.1.10"), None);
+    stamp(&dir, 1000);
+    let mut channel = Channel::new(home(&dir), url.clone());
+    assert_eq!(channel.check().await.expect("check"), Checked::Downloaded("v0.1.10".into()));
+    let file = home(&dir).root().join("update-channel.json");
+    let kept: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).expect("kept")).expect("json");
+    assert_eq!(kept["channels"][&url]["issued_ms"], 1000);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&file).expect("file").permissions().mode() & 0o777, 0o600);
+    }
+
+    std::fs::write(&file, "not json").expect("damage");
+    publish(&dir, "v0.1.10", &tarball(&dir, "v0.1.10"), None);
+    assert_eq!(channel.check().await.expect("unstamped, as before stamps"), Checked::UpToDate);
+    stamp(&dir, 500);
+    assert_eq!(channel.check().await.expect("stamped"), Checked::UpToDate);
+    let kept: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).expect("kept")).expect("json");
+    assert_eq!(kept["channels"][&url]["issued_ms"], 500);
+}
+
+#[tokio::test]
+async fn a_pulled_release_stops_being_offered() {
+    let channel = temp_dir();
+    let url = publish(&channel, "v0.1.10", &tarball(&channel, "v0.1.10"), None);
+    stamp(&channel, 1000);
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    factory.use_channel(&url);
+    let (mut client, _, _) = Client::connect(addr).await;
+    factory.check_on_schedule().await;
+    let offered = client
+        .wait_for(|body| match body {
+            Body::Workspace(workspace) if !workspace.latest_release.is_empty() => Some(workspace.latest_release.clone()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(offered, "v0.1.10");
+
+    // Pulled: a newer manifest names an older release, which can't run here.
+    let mut manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(channel.join("latest.json")).expect("manifest")).expect("json");
+    manifest["version"] = "v0.1.9".into();
+    manifest["archs"] = serde_json::json!(["riscv64"]);
+    manifest["linux"] = serde_json::json!({});
+    manifest["issued_ms"] = 2000.into();
+    write_manifest(&channel, &manifest);
+    factory.check_on_schedule().await;
+    client
+        .wait_for(|body| match body {
+            Body::Workspace(workspace) if workspace.latest_release.is_empty() => Some(()),
+            _ => None,
+        })
+        .await;
+    assert_eq!(release_files(&dir), Vec::<String>::new());
 }
 
 #[tokio::test]

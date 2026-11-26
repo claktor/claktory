@@ -22,14 +22,16 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use claktory_dm_crypto::provider::{Crypto, Provider};
-use claktory_dm_crypto::storage::{SCHEMA, SealKey};
+use claktory_dm_crypto::storage::{FLOOR_SCHEMA, SCHEMA, SealKey};
 use claktory_dm_crypto::{Error, Result};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use zeroize::Zeroizing;
 
 /// The store's tables, in order: the store at version N has run the first
 /// N. Only ever append; never change one that shipped.
-const MIGRATIONS: &[&str] = &[SCHEMA, APP, SIDE, TRANSFERRED];
+// FLOOR_SCHEMA: each group's epoch floor, kept by the crate as it merges
+// (Melone's F2): a rejoin never goes back past it.
+const MIGRATIONS: &[&str] = &[SCHEMA, APP, SIDE, TRANSFERRED, FLOOR_SCHEMA];
 
 /// The app's own tables (dm.rs). Values are sealed ([`Store::seal`]) except
 /// what the service already knows: group ids, their kinds (whose they are),

@@ -19,7 +19,7 @@ There are two ways:
 On the **new** computer, one line installs Claktory and waits for the move:
 
 ```sh
-curl -fsSL https://github.com/claktor/claktory/releases/latest/download/install.sh | bash -s -- --receive
+curl -fsSL https://github.com/claktory/claktory/releases/latest/download/install.sh | bash -s -- --receive
 ```
 
 It installs the newest release held (not started) and shows a move code,
@@ -111,7 +111,7 @@ scp claktory-*.claktory you@new-computer:
 One command installs Claktory and brings the bundle in:
 
 ```sh
-curl -fsSL https://github.com/claktor/claktory/releases/latest/download/install.sh | bash -s -- --import ~/claktory-<machine>-<date>.claktory
+curl -fsSL https://github.com/claktory/claktory/releases/latest/download/install.sh | bash -s -- --import ~/claktory-<machine>-<date>.claktory
 ```
 
 It installs the newest release held (not started), asks for the passphrase,

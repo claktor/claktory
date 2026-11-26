@@ -71,8 +71,8 @@ impl pipe_link::Store for TestStore {
     fn refused(&self, factory: &Arc<Factory>, pipe: &str, msg_id: &str, reason: &str) {
         record(factory, Event::Refused { pipe: pipe.to_owned(), msg_id: msg_id.to_owned(), reason: reason.to_owned() });
     }
-    fn peer_paused(&self, _factory: &Arc<Factory>, _pipe: &str) {}
-    fn peer_resumed(&self, _factory: &Arc<Factory>, _pipe: &str) {}
+    fn peer_paused(&self, _factory: &Arc<Factory>, _pipe: &str, _looped: bool) {}
+    fn peer_resumed(&self, _factory: &Arc<Factory>, _pipe: &str, _looped: bool) {}
     fn peer_closed(&self, factory: &Arc<Factory>, pipe: &str) {
         record(factory, Event::PeerClosed { pipe: pipe.to_owned() });
     }
@@ -174,6 +174,7 @@ async fn two_claktories_pair_approve_and_talk_through_a_pipe() {
         via: Via::Person { name: "Matt".into() },
         text: text.to_owned(),
         files: Vec::new(),
+        sends_only: false,
     };
     assert!(matches!(pipe_link::send(&a, "p-a", note("m0", "hi")), Err(PipeError::NotOpen)));
     pipe_link::approve(&b, "p-b").expect("Ana approves");
@@ -209,6 +210,7 @@ async fn two_claktories_pair_approve_and_talk_through_a_pipe() {
         via: Via::Agent { name: "Lea".into(), role: "Copywriter".into() },
         text: "the launch report".to_owned(),
         files: vec![OutFile { name: "report.txt".into(), path: report.clone() }],
+        sends_only: false,
     };
     assert_eq!(pipe_link::send(&a, "p-a", message).expect("queued"), 1);
     // The queue holds the bytes: the file may go at once.
@@ -274,8 +276,13 @@ async fn a_message_waits_out_the_peer_being_away_and_a_wrong_secret_gets_nothing
     // Ana's Claktory goes away; Matt's message waits in the queue.
     drop(b);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let message =
-        Outgoing { msg_id: "m1".to_owned(), via: Via::Person { name: "Matt".into() }, text: "still there?".to_owned(), files: Vec::new() };
+    let message = Outgoing {
+        msg_id: "m1".to_owned(),
+        via: Via::Person { name: "Matt".into() },
+        text: "still there?".to_owned(),
+        files: Vec::new(),
+        sends_only: false,
+    };
     pipe_link::send(&a, "pipe", message).expect("queued");
     for _ in 0..100 {
         if pipe_link::status(&a, "pipe").queued == 1 {
@@ -349,7 +356,8 @@ async fn agents_messages_wait_while_the_peer_is_another_account() {
     // Ana's Claktory turns out to be another account (as a ping's answer
     // says) while an agent's message and then Matt's wait to go: neither
     // goes, Matt's being behind the agent's.
-    let message = |id: &str, via: Via| Outgoing { msg_id: id.to_owned(), via, text: format!("message {id}"), files: Vec::new() };
+    let message =
+        |id: &str, via: Via| Outgoing { msg_id: id.to_owned(), via, text: format!("message {id}"), files: Vec::new(), sends_only: false };
     holding().lock().expect("holding").insert(of(&a, "held"));
     pipe_link::send(&a, "held", message("m1", Via::Agent { name: "Lea".into(), role: "Copywriter".into() })).expect("queued");
     pipe_link::send(&a, "held", message("m2", Via::Person { name: "Matt".into() })).expect("queued");

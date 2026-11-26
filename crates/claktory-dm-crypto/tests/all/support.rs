@@ -2,7 +2,7 @@
 
 use claktory_dm_crypto::CIPHERSUITE;
 use claktory_dm_crypto::provider::{Crypto, Provider};
-use claktory_dm_crypto::storage::{SCHEMA, SealKey};
+use claktory_dm_crypto::storage::{FLOOR_SCHEMA, SCHEMA, SealKey};
 use ed25519_dalek::Signer as _;
 use openmls::prelude::*;
 use openmls_traits::signatures::{Signer, SignerError};
@@ -35,6 +35,7 @@ pub fn store() -> Connection {
     let db = Connection::open_in_memory().unwrap();
     db.pragma_update(None, "secure_delete", "ON").unwrap();
     db.execute_batch(SCHEMA).unwrap();
+    db.execute_batch(FLOOR_SCHEMA).unwrap();
     db
 }
 
@@ -55,6 +56,7 @@ impl Member {
         db.pragma_update(None, "journal_mode", "DELETE").unwrap();
         db.pragma_update(None, "secure_delete", "ON").unwrap();
         db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch(FLOOR_SCHEMA).unwrap();
         Member { db, ..Member::new(name, seed) }
     }
 

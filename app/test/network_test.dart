@@ -34,6 +34,19 @@ Future<void> until(bool Function() done, {int seconds = 5}) async {
 
 /// A backend at the other end of the tunnel: it welcomes each Hello
 /// unless [welcoming] says not, and counts them.
+
+/// A tunnel whose status starts afresh when told to reconnect, as the
+/// Rust side's does.
+class _ResettingTunnel extends FakeTunnel {
+  _ResettingTunnel(super.port);
+
+  @override
+  Future<void> reconnect() async {
+    reconnects++;
+    status = tunnelStatus();
+  }
+}
+
 class _Far {
   late final HttpServer server;
   var hellos = 0;
@@ -427,6 +440,87 @@ void main() {
     expect(Connection(backend).link, Link.connecting);
     await backend.close();
   });
+
+  test(
+    "checked again (a glance at Control Center), what it knew shows "
+    "again once the quiet time is up, even while a try hangs (row 486)",
+    () async {
+      final closed = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final port = closed.port;
+      await closed.close();
+      final tunnel = _ResettingTunnel(port)
+        ..status = tunnelStatus(
+          phase: TunnelPhase.failed,
+          path: TunnelPath.none,
+          failure: TunnelFailure.unreachable,
+          error: 'no route',
+        );
+      final backend = backendWith(FakeTunnels(tunnel))
+        ..deviceKey = ((_) => 'k' * 64)
+        ..quietReconnect = const Duration(milliseconds: 300);
+      backend.connectTo(parsePairingCode(_code));
+      unawaited(backend.run());
+      await until(() => Connection(backend).link == Link.failing);
+
+      // Now every try hangs: something listens and never answers.
+      final silent = await ServerSocket.bind(
+        InternetAddress.loopbackIPv4,
+        port,
+      );
+      final held = <Socket>[];
+      silent.listen(held.add);
+      backend.check();
+      expect(Connection(backend).link, Link.connecting);
+      final checked = DateTime.now();
+      await until(() => Connection(backend).link == Link.failing);
+      expect(
+        DateTime.now().difference(checked),
+        lessThan(const Duration(seconds: 3)),
+      );
+      expect(Connection(backend).error, 'no route');
+      await backend.close();
+      for (final socket in held) {
+        socket.destroy();
+      }
+      await silent.close();
+    },
+  );
+
+  test(
+    "back, a failure from before shows again once the quiet tries fail, "
+    "without waiting for the tunnel's own dial to give up (row 480)",
+    () async {
+      final closed = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final port = closed.port;
+      await closed.close();
+      final tunnel = _ResettingTunnel(port)
+        ..status = tunnelStatus(
+          phase: TunnelPhase.failed,
+          path: TunnelPath.none,
+          failure: TunnelFailure.unreachable,
+          error: 'no route',
+        );
+      final backend = backendWith(FakeTunnels(tunnel))
+        ..deviceKey = ((_) => 'k' * 64)
+        ..quietReconnect = const Duration(milliseconds: 300);
+      backend.connectTo(parsePairingCode(_code));
+      unawaited(backend.run());
+      await until(() => Connection(backend).link == Link.failing);
+
+      backend.hidden();
+      backend.resumed();
+      // Its tunnel starts afresh, with nothing to say yet.
+      expect(tunnel.status.failure, TunnelFailure.none);
+      expect(Connection(backend).link, Link.connecting);
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(Connection(backend).link, Link.connecting);
+      // The quiet tries failed too: what it knew shows again.
+      await until(() => Connection(backend).link == Link.failing);
+      expect(tunnel.status.failure, TunnelFailure.none);
+      expect(Connection(backend).error, 'no route');
+      await backend.close();
+    },
+  );
 
   group('the device assertion', () {
     test('is asked for while the tunnel dials; slow, a Claktory found '

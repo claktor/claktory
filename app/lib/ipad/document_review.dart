@@ -30,7 +30,23 @@ import '../markdown.dart' show Markdown;
 import '../mobile/metrics.dart' show Metrics, TypeScale;
 import '../protocol/factory/v1/factory.pb.dart';
 import '../dictation.dart' show Dictation;
-import '../review_answer.dart' show PendingReview, finishReview;
+import '../outbox.dart' show decisionWaiting;
+import '../review_answer.dart'
+    show
+        PendingReview,
+        ReviewMovedOn,
+        ReviewMoves,
+        ReviewTalk,
+        finishReview,
+        heldEntry,
+        newerEntry,
+        reviewChosenChanged,
+        reviewFailure,
+        reviewHeld,
+        reviewPick,
+        reviewToFetch,
+        reviewWaits,
+        sendReview;
 import 'document_host.dart' show DocumentSurface;
 import '../visible_codes.dart' show proseCodes;
 
@@ -43,7 +59,8 @@ Future<Uint8List> Function(String file) readComposite = (file) =>
 const _chunk = 1024 * 1024;
 
 /// The question waiting on a file: [agentId]'s oldest pending review of
-/// [path], fetched from its waiting entries as the workspace changes.
+/// [path], fetched from its waiting entries as the workspace changes, or
+/// as the agent's open conversation holds it, kept up to date.
 class ReviewWatch extends ChangeNotifier {
   ReviewWatch({required this.agentId, required this.path});
 
@@ -61,18 +78,60 @@ class ReviewWatch extends ChangeNotifier {
   void follow(Backend backend) {
     if (backend == _backend) return;
     _backend?.workspace.removeListener(_changed);
-    _backend = backend..workspace.addListener(_changed);
+    _backend?.transcript.revision.removeListener(_held);
+    _backend = backend
+      ..workspace.addListener(_changed)
+      ..transcript.revision.addListener(_held);
+    reviewChosenChanged
+      ..removeListener(_held)
+      ..addListener(_held);
     _entries.clear();
     _fetching.clear();
+    _shown = null;
+    final now = ask;
+    _heard = now?.ask;
+    _shown = now?.seq;
     _fetch();
   }
 
   Backend? get backend => _backend;
 
+  /// The ask listeners last heard of: the open conversation changes often
+  /// (its streaming), the ask seldom.
+  AskPerson? _heard;
+
+  /// The card the bar showed last: it stays, held, while a reply has it
+  /// wait on its agent ([reviewPick]).
+  int? _shown;
+
+  void _notify() {
+    final now = ask;
+    _heard = now?.ask;
+    _shown = now?.seq;
+    notifyListeners();
+  }
+
+  void _held() {
+    if (_disposed || identical(ask?.ask, _heard)) return;
+    _notify();
+  }
+
   void _changed() {
     if (_disposed) return;
-    notifyListeners();
+    _notify();
     _fetch();
+  }
+
+  /// Fetches [seq] again, as it is now (its agent changed it, say): what
+  /// waits on the file once it's come.
+  Future<PendingReview?> refresh(int seq) async {
+    final backend = _backend;
+    if (backend == null) return null;
+    final entry = await backend.fetchEntry(agentId, seq);
+    if (_disposed || backend != _backend) return null;
+    if (entry != null) _entries[seq] = entry;
+    _notify();
+    return ask;
   }
 
   List<int> get _waiting => [
@@ -86,14 +145,20 @@ class ReviewWatch extends ChangeNotifier {
   void _fetch() {
     final backend = _backend;
     if (backend == null) return;
-    for (final seq in _waiting) {
-      if (_entries.containsKey(seq) || !_fetching.add(seq)) continue;
+    // What waits, what the bar holds, and what changed since it came.
+    for (final seq in reviewToFetch(
+      agentId: agentId,
+      waiting: _waiting,
+      entries: _entries,
+      shown: _shown,
+    ).toList()) {
+      if (!_fetching.add(seq)) continue;
       unawaited(() async {
         try {
           final entry = await backend.fetchEntry(agentId, seq);
           if (entry != null && !_disposed && backend == _backend) {
             _entries[seq] = entry;
-            notifyListeners();
+            _notify();
           }
         } on RequestFailure {
           // Tried again when the workspace next changes.
@@ -104,26 +169,36 @@ class ReviewWatch extends ChangeNotifier {
     }
   }
 
-  /// The oldest question still waiting on this file.
+  /// The question on this file the bar answers: the card whose Review was
+  /// pressed (Abbacchio's row 1312), else the oldest; held while a reply
+  /// has it wait on its agent (row 1325, [reviewPick]).
   PendingReview? get ask {
-    for (final seq in _waiting) {
-      final entry = _entries[seq];
-      if (entry == null || entry.whichKind() != Entry_Kind.askPerson) {
-        continue;
-      }
-      final ask = entry.askPerson;
-      if (ask.reviewPath == path &&
-          ask.state == AskPersonState.ASK_PERSON_STATE_PENDING) {
-        return (seq: seq, ask: ask);
-      }
-    }
-    return null;
+    final backend = _backend;
+    return reviewPick(
+      agentId: agentId,
+      path: path,
+      waiting: _waiting,
+      entryOf: (seq) => newerEntry(
+        backend == null ? null : heldEntry(backend.transcript, agentId, seq),
+        _entries[seq],
+      ),
+      shown: _shown,
+    );
+  }
+
+  /// Whether [review] waits on the person: not, while a reply has it wait
+  /// on its agent; its bar holds, nothing to send.
+  bool waits(PendingReview review) {
+    final backend = _backend;
+    return backend != null && reviewWaits(backend, agentId, review.seq);
   }
 
   @override
   void dispose() {
     _disposed = true;
     _backend?.workspace.removeListener(_changed);
+    _backend?.transcript.revision.removeListener(_held);
+    reviewChosenChanged.removeListener(_held);
     super.dispose();
   }
 }
@@ -146,6 +221,9 @@ class DocumentReviewBar extends StatefulWidget {
 
 class _DocumentReviewBarState extends State<DocumentReviewBar> {
   var _busy = false;
+
+  /// Whether the bar moved on to its card by itself.
+  final _moves = ReviewMoves();
 
   /// The person's answer, sent with either button (Matt's rule: approve
   /// or dismiss, always with an optional comment); the answer itself when
@@ -181,11 +259,20 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
   /// and back), given back to the field once.
   void _restore(int seq) {
     if (_restored == seq) return;
+    final another = _restored != null;
     _restored = seq;
     final kept = widget.surface.answers[seq];
-    if (kept == null || _comment.text.isNotEmpty) return;
+    // From another card, its words stay with it (kept above), never in
+    // this one's field, where they'd answer the wrong question (Zucchero's
+    // row 513): this card's own, or none.
+    if (!another && (kept == null || _comment.text.isNotEmpty)) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _comment.text.isEmpty) _comment.text = kept;
+      if (!mounted || _restored != seq) return;
+      if (another) {
+        _comment.text = kept ?? '';
+      } else if (_comment.text.isEmpty) {
+        _comment.text = kept!;
+      }
     });
   }
 
@@ -298,7 +385,7 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
 
   Future<bool> _answer(PendingReview ask, {bool dismiss = false}) async {
     final backend = widget.watch.backend;
-    if (_busy || backend == null) return false;
+    if (_busy || backend == null || !widget.watch.waits(ask)) return false;
     setState(() {
       _busy = true;
       _error = null;
@@ -306,19 +393,26 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
     try {
       final attachments = await _drawings(backend, ask.seq);
       final text = _comment.text.trim();
-      await backend.answerAsk(
-        widget.watch.agentId,
-        ask.seq,
+      final watch = widget.watch;
+      // The card as the bar shows it (#428), and its talk (#492).
+      await sendReview(
+        backend,
+        watch.agentId,
+        ask,
+        refresh: () => watch.refresh(ask.seq),
         text: text,
         dismiss: dismiss,
         // A comment typed on a question that doesn't want words is a
         // reply (#370), the drawings with it; it carries out nothing.
         reply: !dismiss && !ask.ask.wantsText && text.isNotEmpty,
         attachments: attachments,
-        // The card as the person read it (#428).
-        revision: ask.ask.revision,
+        // Cut off: "Not sent yet", and it goes once the connection's back.
+        onWaiting: () {
+          if (mounted) setState(() => _error = decisionWaiting);
+        },
       );
       _comment.clear();
+      if (mounted) setState(() => _error = null);
       // Answered: the file's pane closes and the person is back where
       // they pressed Review.
       if (mounted) {
@@ -335,11 +429,7 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
       if (mounted) {
         // Its agent changed it meanwhile: the words and the ink stay, for
         // the person to look again and send.
-        setState(
-          () => _error = cardChanged(failure)
-              ? failure.message
-              : "Couldn't send your answer. Try again.",
-        );
+        setState(() => _error = reviewFailure(failure));
       }
       return false;
     } on Object {
@@ -387,6 +477,9 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
     final typed = commentTyped(_comment);
     // A comment on a question that doesn't want words: Submit alone.
     final replying = typed && !ask.ask.wantsText;
+    // Held while a reply has it wait on its agent (Abbacchio's row 1325).
+    final held = !widget.watch.waits(ask);
+    final off = _busy || held;
     final sending = _sending;
     final String? line = sending != null
         ? (sending.of == 1
@@ -430,6 +523,10 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
                 ),
               ],
             ),
+            if (_moves.movedTo(widget.watch.agentId, ask.seq)) ...[
+              const SizedBox(height: Space.xs),
+              ReviewMovedOn(name: agent.name),
+            ],
             if (ask.ask.title.isNotEmpty || ask.ask.body.isNotEmpty) ...[
               const SizedBox(height: Space.xs),
               // The question; a long one scrolls in its own little room,
@@ -459,6 +556,14 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
                 ),
               ),
             ],
+            // What was said on its card since the person saw it, the
+            // newest showing: so "Look at it again" shows what changed.
+            ReviewTalk(
+              agentId: widget.watch.agentId,
+              review: ask,
+              agent: agent,
+              name: agent.name,
+            ),
             if (line != null) ...[
               const SizedBox(height: Space.xs),
               Semantics(
@@ -508,11 +613,16 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
                   : '${agent.name} gets it with your answer.',
               style: type.caption.copyWith(color: palette.textFaint),
             ),
-            if (_error case final error?) ...[
+            if (_error ?? (held ? reviewHeld(ask.ask, agent.name) : null)
+                case final error?) ...[
               const SizedBox(height: Space.xs),
               Text(
                 error,
-                style: type.secondary.copyWith(color: palette.danger),
+                style: type.secondary.copyWith(
+                  color: error == decisionWaiting || _error == null
+                      ? palette.textMuted
+                      : palette.danger,
+                ),
               ),
             ],
             const SizedBox(height: Space.s),
@@ -528,13 +638,13 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
                   if (replying)
                     SubmitButton(
                       key: const ValueKey('review-send'),
-                      onPressed: _busy ? null : () => unawaited(_answer(ask)),
+                      onPressed: off ? null : () => unawaited(_answer(ask)),
                     )
                   else ...[
                     Button(
                       key: const ValueKey('review-dismiss'),
                       label: 'Dismiss',
-                      onPressed: _busy
+                      onPressed: off
                           ? null
                           : () => unawaited(_answer(ask, dismiss: true)),
                     ),
@@ -545,7 +655,7 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
                       label: ask.ask.wantsText ? 'Send' : 'Approve',
                       primary: true,
                       // Words are the answer when the agent wants them.
-                      onPressed: _busy || (ask.ask.wantsText && !typed)
+                      onPressed: off || (ask.ask.wantsText && !typed)
                           ? null
                           : () => unawaited(_answer(ask)),
                     ),

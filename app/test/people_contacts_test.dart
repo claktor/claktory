@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show HttpOverrides;
 
@@ -36,6 +37,10 @@ class _Service {
   bool signedIn = true;
   String failing = '';
 
+  /// When set, a read of the contacts answers what they were when it was
+  /// asked, once this completes: an answer that comes late.
+  Future<void>? hold;
+
   ContactsApi api() => ContactsApi(
     UserAppsSession(
       signedIn
@@ -48,7 +53,7 @@ class _Service {
           if (bare == failing) {
             throw const AccountServiceUnreachable('offline');
           }
-          return switch (bare) {
+          final answer = switch (bare) {
             '/v1/apps/dms/requests' => requests,
             '/v1/apps/dms/contacts' => contacts,
             '/v1/apps/dms/blocks' => blocks,
@@ -60,6 +65,10 @@ class _Service {
               'friend_id': {'generation': 1, 'created_ms': 0},
             },
           };
+          if (hold case final late? when bare == '/v1/apps/dms/contacts') {
+            await late;
+          }
+          return answer;
         }
         final rest = {...?body}..remove('request_nonce');
         log.add('$method $bare${rest.isEmpty ? '' : ' ${jsonEncode(rest)}'}');
@@ -323,6 +332,86 @@ void main() {
         'DELETE /v1/apps/dms/contacts/c1',
         'DELETE /v1/apps/dms/blocks/b1',
       ]);
+    });
+
+    // Row 1441 (Abbacchio): Remove friend…, then Done, then People again:
+    // the friend is gone from the list then and there, and still gone.
+    testWidgets('a friend removed is gone at once, and after Done and People '
+        'again', (tester) async {
+      service
+        ..contacts = {
+          'contacts': [
+            {..._ana, 'id': 'c1', 'conversation_id': 'v1', 'since_ms': _day},
+          ],
+        }
+        ..act = (method, path) {
+          if (method == 'DELETE' && path == '/v1/apps/dms/contacts/c1') {
+            service.contacts = {'contacts': []};
+          }
+          return {};
+        };
+      await show(tester, size: const Size(1200, 900));
+      expect(find.textContaining('Friends since'), findsOneWidget);
+      await tester.tap(find.bySemanticsLabel('More for Ana · K7QF2M'));
+      await settle(tester);
+      await tester.tap(find.text('Remove friend…'));
+      await settle(tester);
+      await tester.tap(find.text('Remove'));
+      await settle(tester);
+      expect(find.textContaining('Friends since'), findsNothing);
+      await tester.tap(find.text('Done'));
+      await pumpFrames(tester, const Duration(seconds: 1));
+      await tester.tap(find.text('Open'));
+      await pumpFrames(tester, const Duration(seconds: 1));
+      await settle(tester);
+      expect(find.text('People'), findsOneWidget);
+      expect(find.textContaining('Friends since'), findsNothing);
+      expect(find.textContaining('No friends yet'), findsOneWidget);
+    });
+
+    // Row 1441: a read of the lists from before the Remove that answers
+    // after it never puts the friend back.
+    testWidgets('an earlier read answering late never puts a removed friend '
+        'back', (tester) async {
+      service
+        ..contacts = {
+          'contacts': [
+            {..._ana, 'id': 'c1', 'conversation_id': 'v1', 'since_ms': _day},
+          ],
+        }
+        ..blocks = {
+          'blocks': [
+            {..._ana2, 'id': 'b1', 'created_ms': _day},
+          ],
+        }
+        ..act = (method, path) {
+          if (method == 'DELETE' && path == '/v1/apps/dms/contacts/c1') {
+            service.contacts = {'contacts': []};
+          }
+          if (method == 'DELETE' && path == '/v1/apps/dms/blocks/b1') {
+            service.blocks = {'blocks': []};
+          }
+          return {};
+        };
+      await show(tester);
+      expect(find.textContaining('Friends since'), findsOneWidget);
+      // Unblock: its read of the lists, with Ana a friend, answers late.
+      final late = Completer<void>();
+      service.hold = late.future;
+      await tester.tap(find.text('Unblock'));
+      await settle(tester);
+      service.hold = null;
+      await tester.tap(find.bySemanticsLabel('More for Ana · K7QF2M'));
+      await settle(tester);
+      await tester.tap(find.text('Remove friend…'));
+      await settle(tester);
+      await tester.tap(find.text('Remove'));
+      await settle(tester);
+      expect(find.textContaining('Friends since'), findsNothing);
+      late.complete();
+      await settle(tester);
+      expect(find.textContaining('Friends since'), findsNothing);
+      expect(find.textContaining('No friends yet'), findsOneWidget);
     });
 
     testWidgets('a request sent says nothing of whom; accepted first, '

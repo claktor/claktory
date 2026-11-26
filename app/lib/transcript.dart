@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:clock/clock.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
@@ -13,6 +14,7 @@ import 'app_access_card.dart' show AppAccessCard;
 import 'app_grant_card.dart';
 import 'attachments.dart';
 import 'backend.dart' show Backend, RequestFailure;
+import 'device_kind.dart' show thisDeviceKindForHello, thisDeviceNameForHello;
 import 'characters/character.dart';
 import 'checklist_reply.dart' show ChecklistRef;
 import 'avatar.dart';
@@ -195,8 +197,9 @@ double _queuedOpacity(BuildContext context) =>
 /// before it fades out (as it does when /clear drops the queue).
 const _leaveGrace = Duration(milliseconds: 1500);
 
-/// How long a message the person sent still says "Sending…" once it's
-/// queued: an idle agent takes it at once, so "Queued" would only flash.
+/// How long a message the person sent to an idle agent shows whole once
+/// it's queued, before it says "Queued": the agent takes it at once, so
+/// "Queued" would only flash. To a working one it says Queued at once.
 const _sendingFor = Duration(seconds: 1);
 
 /// A queued message on show, or one of the person's on its way.
@@ -224,7 +227,31 @@ class _Waiting {
 
   /// It left without its entry arriving, and is fading out.
   var gone = false;
+
+  /// The person's message on its way to an agent that wasn't working when
+  /// it was sent: shown whole and bright from the tap (#453), not faded.
+  var toIdle = false;
 }
+
+/// This device as a message sent from it names it ([SentFrom]): its kind
+/// and name as its Hello says them, once known; null before.
+({DeviceKind kind, String name})? _ownDevice;
+
+/// Works out [_ownDevice] from what [backend]'s Hello said, once it said
+/// it (the device's kind and name are worked out for it, then kept): never
+/// before, so they're never worked out here.
+Future<void> _knowOwnDevice(Backend? backend) async {
+  if (_ownDevice != null) return;
+  if (backend == null || backend.connectedSince.value == null) return;
+  final kind = await thisDeviceKindForHello();
+  final name = await thisDeviceNameForHello();
+  _ownDevice = (kind: kind, name: name);
+}
+
+/// Stands in for [_ownDevice] in tests.
+@visibleForTesting
+set debugOwnDevice(({DeviceKind kind, String name})? device) =>
+    _ownDevice = device;
 
 class _TranscriptViewState extends State<TranscriptView>
     with SingleTickerProviderStateMixin {
@@ -276,7 +303,7 @@ class _TranscriptViewState extends State<TranscriptView>
 
   void _extrasChanged() {
     final items = widget.extras?.value ?? const <TimelineItem>[];
-    final now = DateTime.now();
+    final now = clock.now();
     var arrived = false;
     for (final item in items) {
       if (_knownExtras.add(item.key)) {
@@ -709,6 +736,10 @@ class _TranscriptViewState extends State<TranscriptView>
   /// rather than arrive.
   final _fromQueue = <int>{};
 
+  /// Of those, the ones whose bubble was already bright (the person's
+  /// message to an idle agent, #453): they just stay as they are.
+  final _fromSent = <int>{};
+
   @override
   void initState() {
     super.initState();
@@ -729,6 +760,7 @@ class _TranscriptViewState extends State<TranscriptView>
     _loads = widget.transcript.loads;
     _queueChanged(initial: true);
     _outboxChanged(initial: true);
+    unawaited(_knowOwnDevice(_scopeBackend).then((_) => _ownKnown()));
     // Opened at what waits for the person: there from the first frame.
     final target = widget.reveal?.value;
     final index = target == null ? null : _indexFor(target);
@@ -866,6 +898,10 @@ class _TranscriptViewState extends State<TranscriptView>
   /// Says "Queued" once a message just sent has been queued a moment.
   Timer? _relabel;
 
+  /// Runs until the next of the person's messages still on its way turns
+  /// slow, to say Sending… under it then.
+  Timer? _slowing;
+
   /// How many earlier entries the view has seen paged in.
   late int _earlier;
 
@@ -936,6 +972,49 @@ class _TranscriptViewState extends State<TranscriptView>
     return null;
   }
 
+  /// The backend above, if any (tests show a transcript without one).
+  Backend? get _scopeBackend =>
+      context.getInheritedWidgetOfExactType<AppScope>()?.backend;
+
+  /// This device, as the backend names it under the messages sent from
+  /// it: its paired name there (Settings → Devices), else its own; null
+  /// until its kind is known.
+  SentFrom? _ownSentFrom() {
+    final own = _ownDevice;
+    if (own == null) {
+      // Known in a moment (what the Hello said is kept): the message
+      // just sent gets it then, before its first frame.
+      unawaited(_knowOwnDevice(_scopeBackend).then((_) => _ownKnown()));
+      return null;
+    }
+    var name = own.name;
+    final backend = _scopeBackend;
+    final id = backend?.deviceId ?? '';
+    for (final device
+        in backend?.workspace.workspace.remote.devices ??
+            const <PairedDevice>[]) {
+      if (id.isNotEmpty && device.id == id && device.name.isNotEmpty) {
+        name = device.name;
+      }
+    }
+    return SentFrom(deviceName: name, kind: own.kind);
+  }
+
+  /// This device just became known: the person's messages on their way
+  /// without it show it.
+  void _ownKnown() {
+    if (!mounted || _ownDevice == null) return;
+    final from = _ownSentFrom();
+    if (from == null) return;
+    var changed = false;
+    for (final waiting in _waiting) {
+      if (waiting.outgoing == null || waiting.message.hasSentFrom()) continue;
+      waiting.message.sentFrom = from;
+      changed = true;
+    }
+    if (changed) setState(() {});
+  }
+
   /// [waiting], the person's message on its way, is now the backend's: it
   /// leaves the outbox and stays where it is.
   void _arrived(_Waiting waiting) {
@@ -955,12 +1034,19 @@ class _TranscriptViewState extends State<TranscriptView>
     var added = false;
     for (final outgoing in current) {
       if (_waiting.any((waiting) => waiting.outgoing == outgoing)) continue;
+      final now = clock.now();
+      // As the backend will have it (#453): when it was sent and where
+      // from, so it shows whole from the tap, not a piece at a time.
+      final stand = QueuedMessage(
+        source: 'person',
+        text: outgoing.text,
+        created: Int64(now.millisecondsSinceEpoch),
+      );
+      final from = _ownSentFrom();
+      if (from != null) stand.sentFrom = from;
       _waiting.add(
-        _Waiting(
-          QueuedMessage(source: 'person', text: outgoing.text),
-          initial ? DateTime(0) : DateTime.now(),
-          outgoing: outgoing,
-        ),
+        _Waiting(stand, initial ? DateTime(0) : now, outgoing: outgoing)
+          ..toIdle = !widget.working,
       );
       added = true;
     }
@@ -968,9 +1054,30 @@ class _TranscriptViewState extends State<TranscriptView>
       (waiting) =>
           waiting.outgoing != null && !current.contains(waiting.outgoing),
     );
+    _watchSlow();
     if (initial) return;
     setState(() {});
     if (added && _controller.pinned) _startGlide();
+  }
+
+  /// Says Sending… under the person's message still on its way once it's
+  /// slow: wakes when the next one turns so.
+  void _watchSlow() {
+    _slowing?.cancel();
+    _slowing = null;
+    final now = clock.now();
+    Duration? next;
+    for (final waiting in _waiting) {
+      if (waiting.outgoing == null || _slow(waiting)) continue;
+      final left = _sendingFor - now.difference(waiting.shown);
+      if (next == null || left < next) next = left;
+    }
+    if (next == null) return;
+    _slowing = Timer(next, () {
+      if (!mounted) return;
+      setState(() {});
+      _watchSlow();
+    });
   }
 
   /// The queue changed: show what's new, and note what left it.
@@ -979,7 +1086,7 @@ class _TranscriptViewState extends State<TranscriptView>
     if (queued == null) return;
     final current = queued.of(widget.agentId);
     final ids = {for (final message in current) message.id};
-    final now = DateTime.now();
+    final now = clock.now();
     var added = false;
     for (final message in current) {
       if (_delivered.contains(message.id)) continue;
@@ -991,11 +1098,14 @@ class _TranscriptViewState extends State<TranscriptView>
           : null;
       if (sent != null) {
         // The person's message just sent: it's queued, where it shows.
-        sent
-          ..message = message
-          ..justSent = true;
+        sent.message = message;
         _arrived(sent);
+        // To a working agent it waits for the step to end: Queued at once
+        // (Zucchero's row 447), never its time first.
+        if (widget.working) continue;
+        sent.justSent = true;
         _relabel?.cancel();
+        _slowing?.cancel();
         _relabel = Timer(_sendingFor, () {
           if (!mounted) return;
           setState(() {
@@ -1119,7 +1229,7 @@ class _TranscriptViewState extends State<TranscriptView>
       _known = length;
       return;
     }
-    final now = DateTime.now();
+    final now = clock.now();
     for (var i = _known; i < length; i++) {
       _arrivals[transcript[i].seq] = now;
       _takeFromQueue(transcript[i]);
@@ -1154,6 +1264,8 @@ class _TranscriptViewState extends State<TranscriptView>
       if (!waiting.gone && same(waiting)) {
         waiting.leaving?.cancel();
         _waiting.remove(waiting);
+        // Shown bright, its entry takes its place as it is.
+        if (_whole(waiting)) _fromSent.add(model.seq);
         if (waiting.outgoing != null) {
           _arrived(waiting);
         } else {
@@ -1166,9 +1278,14 @@ class _TranscriptViewState extends State<TranscriptView>
     }
   }
 
-  /// Glides to the bottom, or with reduced motion, goes there at once.
+  /// Glides to the bottom, or with reduced motion, goes there at once; so
+  /// too while nothing moves (the window reported unseen): a glide waiting
+  /// on a stopped clock would keep the new entry below the fold (friend bug
+  /// #31).
   void _startGlide() {
-    if (!_controller.hasClients || _reducedMotion) {
+    if (!_controller.hasClients ||
+        _reducedMotion ||
+        !TickerMode.getValuesNotifier(context).value.enabled) {
       _controller.gliding = false;
       return;
     }
@@ -1356,9 +1473,7 @@ class _TranscriptViewState extends State<TranscriptView>
         child: Arrival(
           animate:
               !_reducedMotion &&
-              DateTime.now().difference(
-                    _extraArrivals[item.key] ?? DateTime(0),
-                  ) <
+              clock.now().difference(_extraArrivals[item.key] ?? DateTime(0)) <
                   _glideDuration,
           child: KeyedSubtree(
             key: _extraKey(item.key),
@@ -1407,14 +1522,19 @@ class _TranscriptViewState extends State<TranscriptView>
         child: Padding(
           padding: EdgeInsets.symmetric(horizontal: Metrics.of(context).gutter),
           child: Arrival(
-            // A delivered message brightens where its queued bubble was.
-            from: fromQueue ? _queuedOpacity(context) : 0,
+            // A delivered message brightens where its queued bubble was;
+            // one already bright stays as it was.
+            from: !fromQueue
+                ? 0
+                : _fromSent.contains(model.seq)
+                ? 1
+                : _queuedOpacity(context),
             rise: !fromQueue,
             // Only an entry built as it arrives eases in; one built later,
             // as the user scrolls to it, is just there.
             animate:
                 !_reducedMotion &&
-                DateTime.now().difference(_arrivals[model.seq] ?? DateTime(0)) <
+                clock.now().difference(_arrivals[model.seq] ?? DateTime(0)) <
                     _glideDuration,
             child: _Marked(
               key: _entryKeys[model.seq] ??= GlobalKey(),
@@ -1461,6 +1581,28 @@ class _TranscriptViewState extends State<TranscriptView>
     );
   }
 
+  /// The person's typed message, shown whole as its entry will be, its
+  /// time and the device it was sent from with it, and not faded (#453):
+  /// from the tap when the agent was idle, while it isn't waiting in the
+  /// queue (just sent, or taken and its entry on its way), and never once
+  /// sending it failed.
+  bool _whole(_Waiting waiting) {
+    final message = waiting.message;
+    final outgoing = waiting.outgoing;
+    if (message.source != 'person' || outgoing?.failure != null) return false;
+    if (outgoing != null) {
+      return outgoing.voice == null && outgoing.files.isEmpty && waiting.toIdle;
+    }
+    return !message.hasTranscription() &&
+        message.attachments.isEmpty &&
+        (waiting.justSent || waiting.leaving != null);
+  }
+
+  /// The person's message still on its way [_sendingFor] after the tap.
+  bool _slow(_Waiting waiting) =>
+      waiting.outgoing != null &&
+      clock.now().difference(waiting.shown) >= _sendingFor;
+
   /// A message waiting for the agent: as it will look once delivered, but
   /// faded and labeled "Queued".
   Widget _queuedItem(_Waiting waiting) {
@@ -1489,6 +1631,9 @@ class _TranscriptViewState extends State<TranscriptView>
         : voice != null
         ? message.text
         : '';
+    final whole = _whole(waiting);
+    // Still on its way a moment after it was sent: it says so.
+    final slow = _slow(waiting);
     final (Widget bubble, CrossAxisAlignment side) = switch (message.source) {
       'person' when voice != null => (
         Column(
@@ -1556,6 +1701,8 @@ class _TranscriptViewState extends State<TranscriptView>
               ? heardOf(message.text, typed)
               : message.text,
           typed: heard ? typed : '',
+          sentFrom: whole && message.hasSentFrom() ? message.sentFrom : null,
+          sentMs: whole ? message.created.toInt() : 0,
           files: message.attachments,
           voice: heard ? message.transcription : null,
           checklist: message.hasChecklistItem() ? message.checklistItem : null,
@@ -1587,10 +1734,21 @@ class _TranscriptViewState extends State<TranscriptView>
     };
     final outgoing = waiting.outgoing;
     final failure = outgoing?.failure;
-    final sending = outgoing != null || waiting.justSent;
+    // Sending… while files or a recording go, or once it's slow; a typed
+    // one to a working agent says Queued from the tap, as it will be.
+    final plain = voice == null && files.isEmpty;
+    final sending =
+        (outgoing != null && (!plain || slow)) || (waiting.justSent && !whole);
     // Under the bubble: where it was sent from, and Queued or Sending…
-    // (or how a voice message's transcription goes).
-    final Widget? status = failure == null && !voiceFailed
+    // (or how a voice message's transcription goes). Whole and just sent,
+    // nothing: an idle agent takes it at once, so "Queued" would only
+    // flash, and it's no longer on its way. Nor once it left the queue,
+    // waiting for its entry: it isn't queued any more.
+    final Widget? status =
+        failure == null &&
+            !voiceFailed &&
+            !(whole && !slow) &&
+            waiting.leaving == null
         ? Padding(
             padding: EdgeInsets.only(
               top: 2,
@@ -1603,7 +1761,10 @@ class _TranscriptViewState extends State<TranscriptView>
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (message.source == 'person' && message.hasSentFrom()) ...[
+                // Whole, its bubble has it already.
+                if (message.source == 'person' &&
+                    message.hasSentFrom() &&
+                    !whole) ...[
                   DeviceMark(message.sentFrom),
                   const SizedBox(width: Space.xs),
                 ],
@@ -1655,12 +1816,13 @@ class _TranscriptViewState extends State<TranscriptView>
             child: Arrival(
               animate:
                   !_reducedMotion &&
-                  DateTime.now().difference(waiting.shown) < _glideDuration,
+                  clock.now().difference(waiting.shown) < _glideDuration,
               child: Column(
                 crossAxisAlignment: side,
                 children: [
                   Opacity(
-                    opacity: _queuedOpacity(context),
+                    // Whole, it's sent, not waiting: as its entry will be.
+                    opacity: whole ? 1 : _queuedOpacity(context),
                     child: Column(
                       crossAxisAlignment: side,
                       children: [

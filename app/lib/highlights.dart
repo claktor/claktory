@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:clock/clock.dart';
 import 'package:flutter/widgets.dart';
 
 import 'identity.dart';
@@ -58,7 +59,7 @@ class HighlightStore extends ChangeNotifier {
       id: _nextId++,
       key: key,
       colors: colors,
-      started: DateTime.now(),
+      started: clock.now(),
     );
     _glows.add(glow);
     Timer(duration, () {
@@ -90,7 +91,7 @@ class HighlightStore extends ChangeNotifier {
     final keys = [for (final target in highlight.targets) ?targetKey(target)];
     if (keys.isEmpty) return;
     // Pointed at, even with highlights off: a viewer reads its file again.
-    pointedAt.value = (keys: keys, at: DateTime.now());
+    pointedAt.value = (keys: keys, at: clock.now());
     switch (highlight.kind) {
       case HighlightKind.HIGHLIGHT_KIND_MESSAGE:
         // From the sender to the recipient, both rows in both colors.
@@ -312,7 +313,7 @@ class _GlowState extends State<Glow> with SingleTickerProviderStateMixin {
     }
     if (newest != null) {
       _shown = newest.id;
-      final elapsed = DateTime.now().difference(newest.started);
+      final elapsed = clock.now().difference(newest.started);
       final total = HighlightStore.duration.inMicroseconds;
       setState(() => _colors = newest!.colors);
       if (MediaQuery.disableAnimationsOf(context)) {

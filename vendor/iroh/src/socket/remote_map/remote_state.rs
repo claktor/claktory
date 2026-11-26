@@ -35,7 +35,7 @@ use crate::{
     address_lookup::{AddressLookupFailed, AddressLookupServices, Item as AddressLookupItem},
     endpoint::DirectAddr,
     socket::{
-        Metrics as SocketMetrics, RELAY_PATH_MAX_IDLE_TIMEOUT,
+        HEARTBEAT_INTERVAL, Metrics as SocketMetrics, RELAY_PATH_MAX_IDLE_TIMEOUT,
         remote_map::remote_state::path_watcher::PathStateSender,
         transports::{self, OwnedTransmit, TransportsSender},
     },
@@ -1015,6 +1015,16 @@ impl State {
             && let Err(e) = path.set_max_idle_timeout(Some(RELAY_PATH_MAX_IDLE_TIMEOUT))
         {
             debug!(?e, "failed to set relay path idle timeout");
+        }
+        // Claktory: a relay path keeps iroh's own heartbeat, whatever an
+        // endpoint's default path keep-alive (a Claktory device checks its
+        // direct paths more often, to give up on a silent one in seconds,
+        // Bruno 36927): it stays up through the relay actor anyway, and
+        // more on it would only cost an idle phone data.
+        if network_path.is_relay()
+            && let Err(e) = path.set_keep_alive_interval(Some(HEARTBEAT_INTERVAL))
+        {
+            debug!(?e, "failed to set relay path keep-alive");
         }
 
         self.set_path_status(conn_id, path, &network_path);

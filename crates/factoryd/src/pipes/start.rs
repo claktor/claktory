@@ -385,6 +385,7 @@ pub(crate) fn list(factory: &Factory, project: Option<&str>) -> Result<String, S
     let mut lines = Vec::new();
     let grouped = super::groups::members(factory);
     let groups = super::groups::all(factory);
+    let mut shared = super::shares::by_pipe(factory);
     for (id, project_name) in projects {
         for record in factory.pipes.all().into_iter().filter(|record| &record.project == id) {
             let group = grouped
@@ -392,7 +393,24 @@ pub(crate) fn list(factory: &Factory, project: Option<&str>) -> Result<String, S
                 .and_then(|group| groups.iter().find(|known| &known.id == group))
                 .map(|group| format!(", in the group {} (id {})", group.name, group.id))
                 .unwrap_or_default();
-            lines.push(format!("- {} (id {}), in {project_name}{group}: {}", shown_name(&record), record.id, standing(&record, &person)));
+            // The person's websites it gets, by their own names (#471 G4):
+            // never the other side's, which are their words.
+            let websites: Vec<String> = shared
+                .remove(&record.id)
+                .unwrap_or_default()
+                .mine
+                .into_values()
+                .map(|name| format!("\"{}\"", super::agents::escape(&name)))
+                .collect();
+            let websites =
+                if websites.is_empty() { String::new() } else { format!("; {person}'s websites shared with it: {}", websites.join(", ")) };
+            lines.push(format!(
+                "- {} (id {}), in {project_name}{group}: {}{}{websites}",
+                shown_name(&record),
+                record.id,
+                standing(&record, &person),
+                waiting(factory, &record, &person)
+            ));
         }
         let mine: Vec<String> = groups
             .iter()
@@ -421,6 +439,31 @@ fn shown_name(record: &Record) -> String {
     if theirs { "a pipe named by the other side".to_owned() } else { format!("\"{}\"", record.name) }
 }
 
+/// What waits on a pipe, counted only (#471 G11, Fugo: never what they
+/// say): "; 2 messages wait for Matt (1 to send, 1 to let in); 1 message no
+/// agent has answered".
+fn waiting(factory: &Factory, record: &Record, person: &str) -> String {
+    let (out, incoming) = (super::waiting_outgoing(factory, &record.id), super::waiting_incoming(factory, &record.id));
+    let unanswered = super::lead::unanswered(factory, &factory.lock().config, record).len();
+    let messages = |count: usize| if count == 1 { "1 message".to_owned() } else { format!("{count} messages") };
+    let mut said = String::new();
+    if out + incoming > 0 {
+        let mut which = Vec::new();
+        if out > 0 {
+            which.push(format!("{out} to send"));
+        }
+        if incoming > 0 {
+            which.push(format!("{incoming} to let in"));
+        }
+        let wait = if out + incoming == 1 { "waits" } else { "wait" };
+        said.push_str(&format!("; {} {wait} for {person} ({})", messages((out + incoming) as usize), which.join(", ")));
+    }
+    if unanswered > 0 {
+        said.push_str(&format!("; {} from the other side no agent has answered", messages(unanswered)));
+    }
+    said
+}
+
 /// Where a pipe stands, in Claktory's own words.
 fn standing(record: &Record, person: &str) -> String {
     use super::{Pause, State as Pipe};
@@ -430,7 +473,11 @@ fn standing(record: &Record, person: &str) -> String {
         (Pipe::Approval, _) => format!("waiting for {person} to approve it"),
         (Pipe::WaitingPeer, _) => "waiting for the other side to approve it".to_owned(),
         (Pipe::Open, _) => "open".to_owned(),
-        (Pipe::Paused, Pause::Loop) => format!("paused: the agents talked on their own; {person} can continue it"),
+        (Pipe::Paused, Pause::Loop) => {
+            format!(
+                "paused: the agents talked on their own; {person} can continue it, or you can ask them to on a card (pipes_settings resume)"
+            )
+        }
         (Pipe::Paused, Pause::Peer) => "paused by the other side".to_owned(),
         (Pipe::Paused, _) => format!("paused by {person}"),
         (Pipe::Closed, _) => "closed".to_owned(),

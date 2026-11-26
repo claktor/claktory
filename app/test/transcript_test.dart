@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/backend.dart' show RequestFailure;
+import 'package:factory_app/message_time.dart' show TimeFoot;
 import 'package:factory_app/outbox.dart';
 import 'package:factory_app/state.dart';
 import 'package:factory_app/transcript.dart';
@@ -34,6 +35,9 @@ Future<void> show(
   QueuedStore? queued,
   Outbox? outbox,
   Future<void> Function()? loadEarlier,
+  String userNote = '',
+  bool working = false,
+  bool moving = true,
 }) async {
   tester.view.physicalSize = const Size(900, windowHeight);
   tester.view.devicePixelRatio = 1;
@@ -44,14 +48,22 @@ Future<void> show(
       builder: (context, _) => Overlay(
         initialEntries: [
           OverlayEntry(
-            builder: (context) => TranscriptView(
-              transcript: store,
-              working: false,
-              follow: follow,
-              queued: queued,
-              outbox: outbox,
-              loadEarlier: loadEarlier,
-              agentId: 'a',
+            builder: (context) => AgentTints(
+              own: const Color(0xFF3366FF),
+              byId: const {},
+              userNote: userNote,
+              child: TickerMode(
+                enabled: moving,
+                child: TranscriptView(
+                  transcript: store,
+                  working: working,
+                  follow: follow,
+                  queued: queued,
+                  outbox: outbox,
+                  loadEarlier: loadEarlier,
+                  agentId: 'a',
+                ),
+              ),
             ),
           ),
         ],
@@ -318,6 +330,22 @@ void main() {
 
       await tester.pump(const Duration(milliseconds: 300));
       expect(offset(tester), bottom(tester));
+      expect(opacityOf(tester, 'message 100'), 1);
+    });
+
+    // Friend bug #31: with the window reported unseen, a glide waiting on
+    // the stopped clock kept the new message below the fold.
+    testWidgets('while nothing moves, a new entry is at the bottom at once', (
+      tester,
+    ) async {
+      final store = transcriptOf(100);
+      await show(tester, store, ValueNotifier(0), moving: false);
+
+      store.update(EntryUpdate(agentId: 'a', entry: user(100)));
+      await tester.pump();
+      await tester.pump();
+      expect(offset(tester), bottom(tester));
+      expect(onScreen(tester, 'message 100'), isTrue);
       expect(opacityOf(tester, 'message 100'), 1);
     });
 
@@ -613,6 +641,13 @@ void main() {
   });
 
   group('sending', () {
+    setUp(
+      () => debugOwnDevice = (
+        kind: DeviceKind.DEVICE_KIND_PHONE,
+        name: "Matt's iPhone",
+      ),
+    );
+    tearDown(() => debugOwnDevice = null);
     QueuedMessages queue(List<QueuedMessage> messages) =>
         QueuedMessages(agentId: 'a', messages: messages);
     QueuedMessage person(int id, String text) =>
@@ -643,33 +678,54 @@ void main() {
       return (Outbox(backend), backend.answers);
     }
 
-    testWidgets('a message sent shows at once, and its queued one takes its '
-        'place where it is', (tester) async {
+    testWidgets('a message sent shows whole at once, and its queued one '
+        'takes its place where it is', (tester) async {
       final store = transcriptOf(3);
       final queued = QueuedStore();
       final (box, answers) = outbox();
       await show(tester, store, ValueNotifier(0), queued: queued, outbox: box);
+      final times = find.byType(TimeFoot).evaluate().length;
 
+      // The first frame after the tap: its words, its time and this
+      // device together, bright, as its entry will show (#453).
       box.send('a', 'ship it');
       await tester.pump();
+      void whole({bool easing = false}) {
+        expect(find.text('ship it'), findsOneWidget);
+        expect(find.byType(TimeFoot), findsNWidgets(times + 1));
+        expect(find.byType(DeviceMark), findsOneWidget);
+        expect(find.text('Sending…'), findsNothing);
+        expect(find.text('Queued'), findsNothing);
+        // It eases in whole, as anything new does; then it's bright.
+        if (!easing) expect(opacityOf(tester, 'ship it'), 1);
+      }
+
+      whole(easing: true);
       await tester.pump(const Duration(milliseconds: 400));
-      expect(find.text('ship it'), findsOneWidget);
-      expect(find.text('Sending…'), findsOneWidget);
-      expect(opacityOf(tester, 'ship it'), 0.5);
+      whole();
       final place = tester.getTopLeft(find.text('ship it'));
 
-      // The backend queued it (the agent is working), then answered.
-      queued.apply(queue([person(7, 'ship it')]));
+      // The backend queued it, then answered: nothing changes.
+      queued.apply(
+        queue([
+          person(7, 'ship it')
+            ..created = Int64(DateTime.now().millisecondsSinceEpoch)
+            ..sentFrom = SentFrom(
+              deviceName: "Matt's iPhone",
+              kind: DeviceKind.DEVICE_KIND_PHONE,
+            ),
+        ]),
+      );
       answers.single.complete();
       await tester.pump();
-      expect(find.text('ship it'), findsOneWidget);
+      whole();
       expect(tester.getTopLeft(find.text('ship it')), place);
-      expect(opacityOf(tester, 'ship it'), 0.5);
       expect(box.of('a'), isEmpty);
-      // An idle agent takes it at once, so it doesn't flash "Queued".
-      expect(find.text('Sending…'), findsOneWidget);
+      // An idle agent takes it at once; one that doesn't within a second
+      // has it waiting, and it says so.
       await tester.pump(const Duration(seconds: 1));
       expect(find.text('Queued'), findsOneWidget);
+      expect(opacityOf(tester, 'ship it'), 0.5);
 
       // Then delivered: it brightens in place.
       store.update(
@@ -687,6 +743,123 @@ void main() {
       expect(find.text('ship it'), findsOneWidget);
       expect(opacityOf(tester, 'ship it'), 1);
       expect(tester.getTopLeft(find.text('ship it')).dy, place.dy);
+    });
+
+    testWidgets('to a working agent, Queued as soon as the backend has it, '
+        'never its time first (row 447)', (tester) async {
+      final store = transcriptOf(3);
+      final queued = QueuedStore();
+      final (box, answers) = outbox();
+      await show(
+        tester,
+        store,
+        ValueNotifier(0),
+        queued: queued,
+        outbox: box,
+        working: true,
+      );
+      final times = find.byType(TimeFoot).evaluate().length;
+      box.send('a', 'and then');
+      await tester.pump();
+      // Queued from the tap, with its device: it will wait (#453).
+      expect(find.text('Queued'), findsOneWidget);
+      expect(find.text('Sending…'), findsNothing);
+      expect(find.byType(DeviceMark), findsOneWidget);
+      expect(find.byType(TimeFoot), findsNWidgets(times));
+      expect(opacityOf(tester, 'and then'), lessThan(1));
+      queued.apply(
+        queue([
+          person(7, 'and then')
+            ..created = Int64(
+              DateTime(2026, 11, 25, 9, 41).millisecondsSinceEpoch,
+            ),
+        ]),
+      );
+      answers.single.complete();
+      await tester.pump();
+      expect(find.text('Queued'), findsOneWidget);
+      expect(find.byType(TimeFoot), findsNWidgets(times));
+      expect(opacityOf(tester, 'and then'), lessThan(1));
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.text('Queued'), findsOneWidget);
+    });
+
+    testWidgets('confirmed, the message shows whole at once: its time, whom '
+        "it went to and its device together, as its entry will; and once "
+        'the agent took it, never Queued while its entry comes (#453)', (
+      tester,
+    ) async {
+      final store = transcriptOf(3);
+      final queued = QueuedStore();
+      final (box, answers) = outbox();
+      await show(
+        tester,
+        store,
+        ValueNotifier(0),
+        queued: queued,
+        outbox: box,
+        userNote: 'To Tove only',
+      );
+      final times = find.byType(TimeFoot).evaluate().length;
+      box.send('a', 'ship it');
+      await tester.pump();
+      expect(find.byType(DeviceMark), findsOneWidget);
+      expect(find.byType(TimeFoot), findsNWidgets(times + 1));
+
+      // The backend has it: it stays as it was.
+      final iphone = SentFrom(
+        deviceName: "Matt's iPhone",
+        kind: DeviceKind.DEVICE_KIND_PHONE,
+      );
+      final sentAt = DateTime(2026, 11, 25, 9, 41).millisecondsSinceEpoch;
+      queued.apply(
+        queue([
+          person(7, 'ship it')
+            ..sentFrom = iphone
+            ..created = Int64(sentAt),
+        ]),
+      );
+      answers.single.complete();
+      await tester.pump();
+      expect(find.byType(DeviceMark), findsOneWidget);
+      expect(find.byType(TimeFoot), findsNWidgets(times + 1));
+      expect(find.text('Sending…'), findsNothing);
+      // Whom it went to beside it, under the bubble, as on its entry.
+      bool noteBeside() => find
+          .text('To Tove only')
+          .evaluate()
+          .any(
+            (each) =>
+                (tester.getCenter(find.byWidget(each.widget)).dy -
+                        tester.getCenter(find.byType(DeviceMark)).dy)
+                    .abs() <
+                2,
+          );
+      expect(noteBeside(), isTrue);
+
+      // The agent took it; its entry comes a while later (a relay).
+      queued.apply(queue([]));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 1200));
+      expect(find.text('Queued'), findsNothing);
+      expect(find.byType(DeviceMark), findsOneWidget);
+      expect(noteBeside(), isTrue);
+
+      store.update(
+        EntryUpdate(
+          agentId: 'a',
+          entry: Entry(
+            seq: Int64(3),
+            timestampMs: Int64(sentAt),
+            user: UserText(text: 'ship it', sentFrom: iphone),
+          ),
+        ),
+      );
+      await tester.pump();
+      expect(find.byType(DeviceMark), findsOneWidget);
+      await tester.pump(const Duration(seconds: 2));
+      expect(find.text('ship it'), findsOneWidget);
+      expect(find.byType(DeviceMark), findsOneWidget);
     });
 
     testWidgets('its entry can take its place straight away', (tester) async {
@@ -717,8 +890,9 @@ void main() {
       expect(find.text('ship it'), findsOneWidget);
       expect(find.text('Sending…'), findsNothing);
       expect(box.of('a'), isEmpty);
+      // Bright from the tap, it doesn't brighten again.
       for (var i = 0; i < 6; i++) {
-        expect(opacityOf(tester, 'ship it'), greaterThanOrEqualTo(0.5));
+        expect(opacityOf(tester, 'ship it'), 1);
         await tester.pump(const Duration(milliseconds: 40));
       }
       await tester.pump(const Duration(seconds: 1));
@@ -727,6 +901,43 @@ void main() {
       answers.single.complete();
       await tester.pump(const Duration(seconds: 2));
       expect(find.text('ship it'), findsOneWidget);
+    });
+
+    testWidgets('still on its way a second later, it says Sending…, '
+        'its device shown once', (tester) async {
+      final queued = QueuedStore();
+      final (box, answers) = outbox();
+      await show(
+        tester,
+        transcriptOf(3),
+        ValueNotifier(0),
+        queued: queued,
+        outbox: box,
+      );
+      box.send('a', 'ship it');
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 900));
+      expect(find.text('Sending…'), findsNothing);
+      await tester.pump(const Duration(milliseconds: 150));
+      expect(find.text('Sending…'), findsOneWidget);
+      expect(find.byType(DeviceMark), findsOneWidget);
+      expect(opacityOf(tester, 'ship it'), 1);
+
+      // Then the backend has it: sent.
+      queued.apply(
+        queue([
+          person(7, 'ship it')
+            ..sentFrom = SentFrom(
+              deviceName: "Matt's iPhone",
+              kind: DeviceKind.DEVICE_KIND_PHONE,
+            ),
+        ]),
+      );
+      answers.single.complete();
+      await tester.pump();
+      expect(find.text('Sending…'), findsNothing);
+      expect(find.byType(DeviceMark), findsOneWidget);
+      await tester.pump(const Duration(seconds: 2));
     });
 
     testWidgets('one the backend has, but whose own never shows here, goes', (

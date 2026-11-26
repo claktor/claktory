@@ -494,7 +494,7 @@ mod tests {
         let sealed = seal_rotation("matt", &new, &pins).unwrap();
         let opened = open_rotation("matt", &sealed.key, &sealed.bytes).unwrap();
         assert_eq!(opened.identity.public(), new.public());
-        assert!(opened.pins.get("matt").unwrap().retired.contains(&old.public()));
+        assert!(opened.pins.get("matt").unwrap().replaced(&old.public()));
         // Another account's device, another key or changed bytes: nothing.
         assert_eq!(sealed_error(open_rotation("ana", &sealed.key, &sealed.bytes)), Some("a sealed value didn't open".to_owned()));
         assert_eq!(sealed_error(open_rotation("matt", &[9; 32], &sealed.bytes)), Some("a sealed value didn't open".to_owned()));

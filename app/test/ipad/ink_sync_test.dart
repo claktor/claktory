@@ -206,10 +206,10 @@ class _InkBackend extends RecordingBackend {
   Completer<void>? hold;
 
   /// Saves waiting for [hold] now.
-  var holding = 0;
+  var savesHeld = 0;
 
   Future<void> untilHolding() async {
-    while (holding == 0) {
+    while (savesHeld == 0) {
       await Future<void>.delayed(const Duration(milliseconds: 1));
     }
   }
@@ -218,9 +218,9 @@ class _InkBackend extends RecordingBackend {
   Future<InkLayerSaved> saveInkLayer(SaveInkLayer save) async {
     _ink();
     if (hold case final held?) {
-      holding++;
+      savesHeld++;
       await held.future;
-      holding--;
+      savesHeld--;
     }
     if (failNextSave case final failure?) {
       failNextSave = null;

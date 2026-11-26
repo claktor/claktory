@@ -414,6 +414,7 @@ fn swarm_report(factory: &Arc<Factory>, agent: &str, args: Args) -> Result<ToolR
     };
     let now = now_ms();
     let window = Window::ending(now - (offset * HOUR_MS as f64) as i64, window);
+    factory.store.write_calls();
     let (text, details) = report(&factory.home, &team, &names, window, now)?;
     Ok(ToolResult::text(text, details))
 }
@@ -493,6 +494,7 @@ fn check(factory: &Arc<Factory>, now: i64) -> Result<(), String> {
     if watchers.is_empty() {
         return Ok(());
     }
+    factory.store.write_calls();
     let db = metrics::open(&factory.home)?;
     let mut red: HashMap<Option<String>, Vec<Sign>> = HashMap::new();
     for (project, (team, names)) in &teams {

@@ -9,14 +9,19 @@
 //! Factory uses runs short of space, or (if set) the processors stay busier
 //! than `cpu_percent`, the admin agents with the extension on hear it once,
 //! as a Factory event; it's said again only after the machine recovered.
-//! Other agents with it on can look, but aren't told (friend bug #13: one
+//! What was said and still holds is kept in factory.db (#455), so a restart
+//! doesn't say it again while the machine is still short.
+//! A process that uses a full core in every sample for an hour, owned by
+//! no agent's task, watch or running command (Part 2 #4: a leftover
+//! `cat /dev/zero` did for 37 hours), is told the same way, once while it
+//! lives. Other agents with it on can look, but aren't told (friend bug #13: one
 //! owner for the machine's health). When no admin agent can take it,
 //! Claktory notifies the person itself.
 
 mod disk;
 mod sample;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -34,18 +39,28 @@ use crate::transcript::now_ms;
 
 pub(crate) const ID: &str = "resources";
 
+/// What was said about the machine and still holds (#455), by what it's
+/// about, so a restart doesn't say it again.
+pub(crate) const SCHEMA: &str = "
+-- Alerts about this machine that were given and still hold (#455), by what
+-- they're about (\"ram\", \"cpu\" or \"disk:<mount>\"), with what was said:
+-- a restart doesn't give them again. Deleted once it recovers, so a later
+-- crossing alerts again.
+CREATE TABLE resource_alerts (about TEXT PRIMARY KEY, text TEXT NOT NULL, told INTEGER NOT NULL);
+";
+
 static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "Resources",
     icon: "gauge",
-    description: "Shows how this computer's processors, memory and disk are used, and how much of them Claktory takes. Rivet hears when memory or disk runs low and tells you.",
+    description: "Shows how this computer's processors, memory and disk are used, and how much of them Claktory takes. Rivet hears when memory or disk runs low, or a program keeps a processor core busy for over an hour, and tells you.",
     default_enabled: false,
     options: &[],
 };
 
 const PROMPT: &str = "## Resources
 
-The resources tool shows how this machine and Claktory use its processors, memory and disk: the whole machine, Claktory's own processes (its backend and app, agents' background tasks and monitors' watches), the other programs using the most memory, and what Claktory's data and projects take on disk. Claktory samples it every minute and tells you when memory or disk runs low. Then look into it with the tool and tell the person what you found and what they could do. Never stop, kill or delete anything yourself unless the person asks you to.
+The resources tool shows how this machine and Claktory use its processors, memory and disk: the whole machine, Claktory's own processes (its backend and app, agents' background tasks and monitors' watches), the other programs using the most memory, and what Claktory's data and projects take on disk. Claktory samples it every minute and tells you when memory or disk runs low, or when a process no agent's task owns has used a full processor core for over an hour. Then look into it with the tool and tell the person what you found and what they could do. Never stop, kill or delete anything yourself unless the person asks you to, and never change the system, its disks or virtual machines to make room or keep it running: tell the person what they could do.
 ";
 
 /// Its prompt for an agent that isn't an admin agent: it isn't told.
@@ -106,12 +121,29 @@ const HISTORY: usize = 60;
 /// Samples in a row above the line before memory or the processors alert.
 const RAM_SAMPLES: u32 = 3;
 const CPU_SAMPLES: u32 = 5;
+/// How long a process uses a full core's worth of processor time
+/// (`sample::FULL_CORE` on average), no agent's task owning it, before it's
+/// told.
+const STRAY: Duration = Duration::from_secs(3600);
+/// Points kept of a watched process's processor time over `STRAY`: one
+/// every twelfth of it, so it's judged over an hour and at most 5 minutes.
+const STRAY_POINTS: i64 = 12;
 /// The other processes the panel shows.
 const OTHERS_SHOWN: usize = 5;
 /// How long one disk measurement may walk.
 const DISK_BUDGET: Duration = Duration::from_secs(300);
 
 pub(crate) struct Resources;
+
+/// A process busy in some sample, watched: its processor time (ms) at
+/// times (ms) over the last `STRAY` and a little more, when it was last
+/// busy, and whether it was told.
+#[derive(Default)]
+struct Stray {
+    points: VecDeque<(i64, u64)>,
+    seen: i64,
+    told: bool,
+}
 
 /// Over a line: samples in a row, and whether the agents were told.
 #[derive(Default)]
@@ -135,19 +167,34 @@ struct Now {
     cpu: Crossing,
     /// By mount point.
     disks: HashMap<String, Crossing>,
+    /// Processes busy in a sample over the last `STRAY`, by pid and start:
+    /// told once each, kept while they live.
+    strays: HashMap<(u32, u64), Stray>,
     /// What the agents were told, while it still holds, by what it's about.
     alerts: Vec<(String, String)>,
+    /// The last save of `alerts` to factory.db failed: the next sample
+    /// saves them again.
+    unkept: bool,
 }
 
 pub(crate) struct State {
     every_ms: AtomicU64,
     disk_every_ms: AtomicU64,
+    stray_ms: AtomicU64,
+    /// Percent of one core that counts as a full one, as f32 bits.
+    full_core: std::sync::atomic::AtomicU32,
     now: Mutex<Now>,
 }
 
 impl Default for State {
     fn default() -> State {
-        State { every_ms: AtomicU64::new(60_000), disk_every_ms: AtomicU64::new(20 * 60_000), now: Mutex::default() }
+        State {
+            every_ms: AtomicU64::new(60_000),
+            disk_every_ms: AtomicU64::new(20 * 60_000),
+            stray_ms: AtomicU64::new(u64::try_from(STRAY.as_millis()).unwrap_or(u64::MAX)),
+            full_core: std::sync::atomic::AtomicU32::new(sample::FULL_CORE.to_bits()),
+            now: Mutex::default(),
+        }
     }
 }
 
@@ -163,6 +210,12 @@ impl State {
     fn disk_every(&self) -> Duration {
         Duration::from_millis(self.disk_every_ms.load(Ordering::Relaxed))
     }
+
+    /// How long a process uses a full core's worth before it's told, in
+    /// ms: `STRAY`, by the clock, however often samples come.
+    fn stray_ms(&self) -> i64 {
+        i64::try_from(self.stray_ms.load(Ordering::Relaxed)).unwrap_or(i64::MAX)
+    }
 }
 
 impl Factory {
@@ -172,6 +225,15 @@ impl Factory {
         let ms = |every: Duration| u64::try_from(every.as_millis()).unwrap_or(u64::MAX);
         self.resources.every_ms.store(ms(sample), Ordering::Relaxed);
         self.resources.disk_every_ms.store(ms(disk), Ordering::Relaxed);
+    }
+
+    /// How long a process uses a full core's worth before it's told (an
+    /// hour), and what percent of one core on average counts as full (90);
+    /// tests make them smaller, since a busy machine gives no process a
+    /// whole core.
+    pub fn set_resources_stray(&self, after: Duration, core_percent: f32) {
+        self.resources.stray_ms.store(u64::try_from(after.as_millis()).unwrap_or(u64::MAX), Ordering::Relaxed);
+        self.resources.full_core.store(core_percent.to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -262,7 +324,8 @@ fn known(factory: &Factory) -> sample::Known {
         paths.push((project.path.clone(), project.name.clone()));
         paths.extend(project.folders.iter().map(|folder| (folder.path.clone(), project.name.clone())));
     }
-    sample::Known { app, groups, paths }
+    let full_core = f32::from_bits(factory.resources.full_core.load(Ordering::Relaxed));
+    sample::Known { app, groups, paths, full_core }
 }
 
 fn plan(factory: &Factory) -> disk::Plan {
@@ -309,7 +372,14 @@ struct Said {
 
 /// Checks a new sample against the lines; returns what to tell. Each is
 /// said once per crossing.
-fn check(now: &mut Now, lines: &ResourcesConfig, config: &Config) -> Vec<Said> {
+fn check(
+    now: &mut Now,
+    lines: &ResourcesConfig,
+    config: &Config,
+    hot: &[sample::Busy],
+    alive: &HashSet<(u32, u64)>,
+    (stray_ms, full_core): (i64, f32),
+) -> Vec<Said> {
     let mut said = Vec::new();
     let advice = format!(
         "Look into it with the resources tool and tell {} what you find and what they could do. Don't stop, kill or delete anything yourself.",
@@ -351,6 +421,10 @@ fn check(now: &mut Now, lines: &ResourcesConfig, config: &Config) -> Vec<Said> {
             gb(machine.memory_total)
         );
         said.push(Said { about: "ram".to_owned(), text, person });
+    }
+    if lines.cpu_percent == 0 {
+        // Off: nothing holds, kept or not.
+        now.cpu = Crossing::default();
     }
     if lines.cpu_percent > 0 && busy(&mut now.cpu, machine.cpu_percent > f64::from(lines.cpu_percent), CPU_SAMPLES) {
         let mut busiest: Vec<&v1::ResourceProcess> = now.factory.iter().chain(&now.others).collect();
@@ -397,16 +471,66 @@ fn check(now: &mut Now, lines: &ResourcesConfig, config: &Config) -> Vec<Said> {
         let person = format!("{} is running out of space: {} free of {}.", disk_name(&volume.mount), gb(volume.available), gb(volume.total));
         said.push(Said { about: format!("disk:{}", volume.mount), text, person });
     }
+    // A process that used a full core's worth of processor time over the
+    // last hour, owned by no agent's task (Part 2 #4): told once while it
+    // lives, whatever it does after. Judged by its processor time, never
+    // sample by sample, so a loaded machine that starves it now and then
+    // doesn't hide it (#490, row 1243), and by the clock, so samples far
+    // apart (a machine asleep) don't make one.
+    let at = now.sampled;
+    now.strays.retain(|id, stray| alive.contains(id) && (stray.told || at.saturating_sub(stray.seen) <= stray_ms));
+    for process in hot {
+        let stray = now.strays.entry(process.id).or_default();
+        stray.seen = at;
+        if stray.told {
+            continue;
+        }
+        if stray.points.back().is_none_or(|(then, _)| at.saturating_sub(*then) >= stray_ms / STRAY_POINTS) {
+            stray.points.push_back((at, process.cpu_ms));
+        }
+        // From the last point at least `STRAY` ago, the ones before it gone.
+        while stray.points.get(1).is_some_and(|(then, _)| at.saturating_sub(*then) >= stray_ms) {
+            stray.points.pop_front();
+        }
+        let Some(&(then, cpu_then)) = stray.points.front().filter(|(then, _)| at.saturating_sub(*then) >= stray_ms) else { continue };
+        #[allow(clippy::cast_precision_loss)] // a share of a core
+        let average = process.cpu_ms.saturating_sub(cpu_then) as f64 / (at - then) as f64 * 100.0;
+        if average < f64::from(full_core) {
+            continue;
+        }
+        stray.told = true;
+        stray.points = VecDeque::new();
+        let (pid, started) = process.id;
+        let command = if process.command.is_empty() { String::new() } else { format!(", `{}`", short(&process.command)) };
+        let since = i64::try_from(started).map_or_else(|_| String::new(), |started| {
+            format!(", started {}", crate::transcript::local_time(started * 1000, "%b %-d %H:%M"))
+        });
+        said.push(Said {
+            about: format!("process:{pid}:{started}"),
+            text: format!(
+                "A process has used a full processor core for over an hour: {} (pid {pid}{command}{since}), {average:.0}% of a core on average over the last hour, {:.0}% now. No agent's task owns it. {advice}",
+                process.name, process.cpu_percent
+            ),
+            person: format!("A program has used a full processor core on this computer for over an hour: {} (pid {pid}).", process.name),
+        });
+    }
     // What's no longer over its line is over.
     let holding = |about: &str| match about {
         "ram" => now.ram.told,
         "cpu" => now.cpu.told,
+        process if process.starts_with("process:") => stray(process).is_some_and(|id| now.strays.get(&id).is_some_and(|stray| stray.told)),
         disk => now.disks.get(disk.trim_start_matches("disk:")).is_some_and(|crossing| crossing.told),
     };
     let mut alerts: Vec<(String, String)> = now.alerts.drain(..).filter(|(about, _)| holding(about)).collect();
     alerts.extend(said.iter().map(|said| (said.about.clone(), said.text.clone())));
     now.alerts = alerts;
     said
+}
+
+/// A process alert's pid and start ("process:<pid>:<start>").
+fn stray(about: &str) -> Option<(u32, u64)> {
+    let (pid, started) = about.strip_prefix("process:")?.split_once(':')?;
+    Some((pid.parse().ok()?, started.parse().ok()?))
 }
 
 /// Takes a sample in: history, alerts and the panel. An alert goes to the
@@ -419,8 +543,9 @@ fn record(factory: &Arc<Factory>, sampled: sample::Sample) {
         let inner = factory.lock();
         (inner.config.resources.clone(), inner.config.clone())
     };
-    let said = {
+    let (said, kept) = {
         let mut now = factory.resources.now();
+        let before: Vec<String> = now.alerts.iter().map(|(about, _)| about.clone()).collect();
         let factory_memory = sampled.factory.iter().map(|process| process.memory).sum();
         now.history.push_back(v1::ResourceSample {
             time,
@@ -436,8 +561,17 @@ fn record(factory: &Arc<Factory>, sampled: sample::Sample) {
         now.machine = sampled.machine;
         now.factory = sampled.factory;
         now.others = sampled.others;
-        check(&mut now, &lines, &config)
+        let stray = (factory.resources.stray_ms(), f32::from_bits(factory.resources.full_core.load(Ordering::Relaxed)));
+        let said = check(&mut now, &lines, &config, &sampled.busy, &sampled.alive, stray);
+        let changed = now.alerts.len() != before.len() || now.alerts.iter().zip(&before).any(|((about, _), was)| about != was);
+        let keep = changed || std::mem::take(&mut now.unkept);
+        (said, keep.then(|| now.alerts.clone()))
     };
+    if let Some(alerts) = kept
+        && !keep(factory, &alerts, time)
+    {
+        factory.resources.now().unkept = true;
+    }
     if said.is_empty() {
         return refresh_panel(factory);
     }
@@ -453,6 +587,63 @@ fn record(factory: &Arc<Factory>, sampled: sample::Sample) {
         }
     }
     refresh_panel(factory);
+}
+
+/// Keeps the alerts that hold now in factory.db, in place of the last;
+/// false if it couldn't.
+fn keep(factory: &Factory, alerts: &[(String, String)], time: i64) -> bool {
+    let mut db = factory.store.db();
+    let kept = db.transaction().and_then(|transaction| {
+        // Those still holding keep when they were told (Abbacchio, #455).
+        let holding: Vec<&str> = alerts.iter().map(|(about, _)| about.as_str()).collect();
+        let gone: Vec<String> = {
+            let mut statement = transaction.prepare("SELECT about FROM resource_alerts")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+            rows.into_iter().filter(|about| !holding.contains(&about.as_str())).collect()
+        };
+        for about in gone {
+            transaction.execute("DELETE FROM resource_alerts WHERE about = ?1", [about])?;
+        }
+        for (about, text) in alerts {
+            transaction.execute(
+                "INSERT INTO resource_alerts (about, text, told) VALUES (?1, ?2, ?3) ON CONFLICT (about) DO NOTHING",
+                rusqlite::params![about, text, time],
+            )?;
+        }
+        transaction.commit()
+    });
+    if let Err(error) = &kept {
+        tracing::error!(%error, "could not keep the machine's alerts; trying again at the next sample");
+    }
+    kept.is_ok()
+}
+
+/// The alerts that held when Factory last stopped: told already, so not
+/// said again until the machine recovers.
+fn kept(factory: &Factory) {
+    let rows = {
+        let db = factory.store.db();
+        let rows = db.prepare("SELECT about, text FROM resource_alerts ORDER BY told").and_then(|mut statement| {
+            statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?.collect::<Result<Vec<_>, _>>()
+        });
+        match rows {
+            Ok(rows) => rows,
+            Err(error) => return tracing::error!(%error, "could not read the machine's alerts"),
+        }
+    };
+    let mut now = factory.resources.now();
+    for (about, text) in rows {
+        match about.as_str() {
+            "ram" => now.ram.told = true,
+            "cpu" => now.cpu.told = true,
+            process if process.starts_with("process:") => {
+                let Some(id) = stray(process) else { continue };
+                now.strays.insert(id, Stray { told: true, ..Stray::default() });
+            }
+            disk => now.disks.entry(disk.trim_start_matches("disk:").to_owned()).or_default().told = true,
+        }
+        now.alerts.push((about, text));
+    }
 }
 
 /// The agents that look after the machine: admin agents (such as Rivet)
@@ -492,6 +683,7 @@ fn tell_person(factory: &Factory, config: &Config, what: String) {
         seq: 0,
         device_id: String::new(),
         waits: String::new(),
+        share_id: String::new(),
     };
     let delivered = crate::notify::deliver(factory, config, &settings, note);
     tracing::info!(?delivered, "told the person about the machine itself: no admin agent can take it");
@@ -510,6 +702,9 @@ fn refresh_panel(factory: &Factory) {
 
 /// Samples the machine every minute, for as long as Factory runs.
 pub(crate) async fn monitor(factory: Weak<Factory>) {
+    if let Some(factory) = factory.upgrade() {
+        kept(&factory);
+    }
     let mut sampler = match tokio::task::spawn_blocking(sample::Sampler::new).await {
         Ok(Ok(sampler)) => sampler,
         Ok(Err(error)) => return unreadable(&factory, &error),
@@ -799,7 +994,72 @@ impl Extension for Resources {
 
 #[cfg(test)]
 mod tests {
-    use super::disk_name;
+    use super::{Config, Now, ResourcesConfig, check, disk_name, sample};
+    use std::collections::HashSet;
+
+    const HOUR: (i64, f32) = (3_600_000, sample::FULL_CORE);
+
+    /// A process `cat` busy in a sample at `minute` with `cpu_ms` used so
+    /// far, or (None) not busy in it; what Rivet was told.
+    fn at_minute(now: &mut Now, alive: &HashSet<(u32, u64)>, minute: i64, cpu_ms: Option<u64>) -> Vec<String> {
+        let (config, lines) = (Config::default(), ResourcesConfig { ram_percent: 100, disk_free_gb: 0, cpu_percent: 0, ..ResourcesConfig::default() });
+        now.sampled = minute * 60_000;
+        let hot: Vec<sample::Busy> = cpu_ms
+            .map(|cpu_ms| sample::Busy { id: CAT, name: "cat".into(), command: "cat /dev/zero".into(), cpu_percent: 99.6, cpu_ms })
+            .into_iter()
+            .collect();
+        check(now, &lines, &config, &hot, alive, HOUR).into_iter().map(|said| said.text).collect()
+    }
+
+    const CAT: (u32, u64) = (3063, 1_795_000_000);
+
+    /// Part 2 #4, #490 row 1243: a process is told once it used a full
+    /// core's worth of processor time over an hour by the clock, though a
+    /// loaded machine starved it in some samples (here 1.4 cores most
+    /// minutes, a twentieth of one every fifth), once while it lives; gone,
+    /// its alert goes.
+    #[test]
+    fn a_runaway_starved_now_and_then_is_told_once_after_an_hour_of_processor_time() {
+        let (mut now, alive) = (Now::default(), HashSet::from([CAT]));
+        let mut cpu_ms = 0;
+        let mut told = Vec::new();
+        for minute in 0..=70 {
+            let starved = minute % 5 == 0;
+            cpu_ms += if starved { 3_000 } else { 84_000 };
+            let said = at_minute(&mut now, &alive, minute, (!starved).then_some(cpu_ms));
+            assert!(minute >= 61 || said.is_empty(), "told at minute {minute}: {said:?}");
+            told.extend(said.into_iter().map(|text| (minute, text)));
+        }
+        assert_eq!(told.len(), 1, "{told:?}");
+        let (minute, text) = &told[0];
+        assert!(*minute <= 66, "told only at minute {minute}");
+        assert!(text.starts_with("A process has used a full processor core for over an hour: cat (pid 3063, `cat /dev/zero`, started "), "{text}");
+        assert!(text.contains("% of a core on average over the last hour, 100% now. No agent's task owns it."), "{text}");
+        let average: f64 = text.split("), ").nth(1).and_then(|rest| rest.split('%').next()).and_then(|n| n.parse().ok()).expect("average");
+        assert!((100.0..=140.0).contains(&average), "{text}");
+        // Once, busy or not, while it lives; its alert holds meanwhile.
+        assert!(at_minute(&mut now, &alive, 71, Some(cpu_ms + 84_000)).is_empty() && at_minute(&mut now, &alive, 72, None).is_empty());
+        assert!(at_minute(&mut now, &alive, 200, Some(cpu_ms + 9_000_000)).is_empty());
+        assert_eq!(now.alerts.iter().map(|(about, _)| about.as_str()).collect::<Vec<_>>(), ["process:3063:1795000000"]);
+        // Gone: its alert goes.
+        assert!(at_minute(&mut now, &HashSet::new(), 201, None).is_empty());
+        assert!(now.alerts.is_empty() && now.strays.is_empty());
+    }
+
+    /// Under a full core's worth over the hour, it's never told, however
+    /// long it runs; nor across samples far apart (the machine asleep),
+    /// busy as it is in each.
+    #[test]
+    fn half_a_core_or_a_machine_asleep_is_never_told() {
+        let (mut now, alive) = (Now::default(), HashSet::from([CAT]));
+        for minute in 0..=240 {
+            assert!(at_minute(&mut now, &alive, minute, Some(u64::try_from(minute).unwrap_or(0) * 30_000)).is_empty(), "minute {minute}");
+        }
+        let mut now = Now::default();
+        assert!(at_minute(&mut now, &alive, 0, Some(1_000)).is_empty());
+        assert!(at_minute(&mut now, &alive, 90, Some(121_000)).is_empty(), "two busy minutes 90 apart");
+        assert!(at_minute(&mut now, &alive, 91, Some(181_000)).is_empty());
+    }
 
     #[test]
     fn a_disk_is_named_as_the_mac_shows_it_never_by_its_path() {

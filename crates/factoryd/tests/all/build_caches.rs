@@ -211,7 +211,7 @@ async fn the_dev_claktory_keeps_to_its_own_data_folder() {
 }
 
 #[tokio::test]
-async fn a_busy_agent_s_caches_are_cleared_between_its_steps_never_in_a_tool_call() {
+async fn a_busy_agent_s_caches_are_trimmed_between_its_steps_and_cleared_once_idle_never_in_a_tool_call() {
     let dir = temp_dir();
     let (factory, mut client, mut view, repo, tree) = setup(&dir).await;
     apply_request(&mut client, &mut view, client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
@@ -242,23 +242,59 @@ async fn a_busy_agent_s_caches_are_cleared_between_its_steps_never_in_a_tool_cal
     apply_request(&mut client, &mut view, send_message("builder", "build again")).await;
     view.follow(&mut client, |view| idle(view, "builder") && told(view).len() == 1).await;
 
-    // Working, between steps (waiting on its model): cleared, and Builder
-    // hears of it after its current step, not at some later run.
+    // Working, between steps (waiting on its model): a Rust target is
+    // trimmed (its incremental state goes, unannounced) but not cleared,
+    // since its next build would be cold.
     apply_request(&mut client, &mut view, send_message("builder", "hang")).await;
     view.follow(&mut client, |view| view.agent("builder").status() == AgentStatus::Working).await;
-    built(&tree.join("target/debug/big"), 2_000_000);
+    rust_build(&tree.join("target"));
     // Written just now: left, between steps too.
     std::fs::write(tree.join("package.json"), "{}").expect("package");
     std::fs::create_dir_all(tree.join("node_modules/fresh")).expect("fresh");
     std::fs::write(tree.join("node_modules/fresh/index.js"), vec![7; 2_000_000]).expect("fresh");
     factory.set_build_cache_every(Duration::from_millis(50));
-    eventually("clearing between steps", || !tree.join("target").exists()).await;
-    view.follow(&mut client, |view| view.agent("builder").queued_messages == 1).await;
+    eventually("trimming between steps", || !tree.join("target/debug/incremental").exists()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(tree.join("target/debug/big").exists(), "not cleared while Builder works");
     assert!(tree.join("node_modules/fresh/index.js").exists(), "a cache written in the last minutes is left");
-    factory.set_build_cache_every(Duration::from_secs(3600));
+
+    // Once Builder is idle, still over the budget: cleared, and it hears of
+    // it at its next run.
     apply_request(&mut client, &mut view, client_message::Body::StopAgent(v1::StopAgent { agent_id: "builder".into() })).await;
+    view.follow(&mut client, |view| idle(view, "builder")).await;
+    eventually("clearing once Builder is idle", || !tree.join("target").exists()).await;
+    factory.set_build_cache_every(Duration::from_secs(3600));
     apply_request(&mut client, &mut view, send_message("builder", "go on")).await;
     view.follow(&mut client, |view| idle(view, "builder") && told(view).len() == 2).await;
     let told = told(&view);
+    assert_eq!(told.len(), 2, "the trim wasn't announced, the clearing was: {told:?}");
     assert!(told[1].starts_with("Your checkout's build cache (") && told[1].ends_with("was cleared; the next build is cold."), "{told:?}");
+}
+
+/// A Rust build's target, an hour old: 2 MB of incremental state and 2 MB
+/// of the build itself.
+fn rust_build(target: &Path) {
+    built(&target.join("debug/incremental/site-1/s-1/dep-graph.bin"), 2_000_000);
+    built(&target.join("debug/big"), 2_000_000);
+    built(&target.join(".rustc_info.json"), 10);
+}
+
+/// Over the budget, a Rust target loses its incremental state first, and is
+/// left once that's enough: the next build there isn't a cold one.
+#[tokio::test]
+async fn a_rust_target_is_trimmed_before_it_is_cleared() {
+    let dir = temp_dir();
+    let (factory, mut client, mut view, _repo, tree) = setup(&dir).await;
+    let target = tree.join("target");
+    built(&target.join("debug/incremental/site-1/s-1/dep-graph.bin"), 2_000_000);
+    built(&target.join("debug/small"), 100_000);
+    built(&target.join(".rustc_info.json"), 10);
+    factory.set_build_cache_every(Duration::from_millis(50));
+    eventually("trimming the target", || !target.join("debug/incremental").exists()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(target.join("debug/small").exists(), "under the budget once trimmed: kept");
+    factory.set_build_cache_every(Duration::from_secs(3600));
+    apply_request(&mut client, &mut view, send_message("builder", "build it")).await;
+    view.follow(&mut client, |view| idle(view, "builder")).await;
+    assert!(told(&view).is_empty(), "a trim isn't announced: {:?}", told(&view));
 }

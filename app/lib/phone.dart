@@ -18,6 +18,7 @@ import 'conversation_versions.dart' show showVersions;
 import 'devices.dart' show thisDeviceKind;
 import 'explorer.dart';
 import 'extensions.dart';
+import 'forms.dart' show FittedHeading;
 import 'identity.dart';
 import 'ipad/columns.dart' show compactRoutes;
 import 'ipad/document_host.dart' show ipadDocumentPane, ipadProjectDocument;
@@ -31,6 +32,7 @@ import 'mobile/back.dart'
 import 'mobile/drawer.dart';
 import 'mobile/extension_list.dart';
 import 'mobile/header.dart';
+import 'mobile/local_network.dart' show connectNewClaktory;
 import 'mobile/metrics.dart' show PhoneType, TypeScale, withoutInsets;
 import 'mobile/navigation.dart';
 import 'mobile/page_find.dart';
@@ -378,18 +380,51 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
   /// A file of a project's Files, over them.
   void _showFile(String projectId, String path) {
     final files = 'files:$projectId';
+    _pushFile(path, () => _stack.any((entry) => entry.id == files));
+  }
+
+  /// [path]'s viewer over what's in front, apart from any layout, while
+  /// [alive].
+  void _pushFile(String path, bool Function() alive) {
     setState(() {
       _stack.removeWhere((entry) => entry.id.startsWith('file:'));
       _stack.add(
         _Entry(
           id: 'file:$path',
           edgeToEdge: _edgeToEdge(viewerLeaf(path).leaf.kind),
-          alive: () => _stack.any((entry) => entry.id == files),
+          alive: alive,
           builder: (context) {
             final leaf = viewerLeaf(path).leaf;
             return _ViewerScreen(
               leaf: leaf,
               glyph: viewerIcon(leaf, Palette.of(context).textMuted),
+              onBack: pop,
+            );
+          },
+        ),
+      );
+    });
+    _changed();
+  }
+
+  /// An app's view as a page of its own over what's in front, apart from
+  /// any layout: opening an app on a phone never adds it beside an agent's
+  /// conversation on the person's other devices.
+  @override
+  void showApp(ViewLeaf leaf) {
+    setState(() {
+      _stack.removeWhere((entry) => entry.id.startsWith('app:'));
+      _stack.add(
+        _Entry(
+          id: 'app:${leaf.appId}/${leaf.view}',
+          builder: (context) {
+            final agent = AppScope.of(context).workspace.selectedAgent;
+            final color = Palette.of(context).textMuted;
+            return _ViewerScreen(
+              leaf: leaf,
+              glyph: agent == null
+                  ? const SizedBox.shrink()
+                  : paneGlyph(agent, leaf, color),
               onBack: pop,
             );
           },
@@ -416,10 +451,18 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
     if (agent == null) return false;
     // In the agent's layout as its `show` puts it, so the Mac and the iPad
     // have it too; already there, it's that pane.
+    final backend = AppScope.of(context);
     final root = layoutOf(agent);
     final opened = open(root, path);
     if (!identical(opened.root, root)) {
-      fireAndLog(AppScope.of(context).setLayout(agentId, opened.root));
+      // Offline the layout can't take it: the file opens here alone, from
+      // the copy this device kept (#446, Sale's row 127), and the layout
+      // is left as it is.
+      if (!backend.connected.value) {
+        _pushFile(path, () => backend.workspace.agent(agentId) != null);
+        return true;
+      }
+      fireAndLog(backend.setLayout(agentId, opened.root));
     }
     return showPane(agentId, opened.paneId);
   }
@@ -1258,7 +1301,9 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
       final yes = await confirmPairing(context, target);
       if (!mounted) return;
       if (yes) {
-        AppScope.switchFactory(context, target);
+        // The first: why Claktory asks for the local network, before iOS
+        // does.
+        await connectNewClaktory(context, target);
       } else {
         _declined = code;
       }
@@ -1297,7 +1342,8 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
           YourClaktories(
             // Picked from the person's own account, after its own
             // "Connect to …?": nothing more to ask.
-            onConnect: (target) => AppScope.switchFactory(context, target),
+            onConnect: (target) =>
+                unawaited(connectNewClaktory(context, target)),
             offerDelete: true,
           ),
           const SizedBox(height: Space.m),
@@ -1324,8 +1370,19 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
       body = const SizedBox(height: 120);
     }
     WidgetsBinding.instance.addPostFrameCallback((_) => _syncBack());
+    // Which screen shows: another one opens at its top, its title and Back
+    // in sight, not at the scroll the last one was left at (Sale's #363
+    // finding b: "Paste code instead" from the end of the first screen).
+    final screen = start
+        ? 'start'
+        : withAccount
+        ? 'account'
+        : _pasting || access == CameraAccess.unavailable
+        ? 'paste'
+        : '$access';
     return Center(
       child: SingleChildScrollView(
+        key: ValueKey(screen),
         padding: const EdgeInsets.all(Space.xl),
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 420),
@@ -1340,7 +1397,10 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
                   alignment: Alignment.centerLeft,
                   child: _BackButton(onBack: _toStart),
                 ),
-              Text(
+              // Wraps between words, never inside one: at the largest text
+              // size in a 320-point window (Slide Over) it's drawn just
+              // small enough for "Claktory" to fit (Sale's #363 finding a).
+              FittedHeading(
                 'Connect to your Claktory',
                 style: TypeScale.of(context).title
                     .copyWith(color: palette.text),

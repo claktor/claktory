@@ -54,7 +54,9 @@ class TeamActivity extends StatelessWidget {
             // The usage circles' cell; taller with larger text, so the
             // count is never cut (an iPad at the largest text).
             constraints: const BoxConstraints(minHeight: 24),
+            // As wide as the badge, in the footer's wrapping row too.
             child: Center(
+              widthFactor: 1,
               child: AnimatedContainer(
                 duration: Motion.fast,
                 constraints: const BoxConstraints(minHeight: 20),

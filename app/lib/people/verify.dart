@@ -57,6 +57,10 @@ class _VerifyViewState extends State<VerifyView> with WidgetsBindingObserver {
   String? _error;
   var _busy = false;
 
+  /// The person said the numbers don't match and the key change was
+  /// undone (E11-3).
+  var _undone = false;
+
   String get _them => widget.name.isEmpty ? 'them' : widget.name;
   String get _their => widget.name.isEmpty ? 'their' : "${widget.name}'s";
 
@@ -113,12 +117,36 @@ class _VerifyViewState extends State<VerifyView> with WidgetsBindingObserver {
     widget.close();
   }
 
+  /// The numbers don't match: the change to their key isn't confirmed,
+  /// and the key before it is kept (E11-3).
+  Future<void> _undo() async {
+    setState(() => _busy = true);
+    final undone = await widget.e2ee.undoKeyChange(widget.account);
+    if (!mounted) return;
+    // The service still gives the key that didn't match: its note is back
+    // in the chat, which says so.
+    if (undone && (widget.e2ee.pin(widget.account)?.changedUnseen ?? false)) {
+      widget.close();
+      return;
+    }
+    setState(() {
+      _busy = false;
+      _undone = undone;
+      _error = undone
+          ? null
+          : "Couldn't go back to $_their earlier security key. Try again.";
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     final safety = widget.e2ee.safety(widget.account);
-    final verified = widget.e2ee.pin(widget.account)?.verified ?? false;
+    final pin = widget.e2ee.pin(widget.account);
+    final verified = pin?.verified ?? false;
+    // A change the person can still say no to: the key before it is kept.
+    final canUndo = pin?.changedFrom != null && !verified && !_undone;
     final groups = safety?.digits.split(' ') ?? const <String>[];
     // Scan where the camera works or can be asked for; refused, how to
     // allow it; none, or one the person can't allow (Screen Time), no
@@ -184,7 +212,31 @@ class _VerifyViewState extends State<VerifyView> with WidgetsBindingObserver {
             style: type.body.copyWith(color: palette.danger),
           ),
         ],
-        if (canScan && safety != null && !_scanning) ...[
+        if (_undone) ...[
+          const SizedBox(height: Space.s),
+          Text(
+            "Claktory kept $_their earlier security key. If the new one comes "
+            "back, this chat will say it's the one that didn't match.",
+            style: type.body.copyWith(color: palette.text),
+          ),
+        ] else if (canUndo && safety != null && !_scanning) ...[
+          const SizedBox(height: Space.s),
+          Text(
+            "${widget.name.isEmpty ? 'Their' : _their} security key changed. "
+            "If these numbers don't match the "
+            "ones on $_their device, don't accept the change.",
+            style: type.body.copyWith(color: palette.textMuted),
+          ),
+          const SizedBox(height: Space.s),
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: Button(
+              label: "The numbers don't match",
+              onPressed: _busy ? null : _undo,
+            ),
+          ),
+        ],
+        if (canScan && safety != null && !_scanning && !_undone) ...[
           const SizedBox(height: Space.s),
           Align(
             alignment: AlignmentDirectional.centerStart,
@@ -214,10 +266,11 @@ class _VerifyViewState extends State<VerifyView> with WidgetsBindingObserver {
       ],
       error: _error,
       submitLabel: 'Mark as verified',
-      onSubmit: safety == null || verified || _busy || _matched == false
+      onSubmit:
+          safety == null || verified || _busy || _matched == false || _undone
           ? null
           : _mark,
-      cancelLabel: verified ? 'Done' : 'Cancel',
+      cancelLabel: verified || _undone ? 'Done' : 'Cancel',
       onCancel: widget.close,
     );
   }

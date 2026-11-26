@@ -34,7 +34,7 @@ pub(crate) struct Machine {
     /// Where whether it's plugged in is read: `pmset`, or for QA a file.
     pub power: Power,
     /// A laptop on macOS 14 or later: keeping agents working with its lid
-    /// closed can be offered (`crate::lid_closed`).
+    /// closed can be offered (`crate::lid_closed`), in the real Claktory.
     pub lid: bool,
 }
 
@@ -50,7 +50,7 @@ pub(crate) enum Power {
     File(std::path::PathBuf),
 }
 
-/// macOS 14 or later, where launchd enforces the lid-closed helper's launch constraint (Fugo, 23220).
+/// macOS 14 or later (Fugo, 23220): the floor the lid-closed setting kept from its helper.
 #[cfg(target_os = "macos")]
 fn macos_14() -> bool {
     let mut buffer = [0u8; 64];
@@ -59,7 +59,8 @@ fn macos_14() -> bool {
     let read = unsafe {
         libc::sysctlbyname(c"kern.osproductversion".as_ptr(), buffer.as_mut_ptr().cast(), &raw mut size, std::ptr::null_mut(), 0)
     } == 0;
-    let version = if read { String::from_utf8_lossy(&buffer[..size.min(buffer.len())]).trim_end_matches('\0').to_owned() } else { String::new() };
+    let version =
+        if read { String::from_utf8_lossy(&buffer[..size.min(buffer.len())]).trim_end_matches('\0').to_owned() } else { String::new() };
     version.split('.').next().and_then(|major| major.parse::<u32>().ok()).is_some_and(|major| major >= 14)
 }
 
@@ -124,7 +125,10 @@ impl Drop for KeepAwake {
 }
 
 impl KeepAwake {
-    pub(crate) fn load(store: &Store, machine: Machine) -> KeepAwake {
+    /// `real`: this is the real Claktory, the only one that may keep a
+    /// closed lid from sleeping the Mac (never Claktory Dev, whose clearing
+    /// would undo the real one's hold).
+    pub(crate) fn load(store: &Store, machine: Machine, real: bool) -> KeepAwake {
         let read = store
             .db()
             .query_row("SELECT answer, asked FROM keep_awake WHERE id = 1", [], |row| {
@@ -139,10 +143,7 @@ impl KeepAwake {
             }
         };
         let plugged_in = !machine.laptop;
-        // Keeping agents working with the lid closed is hidden (never
-        // available) until #371's version without a helper lands: no release
-        // carries the helper this one needs (Bruno 26385).
-        let lid = Arc::new(crate::lid_closed::Lid::load(store, false));
+        let lid = Arc::new(crate::lid_closed::Lid::load(store, machine.available && machine.lid && real, real));
         KeepAwake { machine, state: Mutex::new(State { answer, asked, plugged_in, holding: None }), changed: Arc::default(), lid }
     }
 
@@ -160,7 +161,8 @@ impl KeepAwake {
         state.answer.unwrap_or(!self.machine.laptop)
     }
 
-    pub(crate) fn view(&self) -> v1::KeepAwake {
+    /// `machine`: this Claktory's name, for the lid-closed fix.
+    pub(crate) fn view(&self, machine: &str) -> v1::KeepAwake {
         let state = self.state();
         let mut keep = v1::KeepAwake {
             available: self.machine.available,
@@ -172,7 +174,7 @@ impl KeepAwake {
             plugged_in: self.machine.available && state.plugged_in,
             ..Default::default()
         };
-        self.lid.view(&mut keep);
+        self.lid.view(&mut keep, machine);
         keep
     }
 
@@ -253,7 +255,7 @@ fn working(inner: &Inner) -> bool {
     inner.agents.values().any(|runtime| runtime.run.is_some())
 }
 
-/// How long the lid-closed helper may take to answer.
+/// How long a look at the lid may take (the kernel, `pmset`).
 const LID_ANSWER: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How often a laptop's power source is looked at while it matters.
@@ -275,15 +277,15 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
             (strong.keep_awake.watching_power(working), working)
         };
         let changed = Arc::clone(&strong.keep_awake.changed);
-        let lid = Arc::clone(&strong.keep_awake.lid);
-        drop(strong);
-        // The lid-closed helper is asked outside every lock: XPC blocks.
-        let watching = watching || lid.on();
+        let watching = watching || strong.keep_awake.lid.watched();
+        // The lid is looked at outside every lock: it asks the kernel and
+        // runs `pmset`. Only on power, as keeping the Mac awake: never a
+        // laptop on battery.
         let stepped = tokio::task::spawn_blocking({
-            let lid = Arc::clone(&lid);
-            // Only on power, as keeping the Mac awake: never a laptop on battery.
-            move || lid.step(working && plugged_in)
+            let factory = Arc::clone(&strong);
+            move || factory.keep_awake.lid.step(&factory.store, working && plugged_in)
         });
+        drop(strong);
         if tokio::time::timeout(LID_ANSWER, stepped).await.is_ok_and(|stepped| stepped.unwrap_or(false))
             && let Some(strong) = factory.upgrade()
         {
@@ -331,57 +333,57 @@ mod tests {
     #[test]
     fn a_laptop_asks_once_agents_work_and_a_yes_holds_it_awake_only_while_they_do_on_power() {
         let (_dir, store) = store();
-        let keep = KeepAwake::load(&store, LAPTOP);
-        assert!(!keep.view().ask && !keep.view().on, "nothing has worked yet, and a laptop is off until asked");
+        let keep = KeepAwake::load(&store, LAPTOP, false);
+        assert!(!keep.view("Studio").ask && !keep.view("Studio").on, "nothing has worked yet, and a laptop is off until asked");
         assert!(keep.follow(&store, false, true), "plugged in, as looked at");
-        assert!(keep.view().plugged_in && !keep.view().ask && !keep.view().holding);
+        assert!(keep.view("Studio").plugged_in && !keep.view("Studio").ask && !keep.view("Studio").holding);
         assert!(keep.follow(&store, true, true));
-        let asking = keep.view();
+        let asking = keep.view("Studio");
         assert!(asking.ask && !asking.answered && !asking.holding, "{asking:?}");
         assert!(!keep.follow(&store, true, true), "asked once");
         // Asked across a restart too, until answered.
-        assert!(KeepAwake::load(&store, LAPTOP).view().ask);
+        assert!(KeepAwake::load(&store, LAPTOP, false).view("Studio").ask);
 
         keep.answer(&store, true);
         assert!(keep.follow(&store, true, true));
-        let held = keep.view();
+        let held = keep.view("Studio");
         assert!(held.on && held.answered && held.holding && held.plugged_in && !held.ask, "{held:?}");
         assert!(keep.watching_power(true), "unplugged, it lets go");
         // On battery it lets go, and holds again once plugged in.
         assert!(keep.follow(&store, true, false));
-        let battery = keep.view();
+        let battery = keep.view("Studio");
         assert!(battery.on && !battery.holding && !battery.plugged_in, "{battery:?}");
         assert!(keep.follow(&store, true, true));
-        assert!(keep.view().holding);
+        assert!(keep.view("Studio").holding);
         assert!(keep.follow(&store, false, true));
-        assert!(!keep.view().holding, "no agent works");
+        assert!(!keep.view("Studio").holding, "no agent works");
         assert!(!keep.watching_power(false));
 
         keep.answer(&store, false);
         assert!(!keep.follow(&store, true, true), "a no holds nothing");
         assert!(!keep.watching_power(true));
-        let kept = KeepAwake::load(&store, LAPTOP).view();
+        let kept = KeepAwake::load(&store, LAPTOP, false).view("Studio");
         assert!(kept.answered && !kept.on && !kept.ask, "{kept:?}");
     }
 
     #[test]
     fn a_desktop_holds_by_default_never_asks_and_a_no_is_kept() {
         let (_dir, store) = store();
-        let desktop = KeepAwake::load(&store, DESKTOP);
-        let first = desktop.view();
+        let desktop = KeepAwake::load(&store, DESKTOP, false);
+        let first = desktop.view("Studio");
         assert!(first.on && !first.answered && !first.ask && first.plugged_in, "{first:?}");
         assert!(desktop.follow(&store, true, true));
-        assert!(desktop.view().holding && !desktop.view().ask);
+        assert!(desktop.view("Studio").holding && !desktop.view("Studio").ask);
         assert!(!desktop.watching_power(true), "a desktop's power isn't watched");
         desktop.answer(&store, false);
         assert!(desktop.follow(&store, true, true));
-        assert!(!desktop.view().holding);
+        assert!(!desktop.view("Studio").holding);
         drop(desktop);
-        let kept = KeepAwake::load(&store, DESKTOP).view();
+        let kept = KeepAwake::load(&store, DESKTOP, false).view("Studio");
         assert!(!kept.on && kept.answered, "{kept:?}");
-        let elsewhere = KeepAwake::load(&store, Machine::default());
+        let elsewhere = KeepAwake::load(&store, Machine::default(), false);
         assert!(!elsewhere.follow(&store, true, true));
-        let nothing = elsewhere.view();
+        let nothing = elsewhere.view("Studio");
         assert!(!nothing.available && !nothing.on && !nothing.holding && !nothing.plugged_in, "{nothing:?}");
     }
 

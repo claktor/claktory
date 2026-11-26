@@ -23,6 +23,7 @@ import 'devices.dart' show thisDeviceKind;
 import 'forms.dart' show FormFrame;
 import 'identity.dart';
 import 'mobile/drawer.dart' show PhoneDrawerHost;
+import 'mobile/local_network.dart' show connectNewClaktory;
 import 'scope.dart';
 
 /// The schemes this app's builds open links with.
@@ -170,7 +171,8 @@ Future<bool?> _onAccount(BuildContext context, RemoteFactory target) async {
 /// (a link, a QR code, a paste): true only for the person's Connect. It
 /// leads with the code's fingerprint; the name is the other side's own
 /// words, so it shows only quoted, never as the title; and it warns when
-/// the Claktory isn't on the person's account (Fugo's rules).
+/// the Claktory isn't on the person's account (Fugo's rules), when that's
+/// known: signed out or unreadable, it only cautions.
 Future<bool> confirmPairing(BuildContext context, RemoteFactory target) async {
   final onAccount = await _onAccount(context, target);
   if (!context.mounted) return false;
@@ -210,12 +212,21 @@ Future<bool> confirmPairing(BuildContext context, RemoteFactory target) async {
           ].join(' '),
           style: TextStyles.body.copyWith(color: palette.textMuted),
         ),
-        if (onAccount != true) ...[
+        // Off the account only once its list was read and says so (#529,
+        // Squalo's MC3): signed out, or the list unreadable, nothing is
+        // known of whose it is, so there's no claim, only the caution.
+        if (onAccount == false) ...[
           const SizedBox(height: Space.m),
           Text(
             "This Claktory isn't on your Claktory account. Connect only "
             "if you're setting it up yourself, right now.",
             style: TextStyles.body.copyWith(color: palette.danger),
+          ),
+        ] else if (onAccount == null) ...[
+          const SizedBox(height: Space.m),
+          Text(
+            "Connect only if you're setting it up yourself, right now.",
+            style: TextStyles.body.copyWith(color: palette.textMuted),
           ),
         ],
       ],
@@ -302,7 +313,9 @@ class _LinkOpenerState extends State<LinkOpener> {
     }
     unawaited(() async {
       if (await confirmPairing(context, target) && mounted) {
-        AppScope.switchFactory(context, target);
+        // The first on an iPhone or iPad: why Claktory asks for the local
+        // network, before iOS does (mobile/local_network.dart).
+        await connectNewClaktory(context, target);
       }
     }());
   }

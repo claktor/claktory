@@ -1,5 +1,7 @@
 //! One task per client: handshake, then requests in and events out.
 
+use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -233,9 +235,12 @@ pub(crate) async fn serve_stream<S: Stream>(
         files,
         views: crate::apps::Viewer::new(&factory, &device.device.id),
         browser: crate::browser::Port::new(&factory, &device.device.id),
+        agent_browser: crate::browser_host::Port::new(&factory, &from),
         presence: factory.notify.connect(&device.device.id, &platform),
         presentation: crate::presentation::Port::new(&factory, &device.device.id),
         dictations: crate::speech::dictation::Port::new(),
+        dms: crate::dm_device::Port::new(),
+        history: crate::history::Watch::new(&factory),
         diagnostics: crate::diagnostics::Source::device(&device.device.id, from, kind as i32, platform, app_version),
     };
     let (id, since) = (device.device.id.clone(), std::time::Instant::now());
@@ -302,6 +307,9 @@ struct Connection {
     /// Browser control's commands for this connection's app alone, when it
     /// brokers for its Chrome (`crate::browser`).
     browser: crate::browser::Port,
+    /// Claktory's browser's live view, for this connection alone, while it
+    /// watches (#435).
+    agent_browser: crate::browser_host::Port,
     /// Where this device was reading, whenever another of its connections
     /// changes it (`crate::presentation`).
     presentation: crate::presentation::Port,
@@ -309,6 +317,10 @@ struct Connection {
     diagnostics: crate::diagnostics::Source,
     /// What its TranscribeAudio requests heard, for it alone.
     dictations: crate::speech::dictation::Port,
+    /// What its DmFollow pushes, for it alone (#451).
+    dms: crate::dm_device::Port,
+    /// What's new in History while it watches (WatchHistory, #458).
+    history: crate::history::Watch,
 }
 
 /// Requests in, events out, until the client leaves. `unpaired` is the
@@ -321,6 +333,7 @@ async fn session<S: Stream>(
     unpaired: Arc<tokio::sync::Notify>,
 ) -> Result<(), ConnectionError> {
     let mut vault_session = crate::vault::requests::Session::new(connection.device.clone(), connection.zoom_device.clone());
+    let mut reads = Reads::new(factory);
     let (agent, revision) = &connection.held_transcript;
     let held = (!agent.is_empty() && !revision.is_empty()).then_some((agent.as_str(), revision.as_str()));
     let mut events = sync(socket, sent, factory, held).await?;
@@ -348,16 +361,31 @@ async fn session<S: Stream>(
                     Frame::Skip => continue,
                     Frame::Closed => return Ok(()),
                 };
-                let reply = handle(factory, message.body, &connection, &mut vault_session).await;
+                // A file is read on its own and answered when it's ready.
+                // It changes nothing, so nothing goes before its answer.
+                let body = match message.body {
+                    Some(client_message::Body::ReadFile(request)) => {
+                        if let Some(refused) = reads.take(message.id, request) {
+                            out(socket, sent, message.id, refused).await?;
+                        }
+                        continue;
+                    }
+                    body => body,
+                };
+                let reply = handle(factory, body, &connection, &mut vault_session).await;
                 // Deliver what the request changed before answering it, so a
                 // client that sees the ack also sees the new state.
                 flush(socket, sent, &mut events, factory).await?;
                 out(socket, sent, message.id, reply).await?;
             }
+            (id, body) = reads.next() => out(socket, sent, id, body).await?,
             body = connection.views.next() => out(socket, sent, 0, body).await?,
             body = connection.browser.next() => out(socket, sent, 0, body).await?,
+            body = connection.agent_browser.next() => out(socket, sent, 0, body).await?,
             body = connection.presentation.next() => out(socket, sent, 0, body).await?,
             body = connection.dictations.next() => out(socket, sent, 0, body).await?,
+            body = connection.dms.next() => out(socket, sent, 0, body).await?,
+            body = connection.history.next() => out(socket, sent, 0, body).await?,
             event = events.recv() => match event {
                 Ok(event) => forward(socket, sent, event).await?,
                 Err(RecvError::Lagged(missed)) => {
@@ -553,7 +581,7 @@ async fn handle(
         Some(Request::CheckForUpdates(_)) => factory.check_for_updates(),
         Some(Request::SetDiagnostics(request)) => crate::diagnostics::set(factory, &request),
         Some(Request::SendDiagnostics(request)) => crate::diagnostics::receive(factory, &connection.diagnostics, request),
-        Some(Request::AcceptPipeIdentity(request)) => crate::pipes::identity::accept(factory, &request.pipe_id),
+        Some(Request::AcceptPipeIdentity(request)) => crate::pipes::identity::accept_request(factory, &request),
         // Automated pipes (pipes-automation.md).
         Some(Request::SetPipeForward(request)) => crate::pipes::handoff::set_forward_request(factory, &request).await,
         Some(Request::SetReportReader(request)) => crate::pipes::handoff::set_reader_request(factory, &request).await,
@@ -875,7 +903,7 @@ async fn handle(
         Some(Request::SetKeepAwake(request)) => crate::keep_awake::set(factory, request.on),
         Some(Request::RestoreBackendService(_)) => crate::service::restore(factory).await,
         // Website sharing over pipes (pipes/shares.rs): the person's only.
-        Some(Request::SharePipeWebsite(request)) => crate::pipes::shares::share(factory, &request),
+        Some(Request::SharePipeWebsite(request)) => crate::pipes::shares::share_request(factory, &request).await,
         Some(Request::StopPipeShare(request)) => crate::pipes::shares::stop(factory, &request),
         Some(Request::CheckPipeSharePort(request)) => {
             return Body::PipeSharePort(crate::pipes::shares::check_port(factory, &request).await);
@@ -893,6 +921,39 @@ async fn handle(
         // Only this Mac's own app, by the connection's kind (its token),
         // never by where it comes from (friend bug #27).
         Some(Request::StopEngine(request)) => crate::service::stop(factory, !connection.remote, request.quitting).await,
+        Some(Request::SetFileCache(request)) => factory.set_file_cache(&connection.zoom_device, request.bytes).await,
+        // History (#458): the person's devices only (rivet_reach: Person).
+        Some(Request::GetHistoryOverview(_)) => match crate::history::overview(factory).await {
+            Ok(overview) => return Body::HistoryOverview(overview),
+            Err(problem) => Err(problem),
+        },
+        Some(Request::GetHistoryEvents(request)) => match crate::history::page(factory, request).await {
+            Ok(page) => return Body::HistoryEvents(page),
+            Err(problem) => Err(problem),
+        },
+        Some(Request::WatchHistory(request)) => connection.history.set(request.on).await,
+        // Claktory's browser (#435, `crate::browser_host`): the person's
+        // devices only (rivet_reach: Person), never a tool or a pipe.
+        Some(Request::WatchAgentBrowser(request)) => connection.agent_browser.watch(&request),
+        Some(Request::AgentBrowserFrameAck(request)) => connection.agent_browser.ack(&request),
+        Some(Request::AgentBrowserInput(request)) => connection.agent_browser.input(&request),
+        Some(Request::TakeOverAgentBrowser(_)) => connection.agent_browser.take_over(),
+        Some(Request::HandBackAgentBrowser(_)) => connection.agent_browser.hand_back(),
+        Some(Request::StopAgentBrowser(_)) => connection.agent_browser.stop(),
+        Some(Request::OpenAgentBrowser(request)) => connection.agent_browser.open(&request),
+        Some(Request::DeleteAgentBrowserData(_)) => connection.agent_browser.delete_data(),
+        Some(Request::SetAgentBrowserLocale(request)) => crate::browser_host::locale::set(factory, &request).await,
+        Some(Request::ListTimeZones(_)) => return Body::TimeZones(crate::browser_host::locale::time_zones()),
+        // Errands (#435 P3, `crate::errands`): the person's (rivet_reach),
+        // refused while Claktory has no browser.
+        Some(Request::OpenErrand(request)) => crate::errands::open_request(factory, &request),
+        Some(Request::ListErrandLog(request)) => return answer(crate::errands::log_request(factory, &request), Body::ErrandLog),
+        Some(Request::SetAgentContained(request)) => crate::errands::contain_request(factory, &request).await,
+        // Direct messages through the home (#451): `crate::dm_device`.
+        Some(Request::DmSend(request)) => return crate::dm_device::send(factory, request),
+        Some(Request::DmFollow(request)) => return crate::dm_device::follow(factory, request, &connection.dms),
+        Some(Request::DmAck(request)) => crate::dm_device::ack(factory, request),
+        Some(Request::DmRoutes(request)) => return crate::dm_device::routes(factory, request),
         // Only this Mac's own app (its own device, either way in) turns it on.
         Some(Request::SetLidClosed(request)) => {
             crate::lid_closed::set(factory, !connection.remote, &request)
@@ -914,7 +975,7 @@ async fn handle(
         Some(Request::RetryVoiceMessage(request)) => crate::speech::voice::retry(factory, &request.agent_id, request.message_id),
         Some(Request::DiscardVoiceMessage(request)) => crate::speech::voice::discard(factory, &request.agent_id, request.message_id),
         Some(Request::TranscribeAudio(request)) => crate::speech::dictation::request(factory, &request, &connection.dictations),
-        Some(Request::AnswerAsk(request)) => crate::extensions::ask::answer(factory, &request).await,
+        Some(Request::AnswerAsk(request)) => crate::extensions::ask::answer(factory, &request, &connection.sent_from.device).await,
         Some(Request::SetSpendCap(request)) => crate::pipes::spend::set_caps(factory, &request),
         Some(Request::TryAgainNow(request)) => factory.try_again_now(&request.agent_id).await,
         Some(Request::ContinueOnAlternative(request)) => {
@@ -937,14 +998,8 @@ async fn handle(
         Some(Request::ClearBuildCache(request)) => {
             crate::extensions::tree::caches::clear_on_request(factory, &request.path).map(|_| ()).map_err(RequestError::BuildCache)
         }
-        Some(Request::ReadFile(request)) => {
-            let data = factory.home.root().to_owned();
-            let content = tokio::task::spawn_blocking(move || crate::previews::read_requested(&data, &request)).await;
-            return match content {
-                Ok(content) => Body::FileContent(content),
-                Err(problem) => error(ErrorCode::Internal, problem.to_string()),
-            };
-        }
+        // session() reads them on their own (Reads); answered the same here.
+        Some(Request::ReadFile(request)) => return read_file(factory.home.root().to_owned(), request).await,
         Some(Request::SetLayout(request)) => {
             crate::extensions::viewer::set_layout(factory, &request.agent_id, request.root, request.focus.as_deref())
         }
@@ -1017,6 +1072,73 @@ async fn handle(
     match result {
         Ok(()) => Body::Ack(v1::Ack {}),
         Err(problem) => error(problem.code(), problem.to_string()),
+    }
+}
+
+/// Files read for one connection at once (ReadFile), and how many more can
+/// wait their turn; past that, one is refused.
+const READS_AT_ONCE: usize = 4;
+const READS_WAITING: usize = 256;
+
+/// A connection's ReadFile requests, each answered when it's read rather
+/// than in turn: a video's preview can take minutes, and meanwhile the
+/// connection goes on reading (so pings are answered) and answering the
+/// app's other requests in order.
+struct Reads {
+    /// Claktory's data folder, where previews are kept.
+    data: PathBuf,
+    running: tokio::task::JoinSet<(u64, Body)>,
+    waiting: VecDeque<(u64, v1::ReadFile)>,
+}
+
+impl Reads {
+    fn new(factory: &Factory) -> Reads {
+        Reads { data: factory.home.root().to_owned(), running: tokio::task::JoinSet::new(), waiting: VecDeque::new() }
+    }
+
+    /// Starts reading request `id`, or keeps it for when a read ends. The
+    /// answer to send at once when too many wait.
+    fn take(&mut self, id: u64, request: v1::ReadFile) -> Option<Body> {
+        if self.running.len() < READS_AT_ONCE {
+            self.start(id, request);
+        } else if self.waiting.len() < READS_WAITING {
+            self.waiting.push_back((id, request));
+        } else {
+            let error = "Too many files are being read at once. Try again in a moment.".to_owned();
+            return Some(Body::FileContent(v1::FileContent { path: request.path, error, ..Default::default() }));
+        }
+        None
+    }
+
+    fn start(&mut self, id: u64, request: v1::ReadFile) {
+        let data = self.data.clone();
+        self.running.spawn(async move { (id, read_file(data, request).await) });
+    }
+
+    /// The next read done: its request's id and answer. Waits for ever while
+    /// none runs. Cancel-safe, for select!.
+    async fn next(&mut self) -> (u64, Body) {
+        loop {
+            let Some(done) = self.running.join_next().await else { return std::future::pending().await };
+            if self.running.len() < READS_AT_ONCE
+                && let Some((id, request)) = self.waiting.pop_front()
+            {
+                self.start(id, request);
+            }
+            match done {
+                Ok(done) => return done,
+                // Only aborted, as the connection ends: never.
+                Err(problem) => tracing::warn!(%problem, "a file read ended unanswered"),
+            }
+        }
+    }
+}
+
+/// ReadFile's answer, read on a thread of its own.
+async fn read_file(data: PathBuf, request: v1::ReadFile) -> Body {
+    match tokio::task::spawn_blocking(move || crate::previews::read_requested(&data, &request)).await {
+        Ok(content) => Body::FileContent(content),
+        Err(problem) => error(ErrorCode::Internal, problem.to_string()),
     }
 }
 

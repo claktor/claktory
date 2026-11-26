@@ -20,10 +20,15 @@ fn uid(dir: &Path) -> u32 {
 
 /// A worker listening at `dir/apps.sock`, answering only `root_uid`.
 fn worker(dir: &Path, root_uid: u32) -> PathBuf {
+    worker_on(dir, root_uid, claktory_user_apps::dms::space::Disk::of(&dir.join("apps.db")))
+}
+
+/// [`worker`], with new DMs checked against `disk`.
+fn worker_on(dir: &Path, root_uid: u32, disk: claktory_user_apps::dms::space::Disk) -> PathBuf {
     let socket = dir.join("apps.sock");
     let listener = tokio::net::UnixListener::bind(&socket).expect("a socket");
     let keys = claktory_user_apps::dms::keys::Keys::from_bytes([7; 32]);
-    let worker = Worker::open(&dir.join("apps.db"), keys).expect("the worker");
+    let worker = Worker::open_on(&dir.join("apps.db"), keys, disk).expect("the worker");
     tokio::spawn(worker::serve(listener, worker, root_uid));
     socket
 }
@@ -438,7 +443,7 @@ async fn a_person_reopens_to_someone_they_declined_and_reports_them_from_their_d
 }
 
 #[tokio::test]
-async fn friends_send_messages_from_their_devices_and_both_read_the_history() {
+async fn friends_reach_each_other_and_messages_go_through_their_homes() {
     let dir = tempfile::tempdir().expect("a folder");
     let socket = worker(dir.path(), uid(dir.path()));
     let instance = with_apps(Some(socket), uid(dir.path())).await;
@@ -482,70 +487,102 @@ async fn friends_send_messages_from_their_devices_and_both_read_the_history() {
     )
     .expect("a channel");
 
+    // Messages go through the person's home now (#451): claktory.com takes
+    // none, through the service as from the worker, and keeps no history.
     let messages = format!("/v1/apps/dms/conversations/{conversation}/messages");
     let send = json!({"client_message_id": "ana-message-000000000001", "contact_generation": generation,
                       "envelope": sealed(&group, 0, "Hello!"), "request_nonce": "1"});
-    let receipt = instance.device_signed(&ana, "POST", &messages, Some(&send), None).await;
-    assert_eq!(receipt.status, 200, "{}", receipt.text());
-    assert_eq!(receipt.value()["seq"], 1);
-    // A retry, with a fresh nonce: the same receipt.
-    instance.advance(1);
-    let mut again = send.clone();
-    again["request_nonce"] = json!("2");
-    assert_eq!(instance.device_signed(&ana, "POST", &messages, Some(&again), None).await.value(), receipt.value());
-
+    let refused = instance.device_signed(&ana, "POST", &messages, Some(&send), None).await;
+    assert_eq!((refused.status, &refused.value()["error"]), (410, &json!("moved_to_home")), "{}", refused.text());
     let page = instance.device_signed(&matt, "GET", &format!("{messages}?after=0&limit=10&request_nonce=3"), None, None).await;
     assert_eq!(page.status, 200, "{}", page.text());
-    assert_eq!((&page.value()["messages"][0]["envelope"], &page.value()["messages"][0]["epoch"]), (&send["envelope"], &json!(0)));
-    assert_eq!(page.value()["messages"][0]["from"], "them");
+    assert_eq!(page.value()["messages"], json!([]));
     // Matt's Claktory can't read it, nor send as him.
     assert_eq!(get(&instance, &studio, &messages).await.status, 403);
     assert_eq!(instance.signed(&studio, "POST", &messages, &send, None).await.status, 403);
-
-    // Matt's devices keep up: a snapshot, then a wait that answers as soon
-    // as Ana writes again.
+    // Matt's devices keep up from a snapshot.
     let snapshot = instance.device_signed(&matt, "GET", "/v1/apps/dms/sync", None, None).await;
     assert_eq!(snapshot.status, 200, "{}", snapshot.text());
-    assert_eq!(snapshot.value()["conversations"][0]["last_seq"], 1);
-    let cursor = snapshot.value()["cursor"].as_str().expect("a cursor").to_owned();
-    let waiting = format!("/v1/apps/dms/sync?since={cursor}&wait=20");
-    let mut next = send.clone();
-    next["client_message_id"] = json!("ana-message-000000000002");
-    next["envelope"] = sealed(&group, 0, "Still there?");
-    let started = std::time::Instant::now();
-    let (changes, sent) = tokio::join!(instance.device_signed(&matt, "GET", &waiting, None, None), async {
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        instance.device_signed(&ana, "POST", &messages, Some(&next), None).await
-    });
-    assert_eq!(sent.status, 200, "{}", sent.text());
-    assert_eq!(changes.status, 200, "{}", changes.text());
-    let message = changes.value()["events"].as_array().expect("events").iter().find(|event| event["kind"] == "message").cloned();
-    assert_eq!(message.expect("the message")["message"]["envelope"], next["envelope"]);
-    assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+    assert_eq!(snapshot.value()["conversations"][0]["id"], json!(conversation));
     assert_eq!(get(&instance, &studio, "/v1/apps/dms/sync").await.status, 403, "a Claktory, as itself, has no sync");
 
-    // Matt's agent June proposes; only Matt, on his phone, sends it.
+    // Matt's agent June proposes, by the digest of what its Claktory put in
+    // the channel through Matt's home; only Matt, on his phone, approves.
     let grant = json!({"app": "dms", "agent": {"id": "june", "incarnation": "inc-1"}, "scopes": ["dm.send"],
                        "resources": [{"kind": "conversation", "id": conversation}]});
     assert_eq!(instance.signed(&studio, "PUT", "/v1/apps/grants", &grant, None).await.status, 200);
+    let digest = "ab".repeat(32);
     let propose = json!({"client_message_id": "june-proposal-0000000001", "contact_generation": generation,
-                         "envelope": sealed(&channel, 0, "Matt says hi"), "agent_name": "June"});
+                         "proposal_digest": digest, "agent_name": "June"});
     let path = format!("/v1/apps/dms/conversations/{conversation}/proposals?agent=june&incarnation=inc-1");
     let proposed = instance.signed(&studio, "POST", &path, &propose, None).await;
     assert_eq!(proposed.status, 200, "{}", proposed.text());
     let id = proposed.value()["proposal_id"].as_str().expect("an id").to_owned();
     let waiting = instance.device_signed(&matt, "GET", "/v1/apps/dms/proposals", None, None).await.value()["proposals"][0].clone();
-    assert_eq!(waiting["envelope"], propose["envelope"]);
-    // Matt's phone reads it from the channel, and seals it again for Ana.
-    let approval = json!({"revision": 1, "proposal_digest": waiting["proposal_digest"], "envelope": sealed(&group, 0, "Matt says hi")});
+    assert_eq!((&waiting["proposal_digest"], &waiting["client_message_id"]), (&json!(digest), &propose["client_message_id"]));
+    assert!(waiting.get("envelope").is_none(), "{waiting}");
+    let approval = json!({"revision": 1, "proposal_digest": digest});
     let approve = format!("/v1/apps/dms/proposals/{id}/approve");
     assert_eq!(instance.signed(&studio, "POST", &approve, &approval, None).await.status, 403, "the backend never approves");
-    let sent = instance.device_signed(&matt, "POST", &approve, Some(&approval), None).await;
-    assert_eq!(sent.status, 200, "{}", sent.text());
-    assert_eq!(sent.value()["state"], "sent");
-    let page = instance.device_signed(&ana, "GET", &format!("{messages}?after=2"), None, None).await;
-    assert_eq!(page.value()["messages"][0]["envelope"], approval["envelope"]);
-    assert_eq!(page.value()["messages"][0]["by_agent"], true);
+    let approved = instance.device_signed(&matt, "POST", &approve, Some(&approval), None).await;
+    assert_eq!(approved.status, 200, "{}", approved.text());
+    assert_eq!(approved.value()["state"], "approved", "Matt's phone sends it, through his home");
+    let _ = &channel;
+}
+
+/// #448, #451: while the disk is nearly full the worker keeps nothing new
+/// (a KeyPackage, a hand-off, an agent's proposal), and says so, but
+/// pickups go on, and the service's own writes (signing in, checking in,
+/// the vault's share) never wait on it.
+#[tokio::test]
+async fn a_nearly_full_disk_holds_up_new_dms_and_nothing_of_the_account() {
+    use claktory_user_apps::dms::space::{Disk, FREE_FLOOR};
+    let dir = tempfile::tempdir().expect("a folder");
+    let socket = worker_on(dir.path(), uid(dir.path()), Disk::fixed(FREE_FLOOR - 1));
+    let instance = with_apps(Some(socket), uid(dir.path())).await;
+    let matt = Device::new("192.0.2.84");
+    instance.sign_in_device(&matt, "matt@example.com", "Matt's iPhone").await;
+    let ana = Device::new("192.0.2.85");
+    instance.sign_in_device(&ana, "ana@example.com", "Ana's phone").await;
+    let code = instance.device_signed(&matt, "POST", "/v1/apps/dms/me/friend-id/reveal", Some(&json!({})), None).await.value()["code"]
+        .as_str()
+        .expect("a code")
+        .to_owned();
+    let sent = json!({"code": code, "action_id": "ana-request-0000000000005"});
+    let request = instance.device_signed(&ana, "POST", "/v1/apps/dms/requests", Some(&sent), None).await.value()["receipt"]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    let contact = instance.device_signed(&matt, "POST", &format!("/v1/apps/dms/requests/{request}/accept"), Some(&json!({})), None).await;
+    let contact = contact.value();
+    let conversation = contact["conversation_id"].as_str().expect("a conversation").to_owned();
+    let generation = contact["generation"].as_i64().expect("a generation");
+    let messages = format!("/v1/apps/dms/conversations/{conversation}/messages");
+    let upload = json!({"key_packages": [], "last_resort": null, "request_nonce": "1"});
+    let refused = instance.device_signed(&ana, "POST", "/v1/apps/dms/key-packages", Some(&upload), None).await;
+    assert_eq!(refused.status, 507, "{}", refused.text());
+    assert_eq!(refused.value()["message"], "Messages can't be sent right now. Try again later.");
+    // What was kept before #451 is still picked up.
+    let page = instance.device_signed(&matt, "GET", &format!("{messages}?after=0&limit=10&request_nonce=2"), None, None).await;
+    assert_eq!((page.status, &page.value()["messages"]), (200, &json!([])), "{}", page.text());
+    assert_eq!(instance.device_signed(&matt, "GET", "/v1/apps/dms/sync", None, None).await.status, 200);
+    // Nor a hand-off to a new device, nor an agent's proposal.
+    let handoff = json!({"to": "ana-new-phone", "sealed": "AAAA", "request_nonce": "3"});
+    let refused = instance.device_signed(&ana, "POST", "/v1/apps/dms/me/handoffs", Some(&handoff), None).await;
+    assert_eq!(refused.status, 507, "{}", refused.text());
+    let mut studio = Claktory::new("198.51.100.33");
+    instance.sign_in(&mut studio, "matt@example.com", "Mac mini").await;
+    let propose = json!({"client_message_id": "june-proposal-0000000009", "contact_generation": generation,
+                         "proposal_digest": "ab".repeat(32), "agent_name": "June"});
+    let path = format!("/v1/apps/dms/conversations/{conversation}/proposals?agent=june&incarnation=inc-1");
+    let refused = instance.signed(&studio, "POST", &path, &propose, None).await;
+    assert_eq!(refused.status, 507, "{}", refused.text());
+
+    // The account's own writes: a Claktory signs in, checks in and gets
+    // its share of the vault.
+    let check_in = CheckIn { version: "v0.1.22".into(), platform: "macos-arm64".into(), ..CheckIn::default() };
+    assert_eq!(instance.signed(&studio, "POST", "/v1/check-in", &check_in, None).await.status, 200);
+    assert!(instance.share(&studio, None).await.is_ok(), "the vault's share");
 }
 
 #[tokio::test]

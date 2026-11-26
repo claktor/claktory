@@ -10,6 +10,7 @@ import 'package:factory_app/devices.dart'
         QrCode,
         androidAppUrl,
         iosAppUrl,
+        localNetworkNote,
         openAppPage,
         pairingQrText;
 import 'package:factory_app/links.dart' show pairingFingerprint;
@@ -223,6 +224,17 @@ void main() {
     await tester.tap(find.text('Remove').last);
     await pumpFrames(tester);
     expect(harness.last.unpairDevice.deviceId, 'd1');
+  });
+
+  testWidgets('on a Mac it says to allow Local Network for devices on the '
+      'same network', (tester) async {
+    await showSettings(tester, workspace()..os = 'macos');
+    expect(find.text(localNetworkNote('this Mac')), findsOneWidget);
+  });
+
+  testWidgets('on Linux there is no Local Network to allow', (tester) async {
+    await showSettings(tester, workspace()..os = 'linux');
+    expect(find.textContaining('Local Network'), findsNothing);
   });
 
   testWidgets('adding a phone shows its code once, as a QR code first, '

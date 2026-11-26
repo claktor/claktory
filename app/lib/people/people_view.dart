@@ -99,10 +99,17 @@ class _PeopleViewState extends State<PeopleView> {
     unawaited(_load());
   }
 
+  /// Reads made so far: only the latest one's answer is shown, so a read
+  /// from before an action that answers after it never shows the lists as
+  /// they were (row 1441: a removed friend back).
+  var _loads = 0;
+
   Future<void> _load() async {
+    final load = ++_loads;
+    bool latest() => mounted && load == _loads;
     try {
       final lists = await _api.lists();
-      if (mounted) {
+      if (latest()) {
         setState(() {
           _lists = lists;
           _signedOut = false;
@@ -110,7 +117,7 @@ class _PeopleViewState extends State<PeopleView> {
         });
       }
     } on UserAppError catch (error) {
-      if (mounted) {
+      if (latest()) {
         setState(() {
           _signedOut = error.problem == UserAppProblem.notSignedIn;
           _error = _signedOut ? null : problemText(error);
@@ -120,7 +127,7 @@ class _PeopleViewState extends State<PeopleView> {
     }
     try {
       final snapshot = await _chats.snapshot();
-      if (mounted) {
+      if (latest()) {
         setState(() {
           _ended = [
             for (final conversation in snapshot.conversations)

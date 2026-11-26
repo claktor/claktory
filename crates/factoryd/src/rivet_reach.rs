@@ -41,9 +41,8 @@ const CARD: &str = "the person's answer to a card or a question";
 const VOICE: &str = "the person's own words";
 const DRAWING: &str = "the person's own drawing";
 const CHAT: &str = "chats are the person's, and agents can't see them";
-const PIPE_PERSON: &str = "a pipe's reports and spending are the person's only";
-
-const PIPE_WORDS: &str = "a pipe's name, what it's for and its instructions are the person's words to the other side and its agents";
+const BROWSER: &str = "Claktory's browser (its live view, turns, errands' log, who's contained for errands, and its time zone and languages) is the person's own: never a tool's or a pipe's (Fugo, #435)";
+const HISTORY: &str = "History is the person's own, on their devices: never an agent's or a pipe's (Fugo, #458)";
 
 /// Everything a request can change, and how Rivet does it. Only the tests
 /// read it: what matters is that it builds.
@@ -60,6 +59,26 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         Body::RestoreSettings(_) => vec![Config(&[])],
         Body::SetHighlights(_) => vec![Config(&["highlights"])],
         Body::SetZoom(_) => vec![Config(&["display.zoom"])],
+        Body::SetFileCache(_) => vec![Config(&["display.file_cache"])],
+        Body::GetHistoryOverview(_) | Body::GetHistoryEvents(_) | Body::WatchHistory(_) => vec![Person(HISTORY)],
+        Body::WatchAgentBrowser(_)
+        | Body::AgentBrowserFrameAck(_)
+        | Body::AgentBrowserInput(_)
+        | Body::TakeOverAgentBrowser(_)
+        | Body::HandBackAgentBrowser(_)
+        | Body::StopAgentBrowser(_)
+        | Body::OpenAgentBrowser(_)
+        | Body::DeleteAgentBrowserData(_)
+        | Body::SetAgentBrowserLocale(_)
+        | Body::ListTimeZones(_) => vec![Person(BROWSER)],
+        // Page text (Fugo 36686): never read untainted through View.
+        Body::ListErrandLog(_) => vec![Person(BROWSER)],
+        // The person's while Claktory's browser is off for everyone (#435):
+        // once it ships, the manual names errand_open, the lead's tool for
+        // it, and this says so.
+        Body::OpenErrand(_) => vec![Person(BROWSER)],
+        // Fugo's condition 6: only the person contains an agent or lifts it.
+        Body::SetAgentContained(_) => vec![Person(BROWSER)],
         Body::ShuffleAvatar(_) => vec![Config(&["user.avatar.seed", "user.avatar.choice"])],
         Body::SetRemoteAccess(_) => vec![Config(&["remote.relays"])],
         // What a connection shows, reads and transfers.
@@ -193,19 +212,27 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         | Body::ApprovePipe(_)
         | Body::AcceptPipeIdentity(_)
         | Body::DecidePipeMessage(_)
-        | Body::DecidePipeReports(_)
         | Body::DismissPipeStart(_)
         | Body::ApproveDevice(_)
         | Body::DenyDevice(_)
         | Body::ConfirmDevice(_)
         | Body::ConfirmMove(_)
         | Body::SetOnboarding(_) => vec![Person(CARD)],
-        Body::SetReportReader(_) | Body::SetSpendCap(_) => vec![Person(PIPE_PERSON)],
-        // Only the person shares a website, and only they open one shared
-        // with them (pipe-port-sharing.md); an agent may propose one later.
-        Body::SharePipeWebsite(_) | Body::StopPipeShare(_) | Body::OpenPipeShare(_) | Body::HidePipeShare(_) => {
-            vec![Person("only the person shares a website from this computer, or opens one shared with it")]
-        }
+        // A pipe's waiting reports, and letting a reader go: on a card the
+        // person approves (#471 G6); making one a reader with pipes_forward.
+        Body::DecidePipeReports(_) => vec![Tool(&["pipes_reports"])],
+        Body::SetReportReader(_) => vec![Tool(&["pipes_forward", "pipes_release_reader"])],
+        // A liaison's daily spending limit: lowered at once, raised on a
+        // card (#471 G5).
+        Body::SetSpendCap(_) => vec![Tool(&["pipes_settings"])],
+        // Sharing a website is the person's, on a card an admin agent asks
+        // for (friend bug #32); stopping one, or hiding one shared with
+        // them, is made at once, and showing it again is a card (#502).
+        // Only they open one shared with them (pipe-port-sharing.md).
+        Body::SharePipeWebsite(_) => vec![Tool(&["pipes_share"])],
+        Body::StopPipeShare(_) => vec![Tool(&["pipes_settings", "pipes_shares"])],
+        Body::HidePipeShare(_) => vec![Tool(&["pipes_shares"])],
+        Body::OpenPipeShare(_) => vec![Person("only the person opens a website shared with them, in their own browser")],
         Body::CheckPipeSharePort(_) => vec![View],
         Body::SendMessage(_)
         | Body::RetryVoiceMessage(_)
@@ -254,14 +281,18 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         }
         // Stopping Claktory on its Mac (friend bug #27).
         Body::StopEngine(_) => vec![Person("it stops Claktory itself, from its app on the Mac it runs on")],
+        // #451, Fugo's ruling (a): the routing table, and the person's
+        // messages, only ever from their own paired devices.
+        Body::DmSend(_) | Body::DmFollow(_) | Body::DmAck(_) | Body::DmRoutes(_) => {
+            vec![Person("direct messages go between the person's own devices and their home Claktory")]
+        }
         // Through a card the person approves (#423, Bruno 28259); a pipe
         // narrowed at once.
         Body::SetUsageAutoContinue(_) => vec![Tool(&["models_auto_continue"])],
         Body::UninstallApp(_) => vec![Tool(&["apps_uninstall"])],
         Body::AddPipeLiaison(_) => vec![Tool(&["pipes_settings"])],
-        Body::SetPipeState(_) => {
-            vec![Tool(&["pipes_settings"]), Person("deleting a closed pipe deletes its messages and its liaison: only the person does")]
-        }
+        // Deleting a closed pipe on a card too (#471 G8).
+        Body::SetPipeState(_) => vec![Tool(&["pipes_settings"])],
         Body::SetAccountService(_) => vec![Person("which account service Claktory signs in at is the person's, as signing in is")],
     }
 }
@@ -379,7 +410,8 @@ fn update_pipe(request: &v1::UpdatePipe) -> Vec<Reach> {
         review_incoming: _,
         send_only: _,
     } = request;
-    vec![Tool(&["pipes_sender", "pipes_settings"]), Person(PIPE_WORDS)]
+    // Its name, what it's for and its instructions on a card (#471 G2).
+    vec![Tool(&["pipes_sender", "pipes_settings"])]
 }
 
 #[cfg(test)]

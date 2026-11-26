@@ -20,6 +20,9 @@ flutter_rust_bridge = "=2.13.0"
 # fast Apple datapath (sendmsg_x/recvmsg_x, private xnu calls looked up with
 # dlsym) only for the Mac, below: never in the App Store's iPhone and iPad app.
 iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring"] }
+# BBR3, the congestion controller iroh's QUIC offers in place of Cubic (row 129);
+# iroh's own version.
+noq-proto = { version = "=1.5.0", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
 anyhow = "1"
 # claktory/2: the tunnel's streams compressed (zstd), as the backend's (crates/factoryd).
@@ -61,6 +64,10 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 # A relay on this computer, for tunnel.rs's tests of the fall back to it
 # (test-utils: only the tests build it, never the app).
 iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring", "test-utils"] }
+# iroh's UDP socket itself, and a socket option iroh doesn't set, for
+# udp_rebind's tests of the vendored netwatch (#490).
+netwatch = "=0.20.2"
+socket2 = "0.6"
 
 # The Mac's tunnel keeps iroh's fast datapath, as factoryd's does. Features
 # on a target's own dependency reach only that target's build (resolver 2),
@@ -78,3 +85,15 @@ n0-dns-resolver = { path = "vendor/n0-dns-resolver" }
 # no relay TLS handshake every ~22 s (n0-computer/iroh#4523) and a relay
 # health ping of at least 3 s. Drop it with the root Cargo.toml's.
 iroh = { path = "../../vendor/iroh" }
+# noq-udp, Claktory's copy of 1.5.0, the backend's own (../../vendor/README.md,
+# #392): on Apple platforms an IPv4 source goes as IP_PKTINFO, which macOS
+# reads, so a Mac answers from the address it was reached at, not its
+# route's (a Mac on two networks, Wi-Fi and Ethernet, say: Matt's MacBook,
+# Bruno 36927). Drop it with the root Cargo.toml's.
+noq-udp = { path = "../../vendor/noq-udp" }
+# netwatch, Claktory's copy of 0.20.2, the backend's own (../../vendor/README.md,
+# #490): a socket whose rebind failed after a network change (a phone moving
+# from Wi-Fi to cellular, a Mac waking) tries again at its next send instead
+# of staying closed, on the relay only, until the app restarts. Drop it with
+# the root Cargo.toml's.
+netwatch = { path = "../../vendor/netwatch" }

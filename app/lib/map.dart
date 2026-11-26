@@ -9,6 +9,9 @@ import 'backend.dart' show fireAndLog;
 import 'canvas.dart';
 import 'characters/character.dart' show AgentCharacter, identityOf;
 import 'controls.dart';
+import 'history/export.dart' show canExportReplay;
+import 'history/view.dart' show HistoryView, MapModeSwitch, shareReplay;
+import 'mobile/share.dart' show globalRectOf;
 import 'identity.dart';
 import 'map_card.dart';
 import 'map_layout.dart';
@@ -52,6 +55,11 @@ const mapLayerNames = {
   MapLayer.apps: 'Apps',
 };
 
+/// The Map last laid out, from what map and in what order, kept in memory
+/// while the app runs: laying out a big Claktory's map takes a moment, and
+/// it's the same picture until the map changes.
+({ClaktoryMap map, Map<String, int> order, MapLayout layout})? _laidOut;
+
 /// The Map: how this Claktory is arranged, drawn like a circuit board.
 /// Rivet and the other admins along the top, then the workspace and each
 /// project as a board with its folders and agents, and the vault along the
@@ -61,28 +69,86 @@ const mapLayerNames = {
 /// opens the pipe. Hover an agent to light up its lines and,
 /// after a moment, see its card (every extension it has, where it works,
 /// whom it messages, its secrets); click it to open its conversation. On a
-/// phone, with no pointer, a tap lights it up and shows its card, with Open
-/// conversation.
+/// phone or an iPad, where a finger comes first, a tap lights it up and
+/// shows its card, with Open conversation, and a tap on the empty board
+/// lets it go (a trackpad's pointer still shows a card on hover).
+///
+/// The window's one Map keeps its state wherever it's shown: an iPad's
+/// window resized across the phone's layout shows it as a page instead of
+/// a pane (or the other way round), and it comes back as it was, History
+/// and where it was in it too (Sale's row 149), as a phone's rotation
+/// keeps it.
 class MapView extends StatefulWidget {
   const MapView({super.key});
 
   @override
-  State<MapView> createState() => _MapViewState();
+  State<MapView> createState() => _MapHolderState();
 }
 
-class _MapViewState extends State<MapView> {
+/// The Map shown now, which holds [_windowMap]; any other shown at the
+/// same time (none, today) has state of its own.
+_MapHolderState? _mapHolder;
+final _windowMap = GlobalKey(debugLabel: 'Map');
+
+class _MapHolderState extends State<MapView> {
+  @override
+  void initState() {
+    super.initState();
+    _mapHolder ??= this;
+  }
+
+  // The layout changing drops the Map where it was before building it in
+  // its new place, in the same frame: it lets the key go, and the new one
+  // takes it, with the state under it.
+  @override
+  void deactivate() {
+    if (_mapHolder == this) _mapHolder = null;
+    super.deactivate();
+  }
+
+  @override
+  void activate() {
+    super.activate();
+    _mapHolder ??= this;
+  }
+
+  @override
+  void dispose() {
+    if (_mapHolder == this) _mapHolder = null;
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      _Map(key: _mapHolder == this ? _windowMap : null);
+}
+
+class _Map extends StatefulWidget {
+  const _Map({super.key});
+
+  @override
+  State<_Map> createState() => _MapViewState();
+}
+
+class _MapViewState extends State<_Map> {
   final _canvas = CanvasController();
   final _hidden = <MapLayer>{};
   String? _hover;
   String? _pinned;
 
+  /// History mode (#458): how this Claktory came to be, replayed.
+  var _history = false;
+
+  /// History's page, for its header's Share replay… (a phone's).
+  final _historyView = GlobalKey();
+  final _shareReplay = GlobalKey();
+
   /// The agent whose card shows on hover, once the pointer has rested.
   String? _card;
   Timer? _cardWait;
 
-  ClaktoryMap? _laidOut;
-  Map<String, int>? _order;
-  var _layout = MapLayout.empty;
+  /// What the board shows: [_laidOut]'s, as it was last laid out.
+  MapLayout get _layout => _laidOut?.layout ?? MapLayout.empty;
 
   @override
   void dispose() {
@@ -92,7 +158,8 @@ class _MapViewState extends State<MapView> {
   }
 
   /// Lays the map out again only when it changed: the workspace comes
-  /// again with every agent's every step.
+  /// again with every agent's every step. The last one laid out is kept
+  /// while the app runs ([_laidOut]), so the Map opens again at once.
   MapLayout _layoutFor(Workspace workspace) {
     // A pipe's liaison sits on its pipe's pad, not as a chip of its own.
     final liaisons = pipeLiaisons(workspace);
@@ -100,23 +167,27 @@ class _MapViewState extends State<MapView> {
       ..removeWhere(
         (id, _) => liaisons.values.any((agent) => id == 'agent:${agent.id}'),
       );
-    if (_laidOut != workspace.map || !_sameOrder(order)) {
-      _laidOut = workspace.map;
-      _order = order;
-      _layout = layoutMap(
-        mapWithout(workspace.map, {
-          for (final agent in liaisons.values) 'agent:${agent.id}',
-        }),
+    final last = _laidOut;
+    if (last == null ||
+        !(identical(last.map, workspace.map) || last.map == workspace.map) ||
+        !_sameOrder(last.order, order)) {
+      _laidOut = (
+        map: workspace.map,
         order: order,
-        you: true,
+        layout: layoutMap(
+          mapWithout(workspace.map, {
+            for (final agent in liaisons.values) 'agent:${agent.id}',
+          }),
+          order: order,
+          you: true,
+        ),
       );
     }
     return _layout;
   }
 
-  bool _sameOrder(Map<String, int> order) {
-    final old = _order;
-    if (old == null || old.length != order.length) return false;
+  static bool _sameOrder(Map<String, int> old, Map<String, int> order) {
+    if (old.length != order.length) return false;
     for (final MapEntry(:key, :value) in order.entries) {
       if (old[key] != value) return false;
     }
@@ -138,9 +209,9 @@ class _MapViewState extends State<MapView> {
 
   void _open(MapNode node) {
     final agent = node.kind == MapNodeKind.MAP_NODE_KIND_AGENT;
-    if (!agent || isPhoneLayout(context)) {
-      // Anything else lights up its lines, and off again; on a phone an
-      // agent too, with its card.
+    if (!agent || isPhoneLayout(context) || touchFirst(context)) {
+      // Anything else lights up its lines, and off again; with a finger
+      // (a phone, an iPad) an agent too, with its card.
       setState(() => _pinned = _pinned == node.id ? null : node.id);
       return;
     }
@@ -161,11 +232,16 @@ class _MapViewState extends State<MapView> {
   Widget _cardFor(Workspace workspace, MapChip chip, {required bool phone}) {
     final details = mapAgentDetails(workspace, chip.node);
     if (phone) {
+      // Along the bottom, never taller than the board it's over (in an
+      // iPad's pane that's less than the screen): its details scroll and
+      // its buttons stay in view.
       return Positioned(
         left: Space.s,
         right: Space.s,
+        top: Space.s,
         bottom: Space.s,
-        child: Center(
+        child: Align(
+          alignment: Alignment.bottomCenter,
           child: ConstrainedBox(
             // At most about half the screen: the map stays in view above
             // it, and its details scroll.
@@ -287,12 +363,20 @@ class _MapViewState extends State<MapView> {
             children: [
               PhoneHeader(
                 leading: HeaderButton.back(onTap: close),
-                title: Text(
-                  'Map',
-                  style: PhoneType.emphasis.copyWith(color: palette.text),
-                ),
+                search: false,
+                // Now or History (#458), once there's a map to replay.
+                title: layout == null
+                    ? Text(
+                        'Map',
+                        style: PhoneType.emphasis.copyWith(color: palette.text),
+                      )
+                    : MapModeSwitch(
+                        history: _history,
+                        phone: true,
+                        onChanged: (on) => setState(() => _history = on),
+                      ),
                 trailing: [
-                  if (layout != null) ...[
+                  if (layout != null && !_history) ...[
                     HeaderButton(
                       label: 'Search the map',
                       glyph: (color) => glyph('search', color),
@@ -305,6 +389,18 @@ class _MapViewState extends State<MapView> {
                       onTap: () => _openLines(layout),
                     ),
                   ],
+                  // History's video (#458 E1), where it can be made.
+                  if (layout != null && _history && canExportReplay)
+                    HeaderButton(
+                      key: _shareReplay,
+                      label: 'Share replay…',
+                      glyph: (color) => glyph('share', color),
+                      onTap: () => shareReplay(
+                        context,
+                        _historyView,
+                        from: globalRectOf(_shareReplay.currentContext!),
+                      ),
+                    ),
                 ],
               ),
               Expanded(
@@ -323,6 +419,8 @@ class _MapViewState extends State<MapView> {
                             ),
                           ),
                         )
+                      : _history
+                      ? HistoryView(key: _historyView, phone: true)
                       : _phoneBoard(workspace, layout),
                 ),
               ),
@@ -350,20 +448,24 @@ class _MapViewState extends State<MapView> {
               controller: _canvas,
               size: layout.size,
               background: (transform) =>
-                  _GridPainter(transform, palette.hairline),
-              child: _Board(
-                layout: layout,
-                pads: portalPads(
-                  layout,
-                  workspace.pipes,
-                  liaisons: pipeLiaisons(workspace),
+                  MapGridPainter(transform, palette.hairline),
+              // Its own layer: moving the canvas moves the board as it's
+              // drawn, without drawing it again.
+              child: RepaintBoundary(
+                child: _Board(
+                  layout: layout,
+                  pads: portalPads(
+                    layout,
+                    workspace.pipes,
+                    liaisons: pipeLiaisons(workspace),
+                  ),
+                  person: workspace.person,
+                  hidden: _hidden,
+                  focus: pinned,
+                  phone: true,
+                  onHover: (_) {},
+                  onTap: _open,
                 ),
-                person: workspace.person,
-                hidden: _hidden,
-                focus: pinned,
-                phone: true,
-                onHover: (_) {},
-                onTap: _open,
               ),
             ),
           ),
@@ -442,11 +544,31 @@ class _MapViewState extends State<MapView> {
                         ),
                       );
                     }
+                    final mode = MapModeSwitch(
+                      history: _history,
+                      onChanged: (on) => setState(() => _history = on),
+                    );
+                    if (_history) {
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          _Strip(child: Row(children: [mode])),
+                          Expanded(child: HistoryView(key: _historyView)),
+                        ],
+                      );
+                    }
                     final layout = _layoutFor(workspace);
                     final focus = _hover ?? _pinned;
                     // On a phone, the tapped agent's card; on a Mac, the
-                    // hovered one's.
-                    final cardId = phone ? _pinned : _card;
+                    // hovered one's; on an iPad the tapped one's, with its
+                    // buttons, else a trackpad's hovered one.
+                    final touch = touchFirst(context);
+                    final cardId = phone
+                        ? _pinned
+                        : touch
+                        ? _pinned ?? _card
+                        : _card;
+                    final cardPinned = touch && cardId == _pinned;
                     final cardChip =
                         cardId == null || !cardId.startsWith('agent:')
                         ? null
@@ -461,6 +583,7 @@ class _MapViewState extends State<MapView> {
                           hidden: _hidden,
                           phone: phone,
                           canvas: _canvas,
+                          mode: mode,
                           onToggle: (layer) => setState(() {
                             if (!_hidden.remove(layer)) _hidden.add(layer);
                           }),
@@ -469,28 +592,54 @@ class _MapViewState extends State<MapView> {
                           child: Stack(
                             children: [
                               Positioned.fill(
-                                child: ZoomCanvas(
-                                  controller: _canvas,
-                                  size: layout.size,
-                                  background: (transform) =>
-                                      _GridPainter(transform, palette.hairline),
-                                  child: _Board(
-                                    layout: layout,
-                                    pads: portalPads(
-                                      layout,
-                                      workspace.pipes,
-                                      liaisons: pipeLiaisons(workspace),
+                                child: _LetGo(
+                                  // A finger's tap on the empty board lets
+                                  // the tapped agent go; a chip's own tap
+                                  // wins, and a drag or a pinch is the
+                                  // canvas's.
+                                  onTap: touch && _pinned != null
+                                      ? () => setState(() => _pinned = null)
+                                      : null,
+                                  // Drawn to its own measure, as on a phone:
+                                  // the system's text size would burst its
+                                  // boxes (Zucchero's row 517). Zoom reads
+                                  // it closer.
+                                  child: MediaQuery.withNoTextScaling(
+                                    child: ZoomCanvas(
+                                      controller: _canvas,
+                                      size: layout.size,
+                                      background: (transform) => MapGridPainter(
+                                        transform,
+                                        palette.hairline,
+                                      ),
+                                      // Its own layer: moving the canvas moves
+                                      // the board as it's drawn, without
+                                      // drawing it again.
+                                      child: RepaintBoundary(
+                                        child: _Board(
+                                          layout: layout,
+                                          pads: portalPads(
+                                            layout,
+                                            workspace.pipes,
+                                            liaisons: pipeLiaisons(workspace),
+                                          ),
+                                          person: workspace.person,
+                                          hidden: _hidden,
+                                          focus: focus,
+                                          onHover: _hovered,
+                                          onTap: _open,
+                                        ),
+                                      ),
                                     ),
-                                    person: workspace.person,
-                                    hidden: _hidden,
-                                    focus: focus,
-                                    onHover: _hovered,
-                                    onTap: _open,
                                   ),
                                 ),
                               ),
                               if (cardChip != null)
-                                _cardFor(workspace, cardChip, phone: phone),
+                                _cardFor(
+                                  workspace,
+                                  cardChip,
+                                  phone: phone || cardPinned,
+                                ),
                             ],
                           ),
                         ),
@@ -505,6 +654,26 @@ class _MapViewState extends State<MapView> {
       ),
     );
   }
+}
+
+/// Over the board on a touch-first device: a tap that lands on nothing
+/// (a chip's own tap wins, being deeper) lets the tapped agent go. A drag
+/// or a pinch goes past the tap's slop, so the canvas keeps those.
+class _LetGo extends StatelessWidget {
+  const _LetGo({required this.onTap, required this.child});
+
+  final VoidCallback? onTap;
+  final Widget child;
+
+  // Always there, with no tap to take while nothing is tapped, so the
+  // board under it is never built again (and keeps where it's panned to).
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    behavior: HitTestBehavior.translucent,
+    onTap: onTap,
+    excludeFromSemantics: true,
+    child: child,
+  );
 }
 
 /// The board at its own size: boxes and lines painted, chips as widgets
@@ -618,7 +787,7 @@ class _Board extends StatelessWidget {
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: () => onTap(chip.node),
-                  child: _Chip(chip: chip, focused: focus == chip.id),
+                  child: MapChipView(chip: chip, focused: focus == chip.id),
                 ),
               ),
             ),
@@ -629,9 +798,10 @@ class _Board extends StatelessWidget {
 }
 
 /// A node on the board: an agent (its color down the left, its name, role
-/// and badges), a secret, or Claktory's records.
-class _Chip extends StatelessWidget {
-  const _Chip({required this.chip, required this.focused});
+/// and badges), a secret, or Claktory's records. History's board (#458)
+/// draws its chips with it too.
+class MapChipView extends StatelessWidget {
+  const MapChipView({super.key, required this.chip, required this.focused});
 
   final MapChip chip;
   final bool focused;
@@ -1339,9 +1509,10 @@ Widget _padHeightOn(bool phone, Widget pad) => phone
       )
     : pad;
 
-/// A faint dot every two cells, like a board's grid, at every zoom.
-class _GridPainter extends CustomPainter {
-  _GridPainter(this.transform, this.color);
+/// A faint dot every two cells, like a board's grid, at every zoom; behind
+/// History's board too.
+class MapGridPainter extends CustomPainter {
+  MapGridPainter(this.transform, this.color);
 
   final Matrix4 transform;
   final Color color;
@@ -1367,7 +1538,7 @@ class _GridPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_GridPainter old) =>
+  bool shouldRepaint(MapGridPainter old) =>
       old.transform != transform || old.color != color;
 }
 
@@ -1381,8 +1552,11 @@ class _Key extends StatelessWidget {
     required this.phone,
     required this.canvas,
     required this.onToggle,
+    required this.mode,
   });
 
+  /// Now or History, first in the strip.
+  final Widget mode;
   final MapLayout layout;
   final Set<MapLayer> hidden;
   final bool phone;
@@ -1412,61 +1586,101 @@ class _Key extends StatelessWidget {
           ),
     ];
     final caption = TextStyles.caption.copyWith(color: palette.textFaint);
+    // Its text grows only so far, as a bar's, so the board keeps its room
+    // at the largest sizes (Zucchero's row 517); its pills grow with it.
+    return MediaQuery.withClampedTextScaling(
+      maxScaleFactor: 2,
+      child: _strip(
+        palette,
+        switches,
+        badges,
+        caption,
+        touch: touchFirst(context),
+      ),
+    );
+  }
+
+  Widget _strip(
+    Palette palette,
+    List<Widget> switches,
+    Map<String, MapBadge> badges,
+    TextStyle caption, {
+    required bool touch,
+  }) {
+    return _Strip(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              mode,
+              const SizedBox(width: Space.s),
+              Expanded(
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(children: switches),
+                ),
+              ),
+              if (!phone) _ZoomControls(controller: canvas),
+            ],
+          ),
+          // On a phone, room for the board: the switches only.
+          if (!phone) ...[
+            const SizedBox(height: Space.xs),
+            Wrap(
+              spacing: Space.m,
+              runSpacing: Space.xs,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                if (badges.isNotEmpty)
+                  Text('Badges: extra reach or power', style: caption),
+                for (final badge in badges.values)
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ExtensionGlyph(
+                        icon: badge.icon,
+                        name: badge.label,
+                        color: palette.textFaint,
+                        size: 12,
+                      ),
+                      const SizedBox(width: Space.xs),
+                      Text(badge.label, style: caption),
+                    ],
+                  ),
+                Text(
+                  'Agents can read their whole project but change files '
+                  'only in their own folder. '
+                  '${touch ? 'Tap' : 'Hover'} an agent to see '
+                  'everything it has.',
+                  style: caption,
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// The strip under the Map's bar, behind a bottom hairline: the key, or in
+/// History only Now and History.
+class _Strip extends StatelessWidget {
+  const _Strip({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
     return Unselectable(
       child: Container(
         padding: const EdgeInsets.fromLTRB(Space.m, Space.s, Space.m, Space.s),
         decoration: BoxDecoration(
           border: Border(bottom: BorderSide(color: palette.hairline)),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: Row(children: switches),
-                  ),
-                ),
-                if (!phone) _ZoomControls(controller: canvas),
-              ],
-            ),
-            // On a phone, room for the board: the switches only.
-            if (!phone) ...[
-              const SizedBox(height: Space.xs),
-              Wrap(
-                spacing: Space.m,
-                runSpacing: Space.xs,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  if (badges.isNotEmpty)
-                    Text('Badges: extra reach or power', style: caption),
-                  for (final badge in badges.values)
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        ExtensionGlyph(
-                          icon: badge.icon,
-                          name: badge.label,
-                          color: palette.textFaint,
-                          size: 12,
-                        ),
-                        const SizedBox(width: Space.xs),
-                        Text(badge.label, style: caption),
-                      ],
-                    ),
-                  Text(
-                    'Agents can read their whole project but change files '
-                    'only in their own folder. Hover an agent to see '
-                    'everything it has.',
-                    style: caption,
-                  ),
-                ],
-              ),
-            ],
-          ],
-        ),
+        child: child,
       ),
     );
   }
@@ -1498,7 +1712,8 @@ class _LayerSwitch extends StatelessWidget {
         onTap: onToggle,
         builder: (context, hovered) => AnimatedContainer(
           duration: Motion.fast,
-          height: 28,
+          // At least 28, more as its words grow (Zucchero's row 517).
+          constraints: const BoxConstraints(minHeight: 28),
           padding: const EdgeInsets.symmetric(horizontal: Space.s),
           decoration: BoxDecoration(
             color: shown
@@ -1614,8 +1829,11 @@ class _ZoomControls extends StatelessWidget {
               Pressable(
                 onTap: controller.fit,
                 builder: (context, hovered) => Container(
-                  height: 28,
-                  constraints: const BoxConstraints(minWidth: 48),
+                  // Grows with its words at a large text size (row 517).
+                  constraints: const BoxConstraints(
+                    minWidth: 48,
+                    minHeight: 28,
+                  ),
                   alignment: Alignment.center,
                   padding: const EdgeInsets.symmetric(horizontal: Space.xs),
                   decoration: BoxDecoration(

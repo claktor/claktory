@@ -411,22 +411,23 @@ pub(crate) async fn code(factory: &Arc<Factory>, pairing: &str) -> Result<v1::Pa
 
 /// Brings pairings still waiting up to date with devices.json: each card
 /// that changed shows it, and the agent hears how an ended one ended.
-pub(crate) fn sync(factory: &Arc<Factory>) {
+/// Whether any still waits (or they couldn't be read).
+pub(crate) fn sync(factory: &Arc<Factory>) -> bool {
     let live = match live_rows(&factory.store, None) {
         Ok(live) => live,
         Err(error) => {
             tracing::error!(%error, "could not read the devices agents add");
-            return;
+            return true;
         }
     };
     if live.is_empty() {
-        return;
+        return false;
     }
     let devices = match remote::devices(&factory.home) {
         Ok(devices) => devices,
         Err(error) => {
             tracing::error!(%error, "could not read the paired devices");
-            return;
+            return true;
         }
     };
     for mut row in live {
@@ -464,6 +465,7 @@ pub(crate) fn sync(factory: &Arc<Factory>) {
             tell(factory, &row);
         }
     }
+    true
 }
 
 /// Tells the agent how adding its device ended.
@@ -485,12 +487,17 @@ fn tell(factory: &Arc<Factory>, row: &Row) {
 }
 
 /// Keeps agents' pairings up to date: whenever devices may have changed,
-/// and every second.
+/// and every second while one waits (its code runs out); with none waiting,
+/// only when they change (#454).
 pub(crate) async fn monitor(factory: Weak<Factory>) {
     while let Some(strong) = factory.upgrade() {
-        sync(&strong);
+        let waiting = sync(&strong);
         let changed = strong.remote.changed.clone();
         drop(strong);
-        let _ = tokio::time::timeout(CHECK, changed.notified()).await;
+        if waiting {
+            let _ = tokio::time::timeout(CHECK, changed.notified()).await;
+        } else {
+            changed.notified().await;
+        }
     }
 }

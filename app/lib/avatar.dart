@@ -2,6 +2,7 @@ import 'package:flutter/widgets.dart';
 
 import 'controls.dart';
 import 'identity.dart';
+import 'kept.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'selection.dart';
@@ -39,9 +40,14 @@ class PersonAvatar extends StatelessWidget {
         ?.backend
         .workspace;
     if (store == null) return _draw(Person());
+    // Drawn again only when the person changes, not with every agent's
+    // step.
     return ListenableBuilder(
       listenable: store,
-      builder: (context, _) => _draw(store.workspace.person),
+      builder: (context, _) => Kept(
+        inputs: [store.workspace.person, size],
+        builder: (_) => _draw(store.workspace.person),
+      ),
     );
   }
 

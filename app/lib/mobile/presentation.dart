@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -268,6 +269,7 @@ Future<T?> presentSheet<T>(
   bool closeButton = true,
   bool padded = true,
   Future<bool> Function()? shouldClose,
+  ValueListenable<bool>? held,
 }) {
   final overlay = SheetOverlay.of(context);
   // The overlay may be above the phone's Back: it's found from here.
@@ -327,6 +329,7 @@ Future<T?> presentSheet<T>(
         key: host,
         onDismiss: dismiss,
         back: back,
+        held: held,
         canClose: () => guard.mayClose == null,
         child: PhoneSheet(
           title: title,
@@ -504,10 +507,16 @@ class _SheetHost extends StatefulWidget {
     required this.child,
     this.back,
     this.canClose,
+    this.held,
   });
 
   final VoidCallback onDismiss;
   final Widget child;
+
+  /// While true, it can't be set aside, only answered (a screen before a
+  /// system prompt): no grabber, no drag, and the dimmed screen isn't read
+  /// out as Close.
+  final ValueListenable<bool>? held;
 
   /// The phone's Back, which closes it ([onDismiss]) before what's under
   /// it while it's up.
@@ -572,13 +581,21 @@ class _SheetHostState extends State<_SheetHost> with TickerProviderStateMixin {
     await _shown.reverse().orCancel.catchError((_) {});
   }
 
+  /// It can't be set aside now ([_SheetHost.held]).
+  bool get held => widget.held?.value ?? false;
+
+  /// What [held] listens to, if anything.
+  ValueListenable<bool>? get heldListenable => widget.held;
+
   void drag(double delta) {
+    if (held) return;
     _dragged.value = math.max(0, _dragged.value + delta);
   }
 
   /// The finger lifted: closes it past a third of its height or flung down,
   /// else it springs back.
   void release(double velocity) {
+    if (held) return springBack();
     if (_dragged.value > _height / 3 || velocity > 700) {
       unawaited(Haptics.light());
       widget.onDismiss();
@@ -632,13 +649,18 @@ class _SheetHostState extends State<_SheetHost> with TickerProviderStateMixin {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            Semantics(
-              container: true,
-              button: true,
-              label: 'Close',
-              onTap: widget.onDismiss,
-              // Its own tap, labelled, in place of the detector's.
-              excludeSemantics: true,
+            ValueListenableBuilder<bool>(
+              valueListenable: widget.held ?? const _NeverHeld(),
+              // Held, it isn't read out as Close: it doesn't close.
+              builder: (context, held, child) => Semantics(
+                container: true,
+                button: !held,
+                label: held ? null : 'Close',
+                onTap: held ? null : widget.onDismiss,
+                // Its own tap, labelled, in place of the detector's.
+                excludeSemantics: true,
+                child: child,
+              ),
               child: GestureDetector(
                 onTap: widget.onDismiss,
                 child: AnimatedBuilder(
@@ -747,18 +769,23 @@ class PhoneSheet extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // The grabber.
+        // The grabber, while it can be dragged away.
         SizedBox(
           height: Space.l + 4,
-          child: Center(
-            child: Container(
-              width: 36,
-              height: 5,
-              decoration: BoxDecoration(
-                color: palette.textFaint.withValues(alpha: 0.5),
-                borderRadius: BorderRadius.circular(2.5),
-              ),
-            ),
+          child: ValueListenableBuilder<bool>(
+            valueListenable: host?.heldListenable ?? const _NeverHeld(),
+            builder: (context, held, _) => held
+                ? const SizedBox.shrink()
+                : Center(
+                    child: Container(
+                      width: 36,
+                      height: 5,
+                      decoration: BoxDecoration(
+                        color: palette.textFaint.withValues(alpha: 0.5),
+                        borderRadius: BorderRadius.circular(2.5),
+                      ),
+                    ),
+                  ),
           ),
         ),
         if (title != null || onClose != null)
@@ -1078,4 +1105,18 @@ class _ChoiceList<T> extends StatelessWidget {
       ],
     );
   }
+}
+
+/// Never held: a sheet that can always be set aside.
+class _NeverHeld implements ValueListenable<bool> {
+  const _NeverHeld();
+
+  @override
+  bool get value => false;
+
+  @override
+  void addListener(VoidCallback listener) {}
+
+  @override
+  void removeListener(VoidCallback listener) {}
 }

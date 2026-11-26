@@ -554,7 +554,10 @@ void main() {
     }
     await pumpEventQueue();
     expect(voice.levels, hasLength(VoiceRecording.samples));
-    expect(voice.elapsed, const Duration(milliseconds: 50 * 129));
+    expect(
+      voice.elapsed,
+      const Duration(milliseconds: 50 * (VoiceRecording.samples + 9)),
+    );
 
     final recording = await voice.finish();
     expect(recording!.duration, const Duration(seconds: 42));

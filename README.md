@@ -1,12 +1,18 @@
 # Claktory
 
-Claktory is where your agents live and work: persistent coding agents, each with its own name, role, prompt, model and folder, running on your own Mac or server, working together on your projects while you're away. Its backend, `factoryd`, holds all the state; the desktop app shows it.
+Your own AI team. Say what you want. Your agents get it done.
 
-Install the latest release on a Mac (or a Linux server, for the backend):
+Claktory is an app on your own computer where AI agents work for you as a team and reach you on your phone when they need you. Rivet, your first agent, builds the team for the work you describe. Each agent has a name and a role, keeps its conversation across days, and works with the others on coding, writing, research and anything else you'd do at a computer. Claktory runs on a Mac or a Linux server and uses your Claude or ChatGPT plan, or an API key. It has apps for iPhone, iPad and Android, and it's free.
+
+Install it on a Mac with an M1 chip or newer, or on a Linux server:
 
 ```sh
-curl -fsSL https://github.com/claktor/claktory/releases/latest/download/install.sh | bash
+curl -fsSL https://claktory.com/install.sh | bash
 ```
+
+Or [download it for Mac](https://claktory.com/download). The [docs](https://claktory.com/docs) show how to connect your phone and build your team.
+
+Made by Copium Labs Ltd, London.
 
 ### On a Linux server
 
@@ -19,6 +25,8 @@ On NixOS, add `git` to your packages (your agents need it), and set `users.users
 The source is available under the PolyForm Shield License 1.0.0 ([LICENSE.md](LICENSE.md)): read it, run it, change it, but not to compete with it.
 
 ## Working on it
+
+Claktory's backend, `factoryd`, holds all the state; the apps show it.
 
 [TENETS.md](TENETS.md) says what Claktory is. [docs/IDENTITY.md](docs/IDENTITY.md) says how it looks. [AGENTS.md](AGENTS.md) is how to work on it, for people and agents.
 
@@ -67,3 +75,7 @@ Edit `proto/factory/v1/factory.proto`, then run `scripts/gen-proto.sh` to regene
 cargo test --workspace
 cd app && flutter test
 ```
+
+## Who makes it
+
+Claktory is made by Copium Labs Ltd, company number 15778277, registered in England and Wales. Registered office: 167-169 Great Portland Street, Fifth Floor, London W1W 5PF. Contact: [hello@claktory.com](mailto:hello@claktory.com).

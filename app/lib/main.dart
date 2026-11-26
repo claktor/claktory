@@ -14,13 +14,14 @@ import 'engine.dart' show EngineControl;
 import 'identity.dart';
 import 'ipad/workbench.dart' show WorkbenchFocus, WorkbenchScope;
 import 'licenses.dart';
-import 'lid_closed.dart' show LidClosedWatcher;
 import 'links.dart' show appLinks;
 import 'mobile/device.dart' show loadDeviceCapabilities;
+import 'mobile/local_network.dart' show DeviceLocalNetwork, localNetwork;
 import 'mobile/platform_policy.dart';
 import 'mobile/push.dart' show HttpPushRelay, IosPushDevice, PushRegistrar;
 import 'notifications.dart';
 import 'people/secret_clipboard.dart' show startClipboardSweeps;
+import 'people/start_messages.dart';
 import 'rail.dart';
 import 'scope.dart';
 import 'setup.dart';
@@ -195,14 +196,6 @@ class _FactoryAppState extends State<FactoryApp> {
     // Chrome's tabs reach an agent only through a Mac's app.
     if (defaultTargetPlatform == TargetPlatform.macOS) {
       _browser = BrowserHost.of(_claktories);
-      // This Mac's own Claktory hears what macOS says of its lid-closed
-      // helper (#371, lid_closed.dart).
-      _lidClosed = LidClosedWatcher(
-        changes: _claktories,
-        local: () => _claktories.localBackend
-            ? _claktories.all.firstWhere((each) => each.target == null).backend
-            : null,
-      );
     }
     // An iPhone registers with each Claktory for pushes, once the person
     // allows notifications (mobile/push.dart).
@@ -212,6 +205,8 @@ class _FactoryAppState extends State<FactoryApp> {
         device: IosPushDevice(),
         relay: HttpPushRelay(),
       );
+      // Asked for before the first connection (mobile/local_network.dart).
+      localNetwork = const DeviceLocalNetwork();
     }
   }
 
@@ -219,9 +214,6 @@ class _FactoryAppState extends State<FactoryApp> {
 
   /// This Mac's browser control (browser/browser_view.dart).
   BrowserHost? _browser;
-
-  /// This Mac's lid-closed helper, told to its own Claktory.
-  LidClosedWatcher? _lidClosed;
 
   /// The window, as an overlay entry: the root layer the phone's list of
   /// Claktories and its dialogs float in.
@@ -254,7 +246,6 @@ class _FactoryAppState extends State<FactoryApp> {
     _notifications?.dispose();
     _pushes?.dispose();
     _browser?.dispose();
-    _lidClosed?.dispose();
     _claktories.dispose();
     for (final focus in _focuses.values) {
       focus.dispose();
@@ -342,6 +333,8 @@ class _FactoryAppState extends State<FactoryApp> {
                             ),
                             // Files dragged over the window from the Finder.
                             const Positioned.fill(child: WindowDropOverlay()),
+                            // Messages followed from launch (row 569).
+                            const Positioned(child: StartMessages()),
                             // A change to what this device keeps that wasn't
                             // saved says so.
                             Positioned(

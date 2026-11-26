@@ -3,11 +3,13 @@
 // the native viewer (app/macos/Runner/PaperViewer.swift); the header says
 // which page, Find… finds, and a link asks before it opens.
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:factory_app/find.dart';
 import 'package:factory_app/ipad/ink_bridge.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/viewers/file_cache.dart';
 import 'package:factory_app/viewers/pdf.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
@@ -16,7 +18,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
-import 'panes_test.dart' show beside, showPanes;
+import 'panes_test.dart' show beside, showPanes, snapshot;
 
 const _path = '/w/paper.pdf';
 
@@ -215,6 +217,52 @@ void main() {
       await tester.pump();
       expect(find.text('Page 3 of 12'), findsOneWidget);
       expect(native.calls.first.method, 'attach');
+    },
+    variant: mac,
+  );
+
+  testWidgets(
+    'from a Claktory on another machine, the PDF is kept with the files '
+    'this device keeps (#446): opened again, only a one-byte read',
+    (tester) async {
+      final folder = Directory.systemTemp.createTempSync('kept-pdf');
+      keepsFilesOf = (_) => true;
+      fileCacheFolder = () async => folder.path;
+      addTearDown(() {
+        keepsFilesOf = (backend) => backend.target != null;
+        FileCache.forgetAllInMemory();
+        folder.deleteSync(recursive: true);
+      });
+      Future<void> working() async {
+        for (var i = 0; i < 30; i++) {
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 20)),
+          );
+          await tester.pump();
+        }
+      }
+
+      final cache = _Cache();
+      final native = _Native();
+      final file = _pdf('a paper');
+      final harness = await _show(tester, file);
+      await working();
+      // Not the render cache: the device's own copies.
+      expect(cache.calls, isEmpty);
+      final shown = (native.params['document'] as Map)['file'] as String;
+      expect(shown, startsWith(folder.path));
+      expect(File(shown).readAsBytesSync(), file.data);
+
+      final before = harness.backend.sent.length;
+      harness.backend.workspace.apply(snapshot());
+      await working();
+      harness.backend.workspace.apply(snapshot(layout: beside('pdf', _path)));
+      await working();
+      final again = _reads(harness).skip(
+        harness.backend.sent.take(before).where((m) => m.hasReadFile()).length,
+      );
+      expect(again.map((r) => r.maxBytes.toInt()), [1]);
+      expect((native.params['document'] as Map)['file'], shown);
     },
     variant: mac,
   );

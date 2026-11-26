@@ -161,7 +161,8 @@ pub(crate) fn unbind_if_gone(factory: &Arc<Factory>, before: &Record) {
     change(factory, &record.id, |record| record.bound.clear());
     let Some(name) = name else { return };
     line(factory, &record.id, format!("{name} isn't this pipe's liaison any more: it's in the sidebar with your other agents."));
-    let summary = format!("{person} took you out of the pipe \"{}\": you're no longer its liaison, and its tools are gone", record.name);
+    // Whoever did, the person or an admin agent narrowing it.
+    let summary = format!("You were taken out of the pipe \"{}\": you're no longer its liaison, and its tools are gone", record.name);
     let mut text = format!("{summary}.");
     if before.quarantined.contains(&agent) {
         text.push_str(&format!(

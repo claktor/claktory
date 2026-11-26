@@ -4,12 +4,14 @@
 // image's viewer. Wherever the image shows, on any device, the ink saved
 // on its version lies over it, read-only, following saves.
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:crypto/crypto.dart' show sha256;
 
 import 'package:factory_app/backend.dart' show RequestFailure;
 import 'package:factory_app/claktory_identity.dart';
 import 'package:factory_app/ink_preview.dart';
+import 'package:factory_app/ipad/document_host.dart' show documentChunk;
 import 'package:factory_app/ipad/workbench.dart';
 import 'package:factory_app/mobile/navigation.dart' show PhoneRoutesScope;
 import 'package:factory_app/panes.dart';
@@ -17,6 +19,7 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart'
     hide InkComposite;
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/shell.dart' show Shell;
+import 'package:factory_app/viewers/file_cache.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -314,6 +317,89 @@ void main() {
     expect(
       native.calls.where((c) => c.method == 'setActive').length,
       greaterThanOrEqualTo(1),
+    );
+  });
+
+  testWidgets('from a Claktory on another machine, Draw opens: the image '
+      "kept with the device's files, its version from the next byte's read, "
+      'since a part of an image read from its start has no hash (row 466)', (
+    tester,
+  ) async {
+    final folder = Directory.systemTemp.createTempSync('kept-ipad-image');
+    keepsFilesOf = (_) => true;
+    fileCacheFolder = () async => folder.path;
+    addTearDown(() {
+      keepsFilesOf = (backend) => backend.target != null;
+      FileCache.forgetAllInMemory();
+      folder.deleteSync(recursive: true);
+    });
+    Future<void> working() async {
+      for (var i = 0; i < 30; i++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 20)),
+        );
+        await tester.pump();
+      }
+    }
+
+    final (native, harness, _) = await _open(
+      tester,
+      before: (harness) => harness.backend.partsUnhashed = true,
+    );
+    // The image itself is kept too (the viewer's), real work on the disk;
+    // cleared, as when the viewer kept only a preview (Zucchero's row 468),
+    // so Draw reads and keeps the original.
+    await working();
+    await _decode(tester);
+    await tester.runAsync(() => FileCache.of(harness.backend)!.clear());
+    final before = harness.backend.sent.length;
+    await tester.tap(_draw);
+    await working();
+    expect(find.textContaining('to draw on images'), findsNothing);
+    final params = native.created.last;
+    expect(params['surface'], 'image');
+    expect((params['source'] as Map)['sha256'], 'v1');
+    final file = (params['document'] as Map)['file'] as String;
+    expect(file, startsWith(folder.path));
+    expect(File(file).readAsBytesSync(), harness.backend.files[_path]!.data);
+    // Kept, under its version: Settings → Storage counts it.
+    final kept = await tester.runAsync(
+      () => FileCache.of(harness.backend)!.find(_path, originalVariant),
+    );
+    expect((kept?.sha256, kept?.file.path), ('v1', file));
+    final reads = [
+      for (final message in harness.backend.sent.skip(before))
+        if (message.hasReadFile() && message.readFile.path == _path)
+          message.readFile,
+    ];
+    expect(
+      [
+        for (final read in reads.take(2))
+          (read.offset.toInt(), read.maxBytes.toInt()),
+      ],
+      [(0, 1), (1, 1)],
+    );
+  });
+
+  testWidgets('a backend from before ranged reads still says to update it', (
+    tester,
+  ) async {
+    final (_, harness, _) = await _open(
+      tester,
+      before: (harness) => harness.backend
+        ..partsUnhashed = true
+        ..rangedReads = false,
+    );
+    documentChunk = 8;
+    addTearDown(() => documentChunk = 8 * 1024 * 1024);
+    await tester.tap(_draw);
+    await settle(tester);
+    expect(
+      find.text(
+        'Update Claktory on ${claktoryName(harness.backend)} to draw on '
+        'images.',
+      ),
+      findsOneWidget,
     );
   });
 

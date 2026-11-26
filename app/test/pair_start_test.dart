@@ -256,4 +256,37 @@ void main() {
       await _linkWhole(tester, 'Sign in with your email instead');
     });
   }
+
+  testWidgets('at the largest text in a 320-point window, the title wraps '
+      'between words, and Paste code instead opens at its top (Sale, '
+      '#363 F3)', (tester) async {
+    tester.platformDispatcher.textScaleFactorTestValue = 3.12;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    await _show(
+      tester,
+      TargetPlatform.iOS,
+      camera: CameraAccess.unavailable,
+      size: const Size(320, 1146),
+    );
+    expect(tester.takeException(), isNull);
+    // Every word of the title on one line of its own or shared, never cut.
+    const title = 'Connect to your Claktory';
+    final paragraph = tester.renderObject<RenderParagraph>(find.text(title));
+    var at = 0;
+    for (final word in title.split(' ')) {
+      final boxes = paragraph.getBoxesForSelection(
+        TextSelection(baseOffset: at, extentOffset: at + word.length),
+      );
+      expect(boxes, hasLength(1), reason: word);
+      at += word.length + 1;
+    }
+    // From the end of the first screen, the paste screen starts at its top.
+    await tester.ensureVisible(find.text('Paste code instead'));
+    await pumpFrames(tester);
+    await tester.tap(find.text('Paste code instead'));
+    await pumpFrames(tester);
+    expect(find.textContaining('Paste the code for this iPhone.'), findsOne);
+    expect(tester.getRect(find.bySemanticsLabel('Back')).top, greaterThan(0));
+    expect(tester.getRect(find.text(title)).top, greaterThan(0));
+  });
 }

@@ -47,6 +47,8 @@ static CONNECTING: Manifest = Manifest {
 const ASK: &str = "## Asking for secrets
 
 You can use only the secrets listed in your Secrets section, if any. The person may keep others in the vault that could help with your work; you can't see them. When you need a key, token or password you weren't given, ask with `secrets_request`, never in a message: describe the kind of secret (a short name; which service, what the secret must be able to do and roughly how much, such as \"an Anthropic API key that can run Claude models a few times\"; and the environment variables you expect, never values) and say why. Ask for the least access that works. Give `link`, the https address of the service's own page for making it, with the name and permissions filled in where the service takes them in the address (GitHub's `https://github.com/settings/tokens/new?scopes=repo&description=Alex`), and `steps`, at most one line of what to do there: the person sees them on the card, so they make it in one go. The person approves the need or dismisses it; approved, you're given one that fits, theirs or a new one, and you're told what you got. `secrets_requests` lists your requests; while one waits, change it with `secrets_request_update` rather than asking again, and withdraw it with `secrets_request_cancel` once you no longer need it. For a new ssh key or password, have the vault generate it (`generate`): no one, you included, ever sees its private half or the password, and you're told a key's public half. For a file already on this computer (a keystore, a credentials file), ask to import it (`import`); never ask the person to copy a file's contents into the vault by hand.
+
+When you're done with a secret you were given, or decide you shouldn't hold it, give it up with `secrets_give_up`: it's taken from you at once, without asking the person, and their History shows it with your reason. Getting it back takes a new `secrets_request`.
 ";
 
 const CONNECT: &str = "## Connecting services
@@ -72,6 +74,7 @@ const REQUEST: &str = "Ask the person for a secret you need: name, a short name 
 const REQUESTS: &str = "Your requests for secrets: the ones waiting for the person, and your latest decided ones, each with its id, name, state, variables and reason.";
 const UPDATE: &str = "Change a request of yours that's still waiting, rather than asking again: id from secrets_requests; give only what changes: description, variables ([{name, file}], all of them) or reason. The person sees it changed.";
 const CANCEL: &str = "Withdraw a request of yours that's still waiting, once you no longer need it: id from secrets_requests; reason, optional, why. The person sees it withdrawn.";
+const GIVE_UP: &str = "Give up a secret you were given, at once and without asking the person: when you're done with it, or decide you shouldn't hold it. secret is its name; reason, why, which the person reads in History. You can't use it from your next command on; getting it back takes a new secrets_request. stop_tasks: also stop your background tasks that got it (left out, they keep running with what they got).";
 const LIST: &str = "The vault's secrets: each one's name, description, the variables it sets and the agents that have it, never a value. q filters by name or description.";
 const GRANT: &str = "Give a secret to agents, when the person asks: secret is its name, agents their ids or names. Each agent can use it in bash's `secrets` from its next step. To answer a request the person approved, pass request (its id) instead of agents: the secret goes to the request's asker, renamed to the variables it asked for when they differ (one mismatch pairs by itself; otherwise pass aliases, {asked name: the secret's variable}, or as_is to keep the secret's own names), and the asker is told what it got, with note, if you give one, as yours (\"pasted without its last newline: check it\").";
 const COLLECT: &str = "When no secret in the vault fits a request the person approved, ask them to add one: request is its id. The add-secret card opens in your conversation, prefilled from the request; the person types the values there, straight into the vault, and the new secret goes to the asker. You never see values. cancel: true closes your open card, leaving the request approved. You're told how it ends.";
@@ -196,6 +199,18 @@ impl Extension for Secrets {
                     "additionalProperties": false,
                 }),
                 super::typed_handler(factory, agent, cancel_request),
+            ),
+            super::tool(
+                crate::vault::given_up::TOOL,
+                "Give up a secret",
+                GIVE_UP,
+                json!({
+                    "type": "object",
+                    "required": ["secret", "reason"],
+                    "properties": {"secret": {"type": "string"}, "reason": {"type": "string"}, "stop_tasks": {"type": "boolean"}},
+                    "additionalProperties": false,
+                }),
+                super::typed_handler(factory, agent, give_up),
             ),
         ];
         if connect && crate::connectors::offered() {
@@ -533,6 +548,55 @@ fn cancel_request(factory: &Arc<Factory>, asker: &str, args: CancelArgs) -> Resu
     Ok(ToolResult::text(said, json!({"request_id": request.id})))
 }
 
+#[derive(Deserialize)]
+struct GiveUpArgs {
+    secret: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    stop_tasks: bool,
+}
+
+/// The most of a give-up's reason kept.
+const MAX_GIVE_UP_REASON: usize = 1000;
+
+/// secrets_give_up (#449): the asker's own grant only, taken as an admin's
+/// revoke takes it (`take_back`), with no card; History keeps it.
+fn give_up(factory: &Arc<Factory>, asker: &str, args: GiveUpArgs) -> Result<ToolResult, String> {
+    let reason = args.reason.trim();
+    if reason.is_empty() {
+        return Err("Say why you're giving it up, in reason: the person reads it in History. Nothing was changed.".to_owned());
+    }
+    if reason.chars().count() > MAX_GIVE_UP_REASON {
+        return Err(format!("Keep reason under {MAX_GIVE_UP_REASON} characters. Nothing was changed."));
+    }
+    let named = args.secret.trim();
+    // Only what it holds: a name it doesn't is answered the same whether
+    // or not the vault has it.
+    let Some((id, _)) = factory.vault.held(asker, named).map_err(|error| error.to_string())? else {
+        let yours = factory.vault.held_names(asker);
+        let yours = if yours.is_empty() { "You hold none.".to_owned() } else { format!("Yours: {}.", yours.join(", ")) };
+        return Err(format!("\"{named}\" isn't one of your secrets. {yours} Nothing was changed."));
+    };
+    let running: Vec<String> =
+        factory.vault.recent_tasks(&id, asker).into_iter().filter(|task| factory.store.task_running(asker, task)).collect();
+    let (name, stopped) =
+        crate::vault::requests::take_back(factory, &id, asker, asker, args.stop_tasks).map_err(|error| error.to_string())?;
+    let kept = crate::vault::given_up::record(factory, asker, &id, &name, reason);
+    let person = factory.lock().config.person_capitalized().to_owned();
+    let mut said = format!("Gave up {name}: you can't use it from your next command on. {person} sees it in History, with your reason.");
+    if !stopped.is_empty() {
+        said.push_str(&format!(" Stopped your background tasks that got it: {}.", stopped.join(", ")));
+    } else if !running.is_empty() {
+        said.push_str(&format!(
+            " Your background tasks that got it keep running with what they got: {}. Stop them with tasks_stop, or give stop_tasks next time.",
+            running.join(", ")
+        ));
+    }
+    said.push_str(" To get it back, ask with secrets_request.");
+    Ok(ToolResult::text(said, json!({"secret": name, "stopped": stopped, crate::vault::given_up::DETAIL: kept.map(|id| id.to_string())})))
+}
+
 /// "12m", "3h", "2d": how long ago `since` was.
 fn ago(since: i64, now: i64) -> String {
     let minutes = (now - since).max(0) / 60_000;
@@ -862,7 +926,7 @@ fn inspect(factory: &Arc<Factory>, asker: &str, args: SecretArgs) -> Result<Tool
             && let Ok(proposal) = factory.vault.connect_proposal(&connection.proposal_id)
         {
             let proposer =
-                factory.lock().config.agent(&proposal.agent_id).map_or_else(|| proposal.agent_id.clone(), |agent| agent.name.clone());
+                factory.agent_name(&proposal.agent_id);
             lines.push(format!(
                 "Connected for {proposer} ({})'s suggestion:\n- Purpose: {}\n- Access asked: {}\n- Reason: {}",
                 proposal.agent_id, proposal.purpose, proposal.access, proposal.reason

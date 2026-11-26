@@ -1,6 +1,6 @@
 //! Report types as data (pipes-automation.md §11): the person and an
 //! untainted Rivet define types within the rules in code; each pipe forwards
-//! its own types, and a liaison of several pipes can forward each one's;
+//! its own types, and an agent limited to several pipes can forward each one's;
 //! an edit makes a new version, and a report stays checked and shown
 //! against its own; a reader answers only what its report's type allows;
 //! and every change shows in Needs you's history.
@@ -13,9 +13,9 @@ use factory_protocol::v1::{self, client_message::Body as Request, entry::Kind, s
 use factoryd::factory::Factory;
 use factoryd::pipes;
 
-/// Site with Lea, Ingrid, Dev (the Pipes extension, not an admin) and Rivet
-/// (the admin agent); a pipe whose liaison is also the only member of a
-/// second pipe; reports' wakes at once.
+/// Site with Lea, Ingrid, Scout, Dev (the Pipes extension, not an admin) and
+/// Rivet (the admin agent); a pipe with its liaison, and Scout limited to it
+/// and the only member of a second pipe; reports' wakes at once.
 async fn setup() -> (Arc<Factory>, Client, View, String, String) {
     let dir = temp_dir();
     std::fs::create_dir_all(dir.join("home")).expect("home");
@@ -30,7 +30,7 @@ async fn setup() -> (Arc<Factory>, Client, View, String, String) {
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
     apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
-    for name in ["Lea", "Ingrid"] {
+    for name in ["Lea", "Ingrid", "Scout"] {
         apply_request(&mut client, &mut view, crate::common::create_agent("site", name, "")).await;
     }
     let settings = v1::UpdateSettings { default_model: Some(MODEL.into()), default_effort: Some("off".into()), ..Default::default() };
@@ -41,10 +41,20 @@ async fn setup() -> (Arc<Factory>, Client, View, String, String) {
     let add = v1::AddPipeLiaison { pipe_id: first.clone(), name: "Liaison".into() };
     apply_request(&mut client, &mut view, Request::AddPipeLiaison(add)).await;
     view.follow(&mut client, |view| shown(view, &first).is_some_and(|pipe| pipe.lead_id == "liaison")).await;
-    let second = pipes::open_for_test(&factory, "site", "Docs", &["liaison"], "liaison", false);
-    let limited = v1::UpdatePipe { pipe_id: second.clone(), quarantined: Some(v1::PipeMembers { agent_ids: vec!["liaison".into()] }), ..Default::default() };
+    // A pipe's liaison uses no other pipe (#414): Scout, limited to each, is
+    // on both.
+    let members = shown(&view, &first).expect("first").member_ids;
+    let both = v1::UpdatePipe {
+        pipe_id: first.clone(),
+        members: Some(v1::PipeMembers { agent_ids: members.into_iter().chain(["scout".to_owned()]).collect() }),
+        quarantined: Some(v1::PipeMembers { agent_ids: vec!["liaison".into(), "scout".into()] }),
+        ..Default::default()
+    };
+    apply_request(&mut client, &mut view, Request::UpdatePipe(both)).await;
+    let second = pipes::open_for_test(&factory, "site", "Docs", &["scout"], "scout", false);
+    let limited = v1::UpdatePipe { pipe_id: second.clone(), quarantined: Some(v1::PipeMembers { agent_ids: vec!["scout".into()] }), ..Default::default() };
     apply_request(&mut client, &mut view, Request::UpdatePipe(limited)).await;
-    view.follow(&mut client, |view| shown(view, &second).is_some_and(|pipe| pipe.quarantined_ids == ["liaison"])).await;
+    view.follow(&mut client, |view| shown(view, &second).is_some_and(|pipe| pipe.quarantined_ids == ["scout"])).await;
     (factory, client, view, first, second)
 }
 
@@ -151,18 +161,18 @@ async fn each_pipe_forwards_its_own_types_and_a_reader_answers_only_what_a_type_
     let said = refused(&mut client, &mut view, forward(&first, "ingrid", &["nothing_like_it"])).await;
     assert!(said.contains("There's no report type"), "{said}");
 
-    // The liaison forwards each pipe's types: not just its first pipe's.
+    // Scout forwards each pipe's types: not just its first pipe's.
     let task = serde_json::json!({"title": "Translate the page", "needed": "In Italian", "priority": "high", "due": "2026-12-01"});
-    let said = later(&mut client, &mut view, "liaison", "handoff_submit", &submit(&first, "task_request", task.clone())).await;
+    let said = later(&mut client, &mut view, "scout", "handoff_submit", &submit(&first, "task_request", task.clone())).await;
     assert_eq!(said, "accepted #1");
-    let tools = pipes::handoff::submit_parameters_for_test(&factory, "liaison").expect("handoff_submit");
+    let tools = pipes::handoff::submit_parameters_for_test(&factory, "scout").expect("handoff_submit");
     assert!(tools.contains("task_request") && tools.contains("question") && tools.contains("anyOf"), "{tools}");
     let question = serde_json::json!({"question": "Is there a style guide?", "urgency": "today"});
-    assert_eq!(later(&mut client, &mut view, "liaison", "handoff_submit", &submit(&first, "question", question.clone())).await, "refused: type");
-    assert_eq!(later(&mut client, &mut view, "liaison", "handoff_submit", &submit(&second, "question", question)).await, "accepted #1");
+    assert_eq!(later(&mut client, &mut view, "scout", "handoff_submit", &submit(&first, "question", question.clone())).await, "refused: type");
+    assert_eq!(later(&mut client, &mut view, "scout", "handoff_submit", &submit(&second, "question", question)).await, "accepted #1");
     let bad_day = serde_json::json!({"title": "x", "needed": "y", "priority": "low", "due": "2026-02-30"});
-    assert_eq!(later(&mut client, &mut view, "liaison", "handoff_submit", &submit(&first, "task_request", bad_day)).await, "refused: date due");
-    // A refusal for the type keeps no type: nothing the liaison sent.
+    assert_eq!(later(&mut client, &mut view, "scout", "handoff_submit", &submit(&first, "task_request", bad_day)).await, "refused: date due");
+    // A refusal for the type keeps no type: nothing Scout sent.
     let page = list(&mut client, &mut view, &first).await;
     let refusal = page.reports.iter().find(|report| report.refused_code == "type").expect("refused");
     assert_eq!(refusal.schema_id, "");
@@ -174,9 +184,9 @@ async fn each_pipe_forwards_its_own_types_and_a_reader_answers_only_what_a_type_
     let page = list(&mut client, &mut view, &first).await;
     let kept = page.reports.iter().find(|report| report.number == 1).expect("#1");
     assert_eq!((kept.state(), kept.schema_id.as_str(), kept.type_version), (v1::PipeReportState::New, "task_request", 1));
-    assert_eq!(later(&mut client, &mut view, "liaison", "handoff_submit", &submit(&first, "task_request", task)).await, "refused: type");
+    assert_eq!(later(&mut client, &mut view, "scout", "handoff_submit", &submit(&first, "task_request", task)).await, "refused: type");
     view.follow(&mut client, |view| events(view).iter().any(|text| text.contains("now forwards \"Bug report\""))).await;
-    // With handoff_submit as it is now, for a liaison whose tool list is older.
+    // With handoff_submit as it is now, for an agent whose tool list is older.
     let told = events(&view).into_iter().rev().find(|text| text.contains("now forwards \"Bug report\"")).expect("told");
     let both = told.contains(r#""enum":["bug_report","question"]"#) || told.contains(r#""enum":["question","bug_report"]"#);
     assert!(told.contains("through extension_call") && both && !told.contains("task_request"), "{told}");
@@ -193,7 +203,7 @@ async fn each_pipe_forwards_its_own_types_and_a_reader_answers_only_what_a_type_
     assert!(wrong.contains("can be marked accepted, done, declined, known, needs_info"), "{wrong}");
     let done = call(&mut client, &mut view, "ingrid", "handoff_mark", &format!(r#"{{"report": {id}, "status": "done"}}"#)).await;
     assert!(done.ends_with("done."), "{done}");
-    let status = later(&mut client, &mut view, "liaison", "handoff_status", &format!(r#"{{"pipe": "{first}"}}"#)).await;
+    let status = later(&mut client, &mut view, "scout", "handoff_status", &format!(r#"{{"pipe": "{first}"}}"#)).await;
     assert_eq!(status, "#1: done");
     let page = list(&mut client, &mut view, &first).await;
     assert_eq!(page.reports.iter().find(|report| report.number == 1).map(|report| report.state()), Some(v1::PipeReportState::Done));

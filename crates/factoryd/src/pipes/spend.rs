@@ -81,6 +81,7 @@ pub(crate) fn caps(db: &Connection, agent: &str) -> rusqlite::Result<(f64, u64)>
 /// per million tokens; usage is counted by UTC hour, so on a half-hour
 /// time zone the hour that holds midnight counts whole.
 pub(crate) fn spent(factory: &Factory, agent: &str, now: i64) -> rusqlite::Result<Spend> {
+    factory.store.write_calls();
     let (rows, (cap_usd, cap_tokens), resets_ms) = {
         let db = factory.store.db();
         let (midnight, next) = day(&db, now)?;

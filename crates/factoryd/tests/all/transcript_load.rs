@@ -61,13 +61,13 @@ async fn older_segments_show_the_same_without_their_images_data() {
     assert_eq!(shown, ["user: look\n[image]", "user: and this\n[image]", "compaction: What happened", "user: new\n[image]"]);
 
     // The model's context: the newest segment, images and all.
-    let images: Vec<&str> = transcript
+    let images: Vec<String> = transcript
         .messages()
         .iter()
         .filter_map(|message| match message {
             Message::User(user) => match &user.content {
                 UserContent::Parts(parts) => parts.iter().find_map(|part| match part {
-                    UserPart::Image { data, .. } => Some(data.as_str()),
+                    UserPart::Image { data, .. } => data.base64().map(|data| data.to_string()),
                     UserPart::Text { .. } => None,
                 }),
                 UserContent::Text(_) => None,

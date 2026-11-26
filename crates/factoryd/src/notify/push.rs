@@ -40,6 +40,12 @@ const MAX_TITLE: usize = 100;
 const ATTEMPTS: u32 = 3;
 /// How long a push to the relay may take.
 const TIMEOUT: Duration = Duration::from_secs(15);
+/// How many counters a device's push counter is saved ahead by (#36): the
+/// file holds the highest it may reach, saved before any of them is used,
+/// so pushes go on from memory once the disk can't be written (an alert
+/// that it can't), and a restart, or a version from before, starts past
+/// all of them: none is ever used twice.
+const RESERVE: u64 = 64;
 
 /// A device registered for pushes, as kept.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,9 +57,14 @@ struct Registration {
     /// "apns", "apns_sandbox", "fcm" or "".
     #[serde(default)]
     platform: String,
-    /// The last counter sealed into a push to it.
+    /// The highest counter pushes to it may use (`RESERVE`); before, the
+    /// last one sealed, which reads the same.
     #[serde(default)]
     ctr: u64,
+    /// The last counter sealed into a push to it, never past `ctr`; from a
+    /// file just read, `ctr`, so a range that may have been used is skipped.
+    #[serde(skip)]
+    used: u64,
     /// When it registered, in ms since 1970.
     #[serde(default)]
     registered: i64,
@@ -85,13 +96,16 @@ fn path(factory: &Factory) -> PathBuf {
 fn registry(factory: &Factory) -> MutexGuard<'_, Option<BTreeMap<String, Registration>>> {
     let mut registry = factory.notify.push.registry.lock().unwrap_or_else(PoisonError::into_inner);
     if registry.is_none() {
-        let read = match std::fs::read(path(factory)) {
+        let mut read: BTreeMap<String, Registration> = match std::fs::read(path(factory)) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
                 tracing::error!(%error, "notifications.json can't be read; devices register again");
                 BTreeMap::new()
             }),
             Err(_) => BTreeMap::new(),
         };
+        for registration in read.values_mut() {
+            registration.used = registration.ctr;
+        }
         *registry = Some(read);
     }
     registry
@@ -138,13 +152,16 @@ pub(crate) fn register(factory: &Factory, device: &str, request: &v1::RegisterNo
     }
     // Under the same key the counter goes on: the phone drops a push whose
     // counter isn't past the highest it saw. A new key starts again.
-    let registration = Registration {
+    let mut registration = Registration {
         handle: handle.to_owned(),
         ctr: same_key.map_or(0, |before| before.ctr),
+        used: same_key.map_or(0, |before| before.used),
         key,
         platform: platform.to_owned(),
         registered: crate::transcript::now_ms(),
     };
+    // Counters saved ahead, from the start.
+    reserve(&mut registration);
     let before = registrations.insert(device.to_owned(), registration);
     if let Err(error) = save(factory, registrations) {
         match before {
@@ -173,6 +190,11 @@ pub(crate) fn forget(factory: &Factory, device: &str) {
     tracing::info!(%device, "a device no longer gets notifications");
 }
 
+/// Reads the registrations again at the next use, as after a restart.
+pub(crate) fn forget_read(factory: &Factory) {
+    *factory.notify.push.registry.lock().unwrap_or_else(PoisonError::into_inner) = None;
+}
+
 /// Whether `device` gets pushes (PairedDevice.notifications).
 pub(crate) fn registered(factory: &Factory, device: &str) -> bool {
     registry(factory).as_ref().is_some_and(|registrations| registrations.contains_key(device))
@@ -193,7 +215,9 @@ pub(crate) fn queue(factory: &Factory, config: &Config, settings: &super::Notifi
     let relay = relay_of(settings);
     let badge = factory.notify.badge();
     let claktory = config.claktory_name();
-    let mut jobs = Vec::new();
+    let mut jobs: Vec<Job> = Vec::new();
+    // Devices whose counters were saved further ahead, as they were.
+    let mut reserved: Vec<(String, (u64, u64))> = Vec::new();
     {
         let mut registry = registry(factory);
         let registrations = registry.get_or_insert_default();
@@ -206,8 +230,15 @@ pub(crate) fn queue(factory: &Factory, config: &Config, settings: &super::Notifi
                 continue;
             }
             let Some(key) = STANDARD.decode(&registration.key).ok().filter(|key| key.len() == 32) else { continue };
-            registration.ctr += 1;
-            match seal_push(&key, registration.ctr, now, &claktory, badge, notify) {
+            let before = (registration.ctr, registration.used);
+            let Some(ctr) = next_ctr(registration) else {
+                tracing::error!(%device, "a device's notification counter is used up; nothing pushed to it");
+                continue;
+            };
+            if registration.ctr != before.0 {
+                reserved.push((device.clone(), before));
+            }
+            match seal_push(&key, ctr, now, &claktory, badge, notify) {
                 Some(sealed) => jobs.push(Job {
                     relay: relay.clone(),
                     device: device.clone(),
@@ -224,13 +255,112 @@ pub(crate) fn queue(factory: &Factory, config: &Config, settings: &super::Notifi
                 None => tracing::error!(%device, "could not seal a notification"),
             }
         }
-        if (!jobs.is_empty() || !gone.is_empty())
+        if (!reserved.is_empty() || !gone.is_empty())
             && let Err(error) = save(factory, registrations)
         {
-            // Without the counter saved, a later push could repeat it, and
-            // the phone would show it as a replay: send nothing.
-            tracing::error!(%error, "could not save the notification counters; nothing pushed");
-            return 0;
+            // A counter past what's saved could be used again after a
+            // restart, and the phone would drop that push as a replay: those
+            // devices get nothing. The others' counters were saved before.
+            tracing::error!(%error, devices = reserved.len(), "could not save the notification counters; pushed only within those saved");
+            for (device, (ctr, used)) in &reserved {
+                if let Some(registration) = registrations.get_mut(device) {
+                    (registration.ctr, registration.used) = (*ctr, *used);
+                }
+            }
+            jobs.retain(|job| !reserved.iter().any(|(device, _)| *device == job.device));
+        }
+    }
+    let count = jobs.len();
+    if count > 0 {
+        factory.notify.push.outbox.lock().unwrap_or_else(PoisonError::into_inner).extend(jobs);
+        factory.notify.wake();
+    }
+    count
+}
+
+/// The next counter for a push to `registration`, saving further ahead
+/// (`RESERVE`) when the ones saved are used up: the caller saves the file
+/// before the push goes. None once there are none left.
+fn next_ctr(registration: &mut Registration) -> Option<u64> {
+    if registration.used >= registration.ctr && !reserve(registration) {
+        return None;
+    }
+    registration.used += 1;
+    Some(registration.used)
+}
+
+/// Saves `RESERVE` more counters ahead of the last used, once those saved
+/// are used up; false when the counter can't go that far.
+fn reserve(registration: &mut Registration) -> bool {
+    if registration.used < registration.ctr {
+        return true;
+    }
+    match registration.used.checked_add(RESERVE) {
+        Some(ctr) => {
+            registration.ctr = ctr;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Counters saved ahead for every registered device, read now: what an
+/// alert pushes with once nothing can be saved (#36). At start.
+pub(crate) fn prepare(factory: &Factory) {
+    let mut registry = registry(factory);
+    let registrations = registry.get_or_insert_default();
+    let mut before = Vec::new();
+    for (device, registration) in registrations.iter_mut() {
+        let ctr = registration.ctr;
+        reserve(registration);
+        if registration.ctr != ctr {
+            before.push((device.clone(), ctr));
+        }
+    }
+    if !before.is_empty()
+        && let Err(error) = save(factory, registrations)
+    {
+        tracing::warn!(%error, "could not save the notification counters ahead");
+        for (device, ctr) in before {
+            if let Some(registration) = registrations.get_mut(&device) {
+                registration.ctr = ctr;
+            }
+        }
+    }
+}
+
+/// Pushes `notify` to every registered device, whoever is using what,
+/// with counters already saved, writing nothing (#36: the disk can't be
+/// written). Devices without one left get nothing. How many it was queued
+/// for.
+pub(crate) fn emergency(factory: &Factory, settings: &super::NotificationsConfig, claktory: &str, notify: &v1::Notify, now: i64) -> usize {
+    let relay = relay_of(settings);
+    let badge = factory.notify.badge();
+    let mut jobs = Vec::new();
+    {
+        let mut registry = registry(factory);
+        for (device, registration) in registry.get_or_insert_default().iter_mut() {
+            let Some(key) = STANDARD.decode(&registration.key).ok().filter(|key| key.len() == 32) else { continue };
+            if registration.used >= registration.ctr {
+                tracing::warn!(%device, "no notification counter saved ahead for a device; it doesn't get the alert");
+                continue;
+            }
+            registration.used += 1;
+            if let Some(sealed) = seal_push(&key, registration.used, now, claktory, badge, notify) {
+                jobs.push(Job {
+                    relay: relay.clone(),
+                    device: device.clone(),
+                    body: json!({
+                        "handle": registration.handle,
+                        "ciphertext": sealed.ciphertext,
+                        "urgency": "urgent",
+                        "collapse": sealed.collapse,
+                        "thread": sealed.thread,
+                        "ttl": ttl(notify.kind()),
+                    }),
+                    attempts: 0,
+                });
+            }
         }
     }
     let count = jobs.len();
@@ -285,7 +415,7 @@ pub(crate) fn seal_push(key: &[u8], ctr: u64, now: i64, claktory: &str, badge: u
     let title: String = notify.title.chars().take(MAX_TITLE).collect();
     let mut body = notify.body.clone();
     let plaintext = loop {
-        let payload = json!({
+        let mut payload = json!({
             "v": 1,
             "id": notify.id,
             "ctr": ctr,
@@ -299,6 +429,10 @@ pub(crate) fn seal_push(key: &[u8], ctr: u64, now: i64, claktory: &str, badge: u
             "urgent": notify.urgent,
             "target": {"agent": notify.agent_id, "pipe": notify.pipe_id, "chat": notify.chat_id, "seq": notify.seq, "device": notify.device_id},
         });
+        // Only when there's one (W2), so every other push stays as it was.
+        if !notify.share_id.is_empty() {
+            payload["target"]["share"] = serde_json::Value::from(notify.share_id.clone());
+        }
         let bytes = serde_json::to_vec(&payload).ok()?;
         if bytes.len() <= BUCKETS[BUCKETS.len() - 1] {
             break bytes;

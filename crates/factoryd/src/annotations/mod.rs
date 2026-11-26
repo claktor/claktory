@@ -1376,10 +1376,18 @@ pub(crate) fn written(factory: &Factory, agent: &str, folder: &Path, path: &str)
 }
 
 /// Checks the files shown in panes every second, and tells clients of the
-/// ones that changed, with their threads placed again.
+/// ones that changed, with their threads placed again. While no app is
+/// connected, or no pane shows a file, it waits for one (#454); a file
+/// that changed meanwhile is told of at the first look after.
 pub(crate) async fn monitor(factory: Weak<Factory>) {
+    let Some(mut woken) = factory.upgrade().map(|factory| factory.loops_woken()) else { return };
     loop {
-        tokio::time::sleep(POLL_EVERY).await;
+        let Some(looking) = factory.upgrade().map(|factory| factory.clients() > 0 && shows_files(&factory)) else { return };
+        if looking {
+            tokio::time::sleep(POLL_EVERY).await;
+        } else if woken.changed().await.is_err() {
+            return;
+        }
         let Some(strong) = factory.upgrade() else { return };
         if tokio::task::spawn_blocking(move || poll(&strong)).await.is_err() {
             return;
@@ -1387,11 +1395,18 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
     }
 }
 
+/// The kinds of pane that show a file.
+const FILE_PANES: [&str; 4] = ["text", "image", "video", "pdf"];
+
+fn shows_files(factory: &Factory) -> bool {
+    FILE_PANES.iter().any(|kind| !factory.viewer.paths(kind).is_empty())
+}
+
 fn poll(factory: &Factory) {
-    let mut paths = factory.viewer.paths("text");
-    paths.extend(factory.viewer.paths("image"));
-    paths.extend(factory.viewer.paths("video"));
-    paths.extend(factory.viewer.paths("pdf"));
+    let mut paths = std::collections::HashSet::new();
+    for kind in FILE_PANES {
+        paths.extend(factory.viewer.paths(kind));
+    }
     let mut changed = Vec::new();
     {
         let mut seen = guard(&factory.annotations.seen);

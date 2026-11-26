@@ -48,7 +48,7 @@ class ShareIntake(
      * with no text and no file it can take still comes, with its error, so
      * the app can say so rather than show nothing.
      */
-    fun plan(text: String?, subject: String?, uris: List<String>): Plan? {
+    fun plan(text: String?, subject: String?, uris: List<String>, leftOut: String? = null): Plan? {
         val (kept, cut) = cap(text, MAX_TEXT)
         val title = cap(subject, MAX_SUBJECT).first
         var error: String? = null
@@ -58,6 +58,11 @@ class ShareIntake(
                 emptyList()
             }
             else -> uris.filter { readable(it) }.also { if (it.size < uris.size) error = REFUSED }
+        }
+        // What ShareActivity left out before the share reached the app.
+        when (leftOut) {
+            TOO_MANY -> error = TOO_MANY
+            REFUSED -> if (error == null) error = REFUSED
         }
         if (kept == null && files.isEmpty() && error == null) return null
         return Plan(kept, cut, title, files, error)
@@ -223,7 +228,8 @@ class SharedChannel(
         } ?: return false
         val token = intent.getStringExtra(ShareActivity.EXTRA_TOKEN)
         if (token != null && !taken.add(token)) return true
-        val plan = intake.plan(shared.text, shared.subject, shared.uris.map { it.toString() }) ?: return true
+        val leftOut = runCatching { intent.getStringExtra(ShareActivity.EXTRA_LEFT_OUT) }.getOrNull()
+        val plan = intake.plan(shared.text, shared.subject, shared.uris.map { it.toString() }, leftOut) ?: return true
         val id = ++next
         val resolver = activity.contentResolver
         val uris = shared.uris.filter { it.toString() in plan.uris }
@@ -369,34 +375,90 @@ class SharedChannel(
 class ShareActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val forward = try {
-            intent?.let { forward(this, it) }
-        } catch (error: Exception) {
-            null
+        val incoming = intent
+        if (incoming != null) {
+            // The grants are checked as the files are left out, but a share
+            // that still can't be passed on (a grant that ended between the
+            // two, say) comes without its files, and never ends the app.
+            pass(incoming) { forward(this, it, ::readable) } || pass(incoming) { forward(this, it) { false } }
         }
-        if (forward != null) startActivity(forward)
         finish()
+    }
+
+    /** [forward] made and started: false when either failed. */
+    private fun pass(incoming: Intent, forward: (Intent) -> Intent?): Boolean = try {
+        forward(incoming)?.let(::startActivity)
+        true
+    } catch (error: Exception) {
+        false
+    }
+
+    /**
+     * Whether this app may read [uri] now, as passing it on needs: a grant
+     * (the sharing app's, usually), or a provider anyone may read. A file
+     * the sharing app didn't let Claktory read can't be passed on: the
+     * system refuses the whole forward, which took the app down (Sale's
+     * defect, #193).
+     */
+    private fun readable(uri: Uri): Boolean = try {
+        val read = Intent.FLAG_GRANT_READ_URI_PERMISSION
+        val pid = android.os.Process.myPid()
+        val uid = android.os.Process.myUid()
+        when {
+            checkUriPermission(uri, pid, uid, read) == android.content.pm.PackageManager.PERMISSION_GRANTED -> true
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM ->
+                checkContentUriPermissionFull(uri, pid, uid, read) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            else -> {
+                val provider = uri.authority?.let { packageManager.resolveContentProvider(it, 0) }
+                provider != null && provider.exported && provider.readPermission == null &&
+                    provider.pathPermissions.isNullOrEmpty() &&
+                    (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || !provider.forceUriPermissions)
+            }
+        }
+    } catch (error: Exception) {
+        false
     }
 
     companion object {
         const val EXTRA_TOKEN = "com.claktory.SHARE_TOKEN"
 
-        fun forward(context: Context, incoming: Intent): Intent? {
+        /**
+         * Left out by [ShareActivity]: too_many when there were more files
+         * than the app takes (none passed on), refused when some couldn't
+         * be read. The app says so as for its own refusals.
+         */
+        const val EXTRA_LEFT_OUT = "com.claktory.SHARE_LEFT_OUT"
+
+        /**
+         * The app's screen's intent for [incoming], with only the files
+         * [readable] lets through: a file the sharing app gave no access to
+         * can't be passed on, and would stop the whole share.
+         */
+        fun forward(context: Context, incoming: Intent, readable: (Uri) -> Boolean): Intent? {
             val shared = SharedChannel.Shared.read(incoming) ?: return null
+            var leftOut: String? = null
+            val uris = when {
+                shared.uris.size > ShareIntake.MAX_FILES -> {
+                    leftOut = ShareIntake.TOO_MANY
+                    emptyList()
+                }
+                else -> shared.uris.filter(readable).also { if (it.size < shared.uris.size) leftOut = ShareIntake.REFUSED }
+            }
             val out = Intent(context, MainActivity::class.java)
                 .setAction(incoming.action)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
                 .putExtra(EXTRA_TOKEN, java.util.UUID.randomUUID().toString())
             shared.text?.let { out.putExtra(Intent.EXTRA_TEXT, it) }
             shared.subject?.let { out.putExtra(Intent.EXTRA_SUBJECT, it) }
-            if (shared.uris.isNotEmpty()) {
+            leftOut?.let { out.putExtra(EXTRA_LEFT_OUT, it) }
+            if (uris.isNotEmpty()) {
                 if (incoming.action == Intent.ACTION_SEND) {
-                    out.putExtra(Intent.EXTRA_STREAM, shared.uris.first())
+                    out.putExtra(Intent.EXTRA_STREAM, uris.first())
                 } else {
-                    out.putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(shared.uris))
+                    out.putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
                 }
-                val clip = ClipData.newRawUri("", shared.uris.first())
-                shared.uris.drop(1).forEach { clip.addItem(ClipData.Item(it)) }
+                val clip = ClipData.newRawUri("", uris.first())
+                uris.drop(1).forEach { clip.addItem(ClipData.Item(it)) }
                 out.clipData = clip
                 // Read only: nothing writable or persistable is passed on, whatever came in.
                 out.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)

@@ -27,6 +27,9 @@
 //!   drafts to 20 an hour a grant; wakes for a conversation wait until the
 //!   agent has read the last one, and come at most 20 an hour an agent.
 
+// H2, H3 and H5 call it as they land (#451).
+#[allow(dead_code)]
+pub(crate) mod home;
 pub(crate) mod leaf;
 mod pace;
 pub(crate) mod process;
@@ -117,8 +120,12 @@ pub(crate) struct Dms;
 #[derive(Default)]
 pub(crate) struct Wakes {
     pub(super) process: Arc<tokio::sync::Notify>,
-    pub(super) watch: Arc<tokio::sync::Notify>,
     pub(super) sends: Arc<tokio::sync::Notify>,
+    /// Friends' messages the leaf kept, for `watch::followers`.
+    pub(super) heard: std::sync::Mutex<Vec<(String, i64, i64)>>,
+    pub(super) followers: Arc<tokio::sync::Notify>,
+    /// What agents follow, as `watch::followers` keeps it, is stale.
+    pub(super) follows_changed: AtomicBool,
 }
 
 static PREVIEW: AtomicBool = AtomicBool::new(false);
@@ -354,8 +361,6 @@ pub(crate) struct Conversation {
     pub with: Peer,
     #[serde(default)]
     pub active: bool,
-    #[serde(default)]
-    pub last_seq: i64,
     /// Messages sent from then on can be read (the grant's start).
     #[serde(default)]
     pub from_ms: i64,
@@ -582,8 +587,12 @@ async fn read_messages(factory: &Arc<Factory>, agent: &str, args: ReadArgs) -> R
         let mut text = String::from("The conversations you can reach (names as the other person chose them):");
         for conversation in &listed {
             let state = if conversation.active { "ongoing" } else { "ended" };
-            let _ =
-                write!(text, "\n- {}: with {}, {state}, last message #{}", conversation.id, who(&conversation.with), conversation.last_seq);
+            let _ = write!(text, "\n- {}: with {}, {state}", conversation.id, who(&conversation.with));
+            // The service doesn't see the messages (#451): the last one
+            // this Claktory kept.
+            if let Some(last) = last_kept(factory, &conversation.group_id) {
+                let _ = write!(text, ", last message #{last}");
+            }
             if conversation.from_ms > 0 {
                 let _ = write!(text, "; you see messages from {} on", day(conversation.from_ms));
             }
@@ -640,6 +649,12 @@ async fn read_messages(factory: &Arc<Factory>, agent: &str, args: ReadArgs) -> R
             (_, false) => them.clone(),
             (_, true) => format!("{them} · an agent"),
         };
+        // Said by a device its person has since taken out (row 561).
+        let writer = if message.body.get("from_removed_device") == Some(&Value::Bool(true)) {
+            format!("{writer} · from a device since removed")
+        } else {
+            writer
+        };
         let text = message.body.get("text").and_then(Value::as_str).unwrap_or("(a message this Claktory can't show)");
         let _ = write!(body, "#{} {writer}, {}:\n{}\n", message.seq, day(message.accepted_ms), crate::pipes::agents::escape(text));
     }
@@ -651,6 +666,15 @@ async fn read_messages(factory: &Arc<Factory>, agent: &str, args: ReadArgs) -> R
         let _ = write!(text, "\nThere are more: read with before {first} for earlier ones, or after {last} for later ones.");
     }
     Ok(ToolResult::text(text, json!({})))
+}
+
+/// The last message this Claktory kept of a conversation's group, if any.
+fn last_kept(factory: &Factory, group_id: &str) -> Option<i64> {
+    use base64::Engine as _;
+    let group_id = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(group_id).ok()?;
+    leaf::step(factory, |step| Ok(step.db().query_row("SELECT MAX(seq) FROM history WHERE group_id = ?1", [&group_id], |row| row.get(0))?))
+        .ok()
+        .flatten()
 }
 
 /// A page of a conversation from this Claktory's own store, as the
@@ -702,7 +726,12 @@ fn local_page(factory: &Factory, entry: &Conversation, after: Option<i64>, befor
                 from: from.to_owned(),
                 by_agent: !content["by_agent"].is_null(),
                 accepted_ms: accepted,
-                body: json!({"text": content["text"]}),
+                body: if row["departed"] == json!(true) {
+                    // Said by a device its person has since taken out (row 561).
+                    json!({"text": content["text"], "from_removed_device": true})
+                } else {
+                    json!({"text": content["text"]})
+                },
             });
         }
         messages.sort_by_key(|message| message.seq);
@@ -793,16 +822,19 @@ struct SealedDraft<'a> {
     text: &'a str,
 }
 
-/// Seals `draft` in this Claktory's channel and keeps it at the service.
-/// Refused as out of date (the channel's epoch moved on, or the
-/// friendship's generation), it's made again once, after catching up.
+/// Seals `draft` in this Claktory's channel, keeps its digest at the
+/// service and sends it into the channel through the person's home (#451).
+/// Refused as out of date (the friendship's generation), or bounced by the
+/// home (the channel's epoch moved on), it's made again once, after
+/// catching up.
 /// Err(Ok(words)) when the leaf can't, Err(Err(problem)) when the service refused.
 async fn sealed_draft(factory: &Arc<Factory>, route: &str, draft: &SealedDraft<'_>) -> Result<Vec<u8>, Result<String, Problem>> {
     let person = factory.lock().config.person_capitalized().to_owned();
     let mut again = true;
     let mut generation = draft.generation;
+    let mut bounced = false;
     loop {
-        let envelope = leaf::step(factory, |step| {
+        let (envelope, leaf_id, channel) = leaf::step(factory, |step| {
             let content = claktory_dm_crypto::content::Content {
                 v: claktory_dm_crypto::content::VERSION,
                 kind: claktory_dm_crypto::content::kind::AGENT_DRAFT.to_owned(),
@@ -822,10 +854,16 @@ async fn sealed_draft(factory: &Arc<Factory>, route: &str, draft: &SealedDraft<'
                 .into_iter()
                 .collect(),
             };
-            step.channel_send(&content)
+            let envelope = step.channel_send(&content)?;
+            let channel = step.channel()?.1.group_id().to_vec();
+            Ok((envelope, step.leaf()?.me.certificate.leaf.leaf_id, channel))
         })
         .map_err(|error| Ok(error.words(&person)))?;
-        let body = json!({"contact_generation": generation, "envelope": envelope.to_json()});
+        let body = json!({
+            "contact_generation": generation,
+            "draft_digest": crate::encoding::hex(&envelope.digest()),
+            "agent_name": sends::service_name(draft.agent_name),
+        });
         match factory.account.dms("PUT", route, &[], Some(draft.actor), Some(body), None).await {
             Err(Problem::Refused(409, _)) if again => {
                 again = false;
@@ -834,6 +872,14 @@ async fn sealed_draft(factory: &Arc<Factory>, route: &str, draft: &SealedDraft<'
                 conversations(factory, draft.actor).await.map_err(Ok)?;
                 generation = peer_of(factory, draft.conversation).map_or(generation, |(_, generation)| generation);
             }
+            Ok(answer) => match sends::to_home(factory, &channel, &leaf_id, envelope).map_err(Ok)? {
+                sends::AtHome::Taken => return Ok(answer),
+                sends::AtHome::Bounced if !bounced => {
+                    bounced = true;
+                    leaf::catch_up_channel(factory).await.map_err(|error| Ok(error.words(&person)))?;
+                }
+                sends::AtHome::Bounced => return Err(Ok(sends::home_words(factory))),
+            },
             answer => return answer.map_err(Err),
         }
     }

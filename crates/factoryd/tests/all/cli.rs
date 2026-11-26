@@ -177,7 +177,7 @@ async fn a_device_paired_without_a_name_gives_its_own_and_is_allowed_by_its_digi
     assert_eq!(
         bare.text,
         format!(
-            "A device calling itself \"Matt's MacBook\" is waiting. Allow it only if its screen shows the number you type: factoryd allow {id} --number <the 4 digits on its screen>."
+            "A device calling itself \"Matt's MacBook\" is waiting. Allow it only if its screen shows the number you type: in a terminal on this computer, run factoryd allow {id} and type the 4 digits on its screen. Over SSH, connect with ssh -t, or it isn't a terminal."
         )
     );
     assert!(!bare.text.contains(&shows) && !bare.json.to_string().contains(&format!("\"{shows}\"")));
@@ -205,10 +205,18 @@ async fn a_device_paired_without_a_name_gives_its_own_and_is_allowed_by_its_digi
         format!("allow {second_id} --number {shows} --json"),
         format!("allow {second_id} --json"),
         format!("allow {second_id} --number {shows}"),
+        format!("allow {second_id} --number {shows} --no-wait"),
     ] {
         let refused = cli(&dir, addr, &line, "").await;
         assert_eq!((refused.exit, refused.json["error"].as_str()), (Exit::Refused, Some("has_devices")), "{line}: {refused:?}");
         assert_eq!(refused.text, factoryd::cli::HAS_DEVICES);
+    }
+    // At a terminal too, --no-wait or --json is a program's (Fugo 35297).
+    for line in [format!("allow {second_id} --number {shows} --no-wait"), format!("allow {second_id} --number {shows} --json")] {
+        let mut flags = Flags::parse(&shell_words(&line)).expect("ours");
+        flags.interactive = true;
+        let refused = run(&Instance { home: home(&dir), addr }, &flags, String::new).await;
+        assert_eq!(refused.json["error"].as_str(), Some("has_devices"), "{line}: {refused:?}");
     }
     let waiting = ok(&cli(&dir, addr, "devices --json", "").await).clone();
     assert!(
@@ -218,9 +226,19 @@ async fn a_device_paired_without_a_name_gives_its_own_and_is_allowed_by_its_digi
             .iter()
             .any(|device| device["id"] == second_id.as_str() && device["state"] == "waiting")
     );
-    let mut flags = Flags::parse(&shell_words(&format!("allow {second_id} --number {shows}"))).expect("ours");
-    flags.interactive = true;
-    let allowed = run(&Instance { home: home(&dir), addr }, &flags, String::new).await;
+    // A person at a terminal (ssh -t) who leaves the digits out is asked
+    // for them (Matt's case, Fugo 35297): the backend still checks them.
+    let at_terminal = |typed: &str| {
+        let mut flags = Flags::parse(&shell_words(&format!("allow {second_id}"))).expect("ours");
+        flags.interactive = true;
+        flags.typed = Some(typed.to_owned());
+        flags
+    };
+    let other = if shows == "0000" { "0001" } else { "0000" };
+    let wrong = run(&Instance { home: home(&dir), addr }, &at_terminal(other), String::new).await;
+    assert_eq!((wrong.exit, wrong.json["error"].as_str()), (Exit::Refused, Some("wrong_number")), "{wrong:?}");
+    assert_eq!(wrong.text, "That's not the number iPad shows. 2 tries left.");
+    let allowed = run(&Instance { home: home(&dir), addr }, &at_terminal(&shows), String::new).await;
     assert_eq!(ok(&allowed)["allowed"].as_str(), Some(second_id.as_str()));
     assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
 }
@@ -244,6 +262,8 @@ async fn factoryd_pair_without_a_name_makes_a_code_the_device_names() {
     let printed = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success(), "{printed}{}", String::from_utf8_lossy(&output.stderr));
     assert!(printed.contains("factory://?t="), "{printed}");
+    // No terminal (Matt's ssh without -t): how to be asked for the digits.
+    assert!(printed.contains("run factoryd allow") && printed.contains("connect with ssh -t"), "{printed}");
     let devices = factoryd::remote::devices(&home(&dir)).expect("devices");
     let made = devices.iter().find(|device| !device.local).expect("a device");
     assert_eq!((made.name.as_str(), made.unnamed), ("New device", true));
@@ -283,7 +303,7 @@ fn factoryd_devices_prints_no_number_and_no_escapes() {
     let shown = factoryd::remote::shown_name(name);
     assert_eq!(
         printed,
-        format!("first  A device calling itself \"{shown}\" is waiting. Allow it only if its screen shows the number you type: factoryd allow first --number <the 4 digits on its screen>.\n")
+        format!("first  {}\n", factoryd::cli::waiting_sentence("first", &shown))
     );
     let claktory = factoryd::remote::secret_key(&home).expect("key").public().to_string();
     let number = factoryd::remote::approval_number(&claktory, "e-first", &"00".repeat(32));

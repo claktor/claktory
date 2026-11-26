@@ -149,8 +149,10 @@ struct AnswerHead {
 }
 
 /// The statuses an answer may have; any other is the worker's failure.
-/// 401 isn't one: only the root says who's signed in.
-const STATUSES: &[u16] = &[200, 201, 202, 204, 400, 403, 404, 409, 410, 413, 422, 429, 503];
+/// 401 isn't one: only the root says who's signed in. 507: the disk is
+/// nearly full, so no new DM is kept (`dms::space`); a service from before
+/// it answers 503 instead.
+const STATUSES: &[u16] = &[200, 201, 202, 204, 400, 403, 404, 409, 410, 413, 422, 429, 503, 507];
 
 /// Whether the root may pass on an answer: a status of `STATUSES` and a JSON
 /// body (empty only with 204), so an app can't make the service serve a

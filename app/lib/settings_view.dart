@@ -15,6 +15,7 @@ import 'controls.dart';
 import 'devices.dart';
 import 'diagnostics.dart' show DiagnosticsSettings;
 import 'find.dart' show RenderedFindScope;
+import 'forms.dart' show FittedHeading;
 import 'identity.dart';
 import 'keep_awake_card.dart'
     show keepAwakeHolding, keepAwakeLabel, keepAwakeNote, keepAwakeOnBattery;
@@ -42,6 +43,8 @@ import 'secrets.dart';
 import 'transcript.dart';
 import 'tell_rivet.dart';
 import 'update_check.dart' show UpdateCheckRow;
+import 'viewers/file_cache.dart' show keepsFiles;
+import 'viewers/file_cache_setting.dart' show FileCacheSetting;
 import 'selection.dart';
 import 'voice.dart' show VoiceSettings, voiceKnown;
 import 'zoom.dart' show ZoomSetting;
@@ -319,6 +322,15 @@ List<SettingsSection> settingsSectionsOf(
         _Highlights(workspace: workspace),
       ],
     ),
+    // The files this device keeps from a Claktory on another machine
+    // (#446): how much, and Clear.
+    if (keepsFiles(AppScope.of(context)))
+      SettingsSection(
+        title: 'Storage',
+        group: 3,
+        glyph: lucide('database'),
+        children: const [FileCacheSetting()],
+      ),
     // Advanced diagnostics, from a backend that records them.
     if (workspace.hasDiagnostics())
       SettingsSection(
@@ -463,7 +475,9 @@ class _SectionRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final large = largeText(context);
-    final title = Text(
+    // Never broken inside a word ("Notification / s" at the largest
+    // text on an iPhone SE, Zucchero's row 510): drawn smaller to fit.
+    final title = FittedHeading(
       section.title,
       style: PhoneType.body.copyWith(color: palette.text),
     );
@@ -1628,7 +1642,7 @@ class _EngineState extends State<_Engine> with SettingRequests {
       context,
       title: 'Turn off Claktory?',
       message: stopEngineMessage,
-      actions: const [SheetAction('Turn Off', true, destructive: true)],
+      actions: const [SheetAction('Turn off', true, destructive: true)],
     );
     if (sure != true || !mounted) return;
     await run(() => backend.stopEngine(quitting: false));
@@ -1796,162 +1810,82 @@ class _KeepAwakeState extends State<_KeepAwake> with SettingRequests {
 }
 
 /// Keeping a laptop's agents working with its lid closed (#371,
-/// lid_closed.dart): on a laptop that can (KeepAwake.lid_closed_available),
-/// and on the Mac itself only when this app carries the helper. Turning it
-/// on asks first and works only on the Mac; off works anywhere. Its line
-/// says where the helper stands, with what to do about it on the Mac.
+/// lid_closed.dart): on a laptop that can (KeepAwake.lid_closed_available).
+/// Turning it on asks first and works only on the Mac; off works anywhere.
+/// Its line says where it stands; STUCK (the Mac can't sleep with its lid
+/// closed although Claktory isn't keeping it awake) shows even where the
+/// switch doesn't, with what fixes it.
 class LidClosedSetting extends StatefulWidget {
   const LidClosedSetting({super.key, required this.keep});
 
   final KeepAwake keep;
 
-  /// Shown at all: a laptop that can.
-  static bool offered(KeepAwake keep) => keep.laptop && keep.lidClosedAvailable;
+  /// Shown at all: a laptop that can, or one that's stuck.
+  static bool offered(KeepAwake keep) =>
+      keep.lidClosed == LidClosedState.LID_CLOSED_STUCK ||
+      (keep.laptop && keep.lidClosedAvailable);
 
   @override
   State<LidClosedSetting> createState() => _LidClosedSettingState();
 }
 
-class _LidClosedSettingState extends State<LidClosedSetting> {
+class _LidClosedSettingState extends State<LidClosedSetting>
+    with SettingRequests {
   late final Backend _backend = AppScope.of(context);
-
-  /// What macOS says of this app's helper: asked only on the Mac it's
-  /// installed from; null until then.
-  LidHelperStatus? _status;
-  var _busy = false;
-  String? _failure;
-
-  bool get _here => lidClosedHere(_backend);
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _here) unawaited(_read());
-    });
-  }
-
-  @override
-  void didUpdateWidget(LidClosedSetting old) {
-    super.didUpdateWidget(old);
-    // Where it stands changed (approved, removed): macOS asked again.
-    if (old.keep.lidClosed != widget.keep.lidClosed && _here) {
-      unawaited(_read());
-    }
-  }
-
-  Future<void> _read() async {
-    final status = await lidHelper.status();
-    if (mounted) setState(() => _status = status);
-  }
-
-  Future<void> _run(Future<void> Function() change) async {
-    setState(() {
-      _busy = true;
-      _failure = null;
-    });
-    try {
-      await change();
-    } on RequestFailure catch (failure) {
-      if (mounted) setState(() => _failure = failure.message);
-    } on LidHelperFailure catch (failure) {
-      if (mounted) setState(() => _failure = failure.message);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-      if (mounted && _here) unawaited(_read());
-    }
-  }
 
   void _turn(bool on) => on
       ? unawaited(askLidClosed(context, _backend))
-      : unawaited(_run(() => removeLidHelper(_backend)));
+      : unawaited(run(() => _backend.setLidClosed(on: false)));
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final keep = widget.keep;
-    final on = keep.lidClosed != LidClosedState.LID_CLOSED_OFF;
-    final here = _here;
-    // On the Mac, a build with no helper (Claktory Dev, ad hoc) leaves it
-    // out, unless it's on and has to be turned off.
-    if (here && !on && !(_status?.present ?? false)) {
-      return const SizedBox.shrink();
-    }
-    final status = lidClosedStatus(_backend, keep, here: here);
-    final openLoginItems = (
-      'Open Login Items',
-      () => unawaited(lidHelper.openLoginItems()),
-    );
-    final install = (
-      'Install again',
-      () => unawaited(_run(() => installLidHelper(_backend))),
-    );
-    // A helper macOS refused once stays off in Login Items until the person
-    // turns it on there again (Pericolo's spike): missing, that's offered
-    // before installing it again.
-    final actions = !here || _busy
-        ? const <(String, VoidCallback)>[]
-        : switch (keep.lidClosed) {
-            LidClosedState.LID_CLOSED_NEEDS_APPROVAL => [openLoginItems],
-            LidClosedState.LID_CLOSED_MISSING => [openLoginItems, install],
-            LidClosedState.LID_CLOSED_OUTDATED => [install],
-            LidClosedState.LID_CLOSED_FAILED => [
-              (
-                'Try again',
-                () => unawaited(_run(() => installLidHelper(_backend))),
-              ),
-            ],
-            _ => const <(String, VoidCallback)>[],
-          };
+    final stuck = keep.lidClosed == LidClosedState.LID_CLOSED_STUCK;
+    final on = lidClosedTurnedOn(keep);
+    // Shown where it can be turned on, and wherever it's on, so off is
+    // always there.
+    final switchShown = (keep.laptop && keep.lidClosedAvailable) || on;
+    final here = lidClosedHere(_backend);
+    final status = lidClosedStatus(_backend, keep);
     const indent = EdgeInsets.only(left: 28 + Space.m);
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        _Switch(
-          label: lidClosedLabel,
-          note: here || on ? lidClosedNote : lidClosedFromMac,
-          value: on,
-          // Turned on only on the Mac; off from anywhere.
-          onChanged: _busy || (!here && !on) ? null : _turn,
-        ),
-        if (status != null) ...[
+        if (switchShown)
+          _Switch(
+            label: lidClosedLabel,
+            note: here || on ? lidClosedNote : lidClosedFromMac,
+            value: on,
+            // Turned on only on the Mac; off from anywhere.
+            onChanged: !here && !on ? null : _turn,
+          ),
+        if (status != null && !stuck) ...[
           const SizedBox(height: Space.xs),
           Padding(
             padding: indent,
-            child: status.failed
-                ? ErrorLine(status.text, about: 'In Settings → General:')
-                : Text(
-                    status.text,
-                    style: TypeScale.of(context).caption.copyWith(
-                      color: status.holding
-                          ? palette.signal
-                          : palette.textMuted,
-                    ),
-                  ),
-          ),
-        ],
-        if (actions.isNotEmpty) ...[
-          const SizedBox(height: Space.s),
-          Padding(
-            padding: indent,
-            child: Wrap(
-              spacing: Space.s,
-              runSpacing: Space.s,
-              children: [
-                for (final (label, onPressed) in actions)
-                  Button(label: label, onPressed: onPressed),
-              ],
+            child: Text(
+              status.text,
+              style: TypeScale.of(context).caption.copyWith(
+                color: status.failed
+                    ? palette.danger
+                    : status.holding
+                    ? palette.signal
+                    : palette.textMuted,
+              ),
             ),
           ),
         ],
-        if (_failure case final failure?) ...[
-          const SizedBox(height: Space.xs),
+        if (stuck) ...[
+          if (switchShown) const SizedBox(height: Space.s),
           Padding(
-            padding: indent,
-            child: ErrorLine(failure, about: 'In Settings → General:'),
+            padding: switchShown ? indent : EdgeInsets.zero,
+            child: LidClosedStuck(keep: keep),
           ),
         ],
+        if (failure != null)
+          Padding(padding: indent, child: failureLine(palette)),
       ],
     );
   }

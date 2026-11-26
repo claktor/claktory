@@ -1,148 +1,121 @@
-//! Waking agents that follow a direct-message conversation (dm_subscribe):
-//! while any agent here holds a grant that may follow one, this Claktory
-//! long-polls the account's message events (`GET …/dms/agent/events`,
-//! up to 25 seconds a call). The service answers only messages from the
-//! other person, in conversations an agent follows with a live grant to
-//! read and follow them, sent after the grant began; ids only, never the
-//! text. Each call is this Claktory's own, authenticated afresh, so a
-//! delivery is checked against its registration as it is then.
+//! Waking agents that follow a direct-message conversation (dm_subscribe).
+//! claktory.com never sees the messages (#451: they go through the
+//! person's home), so the wakes come from this Claktory's leaf: each
+//! friend's message it keeps wakes the agents here that follow that
+//! conversation, as the service lists them for each agent (its live grant
+//! to read and follow it, `subscribed`, and the grant's start), asked again
+//! at most once a minute an agent, and at once after a grant or a follow
+//! changes here.
 //!
 //! An event wakes its agent once a conversation until the agent has read
 //! that far (dm_read), at most 20 times an hour an agent, and only an agent
 //! that is still the one the grant was given to and has Direct messages on.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use rusqlite::{OptionalExtension, params};
-use serde::Deserialize;
 
 use super::{APP, ID, peer_of, who};
-use crate::account::apps::{Actor, Problem};
+use crate::account::apps::Actor;
 use crate::factory::{Factory, host_event};
 use crate::transcript::now_ms;
 
-/// How long the service may hold a call, and how long this side waits for
-/// its answer.
-const WAIT: u64 = 25;
-const CALL: Duration = Duration::from_secs(WAIT + 15);
-/// Between looks while nothing is followed.
-const IDLE: Duration = Duration::from_secs(60);
 /// Wakes an agent gets an hour from messages, at most.
 const WAKES_AN_HOUR: i64 = 20;
 
-/// Something changed (a grant, a subscription): look again now.
+/// How long what an agent follows, as the service listed it, is used
+/// before asking again.
+const FOLLOWS_FOR: Duration = Duration::from_secs(60);
+
+/// Something changed (a grant, a subscription): ask the service again.
 pub(crate) fn wake(factory: &Factory) {
-    factory.dm_wakes.watch.notify_waiters();
+    factory.dm_wakes.follows_changed.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-#[derive(Deserialize)]
-struct Events {
-    #[serde(default)]
-    events: Vec<Event>,
-    next_cursor: String,
+/// Friends' messages the leaf kept, (conversation, seq, accepted ms): their
+/// followers here are woken (`followers`).
+pub(crate) fn heard(factory: &Factory, heard: Vec<(String, i64, i64)>) {
+    factory.dm_wakes.heard.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend(heard);
+    factory.dm_wakes.followers.notify_one();
 }
 
-#[derive(Deserialize)]
+/// Wakes the agents following the conversations of the friends' messages
+/// the leaf keeps.
+async fn followers(factory: Weak<Factory>) {
+    let mut follows: HashMap<String, (tokio::time::Instant, Vec<super::Conversation>)> = HashMap::new();
+    loop {
+        let Some(strong) = factory.upgrade() else { return };
+        let wake = strong.dm_wakes.followers.clone();
+        let heard = std::mem::take(&mut *strong.dm_wakes.heard.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        if heard.is_empty() {
+            drop(strong);
+            wake.notified().await;
+            continue;
+        }
+        if strong.dm_wakes.follows_changed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            follows.clear();
+        }
+        for agent in following(&strong) {
+            let Some(incarnation) = crate::user_apps::current_incarnation(&strong.home, &agent) else { continue };
+            let actor = Actor { id: agent.clone(), incarnation };
+            let fresh = follows.get(&agent).is_some_and(|(at, _)| at.elapsed() < FOLLOWS_FOR);
+            if !fresh {
+                match super::conversations(&strong, &actor).await {
+                    Ok(listed) => {
+                        follows.insert(agent.clone(), (tokio::time::Instant::now(), listed));
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "what an agent follows wasn't listed");
+                        follows.remove(&agent);
+                        continue;
+                    }
+                }
+            }
+            let Some((_, listed)) = follows.get(&agent) else { continue };
+            for (conversation, seq, accepted_ms) in &heard {
+                let follows_it = listed
+                    .iter()
+                    .any(|listed| listed.id == *conversation && listed.subscribed && listed.active && *accepted_ms >= listed.from_ms);
+                if follows_it {
+                    deliver(&strong, &Event { agent: actor.clone(), conversation_id: conversation.clone(), seq: *seq });
+                }
+            }
+        }
+    }
+}
+
+/// The agents here with a live grant that may follow a conversation, as
+/// the mirror has it.
+fn following(factory: &Factory) -> Vec<String> {
+    let db = factory.store.db();
+    let listed = (|| -> rusqlite::Result<Vec<String>> {
+        let mut statement = db.prepare(
+            "SELECT DISTINCT agent FROM app_grants WHERE app = ?1 AND scopes LIKE '%\"dm.subscribe\"%' AND (expires = 0 OR expires > ?2)",
+        )?;
+        statement.query_map(params![APP, now_ms()], |row| row.get(0))?.collect()
+    })();
+    listed.unwrap_or_default()
+}
+
+/// A friend's message an agent follows.
 struct Event {
     agent: Actor,
     conversation_id: String,
     seq: i64,
 }
 
-/// Whether an agent here may follow a conversation, as the mirror has it.
-fn wanted(factory: &Factory) -> bool {
-    let db = factory.store.db();
-    db.query_row(
-        "SELECT EXISTS (SELECT 1 FROM app_grants WHERE app = ?1 AND scopes LIKE '%\"dm.subscribe\"%' AND (expires = 0 OR expires > ?2))",
-        params![APP, now_ms()],
-        |row| row.get(0),
-    )
-    .unwrap_or(false)
-}
-
-fn cursor(factory: &Factory) -> Option<String> {
-    factory.store.db().query_row("SELECT cursor FROM dm_watch WHERE id = 1", [], |row| row.get(0)).optional().ok().flatten()
-}
-
-fn keep_cursor(factory: &Factory, cursor: Option<&str>) {
-    let db = factory.store.db();
-    let kept = match cursor {
-        Some(cursor) => db.execute("INSERT OR REPLACE INTO dm_watch (id, cursor) VALUES (1, ?1)", [cursor]),
-        None => db.execute("DELETE FROM dm_watch", []),
-    };
-    if let Err(error) = kept {
-        tracing::warn!(%error, "couldn't keep where the direct-message events are");
-    }
-}
-
+/// Starts the direct-message loops (in the preview only) and wakes the
+/// agents following what the leaf keeps.
 pub(crate) async fn monitor(factory: Weak<Factory>) {
     if !super::preview() {
         return;
     }
     tokio::spawn(super::sends::monitor(factory.clone()));
     tokio::spawn(super::process::monitor(factory.clone()));
-    crate::network::ready().await;
-    let mut backoff = Duration::from_secs(30);
-    let mut pace = super::pace::Pace::default();
-    loop {
-        let Some(strong) = factory.upgrade() else { return };
-        let wake = strong.dm_wakes.watch.clone();
-        if !wanted(&strong) || strong.account.signed_in_as(&strong.lock().config.account).is_none() {
-            drop(strong);
-            tokio::select! {
-                () = tokio::time::sleep(IDLE) => {}
-                () = wake.notified() => {}
-            }
-            continue;
-        }
-        let asked = tokio::time::Instant::now();
-        let wait = Duration::from_secs(WAIT);
-        let pause = match poll(&strong).await {
-            Ok(nothing) => {
-                backoff = Duration::from_secs(30);
-                // Not held at the worker: not again at once.
-                pace.after(super::pace::early(wait, asked.elapsed(), nothing), wait)
-            }
-            Err(Problem::Refused(410, _)) => {
-                // Too far behind: start again from now.
-                keep_cursor(&strong, None);
-                None
-            }
-            Err(problem) => {
-                tracing::debug!(?problem, "the direct-message events weren't read");
-                let pause = backoff;
-                backoff = (backoff * 2).min(Duration::from_secs(300));
-                Some(pause)
-            }
-        };
-        drop(strong);
-        if let Some(pause) = pause {
-            tokio::select! {
-                () = tokio::time::sleep(pause) => {}
-                () = wake.notified() => {}
-            }
-        }
-    }
-}
-
-/// One call: where the events are now, or what happened after the cursor;
-/// whether it was a long poll that answered nothing.
-async fn poll(factory: &Arc<Factory>) -> Result<bool, Problem> {
-    let since = cursor(factory);
-    let query: Vec<(&str, String)> = match &since {
-        Some(since) => vec![("since", since.clone()), ("wait", WAIT.to_string())],
-        None => Vec::new(),
-    };
-    let answer = factory.account.dms("GET", "agent/events", &query, None, None, Some(CALL)).await?;
-    let events: Events = serde_json::from_slice(&answer).map_err(|error| Problem::ForNow(format!("an unreadable answer: {error}")))?;
-    if since.is_some() {
-        for event in &events.events {
-            deliver(factory, event);
-        }
-    }
-    keep_cursor(factory, Some(&events.next_cursor));
-    Ok(since.is_some() && events.events.is_empty())
+    tokio::spawn(super::home::monitor(factory.clone()));
+    followers(factory).await;
 }
 
 /// Wakes the event's agent, unless it isn't the agent given access any

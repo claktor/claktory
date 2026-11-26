@@ -48,6 +48,8 @@ use crate::account::apps::{Actor, Problem};
 use crate::factory::{Factory, host_event};
 use crate::transcript::now_ms;
 
+/// `state` is also `approved` since #451: the person's device sends it
+/// through their home, and claktory.com never says `sent`.
 pub(crate) const SCHEMA: &str = "
 -- Agents' messages proposed to the person's friends (dm_send), waiting for
 -- the person's review or decided: ids, states and times, never the text.
@@ -245,6 +247,7 @@ pub(super) async fn send(factory: &Arc<Factory>, agent: &str, args: SendArgs) ->
             )
         }
         "sent" => format!("{person} already approved that message: it was sent to {with} (proposal {id})."),
+        "approved" => format!("{person} already approved that message: their device sends it to {with} (proposal {id})."),
         _ => format!("That proposal can't be sent any more (it was {}). Propose a new message instead.", status.state),
     };
     Ok(ToolResult::text(text, json!({})))
@@ -302,14 +305,58 @@ fn leaf_words(factory: &Factory, error: &StepError) -> String {
 }
 
 /// Encrypts the proposal's text into the channel, keeping it sealed with
-/// it (in one step), as the content the person's device will decrypt.
-fn encrypt(factory: &Factory, proposal: &Proposal<'_>, generation: i64) -> Result<Envelope, String> {
+/// it (in one step), as the content the person's device will decrypt; and
+/// the leaf it's from.
+fn encrypt(factory: &Factory, proposal: &Proposal<'_>, generation: i64) -> Result<(Envelope, String), String> {
     leaf::step(factory, |step| {
         let envelope = step.channel_send(&proposal.content(generation))?;
         step.keep_proposal(&proposal.pending(generation, proposal.proposal_id.clone()))?;
-        Ok(envelope)
+        Ok((envelope, step.leaf()?.me.certificate.leaf.leaf_id))
     })
     .map_err(|error| leaf_words(factory, &error))
+}
+
+/// What became of a message of the leaf's channel at the person's home.
+pub(super) enum AtHome {
+    Taken,
+    /// More than 5 epochs behind the home's: catch up and encrypt it again.
+    Bounced,
+}
+
+/// Sends an application message of this Claktory's channel through the
+/// person's home (#451: claktory.com keeps none): this Claktory's home.db
+/// takes it into the log, or passes it on to the home. Under its digest:
+/// each revision of a proposal or draft is a message of its own there (the
+/// home refuses other bytes under an id it has), and the person's device
+/// finds it by that digest.
+pub(super) fn to_home(factory: &Factory, channel: &[u8], leaf_id: &str, envelope: Envelope) -> Result<AtHome, String> {
+    let client_message_id = crate::encoding::hex(&envelope.digest());
+    let intake = super::home::Intake {
+        group_id: channel.to_vec(),
+        envelope: envelope.into_bytes(),
+        source: super::home::Source::Local { leaf_id: leaf_id.to_owned(), client_message_id },
+    };
+    match super::home::take(factory, intake) {
+        Ok(super::home::Taken::Bounce { .. }) => Ok(AtHome::Bounced),
+        Ok(_) => Ok(AtHome::Taken),
+        Err(error) => {
+            tracing::warn!(?error, "the home didn't take a message of this Claktory's channel");
+            Err(home_words(factory))
+        }
+    }
+}
+
+/// Words for an agent when the person's home didn't take the message.
+pub(super) fn home_words(factory: &Factory) -> String {
+    let person = factory.lock().config.person_capitalized().to_owned();
+    format!("{person}'s home Claktory couldn't take the message just now. Try again in a little while.")
+}
+
+/// The agent's name as the service takes it: none when it holds characters
+/// the service refuses (they ride in the content all the same).
+pub(super) fn service_name(name: &str) -> String {
+    let name = one_line(name, 64);
+    if claktory_dm_crypto::certificate::hidden_in(&name).next().is_some() { String::new() } else { name }
 }
 
 /// Proposes `proposal` (new, a revision, or sent again for a device that
@@ -324,25 +371,50 @@ async fn propose(factory: &Arc<Factory>, proposal: &Proposal<'_>, generation: i6
     let route = format!("conversations/{}/proposals", proposal.conversation);
     let mut generation = generation;
     let mut tries = 0;
+    let mut bounced = 0;
     let answer = loop {
-        let envelope = encrypt(factory, proposal, generation)?;
-        let body = json!({"client_message_id": proposal.client_id, "contact_generation": generation, "envelope": envelope.to_json()});
+        // The service keeps the review and the text's digest; the text goes
+        // into the channel through the person's home (#451).
+        let (envelope, leaf_id) = encrypt(factory, proposal, generation)?;
+        let body = json!({
+            "client_message_id": proposal.client_id,
+            "contact_generation": generation,
+            "proposal_digest": crate::encoding::hex(&envelope.digest()),
+            "agent_name": service_name(proposal.name),
+        });
         let answer = factory.account.dms("POST", &route, &[], Some(proposal.actor), Some(body), None).await;
         tries += 1;
         match answer {
             Err(Problem::Refused(409, _)) if tries == 1 => {
-                // A stale generation or epoch: catch up on both, then again.
-                // Boxed: catching up can send waiting proposals again (`reposted`).
+                // A stale generation: catch up, then again. Boxed: catching
+                // up can send waiting proposals again (`reposted`).
                 if !again && let Err(error) = Box::pin(leaf::catch_up_channel(factory)).await {
                     tracing::debug!(?error, "the channel didn't catch up before proposing again");
                 }
                 conversations(factory, proposal.actor).await?;
                 generation = peer_of(factory, proposal.conversation).map_or(generation, |(_, generation)| generation);
             }
-            answer => break answer,
+            Ok(answer) => {
+                let channel = leaf::step(factory, |step| Ok(step.channel()?.1.group_id().to_vec())).map_err(|error| leaf_words(factory, &error))?;
+                match to_home(factory, &channel, &leaf_id, envelope) {
+                    Ok(AtHome::Taken) => break Ok(answer),
+                    // Behind the home's epoch: caught up and encrypted again,
+                    // the new text's digest the proposal's next revision.
+                    Ok(AtHome::Bounced) if bounced == 0 => {
+                        bounced += 1;
+                        tries = 0;
+                        if !again && let Err(error) = Box::pin(leaf::catch_up_channel(factory)).await {
+                            tracing::debug!(?error, "the channel didn't catch up after the home bounced a proposal");
+                        }
+                    }
+                    Ok(AtHome::Bounced) => break Err(home_words(factory)),
+                    Err(words) => break Err(words),
+                }
+            }
+            Err(problem) => break Err(send_refused(factory, problem)),
         }
     };
-    let status = match answer.map_err(|problem| send_refused(factory, problem)).and_then(|answer| status_of(&answer)) {
+    let status = match answer.and_then(|answer| status_of(&answer)) {
         Ok(status) => status,
         Err(words) => {
             match before {
@@ -466,6 +538,7 @@ pub(super) async fn withdraw(factory: &Arc<Factory>, agent: &str, args: Withdraw
             let text = match state.as_str() {
                 "withdrawn" => "You took it back: it won't be sent.".to_owned(),
                 "sent" => format!("Too late: {person} had already approved it, and it was sent."),
+                "approved" => format!("Too late: {person} had already approved it, and their device sends it."),
                 state => format!("It wasn't waiting any more (it was {state}); nothing was sent."),
             };
             Ok(ToolResult::text(text, json!({})))
@@ -550,6 +623,10 @@ fn end(factory: &Arc<Factory>, row: &Row, state: &str, seq: Option<i64>, tell: E
     let id = &row.id;
     let (summary, mut text) = match state {
         "sent" => (format!("{writer} sent your message"), format!("{writer} approved your message to {with}, and it was sent (proposal {id}")),
+        "approved" => (
+            format!("{writer} approved your message"),
+            format!("{writer} approved your message to {with}, and their device sends it (proposal {id}"),
+        ),
         "declined" => {
             (format!("{writer} declined your message"), format!("{writer} declined your message to {with} (proposal {id}): nothing was sent"))
         }
@@ -564,7 +641,7 @@ fn end(factory: &Arc<Factory>, row: &Row, state: &str, seq: Option<i64>, tell: E
             ),
         ),
     };
-    if state == "sent" {
+    if state == "sent" || state == "approved" {
         if let Some(seq) = seq {
             let _ = write!(text, ", message #{seq}");
         }

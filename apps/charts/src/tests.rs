@@ -781,6 +781,8 @@ fn a_failing_query_shows_why_in_its_panel() {
     let error = host.surface("s1").data["panels"][0]["error"].as_str().unwrap().to_owned();
     assert!(error.starts_with("Couldn't run this panel's query: no such table"), "{error}");
     assert_eq!(host.component("s1", "p0_body_error")["text"], json!({"@path": "/panels/0/error"}));
+    // Its title drawn as every panel's (T6).
+    assert_eq!(host.component("s1", "p0_body_title")["variant"], "title");
     assert!(host.shows("s1", "Couldn't run this panel's query"));
 }
 
@@ -945,6 +947,10 @@ fn an_agent_with_the_edit_grant_adds_a_panel_and_open_views_show_it() {
     app.on_timer(&mut host, REFRESH);
     assert!(host.shows("s1", "Failed runs"));
     assert_eq!(host.component("s1", "p7_body_table")["component"], "Table");
+    // As tall as its grid height, as a chart beside it (h 4: 144 points).
+    assert_eq!(host.component("s1", "p7_body_table")["height"], 144);
+    // Its title drawn as a chart's, not as a caption (T6).
+    assert_eq!(host.component("s1", "p7_body_title")["variant"], "title");
     assert_eq!(host.surface("s1").data["panels"][7]["data"]["columns"], json!(["agent", "n"]));
 
     // Put again on the revision it read: refused, nothing changes.
@@ -1377,6 +1383,18 @@ fn since_0_4_0(was: &Value, is: &Value) -> Value {
         let (then, now) = (was["height"].as_i64().unwrap(), is["height"].as_i64().expect("a chart says its height"));
         assert!((120..=480).contains(&now) && (now - then).abs() <= 27, "{was} {is}");
         was["height"] = json!(now);
+    }
+    // A table fills its grid height as a chart beside it does (0.7.1),
+    // its rows scrolling inside: the same rows, columns and data.
+    if was["component"] == "Table" {
+        let height = is["height"].as_u64().expect("a table says its height");
+        assert!((120..=480).contains(&height), "{is}");
+        was["height"] = json!(height);
+    }
+    // A table's or an error's panel title is drawn as a chart's (0.7.2).
+    if was["component"] == "Text" && was["id"].as_str().is_some_and(|id| id.ends_with("_body_title")) {
+        assert_eq!(was["variant"], "caption", "{was}");
+        was["variant"] = json!("title");
     }
     // A time axis spans the range shown.
     if was["component"] == "Chart" && was["kind"] == "timeseries" {

@@ -181,6 +181,68 @@ class SharedContentTest {
     }
 
     @Test
+    fun anUngrantedFileIsLeftOutAndTheAppGoesOn() {
+        // Sale's #193: the shell shares a file of a provider it can't read and passes on no grant,
+        // as any app could. Passing that address on took the app down; now it's left out and said.
+        SharedChannel.heard = { heard += it }
+        val target = "${context.packageName}/${ShareActivity::class.java.name}"
+        instrumentation.shell(
+            "am start -a android.intent.action.SEND -t image/png" +
+                " --eu android.intent.extra.STREAM content://${ShareSender.PRIVATE_AUTHORITY}/other.png" +
+                " --es android.intent.extra.TEXT ungranted --grant-read-uri-permission -n $target",
+        )
+        waitFor("the share") { heard.isNotEmpty() }
+        val got = heard.single()
+        assertEquals("ungranted", got["text"])
+        assertTrue(files(got).isEmpty())
+        assertEquals(ShareIntake.REFUSED, got["error"])
+        waitFor("one screen") { mainScreens().size == 1 }
+        // Still running: the next share comes too.
+        share(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, "after"))
+        waitFor("the share after") { heard.size == 2 }
+        assertEquals("after", heard[1]["text"])
+    }
+
+    @Test
+    fun aFileWithoutItsGrantLeavesTheOthers() {
+        SharedChannel.heard = { heard += it }
+        val target = "${context.packageName}/${ShareActivity::class.java.name}"
+        instrumentation.shell("am start -n ${instrumentation.context.packageName}/com.claktory.app.ShareSender --es target $target --ez mixed true")
+        waitFor("the share") { heard.isNotEmpty() }
+        val got = heard.single()
+        assertEquals("mixed", got["text"])
+        assertEquals(listOf("granted.png"), files(got).map { File(it).name })
+        assertArrayEquals(ShareTestProvider.BYTES, File(files(got).single()).readBytes())
+        assertEquals(ShareIntake.REFUSED, got["error"])
+        waitFor("one screen") { mainScreens().size == 1 }
+    }
+
+    @Test
+    fun onlyWhatCanBeReadIsPassedOn() {
+        val readable = ShareTestProvider.uri("notes.txt")
+        val not = Uri.parse("content://${ShareSender.PRIVATE_AUTHORITY}/other.png")
+        val incoming = Intent(Intent.ACTION_SEND_MULTIPLE).setType("*/*")
+            .putParcelableArrayListExtra(Intent.EXTRA_STREAM, arrayListOf(readable, not))
+        val out = ShareActivity.forward(context, incoming) { it == readable }!!
+        @Suppress("DEPRECATION")
+        assertEquals(listOf(readable), out.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM))
+        assertEquals(1, out.clipData!!.itemCount)
+        assertEquals(readable, out.clipData!!.getItemAt(0).uri)
+        assertEquals(ShareIntake.REFUSED, out.getStringExtra(ShareActivity.EXTRA_LEFT_OUT))
+        // None readable: no grant asked for at all, so nothing can stop the share.
+        val none = ShareActivity.forward(context, incoming) { false }!!
+        assertNull(none.clipData)
+        assertFalse(none.hasExtra(Intent.EXTRA_STREAM))
+        assertEquals(0, none.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        // Too many: none passed on, none checked.
+        val many = Intent(Intent.ACTION_SEND_MULTIPLE).setType("*/*")
+            .putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(List(ShareIntake.MAX_FILES + 1) { ShareTestProvider.uri("n$it") }))
+        val capped = ShareActivity.forward(context, many) { throw AssertionError("checked") }!!
+        assertNull(capped.clipData)
+        assertEquals(ShareIntake.TOO_MANY, capped.getStringExtra(ShareActivity.EXTRA_LEFT_OUT))
+    }
+
+    @Test
     fun onlyTheShareIsForwardedAndOnlyToRead() {
         val incoming = Intent(Intent.ACTION_SEND).setType("text/plain")
             .putExtra(Intent.EXTRA_TEXT, "hello")
@@ -194,7 +256,7 @@ class SharedContentTest {
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
                     Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION,
             )
-        val out = ShareActivity.forward(context, incoming)!!
+        val out = ShareActivity.forward(context, incoming) { true }!!
         assertEquals(MainActivity::class.java.name, out.component!!.className)
         assertEquals(context.packageName, out.component!!.packageName)
         assertEquals(
@@ -214,7 +276,7 @@ class SharedContentTest {
         val odd = Intent(Intent.ACTION_SEND).setType("image/png")
             .putExtra(Intent.EXTRA_STREAM, Intent(Intent.ACTION_VIEW))
         assertTrue(SharedChannel.Shared.read(odd)!!.uris.isEmpty())
-        assertNull("nothing left to share", ShareActivity.forward(context, odd)!!.clipData)
+        assertNull("nothing left to share", ShareActivity.forward(context, odd) { true }!!.clipData)
         val many = Intent(Intent.ACTION_SEND_MULTIPLE).setType("*/*")
             .putParcelableArrayListExtra(Intent.EXTRA_STREAM, arrayListOf(Bundle(), ShareTestProvider.uri("notes.txt")))
         // The address may come or (Android 13's typed getter refusing the mixed list) not; the bundle never.

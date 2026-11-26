@@ -10,8 +10,9 @@
 //! when it ends. A busy team changes the Workspace several times a second,
 //! each its own packet and a wake for the phone. What the person waits on
 //! isn't held: a request's answer comes after what it changed (`release`),
-//! and a change in what waits on them (a question, say) goes at once
-//! (`waiting_changed`).
+//! and a change in what waits on them (a question, say) or in whether an
+//! agent is working goes at once (`waiting_changed`), so a reply that has
+//! come doesn't show as still being written (Zucchero's #453).
 //!
 //! What a model writes (EntryDelta, ChatEntryDelta) goes to such a device
 //! the same way, at most every 0.1 s: the first piece at once, the pieces
@@ -37,8 +38,9 @@ const AGENTS: u32 = 2;
 const WAITING_WORKSPACE: [u32; 2] = [26, 37];
 /// Agent.id.
 const AGENT_ID: u32 = 1;
-/// Agent.waiting_seqs and waiting_items: its questions for the person.
-const WAITING_AGENT: [u32; 2] = [32, 42];
+/// Agent.status, waiting_seqs and waiting_items: whether it's working (it
+/// changes only as a run starts or ends) and its questions for the person.
+const WAITING_AGENT: [u32; 3] = [7, 32, 42];
 
 /// How often a device on another machine gets the Workspace at most.
 pub(crate) const REMOTE_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
@@ -48,6 +50,8 @@ pub(crate) const REMOTE_EVERY: std::time::Duration = std::time::Duration::from_s
 pub(crate) const REMOTE_TEXT_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 /// ServerMessage.delta and chat_delta: what a model writes, piece by piece.
 const DELTAS: [u32; 2] = [8, 47];
+/// ServerMessage.entry and chat_entry: an entry going into a conversation.
+const ENTRIES: [u32; 2] = [7, 46];
 const LENGTH_DELIMITED: u8 = 2;
 
 /// ServerMessage.workspace_revision and workspace_base_revision (#378).
@@ -182,10 +186,17 @@ impl Workspaces {
     /// What goes now for `event`, an encoded ServerMessage, in order: the
     /// model's writing held first when `event` can't wait behind it.
     pub(crate) fn frames(&mut self, event: Bytes) -> Vec<Bytes> {
-        let now = std::time::Instant::now();
+        self.frames_at(event, std::time::Instant::now())
+    }
+
+    /// A message of the person's going into a conversation brings the
+    /// Workspace held before it, which shows what it did (the agent
+    /// working, the queue taken), rather than a while after it.
+    fn frames_at(&mut self, event: Bytes, now: std::time::Instant) -> Vec<Bytes> {
         let [held, event] = self.deltas.offer(event, now);
+        let workspace = event.as_deref().filter(|event| persons_entry(event)).and_then(|_| self.release_at(now));
         let event = event.and_then(|event| self.outgoing_at(event, now));
-        held.into_iter().chain(event).collect()
+        held.into_iter().chain(workspace).chain(event).collect()
     }
 
     /// When what's held goes, if anything is.
@@ -399,14 +410,28 @@ fn merged(held: &mut ServerMessage, next: &ServerMessage) -> bool {
     true
 }
 
+/// Whether an encoded ServerMessage is an entry of the person's going into
+/// the conversation shown, an agent's or a chat's.
+fn persons_entry(frame: &[u8]) -> bool {
+    if !body_number(frame).is_some_and(|body| ENTRIES.contains(&body)) {
+        return false;
+    }
+    let entry = match ServerMessage::decode(frame).map(|message| message.body) {
+        Ok(Some(Body::Entry(update))) => update.entry,
+        Ok(Some(Body::ChatEntry(update))) => update.entry,
+        _ => None,
+    };
+    matches!(entry, Some(v1::Entry { kind: Some(v1::entry::Kind::User(_)), .. }))
+}
+
 /// The body an encoded ServerMessage carries: its field's number.
 fn body_number(frame: &[u8]) -> Option<u32> {
     Field::all(frame)?.into_iter().map(|field| field.number).find(|number| (2..REVISION).contains(number))
 }
 
 /// Whether what waits on the person changed from `last` to `next`: an
-/// agent's questions, the pipes (their messages held for review) or direct
-/// messages to approve. Unknown counts as yes.
+/// agent's status or questions, the pipes (their messages held for review)
+/// or direct messages to approve. Unknown counts as yes.
 fn waiting_changed(last: Option<&Parsed>, next: Option<&Parsed>) -> bool {
     let (Some(last), Some(next)) = (last, next) else { return true };
     if WAITING_WORKSPACE.iter().any(|number| last.fields.get(number) != next.fields.get(number)) {
@@ -945,8 +970,8 @@ mod tests {
         let first = workspace();
         sent.outgoing_at(frame(&first), at(0));
         let mut busy = first.clone();
-        busy.agents[0].status = v1::AgentStatus::Working.into();
-        assert!(sent.outgoing_at(frame(&busy), at(100)).is_none(), "a status: held");
+        busy.agents[0].context_tokens = 1234;
+        assert!(sent.outgoing_at(frame(&busy), at(100)).is_none(), "its context: held");
 
         // A question of an agent's, with what was held.
         let mut asks = busy.clone();
@@ -959,18 +984,65 @@ mod tests {
         answered.agents[2].waiting_seqs.clear();
         assert!(sent.outgoing_at(frame(&answered), at(300)).is_some());
 
-        // A new agent already asking, an item it names, a pipe, a direct message.
-        let changes: [fn(&mut v1::Workspace); 4] = [
+        // A new agent already asking, an item it names, a pipe, a direct
+        // message, an agent starting or ending its work.
+        let changes: [fn(&mut v1::Workspace); 6] = [
             |workspace| workspace.agents.push(v1::Agent { id: "omar".into(), waiting_seqs: vec![3], ..Default::default() }),
             |workspace| workspace.agents[1].waiting_items = vec![v1::WaitingItem::default()],
             |workspace| workspace.pipes = vec![v1::Pipe { id: "p".into(), ..Default::default() }],
             |workspace| workspace.dm_sends = vec![v1::DmSendWaiting::default()],
+            |workspace| workspace.agents[0].status = v1::AgentStatus::Working.into(),
+            |workspace| workspace.agents[0].status = v1::AgentStatus::Idle.into(),
         ];
         let mut now = answered;
         for (n, change) in changes.iter().enumerate() {
             change(&mut now);
             assert!(sent.outgoing_at(frame(&now), at(400 + n as u64 * 10)).is_some(), "change {n}");
         }
+    }
+
+    #[test]
+    fn paced_a_message_of_the_persons_brings_the_workspace_held_before_it() {
+        let start = std::time::Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        let mut sent = Workspaces::new(true).paced(std::time::Duration::from_secs(1), std::time::Duration::from_millis(100));
+        let first = workspace();
+        sent.frames_at(frame(&first), at(0));
+        let mut busy = first.clone();
+        busy.agents[1].context_tokens = 1234;
+        assert!(sent.frames_at(frame(&busy), at(100)).is_empty(), "its context: held");
+
+        // Another's entry (an agent's reply, an event) leaves it held.
+        let entry = |kind: v1::entry::Kind| -> Bytes {
+            let entry = v1::Entry { seq: 7, kind: Some(kind), ..Default::default() };
+            let update = v1::EntryUpdate { agent_id: "sam".into(), entry: Some(entry) };
+            ServerMessage { body: Some(Body::Entry(update)), ..Default::default() }.encode_to_vec().into()
+        };
+        let reply = entry(v1::entry::Kind::Assistant(v1::AssistantText::default()));
+        assert_eq!(sent.frames_at(reply.clone(), at(200)), vec![reply]);
+        assert_eq!(sent.due(), Some(at(1000)));
+
+        // The person's: the Workspace goes first, then the entry.
+        let theirs = entry(v1::entry::Kind::User(v1::UserText { text: "hi".into(), ..Default::default() }));
+        let frames = sent.frames_at(theirs.clone(), at(300));
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        let Body::WorkspacePatch(patch) = decode(frames[0].clone()) else { panic!("not a patch") };
+        assert_eq!(apply(&first, patch), busy);
+        assert_eq!(frames[1], theirs);
+        assert_eq!(sent.due(), None, "nothing left held");
+        // Nothing held: it goes alone.
+        assert_eq!(sent.frames_at(theirs.clone(), at(400)), vec![theirs]);
+
+        // In a chat too.
+        let mut idle = busy.clone();
+        idle.agents[1].context_tokens = 5678;
+        assert!(sent.frames_at(frame(&idle), at(500)).is_empty());
+        let chat = v1::ChatEntryUpdate {
+            chat_id: "c".into(),
+            entry: Some(v1::Entry { kind: Some(v1::entry::Kind::User(v1::UserText::default())), ..Default::default() }),
+        };
+        let chat: Bytes = ServerMessage { body: Some(Body::ChatEntry(chat)), ..Default::default() }.encode_to_vec().into();
+        assert_eq!(sent.frames_at(chat, at(600)).len(), 2);
     }
 
     fn delta(agent: &str, seq: u64, text: &str, revision: &str) -> Bytes {

@@ -119,6 +119,9 @@ async fn an_agents_message_is_sent_only_once_the_person_approves_exactly_it() {
     });
     std::fs::write(dir.join("home/config.json"), config.to_string()).expect("config");
     let (addr, factory) = start(&dir).await;
+    // Homes find each other on this machine's relay and lookup (#451).
+    let network = dm_device::Network::start().await;
+    network.serve(&factory);
     let (mut client, _, _) = Client::connect(addr).await;
     let workspace = sign_in(&mut client, &mail, "matt@example.com").await;
     let mut view = View { workspace, ..View::default() };
@@ -130,10 +133,14 @@ async fn an_agents_message_is_sent_only_once_the_person_approves_exactly_it() {
         .expect("Matt's account");
 
     // Matt's phone and Bo, with a device of his own, become friends.
+    // This Claktory is Matt's home; Bo's is one of his own, elsewhere.
     let mut bo = dm_device::Device::new(&dir, "bo", 9);
+    bo.friend_home = Some(dm_device::FriendHome::start(&network).await);
     bo.publish_keys().await;
     bo.stock(3).await;
     let mut phone = dm_device::Device::new(&dir, &matt, 3);
+    phone.home = factoryd::dm_device::endpoint_for_test(&factory);
+    phone.set_home_addr(addr);
     phone.publish_keys().await;
     let (_, me) = bo.call("GET", "me", Value::Null).await;
     let (status, shown) = bo.call("PUT", "me/profile", json!({"name": "Bo", "revision": me["profile"]["revision"]})).await;
@@ -184,6 +191,7 @@ async fn an_agents_message_is_sent_only_once_the_person_approves_exactly_it() {
     let packages = phone.claim("bo", &[&bo.device_key]).await;
     phone.add(&group, packages).await;
     assert_eq!(bo.join_welcomes(|_| people.clone()).await, vec![group.clone()]);
+    phone.route(&bo, &[&group]).await;
     let (mut watcher, _, _) = Client::connect(addr).await;
 
     // Proposed: it waits in Needs you, with who and to whom, never the text.
@@ -219,7 +227,7 @@ async fn an_agents_message_is_sent_only_once_the_person_approves_exactly_it() {
     let shown = phone.proposals().await;
     assert_eq!(shown.len(), 1);
     assert!(shown[0].get("text").is_none(), "{}", shown[0]);
-    let opened = phone.open(&channel, &shown[0]);
+    let opened = phone.open(&channel, &shown[0]).await;
     assert_eq!((opened.from.leaf.kind, claktory_of(&opened.from.leaf.leaf_id)), (LeafKind::Claktory, Some(offer.claktory_id.as_str())));
     assert_eq!((opened.content.kind.as_str(), opened.content.text.as_deref()), ("proposal", Some("See you at 6, canary-dm-send")));
     assert_eq!(
@@ -235,7 +243,7 @@ async fn an_agents_message_is_sent_only_once_the_person_approves_exactly_it() {
     let (status, stale) = phone.approve(&group, &opened).await;
     assert_eq!(status, 409, "what the phone opened isn't what waits now: {stale}");
     let shown = phone.proposals().await;
-    let changed = phone.open(&channel, &shown[0]);
+    let changed = phone.open(&channel, &shown[0]).await;
     assert_eq!((changed.content.text.as_deref(), changed.extra("sequence")), (Some("See you at 7"), &json!(2)));
 
     // Matt's tablet joins the channel: it couldn't open what was sent
@@ -257,7 +265,7 @@ async fn an_agents_message_is_sent_only_once_the_person_approves_exactly_it() {
         assert!(std::time::Instant::now() < deadline, "never sent again: {shown:?}");
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     };
-    let reposted = tablet.open(&channel, &shown[0]);
+    let reposted = tablet.open(&channel, &shown[0]).await;
     assert_eq!((reposted.content.text.as_deref(), reposted.extra("sequence")), (Some("See you at 7"), &json!(3)));
     assert_eq!(reposted.shown["id"], json!(id), "the same proposal");
 
@@ -268,7 +276,8 @@ async fn an_agents_message_is_sent_only_once_the_person_approves_exactly_it() {
     assert_eq!(status, 200, "{sent}");
     view.follow(&mut client, |view| view.workspace.dm_sends.is_empty() && told(view, "The person approved your message").is_some()).await;
     let event = told(&view, "The person approved your message").expect("told");
-    assert!(event.contains("to \"Bo\" · ") && event.contains(&format!("(proposal {id}, message #")), "{event}");
+    // The device sends it through the home: no seq from the service.
+    assert!(event.contains("to \"Bo\" · ") && event.contains("their device sends it") && event.contains(&format!("(proposal {id})")), "{event}");
     assert!(!event.contains("See you"), "never the text: {event}");
     let read = bo.catch_up(&group).await;
     let message = read.iter().find_map(|(_, content)| content.clone()).expect("Bo got it");

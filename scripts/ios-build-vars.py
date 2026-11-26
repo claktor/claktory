@@ -53,7 +53,20 @@ def fill(app: Path, source: Path, team: str) -> int:
         plist = plistlib.loads(path.read_bytes())
         for key, value in wanted.items():
             if isinstance(value, str) and "$(AppIdentifierPrefix)" in value:
-                plist[key] = value.replace("$(AppIdentifierPrefix)", f"{team}.")
+                built = plist.get(key)
+                # Xcode expanded the rest (CLAKTORY_PUSH_GROUP, #501) and
+                # left the prefix empty: the team's goes in front of what it
+                # built.
+                if (
+                    value.startswith("$(AppIdentifierPrefix)")
+                    and isinstance(built, str)
+                    and built
+                    and "$(" not in built
+                    and not built.startswith(f"{team}.")
+                ):
+                    plist[key] = f"{team}.{built}"
+                else:
+                    plist[key] = value.replace("$(AppIdentifierPrefix)", f"{team}.")
                 print(f"{name}: {key} = {plist[key].replace(team, 'TEAM')}")
         path.write_bytes(plistlib.dumps(plist, fmt=plistlib.FMT_BINARY))
     return 0

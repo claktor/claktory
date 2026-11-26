@@ -131,6 +131,38 @@ void main() {
     );
   });
 
+  testWidgets('at the largest text on a small phone, an action wider than '
+      'its half of the bar is drawn smaller, whole (row 149)', (tester) async {
+    tester.platformDispatcher.textScaleFactorTestValue = 53 / 17;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    await _showForm(
+      tester,
+      (close) => FormFrame(
+        title: 'Share replay',
+        fields: const [SizedBox(height: 40)],
+        error: null,
+        submitLabel: 'Make video',
+        onSubmit: () {},
+        onCancel: () {},
+      ),
+      size: const Size(321, 568),
+    );
+    for (final label in ['Make video', 'Cancel']) {
+      final text = find.text(label);
+      final paragraph = tester.firstRenderObject<RenderParagraph>(
+        find.descendant(of: text, matching: find.byType(RichText)),
+      );
+      expect(paragraph.didExceedMaxLines, isFalse, reason: label);
+      // On screen, in its half, and still a finger's size.
+      final drawn = tester.getRect(text);
+      final button = tester.getRect(find.bySemanticsLabel(label));
+      expect(drawn.left, greaterThanOrEqualTo(button.left), reason: label);
+      expect(drawn.right, lessThanOrEqualTo(button.right), reason: label);
+      expect(button.width, lessThanOrEqualTo(321 / 2), reason: label);
+      expect(button.height, greaterThanOrEqualTo(44), reason: label);
+    }
+  });
+
   testWidgets("the top row's words are iOS's 44pt targets, Android's 48dp", (
     tester,
   ) async {

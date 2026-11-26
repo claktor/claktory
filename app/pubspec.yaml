@@ -9,6 +9,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # The time as the tests' fake clock has it in tests (highlights.dart).
+  clock: ^1.1.2
   crypto: ^3.0.6
   # The iPhone's own text selection: handles, magnifier, edit menu.
   cupertino_ui: ^1.1.7

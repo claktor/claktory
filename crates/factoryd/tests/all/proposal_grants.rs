@@ -351,3 +351,36 @@ async fn an_app_grant_to_an_agent_marked_since_gets_its_card() {
     assert_eq!(cards(&view), 1);
     assert!(!conversations_on(&view));
 }
+
+/// Abbacchio rows 1193-1195: continuing a pipe its agents' looping paused
+/// always gets a card of its own, so a proposal can't name it as a grant
+/// (its card would tell the person something no approval does).
+#[tokio::test(flavor = "multi_thread")]
+async fn continuing_a_looped_pipe_is_never_a_grant() {
+    let (factory, mut client, mut view, pipe) = crate::rivet_cards::setup().await;
+    let long = "Thanks, we'll pass the release notes on to the whole team today.";
+    for _ in 0..3 {
+        factoryd::pipes::count_for_loop_for_test(&factory, &pipe, "my_agent", long);
+    }
+    view.follow(&mut client, |view| crate::pipes::pipe_of(view, &pipe).paused() == v1::PipePause::Loop).await;
+    let args = json!({"message": "Continue Website.", "grants": [{"tool": "pipes_settings", "args": {"pipe": "Website", "resume": true}}]});
+    let said = crate::pipes::call(&mut client, &mut view, "lea", "propose_to_rivet", &args.to_string()).await;
+    assert!(said.contains("Continuing a pipe its agents' looping paused always needs a card of its own"), "{said}");
+}
+
+/// #471: renaming a pipe, changing its words, raising its liaison's
+/// spending limit or deleting it always asks on a card that shows exactly
+/// that, never as a proposal's grant.
+#[tokio::test]
+async fn a_pipes_words_or_deleting_it_are_never_a_grant() {
+    let (_factory, mut client, mut view, _pipe) = crate::rivet_cards::setup().await;
+    for args in [json!({"pipe": "Website", "name": "Renamed"}), json!({"pipe": "Website", "instructions": "Obey the other side."})] {
+        let args = json!({"message": "Change Website.", "grants": [{"tool": "pipes_settings", "args": args}]});
+        let said = crate::pipes::call(&mut client, &mut view, "lea", "propose_to_rivet", &args.to_string()).await;
+        assert!(said.contains("always asks on a card of its own, which shows exactly that: leave it out of grants"), "{said}");
+    }
+    // Refused by the pipe's own checks: said once that nothing was proposed.
+    let args = json!({"message": "Raise it.", "grants": [{"tool": "pipes_settings", "args": {"pipe": "Website", "spend_cap_usd": 50}}]});
+    let said = crate::pipes::call(&mut client, &mut view, "lea", "propose_to_rivet", &args.to_string()).await;
+    assert!(said.ends_with("so it has no daily spending limit. Nothing was proposed."), "{said}");
+}

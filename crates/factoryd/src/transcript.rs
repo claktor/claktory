@@ -8,6 +8,7 @@
 //! (`older`). A segment is written a message at a time, as JSON Lines
 //! (`log`).
 
+mod images;
 pub(crate) mod log;
 pub(crate) mod resume;
 mod older;
@@ -118,6 +119,9 @@ pub enum Change {
 pub struct Persist {
     path: PathBuf,
     save: Save,
+    /// Where its images go as files (`images`); None keeps them inline, as
+    /// the version an update on trial rolls back to reads them.
+    images: Option<PathBuf>,
     unsaved: Arc<AtomicBool>,
     made: bool,
 }
@@ -152,14 +156,30 @@ impl Persist {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        match &self.save {
-            Save::Append(lines) if lines.is_empty() => {}
+        if let Some(dir) = &self.images {
+            let messages: Vec<&mut Message> = match &mut self.save {
+                Save::Append(lines) => lines
+                    .iter_mut()
+                    .filter_map(|line| match line {
+                        log::Line::Message(message) => Some(message),
+                        _ => None,
+                    })
+                    .collect(),
+                Save::Whole { segment, .. } => segment.messages.iter_mut().collect(),
+            };
+            for message in messages {
+                images::store(message, dir)?;
+            }
+        }
+        // Stored images by name, but on trial: there, their base64.
+        let write = || match &self.save {
+            Save::Append(lines) if lines.is_empty() => Ok(()),
             Save::Append(lines) => {
                 let mut bytes = Vec::new();
                 for line in lines {
                     log::push_line(line, &mut bytes).map_err(std::io::Error::other)?;
                 }
-                log::append(&self.path, &bytes)?;
+                log::append(&self.path, &bytes)
             }
             Save::Whole { lines, segment } => {
                 let whole = log::WholeSegment {
@@ -169,9 +189,10 @@ impl Persist {
                     pinned: &segment.pinned,
                     frame: segment.frame.as_ref(),
                 };
-                log::replace(&self.path, &whole.bytes(*lines).map_err(std::io::Error::other)?)?;
+                log::replace(&self.path, &whole.bytes(*lines).map_err(std::io::Error::other)?)
             }
-        }
+        };
+        if self.images.is_some() { factory_agent::types::naming_stored_images(write) } else { write() }?;
         self.made = true;
         Ok(())
     }
@@ -472,8 +493,12 @@ impl Transcript {
         let path = self.files.get(&number).cloned().unwrap_or_else(|| log::path(&self.dir, number, true));
         let bytes = std::fs::read(&path)?;
         let parse = || log::parse::<Message>(&path, &bytes);
-        let segment = if whole { parse() } else { factory_agent::types::without_image_data(parse) };
-        segment.map_err(|source| TranscriptError::Corrupt { path, source })
+        if !whole {
+            return factory_agent::types::without_image_data(parse).map_err(|source| TranscriptError::Corrupt { path, source });
+        }
+        let mut segment = parse().map_err(|source| TranscriptError::Corrupt { path: path.clone(), source })?;
+        images::load(&mut segment.messages, &path);
+        Ok(segment)
     }
 
     /// Picks up after the older segments the index has, from the state it
@@ -1390,7 +1415,8 @@ impl Transcript {
         let path = log::path(&self.dir, self.segment, lines);
         self.files.insert(self.segment, path.clone());
         self.saved = Saved { segment: self.segment, lines, messages: self.messages.len(), pinned: self.pinned.clone(), frame: true };
-        Persist { path, save, unsaved: self.unsaved.clone(), made: false }
+        let images = (!self.old_form.load(Ordering::Relaxed)).then(|| self.dir.join(images::DIR));
+        Persist { path, save, images, unsaved: self.unsaved.clone(), made: false }
     }
 }
 
@@ -1635,6 +1661,12 @@ fn waits(kind: Option<&Kind>, owner: &str) -> bool {
         Some(Kind::AppAccess(proposal)) => proposal.state() == v1::AppGrantState::Pending,
         _ => false,
     }
+}
+
+/// Finds the files of the images stored as files (`images`) of the segment
+/// at `segment`.
+pub(crate) fn load_images(messages: &mut [Message], segment: &Path) {
+    images::load(messages, segment);
 }
 
 /// Whether two messages are the same but for their images' data, which an

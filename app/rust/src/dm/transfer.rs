@@ -625,10 +625,10 @@ fn checked(messages: Vec<DmMessage>, from: i64) -> anyhow::Result<Vec<DmMessage>
                 }
             }
             if let Some(members) = &message.members {
-                if members.added.len() + members.removed.len() + members.set_up_again.len() > MAX_MEMBERS {
+                if members.added.len() + members.removed.len() + members.set_up_again.len() + members.joined.len() > MAX_MEMBERS {
                     bail!("a change of too many members");
                 }
-                for member in members.added.iter().chain(&members.removed).chain(&members.set_up_again) {
+                for member in members.added.iter().chain(&members.removed).chain(&members.set_up_again).chain(&members.joined) {
                     if !ascii(&member.account, MAX_ACCOUNT_ID) || !ascii(&member.leaf_id, MAX_LEAF_ID) || !one_line(&member.name, MAX_NAME)
                     {
                         bail!("a member that isn't named in one line");
@@ -968,6 +968,7 @@ mod tests {
             },
             arrived_ms: 1_000 + seq,
             members: None,
+            departed: false,
         }
     }
 
@@ -1286,6 +1287,7 @@ mod tests {
             key_changed: vec![],
             skipped: None,
             set_up_again: vec![],
+            joined: vec![],
         });
         assert!(checked(vec![added.clone()], 0).is_ok());
         added.members = Some(DmMembers {
@@ -1294,8 +1296,18 @@ mod tests {
             key_changed: vec![],
             skipped: None,
             set_up_again: vec![],
+            joined: vec![],
         });
-        assert!(checked(vec![added], 0).is_err(), "a hidden character in a name");
+        assert!(checked(vec![added.clone()], 0).is_err(), "a hidden character in a name");
+        added.members = Some(DmMembers {
+            added: vec![],
+            removed: vec![],
+            key_changed: vec![],
+            skipped: None,
+            set_up_again: vec![],
+            joined: vec![member("iPad\u{202e}")],
+        });
+        assert!(checked(vec![added], 0).is_err(), "a hidden character in a joining device's name");
         assert!(!checked(vec![good()], 0).unwrap()[0].mine);
     }
 

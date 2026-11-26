@@ -52,11 +52,10 @@ class MainFlutterWindow: NSWindow {
     Recorder.register(with: flutterViewController.engine.binaryMessenger)
     // And playing them back (AudioPlayer.swift).
     AudioPlayer.register(with: flutterViewController.engine.binaryMessenger)
+    // History's video export, its frames into an MP4 (ReplayWriter.swift).
+    ReplayWriter.register(with: flutterViewController.engine.binaryMessenger)
     // The network path, to reconnect the moment it changes (NetworkPath.swift).
     NetworkPath.register(with: flutterViewController.engine.binaryMessenger)
-    // Keeping agents working with a laptop's lid closed: its helper,
-    // registered and removed at the person's word (LidHelper.swift).
-    LidHelper.register(with: flutterViewController.engine.binaryMessenger)
     // Copying a secret, such as a device's add code, hidden from clipboard
     // managers (SecretClipboard.swift).
     SecretClipboard.register(with: flutterViewController.engine.binaryMessenger)
@@ -97,20 +96,57 @@ class MainFlutterWindow: NSWindow {
     sightChannel = FlutterMethodChannel(
       name: "factory/sight", binaryMessenger: flutterViewController.engine.binaryMessenger)
     sightChannel?.setMethodCallHandler { [weak self] call, result in
-      guard let self, call.method == "state" else { return result(FlutterMethodNotImplemented) }
-      self.lastSight = self.sight
-      result(self.lastSight)
+      guard let self else { return result(FlutterMethodNotImplemented) }
+      switch call.method {
+      case "state":
+        self.lastSight = self.sight
+        result(self.lastSight)
+      // The person's pointer is over the window, so it's seen whatever
+      // occlusion said: the next real change is told from there.
+      case "seen":
+        self.lastSight["shown"] = true
+        self.nudgeLifecycle(seen: true)
+        result(nil)
+      default: result(FlutterMethodNotImplemented)
+      }
     }
+    lifecycleMessenger = flutterViewController.engine.binaryMessenger
+    // Occlusion alone goes stale (flutter#155977): a window uncovered while
+    // another app is in front could stay "unseen" until clicked (friend
+    // bugs #31 and #40). So it's read again on every change that may
+    // uncover it (another app coming to the front among them), and a while
+    // after each.
     for name in [
       NSWindow.didChangeOcclusionStateNotification, NSWindow.didBecomeKeyNotification,
+      NSWindow.didResignKeyNotification,
       NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification,
     ] {
       NotificationCenter.default.addObserver(
         self, selector: #selector(sightChanged), name: name, object: self)
     }
-    NSWorkspace.shared.notificationCenter.addObserver(
-      self, selector: #selector(sightChanged),
-      name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+    for name in [
+      NSApplication.didChangeOcclusionStateNotification,
+      NSApplication.didBecomeActiveNotification, NSApplication.didResignActiveNotification,
+    ] {
+      NotificationCenter.default.addObserver(
+        self, selector: #selector(sightChanged), name: name, object: NSApp)
+    }
+    for name in [
+      NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+      NSWorkspace.activeSpaceDidChangeNotification,
+      NSWorkspace.didActivateApplicationNotification,
+    ] {
+      NSWorkspace.shared.notificationCenter.addObserver(
+        self, selector: #selector(sightChanged), name: name, object: nil)
+    }
+    // And the pointer over the window says it's seen, whichever app is in
+    // front: Flutter's own hover follows only the key window.
+    let pointer = SightPointer { [weak self] in self?.pointerSeen() }
+    sightPointer = pointer
+    flutterViewController.view.addTrackingArea(
+      NSTrackingArea(
+        rect: .zero, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+        owner: pointer, userInfo: nil))
 
     // The View menu's zoom items, done by the app (app/lib/zoom.dart).
     menuChannel = FlutterMethodChannel(
@@ -198,6 +234,11 @@ class MainFlutterWindow: NSWindow {
       return self.pasting ? nil : event
     }
 
+    // Any build but the real Claktory (#501) wears the DEV VERSION mark,
+    // whatever it was built with: a debug or profile build, or a copy
+    // given another bundle id.
+    if Bundle.main.bundleIdentifier != "dev.factory.app" { showDevMark() }
+
     super.awakeFromNib()
   }
 
@@ -240,18 +281,150 @@ class MainFlutterWindow: NSWindow {
 
   private var sightChannel: FlutterMethodChannel?
   private var lastSight: [String: Bool] = [:]
+  private var lifecycleMessenger: FlutterBinaryMessenger?
+  /// The tracking area's owner, which it doesn't keep.
+  private var sightPointer: SightPointer?
+  private var lastPointerSeen = Date.distantPast
+  /// Looks again while other windows cover this one (`tellSight`).
+  private var coverWatch: Timer?
 
-  /// Shown while any of the window is on screen; the key window counts as
-  /// shown too, in case its occlusion state is stale (flutter#155977).
   private var sight: [String: Bool] {
     [
-      "shown": !isMiniaturized && (occlusionState.contains(.visible) || isKeyWindow),
+      "shown": seen,
       "reduceMotion": NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
     ]
   }
 
+  /// Shown while any of the window is on screen. The key window is shown;
+  /// otherwise the windows in front of it are measured, and any of it left
+  /// uncovered is shown. Its occlusion state is only the fallback, when the
+  /// window server can't be read: it goes stale (flutter#155977: "covered"
+  /// while uncovered, friend bugs #31 and #40), and it counts only opaque
+  /// windows as covering, so behind a Finder window, whose sidebar lets
+  /// what's under it blur through, it stays "visible" and everything that
+  /// changes draws for no one (Abbacchio's #384 d).
+  private var seen: Bool {
+    if isMiniaturized || !isVisible || NSApp.isHidden || !isOnActiveSpace { return false }
+    if isKeyWindow { return true }
+    return Self.uncovered(windowNumber) ?? occlusionState.contains(.visible)
+  }
+
+  /// Whether any of window `number` on screen is left uncovered by other
+  /// apps' ordinary windows in front of it, as the window server has them
+  /// now (their bounds only: no permission is needed); nil when it can't
+  /// say. Only ordinary windows (layer 0) count: the menu bar and the Dock
+  /// never hide all of it, and a see-through overlay above everything (a
+  /// screen tool's) must not stop the window drawing.
+  private static func uncovered(_ number: Int) -> Bool? {
+    guard number > 0,
+      let own = CGWindowListCopyWindowInfo(.optionIncludingWindow, CGWindowID(number))
+        as? [[String: Any]],
+      let frame = own.first.flatMap(bounds)
+    else { return nil }
+    let infront =
+      CGWindowListCopyWindowInfo(.optionOnScreenAboveWindow, CGWindowID(number))
+      as? [[String: Any]] ?? []
+    let me = Int(ProcessInfo.processInfo.processIdentifier)
+    let cover = infront.filter {
+      (($0[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1) > 0
+        && ($0[kCGWindowLayer as String] as? NSNumber)?.intValue == 0
+        && ($0[kCGWindowOwnerPID as String] as? NSNumber)?.intValue != me
+    }.compactMap(bounds)
+    // The screens, in the window server's coordinates: y down from the top
+    // of the main screen.
+    let top = NSScreen.screens.first?.frame.maxY ?? 0
+    let screens = NSScreen.screens.map {
+      CGRect(x: $0.frame.minX, y: top - $0.frame.maxY, width: $0.frame.width, height: $0.frame.height)
+    }
+    return anyUncovered(frame, by: cover, on: screens)
+  }
+
+  private static func bounds(_ window: [String: Any]) -> CGRect? {
+    guard let bounds = window[kCGWindowBounds as String] as? NSDictionary else { return nil }
+    return CGRect(dictionaryRepresentation: bounds as CFDictionary)
+  }
+
+  /// Whether a point of a grid over `frame` is on a screen and outside
+  /// every rectangle of `cover`.
+  static func anyUncovered(_ frame: CGRect, by cover: [CGRect], on screens: [CGRect]) -> Bool {
+    let inner = frame.insetBy(dx: 1, dy: 1)
+    guard !inner.isEmpty else { return false }
+    let steps = 16
+    for column in 0...steps {
+      for row in 0...steps {
+        let point = CGPoint(
+          x: inner.minX + inner.width * CGFloat(column) / CGFloat(steps),
+          y: inner.minY + inner.height * CGFloat(row) / CGFloat(steps))
+        if screens.contains(where: { $0.contains(point) })
+          && !cover.contains(where: { $0.contains(point) })
+        {
+          return true
+        }
+      }
+    }
+    return false
+  }
+
+  /// Flutter's engine reads the app's occlusion state too, and goes stale
+  /// with it: it then says the app is hidden, and Flutter draws nothing at
+  /// all, so nothing new shows until Claktory is brought to the front
+  /// (friend bugs #31 and #40); or it says it's seen while covered, and
+  /// everything that changes draws for no one. So the app hears what this
+  /// window's sight says, as the engine would say it: resumed in front,
+  /// inactive behind another app, hidden when not [seen]. Told on every
+  /// read, the moments after a change included, so it has the last word
+  /// over the engine's own; Flutter ignores a state it's already in.
+  private func nudgeLifecycle(seen: Bool) {
+    let state =
+      !seen
+      ? "AppLifecycleState.hidden"
+      : NSApp.isActive ? "AppLifecycleState.resumed" : "AppLifecycleState.inactive"
+    lifecycleMessenger?.send(onChannel: "flutter/lifecycle", message: state.data(using: .utf8))
+  }
+
+  /// The pointer is over the window: it's seen, whatever occlusion said.
+  private func pointerSeen() {
+    let now = Date()
+    // Moves come many times a second; once a second is plenty.
+    guard now.timeIntervalSince(lastPointerSeen) >= 1 else { return }
+    lastPointerSeen = now
+    nudgeLifecycle(seen: true)
+    guard lastSight["shown"] != true else { return }
+    var next = sight
+    next["shown"] = true
+    lastSight = next
+    sightChannel?.invokeMethod("sight", arguments: next)
+  }
+
   @objc private func sightChanged(_ notification: Notification) {
+    tellSight()
+    // macOS may settle the occlusion state after the notification: read
+    // it again a moment later, and once more after that.
+    for delay in [0.5, 2.0] {
+      DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+        self?.tellSight()
+      }
+    }
+  }
+
+  /// Tells the app what's seen, when it changed since it was last told.
+  /// While other windows cover it, it looks again every second: one
+  /// moved away tells this window nothing (its occlusion may never have
+  /// changed), and what's under it must show at once (friend bug #40).
+  private func tellSight() {
     let now = sight
+    nudgeLifecycle(seen: now["shown"] == true)
+    let covered =
+      now["shown"] != true && isVisible && !isMiniaturized && !NSApp.isHidden && isOnActiveSpace
+    if covered, coverWatch == nil {
+      let watch = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.tellSight() }
+      watch.tolerance = 0.25
+      RunLoop.main.add(watch, forMode: .common)
+      coverWatch = watch
+    } else if !covered, let watch = coverWatch {
+      watch.invalidate()
+      coverWatch = nil
+    }
     guard now != lastSight else { return }
     lastSight = now
     sightChannel?.invokeMethod("sight", arguments: now)
@@ -739,4 +912,20 @@ final class DevMarkView: NSView {
       options: [.usesLineFragmentOrigin, .usesFontLeading])
     context.restoreGState()
   }
+}
+
+/// Owns the window's pointer tracking for what's seen: entering the window
+/// or moving over it, whichever app is in front.
+final class SightPointer: NSResponder {
+  init(_ pointed: @escaping () -> Void) {
+    self.pointed = pointed
+    super.init()
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  private let pointed: () -> Void
+
+  override func mouseEntered(with event: NSEvent) { pointed() }
+  override func mouseMoved(with event: NSEvent) { pointed() }
 }

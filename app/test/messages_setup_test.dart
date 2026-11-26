@@ -201,6 +201,86 @@ void main() {
     expect(find.text('Remove…'), findsNothing);
   });
 
+  testWidgets('where the messages are kept (#451): this Claktory, or '
+      'another with Keep them on this Claktory; and who sees its address', (
+    tester,
+  ) async {
+    final worker = FakeWorker();
+    final phone = FakeEndpoint(worker, 'matt', 'phone', name: 'iPhone');
+    await phone.e2ee.start();
+    await phone.e2ee.setUpFirst();
+    final home = FakeHome(worker);
+    phone.e2ee.home = home;
+    await phone.e2ee.sync();
+    await phone.e2ee.sync();
+    await _show(tester, phone.e2ee);
+    expect(find.text('Where your messages are kept'), findsOneWidget);
+    expect(
+      find.text(
+        "Your Claktory connects to your friends' Claktories directly when it "
+        'can, so they can see its network address.',
+      ),
+      findsOneWidget,
+    );
+    // Its list named no home: the Claktory the app shows became it.
+    expect(phone.e2ee.homeEndpoint, home.endpointId);
+    expect(
+      find.text('On the Claktory this app is connected to.'),
+      findsOneWidget,
+    );
+    expect(find.text('Keep them on this Claktory'), findsNothing);
+
+    // The app shows another of Matt's Claktories now.
+    home
+      ..isHome = false
+      ..endpointId = List.filled(32, 6)
+      ..said();
+    await _settle(tester);
+    expect(
+      find.text(
+        'On another of your Claktories. What you send waits until you '
+        'connect to it, unless you keep them on this one.',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Keep them on this Claktory'));
+    await _settle(tester);
+    expect(phone.e2ee.homeEndpoint, List.filled(32, 6));
+    home
+      ..isHome = true
+      ..said();
+    await _settle(tester);
+    expect(
+      find.text('On the Claktory this app is connected to.'),
+      findsOneWidget,
+    );
+    await tester.pump(const Duration(seconds: 2));
+  });
+
+  // Zucchero's row 548: the Claktory answers the first routes before it
+  // placed itself from the list that now names it; the list is the
+  // person's choice, so it reads as this Claktory at once, with no Keep.
+  testWidgets('set up on the Claktory the app shows: this Claktory, even '
+      'before it says it placed itself', (tester) async {
+    final worker = FakeWorker();
+    final phone = FakeEndpoint(worker, 'matt', 'phone', name: 'iPhone');
+    await phone.e2ee.start();
+    await phone.e2ee.setUpFirst();
+    final home = FakeHome(worker)..isHome = false;
+    phone.e2ee.home = home;
+    await phone.e2ee.sync();
+    await phone.e2ee.sync();
+    await _show(tester, phone.e2ee);
+    expect(phone.e2ee.homeEndpoint, home.endpointId);
+    expect(phone.e2ee.homeState!.isHome, isFalse);
+    expect(
+      find.text('On the Claktory this app is connected to.'),
+      findsOneWidget,
+    );
+    expect(find.text('Keep them on this Claktory'), findsNothing);
+    await tester.pump(const Duration(seconds: 2));
+  });
+
   testWidgets('a new device shows its code; the phone scans and adds it', (
     tester,
   ) async {
@@ -297,6 +377,80 @@ void main() {
     expect(find.textContaining("The camera isn't available"), findsOneWidget);
     expect(find.text('Open Settings'), findsNothing);
     expect(find.text('Paste code instead'), findsOneWidget);
+  });
+
+  // Row 564: the new device's app closed before the other added it; its
+  // code's keys went with it.
+  testWidgets('a code its app closed on: the new code says the earlier '
+      "one no longer works, and the device it listed says it never set "
+      'up', (tester) async {
+    final worker = FakeWorker();
+    final phone = FakeEndpoint(worker, 'matt', 'phone', name: 'iPhone');
+    await phone.e2ee.start();
+    await phone.e2ee.setUpFirst();
+    final ipad = FakeEndpoint(worker, 'matt', 'ipad');
+    await ipad.e2ee.start();
+    final code = await ipad.e2ee.offerThisDevice(platform: 'iPad');
+    final ipadNow = ipad.relaunch();
+    await phone.e2ee.addDevice(await phone.e2ee.scanned(code!));
+    await ipadNow.start();
+    await ipadNow.offerThisDevice(platform: 'iPad');
+    await ipadNow.takeHandoff();
+    expect(ipadNow.setup, DmSetup.addThisDevice);
+    expect(ipadNow.earlierCodeSpent, isTrue);
+    expect(worker.handoffs.values.expand((each) => each), isEmpty);
+
+    await _show(tester, ipadNow);
+    expect(
+      find.textContaining('Your earlier code no longer works'),
+      findsOneWidget,
+    );
+    await tester.pumpWidget(const SizedBox());
+
+    // The phone lists it, waiting, until its code's 30 minutes are up.
+    await phone.e2ee.sync();
+    await _show(tester, phone.e2ee);
+    expect(find.textContaining('Not set up'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+    phone.now += E2ee.codeLife.inMilliseconds;
+    await _show(tester, phone.e2ee);
+    expect(find.textContaining('Not set up'), findsOneWidget);
+    expect(find.text('Remove…'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+
+    // Added again with the new code: set up, and nothing more said.
+    await phone.e2ee.addDevice(await phone.e2ee.scanned(ipadNow.offer!));
+    await ipadNow.takeHandoff();
+    expect(ipadNow.setup, DmSetup.ready);
+    expect(ipadNow.earlierCodeSpent, isFalse);
+    await phone.e2ee.sync();
+    await _show(tester, phone.e2ee);
+    expect(find.textContaining('Not set up'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  // Fugo 39894: a Claktory the person's account doesn't list says so, and
+  // offers nothing to keep messages on it.
+  testWidgets('a Claktory on another account says so, with no Keep', (
+    tester,
+  ) async {
+    final worker = FakeWorker();
+    final phone = FakeEndpoint(worker, 'matt', 'phone', name: 'iPhone');
+    await phone.e2ee.start();
+    await phone.e2ee.setUpFirst();
+    phone.e2ee
+      ..home = FakeHome(worker)
+      ..ungatedForTests = false
+      ..accountClaktories = (() async => const [])
+      ..show(const DmShown.remote(code: 'code-a', endpoint: 'aa11'));
+    await phone.e2ee.sync();
+    await _show(tester, phone.e2ee);
+    expect(
+      find.textContaining('This Claktory is signed in to another account'),
+      findsOneWidget,
+    );
+    expect(find.text('Keep them on this Claktory'), findsNothing);
+    await tester.pumpWidget(const SizedBox());
   });
 
   testWidgets('removing a device asks first', (tester) async {
@@ -572,9 +726,14 @@ void main() {
       expect(worker.log, isNot(contains('POST me/keys/rotate')));
       expect(mac.device.identity, old);
 
-      // Kept as under way: Your devices says so too (R5b).
+      // Kept as under way: Your devices says so too (R5b), and what's
+      // still true (Fugo 41048).
       expect(
-        find.text("ipad and phone aren't fully locked out yet."),
+        find.text(
+          "ipad and phone can't read new messages, but Claktory couldn't "
+          "sign them out of your Claktory account, so your security key "
+          "hasn't changed yet. Try again.",
+        ),
         findsOneWidget,
       );
 
@@ -589,6 +748,49 @@ void main() {
       expect(mac.device.lists['matt']!.leaves.map((each) => each.leafId), [
         'mac',
       ]);
+    });
+
+    // E11-6 (Fugo 41048, Abbacchio's row 12): the sign-in a new key wants,
+    // cancelled, never stalls it silently: Your devices says what's still
+    // true and asks to sign in again, after a relaunch too.
+    testWidgets('the sign-in cancelled: said, with Sign in again…, which '
+        'asks again; and the same after a relaunch', (tester) async {
+      final (worker, mac, _, _) = await three();
+      final old = mac.device.identity;
+      worker.staleSignIn.add('matt/mac');
+      await _show(tester, mac.e2ee);
+      await tester.tap(find.text('Lost or stolen…').first);
+      await _settle(tester);
+      await tester.tap(find.text('Lock out'));
+      await _settle(tester);
+      await tester.tap(find.text('Cancel'));
+      await _settle(tester);
+      const line =
+          "ipad can't read new messages, but your security key hasn't "
+          'changed yet. Sign in again to finish locking it out.';
+      expect(find.text(line), findsOneWidget);
+      // Off the list and signed out already; only the key waits.
+      expect(
+        mac.device.lists['matt']!.leaves.map((each) => each.leafId),
+        isNot(contains('ipad')),
+      );
+      expect(worker.signedOut['matt'], contains('ipad'));
+      expect(mac.device.identity, old);
+
+      await tester.tap(find.text('Sign in again…'));
+      await _settle(tester);
+      expect(find.text('Sign in again'), findsOneWidget);
+      await tester.tap(find.text('Cancel').last);
+      await _settle(tester);
+      expect(find.text(line), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+
+      final again = mac.relaunch();
+      await again.start();
+      await _show(tester, again);
+      expect(find.text(line), findsOneWidget);
+      expect(find.text('Sign in again…'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
     });
   });
 

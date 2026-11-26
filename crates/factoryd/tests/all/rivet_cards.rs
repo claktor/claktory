@@ -12,7 +12,7 @@ use factory_protocol::v1::{self, AgentStatus, client_message::Body as Request, e
 use factoryd::pipes;
 
 /// Rivet's cards (questions) in its conversation, with their seqs.
-fn cards(view: &View) -> Vec<(u64, v1::AskPerson)> {
+pub(crate) fn cards(view: &View) -> Vec<(u64, v1::AskPerson)> {
     view.entries
         .iter()
         .filter_map(|entry| match &entry.kind {
@@ -22,7 +22,7 @@ fn cards(view: &View) -> Vec<(u64, v1::AskPerson)> {
         .collect()
 }
 
-fn answer(seq: u64, dismiss: bool) -> Request {
+pub(crate) fn answer(seq: u64, dismiss: bool) -> Request {
     Request::AnswerAsk(v1::AnswerAsk { agent_id: "rivet".into(), seq, dismiss, ..Default::default() })
 }
 
@@ -32,7 +32,7 @@ fn reply(seq: u64, text: &str) -> Request {
 
 /// The event from Claktory in Rivet's conversation that holds `containing`,
 /// once Rivet has run on it.
-async fn told(client: &mut Client, view: &mut View, containing: &str) -> String {
+pub(crate) async fn told(client: &mut Client, view: &mut View, containing: &str) -> String {
     let found = |view: &View| {
         view.entries.iter().find_map(|entry| match &entry.kind {
             Some(Kind::Event(event)) if event.source() == v1::EventSource::Factory && event.text.contains(containing) => {
@@ -111,6 +111,21 @@ async fn continue_automatically_changes_only_with_the_persons_approval() {
     // On already: nothing to ask.
     let said = call(&mut client, &mut view, "rivet", "models_auto_continue", r#"{"on": true, "reason": "x"}"#).await;
     assert_eq!(said, "Continue automatically is on already. Nothing was asked.");
+
+    // Its words can't be talked over (#492, Fugo A): a reply to the person's
+    // comment, with new words or none, is refused, and the card stays as it was.
+    call(&mut client, &mut view, "rivet", "models_auto_continue", r#"{"on": false, "reason": "Matt asked."}"#).await;
+    let (seq, _) = cards(&view).pop().expect("a card");
+    apply_request(&mut client, &mut view, reply(seq, "Only at night, please.")).await;
+    told(&mut client, &mut view, "Only at night, please.").await;
+    let before = cards(&view).pop().expect("the card").1;
+    for args in [json!({"id": before.id, "text": "Nights only, then."}), json!({"id": before.id, "text": "Nights only.", "body": "Turn it off at night."}), json!({"id": before.id, "text": "Settled.", "resolve": true})] {
+        let said = call(&mut client, &mut view, "rivet", "ask_reply", &args.to_string()).await;
+        assert!(said.contains("does exactly what it shows when the person approves it, so it can't be answered on, opened again or changed in a reply."), "{said}");
+    }
+    let after = cards(&view).pop().expect("the card").1;
+    assert_eq!((after.revision, after.body.as_str(), after.thread.len(), after.approve_follows_talk), (before.revision, before.body.as_str(), 0, false));
+    assert!(view.workspace.usage_auto_continue, "nothing changed");
 }
 
 #[tokio::test]
@@ -308,4 +323,161 @@ async fn the_other_side_shares_at_most_so_many_websites_over_a_pipe() {
     // One it has already is updated, not refused.
     pipes::shares::offered_for_test(&factory, &pipe, "peer-key", &format!("{:032x}", 0), "Renamed");
     view.follow(&mut client, |view| view.workspace.pipe_shares.iter().any(|share| share.name == "Renamed")).await;
+}
+
+/// Approved, but the change couldn't be made (#414's boundary here): the
+/// card says why on every device, not only to Rivet (Zucchero's #414 run).
+#[tokio::test]
+async fn an_approved_change_that_cant_be_made_says_why_on_the_card() {
+    let (factory, mut client, mut view, pipe) = setup().await;
+    let other = pipes::open_for_test(&factory, "site", "Partners", &["cy"], "cy", false);
+    let add = v1::AddPipeLiaison { pipe_id: other.clone(), name: "Freya".into() };
+    apply_request(&mut client, &mut view, Request::AddPipeLiaison(add)).await;
+    view.follow(&mut client, |view| shown(view, &other).is_some_and(|pipe| pipe.lead_id == "freya")).await;
+
+    let args = json!({"pipe": "Website", "reason": "Freya helps.", "add": ["Freya"]});
+    let said = call(&mut client, &mut view, "rivet", "pipes_settings", &args.to_string()).await;
+    assert!(said.starts_with("Asked "), "{said}");
+    let (seq, card) = cards(&view).pop().expect("a card");
+    assert_eq!(card.action_error, "", "nothing to say while it waits");
+    apply_request(&mut client, &mut view, answer(seq, false)).await;
+    let told = told(&mut client, &mut view, "but it couldn't be done: ").await;
+    let why = told.split("but it couldn't be done: ").nth(1).expect("why").to_owned();
+    assert!(why.starts_with("Freya is Partners' liaison"), "{why}");
+
+    let (_, decided) = cards(&view).pop().expect("the card");
+    assert_eq!(decided.state(), v1::AskPersonState::Answered);
+    assert!(why.starts_with(&decided.action_error) && !decided.action_error.is_empty(), "{:?} / {why}", decided.action_error);
+    assert_eq!(pipe_of(&view, &pipe).member_ids, ["lea", "bo"], "nothing changed");
+
+    // Kept: the conversation read again still says it.
+    apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "lea".into() })).await;
+    apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
+    let (_, again) = cards(&view).pop().expect("the card");
+    assert_eq!(again.action_error, decided.action_error);
+}
+
+/// Friend bug #32 (Fugo 33421): Rivet asks to share a website with a pipe
+/// only on a card, which shows exactly what it exposes; never for another
+/// agent, nor while it has read from outside, nor with a pipe it can't
+/// trust, nor for a port that can't be shared; and nothing is shared until
+/// the person approves, the same program still listening.
+#[tokio::test]
+async fn rivet_asks_to_share_a_website_only_on_a_card_that_shows_what_it_exposes() {
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("home")).expect("home");
+    let config = json!({
+        "agents": [
+            {"id": "rivet", "name": "Rivet", "model": MODEL, "effort": "off", "extensions": {"agents": {"admin": true}}},
+            {"id": "dev", "name": "Dev", "model": MODEL, "effort": "off", "extensions": {"pipes": {"enabled": true}}},
+        ],
+    });
+    std::fs::write(dir.join("home/config.json"), config.to_string()).expect("config");
+    let (addr, factory) = start_with_models(&dir, std::sync::Arc::new(Scripted::signed_in())).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    let pipe = pipes::open_for_test(&factory, "site", "Website", &[], "", false);
+    view.follow(&mut client, |view| shown(view, &pipe).is_some()).await;
+    let site = std::net::TcpListener::bind("127.0.0.1:0").expect("a website");
+    let port = site.local_addr().expect("its port").port();
+    let ask = |port: u16| json!({"pipe": "Website", "port": port, "name": "Dashboard", "reason": "Matt wants Ana to see it."}).to_string();
+
+    // Not an admin agent.
+    let refused = call(&mut client, &mut view, "dev", "pipes_share", &ask(port)).await;
+    assert!(refused.starts_with("Only an admin agent can ask to share a website"), "{refused}");
+    // A pipe whose other side isn't pinned yet.
+    let refused = call(&mut client, &mut view, "rivet", "pipes_share", &ask(port)).await;
+    assert_eq!(refused, "The pipe's other side isn't pinned to a key yet, so it can't get a website. Nothing was asked.");
+    factoryd::pipe_link::pin_for_test(&factory, &pipe, "peer-endpoint");
+    // Ports that can't be shared, or where nothing answers.
+    let refused = call(&mut client, &mut view, "rivet", "pipes_share", &ask(7421)).await;
+    assert_eq!(refused, "Port 7421 is Claktory's own. Nothing was asked.");
+    let nothing = std::net::TcpListener::bind("127.0.0.1:0").expect("a port").local_addr().expect("its port").port();
+    let refused = call(&mut client, &mut view, "rivet", "pipes_share", &ask(nothing)).await;
+    assert!(refused.starts_with(&format!("Nothing answers on port {nothing} on this computer")), "{refused}");
+    assert!(cards(&view).is_empty(), "a refusal made a card");
+
+    // The card: what it exposes, in Claktory's words; nothing shared yet.
+    let said = call(&mut client, &mut view, "rivet", "pipes_share", &ask(port)).await;
+    assert!(said.starts_with("Asked "), "{said}");
+    let (seq, card) = cards(&view).pop().expect("a card");
+    assert_eq!(card.title, "Share a website with the pipe \"Website\"");
+    // On this machine, by its name (W3).
+    let expected = format!("Rivet asks to share the website at http://localhost:{port} on ");
+    assert!(card.action_description.starts_with(&expected), "{}", card.action_description);
+    let expected = format!(" with the pipe \"Website\" (Not verified), called \"Dashboard\" there. What listens on port {port} now: ");
+    assert!(card.action_description.contains(&expected), "{}", card.action_description);
+    assert!(!card.action_description.starts_with(&format!("Rivet asks to share the website at http://localhost:{port} on this computer")));
+    assert!(card.action_description.contains(&format!("(process {}).", std::process::id())), "{}", card.action_description);
+    assert!(
+        card.action_description.ends_with(
+            "While it's shared, the other side can use every page and action of that site, as a browser on this computer could. It stays shared until you choose Stop under Shared websites in the pipe's settings."
+        ),
+        "{}",
+        card.action_description
+    );
+    assert_eq!(card.action_reason, "Matt wants Ana to see it.");
+    assert!(view.workspace.pipe_shares.is_empty(), "nothing until they approve");
+
+    // What listened there is gone: the card is void, and nothing is shared.
+    drop(site);
+    apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
+    match apply_request(&mut client, &mut view, answer(seq, false)).await {
+        v1::server_message::Body::Error(error) => {
+            assert_eq!(error.message, format!("Nothing answers on port {port} now, so there's nothing to share: dismiss this card."))
+        }
+        other => panic!("not refused: {other:?}"),
+    }
+    assert!(view.workspace.pipe_shares.is_empty());
+
+    // A program Claktory can't name there (another user's, say): never
+    // from a card (Fugo 33782): refused when asked, and void at Approve.
+    let theirs = std::net::TcpListener::bind("127.0.0.1:0").expect("someone else's website");
+    let unnamed = theirs.local_addr().expect("its port").port();
+    pipes::shares::unnamed_listener_for_test(unnamed);
+    let refused = call(&mut client, &mut view, "rivet", "pipes_share", &ask(unnamed)).await;
+    assert_eq!(
+        refused,
+        format!(
+            "Claktory can't tell which of the person's programs listens on port {unnamed}, so you can't ask to share it. They can share it themselves from the pipe's settings if it's theirs. Nothing was asked."
+        )
+    );
+    let website = std::net::TcpListener::bind("127.0.0.1:0").expect("a website");
+    let port = website.local_addr().expect("its port").port();
+    call(&mut client, &mut view, "rivet", "pipes_share", &ask(port)).await;
+    let (seq, _) = cards(&view).pop().expect("a card");
+    pipes::shares::unnamed_listener_for_test(port);
+    match apply_request(&mut client, &mut view, answer(seq, false)).await {
+        v1::server_message::Body::Error(error) => {
+            assert_eq!(error.message, format!("A different program listens on port {port} now: dismiss this card and ask again."))
+        }
+        other => panic!("not refused: {other:?}"),
+    }
+    assert!(view.workspace.pipe_shares.is_empty());
+
+    // Another account on the other side now: refused.
+    let website = std::net::TcpListener::bind("127.0.0.1:0").expect("a website");
+    let port = website.local_addr().expect("its port").port();
+    pipes::identity::vouch_for_test(&factory, true, Some(String::new()), |statement: &str, at: &str, _now: i64| {
+        let [account, email, iat, key] = statement.split('|').collect::<Vec<_>>()[..] else { return None };
+        let iat: i64 = iat.parse().ok()?;
+        (key == at).then(|| (account.to_owned(), email.to_owned(), iat, iat + 7 * 24 * 3600))
+    });
+    let now = factoryd::transcript::now_ms() / 1000;
+    pipes::identity::heard_for_test(&factory, &pipe, "peer-endpoint", &format!("a1|ana@example.com|{now}|peer-endpoint"));
+    view.follow(&mut client, |view| shown(view, &pipe).and_then(|pipe| pipe.peer).is_some_and(|peer| peer.verified)).await;
+    let said = call(&mut client, &mut view, "rivet", "pipes_share", &ask(port)).await;
+    assert!(said.starts_with("Asked "), "{said}");
+    let (_, card) = cards(&view).pop().expect("a card");
+    assert!(card.action_description.contains("(Verified: ana@example.com)"), "{}", card.action_description);
+    pipes::identity::heard_for_test(&factory, &pipe, "peer-endpoint", &format!("b1|bo@example.com|{}|peer-endpoint", now + 1));
+    let refused = call(&mut client, &mut view, "rivet", "pipes_share", &ask(port)).await;
+    assert!(refused.starts_with("The pipe's Claktory now belongs to a different account"), "{refused}");
+
+    // Having read from outside.
+    pipes::taint_for_test(&factory, "rivet", "browser:https://example.com");
+    let refused = call(&mut client, &mut view, "rivet", "pipes_share", &ask(port)).await;
+    assert!(refused.starts_with("Not while you've read"), "{refused}");
+    assert!(view.workspace.pipe_shares.is_empty());
 }

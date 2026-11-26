@@ -77,7 +77,10 @@ pub(crate) fn path(home: &Home, target: &Target) -> PathBuf {
 /// (`crate::extensions::agents::provenance`); and the person's notes on
 /// their decisions, kept for Needs you's history (`crate::needs_you`); and
 /// ink, the person's drawings on files and what each device was reading,
-/// which reach an agent only in what the person sends (`crate::ink`).
+/// which reach an agent only in what the person sends (`crate::ink`); and
+/// the Map's history, which holds the names of pipes, another Claktory's
+/// connections (`crate::history`, Fugo's ruling for #458); and what
+/// commands the person ran from cards printed (`crate::command_cards`).
 fn private(table: &str) -> bool {
     table.starts_with("memory_")
         || table == "pipes"
@@ -87,8 +90,10 @@ fn private(table: &str) -> bool {
         || table == "quiet_copies"
         || table == "decision_notes"
         || table.starts_with("ink_")
+        || table == "ask_runs"
         || table == "presentations"
         || table.starts_with("presentation_")
+        || table.starts_with("map_history")
 }
 
 /// What `target`'s statements may do. Writes to factory.db are already
@@ -176,7 +181,7 @@ pub(crate) fn sql_error(error: &rusqlite::Error, target: &Target) -> String {
     }
     if *target == Target::Factory && (text.contains("prohibited") || text.contains("not authorized")) {
         return format!(
-            "{text}. Agents' memory (the memory_ tables), pipes (pipes, pipe_), comments on files (threads, thread_), quiet copies (quiet_copies) and ink (ink_, presentations) aren't readable, even by admin agents; comments sent to you are in comments_list, and your quiet copies in agents_copies."
+            "{text}. Agents' memory (the memory_ tables), pipes (pipes, pipe_), comments on files (threads, thread_), quiet copies (quiet_copies), ink (ink_, presentations), the Map's history (map_history) and what commands on cards printed (ask_runs) aren't readable, even by admin agents; comments sent to you are in comments_list, and your quiet copies in agents_copies."
         );
     }
     if text.contains("not authorized") {
@@ -434,7 +439,7 @@ mod tests {
         let factory = Connection::open(home.db_path()).expect("open");
         factory
             .execute_batch(
-                "PRAGMA journal_mode = wal; CREATE TABLE messages (agent TEXT, text TEXT); INSERT INTO messages VALUES ('rivet', 'hi'); CREATE TABLE memory_notes (agent TEXT, body TEXT); INSERT INTO memory_notes VALUES ('scout', 'secret'); CREATE TABLE threads (id INTEGER, agent TEXT); CREATE TABLE thread_comments (thread INTEGER, body TEXT, draft INTEGER); INSERT INTO thread_comments VALUES (1, 'not sent yet', 1); CREATE TABLE thread_files (path TEXT, text TEXT); CREATE TABLE quiet_copies (agent TEXT, text TEXT, taint TEXT); INSERT INTO quiet_copies VALUES ('lea', 'from a pipe', '{\"p\":[]}'); CREATE TABLE decision_notes (kind TEXT, ref TEXT, comment TEXT, created INTEGER); INSERT INTO decision_notes VALUES ('pipe_message', 'p:1', 'not that', 1); CREATE TABLE ink_layers (path TEXT); INSERT INTO ink_layers VALUES ('/a.pdf'); CREATE TABLE ink_revisions (layer INTEGER); CREATE TABLE ink_items (layer TEXT); CREATE TABLE presentations (device TEXT); CREATE TABLE presentation_sidebars (device TEXT);",
+                "PRAGMA journal_mode = wal; CREATE TABLE messages (agent TEXT, text TEXT); INSERT INTO messages VALUES ('rivet', 'hi'); CREATE TABLE memory_notes (agent TEXT, body TEXT); INSERT INTO memory_notes VALUES ('scout', 'secret'); CREATE TABLE threads (id INTEGER, agent TEXT); CREATE TABLE thread_comments (thread INTEGER, body TEXT, draft INTEGER); INSERT INTO thread_comments VALUES (1, 'not sent yet', 1); CREATE TABLE thread_files (path TEXT, text TEXT); CREATE TABLE quiet_copies (agent TEXT, text TEXT, taint TEXT); INSERT INTO quiet_copies VALUES ('lea', 'from a pipe', '{\"p\":[]}'); CREATE TABLE decision_notes (kind TEXT, ref TEXT, comment TEXT, created INTEGER); INSERT INTO decision_notes VALUES ('pipe_message', 'p:1', 'not that', 1); CREATE TABLE ink_layers (path TEXT); INSERT INTO ink_layers VALUES ('/a.pdf'); CREATE TABLE ink_revisions (layer INTEGER); CREATE TABLE ink_items (layer TEXT); CREATE TABLE presentations (device TEXT); CREATE TABLE presentation_sidebars (device TEXT); CREATE TABLE map_history (node TEXT, data TEXT); CREATE TABLE map_history_meta (since INTEGER); CREATE TABLE ask_runs (ask INTEGER, output TEXT);",
             )
             .expect("schema");
         let target = Target::Factory;
@@ -442,7 +447,7 @@ mod tests {
         assert_eq!(query(&db, &target, "SELECT * FROM messages", None).as_deref(), Ok("agent | text\nrivet | hi"));
         let memory = query(&db, &target, "SELECT body FROM memory_notes", None).unwrap_err();
         assert!(
-            memory.contains("(the memory_ tables), pipes (pipes, pipe_), comments on files (threads, thread_), quiet copies (quiet_copies) and ink (ink_, presentations) aren't readable"),
+            memory.contains("(the memory_ tables), pipes (pipes, pipe_), comments on files (threads, thread_), quiet copies (quiet_copies), ink (ink_, presentations), the Map's history (map_history) and what commands on cards printed (ask_runs) aren't readable"),
             "{memory}"
         );
         // Comments on files hold the person's drafts: no table of them is read, joined or listed.
@@ -462,9 +467,14 @@ mod tests {
             "SELECT m.text FROM messages m JOIN ink_layers i ON 1",
             "SELECT * FROM presentations",
             "SELECT * FROM presentation_sidebars",
+            // The Map's history holds pipes' names (#458, Fugo).
+            "SELECT data FROM map_history",
+            "SELECT * FROM map_history_meta",
+            // What a command on a card printed, which may be anything (#494, Fugo).
+            "SELECT output FROM ask_runs",
         ] {
             let refused = query(&db, &target, sql, None).unwrap_err();
-            assert!(refused.contains("quiet copies (quiet_copies) and ink (ink_, presentations) aren't readable"), "{sql}: {refused}");
+            assert!(refused.contains("quiet copies (quiet_copies), ink (ink_, presentations), the Map's history (map_history) and what commands on cards printed (ask_runs) aren't readable"), "{sql}: {refused}");
         }
         assert!(exec(&mut db, &target, "INSERT INTO messages VALUES ('x', 'y')", None).is_err());
         assert_eq!(schema(&db, &target, None).as_deref(), Ok("messages (1 rows): agent TEXT, text TEXT"));

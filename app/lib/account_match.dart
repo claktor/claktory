@@ -88,6 +88,10 @@ class AccountMatch extends ChangeNotifier {
   /// is first answered.
   Set<String>? _listed;
 
+  /// When each of the account's Claktories last checked in with it, by
+  /// endpoint (lowercase), as the list last read said.
+  var _checkedIn = const <String, DateTime>{};
+
   /// Signed out when the list was last asked for.
   var _signedOut = false;
 
@@ -118,6 +122,15 @@ class AccountMatch extends ChangeNotifier {
         : AccountCheck.notTheirs;
   }
 
+  /// When the Claktory dialled by [endpointId] last checked in with the
+  /// person's account, as its list last said; null when it isn't on it,
+  /// never did, or nothing is known (friend bug #37).
+  DateTime? checkedIn(String? endpointId) {
+    if (endpointId == null || endpointId.isEmpty) return null;
+    if (check(endpointId) != AccountCheck.theirs) return null;
+    return _checkedIn[endpointId.toLowerCase()];
+  }
+
   /// Reads the account's list again: when the account changes, a Claktory
   /// is added, the app comes back to the front, and a minute after it
   /// couldn't be read.
@@ -144,15 +157,22 @@ class AccountMatch extends ChangeNotifier {
     final who = whose();
     final listed = theirs();
     var next = const <String>{};
+    var checkedIn = const <String, DateTime>{};
     var unreadable = false;
     // Failing, but not for long enough to say so: nothing known yet.
     var unsure = false;
     if (listed != null) {
       try {
+        final claktories = await listed;
         next = {
-          for (final claktory in await listed)
+          for (final claktory in claktories)
             if (claktory.endpointId.isNotEmpty)
               claktory.endpointId.toLowerCase(),
+        };
+        checkedIn = {
+          for (final claktory in claktories)
+            if (claktory.endpointId.isNotEmpty && claktory.lastContact != null)
+              claktory.endpointId.toLowerCase(): claktory.lastContact!,
         };
         _failingSince = null;
         _nextRetry = firstRetry;
@@ -165,6 +185,7 @@ class AccountMatch extends ChangeNotifier {
         var wait = retryAfter;
         if (!none) {
           next = last;
+          checkedIn = _checkedIn;
         } else {
           final since = _failingSince ??= _now();
           final left = unsureFor - _now().difference(since);
@@ -187,6 +208,7 @@ class AccountMatch extends ChangeNotifier {
       // As before the first answer: nothing marked.
       final changed = _listed != null;
       _listed = null;
+      _checkedIn = const {};
       _signedOut = false;
       _unreadable = false;
       if (changed) notifyListeners();
@@ -197,8 +219,10 @@ class AccountMatch extends ChangeNotifier {
         before == null ||
         !setEquals(before, next) ||
         _signedOut != (listed == null) ||
-        _unreadable != unreadable;
+        _unreadable != unreadable ||
+        !mapEquals(_checkedIn, checkedIn);
     _listed = next;
+    _checkedIn = checkedIn;
     if (!unreadable) _listedWhose = who;
     _signedOut = listed == null;
     _unreadable = unreadable;

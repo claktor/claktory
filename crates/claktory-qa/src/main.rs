@@ -21,13 +21,16 @@ Exit 0 done, 1 failed, 2 usage, 3 refused (by the sandbox, or as unsafe), 4 the 
 
 Sandboxes
   up [NAME] [--no-account] [--port PORT] [--model] [--script FILE] [--machine-name NAME] [--speech MODEL] [--claude]
+     [--claim-email EMAIL] [--claim-claktory-id ID]
                                            start one: a fresh Claktory on a free port (7500 up), with its
                                            own account service whose emails land in its mail folder; with
                                            --model (or --script), its agents run on qa-model, a scripted model;
                                            it shows the machine name qa-NAME (or --machine-name's), never this computer's;
                                            with --speech, it recognizes speech: the commit's claktory-speech on
                                            MODEL (a .gguf with its .receipt beside it), copied in; with --claude,
-                                           Claude is signed in, fake, on qa-model, and its agents run on Claude
+                                           Claude is signed in, fake, on qa-model, and its agents run on Claude;
+                                           with --claim-email or --claim-claktory-id, its factoryd lies that it's
+                                           that account's (its Workspace email) or that Claktory (its leaf offer)
   down NAME… | --all | --all-agents [--keep]
                                            end them and delete their folders (--keep keeps the folders); --all
                                            ends only yours (the root is every agent's: each sandbox records who
@@ -181,7 +184,11 @@ async fn run(args: &[String]) -> Outcome {
     let Some((command, args)) = args.split_first() else { return Err(Failure::usage(USAGE)) };
     match command.as_str() {
         "up" => {
-            let args = Args::parse(args, &["--port", "--script", "--machine-name", "--speech"], &["--no-account", "--model", "--claude"])?;
+            let args = Args::parse(
+                args,
+                &["--port", "--script", "--machine-name", "--speech", "--claim-email", "--claim-claktory-id"],
+                &["--no-account", "--model", "--claude"],
+            )?;
             let port = match args.value("--port") {
                 Some(port) => Some(port.parse().map_err(|_| Failure::usage("--port takes a port number"))?),
                 None => None,
@@ -198,6 +205,8 @@ async fn run(args: &[String]) -> Outcome {
                 machine_name: args.value("--machine-name").map(str::to_owned),
                 speech: args.value("--speech").map(std::path::PathBuf::from),
                 claude: args.flag("--claude"),
+                claim_email: args.value("--claim-email").map(str::to_owned),
+                claim_claktory_id: args.value("--claim-claktory-id").map(str::to_owned),
             };
             let sandbox = sandbox::up(up)?;
             Ok(sandbox.to_json())

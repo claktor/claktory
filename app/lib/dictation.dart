@@ -63,7 +63,10 @@ const _chunk = 1024 * 1024;
 /// upload, the job transcribing it, or the words it heard. When the
 /// Claktory no longer has it (no_recording: a restart, or over an hour),
 /// it goes up again, once, as a new upload.
-Future<String> transcribeOnClaktory(
+Future<String> transcribeOnClaktory(Backend backend, Recording recording) =>
+    backend.holding(() => _transcribeOnClaktory(backend, recording));
+
+Future<String> _transcribeOnClaktory(
   Backend backend,
   Recording recording,
 ) async {

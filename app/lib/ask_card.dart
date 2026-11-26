@@ -4,6 +4,7 @@ import 'package:flutter/widgets.dart';
 import 'avatar.dart';
 import 'backend.dart';
 import 'characters/character.dart';
+import 'command_card.dart';
 import 'controls.dart';
 import 'decision.dart';
 import 'dictation.dart';
@@ -17,16 +18,26 @@ import 'message_time.dart' show clockTime;
 import 'mobile/lines.dart';
 import 'mobile/metrics.dart';
 import 'outbox.dart' show connectionLost, decisionWaiting;
+import 'pipes.dart'
+    show PipeApprovalAsk, PipeApprovalAskView, PipeTrustAsk, PipeTrustAskView;
 import 'mobile/navigation.dart' show PhoneRoutes;
 import 'protocol/factory/v1/factory.pb.dart';
-import 'review_answer.dart' show rememberReviewReturn;
+import 'review_answer.dart' show rememberReviewReturn, rememberReviewTalk;
 import 'scope.dart';
 import 'selection.dart' show SelectableArea;
 import 'taint_label.dart';
-import 'visible_codes.dart' show proseCodes, visibleCodes;
+import 'visible_codes.dart' show proseCodes;
 
 /// Why an answer waits, under its card.
 const askWaiting = decisionWaiting;
+
+/// Approved, but the change the card asked for couldn't be made; its
+/// reason follows (AskPerson.action_error).
+const approvedNotDone = "Approved, but it couldn't be done";
+
+/// How the Claktory refuses an answer to a card its agent changed since
+/// it was shown (#428).
+const cardChanged = 'This card changed.';
 
 /// An agent's question for the person, one it can't go on without: what it
 /// needs (its title) and why (the body, Markdown), and the person's answer
@@ -84,6 +95,10 @@ class _AskPersonCardState extends State<AskPersonCard> {
   /// A procedure's finished steps are listed, not only counted.
   var _showSteps = false;
 
+  /// An Execute card with warnings: Execute was tapped once, and asks
+  /// again (#494).
+  var _confirming = false;
+
   @override
   void didUpdateWidget(AskPersonCard old) {
     super.didUpdateWidget(old);
@@ -108,14 +123,22 @@ class _AskPersonCardState extends State<AskPersonCard> {
     super.dispose();
   }
 
-  /// [revision]: the card's version the person answered (#428), kept
-  /// for a send again once the connection is back, so a card changed
-  /// meanwhile is never answered unseen.
+  /// What the person answered last, refused because the card had changed
+  /// meanwhile (#473): shown, so it reads as set aside, not lost, until
+  /// they answer again.
+  String? _setAside;
+
+  /// [revision]: the card's version the person answered (#428), and
+  /// [talkSeen], how much of its talk it showed them (#492), kept for a
+  /// send again once the connection is back, so a card changed or replied
+  /// on meanwhile is never answered unseen.
   Future<void> _answer({
     required bool dismiss,
     int? step,
     bool again = false,
     int? revision,
+    int? talkSeen,
+    bool confirmed = false,
   }) async {
     final text = _text.text.trim();
     if (_busy ||
@@ -123,6 +146,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
       return;
     }
     final seen = revision ?? widget.ask.revision;
+    final talk = talkSeen ?? widget.ask.thread.length;
     await _send(
       (backend) => backend.answerAsk(
         widget.agentId,
@@ -132,19 +156,42 @@ class _AskPersonCardState extends State<AskPersonCard> {
         dismiss: dismiss,
         step: step,
         revision: seen,
+        talkSeen: talk,
         from: widget.from,
+        confirmed: confirmed,
       ),
-      () => _answer(dismiss: dismiss, step: step, again: true, revision: seen),
+      () => _answer(
+        dismiss: dismiss,
+        step: step,
+        again: true,
+        revision: seen,
+        talkSeen: talk,
+        confirmed: confirmed,
+      ),
       again: again,
+      said: text.isNotEmpty
+          ? text
+          : step != null
+          ? (dismiss ? "Can't do this" : 'Done')
+          : dismiss
+          ? 'Dismiss'
+          : confirmed
+          ? 'Execute'
+          : 'Approve',
     );
   }
 
   /// Sends what's typed as the person's reply (#370): the agent is told
   /// their words, with no yes or no, and the question counts as answered.
-  Future<void> _reply({bool again = false, int? revision}) async {
+  Future<void> _reply({
+    bool again = false,
+    int? revision,
+    int? talkSeen,
+  }) async {
     final text = _text.text.trim();
     if (_busy || text.isEmpty) return;
     final seen = revision ?? widget.ask.revision;
+    final talk = talkSeen ?? widget.ask.thread.length;
     await _send(
       (backend) => backend.answerAsk(
         widget.agentId,
@@ -152,19 +199,26 @@ class _AskPersonCardState extends State<AskPersonCard> {
         text: text,
         reply: true,
         revision: seen,
+        talkSeen: talk,
         from: widget.from,
       ),
-      () => _reply(again: true, revision: seen),
+      () => _reply(again: true, revision: seen, talkSeen: talk),
       again: again,
+      said: text,
     );
   }
 
   /// Ends a card with a thread, deciding nothing: what's typed goes as
   /// the person's last words on it.
-  Future<void> _resolve({bool again = false, int? revision}) async {
+  Future<void> _resolve({
+    bool again = false,
+    int? revision,
+    int? talkSeen,
+  }) async {
     if (_busy) return;
     final text = _text.text.trim();
     final seen = revision ?? widget.ask.revision;
+    final talk = talkSeen ?? widget.ask.thread.length;
     await _send(
       (backend) => backend.answerAsk(
         widget.agentId,
@@ -172,10 +226,12 @@ class _AskPersonCardState extends State<AskPersonCard> {
         text: text,
         resolve: true,
         revision: seen,
+        talkSeen: talk,
         from: widget.from,
       ),
-      () => _resolve(again: true, revision: seen),
+      () => _resolve(again: true, revision: seen, talkSeen: talk),
       again: again,
+      said: text.isNotEmpty ? text : 'Resolve',
     );
   }
 
@@ -214,6 +270,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
     Future<void> Function(Backend backend) request,
     VoidCallback retry, {
     required bool again,
+    required String said,
   }) async {
     final backend = AppScope.of(context);
     setState(() {
@@ -227,7 +284,10 @@ class _AskPersonCardState extends State<AskPersonCard> {
       await request(backend);
       // Sent: should its agent reply and reopen the card, the field starts
       // empty under the thread, which now holds these words.
-      if (mounted) _text.clear();
+      if (mounted) {
+        _text.clear();
+        setState(() => _setAside = null);
+      }
     } on RequestFailure catch (failure) {
       if (!mounted) return;
       if (again && failure.message.startsWith('This question was already')) {
@@ -244,6 +304,12 @@ class _AskPersonCardState extends State<AskPersonCard> {
             _waiting = true;
           });
         }
+        return;
+      }
+      // Its agent changed the card meanwhile: the answer is set aside,
+      // shown with the change, and what's typed stays to send again.
+      if (failure.message.startsWith(cardChanged)) {
+        setState(() => _setAside = said);
         return;
       }
       setState(() => _error = failure.message);
@@ -294,9 +360,12 @@ class _AskPersonCardState extends State<AskPersonCard> {
               ],
               Flexible(
                 child: Text(
-                  // Taken back, it needs nothing (#407).
-                  ask.withdrawn
+                  // Answered, dismissed or taken back (#407), it needs
+                  // nothing.
+                  ask.withdrawn || !pending
                       ? '$name asked'
+                      : ask.hasCommand()
+                      ? '$name asks to run a command'
                       : ask.steps.isEmpty
                       ? '$name needs your answer'
                       : '$name needs you to do something',
@@ -311,14 +380,23 @@ class _AskPersonCardState extends State<AskPersonCard> {
           // Where the question may come from, when its agent read a pipe.
           TaintLabel(taint: ask.taint, agent: name),
           const SizedBox(height: Space.s),
-          // What the agent wrote, to decide on: what reorders text shows by
-          // its code (proseCodes, Fugo).
-          Text(
-            proseCodes(ask.title),
-            style: type.emphasis.copyWith(
-              color: dismissed ? palette.textMuted : palette.text,
+          // A command to run (#494): Claktory's heading and the command,
+          // the agent's title and body under them as its reason.
+          if (ask.hasCommand())
+            CommandFacts(
+              ask: ask,
+              name: name,
+              muted: dismissed || ask.withdrawn,
+            )
+          else
+            // What the agent wrote, to decide on: what reorders text shows
+            // by its code (proseCodes, Fugo).
+            Text(
+              proseCodes(ask.title),
+              style: type.emphasis.copyWith(
+                color: dismissed ? palette.textMuted : palette.text,
+              ),
             ),
-          ),
           // An admin agent's action card (#423): what Approve does, in
           // Claktory's own words, then the agent's reason apart and named
           // as its, so its words never read as part of the action (Fugo).
@@ -328,23 +406,19 @@ class _AskPersonCardState extends State<AskPersonCard> {
               proseCodes(ask.actionDescription),
               style: type.body.copyWith(color: palette.text),
             ),
-            if (ask.actionReason.isNotEmpty) ...[
+            // Waiting to trust a pipe's other side again (#471 G7), the
+            // reason goes under Claktory's warning instead (Fugo).
+            if (ask.actionReason.isNotEmpty &&
+                !(ask.hasPipeTrust() && pending && !ask.withdrawn)) ...[
               const SizedBox(height: Space.s),
-              Text(
-                "$name's reason",
-                style: type.caption.copyWith(
-                  color: palette.textFaint,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              Markdown(proseCodes(ask.actionReason), color: palette.textMuted),
+              _reason(palette, type, name),
             ],
-          ] else if (ask.body.isNotEmpty) ...[
+          ] else if (ask.body.isNotEmpty && !ask.hasCommand()) ...[
             const SizedBox(height: Space.xs),
             for (final (i, part) in askBodyParts(ask.body).indexed) ...[
               if (i > 0) const SizedBox(height: Space.s),
               part.command
-                  ? _Command(part.text)
+                  ? CommandBlock(part.text)
                   : Markdown(proseCodes(part.text), color: palette.textMuted),
             ],
           ],
@@ -356,16 +430,33 @@ class _AskPersonCardState extends State<AskPersonCard> {
               // Nothing to review once its agent took it back (#407).
               onReview: ask.withdrawn
                   ? null
-                  : () => openReview(context, widget.agentId, ask.reviewPath),
+                  : () => openReview(
+                      context,
+                      widget.agentId,
+                      ask.reviewPath,
+                      // The talk as the card shows it now (#492).
+                      card: (seq: widget.seq, talkSeen: ask.thread.length),
+                    ),
             ),
           ],
           // Changed by its agent while it waited (#428): when, and why in
           // its words, above the answer (what's typed stays).
-          if (ask.updatedMs > 0) ...[
+          // Or an answer it set aside (#473), even before the new version
+          // comes.
+          if (ask.updatedMs > 0 || _setAside != null) ...[
             const SizedBox(height: Space.s),
             UpdatedLine(
               updatedMs: ask.updatedMs.toInt(),
-              reason: ask.updateReason,
+              // Said once: the card's own reason already says it (an
+              // action card updated with the same words, Zucchero's row
+              // 535).
+              reason:
+                  ask.actionDescription.isNotEmpty &&
+                      ask.updateReason.trim() == ask.actionReason.trim()
+                  ? ''
+                  : ask.updateReason,
+              name: name,
+              setAside: _setAside,
             ),
           ],
           // The talk on it so far, oldest first: the person's words and
@@ -386,10 +477,18 @@ class _AskPersonCardState extends State<AskPersonCard> {
             )
           else if (ask.steps.isNotEmpty)
             ..._procedure(palette, type, color, name, pending, decided)
+          else if (pending && ask.hasCommand())
+            ..._execute(palette, type, name)
           else if (pending)
             ..._pending(palette, type, name)
-          else
+          else ...[
             ..._decided(palette, type, color, name, dismissed, decided),
+            // What it did, on the card only (never in History).
+            if (ask.hasCommand() && ask.command.hasRun()) ...[
+              const SizedBox(height: Space.s),
+              CommandRunView(command: ask.command),
+            ],
+          ],
         ],
       ),
     );
@@ -414,8 +513,123 @@ class _AskPersonCardState extends State<AskPersonCard> {
     select: (backend) => backend.selectAgent(widget.agentId),
   );
 
+  /// An action card's reason, in its agent's words, named as its so they
+  /// never read as part of the action (Fugo).
+  Widget _reason(Palette palette, TypeScale type, String name) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      Text(
+        "$name's reason",
+        style: type.caption.copyWith(
+          color: palette.textFaint,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+      Markdown(proseCodes(widget.ask.actionReason), color: palette.textMuted),
+    ],
+  );
+
+  /// An Execute card waiting (#494): Dismiss or Execute, which runs
+  /// exactly the command shown, once; with Claktory's warnings, a second
+  /// tap to confirm. No reply: the backend refuses one on it.
+  List<Widget> _execute(Palette palette, TypeScale type, String name) {
+    final warned = widget.ask.command.warnings.isNotEmpty;
+    void execute() {
+      if (warned && !_confirming) {
+        setState(() => _confirming = true);
+        return;
+      }
+      _answer(dismiss: false, confirmed: true);
+    }
+
+    return [
+      ActionLine(
+        lead: Text(
+          _error ??
+              (_confirming
+                  ? 'Run it anyway? Read the warnings above first.'
+                  : '$name gets what it prints once it has run.'),
+          style: type.caption.copyWith(
+            color: _confirming && _error == null
+                ? palette.danger
+                : _statusColor(palette),
+          ),
+        ),
+        action: ControlsLine(
+          children: [
+            if (_confirming)
+              Button(
+                label: 'Cancel',
+                onPressed: _busy
+                    ? null
+                    : () => setState(() => _confirming = false),
+              )
+            else
+              Button(
+                label: 'Dismiss',
+                onPressed: _busy ? null : () => _answer(dismiss: true),
+              ),
+            Button(
+              label: _confirming ? 'Run anyway' : 'Execute',
+              primary: true,
+              onPressed: _busy ? null : execute,
+            ),
+          ],
+        ),
+      ),
+    ];
+  }
+
   List<Widget> _pending(Palette palette, TypeScale type, String name) {
     final wantsText = widget.ask.wantsText;
+    // An agent asking the person to approve a pipe (#471 G1): the pipe's
+    // approval card, from what it proposes, approved through this card;
+    // its Dismiss and reply are this card's.
+    // An agent asking the person to accept a change at a pipe's other end
+    // (#471 G7): Claktory's warning from the pipe as it is, the agent's
+    // reason under it, then Trust (or OK) through this card.
+    if (widget.ask.hasPipeTrust()) {
+      return [
+        PipeTrustAskView(
+          pipeId: widget.ask.pipeTrust.pipeId,
+          ask: PipeTrustAsk(
+            cardId: widget.ask.id,
+            agent: name,
+            change: widget.ask.pipeTrust.identityChange,
+            comment: _text,
+            onDismiss: () => _answer(dismiss: true),
+            onReply: _reply,
+            reason: widget.ask.actionReason.isEmpty
+                ? null
+                : _reason(palette, type, name),
+            busy: _busy,
+            error: _error,
+          ),
+        ),
+        ..._afterTalk(palette, type, name),
+        if (widget.ask.thread.isNotEmpty) ..._talk(type, reply: false),
+      ];
+    }
+    if (widget.ask.hasPipeApproval()) {
+      return [
+        PipeApprovalAskView(
+          pipeId: widget.ask.pipeApproval.pipeId,
+          ask: PipeApprovalAsk(
+            cardId: widget.ask.id,
+            agent: name,
+            proposal: widget.ask.pipeApproval,
+            updated: widget.ask.updatedMs > 0,
+            comment: _text,
+            onDismiss: () => _answer(dismiss: true),
+            onReply: _reply,
+            busy: _busy,
+            error: _error,
+          ),
+        ),
+        ..._afterTalk(palette, type, name),
+        if (widget.ask.thread.isNotEmpty) ..._talk(type, reply: false),
+      ];
+    }
     return [
       // A written answer has its box; an approval, a comment under its
       // buttons for either.
@@ -446,6 +660,8 @@ class _AskPersonCardState extends State<AskPersonCard> {
         ),
         const SizedBox(height: Space.s),
       ],
+      // What Approve means after a talk on the card (#492), above it.
+      ..._afterTalk(palette, type, name, below: false),
       // On a phone at large text the buttons go under the words. Once a
       // comment is typed on an approval, one Submit in place of both: what's
       // typed is a reply, never a yes or a no (#370).
@@ -496,6 +712,46 @@ class _AskPersonCardState extends State<AskPersonCard> {
         ),
       if (widget.ask.thread.isNotEmpty) ..._talk(type, reply: wantsText),
     ];
+  }
+
+  /// What answering means after a talk on the card (#492): agreeing with
+  /// where it ended, when the agent's reply came after the card's words
+  /// last changed (the backend says, AskPerson.approve_follows_talk); on an
+  /// action card, which can't be talked on, only what it shows, should a
+  /// talk ever be there. [below]: under the card's own view (the pipe
+  /// cards'), rather than above its buttons.
+  List<Widget> _afterTalk(
+    Palette palette,
+    TypeScale type,
+    String name, {
+    bool below = true,
+  }) {
+    final ask = widget.ask;
+    final String line;
+    if (ask.approveFollowsTalk) {
+      line = ask.wantsText
+          ? "Your answer follows $name's last reply."
+          : "Approving agrees with $name's last reply.";
+    } else if (ask.thread.isNotEmpty &&
+        (ask.actionDescription.isNotEmpty ||
+            ask.hasPipeApproval() ||
+            ask.hasPipeTrust())) {
+      line =
+          'Approving does only what the card says, not what was said in '
+          'the talk.';
+    } else {
+      return const [];
+    }
+    final text = Text(
+      line,
+      style: type.caption.copyWith(
+        color: palette.textMuted,
+        fontWeight: FontWeight.w500,
+      ),
+    );
+    return below
+        ? [const SizedBox(height: Space.s), text]
+        : [text, const SizedBox(height: Space.xs)];
   }
 
   /// Under a card with a thread, beneath its own buttons: Reply, for a
@@ -570,7 +826,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
         for (final (i, part) in askBodyParts(step.text).indexed) ...[
           if (i > 0) const SizedBox(height: Space.s),
           part.command
-              ? _Command(part.text)
+              ? CommandBlock(part.text)
               : Markdown(proseCodes(part.text), color: palette.text),
         ],
         const SizedBox(height: Space.m),
@@ -662,7 +918,12 @@ class _AskPersonCardState extends State<AskPersonCard> {
         ask.state == AskPersonState.ASK_PERSON_STATE_ANSWERED &&
         stopped == null &&
         !talked;
-    final outcome = ask.resolved
+    // Closed by its agent as settled in the talk (#496).
+    final agentClosed = agentResolved(ask);
+    final agent = AppScope.of(context).workspace.agent(widget.agentId);
+    final outcome = agentClosed
+        ? '$name closed it'
+        : ask.resolved
         ? 'Resolved'
         : ask.replied
         ? 'Replied'
@@ -677,7 +938,10 @@ class _AskPersonCardState extends State<AskPersonCard> {
       Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const PersonAvatar(size: 16),
+          if (agentClosed && agent != null)
+            AgentCharacter(agent: agent, size: 16)
+          else
+            const PersonAvatar(size: 16),
           const SizedBox(width: Space.xs + 2),
           Flexible(
             child: Text.rich(
@@ -692,8 +956,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
                   ),
                   if (decided > 0)
                     TextSpan(
-                      text:
-                          ' · ${cardTime(context, decided)}',
+                      text: ' · ${cardTime(context, decided)}',
                       style: TextStyle(color: palette.textFaint),
                     ),
                 ],
@@ -737,11 +1000,25 @@ class _AskPersonCardState extends State<AskPersonCard> {
     int decided,
   ) {
     final ask = widget.ask;
+    // Approved, but the change it asked for couldn't be made (#423's
+    // action cards, a clear): Claktory says why (AskPerson.action_error).
+    final failed =
+        !ask.resolved &&
+        !ask.replied &&
+        !dismissed &&
+        ask.actionError.isNotEmpty;
+    // Closed by its agent once the talk settled it (ask_reply's resolve,
+    // #496): its words end the talk, said as it closed the card.
+    final agentClosed = agentResolved(ask);
+    final agent = AppScope.of(context).workspace.agent(widget.agentId);
     return [
       Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const PersonAvatar(size: 16),
+          if (agentClosed && agent != null)
+            AgentCharacter(agent: agent, size: 16)
+          else
+            const PersonAvatar(size: 16),
           const SizedBox(width: Space.xs + 2),
           Flexible(
             child: Text.rich(
@@ -751,17 +1028,25 @@ class _AskPersonCardState extends State<AskPersonCard> {
                     // A reply (#370): the person's words, neither a yes
                     // nor a no.
                     // Ended with no decision, after talking it through.
-                    text: ask.resolved
+                    text: agentClosed
+                        ? '$name closed it'
+                        : ask.resolved
                         ? 'Resolved'
                         : ask.replied
                         ? 'Replied'
                         : dismissed
                         ? 'Left to $name'
+                        : failed
+                        ? approvedNotDone
                         : ask.wantsText
                         ? 'Answered'
+                        : ask.hasCommand()
+                        ? 'Executed'
                         : 'Approved',
                     style: TextStyle(
-                      color: dismissed && !ask.replied
+                      color: failed
+                          ? palette.danger
+                          : dismissed && !ask.replied
                           ? palette.textMuted
                           : color,
                       fontWeight: FontWeight.w500,
@@ -769,8 +1054,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
                   ),
                   if (decided > 0)
                     TextSpan(
-                      text:
-                          ' · ${cardTime(context, decided)}',
+                      text: ' · ${cardTime(context, decided)}',
                       style: TextStyle(color: palette.textFaint),
                     ),
                 ],
@@ -780,6 +1064,13 @@ class _AskPersonCardState extends State<AskPersonCard> {
           ),
         ],
       ),
+      if (failed) ...[
+        const SizedBox(height: Space.xs),
+        Text(
+          ask.actionError,
+          style: type.body.copyWith(color: palette.textMuted),
+        ),
+      ],
       // The answer, or the comment it was dismissed with.
       if (ask.answer.isNotEmpty) ...[
         const SizedBox(height: Space.xs),
@@ -799,11 +1090,24 @@ class _AskPersonCardState extends State<AskPersonCard> {
 /// anything else by when it came; 0 for none.
 int waitingSince(Entry? entry) {
   if (entry == null) return 0;
+  var since = entry.timestampMs.toInt();
+  // Changed by its agent since (#428, #473): from then, so it rises.
+  final updated = updatedSince(entry);
+  if (updated > since) since = updated;
   if (entry.hasAskPerson() && entry.askPerson.thread.isNotEmpty) {
     final last = entry.askPerson.thread.last.atMs.toInt();
-    if (last > 0) return last;
+    if (last > since) since = last;
   }
-  return entry.timestampMs.toInt();
+  return since;
+}
+
+/// When [entry]'s card was last changed by its agent (ask_update,
+/// proposal_update), in ms since 1970; 0 if it never was.
+int updatedSince(Entry? entry) {
+  if (entry == null) return 0;
+  if (entry.hasAskPerson()) return entry.askPerson.updatedMs.toInt();
+  if (entry.hasProposal()) return entry.proposal.updatedMs.toInt();
+  return 0;
 }
 
 /// The talk on a card (AskPerson.thread), oldest first and compact: each
@@ -936,8 +1240,7 @@ class WithdrawnLine extends StatelessWidget {
                     ),
                     if (decidedMs > 0)
                       TextSpan(
-                        text:
-                            ' · ${cardTime(context, decidedMs)}',
+                        text: ' · ${cardTime(context, decidedMs)}',
                         style: TextStyle(color: palette.textFaint),
                       ),
                   ],
@@ -971,34 +1274,97 @@ String cardTime(BuildContext context, int ms) {
   return space < 0 ? clock : '${logged.substring(0, space)} $clock';
 }
 
-/// A card its agent changed while it waited (#428): "Updated · 14:32" in
-/// caption faint, and its reason under it in the agent's own words, muted,
+/// A card its agent changed while it waited (#428, #473): "Updated" in
+/// signal and "· 14:32" faint, in caption; an answer the change set aside,
+/// as the person gave it; and its reason in the agent's own words, muted,
 /// as a card's body reads.
 class UpdatedLine extends StatelessWidget {
-  const UpdatedLine({super.key, required this.updatedMs, required this.reason});
+  const UpdatedLine({
+    super.key,
+    required this.updatedMs,
+    required this.reason,
+    this.name = '',
+    this.setAside,
+  });
 
   final int updatedMs;
   final String reason;
+
+  /// The agent's name, for its reason's label; none without it.
+  final String name;
+
+  /// What the person answered, refused because the card changed meanwhile
+  /// (#473): shown so they see it wasn't lost.
+  final String? setAside;
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
+    final said = setAside;
+    final who = name.isEmpty ? 'The agent' : name;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Updated · ${cardTime(context, updatedMs)}',
-          style: type.caption.copyWith(color: palette.textFaint),
-        ),
+        // Quiet but seen (Matt): the mark in signal, as what waits on the
+        // person is, the time faint.
+        if (updatedMs > 0)
+          Text.rich(
+            TextSpan(
+              children: [
+                TextSpan(
+                  text: updatedMark,
+                  style: TextStyle(
+                    color: palette.signal,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                TextSpan(
+                  text: ' · ${cardTime(context, updatedMs)}',
+                  style: TextStyle(color: palette.textFaint),
+                ),
+              ],
+            ),
+            style: type.caption,
+          ),
+        if (said != null) ...[
+          if (updatedMs > 0) const SizedBox(height: Space.xs),
+          Text(
+            changedAfterAnswer(who),
+            style: type.body.copyWith(color: palette.text),
+          ),
+          Text(
+            youSaid(said),
+            style: type.body.copyWith(color: palette.textMuted),
+          ),
+        ],
         if (reason.isNotEmpty) ...[
           const SizedBox(height: Space.xs),
+          if (name.isNotEmpty)
+            Text(
+              "$name's reason",
+              style: type.caption.copyWith(
+                color: palette.textFaint,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
           Markdown(proseCodes(reason), color: palette.textMuted),
         ],
       ],
     );
   }
 }
+
+/// A card its agent changed while it waited (#428, #473).
+const updatedMark = 'Updated';
+
+/// The person answered a version of a card its agent changed meanwhile:
+/// their answer was set aside, not lost (#473).
+String changedAfterAnswer(String name) =>
+    '$name changed this after your answer.';
+
+/// What they answered, as they answered it.
+String youSaid(String said) => 'You said: “$said”';
 
 /// A procedure's step not answered yet.
 bool _open(AskStep step) =>
@@ -1021,9 +1387,23 @@ int? currentStep(AskPerson ask) {
 /// What a waiting ask says in a line (Needs you, the agent's list): its
 /// title, and for a procedure the step it's at.
 String askSummary(AskPerson ask) => switch (currentStep(ask)) {
+  // A command to run (#494): Claktory's heading, never the agent's title.
+  // And its first line, so cards for one machine can be told apart.
+  _ when ask.hasCommand() => commandSummary(ask.command),
   final at? => '${ask.title} · Step ${at + 1} of ${ask.steps.length}',
   null => ask.title,
 };
+
+/// Whether [ask] was closed by its agent as settled in the talk (#496),
+/// rather than resolved by the person: its talk ends with the agent's
+/// words, said as the card closed (the backend stamps both with the same
+/// moment), with no comment of the person's.
+bool agentResolved(AskPerson ask) =>
+    ask.resolved &&
+    ask.answer.isEmpty &&
+    ask.thread.isNotEmpty &&
+    ask.thread.last.fromAgent &&
+    ask.thread.last.atMs == ask.decidedMs;
 
 /// A part of an ask's body: Markdown, or a command (a fenced code block's
 /// contents) to show with Copy.
@@ -1052,38 +1432,20 @@ List<AskBodyPart> askBodyParts(String body) {
 
 /// A command from an ask's body in a code block, with Copy at its end (on
 /// a phone at large text, under it): "Copied" once it's on the clipboard.
-class _Command extends StatefulWidget {
-  const _Command(this.command);
-
-  final String command;
-
-  @override
-  State<_Command> createState() => _CommandState();
-}
-
-class _CommandState extends State<_Command> {
-  var _copied = false;
-
-  @override
-  Widget build(BuildContext context) => ActionLine(
-    // Code an agent wrote, shown as tool calls show it: every hidden
-    // character by its code (Fugo). Copy copies it as it is.
-    lead: CodeBlock(visibleCodes(widget.command)),
-    action: Button(
-      label: _copied ? 'Copied' : 'Copy',
-      onPressed: () {
-        Clipboard.setData(ClipboardData(text: widget.command));
-        setState(() => _copied = true);
-      },
-    ),
-  );
-}
-
 /// Opens the file [agentId] asked the person to review ([path]) in that
 /// agent's conversation, expanded to fill the window, so every comment
 /// they leave on it goes to that agent. On an iPad's workbench, its pane
 /// is the one shown.
-void openReview(BuildContext context, String agentId, String path) {
+///
+/// [card], when it's opened from the card: its entry and how many messages
+/// of its talk it showed, so the review's answer says so (talk_seen).
+void openReview(
+  BuildContext context,
+  String agentId,
+  String path, {
+  ({int seq, int talkSeen})? card,
+}) {
+  if (card != null) rememberReviewTalk(agentId, card.seq, card.talkSeen);
   // On a phone, a page over what shows (Needs you stays under it, for
   // Back), with the review's bar at its foot.
   if (PhoneRoutes.of(context)?.showFile(agentId, path) ?? false) return;
@@ -1211,6 +1573,11 @@ class _StepsToggle extends StatelessWidget {
                     style: TextStyle(
                       color: hovered ? palette.text : palette.textMuted,
                       fontWeight: FontWeight.w500,
+                      // A link at rest too, not only on hover (Illuso).
+                      decoration: TextDecoration.underline,
+                      decorationColor: hovered
+                          ? palette.text
+                          : palette.textMuted,
                     ),
                   ),
                   TextSpan(

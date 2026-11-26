@@ -702,6 +702,7 @@ async fn drive(
     tokio::time::sleep(Duration::from_millis(300)).await;
     factory.finish_writes(Duration::from_secs(5)).await;
     factory.vault.hand_over(false);
+    factory.store.write_calls();
     crate::account::analytics::backend_stopped(&factory.home);
     std::process::exit(0);
 }

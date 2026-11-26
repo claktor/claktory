@@ -3,3 +3,18 @@
 // The scheme of the links this build opens (links.dart): claktory:// is
 // always the real Claktory's; Claktory Dev's is claktory-dev (scripts/ios.sh).
 CLAKTORY_URL_SCHEME = claktory-debug
+
+// Not the real Claktory (#501): its own bundle id (its notification
+// extension's follows it), shown as Claktory Dev with the Dev icon, so it
+// can never stand in for the real one on a device. scripts/ios.sh --dev
+// turns this build into Claktory Dev (com.claktory.app.dev) as before.
+CLAKTORY_BUNDLE_ID = com.claktory.app.debug
+CLAKTORY_NAME = Claktory Dev
+CLAKTORY_APP_ICON = AppIconDev
+// The keychain group the app shares with its notification extension (push
+// keys): never the real app's, so a debug build can't read them (Fugo, #501).
+CLAKTORY_PUSH_GROUP = com.claktory.app.debug.notifications
+
+// The app's entitlements; scripts/ios.sh --dev gives Claktory Dev its own
+// (RunnerDev.entitlements), on the Simulator only.
+CLAKTORY_RUNNER_ENTITLEMENTS = Runner/Runner.entitlements

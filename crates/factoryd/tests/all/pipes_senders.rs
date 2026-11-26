@@ -13,7 +13,7 @@ use crate::common::{Client, MODEL, Scripted, View, apply_request, create_project
 use crate::pipes::{call, idle, incoming, pipe_of, select, shown};
 use factory_protocol::v1::{self, client_message::Body as Request, entry::Kind, server_message};
 use factoryd::factory::Factory;
-use factoryd::pipe_link::Side;
+use factoryd::pipe_link::{Incoming, Side, Via};
 use factoryd::pipes::{self, identity};
 
 /// What the other side says, everywhere it can say something.
@@ -314,4 +314,160 @@ async fn the_settings_never_make_a_reader_send_only() {
     assert_eq!(outside, "Rivet isn't in this pipe's project.");
     let stray = refused(&mut client, &mut view, approve(&["rivet"], &[], &["lea"])).await;
     assert_eq!(stray, "Rivet isn't one of this pipe's agents.");
+}
+
+/// Friend bug #33: a member that only sends answers nothing, so its posts
+/// are no exchange and never pause the pipe as a loop, the same long text
+/// again included; a flood of them still meets the pipe's own limits.
+#[tokio::test]
+async fn a_senders_posts_never_pause_the_pipe_as_a_loop_but_meet_its_limits() {
+    let (factory, mut client, mut view, pipe, _models) = setup().await;
+    call(&mut client, &mut view, "rivet", "pipes_sender", r#"{"pipe": "Website", "agent": "Rivet", "send": true}"#).await;
+    let text = "Feedback from Matt: the checkout page fails on Safari, please look.";
+    let feedback = serde_json::json!({"pipe": "Website", "text": text}).to_string();
+    for _ in 0..4 {
+        // (No transport here: it went to it, unheld.)
+        assert_eq!(later(&mut client, &mut view, "rivet", "pipe_send", &feedback).await, "Not sent: No such pipe.");
+    }
+    assert_eq!(pipe_of(&view, &pipe).paused(), v1::PipePause::Unspecified, "a sender's posts paused the pipe");
+
+    // Its posts meet the pipe's limits like anyone's (held for review here,
+    // which counts as sent).
+    let review = v1::UpdatePipe { pipe_id: pipe.clone(), review_outgoing: Some(true), ..Default::default() };
+    apply_request(&mut client, &mut view, Request::UpdatePipe(review)).await;
+    for n in 0..5 {
+        let said = later(&mut client, &mut view, "rivet", "pipe_send", &format!(r#"{{"pipe": "Website", "text": "Note {n}"}}"#)).await;
+        assert!(said.starts_with("Held for "), "{said}");
+    }
+    let said = later(&mut client, &mut view, "rivet", "pipe_send", r#"{"pipe": "Website", "text": "Note 5"}"#).await;
+    assert_eq!(said, "Not sent: Over the pipe's limit of 5 messages a minute.");
+    assert_eq!(pipe_of(&view, &pipe).paused(), v1::PipePause::Unspecified);
+
+    // An exchange still pauses it: the same long text from members that read it.
+    for _ in 0..3 {
+        pipes::count_for_loop_for_test(&factory, &pipe, "my_agent", text);
+    }
+    view.follow(&mut client, |view| pipe_of(view, &pipe).paused() == v1::PipePause::Loop).await;
+}
+
+/// Friend bug #33 on the receiving side (Fugo 33515): what the other side
+/// marks as a sender's post takes no part in this side's loop breaker, not
+/// even a place among the latest; so a peer that marks everything still
+/// can't hide this side's own loops, and a person's message counts whatever
+/// it says.
+#[tokio::test]
+async fn the_other_sides_sender_posts_are_left_out_of_the_loop_breaker_and_never_hide_ours() {
+    let (factory, mut client, mut view, _pipe, _models) = setup().await;
+    let long = "Release notes v2: the export button now keeps your filters and sorting.";
+    let reply = "Thanks, we'll pass the release notes on to the whole team today.";
+    let mut next = 0;
+    let mut receive = |pipe: &str, via: Via, text: &str| {
+        next += 1;
+        let message = Incoming { via, sends_only: true, ..incoming(&format!("m{next}"), text) };
+        pipes::receive_for_test(&factory, pipe, message).expect("received");
+    };
+    let agent = || Via::Agent { name: "Max".into(), role: String::new() };
+    let paused = |view: &View, pipe: &str| pipe_of(view, pipe).paused();
+    // A pipe of its own for each case, its limits out of the way.
+    let mut fresh = async |name: &str| {
+        let pipe = pipes::open_for_test(&factory, "site", name, &["lea", "bo"], "lea", false);
+        let limits = v1::PipeLimits { messages_per_hour: 1000, burst: 1000, file_mb_per_day: 50, ..Default::default() };
+        let raise = v1::UpdatePipe { pipe_id: pipe.clone(), limits: Some(limits), ..Default::default() };
+        apply_request(&mut client, &mut view, Request::UpdatePipe(raise)).await;
+        pipe
+    };
+
+    // The same long post three times, then fifty more in a row: open.
+    let posts = fresh("Posts").await;
+    for _ in 0..3 {
+        receive(&posts, agent(), long);
+    }
+    for n in 0..50 {
+        receive(&posts, agent(), &format!("Release note {n}"));
+    }
+    // Our own repeats, with marked posts between them pushing nothing out
+    // of the latest ten: paused.
+    let window = fresh("Window").await;
+    pipes::count_for_loop_for_test(&factory, &window, "my_agent", reply);
+    for n in 0..8 {
+        receive(&window, agent(), &format!("Unique note {n}"));
+    }
+    pipes::count_for_loop_for_test(&factory, &window, "my_agent", reply);
+    pipes::count_for_loop_for_test(&factory, &window, "my_agent", reply);
+    // A peer marking every post while our agent repeats its long answer.
+    let repeats = fresh("Repeats").await;
+    for n in 0..3 {
+        receive(&repeats, agent(), &format!("Question {n}"));
+        pipes::count_for_loop_for_test(&factory, &repeats, "my_agent", reply);
+    }
+    // ...and while our agent answers each one: our own LOOP_AFTER, not half.
+    let count = fresh("Count").await;
+    for n in 0..49 {
+        receive(&count, agent(), &format!("Question {n}"));
+        pipes::count_for_loop_for_test(&factory, &count, "my_agent", &format!("Answer {n}"));
+    }
+    // A person's message counts, marked or not.
+    let person = fresh("Person").await;
+    for _ in 0..3 {
+        receive(&person, Via::Person { name: "Ana".into() }, long);
+    }
+    view.follow(&mut client, |view| [&window, &repeats, &person].iter().all(|pipe| paused(view, pipe) == v1::PipePause::Loop)).await;
+    assert_eq!(paused(&view, &posts), v1::PipePause::Unspecified, "a sender's posts paused it");
+    assert_eq!(paused(&view, &count), v1::PipePause::Unspecified, "49 of ours");
+    pipes::count_for_loop_for_test(&factory, &count, "my_agent", "Answer 49");
+    view.follow(&mut client, |view| paused(view, &count) == v1::PipePause::Loop).await;
+}
+
+/// Fugo 33882: the other side's word that its person continued a loop
+/// pause starts this side's repeats over, never its count: a peer cycling
+/// pause and continue still pauses this side at its own LOOP_AFTER, which
+/// only this side's person continues.
+#[tokio::test]
+async fn a_peer_continuing_its_loop_pauses_never_lifts_our_count() {
+    let (factory, mut client, mut view, _pipe, _models) = setup().await;
+    let pipe = pipes::open_for_test(&factory, "site", "Cycle", &["lea", "bo"], "lea", false);
+    let limits = v1::PipeLimits { messages_per_hour: 1000, burst: 1000, file_mb_per_day: 50, ..Default::default() };
+    let raise = v1::UpdatePipe { pipe_id: pipe.clone(), limits: Some(limits), ..Default::default() };
+    apply_request(&mut client, &mut view, Request::UpdatePipe(raise)).await;
+    for n in 0..49 {
+        if n % 5 == 4 {
+            pipes::peer_looped_for_test(&factory, &pipe, true);
+            pipes::peer_looped_for_test(&factory, &pipe, false);
+        }
+        pipes::receive_for_test(&factory, &pipe, incoming(&format!("m{n}"), &format!("Note {n}"))).expect("received");
+    }
+    assert_eq!(pipe_of(&view, &pipe).paused(), v1::PipePause::Unspecified);
+    pipes::peer_looped_for_test(&factory, &pipe, true);
+    pipes::peer_looped_for_test(&factory, &pipe, false);
+    pipes::receive_for_test(&factory, &pipe, incoming("m49", "Note 49")).expect("received");
+    view.follow(&mut client, |view| pipe_of(view, &pipe).paused() == v1::PipePause::Loop).await;
+}
+
+/// Friend bug #35: Rivet is told it can post to a pipe itself by making
+/// itself its sender, and both rules read the same everywhere: pipes_sender
+/// is refused while the admin agent has read from outside, and a sender
+/// that has read from outside has each message wait for the person.
+#[tokio::test]
+async fn rivet_is_told_it_can_make_itself_a_sender_and_the_rules_read_the_same() {
+    let (factory, mut client, mut view, _pipe, models) = setup().await;
+    call(&mut client, &mut view, "rivet", "pipes_list", "{}").await;
+    let prompt = models
+        .requests
+        .lock()
+        .expect("lock")
+        .iter()
+        .rev()
+        .find(|request| request.system_prompt.contains("You are Rivet, a persistent agent"))
+        .map(|request| request.system_prompt.clone())
+        .expect("Rivet's system prompt");
+    for said in [
+        "to post to a pipe yourself, one a liaison leads included, make yourself its sender (agent: you)",
+        "pipes_sender is refused while you've read anything from outside",
+        "once a sender has read from outside (a web page, or a pipe it reads), each message it sends waits for",
+    ] {
+        assert!(prompt.contains(said), "{said}");
+    }
+    call(&mut client, &mut view, "rivet", "pipes_sender", r#"{"pipe": "Website", "agent": "Rivet", "send": true}"#).await;
+    let section = pipes::prompt_for_test(&factory, "rivet").expect("its pipes");
+    assert!(section.contains("Once you've read from outside") && section.contains("each message you send waits for"), "{section}");
 }

@@ -746,10 +746,14 @@ mod tests {
         let (_, start) = ask(&shown, 0, 0);
         ahead_with(&data, &shown, &start.sha256, start.size, &[PHONE], || Some(maker));
         let args = std::fs::read_to_string(dir.join("args")).unwrap();
-        let lines: Vec<&str> = args.lines().collect();
-        assert_eq!(lines.len(), 2, "{args}");
-        assert!(lines[0].contains("-threads 4 -f mov -i") && lines[0].contains("opened.mp4 -threads 4 -vf"), "{args}");
-        assert!(lines[1].contains("-threads 1 -f mov -i") && lines[1].contains("shown.mp4 -threads 1 -vf"), "{args}");
+        // The one made ahead runs again when another test's person's preview
+        // stopped it (MAKING is the whole process's), so by file, not count.
+        let runs = |file: &str| args.lines().filter(|line| line.contains(&format!("{file} -threads"))).collect::<Vec<_>>();
+        let (person, ahead) = (runs("opened.mp4"), runs("shown.mp4"));
+        assert_eq!(person.len(), 1, "{args}");
+        assert!(!ahead.is_empty() && person.len() + ahead.len() == args.lines().count(), "{args}");
+        assert!(person[0].contains("-threads 4 -f mov -i") && person[0].contains("opened.mp4 -threads 4 -vf"), "{args}");
+        assert!(ahead.iter().all(|line| line.contains("-threads 1 -f mov -i") && line.contains("shown.mp4 -threads 1 -vf")), "{args}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

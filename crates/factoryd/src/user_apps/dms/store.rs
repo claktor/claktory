@@ -25,7 +25,7 @@
 use std::path::{Path, PathBuf};
 
 use claktory_dm_crypto::provider::Crypto;
-use claktory_dm_crypto::storage::{SCHEMA as MLS_SCHEMA, SealKey};
+use claktory_dm_crypto::storage::{FLOOR_SCHEMA, SCHEMA as MLS_SCHEMA, SealKey};
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::home::Home;
@@ -194,6 +194,9 @@ impl Store {
                 tx.commit()?;
             }
         }
+        // Added since a store's first version, at every open (Melone's F2):
+        // each group's epoch floor, which a rejoin never goes below.
+        db.execute_batch(FLOOR_SCHEMA)?;
         let store_id = meta(&db, "store_id")?.ok_or_else(|| OpenError::Failed("the store has no id".to_owned()))?;
         let key = match vault.dm_store_key(&store_id, "seal") {
             Ok(key) => key,

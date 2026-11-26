@@ -29,7 +29,8 @@ use claktory_dm_crypto::content::Content;
 use claktory_dm_crypto::envelope::Envelope;
 use claktory_dm_crypto::group::{Group, LeafKey, Me};
 use claktory_dm_crypto::provider::Provider;
-use claktory_dm_crypto::validation::{GroupKind, Pins};
+use claktory_dm_crypto::device_list::SignedDeviceList;
+use claktory_dm_crypto::validation::{GroupKind, Pins, Trust as _};
 use factory_protocol::v1;
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -56,6 +57,9 @@ pub(crate) struct State {
     /// When the channel may next be rejoined for a commit that stays
     /// refused (`process::unlisted`), and the wait after that one fails.
     pub(super) rejoin: Mutex<Rejoin>,
+    /// Groups the home took something for since the loop last looked
+    /// (`process::arrivals`).
+    pub(super) arrived: Mutex<Vec<Vec<u8>>>,
 }
 
 /// The throttle on rejoining the channel for a commit that stays refused
@@ -197,6 +201,9 @@ pub(crate) struct Step<'a> {
     store: &'a StoreKeys<'a>,
     registration: (String, String, u64),
     channel_waits: Option<Unready>,
+    /// Friends' messages kept in this step: (conversation, seq, accepted
+    /// ms), for the agents following them once it's committed.
+    heard: Vec<(String, i64, i64)>,
 }
 
 /// The store's key and cryptography, apart from its connection.
@@ -267,10 +274,15 @@ pub(crate) fn step<T>(factory: &Factory, f: impl FnOnce(&mut Step<'_>) -> Result
     let tx = db.transaction()?;
     let keys = StoreKeys { key, crypto };
     let channel_waits = factory.dm_leaf.channel_waits();
-    let mut step = Step { tx: &tx, store: &keys, registration, channel_waits };
+    let mut step = Step { tx: &tx, store: &keys, registration, channel_waits, heard: Vec::new() };
     let out = f(&mut step)?;
+    let heard = std::mem::take(&mut step.heard);
     drop(step);
     tx.commit()?;
+    drop(guard);
+    if !heard.is_empty() {
+        super::watch::heard(factory, heard);
+    }
     Ok(out)
 }
 
@@ -288,6 +300,12 @@ impl Step<'_> {
 
     pub(crate) fn db(&self) -> &rusqlite::Connection {
         self.tx
+    }
+
+    /// A friend's message in `conversation` was kept: the agents following
+    /// it are woken once this step is committed.
+    pub(crate) fn hear(&mut self, conversation: &str, seq: i64, accepted_ms: i64) {
+        self.heard.push((conversation.to_owned(), seq, accepted_ms));
     }
 
     pub(crate) fn seal(&self, place: &[&[u8]], plain: &[u8]) -> Result<Vec<u8>, StepError> {
@@ -344,6 +362,13 @@ impl Step<'_> {
         let Some(mut pins) = self.kept_pins()? else { return Err(StepError::Unready(Unready::NotEnrolled)) };
         pins.accept_list(account, list)?;
         self.keep_pins(&pins)
+    }
+
+    /// The person's own signed device list as this leaf took it (signed by
+    /// their pinned identity, never older than one seen before), if any yet.
+    pub(crate) fn own_list(&self) -> Result<Option<SignedDeviceList>, StepError> {
+        let own = &self.registration.0;
+        Ok(self.kept_pins()?.and_then(|pins| pins.current(own).and_then(|(_, list)| list.cloned())))
     }
 
     /// The version of `account`'s device list kept, 0 for none.
@@ -510,6 +535,8 @@ pub(crate) fn offer(factory: &Arc<Factory>) -> Result<v1::DmLeafOffer, String> {
                 (key, false)
             }
         };
+        #[cfg(feature = "qa-lies")]
+        let claktory_id = crate::qa_lies::claktory_id(claktory_id);
         Ok(v1::DmLeafOffer {
             leaf_signature_key: key.public().to_vec(),
             leaf_id: claktory_leaf_id(&claktory_id, epoch),

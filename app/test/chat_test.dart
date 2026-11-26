@@ -1,13 +1,17 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart' show sha256;
+
 import 'package:factory_app/agent_view.dart';
 import 'package:factory_app/controls.dart' show Button, showModal;
 import 'package:factory_app/device_account.dart';
+import 'package:factory_app/extensions.dart' show logTime;
 import 'package:factory_app/inbox.dart';
 import 'package:factory_app/people/chat.dart';
 import 'package:factory_app/people/chat_view.dart';
 import 'package:factory_app/people/contacts.dart';
+import 'package:factory_app/people/dm_home.dart';
 import 'package:factory_app/people/e2ee.dart';
 import 'package:factory_app/people/people_view.dart';
 import 'package:factory_app/people/report_form.dart';
@@ -17,6 +21,7 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scanner.dart';
 import 'package:factory_app/tunnel/api/dm.dart'
     show DmByAgent, DmContent, DmLeafKind, DmMember, DmMembers;
+import 'package:factory_app/tunnel/api/dm.dart' as dm show DmMessage;
 import 'package:factory_app/user_apps/session.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
@@ -353,15 +358,20 @@ Map<String, Object?> _agentDraft({
   ),
 };
 
-/// What Matt's device sent approving: its body, and the message sealed in
-/// it as the conversation's group has it.
+/// What Matt's device sent approving (#451: the approval, then the
+/// message itself into the conversation): the approval's body, and the
+/// message as the conversation's group has it.
 ({Map<String, Object?> body, Map<String, Object?> sealed}) _approval(
+  _World world,
   String line,
 ) {
   final body = jsonDecode(
     line.substring('POST approve '.length),
   ) as Map<String, Object?>;
-  return (body: body, sealed: readFake(jsonEncode(body['envelope'])));
+  final said = world.worker
+      .mailboxOf(world.group)
+      .lastWhere((m) => m['kind'] == 'application');
+  return (body: body, sealed: readFake(jsonEncode(said['envelope'])));
 }
 
 const _ana = PeoplePerson(
@@ -381,6 +391,45 @@ DmConversation _conversation({bool active = true}) => DmConversation(
   endedMs: active ? 0 : _now,
   lastSeq: 0,
 );
+
+/// An agent's proposal through the home (#451): the service's record,
+/// which names only the digest of the channel message, and that message
+/// as the Claktory's leaf sends it into Matt's channel.
+({Map<String, Object?> record, String envelope}) _homeProposal({
+  String id = 'p1',
+  String text = 'See you at 6',
+}) {
+  final envelope = FakeDmDevice.claktorySays(
+    _channel,
+    _mini,
+    DmContent(
+      kind: 'proposal',
+      clientMessageId: 'cm-$id-1',
+      text: text,
+      extraJson: jsonEncode({
+        'conversation_id': 'v1',
+        'contact_generation': 3,
+        'agent_id': 'june',
+        'incarnation': 'inc-1',
+        'agent_name': 'June',
+        'sequence': 1,
+      }),
+    ),
+  );
+  final record = _proposal(id: id, text: text)
+    ..remove('envelope')
+    ..remove('epoch')
+    ..['proposal_digest'] = sha256.convert(dmBytesOf(envelope)).toString()
+    ..['client_message_id'] = 'Kq3hR7mWx2LpN8vT4cYb1A';
+  return (record: record, envelope: envelope);
+}
+
+/// The engine's work on a feed the home pushed, done.
+Future<void> _settleHome() async {
+  for (var i = 0; i < 40; i++) {
+    await Future<void>.delayed(Duration.zero);
+  }
+}
 
 Future<void> _settle() async {
   for (var i = 0; i < 5; i++) {
@@ -654,6 +703,7 @@ void main() {
     expect(
       memberLines(
         DmMembers(
+          joined: [member('ana', 'Pixel 9', DmLeafKind.device)],
           setUpAgain: const [],
           added: [
             member('ana', 'Pixel', DmLeafKind.device),
@@ -669,6 +719,7 @@ void main() {
       ),
       [
         "Ana's security key changed",
+        'Ana joined on Pixel 9',
         'Ana added a device: Pixel',
         "Ana's Claktory mac-mini can now read this chat",
         'You added a device: iPad',
@@ -690,6 +741,7 @@ void main() {
     expect(
       memberLines(
         DmMembers(
+          joined: const [],
           setUpAgain: const [],
           added: const [],
           removed: [
@@ -714,6 +766,7 @@ void main() {
     expect(
       memberLines(
         DmMembers(
+          joined: const [],
           setUpAgain: const [],
           added: const [],
           removed: [
@@ -747,6 +800,7 @@ void main() {
     expect(
       memberLines(
         DmMembers(
+          joined: const [],
           setUpAgain: [member('ana', 'iPhone'), member('matt', 'iPad')],
           added: const [],
           removed: const [],
@@ -763,6 +817,7 @@ void main() {
       'knows (row 654)', () {
     List<String> skipped(String because) => memberLines(
       DmMembers(
+        joined: const [],
         setUpAgain: const [],
         added: const [],
         removed: const [],
@@ -783,6 +838,31 @@ void main() {
     expect(skipped(''), [
       "Some messages sent while this device was away can't be shown on it.",
     ]);
+    // Sent while a device they took off their list was in the chat (row
+    // 561, Trish 40465).
+    expect(skipped('device:ana'), [
+      "Some earlier messages can't be shown here: they were sent while a "
+          'device Ana has since removed was in this chat.',
+    ]);
+    expect(skipped('device:matt'), [
+      "Some earlier messages can't be shown here: they were sent while a "
+          "device you've since removed was in this chat.",
+    ]);
+  });
+
+  test('a message from a device since removed says whose (row 561)', () {
+    expect(
+      departedLine(mine: false, friend: 'Ana'),
+      'From a device Ana has since removed',
+    );
+    expect(
+      departedLine(mine: false, friend: ''),
+      "From a device they've since removed",
+    );
+    expect(
+      departedLine(mine: true, friend: 'Ana'),
+      "From a device you've since removed",
+    );
   });
 
   group("agents' suggestions (D3d)", () {
@@ -813,8 +893,8 @@ void main() {
     });
 
     test("only this conversation's waiting proposals, opened here; "
-        'approving seals exactly what was opened, by its agent, with the '
-        "digest of what came, never the service's", () async {
+        "approving names the digest of what came, never the service's, then "
+        'sends exactly what was opened, by its agent, under its id', () async {
       final service = world.service
         ..proposals.addAll([
           _proposal(),
@@ -828,17 +908,38 @@ void main() {
       final approval = service.log.firstWhere(
         (l) => l.startsWith('POST approve'),
       );
-      final (:body, :sealed) = _approval(approval);
+      final (:body, :sealed) = _approval(world, approval);
+      // The approval carries no message (Mista 32507).
+      expect(body.keys.toSet(), {'revision', 'proposal_digest'});
       expect(body['revision'], 1);
       expect(body['proposal_digest'], DmProposal.fromJson(_proposal()).digest);
       expect(body['proposal_digest'], isNot('f' * 64));
       expect(sealed['g'], world.group);
       final said = sealed['c']! as Map<String, Object?>;
+      // The id it was sealed with, as the service lists none here.
       expect((said['id'], said['text']), ('cm-p1-1', 'See you at 6'));
       expect((said['by']! as Map)['agent_id'], 'june');
       expect(thread.proposals, isEmpty);
-      // Not sent any other way meanwhile.
+      // Sent once.
       await world.matt.e2ee.sync();
+      expect(
+        world.worker
+            .mailboxOf(world.group)
+            .where((m) => m['kind'] == 'application'),
+        hasLength(1),
+      );
+    });
+
+    test('not approved (changed since): nothing is sealed or sent', () async {
+      final service = world.service..proposals.add(_proposal());
+      final thread = world.thread();
+      await thread.load();
+      service.onApprove = (_) =>
+          const AccountServiceError(409, 'changed', '', {});
+      await thread.approve(thread.proposals.single);
+      expect(thread.reviewProblem, 'changed');
+      await world.matt.e2ee.sync();
+      expect(await world.matt.e2ee.unsent(world.group), isEmpty);
       expect(
         world.worker
             .mailboxOf(world.group)
@@ -859,21 +960,6 @@ void main() {
       await thread.load();
       await _settle();
       expect(thread.proposals.map((p) => p.id), ['p4']);
-    });
-
-    test('the group moved on first: sealed again, then approved', () async {
-      final service = world.service..proposals.add(_proposal());
-      final thread = world.thread();
-      await thread.load();
-      await _settle();
-      var tries = 0;
-      service.onApprove = (_) => ++tries == 1
-          ? const AccountServiceError(409, 'epoch', '', {'epoch': 2})
-          : null;
-      await thread.approve(thread.proposals.single);
-      expect(tries, 2);
-      expect(thread.reviewProblem, isNull);
-      expect(thread.proposals, isEmpty);
     });
 
     test(
@@ -964,6 +1050,193 @@ void main() {
         thread.close();
       },
     );
+  });
+
+  group('through the home (#451)', () {
+    late FakeHome home;
+    setUp(() async {
+      home = FakeHome(world.worker);
+      world.matt.e2ee.home = home;
+      await world.matt.e2ee.sync();
+      await _settleHome();
+    });
+
+    test("an agent's proposal shows once its message came from its "
+        'Claktory through the home, on its way until then; approved, then '
+        'sent through the home under its id, by its agent', () async {
+      final (:record, :envelope) = _homeProposal();
+      world.service.proposals.add(record);
+      final thread = world.thread();
+      unawaited(thread.follow());
+      await _settleHome();
+      expect(thread.proposals, isEmpty);
+      expect(thread.arriving, 1);
+
+      world.worker.deliver(_channel, envelope);
+      home.pull(_channel);
+      await _settleHome();
+      expect(thread.arriving, 0);
+      expect(thread.proposals.single.text, 'See you at 6');
+
+      await thread.approve(thread.proposals.single);
+      final approval = jsonDecode(
+        world.service.log
+            .firstWhere((l) => l.startsWith('POST approve'))
+            .substring('POST approve '.length),
+      ) as Map<String, Object?>;
+      expect(approval, {
+        'revision': 1,
+        'proposal_digest': record['proposal_digest'],
+      });
+      final send = home.sends.last;
+      // Under the id the service lists for it (Mista 32744).
+      expect(send.clientMessageId, 'Kq3hR7mWx2LpN8vT4cYb1A');
+      final said =
+          readFake(dmEnvelopeOf(send.envelope))['c']! as Map<String, Object?>;
+      expect(said['text'], 'See you at 6');
+      expect((said['by']! as Map)['agent_id'], 'june');
+      expect(thread.proposals, isEmpty);
+      thread.close();
+    });
+
+    test("a record whose message came from elsewhere than its Claktory's "
+        'leaf never shows', () async {
+      final (:record, envelope: _) = _homeProposal();
+      final forged = FakeDmDevice.claktorySays(
+        _channel,
+        'matt/tablet',
+        const DmContent(
+          kind: 'proposal',
+          clientMessageId: 'x',
+          text: 'forged',
+          extraJson: '',
+        ),
+      );
+      world.service.proposals.add({
+        ...record,
+        'proposal_digest': sha256.convert(dmBytesOf(forged)).toString(),
+      });
+      world.worker.deliver(_channel, forged);
+      home.pull(_channel);
+      await _settleHome();
+      final thread = world.thread();
+      await thread.load();
+      await _settleHome();
+      expect(thread.proposals, isEmpty);
+      // It came, and didn't open: not on its way either.
+      expect(thread.arriving, 0);
+    });
+
+    test('where the newest of the person\'s messages stands, as the home '
+        'says', () async {
+      final thread = world.thread();
+      unawaited(thread.follow());
+      await _settleHome();
+      await thread.send('hi Ana');
+      await _settleHome();
+      final mine = thread.messages.last;
+      expect(thread.delivered(mine).state, DmDelivered.sent);
+      String? line() =>
+          deliveredLine(thread.delivered(mine), friend: 'Ana', newest: true);
+      expect(line(), 'Sent');
+      // Ana's Claktory out of reach, as the home says of it: since before
+      // it was sent, so it can't have had it.
+      final before = mine.acceptedMs - 1;
+      home
+        ..peers.add(
+          DmPeer(
+            accountId: 'ana',
+            reachable: false,
+            lastReachableMs: Int64(before),
+          ),
+        )
+        ..said();
+      await _settleHome();
+      expect(
+        line(),
+        "Not delivered yet: Ana's Claktory has been offline since "
+        '${logTime(DateTime.fromMillisecondsSinceEpoch(before))}',
+      );
+      // Reachable after it was sent: it may have had it (a delivery lost
+      // with a restart), so only Sent.
+      home
+        ..peers.first.lastReachableMs = Int64(mine.acceptedMs + 1)
+        ..said();
+      await _settleHome();
+      expect(line(), 'Sent');
+      home
+        ..peers.first.lastReachableMs = Int64.ZERO
+        ..said();
+      await _settleHome();
+      expect(line(), "Not delivered yet: Ana's Claktory is offline.");
+      // Another of Matt's Claktories, not his home, sends nothing: its
+      // word on Ana's is no word on this message (row 567).
+      home
+        ..isHome = false
+        ..endpointId = List<int>.filled(32, 6)
+        ..said();
+      await _settleHome();
+      expect(line(), 'Sent');
+      home
+        ..isHome = true
+        ..endpointId = world.matt.e2ee.homeEndpoint!
+        ..said();
+      await _settleHome();
+      expect(line(), "Not delivered yet: Ana's Claktory is offline.");
+      // Her home turns Matt's away (row 567): said as such.
+      home
+        ..peers.first.refused = dmTurnedAway
+        ..said();
+      await _settleHome();
+      expect(
+        line(),
+        "Not delivered yet: Ana's Claktory isn't taking messages from yours "
+        'right now.',
+      );
+      home
+        ..peers.first.refused = ''
+        ..said();
+      await _settleHome();
+      expect(line(), "Not delivered yet: Ana's Claktory is offline.");
+      // Sent before this Claktory became the home (row 595): an earlier
+      // home sent it on and knew if it arrived, so only Sent.
+      home
+        ..homeSinceMs = mine.acceptedMs + 1
+        ..said();
+      await _settleHome();
+      expect(line(), 'Sent');
+      home
+        ..homeSinceMs = mine.acceptedMs
+        ..said();
+      await _settleHome();
+      expect(line(), "Not delivered yet: Ana's Claktory is offline.");
+      home.deliver(
+        world.group,
+        mine.clientMessageId,
+        DmDeliveryState.DM_DELIVERY_STATE_DELIVERED,
+      );
+      await _settleHome();
+      expect(line(), "Delivered to Ana's Claktory");
+      thread.close();
+    });
+
+    test('the home out of reach: Waiting for your Claktory, quietly, with '
+        'Remove', () async {
+      final thread = world.thread();
+      unawaited(thread.follow());
+      await _settleHome();
+      home.connected.value = false;
+      await thread.send('later');
+      await _settleHome();
+      final waiting = thread.outgoing.single;
+      expect(waiting.state, OutgoingState.waiting);
+      expect(outgoingLine(waiting), 'Waiting for your Claktory');
+      home.connected.value = true;
+      await _settleHome();
+      expect(thread.outgoing, isEmpty);
+      expect(thread.messages.last.text, 'later');
+      thread.close();
+    });
   });
 
   group('the screen', () {
@@ -1171,6 +1444,301 @@ void main() {
       await close(tester);
     });
 
+    // E11-3 (Bruno 40394, Fugo 40427): a friend whose key changed is said
+    // to have a new key, never to be waiting to join, which their devices
+    // under it can't; a key this device refuses says so too, with Verify
+    // and no OK, and a message that can't go points to a note that's there.
+    testWidgets("a friend's key changed: said as such, never as waiting "
+        'to join', (tester) async {
+      world.worker.packages.remove('ana/pixel');
+      world.worker.lastResort.remove('ana/pixel');
+      await show(tester, _conversation());
+      await world.matt.e2ee.sync();
+      await settle(tester);
+      const waiting = 'Waiting for Ana to join this chat.';
+      expect(find.text(waiting), findsOneWidget);
+
+      world.worker.keys['ana']!['identity_key'] = dmB64(List.filled(32, 9));
+      await world.matt.e2ee.refreshKeys('ana');
+      await settle(tester);
+      expect(find.text(waiting), findsNothing);
+      expect(
+        find.textContaining("Ana's security key changed."),
+        findsOneWidget,
+      );
+      await close(tester);
+    });
+
+    testWidgets("a key this device refuses: their key changed, Verify and "
+        'no OK, never waiting to join', (tester) async {
+      world.worker.packages.remove('ana/pixel');
+      world.worker.lastResort.remove('ana/pixel');
+      await show(tester, _conversation());
+      await world.matt.e2ee.sync();
+      final refused = dmB64(List.filled(32, 8));
+      world.matt.device.refusedKeys.add(refused);
+      world.worker.keys['ana']!['identity_key'] = refused;
+      await world.matt.e2ee.refreshKeys('ana');
+      await settle(tester);
+      expect(world.matt.e2ee.keyRefused, {'ana'});
+      expect(find.text('Waiting for Ana to join this chat.'), findsNothing);
+      expect(
+        find.text(
+          "Ana's security key changed to one this device can't accept, so "
+          "nothing is sent to Ana. Verify Ana to be sure it's still them.",
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Verify…'), findsWidgets);
+      expect(find.text('OK'), findsNothing);
+      await close(tester);
+    });
+
+    // Row 1440 (Fugo 41212, Mista 41215): the service lied about her key,
+    // then told the truth, and the note waited for OK meanwhile: OK and her
+    // device is added at once, the chat open, with no relaunch or sync.
+    testWidgets('a lie and the truth about her key, then OK: she joins at '
+        'once, never left waiting', (tester) async {
+      final packages = world.worker.packages.remove('ana/pixel');
+      final lastResort = world.worker.lastResort.remove('ana/pixel');
+      await show(tester, _conversation());
+      await world.matt.e2ee.sync();
+      await settle(tester);
+      const waiting = 'Waiting for Ana to join this chat.';
+      expect(find.text(waiting), findsOneWidget);
+
+      final real = world.worker.keys['ana']!['identity_key'];
+      world.worker.keys['ana']!['identity_key'] = dmB64(List.filled(32, 9));
+      await world.matt.e2ee.refreshKeys('ana');
+      world.worker.keys['ana']!['identity_key'] = real;
+      await world.matt.e2ee.refreshKeys('ana');
+      // Her device can be added now; its add was tried and waits.
+      world.worker.packages['ana/pixel'] = packages!;
+      world.worker.lastResort['ana/pixel'] = lastResort!;
+      await settle(tester);
+      expect(find.text(waiting), findsNothing);
+      expect(find.textContaining("Ana's security key changed"), findsOneWidget);
+
+      await tester.tap(find.text('OK'));
+      await settle(tester);
+      await settle(tester);
+      expect(world.matt.e2ee.joining, isEmpty);
+      expect(find.text(waiting), findsNothing);
+      expect(find.textContaining('security key changed'), findsNothing);
+      await close(tester);
+    });
+
+    // E11-3 (Bruno 40394, Fugo 41541): The numbers don't match on Verify
+    // goes back to the key before the change. A service still giving the
+    // one that didn't match brings its note back at once, saying so; one
+    // giving the earlier key again leaves it kept, and the sheet says so.
+    testWidgets("The numbers don't match: a key still given comes back at "
+        'once, marked; the earlier key, given again, is kept', (tester) async {
+      await show(tester, _conversation());
+      final real = world.matt.e2ee.pin('ana')!.identityPublic;
+      world.worker.keys['ana']!['identity_key'] = dmB64(List.filled(32, 9));
+      await world.matt.e2ee.refreshKeys('ana');
+      await settle(tester);
+      await tester.tap(find.text('Verify…').last);
+      await settle(tester);
+      await settle(tester);
+      expect(
+        find.text(
+          "Ana's security key changed. If these numbers don't match the ones "
+          "on Ana's device, don't accept the change.",
+        ),
+        findsOneWidget,
+      );
+      await tester.tap(find.text("The numbers don't match"));
+      await settle(tester);
+      await settle(tester);
+      // Still given: back at once, unseen, and the note says so.
+      expect(find.text('Verify Ana'), findsNothing);
+      var pin = world.matt.e2ee.pin('ana')!;
+      expect(pin.identityPublic, List.filled(32, 9));
+      expect(pin.mismatched, isTrue);
+      expect(pin.changedUnseen, isTrue);
+      expect(
+        find.text(
+          "Ana's security key changed back to the one that didn't match when "
+          'you compared numbers. Verify Ana before you send anything.',
+        ),
+        findsOneWidget,
+      );
+
+      // The service gives her real key again: the undo holds.
+      world.worker.keys['ana']!['identity_key'] = dmB64(real);
+      await tester.tap(find.text('Verify…').last);
+      await settle(tester);
+      await settle(tester);
+      await tester.tap(find.text("The numbers don't match"));
+      await settle(tester);
+      await settle(tester);
+      expect(
+        find.text(
+          "Claktory kept Ana's earlier security key. If the new one comes "
+          "back, this chat will say it's the one that didn't match.",
+        ),
+        findsOneWidget,
+      );
+      expect(find.text("The numbers don't match"), findsNothing);
+      pin = world.matt.e2ee.pin('ana')!;
+      expect(pin.identityPublic, real);
+      expect(pin.changedUnseen, isFalse);
+      await tester.tap(find.text('Done').last);
+      await settle(tester);
+      expect(find.textContaining('security key changed'), findsNothing);
+      await close(tester);
+    });
+
+    testWidgets("a message that can't go for another reason never points "
+        'to a key note', (tester) async {
+      await show(tester, _conversation());
+      world.matt.device.sendFails = StateError('something else');
+      await world.matt.e2ee.say(
+        world.group,
+        DmContent(
+          kind: 'text',
+          clientMessageId: 'm9',
+          text: 'hi',
+          extraJson: '',
+        ),
+      );
+      expect(world.matt.e2ee.sending['m9']!.state, DmSendState.refused);
+      expect(world.matt.e2ee.sending['m9']!.problem, '');
+      await close(tester);
+    });
+
+    // Row 556: the sender's time shows; one held up on the way more than
+    // five minutes says when it arrived too; a clock ahead shows arrival.
+    testWidgets('a message shows when it was sent, and when it arrived '
+        'once held up', (tester) async {
+      await show(tester, _conversation());
+      final sent = DateTime(2026, 11, 26, 6, 50).millisecondsSinceEpoch;
+      world.ana.now = sent;
+      world.worker.acceptAt = sent + const Duration(minutes: 6).inMilliseconds;
+      await world.fromAna(['held up']);
+      world.ana.now = sent + const Duration(minutes: 10).inMilliseconds;
+      world.worker.acceptAt = sent + const Duration(minutes: 11).inMilliseconds;
+      await world.fromAna(['on time']);
+      // Ana's clock ahead: arrival alone.
+      world.ana.now = sent + const Duration(hours: 2).inMilliseconds;
+      world.worker.acceptAt = sent + const Duration(minutes: 12).inMilliseconds;
+      await world.fromAna(['clock ahead']);
+      await settle(tester);
+      final messages = {
+        for (final m in await world.matt.e2ee.history(world.group))
+          if (m.members == null) m.content.text: m,
+      };
+      expect(messages, hasLength(3));
+      // The test's clock is 12-hour, as a device set so shows it.
+      expect(find.text('Arrived 6:56 AM'), findsOneWidget);
+      expect(find.textContaining('Arrived'), findsOneWidget);
+      expect(find.text('6:50 AM'), findsOneWidget);
+      expect(find.text('7:00 AM'), findsOneWidget);
+      expect(find.text('7:02 AM'), findsOneWidget);
+      await close(tester);
+    });
+
+    // Row 561: Ana added a tablet and took it out again while Matt's
+    // device was away; what it said shows, marked.
+    testWidgets('a message from a device since removed shows, marked', (
+      tester,
+    ) async {
+      await show(tester, _conversation());
+      final group = world.group;
+      final epoch = world.worker.epochOf(group);
+      world.matt.device.unlisted.add('ana/tablet');
+      world.worker
+        ..deliver(
+          group,
+          fakeEnvelope({
+            't': 'commit',
+            'g': group,
+            'epoch': epoch,
+            'from': 'ana/pixel',
+            'members': ['matt/phone', 'ana/pixel', 'ana/tablet'],
+          }),
+          advance: false,
+        )
+        ..deliver(
+          group,
+          FakeDmDevice.claktorySays(
+            group,
+            'ana/tablet',
+            const DmContent(
+              kind: 'text',
+              clientMessageId: 't1',
+              text: 'from the tablet',
+              extraJson: '',
+            ),
+            epoch: epoch + 1,
+          ),
+        )
+        ..deliver(
+          group,
+          fakeEnvelope({
+            't': 'commit',
+            'g': group,
+            'epoch': epoch + 1,
+            'from': 'ana/pixel',
+            'members': ['matt/phone', 'ana/pixel'],
+          }),
+          advance: false,
+        );
+      await world.matt.e2ee.sync();
+      await settle(tester);
+      expect(find.text('from the tablet'), findsOneWidget);
+      expect(find.text('From a device Ana has since removed'), findsOneWidget);
+      await close(tester);
+    });
+
+    test('arrived on another day says which', () {
+      final sent = DateTime(2026, 11, 24, 23, 10).millisecondsSinceEpoch;
+      final now = DateTime(2026, 11, 26, 12);
+      expect(
+        arrivedLine(
+          sent,
+          DateTime(2026, 11, 24, 23, 40).millisecondsSinceEpoch,
+          now,
+        ),
+        'Arrived 23:40',
+      );
+      expect(
+        arrivedLine(
+          sent,
+          DateTime(2026, 11, 25, 0, 5).millisecondsSinceEpoch,
+          now,
+        ),
+        'Arrived yesterday at 00:05',
+      );
+      expect(
+        arrivedLine(
+          sent,
+          DateTime(2026, 11, 26, 9, 2).millisecondsSinceEpoch,
+          now,
+        ),
+        'Arrived today at 09:02',
+      );
+      // Within five minutes: nothing more; a clock ahead: arrival alone.
+      const late = DmMessage(
+        seq: 1,
+        mine: false,
+        acceptedMs: 1000,
+        sentMs: 900,
+      );
+      expect((late.shownMs, late.arrivedLate), (900, null));
+      const ahead = DmMessage(
+        seq: 1,
+        mine: false,
+        acceptedMs: 1000,
+        sentMs: 5000,
+      );
+      expect((ahead.shownMs, ahead.arrivedLate), (1000, null));
+      const none = DmMessage(seq: 1, mine: false, acceptedMs: 1000);
+      expect(none.shownMs, 1000);
+    });
+
     testWidgets("a friend's reinstalled device not back yet: said, with its "
         'name, and nothing can be sent until it is (row 202)', (tester) async {
       await show(tester, _conversation());
@@ -1193,6 +1761,33 @@ void main() {
         findsNothing,
       );
       world.matt.device.reinstalledIn.clear();
+      await world.matt.e2ee.sync();
+      await settle(tester);
+      expect(find.text(waiting), findsNothing);
+      await close(tester);
+    });
+
+    // Row 551: a message from past this device's place waits, said, until
+    // what it missed comes; never passed over unread.
+    testWidgets('a message waiting for this device to catch up is said', (
+      tester,
+    ) async {
+      await show(tester, _conversation());
+      await settle(tester);
+      const waiting = 'A message is on its way.';
+      expect(find.text(waiting), findsNothing);
+      world.matt.e2ee.behind[world.group] = 1;
+      await world.matt.e2ee.sync();
+      await settle(tester);
+      expect(find.text(waiting), findsOneWidget);
+      expect(
+        find.text(
+          'It shows here once this device catches up. Claktory keeps '
+          'trying.',
+        ),
+        findsOneWidget,
+      );
+      world.matt.e2ee.behind.clear();
       await world.matt.e2ee.sync();
       await settle(tester);
       expect(find.text(waiting), findsNothing);
@@ -1477,6 +2072,7 @@ void main() {
       await tester.tap(find.text('Send').first);
       await settle(tester);
       final (:body, :sealed) = _approval(
+        world,
         service.log.firstWhere((l) => l.startsWith('POST approve')),
       );
       expect(body['revision'], 1);
@@ -1579,6 +2175,83 @@ void main() {
       expect(find.text('message 1'), findsOneWidget);
       expect(find.textContaining("You're no longer friends"), findsOneWidget);
       expect(find.text('Send'), findsNothing);
+      await close(tester);
+    });
+
+    testWidgets("the friend's Claktory couldn't read it, someone having "
+        'joined since: asked, and Resend sends it again (#451)', (
+      tester,
+    ) async {
+      final home = FakeHome(world.worker);
+      world.matt.e2ee.home = home;
+      await world.matt.e2ee.sync();
+      await show(tester, _conversation());
+      await tester.enterText(find.byType(EditableText), 'stale');
+      await tester.pump();
+      await tester.tap(find.text('Send'));
+      await settle(tester);
+      expect(find.text('Sent'), findsOneWidget);
+      // What was said, not commits or drafts to Matt's devices.
+      Iterable<String> said() => [
+        for (final send in home.sends)
+          if (readFake(dmEnvelopeOf(send.envelope))['c'] case {'kind': 'text'})
+            send.clientMessageId,
+      ];
+      final id = said().single;
+      home.deliver(
+        world.group,
+        id,
+        DmDeliveryState.DM_DELIVERY_STATE_DELIVERED,
+      );
+      await settle(tester);
+      expect(find.text("Delivered to Ana's Claktory"), findsOneWidget);
+      world.matt.device.keep(
+        world.group,
+        dm.DmMessage(
+          departed: false,
+          seq: 1 << 40,
+          mine: false,
+          fromAccount: '',
+          fromLeaf: '',
+          fromKindDevice: false,
+          content: const DmContent(
+            kind: '',
+            clientMessageId: '',
+            extraJson: '',
+          ),
+          arrivedMs: _now,
+          members: DmMembers(
+            joined: const [],
+            setUpAgain: const [],
+            added: [
+              DmMember(
+                account: 'ana',
+                leafId: 'ipad',
+                kind: DmLeafKind.device,
+                name: 'iPad',
+                sinceMs: BigInt.one,
+              ),
+            ],
+            removed: const [],
+            keyChanged: const [],
+          ),
+        ),
+      );
+      home.deliver(world.group, id, DmDeliveryState.DM_DELIVERY_STATE_BOUNCED);
+      await settle(tester);
+      expect(
+        find.text("Resend to Ana? Ana's conversation has changed since."),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Resend'));
+      await settle(tester);
+      expect(said(), hasLength(2));
+      expect(find.text('Resend'), findsNothing);
+      expect(
+        find.text("Ana's Claktory couldn't read this one. Sent again."),
+        findsOneWidget,
+      );
+      await tester.pump(const Duration(seconds: 2));
       await close(tester);
     });
 

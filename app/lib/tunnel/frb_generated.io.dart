@@ -280,6 +280,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DmView dco_decode_dm_view(dynamic raw);
 
   @protected
+  DmWindowEnd dco_decode_dm_window_end(dynamic raw);
+
+  @protected
+  DmWindowItem dco_decode_dm_window_item(dynamic raw);
+
+  @protected
+  DmWindowOutcome dco_decode_dm_window_outcome(dynamic raw);
+
+  @protected
   ForwardError dco_decode_forward_error(dynamic raw);
 
   @protected
@@ -310,7 +319,13 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<DmMessage> dco_decode_list_dm_message(dynamic raw);
 
   @protected
+  List<DmProcessed> dco_decode_list_dm_processed(dynamic raw);
+
+  @protected
   List<DmUnsent> dco_decode_list_dm_unsent(dynamic raw);
+
+  @protected
+  List<DmWindowItem> dco_decode_list_dm_window_item(dynamic raw);
 
   @protected
   List<Uint8List> dco_decode_list_list_prim_u_8_strict(dynamic raw);
@@ -658,6 +673,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DmView sse_decode_dm_view(SseDeserializer deserializer);
 
   @protected
+  DmWindowEnd sse_decode_dm_window_end(SseDeserializer deserializer);
+
+  @protected
+  DmWindowItem sse_decode_dm_window_item(SseDeserializer deserializer);
+
+  @protected
+  DmWindowOutcome sse_decode_dm_window_outcome(SseDeserializer deserializer);
+
+  @protected
   ForwardError sse_decode_forward_error(SseDeserializer deserializer);
 
   @protected
@@ -688,7 +712,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<DmMessage> sse_decode_list_dm_message(SseDeserializer deserializer);
 
   @protected
+  List<DmProcessed> sse_decode_list_dm_processed(SseDeserializer deserializer);
+
+  @protected
   List<DmUnsent> sse_decode_list_dm_unsent(SseDeserializer deserializer);
+
+  @protected
+  List<DmWindowItem> sse_decode_list_dm_window_item(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<Uint8List> sse_decode_list_list_prim_u_8_strict(
@@ -1113,6 +1145,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_dm_view(DmView self, SseSerializer serializer);
 
   @protected
+  void sse_encode_dm_window_end(DmWindowEnd self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_window_item(DmWindowItem self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_dm_window_outcome(
+    DmWindowOutcome self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_forward_error(ForwardError self, SseSerializer serializer);
 
   @protected
@@ -1149,7 +1193,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_dm_processed(
+    List<DmProcessed> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_dm_unsent(List<DmUnsent> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_dm_window_item(
+    List<DmWindowItem> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_list_prim_u_8_strict(

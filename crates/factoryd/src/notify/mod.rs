@@ -337,6 +337,9 @@ struct Data {
     waiting: BTreeSet<String>,
     /// The first Workspace was seen: what waits then isn't new.
     started: bool,
+    /// The Mac couldn't sleep with its lid closed (#371's STUCK), as last
+    /// seen: noted once when it starts, at a start too.
+    lid_stuck: bool,
     /// How many items wait for the person, as last seen: a push's badge.
     badge: u32,
     /// What each source sent this hour, by `Note::source`.
@@ -521,6 +524,9 @@ pub(crate) struct Note {
     /// The Needs-you item it's about, as `waiting_keys` names it: held
     /// through quiet hours while it waits (O3).
     pub waits: String,
+    /// A website another Claktory started sharing over `pipe_id` (W2),
+    /// whose share a tap opens.
+    pub share_id: String,
 }
 
 impl Note {
@@ -540,6 +546,7 @@ impl Note {
             seq: 0,
             device_id: String::new(),
             waits: String::new(),
+            share_id: String::new(),
         }
     }
 }
@@ -705,6 +712,7 @@ pub(crate) fn observe(factory: &Factory, inner: &Inner, workspace: &v1::Workspac
             + workspace.chats.iter().map(|chat| chat.waiting_seqs.len()).sum::<usize>()
             + workspace.dm_sends.len()
             + workspace.provider_waits.len()
+            + usize::from(lid_stuck(workspace))
             + workspace.remote.as_ref().map_or(0, |remote| remote.pending_devices.len());
         data.badge = u32::try_from(waiting).unwrap_or(u32::MAX);
         data.waiting = waiting_keys(workspace);
@@ -730,6 +738,9 @@ fn waiting_keys(workspace: &v1::Workspace) -> BTreeSet<String> {
     }
     keys.extend(workspace.dm_sends.iter().map(|waiting| format!("dm:{}", waiting.proposal_id)));
     keys.extend(workspace.provider_waits.iter().map(|wait| format!("provider:{}", wait.provider_id)));
+    if lid_stuck(workspace) {
+        keys.insert("keep_awake:lid".to_owned());
+    }
     let pending = workspace.remote.as_ref().map_or(&[][..], |remote| &remote.pending_devices[..]);
     keys.extend(pending.iter().map(|device| format!("device:{}", device.device_id)));
     keys
@@ -835,7 +846,32 @@ fn changes(data: &mut Data, factory: &Factory, inner: &Inner, settings: &Notific
 
     notes.extend(provider_waits(data, factory, inner, settings, workspace));
     notes.extend(devices(data, factory, inner, workspace));
+    notes.extend(lid(data, inner, workspace));
     notes
+}
+
+/// Whether the Mac can't sleep with its lid closed although Claktory isn't
+/// keeping it awake (#371, LID_CLOSED_STUCK).
+fn lid_stuck(workspace: &v1::Workspace) -> bool {
+    workspace.keep_awake.as_ref().is_some_and(|keep| keep.lid_closed() == v1::LidClosedState::LidClosedStuck)
+}
+
+/// The Mac became unable to sleep with its lid closed: one note, in
+/// Claktory's words with what fixes it, also when a start finds it so (the
+/// only way the person hears in time, as a closed laptop drains or heats).
+fn lid(data: &mut Data, inner: &Inner, workspace: &v1::Workspace) -> Vec<Note> {
+    let stuck = lid_stuck(workspace);
+    let new = stuck && !data.lid_stuck;
+    data.lid_stuck = stuck;
+    if !new {
+        return Vec::new();
+    }
+    let machine = inner.config.claktory_name();
+    let fix = workspace.keep_awake.as_ref().map(|keep| keep.lid_closed_fix.replace('`', "")).unwrap_or_default();
+    let mut note = Note::new(Kind::NeedsYou, "keep_awake".to_owned(), machine.clone());
+    note.what = format!("{machine} can't sleep with its lid closed right now. {fix}").trim_end().to_owned();
+    note.waits = "keep_awake:lid".to_owned();
+    vec![note]
 }
 
 /// Devices that started waiting to be allowed (#352 P4, Fugo's rules): in
@@ -936,11 +972,8 @@ fn provider_waits(
 /// `key`: 'provider_waits', 'devices'); empty when there's none or it
 /// can't be read.
 fn read_row<T: serde::de::DeserializeOwned + Default>(factory: &Factory, key: &str) -> T {
-    let read = factory
-        .store
-        .db()
-        .query_row("SELECT value FROM notify_settings WHERE key = ?1", [key], |row| row.get::<_, String>(0))
-        .optional();
+    let read =
+        factory.store.db().query_row("SELECT value FROM notify_settings WHERE key = ?1", [key], |row| row.get::<_, String>(0)).optional();
     match read {
         Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_else(|error| {
             tracing::warn!(%error, key, "what notifications noted can't be read; starting afresh");
@@ -998,6 +1031,29 @@ fn waiting_text(kind: Option<&EntryKind>, tainted: bool) -> (String, bool) {
         Some(EntryKind::DevicePairing(pairing)) => (format!("Is adding a device: {}", pairing.name), tainted),
         _ => (String::new(), tainted),
     }
+}
+
+/// A Claktory on `pipe` started sharing a website with this one (W2, its
+/// `share`): one notification, under Needs you, whose tap opens the pipe at
+/// the share. As a held message's (`held_text`), it never says what the
+/// other side chose (the website's name, the pipe's when they named it):
+/// the pipe's name only when the person gave it.
+pub(crate) fn shared(factory: &Factory, pipe: &str, share: &str) {
+    let named = factory
+        .pipes
+        .get(pipe)
+        .filter(|record| record.named_here.unwrap_or(record.peer.is_none()))
+        .map(|record| record.name.trim().to_owned())
+        .filter(|name| !name.is_empty());
+    let (who, what) = match named {
+        Some(name) => (name.clone(), format!("{name} shares a website with you")),
+        None => ("A pipe".to_owned(), "A website was shared with you in a pipe".to_owned()),
+    };
+    let mut note = Note::new(Kind::NeedsYou, format!("pipe:{pipe}"), who);
+    (note.pipe_id, note.share_id, note.what) = (pipe.to_owned(), share.to_owned(), what);
+    let config = factory.lock().config.clone();
+    let delivered = deliver(factory, &config, &settings(factory), note);
+    tracing::info!(pipe, ?delivered, "told the person a website was shared with them");
 }
 
 /// Who and what a pipe's held message says: never what was written, nor
@@ -1104,6 +1160,7 @@ fn send(factory: &Factory, config: &Config, settings: &NotificationsConfig, note
         chat_id: note.chat_id.clone(),
         seq: note.seq,
         device_id: note.device_id.clone(),
+        share_id: note.share_id.clone(),
         urgent: note.urgent && settings.urgent_breaks_quiet,
         collapse,
         thread: note.source.clone(),
@@ -1255,6 +1312,13 @@ pub fn connections_for_test(factory: &Factory) -> usize {
 #[doc(hidden)]
 pub fn registered_for_test(factory: &Factory, device: &str) -> bool {
     push::registered(factory, device)
+}
+
+/// Tests: the registrations are read again from the file, as after a
+/// restart.
+#[doc(hidden)]
+pub fn forget_registrations_for_test(factory: &Factory) {
+    push::forget_read(factory);
 }
 
 #[cfg(test)]

@@ -191,6 +191,9 @@ pub struct Flags {
     /// Run by a person at a terminal (stdin is one): only then does `allow`
     /// let a device in on a Claktory that has devices already.
     pub interactive: bool,
+    /// What the person typed when `allow` asked for the device's digits:
+    /// tests stand in for the terminal with it; None reads the terminal.
+    pub typed: Option<String>,
 }
 
 impl Flags {
@@ -672,8 +675,20 @@ fn devices(workspace: &v1::Workspace, home: &Home) -> Vec<Value> {
 /// the person reads off the device's own screen.
 pub fn waiting_sentence(id: &str, name: &str) -> String {
     format!(
-        "A device calling itself \"{name}\" is waiting. Allow it only if its screen shows the number you type: factoryd allow {id} --number <the 4 digits on its screen>."
+        "A device calling itself \"{name}\" is waiting. Allow it only if its screen shows the number you type: in a terminal on this computer, run factoryd allow {id} and type the 4 digits on its screen. Over SSH, connect with ssh -t, or it isn't a terminal."
     )
+}
+
+/// The line the person types at this computer's terminal after `prompt`;
+/// None without a terminal.
+fn ask_terminal(prompt: &str) -> Option<String> {
+    use std::io::Write;
+    let mut tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty").ok()?;
+    tty.write_all(prompt.as_bytes()).ok()?;
+    tty.flush().ok()?;
+    let mut line = String::new();
+    std::io::BufReader::new(tty).read_line(&mut line).ok()?;
+    Some(line.trim().to_owned())
 }
 
 fn devices_text(devices: &[Value]) -> String {
@@ -738,8 +753,7 @@ fn find_device(workspace: &v1::Workspace, wanted: &str) -> Result<v1::PairedDevi
 /// Why `allow` run by a program, not a person at a terminal, lets no device
 /// in once the Claktory has one: from then on, a device that's in allows
 /// new ones (Fugo's rule, #245).
-pub const HAS_DEVICES: &str =
-    "This Claktory already has devices. Allow new ones in Settings → Devices on one of them, or run factoryd allow in a terminal.";
+pub const HAS_DEVICES: &str = "This Claktory already has devices, so only a person can allow a new one: in Settings → Devices on one of them, or in a terminal on this computer with factoryd allow. Over SSH, connect with ssh -t, or it isn't a terminal.";
 
 /// Whether a device other than this machine's own app is allowed in.
 fn has_devices(workspace: &v1::Workspace) -> bool {
@@ -941,13 +955,22 @@ async fn decide_device(client: &mut Client, verb: &str, wanted: &str, flags: &Fl
     }
     // Allowed only with the digits the person reads off the device's own
     // screen, which the backend checks (#352 P4, Fugo): never read here.
-    let number = number.map(str::trim).unwrap_or_default();
+    // A person at a terminal who left them out is asked for them (Matt's
+    // `factoryd pair` over SSH, Fugo's ruling 35297); a program isn't.
+    let mut number = number.map(str::trim).unwrap_or_default().to_owned();
+    if verb == "allow" && waiting && number.is_empty() && flags.interactive && !flags.json && !flags.no_wait {
+        let prompt = format!("Type the 4 digits shown on {name}: ");
+        number = match &flags.typed {
+            Some(typed) => typed.trim().to_owned(),
+            None => ask_terminal(&prompt).unwrap_or_default(),
+        };
+    }
     if verb == "allow" && waiting && number.is_empty() {
         return Answer::refused("needs_number", waiting_sentence(&device.id, &name));
     }
     let id = device.id.clone();
     let request = match verb {
-        "allow" if waiting => client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone(), number: number.to_owned() }),
+        "allow" if waiting => client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone(), number }),
         "allow" if device.code_expires_ms > crate::transcript::now_ms() => {
             return Answer::fail(
                 Exit::NeedsHuman,

@@ -54,6 +54,12 @@ impl<'a> Provider<'a> {
     pub fn public(crypto: &'a Crypto, db: &'a Connection, key: &'a SealKey) -> Result<Provider<'a>> {
         Ok(Provider { crypto: &crypto.0, storage: SqlStorage::public(db, key)? })
     }
+
+    /// Deletes this endpoint's key packages whose lifetime ended by `now`
+    /// (seconds since the epoch): see [`crate::storage::sweep_key_packages`].
+    pub fn sweep_key_packages(&self, now: u64) -> Result<usize> {
+        self.storage.sweep_key_packages(now)
+    }
 }
 
 impl<'a> OpenMlsProvider for Provider<'a> {

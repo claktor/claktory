@@ -7,7 +7,9 @@
 // nothing (#370); and the viewer closes, back where the person was.
 import 'dart:convert';
 
+import 'package:factory_app/backend.dart' show RequestFailure;
 import 'package:factory_app/mobile/navigation.dart';
+import 'package:factory_app/outbox.dart' show decisionWaiting;
 import 'package:factory_app/mobile/needs_you_button.dart';
 import 'package:factory_app/mobile/presentation.dart' show PhoneSheet;
 import 'package:factory_app/scope.dart' show AppPage;
@@ -120,6 +122,18 @@ void main() {
     semantics.dispose();
   });
 
+  testWidgets("offline, a file not in the layout opens at once, apart from "
+      "it, with no layout sent (#446, Sale's row 127)", (tester) async {
+    final harness = await phone(tester);
+    harness.backend.connected.value = false;
+    await pumpFrames(tester);
+    expect(find.text('notes.md'), findsNothing);
+    expect(_routes(tester).showFile('a1', '/w/notes.md'), isTrue);
+    await pumpFrames(tester);
+    expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
+    expect(find.text('notes.md'), findsWidgets);
+  });
+
   testWidgets('a pane already open is pushed as it is', (tester) async {
     final harness = await phone(tester, layout: beside('text', _plan));
     expect(_routes(tester).showFile('a1', _plan), isTrue);
@@ -191,6 +205,23 @@ void main() {
     expect(find.text('Builder asks you to review this'), findsNothing);
     expect(find.text('Needs you'), findsWidgets);
     expect(harness.page.value, AppPage.inbox);
+  });
+
+  testWidgets("words typed in the bar stay with the card after Back, "
+      "there when it's opened again (Bruno's Q11)", (tester) async {
+    await phone(tester, layout: beside('text', _plan));
+    _routes(tester).showFile('a1', _plan);
+    await pumpFrames(tester);
+    await tester.enterText(find.byType(EditableText).last, 'Words for R4a');
+    await pumpFrames(tester);
+    await tester.tap(find.bySemanticsLabel('Back').last);
+    await pumpFrames(tester);
+    expect(find.text('Builder asks you to review this'), findsNothing);
+    _routes(tester).showFile('a1', _plan);
+    await pumpFrames(tester);
+    expect(find.text('Builder asks you to review this'), findsOneWidget);
+    expect(find.text('Words for R4a'), findsOneWidget);
+    expect(find.text('Submit'), findsOneWidget);
   });
 
   testWidgets("Needs you's Review opens the file over it, with the bar; "
@@ -289,6 +320,33 @@ void main() {
     expect(answer.answerAsk.dismiss, isFalse);
     expect(answer.answerAsk.reply, isFalse);
     expect(answer.answerAsk.text, isEmpty);
+    // Opened from the file, not its card: no talk seen (#492).
+    expect(answer.answerAsk.hasTalkSeen(), isTrue);
+    expect(answer.answerAsk.talkSeen, 0);
+    expect(find.text('Builder asks you to review this'), findsNothing);
+  });
+
+  testWidgets("Review from a card with a talk: the bar's answer says how "
+      'much of it the card showed (#492)', (tester) async {
+    final harness = await phone(tester);
+    harness.backend.entriesById['a1/7'] = _ask()
+      ..askPerson.thread.addAll([
+        AskThreadMessage(text: 'Why Friday?'),
+        AskThreadMessage(fromAgent: true, text: 'The tests pass by then.'),
+        AskThreadMessage(text: 'Fine.'),
+      ]);
+    harness.page.value = AppPage.inbox;
+    await pumpFrames(tester);
+    await tester.tap(find.text('Builder').first);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Review').last);
+    await pumpFrames(tester);
+    expect(find.text('Builder asks you to review this'), findsOneWidget);
+    await tester.tap(find.text('Approve').last);
+    await pumpFrames(tester);
+    final answer = harness.backend.sent.lastWhere((m) => m.hasAnswerAsk());
+    expect(answer.answerAsk.dismiss, isFalse);
+    expect(answer.answerAsk.talkSeen, 3);
     expect(find.text('Builder asks you to review this'), findsNothing);
   });
 
@@ -349,13 +407,23 @@ void main() {
     await pumpFrames(tester);
     await tester.enterText(find.byType(EditableText).last, 'Go ahead.');
     await pumpFrames(tester);
-    harness.backend.refuse = 'Offline.';
+    harness.backend.refuse = 'Connection lost.';
     await tester.tap(find.text('Submit'));
     await pumpFrames(tester);
-    expect(find.text("Couldn't send your answer. Try again."), findsOneWidget);
+    // Cut off: it waits, and goes by itself once the connection's back.
+    expect(find.text(decisionWaiting), findsOneWidget);
     expect(find.text('Go ahead.'), findsOneWidget);
     expect(find.text('Builder asks you to review this'), findsOneWidget);
     harness.backend.refuse = null;
+    harness.backend.connected.value = false;
+    await tester.pump();
+    harness.backend.connected.value = true;
+    await pumpFrames(tester);
+    expect(
+      harness.backend.sent.lastWhere((m) => m.hasAnswerAsk()).answerAsk.text,
+      'Go ahead.',
+    );
+    expect(find.text('Builder asks you to review this'), findsNothing);
   });
 
   testWidgets(
@@ -376,6 +444,169 @@ void main() {
       harness.backend.refuse = null;
     },
   );
+
+  testWidgets("replied on from another device, the bar keeps the card, held, "
+      "rather than an older one; back with what's typed once its agent "
+      "answers (Abbacchio's row 1325)", (tester) async {
+    final harness = await phone(tester, layout: beside('text', _plan));
+    _routes(tester).showFile('a1', _plan);
+    await pumpFrames(tester);
+    await tester.enterText(find.byType(EditableText).last, 'Half done');
+    await pumpFrames(tester);
+    harness.backend.entriesById['a1/7'] = _ask()
+      ..askPerson.state = AskPersonState.ASK_PERSON_STATE_ANSWERED
+      ..askPerson.replied = true
+      ..askPerson.answer = 'From the Mac';
+    await harness.apply(
+      tester,
+      snapshot(layout: beside('text', _plan))..selectedAgentId = 'a1',
+    );
+    await pumpFrames(tester);
+    expect(find.text('Review the release plan'), findsOneWidget);
+    expect(
+      find.text('You replied. Waiting for Builder to answer.'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Submit'));
+    await pumpFrames(tester);
+    expect(harness.backend.sent.where((m) => m.hasAnswerAsk()), isEmpty);
+    // Builder answers on it: it waits again, at a new revision.
+    harness.backend.entriesById['a1/7'] = _ask()..askPerson.revision = 2;
+    await harness.apply(
+      tester,
+      _waiting(snapshot(layout: beside('text', _plan))),
+    );
+    await pumpFrames(tester);
+    expect(
+      find.text('You replied. Waiting for Builder to answer.'),
+      findsNothing,
+    );
+    expect(find.text('Half done'), findsOneWidget);
+    await tester.tap(find.text('Submit'));
+    await pumpFrames(tester);
+    final answer = harness.backend.sent.lastWhere((m) => m.hasAnswerAsk());
+    expect(answer.answerAsk.text, 'Half done');
+    expect(answer.answerAsk.revision, 2);
+  });
+
+  testWidgets("closed while held, the bar moves on to the next card saying "
+      "so, its field empty: the closed card's words never answer another "
+      "(Zucchero's row 513)", (tester) async {
+    final harness = await phone(tester, layout: beside('text', _plan));
+    Entry r4b() => Entry(
+      seq: Int64(8),
+      askPerson: AskPerson(
+        id: 'q2',
+        title: 'And the appendix',
+        state: AskPersonState.ASK_PERSON_STATE_PENDING,
+        reviewPath: _plan,
+      ),
+    );
+    Workspace waiting(List<int> seqs) => snapshot(layout: beside('text', _plan))
+      ..selectedAgentId = 'a1'
+      ..agents.firstWhere((agent) => agent.id == 'a1').waitingSeqs.addAll([
+        for (final seq in seqs) Int64(seq),
+      ]);
+    harness.backend.entriesById['a1/8'] = r4b();
+    await harness.apply(tester, waiting([7, 8]));
+    _routes(tester).showFile('a1', _plan);
+    await pumpFrames(tester);
+    expect(find.text('Review the release plan'), findsOneWidget);
+    await tester.enterText(find.byType(EditableText).last, 'Draft for R3a');
+    await pumpFrames(tester);
+    // Replied from the Mac: held.
+    harness.backend.entriesById['a1/7'] = _ask()
+      ..askPerson.state = AskPersonState.ASK_PERSON_STATE_ANSWERED
+      ..askPerson.replied = true;
+    await harness.apply(tester, waiting([8]));
+    await pumpFrames(tester);
+    expect(find.text('Review the release plan'), findsOneWidget);
+    // Builder closes it, settled in the talk.
+    harness.backend.entriesById['a1/7'] = _ask()
+      ..askPerson.state = AskPersonState.ASK_PERSON_STATE_ANSWERED
+      ..askPerson.replied = true
+      ..askPerson.resolved = true;
+    await harness.apply(tester, waiting([8]));
+    await pumpFrames(tester);
+    expect(find.text('And the appendix'), findsOneWidget);
+    expect(
+      find.text('That card was closed. This is another one from Builder.'),
+      findsOneWidget,
+    );
+    expect(find.text('Draft for R3a'), findsNothing);
+    expect(find.text('Approve'), findsOneWidget);
+    expect(find.text('Submit'), findsNothing);
+  });
+
+  group('a card its agent replied on while the file was open (row 485)', () {
+    const changed = 'This card changed. Look at it again.';
+
+    Entry replied() => _ask()
+      ..askPerson.revision = 2
+      ..askPerson.thread.add(
+        AskThreadMessage(fromAgent: true, text: 'Friday is the freeze.'),
+      );
+
+    Future<Harness> stale(WidgetTester tester) async {
+      final harness = await phone(tester, layout: beside('text', _plan));
+      harness.backend.entriesById['a1/7'] = _ask()..askPerson.revision = 1;
+      _routes(tester).showFile('a1', _plan);
+      await pumpFrames(tester);
+      // Builder replied on the card meanwhile: only its latest revision
+      // is taken.
+      harness.backend.entriesById['a1/7'] = replied();
+      harness.backend.onSend = (m) {
+        if (m.hasAnswerAsk() && m.answerAsk.revision != 2) {
+          throw const RequestFailure(changed);
+        }
+      };
+      return harness;
+    }
+
+    List<AnswerAsk> answers(Harness harness) => [
+      for (final m in harness.backend.sent)
+        if (m.hasAnswerAsk()) m.answerAsk,
+    ];
+
+    testWidgets('Dismiss goes with its latest revision', (tester) async {
+      final harness = await stale(tester);
+      await tester.tap(find.text('Dismiss'));
+      await pumpFrames(tester);
+      expect([for (final a in answers(harness)) a.revision], [1, 2]);
+      expect(answers(harness).last.dismiss, isTrue);
+      expect(find.text(changed), findsNothing);
+      expect(find.text('Builder asks you to review this'), findsNothing);
+    });
+
+    testWidgets('Submit goes too, as a reply', (tester) async {
+      final harness = await stale(tester);
+      await tester.enterText(find.byType(EditableText).last, 'Why Friday?');
+      await pumpFrames(tester);
+      await tester.tap(find.text('Submit'));
+      await pumpFrames(tester);
+      final last = answers(harness).last;
+      expect((last.revision, last.reply, last.text), (2, true, 'Why Friday?'));
+      expect(find.text('Builder asks you to review this'), findsNothing);
+    });
+
+    testWidgets('Approve is refused, and the bar shows the reply; approved '
+        'again, it goes', (tester) async {
+      final harness = await stale(tester);
+      await tester.tap(find.text('Approve'));
+      await pumpFrames(tester);
+      expect(answers(harness), hasLength(1));
+      expect(find.text(changed), findsOneWidget);
+      expect(
+        find.textContaining('Friday is the freeze.', findRichText: true),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Approve'));
+      await pumpFrames(tester);
+      final last = answers(harness).last;
+      expect((last.revision, last.talkSeen, last.dismiss), (2, 1, false));
+      expect(find.text('Builder asks you to review this'), findsNothing);
+    });
+  });
 
   testWidgets('from Needs you, an answer returns to Needs you', (tester) async {
     final harness = await phone(tester, layout: beside('text', _plan));

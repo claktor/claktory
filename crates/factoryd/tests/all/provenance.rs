@@ -94,6 +94,19 @@ async fn a_message_says_its_number_and_a_reply_what_it_answers() {
     }
     assert_eq!(received(&dir, "bo").len(), before, "nothing was sent");
 
+    // A question never goes quietly (#280), to one or to several: refused,
+    // nothing sent; sent loud, it goes.
+    for to in [r#""max""#, r#"["max", "lea"]"#] {
+        let args = format!(r#"{{"to": {to}, "text": "Which wording?", "intent": "decision_request", "quiet": true}}"#);
+        let refused = call(&mut client, &mut view, "bo", "agents_send", &args).await;
+        assert!(refused.contains("A decision request waits on its answer, so it never goes quietly"), "{refused}");
+    }
+    assert_eq!(received(&dir, "max").len(), 1, "nothing was sent");
+    let args = r#"{"to": "max", "text": "Which wording?", "intent": "decision_request"}"#;
+    assert_eq!(call(&mut client, &mut view, "bo", "agents_send", args).await, "Sent.");
+    settle(&mut client, &mut view, &["max"]).await;
+    assert_eq!(received(&dir, "max").last().cloned().expect("max").5, "decision_request");
+
     // A fanout is one send.
     call(&mut client, &mut view, "bo", "agents_send", r#"{"to": ["max", "lea"], "text": "Both of you."}"#).await;
     settle(&mut client, &mut view, &["max", "lea"]).await;

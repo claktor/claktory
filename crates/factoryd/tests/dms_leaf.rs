@@ -186,20 +186,27 @@ async fn a_device_enrolls_this_claktorys_leaf_and_nothing_else_is_taken() {
     assert_eq!(enrolled.leaf_signature_key, first.leaf_signature_key);
 
     // A re-enroll merges pins, never replaces them: from a device that's
-    // behind, a friend's retired key stays retired (L5); from one that
-    // disagrees, nothing changes and it's refused.
+    // behind, a friend's key proven replaced stays retired (L5); from one
+    // that went back to the earlier key, each keeps its own (a key moved
+    // off by key_changed alone is only previous); from one that retired
+    // the key pinned here for good, nothing changes and it's refused.
     let (old, new) = (IdentityKey::generate().expect("a key"), IdentityKey::generate().expect("a key"));
     let mut changed = pins.clone();
     changed.first_contact("ana", old.public()).expect("pinned");
     changed.key_changed("ana", new.public()).expect("changed");
+    changed.retire_previous("ana");
     assert_eq!(enroll(&mut client, &issue(&matt, &|_| {}), &changed).await, None);
     let mut stale = pins.clone();
     stale.first_contact("ana", old.public()).expect("pinned");
     assert_eq!(enroll(&mut client, &issue(&matt, &|_| {}), &stale).await, None);
     assert_eq!(factoryd::user_apps::dms::pinned_identity(&factory, "ana"), Some(new.public().0), "the old key stays retired");
-    let mut disagrees = pins.clone();
-    disagrees.first_contact("ana", new.public()).expect("pinned");
-    disagrees.key_changed("ana", old.public()).expect("changed back");
+    let mut back = pins.clone();
+    back.first_contact("ana", new.public()).expect("pinned");
+    back.key_changed("ana", old.public()).expect("changed back");
+    assert_eq!(enroll(&mut client, &issue(&matt, &|_| {}), &back).await, None);
+    assert_eq!(factoryd::user_apps::dms::pinned_identity(&factory, "ana"), Some(new.public().0));
+    let mut disagrees = back.clone();
+    disagrees.retire_previous("ana");
     let refused = enroll(&mut client, &issue(&matt, &|_| {}), &disagrees).await.expect("refused");
     assert!(refused.contains("catch up"), "{refused}");
     assert_eq!(factoryd::user_apps::dms::pinned_identity(&factory, "ana"), Some(new.public().0));
@@ -296,6 +303,8 @@ struct People {
     bo: dm_device::Device,
     conversation: String,
     generation: i64,
+    /// The relay and lookup the homes find each other on (#451).
+    network: dm_device::Network,
 }
 
 async fn people() -> People {
@@ -309,6 +318,8 @@ async fn people() -> People {
     });
     std::fs::write(dir.join("home/config.json"), config.to_string()).expect("config");
     let (addr, factory, serving) = serve(&dir).await;
+    let network = dm_device::Network::start().await;
+    network.serve(&factory);
     let (mut client, _, _) = Client::connect(addr).await;
     let workspace = sign_in(&mut client, &account.mail, "matt@example.com").await;
     let mut view = View { workspace, ..View::default() };
@@ -318,15 +329,19 @@ async fn people() -> People {
         serde_json::from_slice(&std::fs::read(dir.join("home/account/account.json")).expect("account.json")).expect("JSON");
     let matt = saved["account_id"].as_str().expect("an account").to_owned();
 
+    // This Claktory is Matt's home; Bo's is one of his own, elsewhere.
     let mut bo = dm_device::Device::new(&dir, "bo", 9);
+    bo.friend_home = Some(dm_device::FriendHome::start(&network).await);
     bo.publish_keys().await;
     bo.stock(3).await;
     let mut phone = dm_device::Device::new(&dir, &matt, 3);
+    phone.home = factoryd::dm_device::endpoint_for_test(&factory);
+    phone.set_home_addr(addr);
     phone.publish_keys().await;
     let (conversation, generation) = befriend(&phone, &bo, "Bo", 1).await;
     phone.pin(&bo);
     bo.pin(&phone);
-    People { dir, account, factory, serving, client, view, matt, phone, bo, conversation, generation }
+    People { dir, account, factory, serving, client, view, matt, phone, bo, conversation, generation, network }
 }
 
 /// A Claktory on `dir` that this test can stop, as a restart does.
@@ -375,6 +390,8 @@ impl People {
         self.serving.abort();
         factoryd::user_apps::dms::stop_leaf(&self.factory);
         let (addr, factory, serving) = serve(&self.dir).await;
+        self.network.serve(&factory);
+        self.phone.set_home_addr(addr);
         self.factory = factory;
         self.serving = serving;
         let (client, workspace, _) = Client::connect(addr).await;
@@ -452,6 +469,7 @@ impl People {
         let packages = self.phone.claim("bo", &[&self.bo.device_key]).await;
         self.phone.add(&group, packages).await;
         assert_eq!(self.bo.join_welcomes(|_| people.clone()).await, std::slice::from_ref(&group));
+        self.phone.route(&self.bo, &[&group]).await;
         group
     }
 
@@ -539,7 +557,7 @@ async fn an_agent_reads_and_drafts_end_to_end_and_follows_only_its_conversation(
         people.phone.call("GET", &format!("conversations/{conversation}/agent-drafts"), serde_json::Value::Null).await;
     assert_eq!(status, 200, "{drafts}");
     assert!(!drafts.to_string().contains("Matt will call"), "sealed: {drafts}");
-    let draft = people.phone.open(&channel, &drafts["drafts"][0]).content;
+    let draft = people.phone.open(&channel, &drafts["drafts"][0]).await.content;
     assert_eq!(draft.text.as_deref(), Some("Hi Bo, Matt will call you."));
     assert_eq!(draft.by_agent.as_ref().map(|agent| (agent.agent_id.as_str(), agent.name.as_str())), Some(("mike", "Mike")));
     assert_eq!(draft.extra["conversation_id"], json!(conversation));
@@ -609,11 +627,11 @@ async fn while_the_vault_is_locked_the_leaf_waits_and_reads_on_once_it_opens() {
     assert!(people.channel_position() > before);
 }
 
-/// Away longer than the worker keeps a mailbox (30 days), the leaf is told
-/// it's too far behind and rejoins its channel by an external commit, made
-/// from the GroupInfo the worker keeps; the person's device takes that in,
-/// and what it says next reaches the leaf. The 30 days pass on the worker's
-/// clock: its sweep runs as at a month on.
+/// Away longer than the person's home keeps what it holds (90 days, #451),
+/// the leaf is told it's too far behind and rejoins its channel by an
+/// external commit, made from the GroupInfo the worker keeps; the person's
+/// device takes that in, and what it says next reaches the leaf. The home
+/// lets go of the channel's log as its sweep would after 90 days.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_leaf_away_past_the_mailbox_rejoins_its_channel() {
     let mut people = people().await;
@@ -632,9 +650,11 @@ async fn a_leaf_away_past_the_mailbox_rejoins_its_channel() {
     people.phone.pin(&cy);
     let said = people.phone.share_pins(&channel, 2).await;
     people.phone.positions.insert(channel.clone(), said);
-    let month = factoryd::transcript::now_ms() as i64 + 31 * 86_400_000;
-    let mut worker = rusqlite::Connection::open(people.dir.join("apps.db")).expect("the worker's records");
-    assert!(claktory_user_apps::dms::groups::sweep(&mut worker, month).expect("swept") >= 1);
+    let home = rusqlite::Connection::open(people.dir.join("home/dm/home.db")).expect("the home's records");
+    let id = base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &channel).expect("an id");
+    home.execute("DELETE FROM log WHERE group_id = ?1 AND seq <= ?2", rusqlite::params![id, said]).expect("let go");
+    home.execute("UPDATE groups SET pruned_seq = ?2 WHERE group_id = ?1", rusqlite::params![id, said]).expect("let go");
+    drop(home);
     assert_eq!(people.channel_position(), before);
 
     // Opened: told it's too far behind, the leaf rejoins.
@@ -733,7 +753,7 @@ async fn after_a_new_security_key_the_leaf_moves_to_it_in_every_group() {
     assert!(drafted.starts_with("Kept your draft for the person"), "{drafted}");
     let (status, drafts) = people.phone.call("GET", &format!("conversations/{}/agent-drafts", people.conversation), serde_json::Value::Null).await;
     assert_eq!(status, 200, "{drafts}");
-    let opened = people.phone.open(&channel, &drafts["drafts"][0]);
+    let opened = people.phone.open(&channel, &drafts["drafts"][0]).await;
     assert_eq!(opened.content.text.as_deref(), Some("Hi Bo, Matt will call you."));
     assert_eq!(opened.from.identity.0, new);
     people.bo.post(&group, &people.conversation, people.generation, 1, "New key, same Bo").await;
@@ -771,7 +791,7 @@ async fn a_conversation_whose_grant_ends_is_left_and_forgotten() {
     let leaf = offer.leaf_id.clone();
     let asked = std::time::Instant::now() + PATIENCE;
     loop {
-        let after = people.phone.positions.get(&group).copied().unwrap_or(0);
+        let after = people.phone.worker_positions.get(&group).copied().unwrap_or(0);
         let (status, page) = people.phone.call("GET", &format!("groups/{group}/messages?after={after}"), serde_json::Value::Null).await;
         assert_eq!(status, 200, "{page}");
         if page["messages"].as_array().expect("messages").iter().any(|message| message["kind"] == "proposal") {
@@ -880,7 +900,7 @@ async fn a_device_added_before_the_leaf_has_its_list_is_taken_in_and_the_channel
     assert!(drafted.starts_with("Kept your draft for the person"), "{drafted}");
     let (status, drafts) = tablet.call("GET", &format!("conversations/{}/agent-drafts", people.conversation), serde_json::Value::Null).await;
     assert_eq!(status, 200, "{drafts}");
-    let opened = tablet.open(&channel, &drafts["drafts"][0]);
+    let opened = tablet.open(&channel, &drafts["drafts"][0]).await;
     assert_eq!(opened.content.text.as_deref(), Some("Hi Bo, Matt will call you."));
 }
 
@@ -1032,11 +1052,20 @@ async fn an_out_of_step_channel_heals(more: bool) {
     let mut people = people().await;
     let (_, channel) = people.channel().await;
     let recovery = people.lock().await;
-    let skipped = people.phone.commit(&channel, |mls, provider, me, _| mls.update(provider, me).expect("committed")).await;
-    let skipped = skipped["seq"].as_i64().expect("a seq");
+    people.phone.commit(&channel, |mls, provider, me, _| mls.update(provider, me).expect("committed")).await;
+    // Its place in the person's home, where the leaf reads the channel.
+    let id = base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &channel).expect("an id");
+    let skipped: i64 = rusqlite::Connection::open(people.dir.join("home/dm/home.db"))
+        .and_then(|home| home.query_row("SELECT MAX(seq) FROM log WHERE group_id = ?1 AND kind = 'commit'", [&id], |row| row.get(0)))
+        .expect("the commit at the home");
     if more {
         people.phone.commit(&channel, |mls, provider, me, _| mls.update(provider, me).expect("committed")).await;
     }
+    // The phone has read its own commits there.
+    let own: i64 = rusqlite::Connection::open(people.dir.join("home/dm/home.db"))
+        .and_then(|home| home.query_row("SELECT MAX(seq) FROM log WHERE group_id = ?1", [&id], |row| row.get(0)))
+        .expect("the phone's last commit at the home");
+    people.phone.positions.insert(channel.clone(), own);
     let store = people.dir.join("home/dm/leaf.db");
     let moved = rusqlite::Connection::open(&store)
         .and_then(|db| db.execute("UPDATE groups SET position = ?1 WHERE kind = 'channel'", [skipped]))
@@ -1091,7 +1120,7 @@ async fn after_a_start_over_the_leaf_is_taken_out_and_rejoins_its_channel_once_e
     let (offer, channel) = people.channel().await;
     let matt = people.matt.clone();
     let kind = GroupKind::Channel { account: matt.clone(), claktory_id: offer.claktory_id.clone() };
-    let mut fresh = dm_device::Device::start_over(&people.dir, &matt, 3, &[people.phone.identity.public()]).await;
+    let mut fresh = dm_device::Device::start_over(&people.phone, 3, &[people.phone.identity.public()]).await;
     let (_, removed) = fresh.rejoin(&channel, kind).await;
     assert!(removed.is_some(), "the old phone's leaf and the Claktory's taken out");
     let members = fresh.members(&channel);
@@ -1141,14 +1170,14 @@ async fn after_two_start_overs_the_leaf_rejoins_its_channel_rather_than_wait() {
     let matt = people.matt.clone();
     let kind = GroupKind::Channel { account: matt.clone(), claktory_id: offer.claktory_id.clone() };
     let first_key = people.phone.identity.public();
-    let mut first = dm_device::Device::start_over(&people.dir, &matt, 3, &[first_key]).await;
+    let mut first = dm_device::Device::start_over(&people.phone, 3, &[first_key]).await;
     first.rejoin(&channel, kind.clone()).await;
     let factory = people.factory.clone();
     until("the channel never stopped at the new key", || factoryd::user_apps::dms::channel_waits(&factory)).await;
 
     // A minute later, again; the worker lists both keys before as replaced.
     let second_key = first.identity.public();
-    let mut fresh = dm_device::Device::start_over(&people.dir, &matt, 3, &[first_key, second_key]).await;
+    let mut fresh = dm_device::Device::start_over(&people.phone, 3, &[first_key, second_key]).await;
     let (_, keys) = fresh.call("GET", &format!("keys/{matt}"), serde_json::Value::Null).await;
     // A set to devices: two start-overs in the same millisecond come in key order.
     let mut listed: Vec<&str> = keys["replaced_identity_keys"].as_array().expect("listed").iter().map(|key| key.as_str().expect("a key")).collect();
@@ -1208,4 +1237,109 @@ async fn a_claktory_woken_past_its_places_at_the_worker_doesnt_spin_into_the_ser
     view.follow(client, |view| idle(view, "mike")).await;
     let listed = call(client, view, "mike", "dm_read", &json!({})).await;
     assert!(listed.contains(&format!("- {conversation}: with \"Bo\" · ")), "{listed}");
+}
+
+/// Abbacchio's live setup race (rows 1150–1155): Bo's device, added to the
+/// conversation, rejoins it by external commit from a GroupInfo past its
+/// own add, before taking its Welcome. It's in the group once (the rejoin
+/// takes its old leaf out); the phone, adding Bo's leaf again on a view
+/// from before, is told everyone is in already rather than making a commit
+/// MLS refuses; and the phone's next add, Bo's tablet, goes through, at
+/// the worker and on Bo's device.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_that_rejoins_past_its_own_add_leaves_the_conversation_open_to_more() {
+    let mut people = people().await;
+    // This Claktory's leaf enrolled: it's Matt's home.
+    people.channel().await;
+    let kind = GroupKind::Conversation { people: [people.matt.clone(), "bo".to_owned()] };
+    let body = json!({"kind": "conversation", "conversation_id": people.conversation, "contact_generation": people.generation});
+    let group = people.phone.create(kind.clone(), body).await;
+    let bo_leaf = people.bo.device_key.clone();
+    let packages = people.phone.claim("bo", &[&bo_leaf]).await;
+    people.phone.add(&group, packages).await;
+    people.phone.route(&people.bo, &[&group]).await;
+
+    // Bo's device rejoins from the epoch-1 GroupInfo, which holds it.
+    people.bo.rejoin(&group, kind).await;
+    assert_eq!(people.bo.epoch(&group), 2);
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while people.phone.epoch(&group) < 2 {
+        assert!(std::time::Instant::now() < deadline, "the phone never took Bo's rejoin");
+        people.phone.catch_up(&group).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let leaves = |device: &dm_device::Device| -> Vec<String> {
+        let mut leaves: Vec<String> = device.members(&group).into_iter().map(|member| member.expect("trusted").leaf.leaf_id).collect();
+        leaves.sort();
+        leaves
+    };
+    let mut both = vec![people.phone.device_key.clone(), bo_leaf.clone()];
+    both.sort();
+    assert_eq!(leaves(&people.phone), both, "Bo's leaf is in once");
+
+    // A stale add of Bo's leaf: nothing to commit.
+    let again = people.phone.claim("bo", &[&bo_leaf]).await;
+    assert_eq!(people.phone.add_refused(&group, &again), "refused: everyone it would add is in the group already");
+
+    // Bo's tablet: the next add goes through, and Bo's device takes it.
+    let tablet = people.bo.another(10).await;
+    people.phone.refresh(&people.bo);
+    let packages = people.phone.claim("bo", &[&tablet.device_key]).await;
+    people.phone.add(&group, packages).await;
+    let mut all = vec![people.phone.device_key.clone(), bo_leaf, tablet.device_key.clone()];
+    all.sort();
+    assert_eq!(leaves(&people.phone), all);
+    people.bo.catch_up(&group).await;
+    assert_eq!(people.bo.epoch(&group), 3);
+    assert_eq!(leaves(&people.bo), all);
+}
+
+/// Row 561: while this Claktory's leaf is away, Bo adds a tablet, which
+/// says something, and takes it out again, so Bo's newest list no longer
+/// names it. Back, the leaf reads on past the add (no conversation stuck
+/// at it), and Mike sees the tablet's message marked as from a device
+/// since removed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_the_friend_added_and_removed_while_the_leaf_was_away_is_read_past() {
+    let mut people = people().await;
+    let (offer, _) = people.channel().await;
+    people.grant(&["dm.read"]).await;
+    let group = people.conversation_group().await;
+    people.add_leaf(&group, &offer).await;
+    people.bo.catch_up(&group).await;
+    let (conversation, generation) = (people.conversation.clone(), people.generation);
+    // Whole seconds at the service: past the grant's own.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    // The leaf stops; Matt's home goes on taking what comes.
+    factoryd::user_apps::dms::stop_leaf(&people.factory);
+    let kind = GroupKind::Conversation { people: [people.matt.clone(), "bo".to_owned()] };
+    let mut tablet = people.bo.another(21).await;
+    let packages = people.bo.claim("bo", &[&tablet.device_key]).await;
+    people.bo.add(&group, packages).await;
+    assert_eq!(tablet.join_welcomes(|_| kind.clone()).await, std::slice::from_ref(&group));
+    tablet.post(&group, &conversation, generation, 1, "From the tablet").await;
+    let gone = tablet.device_key.clone();
+    people.bo.commit(&group, |group, provider, me, _| group.remove(provider, me, &[&gone]).expect("removed")).await;
+    people.bo.listed.retain(|listed| listed.leaf_id != gone);
+    people.bo.publish_keys().await;
+    people.bo.post(&group, &conversation, generation, 2, "After the tablet").await;
+
+    // Back: the leaf reads past it.
+    people.restart().await;
+    let People { client, view, .. } = &mut people;
+    select(client, view, "mike").await;
+    view.follow(client, |view| idle(view, "mike")).await;
+    let deadline = std::time::Instant::now() + PATIENCE;
+    let read = loop {
+        let read = call(client, view, "mike", "dm_read", &json!({"conversation": conversation})).await;
+        if read.contains("After the tablet") || std::time::Instant::now() > deadline {
+            break read;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
+    assert!(read.contains("After the tablet"), "{read}");
+    let line = read.lines().position(|line| line.contains("From the tablet")).expect("the tablet's message");
+    let lines: Vec<&str> = read.lines().collect();
+    assert!(lines[line - 1].contains("· from a device since removed"), "{read}");
 }

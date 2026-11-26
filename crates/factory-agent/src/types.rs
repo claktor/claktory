@@ -1,6 +1,9 @@
 use std::cell::Cell;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use parking_lot::RwLock;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 thread_local! {
@@ -22,13 +25,238 @@ pub fn without_image_data<T>(parse: impl FnOnce() -> T) -> T {
     parse()
 }
 
-/// An image's base64 data, or nothing inside `without_image_data`.
-fn image_data<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+/// An image's base64 data, or nothing inside `without_image_data`. A
+/// segment's reference to a stored image (`STORED_IMAGE`) stays one until
+/// its reader finds the file (`ImageData::resolve`).
+fn image_data<'de, D: Deserializer<'de>>(deserializer: D) -> Result<ImageData, D::Error> {
     if SKIP_IMAGE_DATA.get() {
         serde::de::IgnoredAny::deserialize(deserializer)?;
-        Ok(String::new())
+        Ok(ImageData::default())
     } else {
-        String::deserialize(deserializer)
+        let data = String::deserialize(deserializer)?;
+        Ok(match data.strip_prefix(STORED_IMAGE) {
+            Some(name) => ImageData::new(Repr::Named(Arc::from(name))),
+            None => ImageData::from(data),
+        })
+    }
+}
+
+/// What an image's data is in a segment once its bytes are a file of the
+/// conversation's (factoryd's `transcript::images`): this, then its name.
+pub const STORED_IMAGE: &str = "claktory-image:";
+
+/// Said in an image's place when its file can't be read.
+pub const IMAGE_GONE: &str = "[image: its file is no longer on disk]";
+
+thread_local! {
+    static NAMING_STORED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `write` with stored images serialized as their names on this thread
+/// (`STORED_IMAGE`), for a segment; anywhere else they're their base64.
+pub fn naming_stored_images<T>(write: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            NAMING_STORED.set(self.0);
+        }
+    }
+    let _restore = Restore(NAMING_STORED.replace(true));
+    write()
+}
+
+/// An image's data, shared by every copy of the message it's in (#454). A
+/// conversation is copied for each model call (the run's context, the
+/// request's), and its images can be most of its bytes; a copy shares them
+/// instead. Once saved as a file (`store`), every copy holds only where the
+/// file is, and reads it when a request needs it (`base64`, `bytes`). On
+/// the wire it's its base64; in a segment, its name.
+#[derive(Clone)]
+pub struct ImageData(Arc<Shared>);
+
+/// What every copy of an image shares: what it is now, and its size once
+/// worked out (`dimensions`).
+struct Shared {
+    repr: RwLock<Repr>,
+    size: std::sync::OnceLock<Option<(u32, u32)>>,
+}
+
+#[derive(Clone)]
+enum Repr {
+    /// Base64, held.
+    Inline(Arc<str>),
+    /// A file: its path, and its name in a segment (`<sha256>.<ext>`).
+    Stored { path: Arc<Path>, name: Arc<str> },
+    /// A segment's name for it whose file wasn't found yet: no data.
+    Named(Arc<str>),
+}
+
+impl ImageData {
+    fn new(repr: Repr) -> ImageData {
+        ImageData(Arc::new(Shared { repr: RwLock::new(repr), size: std::sync::OnceLock::new() }))
+    }
+
+    fn repr(&self) -> Repr {
+        self.0.repr.read().clone()
+    }
+
+    /// An image stored in the file at `path`, named `name` in a segment.
+    pub fn stored(path: PathBuf, name: &str) -> ImageData {
+        ImageData::new(Repr::Stored { path: Arc::from(path), name: Arc::from(name) })
+    }
+
+    /// Its base64, read from its file when it's stored; None when that
+    /// can't be read (or it's a name whose file wasn't found).
+    pub fn base64(&self) -> Option<Arc<str>> {
+        use base64::Engine as _;
+        match self.repr() {
+            Repr::Inline(data) => Some(data),
+            Repr::Stored { path, .. } => match std::fs::read(&path) {
+                Ok(bytes) => Some(Arc::from(base64::engine::general_purpose::STANDARD.encode(bytes))),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "an image's file can't be read");
+                    None
+                }
+            },
+            Repr::Named(_) => None,
+        }
+    }
+
+    /// Its bytes: decoded, or read from its file; None when they can't be.
+    pub fn bytes(&self) -> Option<Vec<u8>> {
+        use base64::Engine as _;
+        match self.repr() {
+            Repr::Inline(data) => base64::engine::general_purpose::STANDARD.decode(data.as_bytes()).ok(),
+            Repr::Stored { path, .. } => std::fs::read(&*path).ok(),
+            Repr::Named(_) => None,
+        }
+    }
+
+    /// Whether it holds no image: empty base64 (as read without its data,
+    /// or let go of).
+    pub fn is_empty(&self) -> bool {
+        matches!(self.repr(), Repr::Inline(data) if data.is_empty())
+    }
+
+    /// Its file and its name in a segment, when it's stored.
+    pub fn file(&self) -> Option<(PathBuf, String)> {
+        match self.repr() {
+            Repr::Stored { path, name } => Some((path.to_path_buf(), name.to_string())),
+            _ => None,
+        }
+    }
+
+    /// A segment's name for it whose file wasn't found yet.
+    pub fn named(&self) -> Option<String> {
+        match self.repr() {
+            Repr::Named(name) => Some(name.to_string()),
+            _ => None,
+        }
+    }
+
+    /// From now on it's the file at `path`, named `name` in a segment, in
+    /// every copy: they let go of its base64.
+    pub fn store(&self, path: PathBuf, name: &str) {
+        *self.0.repr.write() = Repr::Stored { path: Arc::from(path), name: Arc::from(name) };
+    }
+
+    /// Its width and height in pixels, from what it begins with (its file's
+    /// header when stored), worked out once for every copy; None when it
+    /// can't be read.
+    pub fn dimensions(&self) -> Option<(u32, u32)> {
+        *self.0.size.get_or_init(|| match self.repr() {
+            Repr::Stored { path, .. } => {
+                image::ImageReader::open(&*path).ok()?.with_guessed_format().ok()?.into_dimensions().ok()
+            }
+            Repr::Inline(_) | Repr::Named(_) => crate::estimate::image_size(&self.bytes()?),
+        })
+    }
+
+    /// Lets go of the data: this copy holds none from now on.
+    pub fn clear(&mut self) {
+        *self = ImageData::default();
+    }
+}
+
+impl Default for ImageData {
+    fn default() -> ImageData {
+        ImageData::new(Repr::Inline(Arc::from("")))
+    }
+}
+
+impl std::fmt::Debug for ImageData {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.repr() {
+            Repr::Inline(data) => std::fmt::Debug::fmt(&*data, formatter),
+            Repr::Stored { name, .. } => write!(formatter, "Stored({name:?})"),
+            Repr::Named(name) => write!(formatter, "Named({name:?})"),
+        }
+    }
+}
+
+impl From<String> for ImageData {
+    fn from(data: String) -> ImageData {
+        ImageData::new(Repr::Inline(Arc::from(data)))
+    }
+}
+
+impl From<&str> for ImageData {
+    fn from(data: &str) -> ImageData {
+        ImageData::new(Repr::Inline(Arc::from(data)))
+    }
+}
+
+/// The same image: the same base64, or the same file's name; a file is
+/// read to compare it with base64.
+impl PartialEq for ImageData {
+    fn eq(&self, other: &ImageData) -> bool {
+        if Arc::ptr_eq(&self.0, &other.0) {
+            return true;
+        }
+        match (self.repr(), other.repr()) {
+            (Repr::Inline(a), Repr::Inline(b)) => a == b,
+            // A file is never empty: read without its data, or let go of,
+            // isn't the same, and needs no read to say so.
+            (Repr::Inline(data), _) | (_, Repr::Inline(data)) if data.is_empty() => false,
+            (Repr::Stored { name: a, .. } | Repr::Named(a), Repr::Stored { name: b, .. } | Repr::Named(b)) => a == b,
+            _ => self.base64().is_some_and(|a| other.base64().is_some_and(|b| a == b)),
+        }
+    }
+}
+
+impl PartialEq<str> for ImageData {
+    fn eq(&self, other: &str) -> bool {
+        self.base64().is_some_and(|data| &*data == other)
+    }
+}
+
+impl PartialEq<&str> for ImageData {
+    fn eq(&self, other: &&str) -> bool {
+        *self == **other
+    }
+}
+
+impl PartialEq<String> for ImageData {
+    fn eq(&self, other: &String) -> bool {
+        *self == **other
+    }
+}
+
+/// Its base64; in a segment (`naming_stored_images`), a stored image's
+/// name. A stored image whose file can't be read can't be serialized but
+/// in a segment.
+impl Serialize for ImageData {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.repr() {
+            Repr::Inline(data) => serializer.serialize_str(&data),
+            Repr::Stored { name, .. } | Repr::Named(name) if NAMING_STORED.get() => {
+                serializer.serialize_str(&format!("{STORED_IMAGE}{name}"))
+            }
+            Repr::Stored { .. } | Repr::Named(_) => match self.base64() {
+                Some(data) => serializer.serialize_str(&data),
+                None => Err(serde::ser::Error::custom("an image's file can't be read")),
+            },
+        }
     }
 }
 
@@ -277,7 +505,7 @@ impl Attachment {
         if bytes.len() as u64 > MAX_IMAGE_BYTES {
             return None;
         }
-        Some(UserPart::Image { data: base64::engine::general_purpose::STANDARD.encode(&bytes), mime_type: mime_type.to_owned() })
+        Some(UserPart::Image { data: base64::engine::general_purpose::STANDARD.encode(&bytes).into(), mime_type: mime_type.to_owned() })
     }
 }
 
@@ -533,7 +761,7 @@ pub enum UserPart {
     },
     Image {
         #[serde(deserialize_with = "image_data")]
-        data: String,
+        data: ImageData,
         mime_type: String,
     },
 }
@@ -616,7 +844,7 @@ pub enum ToolResultPart {
     },
     Image {
         #[serde(deserialize_with = "image_data")]
-        data: String,
+        data: ImageData,
         mime_type: String,
         /// The SHA-256 of its bytes (hex), on images read since #382: such
         /// an image goes to Anthropic once, as a file, and later requests

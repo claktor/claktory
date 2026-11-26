@@ -157,6 +157,10 @@ pub(crate) fn placed(factory: &crate::factory::Factory, config: &Config, agent: 
     if factory.pipes.curator(&agent.id) {
         return crate::pipes::curator::places(factory, &agent.id);
     }
+    // An errand agent: a folder of its own, nothing else.
+    if factory.pipes.errand_agent(&agent.id) {
+        return crate::errands::places(factory, &agent.id);
+    }
     match crate::pipes::quarantine::quarantine(factory, config, &agent.id) {
         Some(quarantine) => quarantine.places(),
         None => places(&factory.home, config, agent, &pipe_outboxes(factory, config, &agent.id)),
@@ -248,6 +252,10 @@ fn extensions_of(factory: &crate::factory::Factory, agent: &AgentConfig) -> Vec<
             .collect();
     }
     let mut extensions = enabled_extensions(agent);
+    if factory.pipes.errand_agent(&agent.id) {
+        extensions.retain(|extension| crate::errands::KEPT_EXTENSIONS.contains(&extension.manifest().id));
+        return extensions;
+    }
     if factory.pipes.quarantined(&agent.id) {
         extensions.retain(|extension| crate::pipes::quarantine::KEPT_EXTENSIONS.contains(&extension.manifest().id));
     }
@@ -654,7 +662,7 @@ impl Factory {
     fn next_job(&self, id: &str, current: &[ToolSpec]) -> Option<Job> {
         let mut inner = self.lock();
         let agent = inner.config.agent(id).cloned();
-        let compact_at = inner.config.compact_at_tokens;
+        let compact_at = agent.as_ref().map_or(inner.config.compact_at_tokens, |agent| inner.config.compact_at(agent));
         let models = inner.models.clone();
         let places = agent.as_ref().map(|agent| placed(self, &inner.config, agent));
         let cache_ttl = agent.as_ref().and_then(|agent| inner.config.cache_ttl(&agent.model)).unwrap_or_default();
@@ -713,6 +721,7 @@ impl Factory {
         runtime.stopped = false;
         runtime.wait_said = None;
         (runtime.network_since, runtime.network_waits) = (0, 0);
+        (runtime.provider_since, runtime.provider_waits) = (0, 0);
         // Quiet messages come with what wakes it, never on their own.
         let mut prompts = crate::extensions::agents::quiet::take(runtime, crate::extensions::agents::quiet::At::Wake);
         prompts.splice(0..0, note.into_iter().chain(cleared));
@@ -842,7 +851,7 @@ impl Factory {
             let places = placed(self, &inner.config, &agent);
             let settings = settings_key(&inner.config, &agent, &places.folder, self.pipes.quarantined(id), self.pipes.curator(id));
             let folder_name = if quarantined { None } else { inner.config.agent_folder(&agent).map(|folder| folder.name.clone()) };
-            let compact_at = inner.config.compact_at_tokens;
+            let compact_at = inner.config.compact_at(&agent);
             let user = inner.config.user_name().map(str::to_owned);
             (agent, project, compact_at, inner.models.clone(), sections, pinned, roster, folders, places, settings, folder_name, user)
         };
@@ -1020,6 +1029,7 @@ impl Factory {
         agent.state.cache_ttl = job.cache_ttl;
         agent.wait_out_with(crate::waits::wait_out(Arc::downgrade(self), id.to_owned(), job.epoch));
         agent.wait_network_with(crate::waits::wait_network(Arc::downgrade(self), id.to_owned(), job.epoch));
+        agent.wait_provider_with(crate::waits::wait_provider(Arc::downgrade(self), id.to_owned(), job.epoch));
         let factory = self.clone();
         let agent_id = id.to_owned();
         let epoch = job.epoch;
@@ -1095,6 +1105,9 @@ impl Factory {
         if self.pipes.contained(id) {
             let mut tools = if self.pipes.curator(id) {
                 crate::pipes::curator::tools(self, places)
+            } else if self.pipes.errand_agent(id) {
+                // Its file tools in its own folder, no bash (`errands`).
+                crate::pipes::quarantine::contained_tools(self, places)
             } else {
                 crate::pipes::quarantine::tools(self, id, places)
             };
@@ -1119,6 +1132,11 @@ impl Factory {
         }
         tools.extend(crate::apps::tools(self, id));
         tools.extend(crate::pipes::agents::tools(self, id));
+        // The lead of an errand agent opens its errands and reads their logs
+        // (`crate::errands`).
+        if crate::errands::available() && crate::extensions::errands::leads_errand_agent(self, &self.lock().config, id) {
+            tools.extend(crate::extensions::errands::lead_tools(self, id));
+        }
         tools.push(self.extension_call(id));
         tools
     }
@@ -1127,7 +1145,7 @@ impl Factory {
     fn extension_tools(self: &Arc<Self>, id: &str) -> Vec<Tool> {
         let Some(agent) = self.lock().config.agent(id).cloned() else { return Vec::new() };
         let mut tools: Vec<Tool> = extensions_of(self, &agent).into_iter().flat_map(|extension| extension.tools(self, id)).collect();
-        if self.pipes.curator(id) {
+        if self.pipes.curator(id) || self.pipes.errand_agent(id) {
             return tools;
         }
         if self.pipes.quarantined(id) {
@@ -1254,16 +1272,32 @@ impl Factory {
                 crate::annotations::written(self, id, &folder, path);
             }
         }
+        // A download a file tool used: whoever reads it has read the pages
+        // it came from (#435 R9).
+        if let AgentEvent::ToolExecutionEnd { tool_name, result, is_error: false, .. } = &event
+            && matches!(tool_name.as_str(), "read_file" | "read_image" | "write_file" | "edit_file" | "show")
+            && let Some(path) = result.details.get("path").and_then(serde_json::Value::as_str)
+        {
+            let folder = {
+                let inner = self.lock();
+                inner.config.agent(id).map(|agent| placed(self, &inner.config, agent).folder)
+            };
+            if let Some(folder) = folder {
+                crate::errands::downloads::touched(self, id, &folder, path);
+            }
+        }
         // The images a compaction let go of: their files at the provider go.
         let mut forgotten = Vec::new();
         let persist = {
             let mut inner = self.lock();
-            // An answer: the connection is back (`crate::waits`, #364 O2).
+            // An answer: the connection is back (`crate::waits`, #364 O2),
+            // and the provider with it (#490).
             if let AgentEvent::MessageEnd { message: factory_agent::types::Message::Assistant(answer) } = &event
                 && answer.stop_reason != factory_agent::types::StopReason::Error
                 && let Some(runtime) = inner.agents.get_mut(id).filter(|runtime| runtime.epoch == epoch)
             {
                 (runtime.network_since, runtime.network_waits) = (0, 0);
+                (runtime.provider_since, runtime.provider_waits) = (0, 0);
             }
             // A model call's tokens, for the account's check-ins.
             if matches!(event, AgentEvent::MessageEnd { .. } | AgentEvent::Compacted { .. })
@@ -1275,9 +1309,8 @@ impl Factory {
                     .map(|agent| (agent.model.clone(), agent.name.clone()))
                     .or_else(|| self.chats.model_and_name(id))
                     .unwrap_or_default();
-                let db = self.store.db();
-                crate::account::analytics::record(&db, runtime.run, &model, &event);
-                crate::usage_report::record(&db, id, &name, &model, &event);
+                crate::account::analytics::record(&self.store.calls, runtime.run, &model, &event);
+                crate::usage_report::record(&self.store.calls, id, &name, &model, &event);
             }
             let Some(runtime) = inner.agents.get_mut(id) else { return };
             // A run of a conversation the person cleared.

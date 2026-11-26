@@ -21,6 +21,7 @@ import '../your_claktories.dart' show DeviceSignInForm;
 import 'e2ee.dart';
 import '../user_apps/session.dart' show UserAppError, UserAppProblem;
 import 'secret_clipboard.dart';
+import 'chat_view.dart' show shownClaktoryName;
 
 // E5: People's part for end-to-end messages on this device (dms-e2ee §2,
 // §5.3; Trish's words): set up messages on the person's first device; on
@@ -46,7 +47,13 @@ class MessagesSetup extends StatelessWidget {
   Widget build(BuildContext context) => ListenableBuilder(
     listenable: e2ee,
     builder: (context, _) => switch (e2ee.setup) {
-      DmSetup.ready when devices => _Devices(e2ee: e2ee),
+      DmSetup.ready when devices => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _Devices(e2ee: e2ee),
+          _Home(e2ee: e2ee),
+        ],
+      ),
       _ when devices => const SizedBox.shrink(),
       // Taken from another device: said once (Fugo M2).
       DmSetup.ready when e2ee.newKeyFrom != null => _Note(
@@ -74,6 +81,73 @@ class MessagesSetup extends StatelessWidget {
       DmSetup.failed => _Failed(e2ee: e2ee),
     },
   );
+}
+
+/// Where the person's messages are kept (#451): the home Claktory their
+/// list names, and Keep them on this Claktory when it's another; and that
+/// friends' Claktories see its network address (Fugo).
+class _Home extends StatelessWidget {
+  const _Home({required this.e2ee});
+
+  final E2ee e2ee;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final named = e2ee.homeEndpoint?.isNotEmpty ?? false;
+    final here = e2ee.homeIsHere;
+    final String where;
+    if (e2ee.ownership == DmOwnership.notOurs) {
+      // Not on the person's account (Fugo 39894): given nothing.
+      where =
+          "This Claktory is signed in to another account, so your messages "
+          "aren't kept on it. What you send waits until you connect to one "
+          'of your own.';
+    } else if (e2ee.ownership == DmOwnership.unconfirmable) {
+      // Paired with a code from before the private tunnel (Fugo 40182).
+      where =
+          "Your messages aren't kept on ${shownClaktoryName(context)}: it "
+          "was added with an older code that can't confirm it's yours. Add "
+          'it again with a new code to keep them there.';
+    } else if (e2ee.ownership == DmOwnership.unchecked) {
+      where =
+          "Can't check that this Claktory is yours right now, so your "
+          'messages wait. Claktory tries again by itself.';
+    } else if (!e2ee.homeIsOurs) {
+      where = 'Checking that this Claktory is yours…';
+    } else if (here) {
+      where = 'On the Claktory this app is connected to.';
+    } else if (named) {
+      where =
+          'On another of your Claktories. What you send waits until you '
+          'connect to it, unless you keep them on this one.';
+    } else {
+      where =
+          'Not chosen yet. Connect to one of your Claktories to keep '
+          'them there.';
+    }
+    return Field(
+      label: 'Where your messages are kept',
+      note:
+          "Your Claktory connects to your friends' Claktories directly when "
+          'it can, so they can see its network address.',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(where, style: type.body.copyWith(color: palette.textMuted)),
+          // Another Claktory is the home, and the one shown could be.
+          if (e2ee.homeIsOurs && !here && named && e2ee.homeState != null) ...[
+            const SizedBox(height: Space.s),
+            Button(
+              label: 'Keep them on this Claktory',
+              onPressed: () => unawaited(e2ee.makeHomeHere()),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 }
 
 class _Note extends StatelessWidget {
@@ -341,6 +415,18 @@ class _AddThisState extends State<_AddThis> {
             'choose Add a device… under Your devices, and scan this code.',
             style: type.body.copyWith(color: palette.textMuted),
           ),
+          // A hand-off came for a code this one replaced (its app closed
+          // before it was added, say): the other device's add didn't take
+          // (row 564).
+          if (widget.e2ee.earlierCodeSpent) ...[
+            const SizedBox(height: Space.s),
+            Text(
+              "Your earlier code no longer works, so your other device "
+              "couldn't add this $thisDeviceKind. Add it again with this "
+              'new code.',
+              style: type.body.copyWith(color: palette.danger),
+            ),
+          ],
           const SizedBox(height: Space.m),
           Center(
             child: code == null
@@ -618,6 +704,10 @@ class _Devices extends StatefulWidget {
 class _DevicesState extends State<_Devices> {
   List<DmOwnDevice> _devices = const [];
 
+  /// Reads again once a device still setting up has had its code's time
+  /// (row 564).
+  Timer? _setUpBy;
+
   /// The person's devices off the list but still in a group here, by
   /// leaf, with the names they claim.
   Map<String, String> _strays = const {};
@@ -659,6 +749,7 @@ class _DevicesState extends State<_Devices> {
 
   @override
   void dispose() {
+    _setUpBy?.cancel();
     widget.e2ee.removeListener(_read);
     super.dispose();
   }
@@ -676,6 +767,20 @@ class _DevicesState extends State<_Devices> {
           _strays = strays;
           _replaced = replaced;
         });
+        _setUpBy?.cancel();
+        _setUpBy = null;
+        final e2ee = widget.e2ee;
+        if (devices.any(
+          (each) => !each.here && each.sinceMs == 0 && !e2ee.neverSetUp(each),
+        )) {
+          final left =
+              e2ee.deviceListMs +
+              E2ee.codeLife.inMilliseconds -
+              DateTime.now().millisecondsSinceEpoch;
+          if (left > 0) {
+            _setUpBy = Timer(Duration(milliseconds: left + 1000), _read);
+          }
+        }
       }
     } catch (_) {
       // Read again at the next change.
@@ -698,13 +803,27 @@ class _DevicesState extends State<_Devices> {
     };
     final isnt = names.length > 1 ? "aren't" : "isn't";
     final running = widget.e2ee.removing;
+    final stop = widget.e2ee.removalStop;
+    // What's still true, as it stopped (Fugo 41048).
     final words = removal.newKey
         ? running
               ? 'Locking out $who…'
-              : '$who $isnt fully locked out yet.'
+              : switch (stop) {
+                  DmKeyChange.signInAgain =>
+                    "$who can't read new messages, but your security key "
+                        "hasn't changed yet. Sign in again to finish locking "
+                        '${names.length > 1 ? 'them' : 'it'} out.',
+                  DmKeyChange.signOutFailed =>
+                    "$who can't read new messages, but Claktory couldn't "
+                        "sign ${names.length > 1 ? 'them' : 'it'} out of your "
+                        "Claktory account, so your security key hasn't "
+                        'changed yet. Try again.',
+                  _ => '$who $isnt fully locked out yet.',
+                }
         : running
         ? 'Removing $who…'
         : '$who $isnt fully removed yet.';
+    final signIn = !running && stop == DmKeyChange.signInAgain;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: Space.xs),
       child: ActionLine(
@@ -717,11 +836,33 @@ class _DevicesState extends State<_Devices> {
         action: running
             ? const SizedBox.shrink()
             : Button(
-                label: 'Try again',
-                onPressed: () => unawaited(widget.e2ee.finishRemoval()),
+                label: signIn ? 'Sign in again…' : 'Try again',
+                onPressed: () =>
+                    unawaited(signIn ? _signInThenFinish() : _finishRemoval()),
               ),
       ),
     );
+  }
+
+  /// Try again: carries on with the removal, and when a new key wants a
+  /// fresh sign-in, asks for it there and then (Fugo 41048).
+  Future<void> _finishRemoval() async {
+    final stopped = await widget.e2ee.finishRemoval();
+    if (stopped == DmKeyChange.signInAgain && mounted) {
+      await _signInThenFinish();
+    }
+  }
+
+  /// Signed in again, the Lock out carries on where it stopped.
+  Future<void> _signInThenFinish() async {
+    if (!await _signInAgain(
+          context,
+          'For your security, sign in again to change your security key.',
+        ) ||
+        !mounted) {
+      return;
+    }
+    await widget.e2ee.finishRemoval();
   }
 
   Future<void> _lost(DmOwnDevice device) => showModal(
@@ -775,6 +916,7 @@ class _DevicesState extends State<_Devices> {
                   signedOut:
                       !device.here &&
                       widget.e2ee.signedOut.contains(device.leafId),
+                  notSetUp: widget.e2ee.neverSetUp(device),
                 ),
                 action: device.here
                     ? Text(
@@ -1462,10 +1604,14 @@ class _DeviceName extends StatelessWidget {
     required this.name,
     required this.since,
     this.signedOut = false,
+    this.notSetUp = false,
   });
 
   final String name;
   final String since;
+
+  /// Listed, but its code ran out before it set up (row 564).
+  final bool notSetUp;
 
   /// It signed out of the person's Claktory account (row 671): still on
   /// their list until they remove it.
@@ -1490,6 +1636,11 @@ class _DeviceName extends StatelessWidget {
                 TextSpan(
                   text: '  Signed out',
                   style: type.caption.copyWith(color: palette.textMuted),
+                ),
+              if (notSetUp)
+                TextSpan(
+                  text: '  Not set up',
+                  style: type.caption.copyWith(color: palette.danger),
                 ),
             ],
           ),

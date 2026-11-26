@@ -8,6 +8,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
+import 'ipad/as_ipad.dart';
 
 // C5, the app dock: pinned apps at the foot of the rail (a strip on a
 // phone), and the launcher with every installed app.
@@ -307,4 +308,39 @@ void main() {
     expect(harness.backend.marketplaceTab.value, 'apps');
     expect(tester.takeException(), isNull);
   });
+
+  // Bruno 42883: on a phone, the strip's app opened as a page of its own,
+  // never as a pane in the agent's layout, which the person's Mac and
+  // iPad share. An iPad's narrow window takes the phone's routes.
+  for (final (name, size, ipad) in [
+    ('a phone', const Size(393, 852), false),
+    ('an iPad\'s narrow window', const Size(500, 1024), true),
+  ]) {
+    testWidgets('on $name, an app opens as a page; the layout stays', (
+      tester,
+    ) async {
+      if (ipad) asIPad();
+      final harness = Harness(_workspace());
+      await harness.show(tester, size: size);
+      await pumpFrames(tester);
+      await tester.tap(find.bySemanticsLabel(RegExp(r'^(Menu|Back)$')).first);
+      await pumpFrames(tester, const Duration(seconds: 1));
+      await tester.ensureVisible(find.text('Charts').last);
+      await tester.tap(find.text('Charts').last);
+      await pumpFrames(tester, const Duration(seconds: 1));
+      expect(find.byType(AppPane), findsOneWidget);
+      expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
+      expect(
+        harness.backend.workspace.workspace.agents.single.layout,
+        _workspace().agents.single.layout,
+      );
+      // Its header: the app's name, with Back to the conversation.
+      expect(find.bySemanticsLabel('Back'), findsOneWidget);
+      await tester.tap(find.bySemanticsLabel('Back'));
+      await pumpFrames(tester, const Duration(seconds: 1));
+      expect(find.byType(AppPane), findsNothing);
+      expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
+      expect(tester.takeException(), isNull);
+    });
+  }
 }

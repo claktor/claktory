@@ -24,6 +24,7 @@ pub(crate) mod comments;
 pub(crate) mod conversations;
 pub(crate) mod database;
 pub(crate) mod devices;
+pub(crate) mod errands;
 pub(crate) mod handoff;
 pub(crate) mod highlight;
 pub(crate) mod images;
@@ -229,7 +230,7 @@ pub(crate) fn view(factory: &Factory, inner: &Inner, agent: &str, key: &str) -> 
 
 /// Every extension, sorted by id, which is also the order of their prompt
 /// sections and tools.
-pub(crate) const ALL: [&dyn Extension; 26] = [
+pub(crate) const ALL: [&dyn Extension; 27] = [
     &agents::Agents,
     &app_grants::AppGrants,
     &ask::Ask,
@@ -240,6 +241,7 @@ pub(crate) const ALL: [&dyn Extension; 26] = [
     &database::Database,
     &devices::Devices,
     &crate::user_apps::dms::Dms,
+    &errands::Errands,
     &handoff::Handoff,
     &highlight::Highlight,
     &images::Images,

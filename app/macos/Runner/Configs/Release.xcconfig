@@ -4,3 +4,14 @@
 // The link scheme this build opens (Info.plist, app/lib/links.dart):
 // claktory://add?code=…; Claktory Dev's is claktory-dev (scripts/lib.sh).
 CLAKTORY_URL_SCHEME = claktory
+
+// The real Claktory: only the Release build that scripts/release.sh builds
+// and signs. A Profile build shares this file and is a debug build like any
+// other (#501): its own bundle id, name, icon and link scheme.
+CLAKTORY_BUNDLE_ID = dev.factory.app
+CLAKTORY_NAME = Claktory
+CLAKTORY_APP_ICON = AppIcon
+CLAKTORY_BUNDLE_ID[config=Profile] = dev.factory.app.debug
+CLAKTORY_NAME[config=Profile] = Claktory Dev
+CLAKTORY_APP_ICON[config=Profile] = AppIconDev
+CLAKTORY_URL_SCHEME[config=Profile] = claktory-debug

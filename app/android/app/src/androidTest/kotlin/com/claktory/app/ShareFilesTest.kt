@@ -43,6 +43,9 @@ class ShareFilesTest {
     @Before
     fun setUp() {
         folder.mkdirs()
+        // Marked sent, as the app marks a share that went somewhere: its launch sweep takes every
+        // share left unmarked (cut short), and would take this one's files before the test shares them.
+        File(folder.parentFile, ".sent").createNewFile()
     }
 
     @After

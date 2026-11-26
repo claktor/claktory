@@ -439,6 +439,12 @@ fn key_package(bytes: &[u8]) -> Result<(KeyPackage, Vec<u8>), Refusal> {
     Ok((package, reference.as_slice().to_vec()))
 }
 
+/// When a kept KeyPackage's lifetime ends (seconds since the epoch); None
+/// for one that no longer checks (its lifetime is up, say).
+fn ends(bytes: &[u8]) -> Option<i64> {
+    key_package(bytes).ok().map(|(package, _)| package.life_time().not_after() as i64)
+}
+
 /// The leaf certificate in a KeyPackage, for the leaf's own signature key.
 fn certificate(package: &KeyPackage) -> Result<LeafCertificate, Refusal> {
     let certificate = LeafCertificate::from_credential(package.leaf_node().credential())
@@ -465,10 +471,23 @@ fn supply(db: &Connection, leaf: &Leaf) -> rusqlite::Result<Value> {
         params![leaf.account, leaf.leaf_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    Ok(json!({"remaining": remaining, "last_resort": last_resort}))
+    // When the last resort's lifetime ends, so the leaf replaces it in time
+    // (Melone's F4): 0 when there's none, or it no longer checks.
+    let kept: Option<Vec<u8>> = db
+        .query_row(
+            "SELECT key_package FROM dm_key_packages WHERE account_id = ?1 AND leaf_id = ?2 AND last_resort = 1",
+            params![leaf.account, leaf.leaf_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let last_resort_ends = kept.as_deref().and_then(ends).unwrap_or(0);
+    Ok(json!({"remaining": remaining, "last_resort": last_resort, "last_resort_ends": last_resort_ends}))
 }
 
 fn upload(transaction: &Transaction<'_>, leaf: &Leaf, upload: Upload, now_ms: i64) -> Result<Value, Refusal> {
+    // Each is at most `envelope::KEY_PACKAGE_MOST` (4 KiB), and a leaf keeps
+    // `KEY_PACKAGES_MOST`; none is kept on a nearly full disk (`space`).
+    super::space::guard()?;
     let keys = keys_of(transaction, &leaf.account)?.ok_or_else(not_set_up)?;
     let mut packages = Vec::new();
     let mut certificates: Vec<LeafCertificate> = Vec::new();
@@ -591,14 +610,24 @@ fn claim(transaction: &Transaction<'_>, caller: &Caller, claim: Claim, now_ms: i
         if claim.leaf_ids.as_ref().is_some_and(|wanted| !wanted.contains(&listed.leaf_id)) {
             continue;
         }
-        let found: Option<(Vec<u8>, Vec<u8>, bool)> = transaction
-            .query_row(
-                "SELECT ref, key_package, last_resort FROM dm_key_packages WHERE account_id = ?1 AND leaf_id = ?2
-                 ORDER BY last_resort, uploaded LIMIT 1",
-                params![claim.account_id, listed.leaf_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
+        // The oldest usable one: one whose lifetime is up goes, never handed
+        // out (Melone's F4).
+        let found = loop {
+            let next: Option<(Vec<u8>, Vec<u8>, bool)> = transaction
+                .query_row(
+                    "SELECT ref, key_package, last_resort FROM dm_key_packages WHERE account_id = ?1 AND leaf_id = ?2
+                     ORDER BY last_resort, uploaded LIMIT 1",
+                    params![claim.account_id, listed.leaf_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            match next {
+                Some((reference, bytes, _)) if ends(&bytes).is_none_or(|ends| ends <= now_ms / 1000) => {
+                    transaction.execute("DELETE FROM dm_key_packages WHERE ref = ?1", [&reference])?;
+                }
+                next => break next,
+            }
+        };
         let Some((reference, bytes, last_resort)) = found else { continue };
         if !last_resort {
             transaction.execute("DELETE FROM dm_key_packages WHERE ref = ?1", [&reference])?;
@@ -784,6 +813,7 @@ pub(super) mod tests {
             let store = Connection::open_in_memory().expect("db");
             store.pragma_update(None, "secure_delete", "ON").expect("secure_delete");
             store.execute_batch(mls_storage::SCHEMA).expect("schema");
+            store.execute_batch(mls_storage::FLOOR_SCHEMA).expect("schema");
             store
         }
 
@@ -1063,7 +1093,10 @@ pub(super) mod tests {
 
         // Two one-time ones and a last-resort one.
         let (status, supply) = upload(&mut world, &phone, two[..2].to_vec(), Some(two[2].clone()));
-        assert_eq!((status, supply.clone()), (200, json!({"remaining": 2, "last_resort": true})), "{supply}");
+        assert_eq!((status, counts(&supply)), (200, json!({"remaining": 2, "last_resort": true})), "{supply}");
+        let ends = supply["last_resort_ends"].as_i64().expect("when the last resort's lifetime ends");
+        let thirty_days = claktory_dm_crypto::group::KEY_PACKAGE_LIFETIME as i64;
+        assert!((ends - unix_now() - thirty_days).abs() < 3 * 3600, "{ends}: thirty days from now, so the leaf renews it in time");
         assert_eq!(call(&mut world, &phone, "GET", "key-packages", Value::Null), (200, supply));
         assert_eq!(upload(&mut world, &phone, two[..1].to_vec(), None).1["remaining"], 2, "the same one twice is one");
 
@@ -1074,7 +1107,7 @@ pub(super) mod tests {
         assert_eq!(claim(&mut world, &bo, "ana"), vec![("ana-phone".to_owned(), true)]);
         assert_eq!(claim(&mut world, &bo, "ana"), vec![("ana-phone".to_owned(), true)]);
         let supply = call(&mut world, &phone, "GET", "key-packages", Value::Null).1;
-        assert_eq!(supply, json!({"remaining": 0, "last_resort": true}));
+        assert_eq!(counts(&supply), json!({"remaining": 0, "last_resort": true}));
         let claims: i64 = world.db.query_row("SELECT COUNT(*) FROM dm_claims", [], |row| row.get(0)).expect("claims");
         assert_eq!(claims, 3, "each claimed KeyPackage is remembered once, for its Welcome");
 
@@ -1095,6 +1128,39 @@ pub(super) mod tests {
         let page = Caller::Account { account_id: "bo".into(), registrations: Vec::new() };
         assert_eq!(call(&mut world, &page, "POST", "key-packages/claim", json!({"account_id": "ana"})).0, 403);
         assert_eq!(call(&mut world, &claktory("bo", "mac"), "POST", "key-packages/claim", json!({"account_id": "ana"})).0, 403);
+    }
+
+    /// A leaf's supply without when its last resort ends (the clock's).
+    fn counts(supply: &Value) -> Value {
+        json!({"remaining": supply["remaining"], "last_resort": supply["last_resort"]})
+    }
+
+    fn unix_now() -> i64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("after 1970").as_secs() as i64
+    }
+
+    /// Melone's F4: a KeyPackage lasts thirty days, and once its lifetime is
+    /// up it's never handed out, one-time or last resort: a claim drops it.
+    #[test]
+    fn a_key_package_past_its_lifetime_is_dropped_never_handed_out() {
+        let mut world = World::new();
+        friends(&mut world, "ana", "bo");
+        let mut ana = Person::new("ana");
+        ana.add(device("ana", "ana-phone"));
+        let phone = ana.caller(0);
+        assert_eq!(call(&mut world, &phone, "PUT", "me/keys", ana.put(true)).0, 200);
+        let packages = ana.key_packages(0, 3);
+        assert_eq!(upload(&mut world, &phone, packages[..2].to_vec(), Some(packages[2].clone())).0, 200);
+
+        // Thirty-one days on, all three are past their lifetime.
+        world.now = (unix_now() + 31 * 86_400) * 1000;
+        assert!(claim(&mut world, &device("bo", "bo-phone"), "ana").is_empty(), "none handed out");
+        let left: i64 = world.db.query_row("SELECT COUNT(*) FROM dm_key_packages", [], |row| row.get(0)).expect("count");
+        assert_eq!(left, 0, "each one dropped");
+        assert_eq!(
+            call(&mut world, &phone, "GET", "key-packages", Value::Null).1,
+            json!({"remaining": 0, "last_resort": false, "last_resort_ends": 0})
+        );
     }
 
     /// What Bo is handed for Ana's phone, claim after claim: each one's
@@ -1146,7 +1212,7 @@ pub(super) mod tests {
 
         let fresh = ana.key_packages(0, 3);
         let (status, supply) = upload(&mut world, &phone, fresh[..2].to_vec(), Some(fresh[2].clone()));
-        assert_eq!((status, supply.clone()), (200, json!({"remaining": 2, "last_resort": true})), "{supply}");
+        assert_eq!((status, counts(&supply)), (200, json!({"remaining": 2, "last_resort": true})), "{supply}");
         let claimed = claimed_certificates(&mut world, "ana");
         assert_eq!(claimed.len(), 3, "two one-time ones, then the last-resort one");
         assert!(claimed.iter().all(|(certificate, _)| *certificate == again), "never one from the wiped install");
@@ -1170,7 +1236,10 @@ pub(super) mod tests {
         ana.leaves[0].1 = ana.certify(&phone, LeafKey::generate().expect("a key"));
         ana.wipe(0);
         assert_eq!(call(&mut world, &phone, "PUT", "me/keys", ana.put(false)).0, 200);
-        assert_eq!(call(&mut world, &phone, "GET", "key-packages", Value::Null).1, json!({"remaining": 0, "last_resort": false}));
+        assert_eq!(
+            call(&mut world, &phone, "GET", "key-packages", Value::Null).1,
+            json!({"remaining": 0, "last_resort": false, "last_resort_ends": 0})
+        );
         assert!(claimed_certificates(&mut world, "ana").is_empty(), "nothing to hand out until the new install puts some up");
 
         let fresh = ana.key_packages(0, 2);

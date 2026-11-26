@@ -463,6 +463,33 @@ void main() {
     expect(find.textContaining('Dismissed'), findsNothing);
   });
 
+  testWidgets("a card its agent closed as settled in the talk says so, "
+      "with its words; one the person resolved stays Resolved", (tester) async {
+    const resolved = NeedsYouOutcome.NEEDS_YOU_OUTCOME_RESOLVED;
+    await _openHistory(tester, [
+      _record('june', 'Use the EU bucket?', outcome: resolved)
+        ..agentReason = 'We agreed on the EU bucket, so nothing to decide.',
+      _record(
+        'omar',
+        'Ship on Friday?',
+        outcome: resolved,
+        ago: const Duration(hours: 3),
+      ),
+    ]);
+    expect(
+      find.text('June closed it: settled in the talk', findRichText: true),
+      findsOneWidget,
+    );
+    expect(
+      find.text(
+        'June: “We agreed on the EU bucket, so nothing to decide.”',
+        findRichText: true,
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Resolved', findRichText: true), findsOneWidget);
+  });
+
   testWidgets('a web page read is marked by a globe, not a pipe\'s portal '
       '(#346)', (tester) async {
     await _openHistory(tester, [
@@ -842,6 +869,58 @@ void main() {
       );
       await settle(tester);
       expect(harness.last.selectAgent.agentId, 'mike');
+    });
+  });
+
+  group('a secret an agent gave up (#449)', () {
+    NeedsYouRecord givenUp({int seq = 40}) =>
+        _record(
+            'june',
+            'June gave up Cloudflare',
+            kind: NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_SECRET_GIVEN_UP,
+            outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_CHANGED,
+            seq: seq,
+          )
+          ..agentName = 'June'
+          ..agentReason = 'The DNS move is done, so I no longer need it.';
+
+    testWidgets("Claktory's sentence, the agent's reason in its own words, "
+        'no Undo; a click opens it at its call', (tester) async {
+      final harness = await _openHistory(tester, [givenUp()]);
+      expect(find.text('June gave up Cloudflare'), findsOneWidget);
+      expect(
+        find.text('June: “The DNS move is done, so I no longer need it.”'),
+        findsOneWidget,
+      );
+      expect(find.text('Undo'), findsNothing);
+      await tester.tap(find.text('June gave up Cloudflare'));
+      await settle(tester);
+      expect(harness.last.selectAgent.agentId, 'june');
+      expect(harness.backend.reveal.value?.seq, 40);
+    });
+
+    testWidgets('an app older than it (the kind unknown, read as '
+        'unspecified) still shows the sentence and opens the call', (
+      tester,
+    ) async {
+      final harness = await _openHistory(tester, [
+        givenUp()..kind = NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_UNSPECIFIED,
+      ]);
+      expect(find.text('June gave up Cloudflare'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('June gave up Cloudflare'));
+      await settle(tester);
+      expect(harness.backend.reveal.value?.seq, 40);
+    });
+
+    testWidgets('with no call to show, a click opens its conversation', (
+      tester,
+    ) async {
+      final harness = await _openHistory(tester, [givenUp(seq: 0)]);
+      await tester.tap(find.text('June gave up Cloudflare'));
+      await settle(tester);
+      expect(harness.last.selectAgent.agentId, 'june');
+      expect(harness.backend.reveal.value, isNull);
     });
   });
 }

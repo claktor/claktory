@@ -26,6 +26,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use factory_agent::estimate::ImageRule;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
@@ -458,15 +459,60 @@ async fn chat_completions(model: &Model, stream: &mut TcpStream, body: &[u8]) ->
     };
     let model_id = request["model"].as_str().unwrap_or("qa-model").to_owned();
     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n").await?;
-    for event in events(&answer, number, &model_id, body.len()) {
+    let rule = ImageRule::for_model("openai-completions", &model_id);
+    let prompt = input_tokens(body.len(), &request, rule, &|_| None);
+    for event in events(&answer, number, &model_id, prompt) {
         stream.write_all(format!("data: {event}\n\n").as_bytes()).await?;
     }
     stream.write_all(b"data: [DONE]\n\n").await?;
     stream.shutdown().await
 }
 
+/// A request's input tokens as its provider counts them, so a sandbox's
+/// context fills as a real one's: its text at four bytes a token, and each
+/// image by its size under `rule`, never its base64 (#490: three
+/// screenshots read as a million tokens and forced a compaction). `file`
+/// gives the bytes of an image a request names by id (Anthropic's files).
+pub(crate) fn input_tokens(body_len: usize, request: &Value, rule: ImageRule, file: &dyn Fn(&str) -> Option<Vec<u8>>) -> usize {
+    use base64::Engine as _;
+    fn cost(rule: ImageRule, bytes: Option<Vec<u8>>) -> usize {
+        let size = bytes.as_deref().and_then(factory_agent::estimate::image_size);
+        size.map_or(1200, |(width, height)| usize::try_from(factory_agent::estimate::image_tokens(rule, width, height)).unwrap_or(usize::MAX))
+    }
+    fn walk(value: &Value, rule: ImageRule, file: &dyn Fn(&str) -> Option<Vec<u8>>, base64: &mut usize, tokens: &mut usize) {
+        let decode = |data: &str| base64::engine::general_purpose::STANDARD.decode(data).ok();
+        match value {
+            Value::Array(items) => items.iter().for_each(|item| walk(item, rule, file, base64, tokens)),
+            Value::Object(fields) => {
+                // Anthropic's: base64 or a file's id.
+                if value["type"] == "image" {
+                    match (value["source"]["type"].as_str(), value["source"]["data"].as_str(), value["source"]["file_id"].as_str()) {
+                        (Some("base64"), Some(data), _) => {
+                            *base64 += data.len();
+                            *tokens += cost(rule, decode(data));
+                        }
+                        (Some("file"), _, Some(id)) => *tokens += cost(rule, file(id)),
+                        _ => {}
+                    }
+                    return;
+                }
+                fields.values().for_each(|field| walk(field, rule, file, base64, tokens));
+            }
+            // OpenAI's and OpenRouter's: a data URL, wherever it is.
+            Value::String(text) if text.starts_with("data:image/") => {
+                *base64 += text.len();
+                *tokens += cost(rule, text.split_once(";base64,").and_then(|(_, data)| decode(data)));
+            }
+            _ => {}
+        }
+    }
+    let (mut base64, mut images) = (0, 0);
+    walk(request, rule, file, &mut base64, &mut images);
+    body_len.saturating_sub(base64) / 4 + images
+}
+
 /// The answer as Chat Completions chunks.
-fn events(answer: &Answer, number: u64, model: &str, request_bytes: usize) -> Vec<Value> {
+fn events(answer: &Answer, number: u64, model: &str, prompt: usize) -> Vec<Value> {
     let chunk = |delta: Value, finish: Value| {
         json!({"id": format!("qa-{number}"), "object": "chat.completion.chunk", "created": 0, "model": model,
                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
@@ -482,8 +528,6 @@ fn events(answer: &Answer, number: u64, model: &str, request_bytes: usize) -> Ve
     }
     let finish = if answer.calls.is_empty() { "stop" } else { "tool_calls" };
     events.push(chunk(json!({}), Value::from(finish)));
-    // Tokens as a rough count of characters, so the context fills as it would.
-    let prompt = request_bytes / 4;
     let completion = (answer.text.len() + answer.calls.iter().map(|(_, args)| args.to_string().len()).sum::<usize>()) / 4 + 1;
     events.push(json!({"id": format!("qa-{number}"), "object": "chat.completion.chunk", "created": 0, "model": model, "choices": [],
                        "usage": {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}}));
@@ -500,6 +544,56 @@ fn log(path: &Path, line: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A PNG of `width` × `height` that doesn't compress: as big as a
+    /// screenshot's bytes get.
+    fn noisy_png(width: u32, height: u32) -> Vec<u8> {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let pixels = image::RgbImage::from_fn(width, height, |_, _| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            image::Rgb([state as u8, (state >> 8) as u8, (state >> 16) as u8])
+        });
+        let mut bytes = Vec::new();
+        pixels.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).expect("png");
+        bytes
+    }
+
+    /// #490: three screenshots cost what the provider charges for them, by
+    /// their size, never their base64 (which read as a million tokens and
+    /// forced a compaction after a restart).
+    #[test]
+    fn images_cost_what_their_provider_charges_never_their_base64() {
+        use base64::Engine as _;
+        let data = base64::engine::general_purpose::STANDARD.encode(noisy_png(800, 600));
+        let text = "x".repeat(4000);
+        let chat = json!({"model": "anthropic/claude-sonnet-4.5", "messages": [
+            {"role": "user", "content": [{"type": "text", "text": text}]},
+            {"role": "user", "content": (0..3).map(|_| json!({"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{data}")}})).collect::<Vec<_>>()},
+        ]});
+        let body = chat.to_string();
+        assert!(body.len() / 4 > 1_000_000, "the base64 alone would read as {} tokens", body.len() / 4);
+        let rule = ImageRule::for_model("openai-completions", "anthropic/claude-sonnet-4.5");
+        let tokens = input_tokens(body.len(), &chat, rule, &|_| None);
+        // Anthropic's: 800 × 600 / 750 = 640 an image, and the text.
+        let rest = body.len() - 3 * format!("data:image/png;base64,{data}").len();
+        assert_eq!(tokens, rest / 4 + 3 * 640);
+        // OpenAI's: four 512-pixel tiles, 85 + 4 × 170 = 765.
+        let openai = input_tokens(body.len(), &chat, ImageRule::for_model("openai-completions", "openai/gpt-5"), &|_| None);
+        assert_eq!(openai, rest / 4 + 3 * 765);
+
+        // Anthropic's Messages: base64 or a file's id, its bytes from `file`.
+        let png = noisy_png(2400, 1800);
+        let messages = json!({"messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64::engine::general_purpose::STANDARD.encode(&png)}},
+            {"type": "image", "source": {"type": "file", "file_id": "file_qa_1"}},
+        ]}]});
+        let body = messages.to_string();
+        let tokens = input_tokens(body.len(), &messages, ImageRule::Anthropic, &|id| (id == "file_qa_1").then(|| png.clone()));
+        // Scaled to about 1600 tokens each, its most.
+        assert!(tokens < 3_400 && tokens > 3_000, "{tokens}");
+    }
 
     fn last(role: &str, text: &str, tool: &str) -> Last {
         Last { role: role.to_owned(), text: text.to_owned(), tool: tool.to_owned(), raw: text.to_owned() }
@@ -579,7 +673,7 @@ mod tests {
         assert_eq!(agent_of(&system), "Lea");
         assert_eq!((last.role.as_str(), last.text.as_str(), last.tool.as_str()), ("tool", "ran", "bash"));
         assert_eq!(tools, ["bash", "pipe_send"]);
-        let events = events(&Answer { text: "Hi".into(), calls: vec![("bash".into(), json!({"command": "ls"}))] }, 3, "m", 400);
+        let events = events(&Answer { text: "Hi".into(), calls: vec![("bash".into(), json!({"command": "ls"}))] }, 3, "m", 100);
         assert_eq!(events[1]["choices"][0]["delta"]["content"], "Hi");
         assert_eq!(events[2]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"], "{\"command\":\"ls\"}");
         assert_eq!(events[3]["choices"][0]["finish_reason"], "tool_calls");

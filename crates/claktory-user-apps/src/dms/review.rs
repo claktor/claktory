@@ -3,24 +3,26 @@
 //!
 //! - **Proposal.** An agent with a live `dm.send` grant on a conversation
 //!   proposes a message (`POST conversations/<id>/proposals`, from its
-//!   Claktory's backend, for the agent): an MLS application message in the
-//!   Claktory's channel with the person's devices (E2), which the worker
-//!   keeps as it came and can't read, bound to one revision, the conversation and its generation, and the
-//!   agent (its Claktory, registration epoch and incarnation) and grant.
+//!   Claktory's backend, for the agent). The message itself is an MLS
+//!   application message in the Claktory's channel with the person's
+//!   devices, which goes through the person's home (#451), never here: the
+//!   worker keeps only its digest (SHA-256 of its MLS bytes), bound to one
+//!   revision, the conversation and its generation, and the agent (its
+//!   Claktory, registration epoch and incarnation) and grant.
 //!   Each proposal counts as a use of the grant's `dm.send`. Proposing again
 //!   with the same id and the same bytes is a retry; with others, while it
 //!   waits, it's the next revision, and an approval of an earlier one no
 //!   longer holds.
 //! - **Review.** Only the person, from one of their signed-in devices,
 //!   approves (`POST proposals/<id>/approve`), naming the revision and the
-//!   digest (SHA-256) of the exact proposal it decrypted and showed, and
-//!   bringing the message itself, encrypted by the device in the
-//!   conversation's group: the backend never says "approved". The
-//!   approval's transaction checks the digest against the proposal kept, that the agent's Claktory is
-//!   still registered under the epoch it proposed under, that the same
-//!   grant still holds `dm.send` on the conversation, and that the
-//!   friendship is still on at that generation; then it appends the
-//!   device's message, once, as the agent's. It works with the agent's Claktory off.
+//!   digest of the exact proposal it decrypted from the channel and showed.
+//!   The approval's transaction checks the digest against the one kept,
+//!   that the agent's Claktory is still registered under the epoch it
+//!   proposed under, that the same grant still holds `dm.send` on the
+//!   conversation, and that the friendship is still on at that generation;
+//!   then the proposal is `approved`, and the device itself sends the
+//!   message, as the agent's, through the person's home. It works with the
+//!   agent's Claktory off.
 //!   What can never be sent any more (the grant revoked, the Claktory signed
 //!   out, the friendship ended) is `closed`.
 //! - **Declining** ends it; the agent can withdraw it while it waits; it
@@ -30,23 +32,21 @@
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest as _, Sha256};
 
-use super::bodies::{Stored, Submitted, merge};
+use super::bodies::{Stored, at_home, digest_of, merge};
 use super::groups;
 use super::identity::{Refusal, body, clean_name, hex, invalid, random};
-use super::leaves::leaf_of;
-use super::messages::{Outgoing, append};
 use super::sync::{self, Kind};
 use crate::grants::{self, Resource};
 use crate::ipc::{Actor, Caller};
 
 pub const SCHEMA: &str = "
 -- Messages agents proposed, waiting for the person's review or decided:
--- the text (sealed, as `dms::bodies` keeps it) at its latest revision, and
--- everything an approval is bound to. `state`: pending, sent, declined,
--- withdrawn or closed (it can't be sent any more); a pending one past
--- `expires` has expired.
+-- the digest of the text at its latest revision (`dms::bodies`, format 3:
+-- the text is at the person's home), and everything an approval is bound
+-- to. `state`: pending, approved, declined, withdrawn or closed (it can't
+-- be sent any more), or sent (an approval before #451); a pending one
+-- past `expires` has expired.
 CREATE TABLE IF NOT EXISTS dm_proposals (
     id TEXT PRIMARY KEY,
     account TEXT NOT NULL,
@@ -146,9 +146,9 @@ impl Proposal {
     }
 
     /// What the person's device approves by: SHA-256 of the proposal's
-    /// bytes, in lowercase hex.
+    /// MLS bytes, in lowercase hex.
     fn digest(&self) -> String {
-        hex(&Sha256::digest(&self.stored.bytes))
+        hex(&self.digest)
     }
 
     /// What its agent learns of it: never the person's words, only what
@@ -169,8 +169,8 @@ impl Proposal {
         status
     }
 
-    /// What the person reviews: the proposal as the agent's Claktory
-    /// encrypted it, and what it's bound to.
+    /// What the person reviews: what the proposal is bound to, and the
+    /// digest its device finds it by in the Claktory's channel.
     fn shown(&self, now_ms: i64) -> Result<Value, Refusal> {
         let mut shown = json!({
             "id": self.id,
@@ -185,6 +185,7 @@ impl Proposal {
                 "agent_name": self.agent_name,
             },
             "proposal_digest": self.digest(),
+            "client_message_id": self.client_id,
             "created_ms": self.created,
             "expires_ms": self.expires,
         });
@@ -247,8 +248,9 @@ fn decide(transaction: &Transaction<'_>, proposal: &Proposal, state: &str, now_m
 struct Propose {
     client_message_id: String,
     contact_generation: i64,
-    /// The proposal: an MLS application message in the Claktory's channel.
-    envelope: Value,
+    /// SHA-256 of the proposal's MLS bytes (an application message in the
+    /// Claktory's channel, sent through the person's home), lowercase hex.
+    proposal_digest: String,
     /// The agent's name, as the person knows it (it rides in the content
     /// too).
     #[serde(default)]
@@ -261,6 +263,7 @@ struct Propose {
 /// An agent proposes a message, or retries, or revises one still waiting.
 fn propose(transaction: &Transaction<'_>, caller: &Caller, conversation: &str, bytes: &[u8], now_ms: i64) -> Result<(u16, Value), Refusal> {
     let (account, claktory_id, epoch, agent) = agent_of(caller)?;
+    super::space::guard()?;
     let propose: Propose = body(bytes)?;
     if !super::messages::valid_client_id(&propose.client_message_id) {
         return Err(invalid("client_message_id has to be 22 to 64 letters, digits, - and _."));
@@ -269,9 +272,8 @@ fn propose(transaction: &Transaction<'_>, caller: &Caller, conversation: &str, b
         "" => String::new(),
         name => clean_name(name).ok_or_else(|| invalid("agent_name is 1 to 80 characters, all of them visible."))?,
     };
-    let submitted = Submitted::from_json(&propose.envelope)?;
+    let digest = digest_of(&propose.proposal_digest, "proposal_digest")?;
     let resource = Resource { kind: "conversation".into(), id: conversation.to_owned() };
-    let digest = submitted.digest();
     let earlier = transaction
         .query_row(
             &format!(
@@ -292,15 +294,10 @@ fn propose(transaction: &Transaction<'_>, caller: &Caller, conversation: &str, b
             return Err(Refusal(409, "conflict", "This proposal was already decided. Propose the new text under a new id.".to_owned()));
         }
     }
-    // In the Claktory's channel with the person's devices, at an epoch it
-    // still takes.
-    let channel = groups::channel_of(transaction, account, claktory_id)?
+    // In the Claktory's channel with the person's devices: its home checks
+    // the epoch.
+    groups::channel_of(transaction, account, claktory_id)?
         .ok_or_else(|| Refusal(409, "not_set_up", "This Claktory has no channel with the person's devices yet.".to_owned()))?;
-    match groups::fits(&channel, &submitted) {
-        Ok(_) => {}
-        Err(Refusal(409, "epoch", _)) => return Ok(groups::epoch_answer(channel.epoch)),
-        Err(refused) => return Err(refused),
-    }
     let grant_id = grants::check(transaction, caller, "dms", "dm.send", Some(&resource), now_ms).map_err(granted)?;
     let contact: Option<(i64, Option<i64>)> = transaction
         .query_row(
@@ -334,7 +331,7 @@ fn propose(transaction: &Transaction<'_>, caller: &Caller, conversation: &str, b
             (hex(&random::<16>()), 1)
         }
     };
-    let stored = submitted.store();
+    let stored = at_home();
     let expires = now_ms + WAITS_MS;
     transaction.execute(
         "INSERT INTO dm_proposals (id, account, conversation_id, contact_generation, claktory_id, epoch, agent_id, incarnation,
@@ -372,9 +369,6 @@ struct Approve {
     revision: i64,
     /// SHA-256 of the proposal the device decrypted, in hex.
     proposal_digest: String,
-    /// The approved message, encrypted by the device in the conversation's
-    /// group.
-    envelope: Value,
     #[serde(default)]
     #[allow(dead_code)]
     request_nonce: Option<String>,
@@ -382,7 +376,8 @@ struct Approve {
 
 /// The person approves exactly what their device showed them: see the
 /// module's notes. Something that can't be sent any more is `410
-/// unsendable`, and stays so; a change since is `409 changed`.
+/// unsendable`, and stays so; a change since is `409 changed`. The device
+/// sends the message itself once it's `approved`.
 fn approve(transaction: &Transaction<'_>, caller: &Caller, id: &str, bytes: &[u8], now_ms: i64) -> Result<(u16, Value), Refusal> {
     let Caller::Device { account_id, registrations, .. } = caller else { return Err(device_only()) };
     let approve: Approve = body(bytes)?;
@@ -390,8 +385,8 @@ fn approve(transaction: &Transaction<'_>, caller: &Caller, id: &str, bytes: &[u8
     let changed = || Refusal(409, "changed", "This message changed since you looked. Look again.".to_owned());
     match proposal.state(now_ms) {
         "pending" => {}
-        "sent" if proposal.revision == approve.revision => return Ok((200, proposal.status(now_ms))),
-        "sent" => return Err(changed()),
+        "approved" | "sent" if proposal.revision == approve.revision => return Ok((200, proposal.status(now_ms))),
+        "approved" | "sent" => return Err(changed()),
         state => {
             let message = match state {
                 "declined" => "You declined this message.",
@@ -408,8 +403,6 @@ fn approve(transaction: &Transaction<'_>, caller: &Caller, id: &str, bytes: &[u8
     if proposal.digest() != approve.proposal_digest.to_ascii_lowercase() {
         return Err(changed());
     }
-    let submitted = Submitted::from_json(&approve.envelope)?;
-    let leaf = leaf_of(caller)?;
     let unsendable = |transaction: &Transaction<'_>| -> Result<(u16, Value), Refusal> {
         decide(transaction, &proposal, "closed", now_ms)?;
         Ok((410, json!({"error": "unsendable", "message": "This message can't be sent anymore.", "state": "closed"})))
@@ -425,31 +418,19 @@ fn approve(transaction: &Transaction<'_>, caller: &Caller, id: &str, bytes: &[u8
         Ok(_) | Err(grants::Refused::NotGranted) => return unsendable(transaction),
         Err(refused) => return Err(granted(refused)),
     }
-    let outgoing = Outgoing {
-        conversation: &proposal.conversation,
-        contact_generation: proposal.contact_generation,
-        client_id: &proposal.client_id,
-        body: &submitted,
-        leaf: &leaf,
-    };
-    let receipt = match append(transaction, &agent, &outgoing, now_ms) {
-        Ok(receipt) => receipt,
-        // The device's message is behind, or not yet possible: nothing
-        // decided.
-        Err(Refusal(409, "epoch", _)) => {
-            return super::messages::epoch_of(transaction, &proposal.conversation, proposal.contact_generation);
-        }
-        // Not yet: the friend isn't in the conversation (row 676).
-        Err(refused @ Refusal(400 | 409, "invalid_request" | "not_set_up" | "conflict" | "waiting_for_friend", _)) => return Err(refused),
-        // The friendship ended or began again since: never this one.
-        Err(Refusal(410 | 409 | 403, ..)) => return unsendable(transaction),
-        Err(refused) => return Err(refused),
-    };
-    transaction.execute(
-        "UPDATE dm_proposals SET state = 'sent', updated = ?2, message_id = ?3, seq = ?4 WHERE id = ?1",
-        params![proposal.id, now_ms, receipt.message_id, receipt.seq],
-    )?;
-    sync::emit(transaction, account_id, Kind::Proposal, &proposal.conversation, &proposal.id, proposal.revision, now_ms)?;
+    // The friendship still on, at the generation it was proposed in: never
+    // into one that ended or began again since.
+    let contact: Option<(i64, Option<i64>)> = transaction
+        .query_row(
+            "SELECT generation, ended FROM dm_contacts WHERE conversation_id = ?1 AND (low = ?2 OR high = ?2)",
+            params![proposal.conversation, account_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if !contact.is_some_and(|(generation, ended)| ended.is_none() && generation == proposal.contact_generation) {
+        return unsendable(transaction);
+    }
+    decide(transaction, &proposal, "approved", now_ms)?;
     Ok((200, find(transaction, id, account_id)?.status(now_ms)))
 }
 
@@ -564,7 +545,7 @@ pub fn answer(
             match proposal.state(now_ms) {
                 "pending" => decide(&transaction, &proposal, "declined", now_ms)?,
                 "declined" | "withdrawn" | "expired" | "closed" => {}
-                _ => return Err(Refusal(409, "conflict", "This message was already sent.".to_owned())),
+                _ => return Err(Refusal(409, "conflict", "You already approved this message.".to_owned())),
             }
             find(&transaction, id, &account)?.status(now_ms)
         }
@@ -588,11 +569,12 @@ pub fn purge(transaction: &Transaction<'_>, account: &str) -> rusqlite::Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::super::bodies::tests::{opened, sealed};
+    use super::super::bodies::tests::sealed;
     use super::super::contacts::tests::World;
     use super::super::messages::tests::{client_id, friends, group_of, history, texts};
     use super::*;
     use crate::ipc::Registration;
+    use sha2::{Digest as _, Sha256};
 
     /// Ana and Bo, friends; Ana's agent June, on her Mac mini (registered
     /// under epoch 1), may send in their conversation.
@@ -651,10 +633,19 @@ mod tests {
         super::super::identity::route(&mut world.db, &world.keys, method, route, caller, &bytes, world.now).expect("a route")
     }
 
+    /// What the person's device finds a proposal by in the channel: the
+    /// SHA-256 of its MLS bytes, in lowercase hex.
+    fn digest_of_sealed(envelope: &Value) -> String {
+        let bytes = claktory_dm_crypto::envelope::Envelope::from_json(envelope).expect("an envelope").into_bytes();
+        hex(&Sha256::digest(&bytes))
+    }
+
     impl Review {
+        /// The agent's Claktory sends `text` into its channel through the
+        /// home, and proposes it here by its digest.
         fn propose(&mut self, n: u32, text: &str) -> (u16, Value) {
-            let envelope = sealed(&self.channel, 0, text);
-            let body = json!({"client_message_id": client_id(n), "contact_generation": self.generation, "envelope": envelope,
+            let digest = digest_of_sealed(&sealed(&self.channel, 0, text));
+            let body = json!({"client_message_id": client_id(n), "contact_generation": self.generation, "proposal_digest": digest,
                               "agent_name": "June", "request_nonce": "x"});
             let (june, route) = (self.june.clone(), format!("conversations/{}/proposals", self.conversation));
             call(&mut self.world, &june, "POST", &route, body)
@@ -666,15 +657,11 @@ mod tests {
             listed["proposals"].as_array().expect("proposals").clone()
         }
 
-        /// What the person's device sends: the digest of the proposal it
-        /// decrypted and showed, computed itself, and the message encrypted
-        /// again in the conversation's group.
+        /// What the person's device sends: the revision, and the digest of
+        /// the channel message it found by the record's digest, decrypted
+        /// and showed (the same, then). It sends the message itself after.
         fn approval(&mut self, shown: &Value) -> Value {
-            let bytes = claktory_dm_crypto::envelope::Envelope::from_json(&shown["envelope"]).expect("an envelope").into_bytes();
-            let digest = hex(&Sha256::digest(&bytes));
-            let (group, epoch) = group_of(&mut self.world, &self.conversation, self.generation);
-            let envelope = sealed(&group, epoch, &opened(&shown["envelope"]));
-            json!({"revision": shown["revision"], "proposal_digest": digest, "envelope": envelope, "request_nonce": "y"})
+            json!({"revision": shown["revision"], "proposal_digest": shown["proposal_digest"], "request_nonce": "y"})
         }
 
         fn approve(&mut self, id: &str, approval: Value, epoch: u64) -> (u16, Value) {
@@ -683,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_s_message_is_sent_only_once_the_person_approves_exactly_it() {
+    fn an_agent_s_message_is_approved_only_as_exactly_what_the_person_saw() {
         let mut review = setup();
         let (status, proposed) = review.propose(1, "See you at 6");
         assert_eq!(status, 200, "{proposed}");
@@ -694,16 +681,24 @@ mod tests {
         assert!(proposed.get("envelope").is_none(), "its agent learns only what became of it");
         assert_eq!(review.propose(1, "See you at 6").1, proposed, "a retry");
         let id = proposed["proposal_id"].as_str().expect("id").to_owned();
-        assert!(
-            history(&mut review.world, "bo", &review.conversation, "").1["messages"].as_array().is_some_and(Vec::is_empty),
-            "nothing sent yet"
-        );
 
-        // Ana's devices see it, all of it; Bo's don't.
+        // Ana's devices see what it's bound to and its digest, never its
+        // text (that's at her home); Bo's see nothing.
         let waiting = review.waiting("ana", 1);
         assert_eq!(waiting.len(), 1);
-        assert_eq!((opened(&waiting[0]["envelope"]).as_str(), waiting[0]["from"]["agent_name"].as_str()), ("See you at 6", Some("June")));
-        assert_eq!(waiting[0]["epoch"], 0);
+        let channel = review.channel.clone();
+        assert_eq!(waiting[0]["proposal_digest"], digest_of_sealed(&sealed(&channel, 0, "See you at 6")));
+        assert_eq!(
+            (waiting[0]["from"]["agent_name"].as_str(), waiting[0]["client_message_id"].as_str()),
+            (Some("June"), Some(client_id(1).as_str()))
+        );
+        assert!(waiting[0].get("envelope").is_none() && waiting[0].get("epoch").is_none(), "{}", waiting[0]);
+        let kept: (i64, Vec<u8>) = review
+            .world
+            .db
+            .query_row("SELECT format, body FROM dm_proposals WHERE id = ?1", [&id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("kept");
+        assert_eq!(kept, (super::super::bodies::AT_HOME, Vec::new()), "only the digest is kept");
         assert!(review.waiting("bo", 1).is_empty());
         let (_, snapshot) = call(&mut review.world, &device("ana", 1), "GET", "sync", Value::Null);
         assert_eq!(snapshot["proposals"][0]["id"], id.as_str());
@@ -713,6 +708,10 @@ mod tests {
         let june = review.june.clone();
         let (status, refused) = call(&mut review.world, &june, "POST", &format!("proposals/{id}/approve"), approval.clone());
         assert_eq!((status, refused["error"].as_str()), (403, Some("device_only")));
+        // An approval carries no message any more.
+        let mut with_message = approval.clone();
+        with_message["envelope"] = sealed(&channel, 0, "x");
+        assert_eq!(review.approve(&id, with_message, 1).0, 400);
 
         // A digest of something else than what it showed, or an earlier
         // revision, is refused.
@@ -723,37 +722,20 @@ mod tests {
         assert_eq!((status, revised["revision"].as_i64()), (200, Some(2)));
         assert_eq!(review.approve(&id, approval, 1).1["error"], "changed", "the text changed since");
 
-        // The device's message, behind the conversation's group: nothing
-        // decided, try again.
+        // Approved: the device sends it, through Ana's home; nothing goes
+        // through here.
         let waiting = review.waiting("ana", 1);
         let approval = review.approval(&waiting[0]);
-        let (group, _) = group_of(&mut review.world, &review.conversation, review.generation);
-        review.world.db.execute("UPDATE dm_groups SET epoch = 6 WHERE group_id = ?1", [&group]).expect("moved on");
-        let (status, behind) = review.approve(&id, approval, 1);
-        assert_eq!((status, &behind["epoch"]), (409, &json!(6)), "{behind}");
-        assert_eq!(review.waiting("ana", 1).len(), 1, "still waiting");
-        // Bo's devices not in the conversation's group yet (row 676): not
-        // yet, nothing decided either.
-        review.world.db.execute("INSERT INTO dm_group_people (group_id, both_since) VALUES (?1, NULL)", [&group]).expect("not both");
-        let approval = review.approval(&waiting[0]);
-        let (status, refused) = review.approve(&id, approval, 1);
-        assert_eq!((status, refused["error"].as_str()), (409, Some("waiting_for_friend")), "{refused}");
-        assert_eq!(review.waiting("ana", 1).len(), 1, "still waiting");
-        review.world.db.execute("UPDATE dm_group_people SET both_since = 0 WHERE group_id = ?1", [&group]).expect("both in");
-        let approval = review.approval(&waiting[0]);
-        let (status, sent) = review.approve(&id, approval.clone(), 1);
-        assert_eq!(status, 200, "{sent}");
-        assert_eq!((sent["state"].as_str(), sent["seq"].as_i64()), (Some("sent"), Some(1)));
-        let (_, page) = history(&mut review.world, "bo", &review.conversation, "");
-        assert_eq!(texts(&page), ["See you at 7"]);
-        assert_eq!((page["messages"][0]["by_agent"].as_bool(), page["messages"][0]["from"].as_str()), (Some(true), Some("them")));
-        assert_eq!(review.approve(&id, approval, 1).1, sent, "approving again sends nothing more");
-        assert_eq!(texts(&history(&mut review.world, "bo", &review.conversation, "").1).len(), 1);
+        let (status, approved) = review.approve(&id, approval.clone(), 1);
+        assert_eq!(status, 200, "{approved}");
+        assert_eq!((approved["state"].as_str(), approved.get("seq")), (Some("approved"), None));
+        assert!(texts(&history(&mut review.world, "bo", &review.conversation, "").1).is_empty());
+        assert_eq!(review.approve(&id, approval, 1).1, approved, "approving again changes nothing");
         let (_, status) = call(&mut review.world, &june, "GET", &format!("proposals/{id}"), Value::Null);
-        assert_eq!((status["state"].as_str(), status["waiting"].as_bool()), (Some("sent"), Some(false)));
+        assert_eq!((status["state"].as_str(), status["waiting"].as_bool()), (Some("approved"), Some(false)));
         assert!(review.waiting("ana", 1).is_empty());
         let (status, _) = call(&mut review.world, &device("ana", 1), "POST", &format!("proposals/{id}/decline"), json!({}));
-        assert_eq!(status, 409, "sent is sent");
+        assert_eq!(status, 409, "approved is approved");
         assert_eq!(review.propose(1, "See you at 8").1["error"], "conflict", "decided: a new one has a new id");
 
         // Ana's devices heard of each step; another agent doesn't see it.
@@ -762,7 +744,7 @@ mod tests {
             .db
             .query_row("SELECT COUNT(*) FROM dm_account_events WHERE account = 'ana' AND kind = 'proposal'", [], |row| row.get(0))
             .expect("count");
-        assert_eq!(kinds, 3, "proposed, revised, sent");
+        assert_eq!(kinds, 3, "proposed, revised, approved");
         let other = Caller::Backend {
             account_id: "ana".into(),
             claktory_id: "mac".into(),
@@ -864,25 +846,30 @@ mod tests {
         let (status, refused) = review.propose(99, "one too many");
         assert_eq!((status, refused["error"].as_str()), (429, Some("too_many_waiting")));
         // Names that hide what they say are refused.
+        let digest = "ab".repeat(32);
         let body = json!({"client_message_id": client_id(100), "contact_generation": review.generation,
-                          "envelope": sealed(&review.channel, 0, "x"), "agent_name": "June\u{202E}"});
+                          "proposal_digest": digest, "agent_name": "June\u{202E}"});
         let route = format!("conversations/{}/proposals", review.conversation);
         assert_eq!(call(&mut review.world, &june, "POST", &route, body).0, 400);
         // A device proposes nothing.
-        let body = json!({"client_message_id": client_id(101), "contact_generation": review.generation,
-                          "envelope": sealed(&review.channel, 0, "x")});
+        let body = json!({"client_message_id": client_id(101), "contact_generation": review.generation, "proposal_digest": digest});
         assert_eq!(call(&mut review.world, &device("ana", 1), "POST", &route, body.clone()).0, 403);
-        // Format 1, or another group than the Mac's channel, or a channel
-        // epoch too old.
+        // The message itself, format 1's text, or a digest that isn't one
+        // in lowercase hex.
+        let message = json!({"client_message_id": client_id(102), "contact_generation": review.generation,
+                             "envelope": sealed(&review.channel, 0, "x")});
+        assert_eq!(call(&mut review.world, &june, "POST", &route, message).0, 400);
         let text = json!({"client_message_id": client_id(102), "contact_generation": review.generation, "text": "x"});
         assert_eq!(call(&mut review.world, &june, "POST", &route, text).0, 400);
-        let elsewhere = json!({"client_message_id": client_id(102), "contact_generation": review.generation,
-                               "envelope": sealed(&[9; 16], 0, "x")});
-        assert_eq!(call(&mut review.world, &june, "POST", &route, elsewhere).0, 400);
+        for wrong in ["AB".repeat(32), "ab".repeat(31), "zz".repeat(32)] {
+            let body = json!({"client_message_id": client_id(102), "contact_generation": review.generation, "proposal_digest": wrong});
+            assert_eq!(call(&mut review.world, &june, "POST", &route, body).0, 400);
+        }
+        // No channel with Ana's devices yet: nothing to propose in.
         let channel = review.channel.clone();
-        review.world.db.execute("UPDATE dm_groups SET epoch = 6 WHERE group_id = ?1", [&channel]).expect("moved on");
-        let (status, behind) = call(&mut review.world, &june, "POST", &route, body);
-        assert_eq!((status, &behind["error"], &behind["epoch"]), (409, &json!("epoch"), &json!(6)));
+        review.world.db.execute("DELETE FROM dm_groups WHERE group_id = ?1", [&channel]).expect("gone");
+        let (status, refused) = call(&mut review.world, &june, "POST", &route, body);
+        assert_eq!((status, &refused["error"]), (409, &json!("not_set_up")));
     }
 
     #[test]

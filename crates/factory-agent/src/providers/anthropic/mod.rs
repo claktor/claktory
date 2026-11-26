@@ -24,7 +24,8 @@ use crate::sse::{SseDecoder, SseMessage};
 use crate::stream::{CacheTtl, EventSink, EventStream, LlmContext, StreamOptions, ThinkingLevel, pending_message};
 use crate::tools::ToolSpec;
 use crate::types::{
-    AssistantMessage, AssistantPart, Message, Model, ModelCost, StopReason, StreamEvent, ToolResultPart, UserContent, UserPart,
+    AssistantMessage, AssistantPart, IMAGE_GONE, ImageData, Message, Model, ModelCost, StopReason, StreamEvent, ToolResultPart, UserContent,
+    UserPart,
 };
 use crate::usage::calculate_cost;
 
@@ -152,8 +153,13 @@ fn text_block(text: &str) -> Value {
     json!({"type": "text", "text": text})
 }
 
-fn image_block(data: &str, mime_type: &str) -> Value {
-    json!({"type": "image", "source": {"type": "base64", "media_type": mime_type, "data": data}})
+/// An image inline, its base64 read now when it's a file; what's said in
+/// its place when that can't be read.
+fn image_block(data: &ImageData, mime_type: &str) -> Value {
+    match data.base64() {
+        Some(data) => json!({"type": "image", "source": {"type": "base64", "media_type": mime_type, "data": &*data}}),
+        None => text_block(IMAGE_GONE),
+    }
 }
 
 /// The file id each image already at Anthropic goes as, by digest (#382,
@@ -858,6 +864,14 @@ pub fn file_headers(model: &Model, options: &StreamOptions, oauth: bool) -> Vec<
     request_headers(model, &LlmContext::default(), options, oauth)
 }
 
+/// Whether requests go gzip-compressed (#454, `providers::gzip`): to
+/// Anthropic's own API, which takes them; elsewhere (a proxy, qa-model)
+/// only when the model's `gzipRequests` says so.
+fn takes_gzip(model: &Model) -> bool {
+    let anthropic = url::Url::parse(&model.base_url).is_ok_and(|url| url.host_str() == Some("api.anthropic.com"));
+    compat_flag(model, "gzipRequests", anthropic)
+}
+
 /// Whether Anthropic refused a request for a file it names: one it no
 /// longer has, or files it won't read from this account. A limit, an
 /// outage or anything else about the request isn't one.
@@ -876,16 +890,22 @@ async fn request(
 ) -> Result<(), String> {
     let oauth = options.api_key.as_deref().is_some_and(|key| key.contains("sk-ant-oat"));
     // Images read since #382 go as files Anthropic already has, uploaded
-    // the first time; a request Anthropic refuses for one of them (another
-    // conversation let go of it, or files refused) is sent again once, with
-    // them inline.
+    // the first time. A request Anthropic answers it hasn't one of them (a
+    // 404 naming it: another conversation let go of it) is sent again with
+    // that one uploaded again, the rest as they were, once for each it
+    // named; one it refuses for them otherwise (files refused, or a file
+    // just uploaded again) is sent again once with them inline.
     let images = file_images(model, context, options);
-    let (mut refs, fresh) = image_refs(model, options, oauth, &images).await;
+    let (mut refs, mut fresh) = image_refs(model, options, oauth, &images).await;
     check_cancelled(options)?;
     let mut retried = false;
+    // The files it named before any went missing: each is uploaded again
+    // at most once.
+    let mut named = refs.clone();
     // Refused for thinking bound to another conversation: sent again once,
     // with none of it (`binding`).
     let mut unbound = false;
+    let mut gzip = crate::providers::gzip::wanted(&model.base_url, takes_gzip(model));
     let response = loop {
         let (mut params, bound) = build_params(model, context, oauth, max_tokens, thinking, &refs, unbound)?;
         binding::mark(&mut parser.output, &bound, unbound);
@@ -897,14 +917,43 @@ async fn request(
         for (name, value) in request_headers(model, context, options, oauth) {
             builder = builder.header(name, value);
         }
-        builder = builder.header("content-type", "application/json").body(params.to_string());
+        builder = builder.header("content-type", "application/json");
+        let body = params.to_string();
+        drop(params);
+        let compressed = if gzip { crate::providers::gzip::compress(&body) } else { None };
+        let sent_gzip = compressed.is_some();
+        builder = match compressed {
+            Some(compressed) => {
+                drop(body);
+                builder.header("content-encoding", "gzip").body(compressed)
+            }
+            None => builder.body(body),
+        };
         let response = send_request(builder, options).await?;
         let status = response.status().as_u16();
         if (200..300).contains(&status) {
             break response;
         }
+        crate::accounts::mark_retry_after(&mut parser.output, response.headers());
         let limit = usage_limit(status, response.headers()).map(|resets_at| (resets_at, limit_claim(response.headers()).map(str::to_owned)));
         let text = response_text(response).await;
+        if sent_gzip && crate::providers::gzip::refused(status, &text) {
+            crate::providers::gzip::refuse(&model.base_url);
+            gzip = false;
+            continue;
+        }
+        if let Some(files) = options.image_files.as_ref().filter(|_| !retried && status == 404 && !named.is_empty())
+            && let lost = files.files.lost(&files.account, &named, &text)
+            && !lost.is_empty()
+        {
+            tracing::info!(account = %files.account, images = lost.len(), "Anthropic no longer has an image's file; uploading it again");
+            named.retain(|digest, _| !lost.contains(digest));
+            let again;
+            (refs, again) = image_refs(model, options, oauth, &images).await;
+            fresh |= again;
+            check_cancelled(options)?;
+            continue;
+        }
         if let Some(files) = options.image_files.as_ref().filter(|_| !retried && !refs.is_empty() && file_refused(status, &text)) {
             tracing::info!(account = %files.account, status, "Anthropic refused a request naming images as files; sending them inline");
             files.files.refuse(&files.account, &refs, fresh);
@@ -955,5 +1004,21 @@ async fn request(
             Err(parser.output.error_message.clone().unwrap_or_else(|| "An unknown error occurred".into()))
         }
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_anthropics_own_api_gets_gzip_unless_the_model_says() {
+        let catalog = crate::providers::catalog::models("anthropic");
+        let mut model = catalog.into_iter().find(|model| model.id == "claude-sonnet-4-5").expect("sonnet");
+        assert!(takes_gzip(&model), "{}", model.base_url);
+        model.base_url = "http://127.0.0.1:7600".into();
+        assert!(!takes_gzip(&model), "qa-model, a proxy");
+        model.compat.get_or_insert_with(Default::default).insert("gzipRequests".into(), json!(true));
+        assert!(takes_gzip(&model));
     }
 }

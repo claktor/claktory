@@ -52,6 +52,8 @@ pub fn fresh_runtime() {
 pub struct TunnelHandle {
     tunnel: Arc<tunnel::Tunnel>,
     runtime: tokio::runtime::Handle,
+    /// The relays the device's endpoint is made with (#450).
+    homes: Arc<Mutex<Vec<iroh::RelayUrl>>>,
 }
 
 /// Opens a tunnel to the backend [endpoint_id] (its relays [relays] and
@@ -74,11 +76,20 @@ pub async fn open_tunnel(
         .spawn(async move {
             let key = tunnel::parse_key(&device_key)?;
             let backend = tunnel::backend_addr(&endpoint_id, &relays, &addresses)?;
+            // The device homes on its Claktory's relays: its code's, then
+            // what it says once connected ([TunnelHandle::set_relays]).
+            let homes = Arc::new(Mutex::new(tunnel::relay_urls(&relays)));
             // Made again by reconnect, after the app was away or the network
             // changed (tunnel.rs).
-            let make: tunnel::MakeEndpoint = Arc::new(move || Box::pin(tunnel::device_endpoint(key.clone())));
+            let make: tunnel::MakeEndpoint = Arc::new({
+                let homes = homes.clone();
+                move || {
+                    let (key, relays) = (key.clone(), homes.lock().unwrap().clone());
+                    Box::pin(async move { tunnel::device_endpoint(key, &relays).await })
+                }
+            });
             let tunnel = tunnel::Tunnel::open_with(make, tunnel::REBUILD_AFTER, backend).await?;
-            Ok(TunnelHandle { tunnel: Arc::new(tunnel), runtime })
+            Ok(TunnelHandle { tunnel: Arc::new(tunnel), runtime, homes })
         })
         .await?
 }
@@ -110,6 +121,20 @@ impl TunnelHandle {
     #[frb(sync)]
     pub fn path(&self) -> String {
         self.tunnel.path().to_owned()
+    }
+
+    /// The relays its Claktory uses now, as its Workspace says
+    /// (`RemoteAccess.relays`, #450): the device homes on them from its next
+    /// endpoint on, and dials through them. Those that aren't http(s) URLs
+    /// are left out; none changes nothing.
+    #[frb(sync)]
+    pub fn set_relays(&self, relays: Vec<String>) {
+        let urls = tunnel::relay_urls(&relays);
+        if urls.is_empty() {
+            return;
+        }
+        self.tunnel.set_relays(&urls);
+        *self.homes.lock().unwrap() = urls;
     }
 
     #[frb(sync)]
@@ -182,6 +207,19 @@ impl TunnelHandle {
         let tunnel = self.tunnel.clone();
         let runtime = self.runtime.clone();
         match runtime.spawn(async move { forward::forward(&tunnel, port).await }).await {
+            Ok(Ok(forward)) => Ok(ForwardHandle { forward: Arc::new(forward), runtime }),
+            Ok(Err(error)) => Err(error.into()),
+            Err(error) => Err(ForwardError { kind: ForwardErrorKind::Failed, message: error.to_string() }),
+        }
+    }
+
+    /// Listens on this device's loopback at [port] and carries each
+    /// connection to [target] on the backend's machine: a website a pipe's
+    /// peer shares, from a port of this device's own (#503).
+    pub async fn forward_port_to(&self, port: u16, target: u16) -> Result<ForwardHandle, ForwardError> {
+        let tunnel = self.tunnel.clone();
+        let runtime = self.runtime.clone();
+        match runtime.spawn(async move { forward::forward_to(&tunnel, port, target).await }).await {
             Ok(Ok(forward)) => Ok(ForwardHandle { forward: Arc::new(forward), runtime }),
             Ok(Err(error)) => Err(error.into()),
             Err(error) => Err(ForwardError { kind: ForwardErrorKind::Failed, message: error.to_string() }),

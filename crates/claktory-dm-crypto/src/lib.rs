@@ -78,6 +78,11 @@ pub enum Error {
     /// gone: it could still read it. `reason` says which.
     #[error("waiting for {account}'s {reason} to finish")]
     Waiting { account: String, reason: validation::Held },
+    /// An add whose every leaf is in the group already (or repeated in
+    /// it): nothing to commit. Typed, so a device that tried to add
+    /// someone already in (its view was behind) treats it as done.
+    #[error("refused: everyone it would add is in the group already")]
+    NothingToAdd,
     /// OpenMLS failed.
     #[error("mls: {0}")]
     Mls(String),

@@ -584,6 +584,11 @@ class _PaneLayoutState extends State<PaneLayout> {
     _holdBack(expanded != null || (_panesTakeBack && projection == null));
     if (expanded == null) _before = null;
     final before = expanded == null ? null : (_before ??= ids);
+    // A portal made afresh, after the conversation was alone (every pane
+    // closed: a review answered), starts hidden, since its shown state
+    // went with the one before: shown again, as initState does, or a pane
+    // expanded now (Review's file) is a blank until a relaunch (D1).
+    if (!_portal.isShowing) _portal.show();
     return OverlayPortal(
       controller: _portal,
       overlayChildBuilder: (context) => expanded == null

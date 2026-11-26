@@ -95,7 +95,7 @@ pub async fn read_image(cwd: &Path, args: &Value, cancel: &CancellationToken) ->
         content: vec![
             ToolResultPart::Text { text: note },
             ToolResultPart::Image {
-                data: base64::engine::general_purpose::STANDARD.encode(&out),
+                data: base64::engine::general_purpose::STANDARD.encode(&out).into(),
                 mime_type: out_mime.to_owned(),
                 digest: Some(digest(&out)),
             },
@@ -123,7 +123,7 @@ pub async fn model_part(bytes: Vec<u8>, width: u32, height: u32) -> Result<(Tool
         (fitted.bytes, fitted.mime, Some((fitted.width, fitted.height)))
     };
     let part = ToolResultPart::Image {
-        data: base64::engine::general_purpose::STANDARD.encode(&out),
+        data: base64::engine::general_purpose::STANDARD.encode(&out).into(),
         mime_type: out_mime.to_owned(),
         digest: Some(digest(&out)),
     };

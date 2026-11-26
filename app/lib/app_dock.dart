@@ -75,29 +75,33 @@ void openApp(BuildContext context, AppInfo app, [String view = '']) {
     openAppsTab(context);
     return;
   }
+  // On a phone (and an iPad's narrow window, on the same routes): a page
+  // of its own, never in the agent's layout, which the person's other
+  // devices share.
+  final phone = PhoneRoutes.of(context);
+  if (phone != null) {
+    if (scope.page.value != AppPage.agent) AppScope.closePage(context);
+    phone.pushApp(_appLeaf(app, view));
+    return;
+  }
   final workspace = backend.workspace;
   final agent =
       workspace.selectedAgent ?? workspace.workspace.agents.firstOrNull;
   if (agent == null) return;
-  final phone = PhoneRoutes.of(context);
-  if (phone == null) {
-    _expandApp(context, agent, app, view);
-    return;
-  }
-  if (scope.page.value != AppPage.agent) AppScope.closePage(context);
-  final root = layoutOf(agent);
-  final shown = appPane(root, app.id, view, app.views.first.id);
-  if (shown != null) {
-    if (phone.showPane(agent.id, shown.id)) return;
-    backend.highlights.glow('pane:${agent.id}:${shown.id}', [
-      agentColor(agent.color),
-    ]);
-    return;
-  }
-  final opened = withApp(root, app, view);
-  fireAndLog(backend.setLayout(agent.id, opened));
-  final pane = appPane(opened, app.id, view, app.views.first.id);
-  if (pane != null) phone.showPane(agent.id, pane.id);
+  _expandApp(context, agent, app, view);
+}
+
+/// [app]'s [view] (empty: its first) as a leaf of its own.
+ViewLeaf _appLeaf(AppInfo app, String view) {
+  final spec = view.isEmpty
+      ? app.views.first
+      : app.views.where((v) => v.id == view).firstOrNull;
+  return ViewLeaf(
+    kind: appKind,
+    appId: app.id,
+    view: spec?.id ?? view,
+    title: spec?.title ?? '',
+  );
 }
 
 /// The app view filling each window now ([_expandApp]), by the window's
@@ -109,20 +113,12 @@ final _expanded = Expando<({OverlayEntry entry, String app, String view})>();
 /// band and Esc as an expanded pane, "Back to [agent]". Nothing changes
 /// under it. Another view opened meanwhile takes its place.
 void _expandApp(BuildContext context, Agent agent, AppInfo app, String view) {
-  final spec = view.isEmpty
-      ? app.views.first
-      : app.views.where((v) => v.id == view).firstOrNull;
-  final viewId = spec?.id ?? view;
+  final leaf = _appLeaf(app, view);
+  final viewId = leaf.view;
   final overlay = Overlay.of(context);
   final shown = _expanded[overlay];
   if (shown != null && shown.app == app.id && shown.view == viewId) return;
   _closeExpandedApp(overlay);
-  final leaf = ViewLeaf(
-    kind: appKind,
-    appId: app.id,
-    view: viewId,
-    title: spec?.title ?? '',
-  );
   late final OverlayEntry entry;
   void back() {
     if (_expanded[overlay]?.entry == entry) _closeExpandedApp(overlay);

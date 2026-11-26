@@ -10,7 +10,10 @@ publish.workspace = true
 default = ["worker"]
 # The worker itself. Without it the crate is only `ipc`: the channel's types
 # and framing, for the account service, which forwards to the worker.
-worker = ["dep:base64", "dep:claktory-dm-crypto", "dep:openmls", "dep:tls_codec", "dep:chacha20poly1305", "dep:getrandom", "dep:hmac", "dep:jiff", "dep:rusqlite", "dep:sha2", "dep:zeroize", "dep:tracing-subscriber", "tokio/rt-multi-thread", "tokio/macros", "tokio/signal"]
+worker = ["dep:base64", "dep:claktory-dm-crypto", "dep:openmls", "dep:tls_codec", "dep:chacha20poly1305", "dep:getrandom", "dep:hmac", "dep:jiff", "dep:libc", "dep:rusqlite", "dep:sha2", "dep:zeroize", "dep:tracing-subscriber", "tokio/rt-multi-thread", "tokio/macros", "tokio/signal"]
+# QA only: a worker that lies to the person's devices on purpose, for
+# hostile tests (src/dms/lies.rs). A release build with it doesn't compile.
+qa-lies = ["worker"]
 
 [[bin]]
 name = "claktory-user-apps"
@@ -32,6 +35,8 @@ tls_codec = { version = "0.5", features = ["derive", "serde", "std"], optional =
 getrandom = { version = "0.4", optional = true }
 hmac = { version = "0.13", optional = true }
 jiff = { version = "1", optional = true }
+# The disk guard (`dms::space`): statvfs.
+libc = { version = "0.2", optional = true }
 rusqlite = { version = "0.43.0", features = ["bundled"], optional = true }
 sha2 = { version = "0.11", optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"], optional = true }

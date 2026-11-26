@@ -391,6 +391,37 @@ message ClientMessage {
     CheckPipeSharePort check_pipe_share_port = 220;
     // Stops Claktory on this Mac (StopEngine, friend bug #27).
     StopEngine stop_engine = 221;
+    // How many bytes of files this device keeps for its viewers (#446).
+    SetFileCache set_file_cache = 222;
+    // Direct messages through the person's home Claktory (#451): only
+    // from the person's own paired devices, never an agent's tool.
+    DmSend dm_send = 223;
+    DmFollow dm_follow = 224;
+    DmAck dm_ack = 225;
+    DmRoutes dm_routes = 226;
+    // History (#458): how this Claktory came to be, for the Map's History
+    // mode. Only from the person's devices, never an agent or a pipe.
+    GetHistoryOverview get_history_overview = 227;
+    GetHistoryEvents get_history_events = 228;
+    WatchHistory watch_history = 229;
+    // Claktory's browser (#435): the live view and the person's turns, from
+    // the person's devices only (never an agent's tool, extension_call or
+    // a pipe). See AgentBrowser.
+    WatchAgentBrowser watch_agent_browser = 230;
+    AgentBrowserFrameAck agent_browser_frame_ack = 231;
+    AgentBrowserInput agent_browser_input = 232;
+    TakeOverAgentBrowser take_over_agent_browser = 233;
+    HandBackAgentBrowser hand_back_agent_browser = 234;
+    StopAgentBrowser stop_agent_browser = 235;
+    OpenAgentBrowser open_agent_browser = 236;
+    DeleteAgentBrowserData delete_agent_browser_data = 237;
+    // An errand's log, answered with ErrandLog, to the asker only.
+    ListErrandLog list_errand_log = 238;
+    OpenErrand open_errand = 239;
+    SetAgentContained set_agent_contained = 240;
+    // Claktory's browser's time zone and languages (#435, change 3).
+    SetAgentBrowserLocale set_agent_browser_locale = 241;
+    ListTimeZones list_time_zones = 242;
   }
 }
 
@@ -488,6 +519,9 @@ message PipeShare {
   string listener_problem = 12;
   // Theirs: the person hid it (HidePipeShare).
   bool hidden = 13;
+  // Theirs: not opened yet from this Claktory, on any device: the app
+  // makes it stand out until it is (W2).
+  bool unopened = 14;
 }
 
 // Shares a website on this computer (Share a website… in a pipe's or a
@@ -547,6 +581,15 @@ message PipeSharePort {
   // Why it can't be shared, in a sentence ("Port 7420 is Claktory's
   // own."); empty when it can.
   string problem = 3;
+  // The person's program listening on it on Claktory's computer: its
+  // executable's name only ("node"), never its arguments or path. Empty,
+  // with pid 0, when none of theirs does, or Claktory can't tell (another
+  // user's program, no lsof).
+  string program = 4;
+  uint32 pid = 5;
+  // The pipes this port is shared with already (Pipe.id), live: sharing it
+  // with one of them again is refused, so the form says so.
+  repeated string shared_pipe_ids = 6;
 }
 
 message ServerMessage {
@@ -691,6 +734,28 @@ message ServerMessage {
     PipeShareOpened pipe_share_opened = 78;
     // The answer to CheckPipeSharePort, to the asker only.
     PipeSharePort pipe_share_port = 79;
+    // Direct messages from the home (#451): the answer to DmSend and
+    // DmFollow, and what a following connection is sent as it arrives.
+    DmFeed dm_feed = 80;
+    // The home's state: the answer to DmRoutes, and sent to following
+    // connections when it changes.
+    DmHome dm_home = 81;
+    // The answer to GetHistoryOverview, to the asker only.
+    HistoryOverview history_overview = 82;
+    // The answer to GetHistoryEvents; and, to a connection watching
+    // (WatchHistory), each new event as it happens (reply_to 0).
+    HistoryEvents history_events = 83;
+    // To a connection watching: the overview changed; ask for it again.
+    HistoryChanged history_changed = 84;
+    // Claktory's browser (#435), only to the connection watching it
+    // (WatchAgentBrowser): never in the Workspace, to agents or pipes.
+    AgentBrowserFrame agent_browser_frame = 85;
+    AgentBrowserClipboard agent_browser_clipboard = 86;
+    AgentBrowserViewMoved agent_browser_view_moved = 87;
+    // The answer to ListErrandLog, to the asker only.
+    ErrandLog errand_log = 88;
+    // The answer to ListTimeZones, to the asker only.
+    TimeZones time_zones = 89;
   }
   // Resuming the Workspace on reconnect (#378), only to an app whose Hello
   // has workspace_patches. On a message carrying a Workspace or a
@@ -2565,6 +2630,12 @@ message Workspace {
   // other Claktories share with it. One stopped or ended is gone from it;
   // the pipes' chats keep the lines saying so.
   repeated PipeShare pipe_shares = 48;
+  // Claktory's browser (#435): the one browser agents' errands use, on
+  // this Claktory's computer (or its VM on a Mac). Unset from a backend
+  // without it.
+  AgentBrowser agent_browser = 49;
+  // Errands, running and lately ended (the last 7 days), oldest first.
+  repeated Errand errands = 50;
 }
 
 // Claktory's background service on a Mac (friend bug #24): the LaunchAgent
@@ -2829,17 +2900,27 @@ message KeepAwake {
   // held awake on battery.
   bool plugged_in = 7;
   // Keeping agents working with the lid closed (#371) can be offered: a
-  // laptop on macOS 14 or later. The Mac app also leaves it out when its
-  // own bundle carries no helper (dev and ad hoc builds). Never on a desktop.
+  // laptop on macOS 14 or later, in the real Claktory (never Claktory Dev).
+  // Never on a desktop.
   bool lid_closed_available = 8;
   // Where it stands (LidClosedState): off unless the person turned it on,
   // from its own question, in the Mac app on that Mac.
   LidClosedState lid_closed = 9;
   // LID_CLOSED_FAILED: why, as macOS said it, for the person.
   string lid_closed_error = 10;
-  // The helper holds the Mac awake now (LID_CLOSED_ON, agents work and it's
-  // plugged in), so it doesn't sleep when the lid closes. Never on battery.
+  // Claktory keeps the Mac awake with its lid closed now (LID_CLOSED_ON,
+  // agents work and it's plugged in), so it doesn't sleep when the lid
+  // closes. Never on battery.
   bool lid_closed_holding = 11;
+  // LID_CLOSED_STUCK: what fixes it, a sentence to show as it is, naming
+  // the Mac by this Claktory's name; a Terminal command in it is in
+  // backticks ("In Terminal on Studio, run `sudo pmset -a disablesleep
+  // 0`, or restart it."). Empty otherwise.
+  string lid_closed_fix = 12;
+  // The person's lid-closed setting is on, whatever lid_closed says
+  // (STUCK included): what the switch shows. Turning it off is always
+  // allowed.
+  bool lid_closed_turned_on = 13;
 }
 
 // Keeping a laptop's agents working with its lid closed: a helper the Mac
@@ -2850,33 +2931,33 @@ message KeepAwake {
 enum LidClosedState {
   // The person hasn't turned it on, or turned it off.
   LID_CLOSED_OFF = 0;
-  // Turned on, and the helper waits for the person's approval in System
-  // Settings → Login Items (the app opens it).
+  // No longer sent: the root helper it waited for is gone (#371's
+  // redesign).
   LID_CLOSED_NEEDS_APPROVAL = 1;
-  // Turned on and the helper answers: it holds the Mac awake while agents
-  // work on power (lid_closed_holding).
+  // Turned on: Claktory keeps the Mac awake with its lid closed while agents
+  // work and it's plugged in (lid_closed_holding), and lets it sleep as soon
+  // as it's unplugged.
   LID_CLOSED_ON = 2;
-  // On, and the helper let go: the battery is at 20% or less (it holds again
-  // at 30% or on power).
+  // No longer sent: nothing is held on battery at all.
   LID_CLOSED_PAUSED_BATTERY = 3;
-  // On, and the helper let go: the Mac is too hot (it holds again 10 minutes
-  // after it cools down).
+  // On, and let go: the Mac is too hot (held again 10 minutes after it
+  // cools down).
   LID_CLOSED_PAUSED_HEAT = 4;
-  // On, and the helper let go: the lid is closed on battery, as in a bag.
-  // It holds again once plugged in.
+  // No longer sent: nothing is held on battery at all.
   LID_CLOSED_PAUSED_LID_ON_BATTERY = 5;
-  // On, but no helper answers: it isn't installed, it was turned off in
-  // System Settings, or macOS refused to start it (then Login Items shows it
-  // switched off until the person switches it on again, even after it's
-  // installed again). The Mac app registers it again and offers Login Items;
-  // it never assumes an earlier approval still holds.
+  // No longer sent (the helper is gone).
   LID_CLOSED_MISSING = 6;
-  // On, but the helper is from another version of Claktory: the Mac app
-  // installs it again. factoryd asks it to hold nothing meanwhile.
+  // No longer sent (the helper is gone).
   LID_CLOSED_OUTDATED = 7;
-  // On, but installing or removing the helper failed: lid_closed_error says
-  // why.
+  // On, but macOS refused to keep the lid from sleeping the Mac:
+  // lid_closed_error says why.
   LID_CLOSED_FAILED = 8;
+  // The Mac can't sleep with its lid closed although Claktory isn't keeping
+  // it awake: what Claktory set couldn't be undone, or an old SleepDisabled
+  // setting is on. Before every other state, and sent whatever
+  // lid_closed_available says; lid_closed_fix says what fixes it. Needs you
+  // says so too, with one notification (thread "keep_awake").
+  LID_CLOSED_STUCK = 9;
 }
 
 // What macOS answered the Mac app about the helper (SMAppService's status,
@@ -2892,16 +2973,15 @@ enum LidClosedRegistration {
 }
 
 // The person turns keeping agents working with the lid closed on or off,
-// in the Mac app on the Mac Claktory runs on, after its own question; the
-// app sends it after register() or unregister(), and again whenever what
-// macOS says of the helper changes while it's open. Ack. Turning it on is
-// refused from any other device ("Turn it on from the Mac."), and on a Mac
-// that can't (KeepAwake.lid_closed_available); turning it off is taken
-// from anywhere, and the helper lets go at once.
+// in the Mac app on the Mac Claktory runs on, after its own question. Ack.
+// Turning it on is refused from any other device ("Turn it on from the
+// Mac."), and on a Mac that can't (KeepAwake.lid_closed_available); turning
+// it off is taken from anywhere, and lets the Mac sleep at once.
 message SetLidClosed {
   bool on = 1;
+  // Ignored: what older Mac apps said of the helper, which is gone.
   LidClosedRegistration registration = 2;
-  // LID_CLOSED_REGISTRATION_FAILED: what macOS said.
+  // Ignored, as registration.
   string error = 3;
 }
 
@@ -3782,6 +3862,12 @@ message Settings {
   // it), never UNSPECIFIED. Only matters where BackendService.can_stop.
   // Kept in factory.db.
   QuitMode when_app_quits = 34;
+  // How many bytes of this Claktory's files each device keeps for its
+  // viewers (#446), in config.json's `display.file_cache`, by device id as
+  // Welcome.device_id gives it ("local" as for zoom). A device not listed
+  // keeps 1 GB (1,000,000,000); a listed one 100 MB to 100 GB. Each
+  // device's own; set with SetFileCache.
+  map<string, uint64> file_cache = 35;
 }
 
 // What happens to Claktory on its Mac when the Mac app quits (friend bug
@@ -4342,6 +4428,12 @@ message Agent {
   // When it changes, or a fresh Transcript comes, a list on screen asks
   // again.
   uint32 branches = 51;
+  // Contained for errands (#435): like a pipe's quarantined members, it
+  // can't run commands, use the web or secrets, and messages only its
+  // lead, with what it says fenced as untrusted; only a contained agent
+  // can have the errands extension (Claktory's browser). Only the person
+  // sets or lifts it (SetAgentContained), never its settings or an agent.
+  bool contained = 52;
 }
 
 // What an agent (or a chat) waiting on its provider's usage could continue
@@ -6306,6 +6398,11 @@ enum MapNodeKind {
   // An app installed (see AppInfo): label its name, detail its description
   // (or why it's in trouble), ref_id its id; at the top.
   MAP_NODE_KIND_APP = 7;
+  // A pipe to another Claktory, in History only (the Map draws pipes from
+  // Workspace.pipes): id "pipe:<id>", parent_id its project's node,
+  // label its name only when it was named on this side (otherwise "Pipe"),
+  // detail "Another Claktory". Never anything of the other side's.
+  MAP_NODE_KIND_PIPE = 8;
 }
 
 // An extension an agent has on that grants reach or power.
@@ -6357,6 +6454,183 @@ enum MapEdgeKind {
   // From an agent to its lead (Agent.lead_id). Only leads set in agents'
   // settings: an admin agent leading everyone isn't drawn.
   MAP_EDGE_KIND_LEAD = 7;
+  // In History only: from an agent to a pipe it's a member of; label
+  // "Leads" for the pipe's lead.
+  MAP_EDGE_KIND_PIPE = 8;
+}
+
+// ---- History (#458, history-replay.md) ----
+//
+// The Map's History mode plays this Claktory back from its first day. The
+// backend decides what existed when, who could message whom and what's a
+// chapter; the app filters by time and draws. Nothing here carries message
+// text, card titles or anything of another Claktory's.
+
+// Answered with HistoryOverview: everything that ever existed, when, and
+// how busy each hour was. Asked when History opens and again after
+// HistoryChanged.
+message GetHistoryOverview {}
+
+// When something existed. Before HistoryOverview.recording_since_ms what
+// History knows is reconstructed (inferred): drawn dotted.
+message HistoryInterval {
+  int64 from_ms = 1;
+  // 0: still.
+  int64 to_ms = 2;
+  bool inferred = 3;
+}
+
+// A node's name and place from a moment on: renames and moves.
+message HistoryLabel {
+  int64 at_ms = 1;
+  string label = 2;
+  string detail = 3;
+  string parent_id = 4;
+  string project_id = 5;
+}
+
+message HistoryNode {
+  // As the Map has it, at its latest (a deleted agent's under its last
+  // name).
+  MapNode node = 1;
+  repeated HistoryInterval present = 2;
+  // Oldest first.
+  repeated HistoryLabel labels = 3;
+}
+
+message HistoryEdge {
+  MapEdge edge = 1;
+  repeated HistoryInterval present = 2;
+}
+
+enum HistoryChapterKind {
+  HISTORY_CHAPTER_KIND_UNSPECIFIED = 0;
+  // Recording began: from here on History is exact.
+  HISTORY_CHAPTER_KIND_RECORDING = 1;
+  HISTORY_CHAPTER_KIND_PROJECT = 2;
+  // Agents joined.
+  HISTORY_CHAPTER_KIND_AGENTS = 3;
+  HISTORY_CHAPTER_KIND_PIPE = 4;
+  HISTORY_CHAPTER_KIND_APP = 5;
+  HISTORY_CHAPTER_KIND_SECRET = 6;
+  // A new version of Claktory first ran.
+  HISTORY_CHAPTER_KIND_RELEASE = 7;
+  // A checklist goal was done.
+  HISTORY_CHAPTER_KIND_GOAL = 8;
+  // The busiest hour.
+  HISTORY_CHAPTER_KIND_BUSIEST = 9;
+}
+
+message HistoryChapter {
+  int64 at_ms = 1;
+  HistoryChapterKind kind = 2;
+  // Plain words, with names, written by the backend.
+  string title = 3;
+  // MapNode ids, to frame.
+  repeated string node_ids = 4;
+}
+
+// Where GetHistoryEvents can start to reach a moment.
+message HistoryCursor {
+  // The first event after it.
+  int64 at_ms = 1;
+  bytes cursor = 2;
+}
+
+message HistoryOverview {
+  int64 start_ms = 1;
+  int64 end_ms = 2;
+  // Before it, what History shows is reconstructed; 0 before anything
+  // was recorded.
+  int64 recording_since_ms = 3;
+  // Append-only: a node keeps its index (as HistoryEvents names it) from
+  // the first overview that has it on, across HistoryChanged and restarts;
+  // new ones only ever come at the end.
+  repeated HistoryNode nodes = 4;
+  // In no particular order.
+  repeated HistoryEdge edges = 5;
+  // Events (every HistoryEventKind; runs not) per hour, hour 0 starting
+  // at start_ms floored to the hour (UTC).
+  repeated uint32 histogram = 6;
+  repeated HistoryChapter chapters = 7;
+  uint64 message_count = 8;
+  // Goes up when the overview changes (HistoryChanged).
+  uint64 history_version = 9;
+  // One every 10,000 events.
+  repeated HistoryCursor cursors = 10;
+}
+
+// Answered with HistoryEvents: events in time order from after_cursor.
+message GetHistoryEvents {
+  // Empty: from the first.
+  bytes after_cursor = 1;
+  // 0: no end.
+  int64 until_ms = 2;
+  // 0: 20,000; at most 50,000.
+  uint32 limit = 3;
+  // Also when agents worked (HistoryEvents.run_*).
+  bool include_runs = 4;
+}
+
+enum HistoryEventKind {
+  HISTORY_EVENT_KIND_UNSPECIFIED = 0;
+  // An agent's message to agents.
+  HISTORY_EVENT_KIND_AGENT = 1;
+  // The person's message to an agent.
+  HISTORY_EVENT_KIND_PERSON = 2;
+  // An agent asks the person: a card, a proposal to Rivet, a secret.
+  HISTORY_EVENT_KIND_CARD = 3;
+  HISTORY_EVENT_KIND_PROPOSAL = 4;
+  HISTORY_EVENT_KIND_SECRET_REQUEST = 5;
+  // A pipe's message reaching an agent, and an agent's going out on it.
+  HISTORY_EVENT_KIND_PIPE_IN = 6;
+  HISTORY_EVENT_KIND_PIPE_OUT = 7;
+  // What wakes an agent: its task ending, its monitor, Claktory itself.
+  HISTORY_EVENT_KIND_TASK = 8;
+  HISTORY_EVENT_KIND_MONITOR = 9;
+  HISTORY_EVENT_KIND_CLAKTORY = 10;
+  // An app's event to an agent (Telegram, say): from the app's node.
+  HISTORY_EVENT_KIND_APP = 11;
+}
+
+// Events, columnar. Node indexes: 0 is the person ("You"), i >= 1 is
+// HistoryOverview.nodes[i - 1]. PERSON, TASK, MONITOR and CLAKTORY go from 0
+// to the agent; CARD, PROPOSAL and SECRET_REQUEST from the agent to 0;
+// PIPE_IN from the pipe's node, PIPE_OUT to it (from 0 when the person
+// wrote it); APP from the app's node. Pushed to a watching connection:
+// events only, never runs.
+message HistoryEvents {
+  int64 base_ms = 1;
+  // One each per event:
+  // ms from the previous event (the first: from base_ms).
+  repeated sint64 dt = 2;
+  repeated uint32 from = 3;
+  repeated HistoryEventKind kind = 4;
+  // 1: quiet; 2: a reply; (flags >> 2) & 7: its intent (0 none, 1
+  // handoff, 2 decision_request, 3 decision, 4 status).
+  repeated uint32 flags = 5;
+  // How many of `to` are its (at least 1).
+  repeated uint32 to_count = 6;
+  // Each event's to_count recipients, in a row.
+  repeated uint32 to = 7;
+  // Runs, by start (include_runs): the agent's node, ms from the previous
+  // run's start (the first: from base_ms), and how long (0: running).
+  repeated uint32 run_node = 8;
+  repeated sint64 run_start = 9;
+  repeated uint64 run_ms = 10;
+  // Empty: nothing more up to until_ms. Otherwise opaque: ask from it.
+  bytes next_cursor = 11;
+}
+
+// Answered with Ack. While on, new events come as HistoryEvents and a
+// changed overview as HistoryChanged; off, or the connection ending, stops
+// them.
+message WatchHistory {
+  bool on = 1;
+}
+
+message HistoryChanged {
+  uint64 history_version = 1;
 }
 
 // ---- Connecting services (one-click secrets; docs/CONNECTORS.md) ----
@@ -6684,6 +6958,14 @@ message DeriveSecret {
 // otherwise 0.5 to 2.0 (finite), or it's refused. Answered with Ack.
 message SetZoom {
   double zoom = 1;
+}
+
+// Sets how many bytes of this Claktory's files this device keeps for its
+// viewers (Settings.file_cache): the device this connection is, never
+// another. 0 is the default (1 GB); otherwise 100,000,000 to
+// 100,000,000,000, or it's refused. Answered with Ack.
+message SetFileCache {
+  uint64 bytes = 1;
 }
 
 // Removes a connection and the secrets made from it.
@@ -7372,6 +7654,16 @@ message Pipe {
   // its project's or not (Rivet, say). Never quarantined as well, and not
   // in can_run_commands_ids.
   repeated string send_only_ids = 35;
+  // #414: agents that can't be on this pipe in any role (member, sending
+  // only, lead): each is another pipe's liaison, made for that pipe alone,
+  // with why ("Freya is Partners' liaison: it reads that pipe, so it can't
+  // use another."). Shown disabled with the reason, or left out; the
+  // backend refuses them whoever asks. Empty for a closed pipe. Limiting
+  // an agent on several pipes stays the person's choice (Fugo 32063).
+  repeated PipeAgentHeld held_agents = 36;
+  // Unused, always empty: limiting an agent is never refused by #414's
+  // boundary (Fugo 32063), and a liaison is only ever a new agent.
+  repeated PipeAgentHeld cant_limit = 37;
 }
 
 enum PipeState {
@@ -7453,6 +7745,10 @@ enum PipeIdentityChange {
 
 message AcceptPipeIdentity {
   string pipe_id = 1;
+  // Accepted from an agent's card (AskPerson.pipe_trust, #471 G7): its id.
+  // The backend checks the card is still waiting, for this pipe and for
+  // the change the pipe shows now.
+  string card_id = 2;
 }
 
 message PipeLimits {
@@ -7484,6 +7780,11 @@ message PipeMessage {
   // DISCARDED by a reply (DecidePipeMessage.reply): never sent; the person
   // sent it back to its writer with `note`. Shown as sent back.
   bool replied = 8;
+  // A Claktory line announcing a website the other side shares with this
+  // one ("Ana shares Dashboard."): that share's PipeShare.id, for Open and
+  // Copy address on the line while the share is in Workspace.pipe_shares.
+  // Empty on every other message.
+  string share_id = 9;
 }
 
 message PipeAuthor {
@@ -7619,6 +7920,14 @@ message ApprovePipe {
   // unset makes none. They may be agents outside the pipe's project; none
   // is the lead or quarantined.
   PipeMembers send_only = 11;
+  // Approved from an agent's card (AskPerson.pipe_approval, #471 G1): that
+  // card's id (AskPerson.id). Every check of a plain ApprovePipe runs, then
+  // the card's: still pending, about this pipe, the pipe waiting for this
+  // side's approval with the other side's key the card was asked for. The
+  // card is then answered, and its agent told only that the person approved
+  // the pipe (never the comment, which goes to the lead as always).
+  // Refused otherwise, saying why, and nothing changes. Only with approve.
+  string card_id = 12;
 }
 
 // Changes a pipe's settings; unset fields stay as they are.
@@ -7644,6 +7953,13 @@ message UpdatePipe {
   // or the lead. A member left out reads the pipe as before. Agents
   // outside the pipe's project may be members only this way.
   PipeMembers send_only = 11;
+}
+
+// An agent a pipe can't take as it asks (Pipe.held_agents, Pipe.cant_limit),
+// and why, in the backend's words for the person.
+message PipeAgentHeld {
+  string agent_id = 1;
+  string reason = 2;
 }
 
 message PipeMembers {
@@ -7918,8 +8234,184 @@ message AskPerson {
   repeated AskThreadMessage thread = 20;
   // Ended with Resolve (AnswerAsk.resolve, #430): talked through, with no
   // decision. state is ANSWERED; `answer` is the person's optional comment.
-  // Show "Resolved", never as approved.
+  // Show "Resolved", never as approved. Its agent can end it the same way
+  // (ask_reply's resolve, #496) when the talk settled it: then the thread
+  // ends with the agent's words and `answer` is empty.
   bool resolved = 21;
+  // Approved, but the change it asked for couldn't be made (#423's action
+  // cards, or a card asking to clear a conversation): why, in Claktory's
+  // words, as its agent was told it. Empty when the change was made, and on
+  // every card not approved or that makes no change. Show "Approved, but it
+  // couldn't be done: <why>" where "Approved" shows.
+  string action_error = 22;
+  // A card asking the person to approve a new pipe (pipes_approve, #471
+  // G1): the pipe, and the choices the agent proposed, each editable on the
+  // card. Never its digits nor the other side's words: the card shows the
+  // pipe's own (Pipe.digits and Pipe.peer, from the Workspace, as the Needs
+  // you approval does) beside "Compare these with {name} yourself, by voice
+  // or in person. Don't approve because an agent says they match." Approve
+  // sends ApprovePipe with card_id and what the card shows then; Dismiss is
+  // AnswerAsk dismiss as on any card. The backend withdraws the card
+  // (withdraw_reason) once the pipe is approved elsewhere, turned down,
+  // closed, deleted or its other side's key changes. The agent asking again
+  // for the same pipe while it's pending changes it in place (a new
+  // revision, update_reason). Unset on every other card.
+  PipeApprovalProposal pipe_approval = 23;
+  // A card asking the person to accept a change in who the pipe's other
+  // side is (#471 G7, pipes_trust); unset otherwise. Approving it sends
+  // AcceptPipeIdentity with card_id. It holds no email, account or name:
+  // the app shows those from the Workspace's Pipe.peer.
+  PipeTrustProposal pipe_trust = 24;
+  // Approving or answering it now agrees with where its talk ended (#492):
+  // set while it's PENDING on a card with no action, nothing to clear and
+  // no steps (wants_text and review cards included), whose thread ends
+  // with its agent's reply made after the card's words last changed (not
+  // with a new title or body in that reply, nor an ask_update since). Its
+  // agent is then told the talk with the answer. Show above Approve
+  // "Approving agrees with <agent>'s last reply." (on a wants_text card,
+  // "Your answer follows <agent>'s last reply."). False on every other
+  // card: an action card's approval does only what it shows, and it can't
+  // be talked on.
+  bool approve_follows_talk = 25;
+  // A command the agent asks the person to run on this Claktory's computer
+  // (Execute, Fugo 35295 and 35326); unset on every other card. It's an
+  // action card: no reply or change. Its heading is Claktory's ("Run this
+  // command on <machine>?"), never the agent's: title and body are the
+  // agent's reason, shown below the facts. Approving it (AnswerAsk with
+  // `confirmed`) runs it once; `command.run` follows. An app that doesn't
+  // know this field shows an ordinary card, whose approval is refused.
+  AskCommand command = 26;
+  // A handoff from an errand (#435, browser_handoff): the person's turn in
+  // Claktory's browser (a payment, a sign-in, a code, an agreement…);
+  // unset on every other card. It's an action card: no reply or change.
+  // Its heading is Claktory's, from `handoff.kind` ("Your turn: a payment
+  // in Claktory's browser"); title and body are the agent's words, which
+  // may come from a web page (taint says which): show them as its, below.
+  // Buttons: Show me (WatchAgentBrowser on: the live view, the person's
+  // input), Done (AnswerAsk, approving: the agent carries on from the page
+  // as it is) and Can't do this (AnswerAsk dismiss, with their reason as
+  // the comment: the errand ends, CANCELLED).
+  ErrandHandoff handoff = 27;
+}
+
+// What an Execute card runs, where, and how it went.
+message AskCommand {
+  // Exactly as it runs, byte for byte: shown whole, in monospace, every
+  // line, never folded or changed.
+  string command = 1;
+  // The folder it runs in, absolute.
+  string cwd = 2;
+  // The computer it runs on, by name ("Matt's Mac Studio").
+  string machine = 3;
+  // How long it may run before it's stopped, in seconds.
+  uint32 timeout_seconds = 4;
+  // What to read twice before running it, in Claktory's words; empty for
+  // none. Hints, not a complete list. With any, Execute needs a second tap.
+  repeated CommandWarning warnings = 5;
+  // Unset until the person taps Execute.
+  CommandRun run = 6;
+}
+
+message CommandWarning {
+  CommandWarningKind kind = 1;
+  // Claktory's words: "Runs as administrator (sudo).", "Connects to prime2 (ssh)."
+  string text = 2;
+}
+
+enum CommandWarningKind {
+  COMMAND_WARNING_KIND_UNSPECIFIED = 0;
+  // sudo, doas.
+  COMMAND_WARNING_KIND_ADMIN = 1;
+  // ssh, scp, rsync, sftp to another computer (named in the text).
+  COMMAND_WARNING_KIND_REMOTE = 2;
+  // rm -r, dd, mkfs, diskutil erase or partition, git push --force, git reset --hard.
+  COMMAND_WARNING_KIND_DESTRUCTIVE = 3;
+  // launchctl, systemctl, crontab, schtasks.
+  COMMAND_WARNING_KIND_SERVICES = 4;
+  // A download run by a shell (curl … | sh).
+  COMMAND_WARNING_KIND_PIPE_TO_SHELL = 5;
+  // ~/.factory, ~/.ssh or the keychain (security).
+  COMMAND_WARNING_KIND_SENSITIVE = 6;
+}
+
+// An Execute card's run.
+message CommandRun {
+  CommandRunState state = 1;
+  // How it exited, when EXITED.
+  int32 exit_code = 2;
+  // What it printed, stdout and stderr together: the last 64 KB, secrets
+  // hidden as [secret NAME/VARIABLE].
+  string output = 3;
+  // It printed more than `output` holds.
+  bool output_truncated = 4;
+  int64 started_ms = 5;
+  // How long it ran; so far, while RUNNING (updated about every second).
+  int64 duration_ms = 6;
+  // The device Execute was tapped on.
+  string device = 7;
+  // Why it didn't start (FAILED_TO_START), or what happened to it
+  // (INTERRUPTED), in Claktory's words.
+  string error = 8;
+  // While RUNNING: what it waits for, in Claktory's words ("Waiting for a
+  // fingerprint or password on Matt's Mac Studio (sudo)."): sudo, doas or
+  // su in it asks on that Mac's screen (Touch ID) or for a terminal it
+  // hasn't got. Shown on the card on every device; '' otherwise.
+  string waiting = 9;
+}
+
+enum CommandRunState {
+  COMMAND_RUN_STATE_UNSPECIFIED = 0;
+  COMMAND_RUN_STATE_RUNNING = 1;
+  COMMAND_RUN_STATE_EXITED = 2;
+  // Stopped at timeout_seconds, with everything it started.
+  COMMAND_RUN_STATE_TIMED_OUT = 3;
+  COMMAND_RUN_STATE_FAILED_TO_START = 4;
+  // Claktory stopped while it ran; it's never run again.
+  COMMAND_RUN_STATE_INTERRUPTED = 5;
+}
+
+// What an agent proposes for a new pipe on its approval card
+// (AskPerson.pipe_approval), agents by id.
+message PipeApprovalProposal {
+  string pipe_id = 1;
+  repeated string member_ids = 2;
+  // Among member_ids: those that can run commands on this computer; the
+  // others are quarantined.
+  repeated string can_run_commands_ids = 3;
+  // The lead: an agent among member_ids; else a new liaison of this name.
+  string lead_id = 4;
+  string liaison_name = 5;
+  bool review_incoming = 6;
+  bool review_outgoing = 7;
+  // Members that only send, among member_ids (never the lead).
+  repeated string send_only_ids = 8;
+  // This side's settings of the pipe when the card was asked, or last
+  // updated by another pipes_approve: filled from the pipe by Claktory,
+  // never from the agent. The app compares them with the Workspace's Pipe:
+  // when they differ it says the settings changed since, and highlights
+  // each choice wider than the pipe now where the pipe narrowed since.
+  PipeApprovalBaseline asked_from = 9;
+}
+
+// What an agent's card to accept a pipe's identity change is about
+// (AskPerson.pipe_trust).
+message PipeTrustProposal {
+  string pipe_id = 1;
+  // The change it was asked for. When Pipe.peer.identity_change differs,
+  // the card is stale (the backend withdraws it).
+  PipeIdentityChange identity_change = 2;
+}
+
+// A pipe's own settings as they were (PipeApprovalProposal.asked_from):
+// nothing the other side said.
+message PipeApprovalBaseline {
+  repeated string member_ids = 1;
+  // Among member_ids: those that can't run commands on this computer.
+  repeated string quarantined_ids = 2;
+  repeated string send_only_ids = 3;
+  string lead_id = 4;
+  bool review_incoming = 5;
+  bool review_outgoing = 6;
 }
 
 // One step of a procedure (AskPerson.steps).
@@ -8020,6 +8512,20 @@ message AnswerAsk {
   // Where the person answered from: the agent is told, and asked to answer
   // their words on the card (ask_reply) so they reach them there.
   AskAnsweredFrom from = 10;
+  // How many messages of the card's talk (AskPerson.thread) it showed when
+  // the person answered (#492); send it with every AnswerAsk. An approval
+  // or answer (not a dismissal, reply, resolve or step) of a card with no
+  // action is refused when the thread grew since with a reply of its
+  // agent's among the new messages: the card already shows it, and the
+  // person answers again. Left out (an app before #492), nothing is
+  // checked; `revision` still is.
+  optional uint32 talk_seen = 11;
+  // Approving an Execute card (AskPerson.command): the person saw it as a
+  // command card and tapped Execute, and the confirm too when it has
+  // warnings. Always set by an app that shows command cards; an approval
+  // without it is refused, so an older app that shows only the title and
+  // body can't run a command the person never saw.
+  bool confirmed = 12;
 }
 
 // A chat: a one-off conversation of the person's, beside their agents but
@@ -8349,6 +8855,9 @@ message Notify {
   // device_id): a tap opens its Needs you item. The notification itself
   // never allows it, and says nothing the device chose (#352 P4).
   string device_id = 13;
+  // A website another Claktory started sharing over pipe_id (W2): a tap
+  // opens the pipe at that share (PipeShare.id).
+  string share_id = 14;
 }
 
 enum NotifyKind {
@@ -8548,6 +9057,9 @@ message NeedsYouRecord {
   // person's own changes. MODEL: models_set's reason, the same way;
   // CONVERSATION: conversation_fork's or conversation_switch's;
   // WITHDRAWN: why the agent took its question or proposal back.
+  // RESOLVED: the agent's last words when it closed the card itself as
+  // settled in the talk (ask_reply's resolve, #496): show "<agent> closed
+  // it: settled in the talk" with them; empty when the person resolved it.
   string agent_reason = 21;
   // MODEL: the change, for UndoModelChange. `undone` says it was undone.
   string model_change_id = 22;
@@ -8664,6 +9176,12 @@ enum NeedsYouRecordKind {
   // proposal. A change to an app's access made so is APP_ACCESS, with
   // proposal_id set.
   NEEDS_YOU_RECORD_KIND_PROPOSAL_GRANT = 17;
+  // An agent gave up a secret it had, on its own, with secrets_give_up
+  // (#449): no card, no approval. Outcome CHANGED, agent_id the agent,
+  // title Claktory's sentence ("Mista gave up Cloudflare"), agent_reason
+  // its why. seq is the secrets_give_up call's entry in its conversation.
+  // Getting it back takes a request, like any other secret.
+  NEEDS_YOU_RECORD_KIND_SECRET_GIVEN_UP = 18;
 }
 
 enum NeedsYouOutcome {
@@ -8685,7 +9203,8 @@ enum NeedsYouOutcome {
   // decided_ms is when, agent_reason its reason, and `reply` is empty.
   NEEDS_YOU_OUTCOME_WITHDRAWN = 8;
   // An agent's question talked through on its card and ended with Resolve
-  // (#430), without a decision.
+  // (#430), without a decision: by the person, or by its agent closing it as
+  // settled in the talk (#496; agent_reason holds its words).
   NEEDS_YOU_OUTCOME_RESOLVED = 9;
 }
 
@@ -9519,4 +10038,587 @@ message ReplyReport {
   string note = 4;
   // The text was cut at 16 KB.
   bool truncated = 5;
+}
+
+// ---- Direct messages through the home Claktory (#451) ----
+//
+// Each person's always-on Claktory, their home, keeps their direct messages
+// for their devices; claktory.com keeps only MLS's control plane (keys,
+// key packages, signed device lists, commits, GroupInfo, Welcomes). A
+// device hands its MLS messages to its home here, the home sends them to
+// the friend's home over iroh (ALPN claktory-dm/1) and serves each of its
+// person's leaves what's theirs, in one order per group. The home holds
+// only ciphertext and reads only MLS's public framing. Only the person's
+// paired devices send these, over their own connection: never an agent or
+// Rivet. Behind FACTORY_DMS_PREVIEW until People ships.
+
+// Hands an MLS message to the home: an application message (conversation,
+// self group or channel), or a commit claktory.com has just accepted (sent
+// right after it's accepted, so the person's other devices and the
+// friend's home learn of it at once). Answered with DmFeed holding `sent`;
+// a request that isn't an MLS message of a group is an Error
+// (INVALID_REQUEST).
+message DmSend {
+  bytes group_id = 1;
+  // The MLS message as the device made it: ciphertext, never opened here.
+  bytes envelope = 2;
+  // An application message's id, the same on every retry: 22 to 64
+  // letters, digits, - and _. Empty for a commit.
+  string client_message_id = 3;
+  // The sending device's MLS leaf id: its messages and deliveries are
+  // told apart by it.
+  string leaf_id = 4;
+}
+
+// This connection follows its device's groups: answered with DmFeed pages
+// up to now, then every new entry for the leaf, and its own messages'
+// deliveries, pushed as DmFeed until the connection closes or another
+// DmFollow replaces this one.
+message DmFollow {
+  // This device's MLS leaf id.
+  string leaf_id = 1;
+  // Where it read to in each group; a group left out starts at the
+  // leaf's join.
+  repeated DmCursor cursors = 2;
+}
+
+message DmCursor {
+  bytes group_id = 1;
+  // The home's seq in that group (DmEntry.seq).
+  uint64 seq = 2;
+}
+
+// The device has kept its groups' entries through these seqs: the home may
+// let them go once every leaf of the person's in the group has. Answered
+// with Ack.
+message DmAck {
+  string leaf_id = 1;
+  repeated DmCursor through = 2;
+}
+
+// The routing table, as the device verified it: each friend's home (from
+// their signed device list, checked against the device's pin), with the
+// groups it may send to this home and receive from it. Replaces the whole
+// table. (The person's own other Claktories with a Claktory leaf introduce
+// themselves to the home, signed with that leaf's key: they're not listed
+// here.) Answered with DmHome; sent to a Claktory that isn't the home yet,
+// it's kept for when it is.
+message DmRoutes {
+  repeated DmRoute routes = 1;
+}
+
+message DmRoute {
+  // The friend's account.
+  string account_id = 1;
+  // That home's iroh endpoint id (32 bytes).
+  bytes home_endpoint = 2;
+  repeated bytes group_ids = 3;
+}
+
+message DmFeed {
+  // In each group's order, oldest first.
+  repeated DmEntry entries = 1;
+  // The groups the entries are in, or all the leaf's on DmFollow.
+  repeated DmGroupState groups = 2;
+  // The answer to DmSend.
+  DmReceipt sent = 3;
+  // How the person's own messages are getting on.
+  repeated DmDelivery deliveries = 4;
+  // More pages follow before the device is caught up.
+  bool has_more = 5;
+}
+
+message DmEntry {
+  bytes group_id = 1;
+  // The home's number for it in the group: the same on every device of
+  // the person's.
+  uint64 seq = 2;
+  DmEntryKind kind = 3;
+  // Its epoch, from its framing.
+  uint64 epoch = 4;
+  bytes envelope = 5;
+  // When the home took it.
+  int64 accepted_ms = 6;
+  // Sent by one of the person's own leaves.
+  bool from_me = 7;
+  // The sender's id for it: only on the person's own messages. (Who sent
+  // it, an agent's message included, is inside the encrypted content.)
+  string client_message_id = 8;
+}
+
+enum DmEntryKind {
+  DM_ENTRY_KIND_UNSPECIFIED = 0;
+  DM_ENTRY_KIND_APPLICATION = 1;
+  DM_ENTRY_KIND_COMMIT = 2;
+}
+
+message DmGroupState {
+  bytes group_id = 1;
+  // The epoch the home has the commit for.
+  uint64 epoch = 2;
+  uint64 last_seq = 3;
+  // The home let go of entries past the device's cursor (it was away over
+  // 90 days): it joins the group again.
+  bool behind = 4;
+}
+
+message DmReceipt {
+  bytes group_id = 1;
+  string client_message_id = 2;
+  // The home's seq and time, once stored (STORED, DUPLICATE).
+  uint64 seq = 3;
+  int64 accepted_ms = 4;
+  DmSendResult result = 5;
+  // TOO_OLD: the home's epoch.
+  uint64 epoch = 6;
+  // HOME_FULL, RATE_LIMITED: when to try again.
+  int64 retry_after_ms = 7;
+}
+
+enum DmSendResult {
+  DM_SEND_RESULT_UNSPECIFIED = 0;
+  DM_SEND_RESULT_STORED = 1;
+  // The same id and envelope again: the first receipt.
+  DM_SEND_RESULT_DUPLICATE = 2;
+  // A future epoch the home has no commit for yet: stored once it has.
+  DM_SEND_RESULT_HELD = 3;
+  // The friend has no device in the conversation yet.
+  DM_SEND_RESULT_WAITING_FOR_FRIEND = 4;
+  // More than 5 epochs behind: encrypt it again at the current epoch.
+  DM_SEND_RESULT_TOO_OLD = 5;
+  // The same id with another envelope: refused.
+  DM_SEND_RESULT_CONFLICT = 6;
+  DM_SEND_RESULT_HOME_FULL = 7;
+  DM_SEND_RESULT_RATE_LIMITED = 8;
+  // This Claktory doesn't take direct messages (it isn't the home, or the
+  // preview is off).
+  DM_SEND_RESULT_NOT_HOME = 9;
+}
+
+message DmDelivery {
+  bytes group_id = 1;
+  string client_message_id = 2;
+  DmDeliveryState state = 3;
+  // WAITING: when the friend's home was last reachable (0: never);
+  // DELIVERED: when it took it.
+  int64 at_ms = 4;
+  // BOUNCED: the friend's home's epoch.
+  uint64 epoch = 5;
+  // The friend's account it's about.
+  string account_id = 6;
+}
+
+enum DmDeliveryState {
+  DM_DELIVERY_STATE_UNSPECIFIED = 0;
+  // The home has it and is sending it on.
+  DM_DELIVERY_STATE_HELD_BY_HOME = 1;
+  // The friend's home took it.
+  DM_DELIVERY_STATE_DELIVERED = 2;
+  // The friend's home can't be reached.
+  DM_DELIVERY_STATE_WAITING = 3;
+  // The friend's home can't read it any more (its epoch moved on more
+  // than 5): the device encrypts it again, by itself only when members
+  // were only removed since, otherwise asking the person first.
+  DM_DELIVERY_STATE_BOUNCED = 4;
+}
+
+message DmHome {
+  // This Claktory takes the person's direct messages.
+  bool is_home = 1;
+  // Its iroh endpoint id: what the device signs into its list as `home`.
+  bytes endpoint_id = 2;
+  repeated DmPeer peers = 3;
+  // Ciphertext held for the person and friends, in bytes.
+  uint64 held_bytes = 4;
+  // Taking nothing new: its disk has under 5 GiB free.
+  bool intake_paused = 5;
+  // When this Claktory became the person's home, in ms since the epoch; 0
+  // if it isn't the home (or never knew when). Messages sent before it came
+  // through another home, so this one can't vouch they were delivered.
+  int64 home_since_ms = 6;
+}
+
+message DmPeer {
+  string account_id = 1;
+  bytes home_endpoint = 2;
+  bool reachable = 3;
+  int64 last_reachable_ms = 4;
+  // Messages waiting to go to it.
+  uint32 outbox_count = 5;
+  // A cap it reached with this home ("full"), or "turned_away": it doesn't
+  // take this home's link at all (it isn't the friend's home any more, or
+  // doesn't route this one yet), so the person's device reads the friend's
+  // list again and gives the home new routes. Empty if none.
+  string refused = 6;
+}
+
+// ---- Claktory's browser (#435) ----
+//
+// One Chrome per Claktory, with a kept profile (signed in to sites as a
+// person's browser is), on a private virtual screen nobody sees: on a Linux
+// server as its own user, on a Mac in a small VM. Agents use it only
+// through errands (Errand): a contained agent drives it with the errands
+// extension, within the errand's sites. The person sees it only when they
+// ask: Show me on a handoff card, Watch, Take over, or Open. The live view
+// is the person's alone: frames and the clipboard go only to the one
+// connection watching, and input counts only from it, only during the
+// person's turn (PERSONS_TURN, TAKEN_OVER, BROWSING).
+
+message AgentBrowser {
+  AgentBrowserState state = 1;
+  // The errand using it (Errand.id), or empty.
+  string errand_id = 2;
+  // Why it can't run on this computer, with what fixes it; unset when it
+  // can. While set, state is UNAVAILABLE and nothing starts it.
+  AgentBrowserSetup setup = 3;
+  // The sites it's signed in to: origins holding cookies
+  // ("https://accounts.google.com"), sorted; never a cookie's name or
+  // value. Read when it last ran; kept while it's off.
+  repeated string signed_in_sites = 4;
+  // The device whose connection watches it now (WatchAgentBrowser), by
+  // name ("Matt's iPhone"); empty when none does. Its input is the only
+  // input that counts. A connection knows it's the one: it sent Watch on
+  // and got no AgentBrowserViewMoved since.
+  string viewer_device = 5;
+  // WARM: when it closes by itself unless used (30 minutes after it was
+  // last used), in ms since 1970; 0 otherwise.
+  int64 warm_until_ms = 6;
+  // Chrome's version ("158.0.8127.88"), once known; empty before.
+  string chrome_version = 7;
+  // The time zone its pages see, an IANA name ("Europe/London"); empty
+  // until set (SetAgentBrowserLocale, or the first device's), when they
+  // see the Claktory computer's own. Applies from its next start.
+  string time_zone = 8;
+  // The languages its pages see, BCP 47 tags in order ("en-GB", "en");
+  // empty until set, when they see en-US. Applies from its next start.
+  repeated string languages = 9;
+}
+
+enum AgentBrowserState {
+  AGENT_BROWSER_STATE_UNSPECIFIED = 0;
+  // Not running. The profile is kept.
+  AGENT_BROWSER_STATE_OFF = 1;
+  AGENT_BROWSER_STATE_STARTING = 2;
+  // Running with no one using it, closing by itself at warm_until_ms.
+  AGENT_BROWSER_STATE_WARM = 3;
+  // An errand's agent drives it. The view is view-only.
+  AGENT_BROWSER_STATE_DRIVEN = 4;
+  // An errand handed it to the person (a handoff card waits): Chrome runs
+  // with no automation, the agent can't read or act, and the watching
+  // connection's input counts.
+  AGENT_BROWSER_STATE_PERSONS_TURN = 5;
+  // The person took it from the errand's agent (TakeOverAgentBrowser): the
+  // agent is paused until HandBackAgentBrowser.
+  AGENT_BROWSER_STATE_TAKEN_OVER = 6;
+  // The person opened it with no errand (OpenAgentBrowser): theirs to use.
+  AGENT_BROWSER_STATE_BROWSING = 7;
+  AGENT_BROWSER_STATE_STOPPING = 8;
+  // It can't run on this computer: setup says why.
+  AGENT_BROWSER_STATE_UNAVAILABLE = 9;
+}
+
+// What's missing for Claktory's browser on this computer.
+message AgentBrowserSetup {
+  // Why, in a sentence ("Chrome isn't installed on this computer.").
+  string problem = 1;
+  // The command that sets it up, to run once in a terminal on this
+  // computer (it asks for the administrator's password): show it whole, in
+  // monospace, with Copy. Empty when nothing to run fixes it, or on NixOS.
+  string command = 2;
+  // On NixOS: the lines to add to the configuration instead, then rebuild.
+  string nixos_lines = 3;
+  // Nothing on this computer can fix it (an Intel Mac, a Linux kernel too
+  // old to contain the browser): problem says so, and what can.
+  bool unsupported = 4;
+}
+
+// An agent's errand in Claktory's browser: what it's for, and the sites it
+// may go to, fixed when it was opened.
+message Errand {
+  string id = 1;
+  // The agent doing it: a contained agent with the errands extension.
+  string agent_id = 2;
+  // What it's for, in the words of who opened it (one line).
+  string purpose = 3;
+  // The origins it may go to ("https://play.google.com"), fixed when it
+  // was opened; the agent can't change them.
+  repeated string sites = 4;
+  ErrandState state = 5;
+  // Who opened it: an agent's id (its lead), or empty for the person.
+  string opened_by = 6;
+  // The latest handoff while it waits for the person (PERSONS_TURN);
+  // unset otherwise.
+  ErrandHandoff handoff = 7;
+  int64 created_ms = 8;
+  // When it ended (DONE, STOPPED, CANCELLED, FAILED), in ms; 0 before.
+  int64 ended_ms = 9;
+  // Why it ended, in Claktory's words ("You stopped it.", "Chrome closed
+  // unexpectedly."), or for CANCELLED the person's reason, as theirs.
+  string end_reason = 10;
+}
+
+enum ErrandState {
+  ERRAND_STATE_UNSPECIFIED = 0;
+  // Its agent drives the browser.
+  ERRAND_STATE_RUNNING = 1;
+  // Handed to the person: a handoff card waits.
+  ERRAND_STATE_PERSONS_TURN = 2;
+  // The person took the browser over; the agent waits.
+  ERRAND_STATE_TAKEN_OVER = 3;
+  // Its agent finished it.
+  ERRAND_STATE_DONE = 4;
+  // The person stopped it (StopAgentBrowser, Delete browser data).
+  ERRAND_STATE_STOPPED = 5;
+  // The person answered a handoff with Can't do this.
+  ERRAND_STATE_CANCELLED = 6;
+  // The browser ended under it (it couldn't start, or closed).
+  ERRAND_STATE_FAILED = 7;
+}
+
+// A moment only the person can act on, handed to them by an errand's agent.
+message ErrandHandoff {
+  string errand_id = 1;
+  ErrandHandoffKind kind = 2;
+  // What to do, in the agent's words (one sentence; it has read web pages,
+  // so show it as the agent's, never as Claktory's).
+  string what = 3;
+  // The page it was handed over on, as Claktory read it: its origin, and
+  // its title (control and invisible characters taken out). Show the
+  // origin apart from the title, so a title can't pose as a site.
+  string origin = 4;
+  string title = 5;
+  // The card it waits on: the entry's seq in the agent's conversation
+  // (its AskPerson).
+  uint64 seq = 6;
+}
+
+enum ErrandHandoffKind {
+  ERRAND_HANDOFF_KIND_UNSPECIFIED = 0;
+  ERRAND_HANDOFF_KIND_PAYMENT = 1;
+  // An identity check ("Verify it's you", a document).
+  ERRAND_HANDOFF_KIND_IDENTITY = 2;
+  // A code sent by text message or email.
+  ERRAND_HANDOFF_KIND_CODE = 3;
+  // Accepting an agreement or terms.
+  ERRAND_HANDOFF_KIND_AGREEMENT = 4;
+  ERRAND_HANDOFF_KIND_CAPTCHA = 5;
+  // Signing in to a site: Chrome restarts with no automation first.
+  ERRAND_HANDOFF_KIND_SIGN_IN = 6;
+  // Anything else, such as a site outside the errand's.
+  ERRAND_HANDOFF_KIND_OTHER = 7;
+}
+
+// Starts or stops this connection's live view. One connection watches at a
+// time: Watch from another moves the view there, and the connection before
+// gets AgentBrowserViewMoved. While watching, it gets AgentBrowserFrame,
+// one at a time (the next after its AgentBrowserFrameAck), only when the
+// screen changes; its input counts during the person's turn. Refused while
+// the browser is OFF or UNAVAILABLE (Open starts it).
+message WatchAgentBrowser {
+  bool on = 1;
+  // The widest frame this device wants, in pixels (about 1280 on a Mac,
+  // the phone's width times its scale on a phone); frames are scaled down
+  // to it, never up. 0: as the screen is.
+  uint32 max_width = 2;
+  // A phone's shape, in its logical points (390 × 844): the browser's
+  // screen takes that shape during the person's turn, so pages lay out for
+  // a phone. 0 × 0 keeps the desktop's.
+  uint32 screen_width = 3;
+  uint32 screen_height = 4;
+  // This device's own time zone (an IANA name, from the platform) and its
+  // preferred languages (BCP 47, in order), sent every time: while the
+  // browser's own (AgentBrowser.time_zone, .languages) aren't set, the
+  // first device's become them. Never overwrites a set one.
+  string device_time_zone = 5;
+  repeated string device_languages = 6;
+}
+
+// The watching connection has the frame `seq`: the next can come.
+message AgentBrowserFrameAck {
+  uint64 seq = 1;
+}
+
+// The person's input, from the watching connection, during their turn
+// (PERSONS_TURN, TAKEN_OVER, BROWSING); refused otherwise, and from any
+// other connection. At most 4 KB of text per message, and a limited number
+// of events per second (more are dropped). Never logged or kept: an
+// errand's log says only that the person typed.
+message AgentBrowserInput {
+  repeated AgentBrowserEvent events = 1;
+}
+
+message AgentBrowserEvent {
+  oneof event {
+    AgentBrowserPointer pointer = 1;
+    AgentBrowserWheel wheel = 2;
+    AgentBrowserKey key = 3;
+    // Typed text, as the keys that make it (a phone's keyboard).
+    string text = 4;
+    // Pasted text: put on the browser's clipboard, then pasted (Ctrl+V).
+    string paste = 5;
+  }
+}
+
+// A pointer at (x, y), as fractions of frame `frame_seq`'s width and
+// height (0 to 1, from its top left), so a resize or a scaled frame can't
+// misplace it. A tap is a down then an up.
+message AgentBrowserPointer {
+  AgentBrowserPointerKind kind = 1;
+  float x = 2;
+  float y = 3;
+  // 1 the main button, 2 the middle, 3 the secondary; 0 on a move.
+  uint32 button = 4;
+  uint64 frame_seq = 5;
+}
+
+enum AgentBrowserPointerKind {
+  AGENT_BROWSER_POINTER_KIND_UNSPECIFIED = 0;
+  AGENT_BROWSER_POINTER_KIND_MOVE = 1;
+  AGENT_BROWSER_POINTER_KIND_DOWN = 2;
+  AGENT_BROWSER_POINTER_KIND_UP = 3;
+}
+
+// Scrolling at (x, y), fractions of frame `frame_seq` as for a pointer, by
+// (dx, dy) in the frame's pixels (positive: right and down).
+message AgentBrowserWheel {
+  float x = 1;
+  float y = 2;
+  float dx = 3;
+  float dy = 4;
+  uint64 frame_seq = 5;
+}
+
+// A key pressed or released.
+message AgentBrowserKey {
+  bool down = 1;
+  // The key as the web names it (KeyboardEvent.key: "Enter", "a",
+  // "ArrowLeft", "Backspace").
+  string key = 2;
+  // Held with it: 1 Shift, 2 Control, 4 Alt (Option), 8 Meta (Command).
+  uint32 modifiers = 3;
+}
+
+// Takes the browser from the errand's agent (DRIVEN → TAKEN_OVER): the
+// agent is paused until HandBackAgentBrowser. From the watching connection.
+message TakeOverAgentBrowser {}
+
+// Gives it back: TAKEN_OVER → DRIVEN (the agent carries on from the page
+// as it is, and is told so), or BROWSING → WARM (the person is done).
+message HandBackAgentBrowser {}
+
+// Stops it: the errand ends (STOPPED, its agent told "You stopped the
+// browser.") and Chrome closes. The profile is kept.
+message StopAgentBrowser {}
+
+// Opens it for the person with no errand (BROWSING), at `url` (http or
+// https; empty: where it left off); then WatchAgentBrowser. Refused while
+// an errand uses it (watch it instead).
+message OpenAgentBrowser {
+  string url = 1;
+  // As on WatchAgentBrowser.
+  string device_time_zone = 2;
+  repeated string device_languages = 3;
+}
+
+// Sets the time zone and languages Claktory's browser's pages see
+// (Settings → Claktory's browser), both replaced; empty: not set (the
+// Claktory computer's zone, en-US). The zone must be an IANA name the
+// Claktory knows (ListTimeZones); languages BCP 47 tags ("en-GB"), at most
+// 8. Applies from the browser's next start. The person's only.
+message SetAgentBrowserLocale {
+  string time_zone = 1;
+  repeated string languages = 2;
+}
+
+// The time zones the Claktory knows, for a picker: answered by TimeZones.
+message ListTimeZones {}
+
+// IANA names ("Europe/London"), sorted.
+message TimeZones {
+  repeated string names = 1;
+}
+
+// Deletes everything the browser keeps (sign-ins, history, its profile),
+// stopping it and any errand first. Confirm in the app first.
+message DeleteAgentBrowserData {}
+
+// An errand's log (empty: every errand's), the last 7 days.
+message ListErrandLog {
+  string errand_id = 1;
+}
+
+// The person opens an errand for an agent, as a lead does with
+// errand_open: the agent must be contained, with the errands extension.
+message OpenErrand {
+  string agent_id = 1;
+  string purpose = 2;
+  // Origins ("https://play.google.com"), or hosts, which mean https.
+  repeated string sites = 3;
+  // What to do, told to the agent with the errand (Markdown).
+  string brief = 4;
+}
+
+// The person contains an agent for errands, or lifts it (Agent.contained).
+// Lifting it turns its errands extension off and ends its errand.
+message SetAgentContained {
+  string agent_id = 1;
+  bool contained = 2;
+}
+
+// A frame of the browser's screen, as JPEG, to the watching connection.
+message AgentBrowserFrame {
+  uint64 seq = 1;
+  bytes jpeg = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+  // The page shown: its origin and title, as Claktory read them (control
+  // and invisible characters taken out); show the origin apart from the
+  // title. Empty in the person's turn when Claktory can't read them.
+  string origin = 5;
+  string title = 6;
+  // A text field has the focus (a driven session knows): bring up the
+  // phone's keyboard.
+  bool text_field_focused = 7;
+  // The browser's screen, in its pixels; the frame may be scaled down
+  // from it. Input needs none of it: its positions are fractions.
+  uint32 screen_width = 8;
+  uint32 screen_height = 9;
+}
+
+// Text copied in the browser during the person's turn, to the watching
+// connection: put it on the device's clipboard.
+message AgentBrowserClipboard {
+  string text = 1;
+}
+
+// The live view moved to another device's connection: close it here.
+message AgentBrowserViewMoved {
+  // That device's name.
+  string device = 1;
+}
+
+message ErrandLog {
+  string errand_id = 1;
+  // Oldest first.
+  repeated ErrandLogEntry entries = 2;
+}
+
+// One thing done in an errand, never what was typed or read.
+message ErrandLogEntry {
+  int64 at_ms = 1;
+  string errand_id = 2;
+  // Who: the errand's agent, or empty for the person.
+  string agent_id = 3;
+  // Where: the page's origin, and its path without the query.
+  string origin = 4;
+  string path = 5;
+  // What, in Claktory's words ("Clicked", "Typed 12 characters", "Handed
+  // to you: a payment", "You typed").
+  string action = 6;
+  // How it went: empty when it worked, else why not.
+  string outcome = 7;
+  // What it was done to: the element's role and name ("button "Next"", at
+  // most 80 characters, read from the page: show it as the page's); empty
+  // when none.
+  string target = 8;
 }

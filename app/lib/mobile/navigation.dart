@@ -1,5 +1,7 @@
 import 'package:flutter/widgets.dart';
 
+import '../protocol/factory/v1/factory.pb.dart' show ViewLeaf;
+
 /// How a phone moves between its screens (docs/IDENTITY.md, "Phone"):
 /// the conversation fills the screen; a drawer from the leading edge holds
 /// the Claktories and their projects and agents; everything else is a page
@@ -59,6 +61,11 @@ abstract class PhoneRoutes {
   /// an app's dock does). True when it's done here; false where these
   /// routes can't show it, for the caller to show it its own way.
   bool showPane(String agentId, String paneId);
+
+  /// Shows an app's view ([leaf], an app's leaf) as a page of its own
+  /// over what shows: never in an agent's layout, which other devices
+  /// share. Back pops it.
+  void pushApp(ViewLeaf leaf);
 
   /// Keeps the drawer's edge swipe from starting while something else owns
   /// the finger: a recording's hold and slide, a code block or a picture

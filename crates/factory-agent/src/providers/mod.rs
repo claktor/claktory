@@ -13,6 +13,7 @@ macro_rules! spawn_stream {
 
 pub mod anthropic;
 pub mod catalog;
+pub mod gzip;
 pub mod keys;
 pub mod listing;
 pub mod models;
@@ -31,7 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::auth::{ApiKeyAuth, OAuthFlow};
 use crate::errors::Error;
-use crate::estimate::estimate_context;
+use crate::estimate::{ImageRule, estimate_context_for};
 use crate::stream::{EventSink, EventStream, LlmContext, StreamOptions, ThinkingLevel};
 use crate::types::{AssistantMessage, Model, StopReason, StreamEvent, ToolResultPart};
 
@@ -339,7 +340,7 @@ pub fn clamp_max_tokens(model: &Model, context: &LlmContext, max_tokens: u64) ->
         return max_tokens.max(1);
     }
     let tools = serde_json::to_value(&context.tools).unwrap_or(Value::Null);
-    let estimate = estimate_context(context.system_prompt.as_deref(), &context.messages, Some(&tools)).tokens;
+    let estimate = estimate_context_for(ImageRule::of(model), context.system_prompt.as_deref(), &context.messages, Some(&tools)).tokens;
     let available = model.context_window.saturating_sub(estimate).saturating_sub(CONTEXT_SAFETY_TOKENS);
     max_tokens.min(available.max(1))
 }

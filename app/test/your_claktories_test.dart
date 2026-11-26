@@ -349,6 +349,28 @@ void main() {
     expect(opened.last, privacyPage);
   });
 
+  testWidgets('a Claktory that was signed out itself says so, and that '
+      'it is the one to sign in (friend bug #38)', (tester) async {
+    final (harness, _) = await phone(tester);
+    harness.connections.use(
+      parsePairingCode('factory://?t=${'c' * 64}&e=${'a' * 64}&name=Home'),
+    );
+    const said =
+        'This Claktory was signed out of your Claktory account, so it '
+        "can't let this device in. Sign it in again in its Settings → "
+        'Account, then try again here.';
+    harness.backend.signInRequired.value = said;
+    await pumpFrames(tester);
+    expect(find.text('Home was signed out'), findsOneWidget);
+    expect(find.text('Sign in to connect to Home'), findsNothing);
+    expect(find.text(said), findsOneWidget);
+    // Not this device's sign-in: the Claktory's.
+    expect(find.byKey(const ValueKey('device-email')), findsNothing);
+    expect(find.text('Sign out'), findsNothing);
+    await tester.tap(find.text('Try again'));
+    await pumpFrames(tester);
+  });
+
   testWidgets('a Claktory that wants this device signed in says so, and '
       'connects again once it is', (tester) async {
     final (harness, _) = await phone(tester);
@@ -386,7 +408,7 @@ void main() {
     );
     await pumpFrames(tester);
     expect(
-      find.textContaining('Confirm this iPhone is yours by '),
+      find.textContaining('Sign in to your Claktory account in this app by '),
       findsOneWidget,
     );
     await tester.tap(
@@ -396,7 +418,7 @@ void main() {
       ),
     );
     await pumpFrames(tester);
-    expect(find.text('Confirm this iPhone is yours'), findsOneWidget);
+    expect(find.text('Sign in to keep using Home'), findsOneWidget);
   });
 
   testWidgets("at the largest text the banner's words grow only to 2×", (
@@ -412,7 +434,7 @@ void main() {
     tester.platformDispatcher.textScaleFactorTestValue = 3.1;
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
     await pumpFrames(tester);
-    final words = find.textContaining('Confirm this iPhone is yours by ');
+    final words = find.textContaining('Sign in to your Claktory account in this app by ');
     expect(MediaQuery.textScalerOf(tester.element(words)).scale(10), 20);
     expect(tester.takeException(), isNull);
   });

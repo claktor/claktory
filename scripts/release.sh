@@ -117,7 +117,7 @@ if [[ "$APP_NAME" == "Factory.app" ]]; then
   # Claktory that installs it never hears of another release (v0.1.17's first
   # build, 2026-11-22). Only on purpose, with --no-channel.
   if [[ "$RELEASES" == "$HOME/.factory/releases" && -z "${FACTORY_UPDATE_URL:-}" ]] && ! $NO_CHANNEL; then
-    echo "a release of the real Claktory needs its update channel: FACTORY_UPDATE_URL=https://github.com/claktor/claktory/releases/latest/download/latest.json scripts/release.sh (or --no-channel, only on purpose)" >&2
+    echo "a release of the real Claktory needs its update channel: FACTORY_UPDATE_URL=https://github.com/claktory/claktory/releases/latest/download/latest.json scripts/release.sh (or --no-channel, only on purpose)" >&2
     exit 1
   fi
   # Publishing it pushes its source, which the secret check must pass: find
@@ -133,6 +133,14 @@ if [[ "$APP_NAME" == "Factory.app" ]]; then
   release_rustflags
   release_inputs
   release_pub_get "$SRC_ROOT/app"
+  # QA-only lying features (E11) must stay refused in release builds: their
+  # guards are checked here, never remembered (Fugo 40183). A target folder of
+  # its own, so this release's build starts from nothing as before.
+  if [[ -x "$SRC_ROOT/scripts/check-qa-lies.sh" ]]; then
+    QA_LIES_TARGET="$(mktemp -d)"
+    CARGO_TARGET_DIR="$QA_LIES_TARGET" "$SRC_ROOT/scripts/check-qa-lies.sh" || { rm -rf "$QA_LIES_TARGET"; echo "a QA-only lying feature isn't refused in release builds; not releasing" >&2; exit 1; }
+    rm -rf "$QA_LIES_TARGET"
+  fi
 else
   SRC_ROOT="$ROOT"
 fi
