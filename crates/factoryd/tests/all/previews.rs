@@ -206,3 +206,32 @@ async fn showing_an_image_makes_its_preview_for_the_screens_that_asked() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
+
+/// A picture sent from a device has its previews made as its upload
+/// finishes, for the screens that asked lately: another device's first look
+/// finds them made.
+#[tokio::test]
+async fn an_uploaded_picture_has_its_previews_made_ahead() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let site = dir.join("site");
+    apply_request(&mut client, &mut view, create_project("Site", &site)).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    let earlier = site.join("earlier.png");
+    std::fs::write(&earlier, png(2000, 3000, 6)).expect("write");
+    assert_eq!(content(client.request(read(&earlier, true)).await.body).preview(), FilePreview::Made);
+
+    let photo = png(2400, 1800, 7);
+    let sent = crate::uploads::upload(&mut client, "u1", "builder", "photo.png", &photo, "image/png").await;
+    let kept = factory.home().root().join(format!("cache/previews/{}-1320x2868.preview", sha(&photo)));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !kept.is_file() {
+        assert!(std::time::Instant::now() < deadline, "no preview made ahead");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    // And it's the one a device asking then gets.
+    let asked = content(client.request(read(Path::new(&sent.path), true)).await.body);
+    assert_eq!(asked.preview(), FilePreview::Made);
+}

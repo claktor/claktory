@@ -141,7 +141,10 @@ void main() {
         ),
         findsOneWidget,
       );
-      expect(find.textContaining('Mac or a Linux server'), findsOneWidget);
+      expect(
+        find.textContaining('Mac or a Linux server (or Windows, in preview)'),
+        findsOneWidget,
+      );
       expect(fresh.calls.where((c) => c.method == 'requestCamera'), isEmpty);
       expect(fresh.connections.saved, isEmpty);
       expect(tester.takeException(), isNull);
@@ -198,6 +201,9 @@ void main() {
     final fresh = _Fresh();
     await fresh.show(tester);
     await _tap(tester, 'Scan code instead');
+    // Why first (area 5a, P7): Continue asks.
+    expect(fresh.calls.where((c) => c.method == 'requestCamera'), isEmpty);
+    await _tap(tester, 'Continue');
     expect(fresh.calls.where((c) => c.method == 'requestCamera'), hasLength(1));
     expect(find.text('Open Settings'), findsOneWidget);
     expect(find.text('Paste code instead'), findsOneWidget);

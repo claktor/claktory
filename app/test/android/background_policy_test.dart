@@ -173,6 +173,117 @@ void main() {
     otherBusy.dispose();
   });
 
+  testWidgets('visible Custom Tab protects only its own policy beyond grace', (
+    tester,
+  ) async {
+    final other = AndroidBackgroundPolicy(busy: busy, suspend: () => stops++);
+    policy.externalVisible(true);
+    policy.hidden();
+    other.hidden();
+    await tester.pump(const Duration(minutes: 5));
+    expect(stops, 1, reason: 'the unrelated Claktory still suspends');
+    busy.value = true;
+    busy.value = false;
+    await tester.pump(Duration.zero);
+    expect(stops, 1, reason: 'work finishing cannot close the visible tab');
+    other.dispose();
+  });
+
+  testWidgets(
+    'tab closing starts a fresh full grace, duplicates do not renew',
+    (tester) async {
+      policy.hidden();
+      await tester.pump(const Duration(seconds: 24));
+      policy.externalVisible(true);
+      await tester.pump(const Duration(minutes: 5));
+      expect(stops, 0);
+      policy.externalVisible(false);
+      await tester.pump(const Duration(seconds: 24));
+      policy.externalVisible(false);
+      policy.hidden();
+      await tester.pump(const Duration(milliseconds: 999));
+      expect(stops, 0);
+      await tester.pump(const Duration(milliseconds: 1));
+      expect(stops, 1);
+    },
+  );
+
+  testWidgets('an initial false native event does not renew ordinary grace', (
+    tester,
+  ) async {
+    policy.hidden();
+    await tester.pump(const Duration(seconds: 24));
+    policy.externalVisible(false);
+    await tester.pump(const Duration(seconds: 1));
+    expect(stops, 1);
+  });
+
+  testWidgets('late native visibility rearms a previously suspended policy', (
+    tester,
+  ) async {
+    policy.hidden();
+    await tester.pump(const Duration(seconds: 25));
+    expect(stops, 1);
+    policy.externalVisible(true);
+    await tester.pump(const Duration(minutes: 5));
+    expect(stops, 1);
+    policy.externalVisible(false);
+    await tester.pump(const Duration(seconds: 25));
+    expect(stops, 2, reason: 'the transport can suspend again after reopening');
+  });
+
+  testWidgets('native visibility cancels a stop queued after work completes', (
+    tester,
+  ) async {
+    busy.value = true;
+    policy.hidden();
+    await tester.pump(const Duration(seconds: 25));
+    busy.value = false;
+    policy.externalVisible(true);
+    await tester.pump(Duration.zero);
+    expect(stops, 0);
+    policy.externalVisible(false);
+    await tester.pump(const Duration(seconds: 25));
+    expect(stops, 1);
+  });
+
+  testWidgets('returning to Flutter cancels a tab-close grace', (tester) async {
+    policy.externalVisible(true);
+    policy.hidden();
+    policy.externalVisible(false);
+    await tester.pump(const Duration(seconds: 24));
+    policy.resumed();
+    await tester.pump(const Duration(minutes: 5));
+    expect(stops, 0);
+    policy.hidden();
+    await tester.pump(const Duration(seconds: 25));
+    expect(stops, 1);
+  });
+
+  testWidgets(
+    'tab close still waits for a send finishing after its new grace',
+    (tester) async {
+      policy.externalVisible(true);
+      policy.hidden();
+      policy.externalVisible(false);
+      busy.value = true;
+      await tester.pump(const Duration(seconds: 25));
+      expect(stops, 0);
+      busy.value = false;
+      await tester.pump(Duration.zero);
+      expect(stops, 1, reason: 'send completion does not grant another grace');
+    },
+  );
+
+  testWidgets('disposed policy ignores late tab visibility', (tester) async {
+    policy.hidden();
+    policy.dispose();
+    policy.externalVisible(true);
+    policy.externalVisible(false);
+    await tester.pump(const Duration(minutes: 5));
+    expect(stops, 0);
+  });
+
   testWidgets('a later background visit suspends again after resume', (
     tester,
   ) async {

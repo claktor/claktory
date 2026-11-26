@@ -75,10 +75,22 @@ fn values(entries: &[v1::SecretEntry]) -> Vec<Value> {
 }
 
 pub(crate) fn create_secret(factory: &Factory, request: &v1::CreateSecret) -> Result<(), RequestError> {
+    // Checked first, so a site that can't be one makes no secret.
+    super::sites::checked(&request.sites)?;
     let id = factory.vault.create_secret(&request.name, &request.description, &values(&request.entries), "")?;
     if request.ask_each_time {
         factory.vault.set_ask_each_time(&id, true)?;
     }
+    if !request.sites.is_empty() {
+        factory.vault.set_sites(&id, &request.sites)?;
+    }
+    factory.vault_changed();
+    Ok(())
+}
+
+/// SetSecretSites: where Claktory's browser may fill the secret (#435 W6).
+pub(crate) fn set_secret_sites(factory: &Factory, request: &v1::SetSecretSites) -> Result<(), RequestError> {
+    factory.vault.set_sites(&request.id, &request.sites)?;
     factory.vault_changed();
     Ok(())
 }
@@ -276,6 +288,14 @@ pub(crate) async fn grant_secret(
     request: &v1::GrantSecret,
 ) -> Result<v1::VaultSession, RequestError> {
     open(factory, request.proof.as_ref()).await?;
+    if request.fill_only {
+        // Only for filling in Claktory's browser: no request for a command's
+        // secret is answered by it.
+        factory.known_agent(&request.agent_id)?;
+        factory.vault.grant_fill_only(&request.id, &request.agent_id, "")?;
+        factory.vault_changed();
+        return Ok(session.answer());
+    }
     give(factory, &request.id, &request.agent_id, "")?;
     answer_waiting(factory, &request.id, &request.agent_id)?;
     Ok(session.answer())
@@ -593,8 +613,10 @@ fn settle_request(
         None => (format!("{person} dismissed your request for {}", asked.secret_name), String::new()),
     };
     summary.push('.');
-    // A reply counts as answered: the item isn't asked about again.
-    let about = crate::extensions::checklist::card_decided(factory, &Card::Secret(asked.id.clone()), given.is_none() && !replied);
+    // A reply, or a dismissal with words, counts as answered: the item isn't
+    // asked about again (needs-you-cards §7). Only a bare dismissal doesn't.
+    let bare = given.is_none() && !replied && comment.trim().is_empty();
+    let about = crate::extensions::checklist::card_decided(factory, &Card::Secret(asked.id.clone()), bare);
     // Each note says whose it is (#253).
     let text = if replied {
         format!(
@@ -603,12 +625,27 @@ fn settle_request(
             comment.trim(),
             asked.reason
         )
+    } else if given.is_none() && !bare {
+        // Dismissed with words (needs-you-cards §7): they often hold a
+        // question, a yes or another way to ask, so the agent reads them
+        // rather than taking them as a no.
+        format!(
+            "{person} dismissed your request for {} and says:\n\n{}\n\nRead what they say. If they ask something, say yes, or say what to ask for instead, ask again with that. Only a plain no ends it.\n\nYou asked because: {}{about}",
+            asked.secret_name,
+            comment.trim(),
+            asked.reason
+        )
+    } else if bare {
+        // A plain no (N11): never an invitation to ask again. One for a
+        // checklist item says instead when Claktory has it asked again
+        // (`about`).
+        let again = if about.is_empty() { "\n\nDon't ask for it again unless something changes." } else { "" };
+        format!("{summary}{again}\n\nYou asked because: {}{about}", asked.reason)
     } else {
         format!("{summary}{what}{}\n\nYou asked because: {}{about}", note(&person, comment), asked.reason)
     };
     // Dismissed with nothing more, it's told quietly, at the agent's next
     // wake (friend bug #19): often it was settled elsewhere.
-    let bare = given.is_none() && !replied && comment.trim().is_empty();
     let event = if bare { crate::needs_you::dismissed_event(summary) } else { host_event(summary) };
     factory.deliver_event(agent, text, event);
     Ok(())

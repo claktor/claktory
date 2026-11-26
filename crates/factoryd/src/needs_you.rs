@@ -189,7 +189,8 @@ struct Row {
     model: ModelChange,
     /// CONVERSATION: what History shows of it.
     conversation: ConversationChange,
-    /// PIPE_MEMBER: the agent let send to the pipe, or stopped.
+    /// PIPE_MEMBER: the agent let send to the pipe, or stopped. GIVEN_UP:
+    /// the agent it no longer messages.
     member: String,
     /// WITHDRAWN and SECRET_GIVEN_UP: the agent's reason, cut.
     reason: String,
@@ -199,8 +200,94 @@ struct Row {
     /// and its agent.
     proposal: String,
     proposer: String,
+    /// ALERT: the alert as kept, and where it was read.
+    alert: Option<v1::Alert>,
+    on: Option<v1::AnsweredOn>,
+    /// QUESTION and REVIEW with steps (#533): what History says of them.
+    procedure: Procedure,
+    /// SECRET_REQUEST: how it was approved.
+    secret: SecretOutcome,
     /// All the text a search looks in, lowercase.
     search: String,
+}
+
+/// A procedure's outcome (#533), as History shows it: the step it's about
+/// (1 for the first; 0 without steps), how many there are, and whether its
+/// agent stopped it there after Can't do this.
+#[derive(Default)]
+struct Procedure {
+    step: u32,
+    steps: u32,
+    stopped: bool,
+}
+
+impl Procedure {
+    /// From an ask's stored steps (JSON, or none), whether the person
+    /// replied, and whether it was resolved.
+    fn of(steps: Option<&str>, replied: bool, resolved: bool) -> Procedure {
+        let steps: Vec<Value> = steps.and_then(|steps| serde_json::from_str(steps).ok()).unwrap_or_default();
+        let state = |step: &Value| step.get("state").and_then(Value::as_str).unwrap_or_default().to_owned();
+        let count = u32::try_from(steps.len()).unwrap_or(u32::MAX);
+        if count == 0 {
+            return Procedure::default();
+        }
+        let cant = steps.iter().position(|step| state(step) == "cant");
+        // Their words on a step they did: the one done last.
+        let replied_on = || {
+            steps
+                .iter()
+                .enumerate()
+                .filter(|(_, step)| state(step) == "done")
+                .max_by_key(|(_, step)| step.get("decided").and_then(Value::as_i64).unwrap_or_default())
+                .map(|(at, _)| at)
+        };
+        let at = cant
+            .or_else(|| if replied { replied_on() } else { None })
+            .or_else(|| steps.iter().position(|step| state(step).is_empty()))
+            .unwrap_or(steps.len() - 1);
+        Procedure { step: u32::try_from(at + 1).unwrap_or(u32::MAX), steps: count, stopped: resolved && cant.is_some() }
+    }
+}
+
+/// How a secret request was approved, as History shows it.
+#[derive(Default)]
+struct SecretOutcome {
+    outcome: v1::NeedsYouSecretOutcome,
+    /// The secret it got, by name.
+    given_name: String,
+    /// ADMIN: the admin agent it was left to.
+    admin: String,
+    /// GENERATED or IMPORTED: given to no one (the vault's "generated"
+    /// state), not to the agent that asked.
+    to_no_one: bool,
+}
+
+impl SecretOutcome {
+    /// From a request's row: its state, its new secret's JSON (what the
+    /// card asked to make, and whether the person added it there, #360),
+    /// the name of the secret given, and the admin agent it went to.
+    fn of(state: &str, new_secret: &str, given_name: String, admin: String) -> SecretOutcome {
+        use v1::NeedsYouSecretOutcome as Secret;
+        let new: Value = serde_json::from_str(new_secret).unwrap_or_default();
+        let filled = |key: &str| match new.get(key) {
+            Some(Value::String(text)) => !text.is_empty(),
+            Some(Value::Array(list)) => !list.is_empty(),
+            Some(Value::Object(map)) => !map.is_empty(),
+            _ => false,
+        };
+        let outcome = match state {
+            "granted" | "generated" | "approved" if state == "approved" || !admin.is_empty() => Secret::Admin,
+            "granted" | "generated" if filled("generate") => Secret::Generated,
+            "granted" | "generated" if filled("imports") => Secret::Imported,
+            "granted" | "generated" if new.get("added").and_then(Value::as_bool).unwrap_or(false) => Secret::Added,
+            "granted" | "generated" => Secret::Gave,
+            _ => return SecretOutcome::default(),
+        };
+        let admin = if outcome == Secret::Admin { admin } else { String::new() };
+        let given_name = if outcome == Secret::Admin { String::new() } else { given_name };
+        let to_no_one = matches!(outcome, Secret::Generated | Secret::Imported) && state == "generated";
+        SecretOutcome { outcome, given_name, admin, to_no_one }
+    }
 }
 
 /// A change of an app's access (APP_ACCESS), as History shows it.
@@ -276,6 +363,10 @@ impl Row {
             updates: 0,
             proposal: String::new(),
             proposer: String::new(),
+            alert: None,
+            on: None,
+            procedure: Procedure::default(),
+            secret: SecretOutcome::default(),
             search: String::new(),
         }
     }
@@ -407,7 +498,7 @@ fn from_factory(
 ) -> rusqlite::Result<()> {
     found.add(rows(
         db,
-        "SELECT id, agent, title, answer, state, created, decided, taint, review, body, replied, reason, revision, resolved FROM asks
+        "SELECT id, agent, title, answer, state, created, decided, taint, review, body, replied, reason, revision, resolved, steps FROM asks
          WHERE state IN ('answered', 'dismissed', 'withdrawn') AND decided >= ?1 AND decided < ?2 ORDER BY decided DESC LIMIT ?3",
         window,
         |row| {
@@ -423,6 +514,7 @@ fn from_factory(
             let reason: String = row.get(11)?;
             found.reason = cut(&reason, MAX_REPLY);
             found.updates = updates(row.get(12)?);
+            found.procedure = Procedure::of(row.get::<_, Option<String>>(14)?.as_deref(), row.get(10)?, row.get(13)?);
             Ok(found.searched(&[&row.get::<_, String>(9)?, &row.get::<_, String>(3)?, &reason]))
         },
     )?);
@@ -593,6 +685,24 @@ fn from_factory(
     from_conversation_changes(db, window, names, found)?;
     from_member_changes(db, window, names, found)?;
     from_given_up(db, window, names, found)?;
+    from_access_given_up(db, window, names, found)?;
+    from_alerts(db, window, found)?;
+    Ok(())
+}
+
+/// The alerts the person read (`notify::alerts`): its words as sent (none
+/// when withheld), and the device it was read on.
+fn from_alerts(db: &Connection, window: &Window, found: &mut Found) -> rusqlite::Result<()> {
+    let read = crate::notify::alerts::between(db, window.since, window.before, i64::from(MAX_SCAN) + 1)?;
+    found.changes(read, |read| {
+        let alert = read.alert;
+        let mut row = Row::new(Kind::Alert, alert.id.clone(), alert.agent_id.clone(), Outcome::Read, alert.sent_ms, read.read);
+        row.title = cut(&alert.title, MAX_TITLE);
+        let searched = [alert.text.clone(), alert.from_name.clone()];
+        row.on = Some(read.on);
+        row.alert = Some(alert);
+        row.searched(&[&searched[0], &searched[1]])
+    });
     Ok(())
 }
 
@@ -621,6 +731,25 @@ fn from_given_up(db: &Connection, window: &Window, names: &HashMap<String, Strin
         row.title = cut(&given.title(names), MAX_TITLE);
         row.reason = cut(&given.reason, MAX_REPLY);
         row.searched(&[&given.reason])
+    });
+    Ok(())
+}
+
+/// Access agents gave up on their own (`crate::given_up`, #236):
+/// Claktory's sentence, the agent's reason apart, and what it gave up.
+fn from_access_given_up(db: &Connection, window: &Window, names: &HashMap<String, String>, found: &mut Found) -> rusqlite::Result<()> {
+    use crate::given_up::What;
+    let given = crate::given_up::between(db, window.since, window.before, i64::from(MAX_SCAN) + 1)?;
+    found.changes(given, |given| {
+        let mut row = Row::new(Kind::GivenUp, given.id.to_string(), given.agent.clone(), Outcome::Changed, given.at, given.at);
+        row.title = cut(&given.title(names), MAX_TITLE);
+        row.reason = cut(&given.reason, MAX_REPLY);
+        match given.what {
+            what if what.pipe() => row.pipe = given.target.clone(),
+            What::App => row.app.app = given.target.clone(),
+            _ => row.member = given.target.clone(),
+        }
+        row.searched(&[&given.reason, &given.label])
     });
     Ok(())
 }
@@ -665,7 +794,10 @@ fn from_model_changes(db: &Connection, window: &Window, names: &HashMap<String, 
 fn from_app_access(db: &Connection, window: &Window, names: &HashMap<String, String>, found: &mut Found) -> rusqlite::Result<()> {
     let names: std::collections::BTreeMap<String, String> = names.iter().map(|(id, name)| (id.clone(), name.clone())).collect();
     let changes = crate::apps::changes::between(db, window.since, window.before, i64::from(MAX_SCAN) + 1)?;
-    found.changes(changes, |change| {
+    let capped = changes.len() > MAX_SCAN as usize;
+    // An agent's giving up its own shows as GIVEN_UP (`from_access_given_up`).
+    let changes = changes.into_iter().take(MAX_SCAN as usize).filter(|change| change.via != crate::apps::changes::Via::Agent);
+    let rows = changes.map(|change| {
         let card = change.via == crate::apps::changes::Via::Card;
         // A card's change shows in Rivet's conversation, at its card.
         let (agent, asked) = if card {
@@ -693,6 +825,7 @@ fn from_app_access(db: &Connection, window: &Window, names: &HashMap<String, Str
         };
         row.searched(&[&change.labels.app, &change.reason])
     });
+    found.add((rows.collect(), capped));
     found.add(self::rows(
         db,
         "SELECT id, agent, app, card, state, created, decided, comment, replied FROM app_access_proposals
@@ -843,9 +976,12 @@ fn from_vault(db: &Connection, window: &Window, found: &mut Found) -> rusqlite::
     found.add(rows(
         db,
         &format!(
-            "SELECT id, agent, secret_name, new_secret, comment, state, created, MAX(decided, approved) AS at, reason, {} FROM requests
+            "SELECT id, agent, secret_name, new_secret, comment, state, created, MAX(decided, approved) AS at, reason, {}, {}, {} FROM requests
              WHERE state IN ('granted', 'generated', 'approved', 'dismissed') AND at >= ?1 AND at < ?2 ORDER BY at DESC LIMIT ?3",
-            replied("requests")
+            replied("requests"),
+            // Added later: '' in a vault from before them.
+            if has_column(db, "requests", "given_name") { "given_name" } else { "'' AS given_name" },
+            if has_column(db, "requests", "admin") { "admin" } else { "'' AS admin" },
         ),
         window,
         |row| {
@@ -856,6 +992,9 @@ fn from_vault(db: &Connection, window: &Window, found: &mut Found) -> rusqlite::
             }
             let outcome = outcome(row, 5, 9, ("dismissed", Outcome::Dismissed), Outcome::Approved)?;
             let mut found = Row::new(Kind::SecretRequest, row.get(0)?, row.get(1)?, outcome, row.get(6)?, row.get(7)?);
+            if outcome == Outcome::Approved {
+                found.secret = SecretOutcome::of(&row.get::<_, String>(5)?, &row.get::<_, String>(3)?, row.get(10)?, row.get(11)?);
+            }
             found.title = cut(&name, MAX_TITLE);
             found.reply = cut(&row.get::<_, String>(4)?, MAX_REPLY);
             Ok(found.searched(&[&row.get::<_, String>(8)?]))
@@ -911,9 +1050,15 @@ fn card<'a>(entries: impl DoubleEndedIterator<Item = &'a v1::Entry>, row: &Row) 
             {
                 Vec::new()
             }
+            (Some(Entry::ToolCall(call)), Kind::Alert) if crate::notify::alerts::alert_of(call).as_deref() == Some(row.id.as_str()) => {
+                Vec::new()
+            }
             (Some(Entry::ToolCall(call)), Kind::SecretGivenUp)
                 if crate::vault::given_up::given_up_of(call).as_deref() == Some(row.id.as_str()) =>
             {
+                Vec::new()
+            }
+            (Some(Entry::ToolCall(call)), Kind::GivenUp) if crate::given_up::given_up_of(call).as_deref() == Some(row.id.as_str()) => {
                 Vec::new()
             }
             (Some(Entry::ToolCall(call)), Kind::Conversation)
@@ -1026,8 +1171,13 @@ impl Factory {
                 let entries =
                     inner.agents.get(&row.agent).and_then(|runtime| runtime.transcript.as_ref()).map(|transcript| transcript.in_memory());
                 let piped = piped(row.kind);
-                let (seq, mut taint) =
-                    if piped { (row.seq, Vec::new()) } else { entries.and_then(|entries| card(entries, &row)).unwrap_or_default() };
+                let found = if piped { None } else { entries.and_then(|entries| card(entries, &row)) };
+                // The device it was decided from, as its card says (#514).
+                let answered_on = found.as_ref().and_then(|(seq, _)| {
+                    let transcript = inner.agents.get(&row.agent).and_then(|runtime| runtime.transcript.as_ref())?;
+                    transcript.entry(*seq)?.answered_on.clone()
+                });
+                let (seq, mut taint) = if piped { (row.seq, Vec::new()) } else { found.unwrap_or_default() };
                 if taint.is_empty()
                     && let Some(stored) = row.taint.as_deref().and_then(|text| serde_json::from_str::<Value>(text).ok())
                 {
@@ -1072,7 +1222,7 @@ impl Factory {
                         _ if row.outcome == Outcome::Resolved => row.reason,
                         Kind::Model => row.model.reason,
                         Kind::Conversation => row.conversation.reason,
-                        Kind::SecretGivenUp => row.reason,
+                        Kind::SecretGivenUp | Kind::GivenUp => row.reason,
                         _ => row.app.reason,
                     },
                     model_change_id: row.model.change,
@@ -1085,13 +1235,23 @@ impl Factory {
                             .is_none_or(|agent| (agent.model.clone(), agent.effort.clone()) != row.model.after),
                     subject_agent_id: match row.kind {
                         Kind::Conversation => row.conversation.subject,
-                        Kind::PipeMember => row.member,
+                        Kind::PipeMember | Kind::GivenUp => row.member,
+                        Kind::SecretRequest => row.secret.admin,
                         _ => row.model.subject,
                     },
                     updates: row.updates,
                     proposal_id: row.proposal,
                     proposal_agent_id: row.proposer,
                     proposal_seq,
+                    // An alert's is where it was read.
+                    answered_on: answered_on.or(row.on),
+                    alert: row.alert,
+                    step: row.procedure.step,
+                    steps: row.procedure.steps,
+                    step_stopped: row.procedure.stopped,
+                    secret_outcome: row.secret.outcome.into(),
+                    secret_given_name: row.secret.given_name,
+                    secret_to_no_one: row.secret.to_no_one,
                 }
             })
             .collect();

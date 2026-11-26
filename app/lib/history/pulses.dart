@@ -26,7 +26,18 @@ const tickSeconds = 0.4;
 enum PulseKind { agent, person, asks, pipe, app }
 
 class Pulse {
-  Pulse(this.route, this.at, this.kind, {this.quiet = false, this.count = 1});
+  Pulse(
+    this.route,
+    this.at,
+    this.kind, {
+    this.quiet = false,
+    this.count = 1,
+    this.pad = -1,
+  });
+
+  /// The pipe's pad it goes through (an index into the scene's pads), or
+  /// -1.
+  final int pad;
 
   final Route route;
 
@@ -58,6 +69,7 @@ class Tick {
   required double Function(double play) historyAt,
   required double t,
   int budget = pulseBudget,
+  String? project,
 }) {
   final now = playAt(t);
   final from = log.lowerBound(historyAt(now - _longest));
@@ -66,14 +78,39 @@ class Tick {
   final pulses = <Pulse>[];
   final ticks = <Tick>[];
 
-  // Where an event's node is now: a chip, the person or a pad.
-  (String, Rect, int)? place(int node) {
-    if (node == 0) return you == null ? null : ('you', you, -1);
+  // With one project shown: its box, where what's outside it comes in or
+  // goes out.
+  final box = project == null ? -1 : scene.projectBox(project);
+  final boxRect = box < 0 ? null : scene.boxes[box].box.rect;
+
+  // Where an event's node is now: a chip, the person or a pad (then its
+  // index, else -1); outside the project shown, the point on its box's edge
+  // toward it ("o…").
+  (String, Rect, int, int)? place(int node) {
+    if (node == 0) return you == null ? null : ('you', you, -1, -1);
+    (String, Rect, int, int) outside(String key, Rect rect) {
+      final edge = Routes.edgeToward(boxRect!, rect.center);
+      return (
+        'o$key',
+        Rect.fromCenter(center: edge, width: 0, height: 0),
+        -1,
+        -1,
+      );
+    }
+
     final pad = scene.padOf(node);
-    if (pad >= 0) return ('p$pad', scene.pads[pad].rect, -1);
+    if (pad >= 0) {
+      if (project != null && scene.pads[pad].box != box) {
+        return boxRect == null ? null : outside('p$pad', scene.pads[pad].rect);
+      }
+      return ('p$pad', scene.pads[pad].rect, -1, pad);
+    }
     final chip = scene.chipAt(node, t);
     if (chip < 0) return null;
-    return ('c$chip', scene.chips[chip].rect, chip);
+    if (project != null && !scene.chipInProject(chip, t, project)) {
+      return boxRect == null ? null : outside('c$chip', scene.chips[chip].rect);
+    }
+    return ('c$chip', scene.chips[chip].rect, chip, -1);
   }
 
   for (var i = from; i < until; i++) {
@@ -84,7 +121,9 @@ class Tick {
       if (age >= tickSeconds) continue;
       for (var k = 0; k < log.toCount(i); k++) {
         final chip = scene.chipAt(log.to(i, k), t);
-        if (chip >= 0) ticks.add(Tick(chip, age / tickSeconds));
+        if (chip < 0) continue;
+        if (project != null && !scene.chipInProject(chip, t, project)) continue;
+        ticks.add(Tick(chip, age / tickSeconds));
       }
       continue;
     }
@@ -102,12 +141,18 @@ class Tick {
       final to = log.to(i, k);
       final recipient = place(to);
       if (recipient == null || recipient.$1 == sender.$1) continue;
+      // Neither end in the project shown: not its message.
+      if (sender.$1.startsWith('o') && recipient.$1.startsWith('o')) continue;
       final Route route;
       if (sender.$3 >= 0 && recipient.$3 >= 0) {
         // Along their line, or straight across when none is known then.
         route = scene.timeline.messagingAt(log.from(i), to, log.time(i))
             ? routes.chips(sender.$3, recipient.$3)
             : routes.across(sender.$3, recipient.$3);
+      } else if (recipient.$3 >= 0 && sender.$4 >= 0) {
+        route = routes.pipe(sender.$4, recipient.$3, toChip: true);
+      } else if (sender.$3 >= 0 && recipient.$4 >= 0) {
+        route = routes.pipe(recipient.$4, sender.$3, toChip: false);
       } else if (recipient.$3 >= 0) {
         route = routes.place(sender.$1, sender.$2, recipient.$3, toChip: true);
       } else if (sender.$3 >= 0) {
@@ -122,7 +167,12 @@ class Tick {
       }
       final at = age / pulseSeconds(route.length);
       if (at >= 1) continue;
-      pulses.add(Pulse(route, at, style, quiet: quiet));
+      final pad = sender.$4 >= 0 && recipient.$3 >= 0
+          ? sender.$4
+          : recipient.$4 >= 0 && sender.$3 >= 0
+          ? recipient.$4
+          : -1;
+      pulses.add(Pulse(route, at, style, quiet: quiet, pad: pad));
     }
   }
   return (pulses: merge(pulses, budget), ticks: ticks);
@@ -160,6 +210,13 @@ class _Bin {
 
   Pulse get pulse {
     final lead = _lead!;
-    return Pulse(lead.route, lead.at, lead.kind, quiet: _quiet, count: _count);
+    return Pulse(
+      lead.route,
+      lead.at,
+      lead.kind,
+      quiet: _quiet,
+      count: _count,
+      pad: lead.pad,
+    );
   }
 }

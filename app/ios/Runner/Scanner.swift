@@ -35,6 +35,7 @@ enum Camera {
   /// "granted", "undetermined", "denied", "restricted", or "unavailable"
   /// where there's no camera (the Simulator).
   static func access() -> String {
+    if let pretend = Pretend.current() { return pretend }
     guard AVCaptureDevice.default(for: .video) != nil else { return "unavailable" }
     switch AVCaptureDevice.authorizationStatus(for: .video) {
     case .authorized: return "granted"
@@ -47,6 +48,10 @@ enum Camera {
   /// Asks the person (the system's prompt, with NSCameraUsageDescription)
   /// when they haven't answered yet; answers whether it's allowed.
   static func request(_ done: @escaping (Bool) -> Void) {
+    if let pretend = Pretend.current() {
+      Pretend.answer(pretend, done)
+      return
+    }
     AVCaptureDevice.requestAccess(for: .video) { granted in
       DispatchQueue.main.async { done(granted) }
     }
@@ -55,6 +60,39 @@ enum Camera {
   static func openSettings() {
     if let url = URL(string: UIApplication.openSettingsURLString) {
       UIApplication.shared.open(url)
+    }
+  }
+
+  /// QA's way to reach the camera's screens in the Simulator, which has no
+  /// camera (area 5a, as LocalNetwork.swift's): any build but the App
+  /// Store's reads the file Library/ClaktoryCamera in the app's container,
+  /// "granted", "denied", "restricted" or "undetermined". While it says
+  /// undetermined, a request waits, as the system's prompt would, until the
+  /// file says granted or denied.
+  ///
+  ///   echo undetermined > "$(xcrun simctl get_app_container booted com.claktory.app.dev data)/Library/ClaktoryCamera"
+  enum Pretend {
+    static func current() -> String? {
+      guard Bundle.main.bundleIdentifier != AppStoreBuild.bundleId,
+        let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first,
+        let said = try? String(contentsOf: library.appendingPathComponent("ClaktoryCamera"))
+      else { return nil }
+      let value = said.trimmingCharacters(in: .whitespacesAndNewlines)
+      return ["granted", "denied", "restricted", "undetermined"].contains(value) ? value : nil
+    }
+
+    static func answer(_ pretend: String, _ done: @escaping (Bool) -> Void) {
+      if pretend != "undetermined" {
+        DispatchQueue.main.async { done(pretend == "granted") }
+        return
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+        switch current() {
+        case "undetermined"?: answer("undetermined", done)
+        case let value?: done(value == "granted")
+        case nil: done(false)
+        }
+      }
     }
   }
 }
@@ -94,12 +132,52 @@ class ScannerView: NSObject, FlutterPlatformView, AVCaptureVideoDataOutputSample
     preview.layer.masksToBounds = true
     preview.previewLayer.session = session
     preview.previewLayer.videoGravity = .resizeAspectFill
+    // An iPad's camera stops while the app shares the screen (Split View,
+    // Slide Over, Stage Manager beside another app), or while another app
+    // has it: Flutter says so over the picture, which stays black, and
+    // takes it back when the camera does.
+    let center = NotificationCenter.default
+    center.addObserver(
+      self, selector: #selector(interrupted(_:)),
+      name: AVCaptureSession.wasInterruptedNotification, object: session)
+    center.addObserver(
+      self, selector: #selector(resumed(_:)),
+      name: AVCaptureSession.interruptionEndedNotification, object: session)
     queue.async { [weak self] in self?.start() }
   }
 
   deinit {
+    NotificationCenter.default.removeObserver(self)
     let session = session
     queue.async { session.stopRunning() }
+  }
+
+  /// What `unavailable` says of [reason]: "multitasking" while the app shares
+  /// the screen, "inUse" while another app has the camera, nil for an
+  /// interruption the person needn't act on (a call, audio).
+  static func unavailableReason(_ reason: AVCaptureSession.InterruptionReason?) -> String? {
+    switch reason {
+    case .videoDeviceNotAvailableWithMultipleForegroundApps: return "multitasking"
+    case .videoDeviceInUseByAnotherClient: return "inUse"
+    default: return nil
+    }
+  }
+
+  @objc private func interrupted(_ note: Notification) {
+    let raw = note.userInfo?[AVCaptureSessionInterruptionReasonKey] as? Int
+    guard
+      let reason = Self.unavailableReason(
+        raw.flatMap(AVCaptureSession.InterruptionReason.init(rawValue:)))
+    else { return }
+    DispatchQueue.main.async { [channel] in
+      channel.invokeMethod("unavailable", arguments: ["reason": reason])
+    }
+  }
+
+  @objc private func resumed(_ note: Notification) {
+    DispatchQueue.main.async { [channel] in
+      channel.invokeMethod("available", arguments: nil)
+    }
   }
 
   func view() -> UIView { preview }

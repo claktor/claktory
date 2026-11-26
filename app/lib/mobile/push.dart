@@ -32,6 +32,8 @@ import '../diagnostics_record.dart'
 import '../notifications.dart' show claktoryId;
 import '../protocol/factory/v1/factory.pb.dart';
 import '../rail.dart' show Claktories, Claktory;
+import 'device_permissions.dart' show NotificationsPermission;
+import 'permission.dart' show askPermission, permissionHost;
 
 /// Claktory's own push relay, when a Claktory's settings name none.
 const defaultPushRelay = 'https://push.claktory.com';
@@ -468,6 +470,13 @@ class PushRegistrar {
     _asked = true;
     final state = _state ?? await _safely(device.state);
     if (state == null || state.permission != 'not_determined') return;
+    // Why first, in the permission sheet, where the person is (area 5a,
+    // P3); with no screen to show it on, the system asks straight.
+    final host = permissionHost;
+    if (host != null && host.mounted) {
+      await askPermission(host, NotificationsPermission(this));
+      return;
+    }
     final answer = await _safely(device.ask);
     if (answer == 'allowed') {
       _state = await _safely(device.state) ?? state;

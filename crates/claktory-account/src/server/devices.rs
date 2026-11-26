@@ -12,6 +12,8 @@ use crate::protocol::*;
 const ASSERTIONS_PER_HOUR: u32 = 60;
 /// Other devices a device may remove an hour.
 const REMOVALS_PER_HOUR: u32 = 10;
+/// Vouches a Claktory may make an hour (#529).
+const VOUCHES_PER_HOUR: u32 = 10;
 
 fn unauthorized() -> ApiError {
     ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized", "This device isn't signed in. Sign in again.")
@@ -122,15 +124,16 @@ pub(super) async fn sign_in_start(service: &Service, call: &Call) -> Result<Repl
 pub(super) fn sign_in_verify(service: &Service, call: &Call) -> Result<Reply, ApiError> {
     let account_key = signer(service, call)?;
     let body: DeviceSignInVerify = call.json()?;
-    // Only the key that asked for the code may use it: another one is
-    // turned away before it can spend the code's tries.
-    let asked_by =
-        db::request(&service.db(), &body.request_id)?.filter(|request| request.kind == "device").and_then(|request| request.backend_key);
-    if asked_by.is_some_and(|asked_by| asked_by != account_key) {
+    // Only the key that asked for the code (or was vouched for) may use
+    // it: another one is turned away before it can spend the code's tries.
+    let asked = db::request(&service.db(), &body.request_id)?.filter(|request| request.kind == "device" || request.kind == "vouch");
+    if asked.as_ref().and_then(|request| request.backend_key.as_deref()).is_some_and(|asked_by| asked_by != account_key) {
         return Err(unauthorized());
     }
-    let request = check_code(service, &body.request_id, &body.code, "device", &call.ip)?;
-    let account_id = match db::bind_device(&mut service.db(), &request, service.now())? {
+    let kind = if asked.is_some_and(|request| request.kind == "vouch") { "vouch" } else { "device" };
+    let request = check_code(service, &body.request_id, &body.code, kind, &call.ip)?;
+    let apps = service.config.user_apps.is_some();
+    let account_id = match db::bind_device(&mut service.db(), &request, apps, service.now())? {
         db::Bound::Done { account_id } => account_id,
         db::Bound::TooMany => {
             return Err(ApiError::new(
@@ -141,9 +144,58 @@ pub(super) fn sign_in_verify(service: &Service, call: &Call) -> Result<Reply, Ap
         }
         db::Bound::Removed => return Err(removed()),
         db::Bound::OtherAccount => return Err(of_another_account()),
+        db::Bound::Unvouched => return Err(ApiError::new(StatusCode::GONE, "code_expired", "This code has expired. Ask for a new one.")),
     };
-    tracing::info!("device signed in to account {account_id}");
+    match &request.claktory_id {
+        Some(by) if kind == "vouch" => tracing::info!("device signed in to account {account_id} through Claktory {by}"),
+        _ => tracing::info!("device signed in to account {account_id}"),
+    }
     Ok(Reply::json(&DeviceAccount { account_id, email: request.email, name: request.name.unwrap_or_default() }))
+}
+
+/// A signed-in Claktory vouches for the app on its own computer (#529): a
+/// code, bound to that app's account key and this Claktory's account,
+/// that the app gives sign-in/verify, signed by that key, within
+/// `VOUCH_LIFETIME`, once. No email is sent; the device shows as signed
+/// in through this Claktory, and is signed out when it signs out, signs in
+/// again or elsewhere, moves or is removed.
+pub(super) fn vouch(service: &Service, call: &Call) -> Result<Reply, ApiError> {
+    let claktory = super::api::authenticate(service, call)?;
+    let body: DeviceVouch = call.json()?;
+    if verifying_key(&body.account_key).is_none() || !valid_label(&body.version) || !valid_label(&body.platform) {
+        return Err(ApiError::invalid("A field is missing or out of range."));
+    }
+    service.limit(&[(&format!("vouch:{}", claktory.id), 3600, VOUCHES_PER_HOUR)])?;
+    let conn = service.db();
+    let email = db::account_email(&conn, &claktory.account_id)?.ok_or_else(ApiError::unauthorized)?;
+    if db::device_removed(&conn, &email, &body.account_key)? {
+        return Err(removed());
+    }
+    if db::key_of_another_account(&conn, &email, &body.account_key)? {
+        return Err(of_another_account());
+    }
+    // Carried by the app, never typed: long enough that it can't be
+    // guessed in its tries. Kept only as its hash, and never logged.
+    let code = b64(&random_32()[..16]);
+    let request = db::Request {
+        id: b64(&random_32()[..16]),
+        kind: "vouch".to_owned(),
+        email,
+        claktory_id: Some(claktory.id.clone()),
+        name: Some(clean_name(&body.name)),
+        backend_key: Some(body.account_key),
+        version: Some(body.version),
+        platform: Some(body.platform),
+        code_hash: String::new(),
+        attempts: 0,
+        expires: service.now() + VOUCH_LIFETIME,
+    };
+    let request = db::Request { code_hash: db::code_hash(&code, &request.id), ..request };
+    // One code at a time per Claktory: an earlier one unused goes.
+    db::forget_vouches(&conn, &claktory.id)?;
+    db::insert_request(&conn, &request)?;
+    tracing::info!("Claktory {} vouched for a device", claktory.id);
+    Ok(Reply::json(&DeviceVouched { request_id: request.id, code, expires_in: VOUCH_LIFETIME }))
 }
 
 pub(super) fn me(service: &Service, call: &Call) -> Result<Reply, ApiError> {

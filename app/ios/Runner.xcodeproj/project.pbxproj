@@ -21,6 +21,8 @@
 		7884E8692EC3CC0700C636F3 /* Scanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E86A2EC3CC0400C636F3 /* Scanner.swift */; };
 		7884E86B2EC3CC0700C636F3 /* LocalNetwork.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E86C2EC3CC0400C636F3 /* LocalNetwork.swift */; };
 		7884E8692EC3CC0700C63800 /* BackgroundGrace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E86A2EC3CC0400C63800 /* BackgroundGrace.swift */; };
+		5B5E00000000000000000001 /* ShareBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B5E00000000000000000002 /* ShareBrowser.swift */; };
+		5B5E00000000000000000003 /* ShareBrowserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B5E00000000000000000004 /* ShareBrowserTests.swift */; };
 		7884E8692EC3CC0700C63711 /* Capabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E86A2EC3CC0400C63712 /* Capabilities.swift */; };
 		7884E8812EC3CC0700C63731 /* CommandMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7884E8822EC3CC0400C63732 /* CommandMenu.swift */; };
 		1A2B3C4D5E6F708100000000 /* InkChannel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F708200000000 /* InkChannel.swift */; };
@@ -106,6 +108,8 @@
 		7884E86A2EC3CC0400C636F3 /* Scanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Scanner.swift; sourceTree = "<group>"; };
 		7884E86C2EC3CC0400C636F3 /* LocalNetwork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalNetwork.swift; sourceTree = "<group>"; };
 		7884E86A2EC3CC0400C63800 /* BackgroundGrace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundGrace.swift; sourceTree = "<group>"; };
+		5B5E00000000000000000002 /* ShareBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareBrowser.swift; sourceTree = "<group>"; };
+		5B5E00000000000000000004 /* ShareBrowserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareBrowserTests.swift; sourceTree = "<group>"; };
 		7884E86A2EC3CC0400C63712 /* Capabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Capabilities.swift; sourceTree = "<group>"; };
 		7884E8822EC3CC0400C63732 /* CommandMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandMenu.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F708200000000 /* InkChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ink/InkChannel.swift; sourceTree = "<group>"; };
@@ -170,6 +174,7 @@
 				331C807B294A618700263BE5 /* RunnerTests.swift */,
 				1A2B3C4D5E6F708200000020 /* InkTests.swift */,
 				D3B700000000000000000007 /* PushTests.swift */,
+				5B5E00000000000000000004 /* ShareBrowserTests.swift */,
 			);
 			path = RunnerTests;
 			sourceTree = "<group>";
@@ -222,6 +227,7 @@
 				7884E86A2EC3CC0400C636F3 /* Scanner.swift */,
 				7884E86C2EC3CC0400C636F3 /* LocalNetwork.swift */,
 				7884E86A2EC3CC0400C63800 /* BackgroundGrace.swift */,
+				5B5E00000000000000000002 /* ShareBrowser.swift */,
 				7884E86A2EC3CC0400C63712 /* Capabilities.swift */,
 				7884E8822EC3CC0400C63732 /* CommandMenu.swift */,
 				1A2B3C4D5E6F708200000000 /* InkChannel.swift */,
@@ -434,6 +440,7 @@
 				331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */,
 				1A2B3C4D5E6F708100000020 /* InkTests.swift in Sources */,
 				D3B70000000000000000000C /* PushTests.swift in Sources */,
+				5B5E00000000000000000003 /* ShareBrowserTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -447,6 +454,7 @@
 				7884E8692EC3CC0700C636F3 /* Scanner.swift in Sources */,
 				7884E86B2EC3CC0700C636F3 /* LocalNetwork.swift in Sources */,
 				7884E8692EC3CC0700C63800 /* BackgroundGrace.swift in Sources */,
+				5B5E00000000000000000001 /* ShareBrowser.swift in Sources */,
 				7884E8692EC3CC0700C63711 /* Capabilities.swift in Sources */,
 				7884E8812EC3CC0700C63731 /* CommandMenu.swift in Sources */,
 				1A2B3C4D5E6F708100000000 /* InkChannel.swift in Sources */,

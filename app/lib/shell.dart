@@ -16,6 +16,7 @@ import 'connect_step.dart';
 import 'connection.dart' show Connection, Link;
 import 'engine.dart' show WhenAppQuitsStep, asksWhenAppQuits;
 import 'devices.dart' show FactoryChooser, thisDeviceKind;
+import 'history/export_job.dart' show ReplayJobBanner;
 import 'map.dart';
 import 'monitors_overview.dart' show MonitorsOverview;
 import 'pairing.dart';
@@ -34,19 +35,23 @@ import 'extensions.dart';
 import 'forms.dart';
 import 'identity.dart';
 import 'ipad/pair_step.dart';
+import 'ipad/focus.dart' show IPadFocus;
 import 'ipad/workbench.dart' show WindowKeyboard, Workbench, workbenchRailWidth;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'rail.dart' show railWidth;
 import 'scope.dart';
 import 'settings_view.dart';
 import 'setup.dart';
+import 'needs_you_focus.dart' show FocusModeLayer;
 import 'sidebar.dart';
 import 'state.dart';
 import 'update.dart';
 import 'screens.dart';
 import 'inbox.dart' show InboxView;
 import 'usage_view.dart';
-import 'your_claktories.dart' show DeviceBanners, SignInRequiredView;
+import 'your_claktories.dart'
+    show DeviceBanners, OtherAccountView, SignInRequiredView;
+import 'primary_key.dart';
 
 /// The window: the sidebar on the left, the selected agent in the middle under
 /// the update banner, and its open extension panel on the right. Hosts the
@@ -132,6 +137,11 @@ class _ShellState extends State<Shell> {
   Widget _buildSteps(BuildContext context) => ListenableBuilder(
     listenable: Listenable.merge([
       AppScope.of(context).workspace,
+      // A Claktory that turns this device away: its screen takes the
+      // first launch's questions' place at once (Sale row 173), rather
+      // than the name step waiting there, "Connecting…", until a relaunch.
+      AppScope.of(context).signInRequired,
+      AppScope.of(context).otherAccount,
       signInPutOff(AppScope.of(context)),
       modelStepStarted(AppScope.of(context)),
       AppScope.scope(context).page,
@@ -173,11 +183,26 @@ class _ShellState extends State<Shell> {
       final step = setupStep ?? question;
       // Over the questions the update banner stays in reach: they don't
       // block updating.
-      final window = _layout(
+      final laid = _layout(
         context,
         bannerOnTop: setupStep == null && question != null,
         covered: step != null,
       );
+      // Focus mode (#514) over the window, which stays as it was under it;
+      // a phone's Needs you is its own. An iPad's window keeps it at every
+      // width, so the sitting and its card live through a resize into
+      // Slide Over or ⅓ Split View and back (spec §6.2), where IPadFocus
+      // shows the phone's one-card screen.
+      final window = isPhoneLayout(context) && !_workbench(context)
+          ? laid
+          : FocusModeLayer(
+              // An iPad's: laid out for its window (ipad/focus.dart).
+              focus: _workbench(context)
+                  ? (session, leave) =>
+                        IPadFocus(session: session, leave: leave)
+                  : null,
+              child: laid,
+            );
       // What agents show the person opens here, unless a step covers it.
       if (step == null) return ScreenOpener(covered: false, child: window);
       // The first launch asks the person to sign in, then their name, over
@@ -320,21 +345,39 @@ class _ShellState extends State<Shell> {
                 Widget behind(Widget child) =>
                     covered ? ExcludeSemantics(child: child) : child;
                 final railView = widget.rail;
-                final content = updateOffered(workspace, scope.appBuild.version)
+                final offered = updateOffered(
+                  workspace,
+                  scope.appBuild.version,
+                );
+                // An iPhone's or iPad's app behind a Claktory that's up to
+                // date: a quiet note in the banner's place, which stays laid
+                // out when closed so what's under it keeps its state.
+                final note =
+                    !offered &&
+                    appBehind(workspace, scope.appBuild.version) != null;
+                final content = offered || note
                     ? Column(
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          bannerOnTop
+                          note
+                              ? const AppBehindNote()
+                              : bannerOnTop
                               ? const _LiftedBanner()
                               : const UpdateBanner(),
                           Expanded(
                             child: behind(
-                              const DeviceBanners(child: _Content()),
+                              const DeviceBanners(
+                                child: ReplayJobBanner(child: _Content()),
+                              ),
                             ),
                           ),
                         ],
                       )
-                    : behind(const DeviceBanners(child: _Content()));
+                    : behind(
+                        const DeviceBanners(
+                          child: ReplayJobBanner(child: _Content()),
+                        ),
+                      );
                 // An iPad's window wide enough for panes: the workbench
                 // (ipad/workbench.dart) lays out the same parts, finger-sized,
                 // and decides where the panel fits.
@@ -572,9 +615,15 @@ class _Content extends StatelessWidget {
         backend.pairing,
         backend.signInRequired,
         backend.refused,
+        backend.otherAccount,
         scope.page,
       ]),
       builder: (context, _) {
+        // Another account's Claktory (#529, S4): what it said, in place of
+        // it, before anything that would ask this device to sign in.
+        if (backend.otherAccount.value != null) {
+          return const OtherAccountView();
+        }
         final waiting = scope.connections.current;
         // Another Claktory that lets this device in only once it's signed
         // in to the person's account.
@@ -896,9 +945,16 @@ class _LiftedBannerState extends State<_LiftedBanner> {
         alignment: Alignment.topLeft,
         child: CompositedTransformFollower(
           link: _link,
-          child: SizedBox(
-            width: constraints.maxWidth,
-            child: const UpdateBanner(),
+          // Its own height, as in its place in the window's column: given
+          // the overlay's height, an iPad's banner filled it, over the
+          // whole step (Zucchero's row 635).
+          child: UnconstrainedBox(
+            constrainedAxis: Axis.horizontal,
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: constraints.maxWidth,
+              child: const UpdateBanner(),
+            ),
           ),
         ),
       ),
@@ -958,9 +1014,14 @@ class _History extends StatelessWidget {
   @override
   Widget build(BuildContext context) => CallbackShortcuts(
     bindings: {
-      const SingleActivator(LogicalKeyboardKey.bracketLeft, meta: true): back,
-      const SingleActivator(LogicalKeyboardKey.bracketRight, meta: true):
-          forward,
+      primaryKey(LogicalKeyboardKey.bracketLeft): back,
+      primaryKey(LogicalKeyboardKey.bracketRight): forward,
+      // Windows' and Linux's own Back and Forward, as their browsers have.
+      if (!primaryIsMeta) ...{
+        const SingleActivator(LogicalKeyboardKey.arrowLeft, alt: true): back,
+        const SingleActivator(LogicalKeyboardKey.arrowRight, alt: true):
+            forward,
+      },
     },
     child: Listener(
       behavior: HitTestBehavior.translucent,

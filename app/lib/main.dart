@@ -8,6 +8,7 @@ import 'android/window_back_host.dart';
 import 'backend.dart';
 import 'browser/browser_view.dart' show BrowserHost, BrowserScope;
 import 'connections.dart';
+import 'device_vouch.dart' show LocalVouch;
 import 'drafts.dart';
 import 'drop.dart';
 import 'engine.dart' show EngineControl;
@@ -20,6 +21,7 @@ import 'mobile/local_network.dart' show DeviceLocalNetwork, localNetwork;
 import 'mobile/platform_policy.dart';
 import 'mobile/push.dart' show HttpPushRelay, IosPushDevice, PushRegistrar;
 import 'notifications.dart';
+import 'phone.dart' show phoneLayoutShowing;
 import 'people/secret_clipboard.dart' show startClipboardSweeps;
 import 'people/start_messages.dart';
 import 'rail.dart';
@@ -177,8 +179,8 @@ class _FactoryAppState extends State<FactoryApp> {
     }
   }
 
-  /// A Mac (and an iPhone, through the same channel) shows each
-  /// Claktory's notifications while the person isn't using it
+  /// A Mac, a Windows PC (and an iPhone, through the same channel) shows
+  /// each Claktory's notifications while the person isn't using it
   /// (notifications.dart).
   ClaktoryNotifications? _notifications;
 
@@ -187,15 +189,29 @@ class _FactoryAppState extends State<FactoryApp> {
     super.initState();
     _startSetup();
     if (defaultTargetPlatform == TargetPlatform.macOS ||
-        defaultTargetPlatform == TargetPlatform.iOS) {
+        defaultTargetPlatform == TargetPlatform.iOS ||
+        defaultTargetPlatform == TargetPlatform.windows) {
       _notifications = ClaktoryNotifications(
         claktories: _claktories,
         system: MacNotifications(),
+        phone: () => phoneLayoutShowing,
       );
     }
     // Chrome's tabs reach an agent only through a Mac's app.
     if (defaultTargetPlatform == TargetPlatform.macOS) {
       _browser = BrowserHost.of(_claktories);
+      // Signed in to the person's account through this Mac's own
+      // Claktory, with no code (#529).
+      _vouch = LocalVouch.current = LocalVouch(
+        account: widget.connections.account,
+        local: () =>
+            _claktories.localBackend ? _claktories.all.first.backend : null,
+        changes: _claktories,
+        others: () => [
+          for (final claktory in _claktories.all)
+            if (claktory.target != null) claktory.backend,
+        ],
+      );
     }
     // An iPhone registers with each Claktory for pushes, once the person
     // allows notifications (mobile/push.dart).
@@ -214,6 +230,9 @@ class _FactoryAppState extends State<FactoryApp> {
 
   /// This Mac's browser control (browser/browser_view.dart).
   BrowserHost? _browser;
+
+  /// Signing this Mac's app in through its own Claktory (device_vouch.dart).
+  LocalVouch? _vouch;
 
   /// The window, as an overlay entry: the root layer the phone's list of
   /// Claktories and its dialogs float in.
@@ -246,6 +265,7 @@ class _FactoryAppState extends State<FactoryApp> {
     _notifications?.dispose();
     _pushes?.dispose();
     _browser?.dispose();
+    _vouch?.dispose();
     _claktories.dispose();
     for (final focus in _focuses.values) {
       focus.dispose();

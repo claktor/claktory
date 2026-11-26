@@ -160,6 +160,63 @@ pub(super) async fn retry_sign_outs(service: &Service) -> usize {
     heard
 }
 
+/// Tells the worker that a Claktory's registration under `epoch` ended
+/// (E11-4): it was removed at the account page, signed itself out, or
+/// signed in again. The grants its agents hold under it go, so the person's
+/// devices take it out of the conversations it reached. Its end queued
+/// that (`db::revoke`, `db::sign_out_claktory`, `db::register`), and it's
+/// done once the worker says so; until then it's asked again
+/// (`retry_claktory_removals`), as a device's sign-out is. Meanwhile the
+/// grants are dead already: the worker hears only of registrations live
+/// now. Whether the worker heard.
+pub(super) async fn claktory_removed(service: &Service, account_id: &str, claktory_id: &str, epoch: u64, tries: i64) -> bool {
+    let Some(apps) = service.config.user_apps.clone() else { return false };
+    let request =
+        Request::ClaktoryRemoved { account_id: account_id.to_owned(), claktory_id: claktory_id.to_owned(), epoch, time: service.now() };
+    let failure = match ipc::ask(&apps.socket, apps.uid, &request, &[]).await {
+        Ok((204, _)) => {
+            if let Err(error) = db::apps_claktory_removed(&service.db(), account_id, claktory_id, epoch) {
+                tracing::error!("a Claktory's removal the worker heard of stays queued, so it hears of it again: {error}");
+            }
+            return true;
+        }
+        Ok((status, _)) => format!("the worker answered {status}"),
+        Err(error) => error.to_string(),
+    };
+    let wait = (60_i64 << tries.clamp(0, 6)).min(3600);
+    if tries >= 10 {
+        tracing::error!(tries = tries + 1, "the worker still hasn't heard of a Claktory's removal: {failure}");
+    } else {
+        tracing::warn!(tries = tries + 1, wait, "the worker didn't hear of a Claktory's removal yet: {failure}");
+    }
+    if let Err(error) = db::apps_claktory_removal_failed(&service.db(), account_id, claktory_id, epoch, service.now() + wait) {
+        tracing::error!("couldn't schedule telling the worker of a Claktory's removal again: {error}");
+    }
+    false
+}
+
+/// Tells the worker again of the Claktories' removals that are due: how
+/// many it heard.
+pub(super) async fn retry_claktory_removals(service: &Service) -> usize {
+    if service.config.user_apps.is_none() {
+        return 0;
+    }
+    let due = match db::apps_claktory_removals_due(&service.db(), service.now(), 50) {
+        Ok(due) => due,
+        Err(error) => {
+            tracing::error!("can't read the Claktories' removals to tell the user-level apps of: {error}");
+            return 0;
+        }
+    };
+    let mut heard = 0;
+    for (account_id, claktory_id, epoch, tries) in due {
+        if claktory_removed(service, &account_id, &claktory_id, epoch, tries).await {
+            heard += 1;
+        }
+    }
+    heard
+}
+
 /// Tells the worker an account was deleted, so its apps forget it; its
 /// deletion queued that (`db::delete_account`), and it's done once the
 /// worker says so. Until then (the worker down, say), it's asked again

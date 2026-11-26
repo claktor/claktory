@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What CameraFiles may serve: the file the camera app writes Take
+     photo's picture to, in cache/claktory-camera, and nothing else. -->
+<paths>
+    <cache-path name="camera" path="claktory-camera/" />
+</paths>

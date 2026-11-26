@@ -121,7 +121,11 @@ async fn the_first_device_through_the_account_is_in_at_once_and_the_next_waits_f
     apply_request(
         &mut client,
         &mut view,
-        Request::ApproveDevice(v1::ApproveDevice { device_id: pending.device_id.clone(), number: asking.number.clone() }),
+        Request::ApproveDevice(v1::ApproveDevice {
+            device_id: pending.device_id.clone(),
+            number: asking.number.clone(),
+            ..Default::default()
+        }),
     )
     .await;
     let answer = laptop.receive().await.body.expect("an answer");
@@ -153,7 +157,10 @@ async fn the_first_device_through_the_account_is_in_at_once_and_the_next_waits_f
     let (_, answer) = knock(&local, &stranger, "", &said).await;
     assert_eq!(refused(&answer).0, ErrorCode::Unauthorized);
     let (_, answer) = knock(&local, &stranger, "", &assertion(&instance, "someone-else", &stranger)).await;
-    assert_eq!(refused(&answer), (ErrorCode::Unauthorized, "This Claktory belongs to another account.".to_owned()));
+    // Another account's (#527 S4): a pipe is for that.
+    let (code, reason) = refused(&answer);
+    assert!(code == ErrorCode::OtherAccount && reason.contains("open a pipe"), "{reason}");
+    assert!(matches!(&answer, Body::Error(error) if !error.other_account_before), "never let in here: {answer:?}");
     let (_, answer) = knock(&local, &stranger, "", "").await;
     assert_eq!(refused(&answer).0, ErrorCode::SignInRequired);
     drop(phone);
@@ -204,7 +211,12 @@ async fn a_signed_out_claktory_asks_to_be_signed_in_again_and_a_code_never_pairs
     let Body::PairingPending(pending) = answer else { panic!("expected it to wait, got {answer:?}") };
     view.follow(&mut client, |view| remote(view).pending_devices.iter().any(|device| device.device_id == pending.device_id)).await;
     let number = remote(&view).pending_devices.into_iter().find(|device| device.device_id == pending.device_id).expect("waiting").number;
-    apply_request(&mut client, &mut view, Request::ApproveDevice(v1::ApproveDevice { device_id: pending.device_id.clone(), number })).await;
+    apply_request(
+        &mut client,
+        &mut view,
+        Request::ApproveDevice(v1::ApproveDevice { device_id: pending.device_id.clone(), number, ..Default::default() }),
+    )
+    .await;
     let answer = laptop.receive().await.body.expect("an answer");
     assert_eq!(welcomed(&mut laptop, answer).await.device_id, pending.device_id);
     view.follow(&mut client, |view| remote(view).devices.iter().all(|device| device.id != first)).await;
@@ -212,64 +224,151 @@ async fn a_signed_out_claktory_asks_to_be_signed_in_again_and_a_code_never_pairs
     assert_eq!(listed, [pending.device_id], "listed once");
 }
 
+/// The paired device with this id, as the Workspace shows it.
+fn shown(view: &View, id: &str) -> Option<v1::PairedDevice> {
+    remote(view).devices.into_iter().find(|device| device.id == id)
+}
+
+/// The four digits a waiting device shows, as the Workspace has them.
+fn pending_number(view: &View, id: &str) -> Option<String> {
+    remote(view).pending_devices.into_iter().find(|device| device.device_id == id).map(|device| device.number)
+}
+
+/// #527 S3: no deadlines. A code and the owner's account need no Allow; an
+/// Allow a person made with the digits (here at a terminal) confirms the
+/// device; one let in by a program shows the owner's assertion at once, or
+/// is confirmed from a confirmed device. Each Allow is recorded and
+/// noticed until a device dismisses it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_device_paired_with_a_code_confirms_it_is_the_owners_once() {
+async fn an_allow_a_person_made_confirms_a_device_and_one_by_a_program_needs_the_account() {
     let dir = temp_dir();
     let instance = Instance::start(&dir).await;
     let (_factory, mut client, mut view, local) = signed_in(&dir, &instance).await;
     let account = account_id(&dir);
 
-    // Paired with a code: a code and the account let it in without Allow.
-    let (token, made) = factoryd::remote::pair(&home(&dir), "Phone").expect("paired");
+    // A code and the account: in without Allow.
+    let (token, _) = factoryd::remote::pair(&home(&dir), "Phone").expect("paired");
     let phone = new_device().await;
     let (mut app, answer) = knock(&local, &phone, &token, &assertion(&instance, &account, &phone)).await;
     assert_eq!(welcomed(&mut app, answer).await.confirm_by_ms, 0);
     drop(app);
-    assert_eq!(
-        factoryd::remote::devices(&home(&dir)).expect("devices").iter().find(|device| device.id == made.id).map(|d| d.endpoint_id.clone()),
-        Some(phone.id().to_string())
-    );
 
-    // Paired with a code alone (Allow): asked to confirm, with a week to.
-    let (token, made) = factoryd::remote::pair(&home(&dir), "Tablet").expect("paired");
+    // Allowed at a terminal: confirmed at once, no deadline, and noticed.
+    let (token, made_tablet) = factoryd::remote::pair(&home(&dir), "Tablet").expect("paired");
     let tablet = new_device().await;
     let (mut app, answer) = knock(&local, &tablet, &token, "").await;
     assert!(matches!(answer, Body::PairingPending(_)), "{answer:?}");
-    factoryd::remote::approve(&home(&dir), &made.id).expect("allowed");
+    factoryd::remote::approve(&home(&dir), &made_tablet.id).expect("allowed");
     let answer = app.receive().await.body.expect("an answer");
-    let by = welcomed(&mut app, answer).await.confirm_by_ms;
-    let week = 7 * 24 * 3600 * 1000;
-    assert!((by - factoryd::transcript::now_ms() - week).abs() < 60_000, "{by}");
+    assert_eq!(welcomed(&mut app, answer).await.confirm_by_ms, 0);
+    view.follow(&mut client, |view| shown(view, &made_tablet.id).is_some_and(|device| device.confirmed)).await;
+    let listed = shown(&view, &made_tablet.id).expect("listed");
+    assert_eq!((listed.allowed_by.as_str(), listed.confirm_by_ms), ("terminal", 0));
+    assert!(listed.allowed_ms > 0);
+    let notices = remote(&view).allow_notices;
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!((notices[0].device_id.as_str(), notices[0].allowed_by.as_str()), (made_tablet.id.as_str(), "terminal"));
+    // Dismissed on one device, gone on all.
+    apply_request(&mut client, &mut view, Request::DismissAllowNotice(v1::DismissAllowNotice { device_id: made_tablet.id.clone() })).await;
+    view.follow(&mut client, |view| remote(view).allow_notices.is_empty()).await;
+    drop(app);
+    // Signed in to another account on it (a stolen tablet, say): turned
+    // away, and the person's devices see it (#527 S4) until it's back.
+    let (_, answer) = knock(&local, &tablet, &token, &assertion(&instance, "someone-else", &tablet)).await;
+    let (code, reason) = refused(&answer);
+    assert!(code == ErrorCode::OtherAccount && reason.contains("now signed in to a different"), "{reason}");
+    assert!(matches!(&answer, Body::Error(error) if error.other_account_before), "let in here before: {answer:?}");
     view.follow(&mut client, |view| {
-        remote(view).devices.iter().any(|device| device.id == made.id && !device.confirmed && device.confirm_by_ms == by)
+        shown(view, &made_tablet.id).is_some_and(|device| device.turned_why == "other_account" && device.turned_ms > 0)
     })
     .await;
-    // Again: the same week, not a new one.
-    drop(app);
     let (mut app, answer) = knock(&local, &tablet, &token, "").await;
-    assert_eq!(welcomed(&mut app, answer).await.confirm_by_ms, by);
-    // Signed in on it, it confirms itself.
-    app.ok(Request::ConfirmDevice(v1::ConfirmDevice { assertion: assertion(&instance, &account, &tablet), device_id: String::new() }))
-        .await;
-    view.follow(&mut client, |view| remote(view).devices.iter().any(|device| device.id == made.id && device.confirmed)).await;
-    drop(app);
-    let (mut app, answer) = knock(&local, &tablet, &token, "").await;
-    assert_eq!(welcomed(&mut app, answer).await.confirm_by_ms, 0);
+    welcomed(&mut app, answer).await;
+    view.follow(&mut client, |view| shown(view, &made_tablet.id).is_some_and(|device| device.turned_why.is_empty())).await;
 
-    // Or the person confirms one from a device that's the owner's.
+    // Allowed by a program (`factoryd allow` with no terminal): turned away
+    // at once until it shows the owner's assertion.
     let (token, made) = factoryd::remote::pair(&home(&dir), "Old laptop").expect("paired");
     let laptop = new_device().await;
     let (mut old, answer) = knock(&local, &laptop, &token, "").await;
     assert!(matches!(answer, Body::PairingPending(_)), "{answer:?}");
-    factoryd::remote::approve(&home(&dir), &made.id).expect("allowed");
+    factoryd::remote::approve_by(&home(&dir), &made.id, &factoryd::remote::Allower::Program).expect("allowed");
     let answer = old.receive().await.body.expect("an answer");
-    assert!(welcomed(&mut old, answer).await.confirm_by_ms > 0);
-    // Not from itself, unconfirmed.
-    let mine = Request::ConfirmDevice(v1::ConfirmDevice { assertion: String::new(), device_id: made.id.clone() });
-    let reply = old.request(mine.clone()).await;
-    assert_eq!(refused(&reply.body).0, ErrorCode::Unauthorized);
-    app.ok(mine).await;
-    view.follow(&mut client, |view| remote(view).devices.iter().any(|device| device.id == made.id && device.confirmed)).await;
+    assert_eq!(refused(&answer).0, ErrorCode::SignInRequired, "{answer:?}");
+    view.follow(&mut client, |view| shown(view, &made.id).is_some_and(|device| !device.confirmed && device.allowed_by == "program")).await;
+    let (_, answer) = knock(&local, &laptop, &token, "").await;
+    assert_eq!(refused(&answer).0, ErrorCode::SignInRequired);
+    // The person confirms it from a device that's the owner's.
+    app.ok(Request::ConfirmDevice(v1::ConfirmDevice { assertion: String::new(), device_id: made.id.clone() })).await;
+    let (mut old, answer) = knock(&local, &laptop, &token, "").await;
+    welcomed(&mut old, answer).await;
+    drop(old);
+
+    // Or its own assertion confirms it.
+    let (token, made) = factoryd::remote::pair(&home(&dir), "Spare").expect("paired");
+    let spare = new_device().await;
+    let (mut waiting, answer) = knock(&local, &spare, &token, "").await;
+    assert!(matches!(answer, Body::PairingPending(_)), "{answer:?}");
+    factoryd::remote::approve_by(&home(&dir), &made.id, &factoryd::remote::Allower::Program).expect("allowed");
+    assert_eq!(refused(&waiting.receive().await.body.expect("an answer")).0, ErrorCode::SignInRequired);
+    let (mut spare_app, answer) = knock(&local, &spare, &token, &assertion(&instance, &account, &spare)).await;
+    welcomed(&mut spare_app, answer).await;
+    view.follow(&mut client, |view| shown(view, &made.id).is_some_and(|device| device.confirmed)).await;
+}
+
+/// #527 S3: this computer's own app allows with the digits, and its Allow
+/// confirms; a device not confirmed itself lets another in, unconfirmed.
+/// The record says who, by name as it was then, and never the digits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn who_allowed_a_device_is_recorded_and_only_a_confirmed_one_confirms() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let (_factory, mut client, mut view, local) = signed_in(&dir, &instance).await;
+    // Signed out for now: a device let in by a program connects meanwhile.
+    apply_request(&mut client, &mut view, Request::AccountSignOut(v1::AccountSignOut {})).await;
+    let (mut unconfirmed, unconfirmed_id) = paired(&dir, &local, "Borrowed tablet").await;
+
+    // This computer's own app allows one: confirmed, by "local".
+    let (token, by_app) = factoryd::remote::pair(&home(&dir), "Phone").expect("paired");
+    let phone = new_device().await;
+    let (mut phone_app, answer) = knock(&local, &phone, &token, "").await;
+    assert!(matches!(answer, Body::PairingPending(_)), "{answer:?}");
+    view.follow(&mut client, |view| pending_number(view, &by_app.id).is_some()).await;
+    let number = pending_number(&view, &by_app.id).expect("waiting");
+    let allow = v1::ApproveDevice { device_id: by_app.id.clone(), number: number.clone(), ..Default::default() };
+    apply_request(&mut client, &mut view, Request::ApproveDevice(allow)).await;
+    let answer = phone_app.receive().await.body.expect("an answer");
+    welcomed(&mut phone_app, answer).await;
+    view.follow(&mut client, |view| shown(view, &by_app.id).is_some_and(|device| device.confirmed)).await;
+    let listed = shown(&view, &by_app.id).expect("listed");
+    assert_eq!((listed.allowed_by.as_str(), listed.allowed_by_device_id.as_str()), ("device", "local"));
+    assert!(!listed.allowed_by_name.is_empty());
+    let notice = remote(&view).allow_notices.into_iter().find(|notice| notice.device_id == by_app.id).expect("noticed");
+    assert!(!format!("{notice:?}").contains(&number), "never the digits");
+
+    // The unconfirmed device allows one: let in, not confirmed.
+    let (token, by_device) = factoryd::remote::pair(&home(&dir), "Laptop").expect("paired");
+    let laptop = new_device().await;
+    let (mut laptop_app, answer) = knock(&local, &laptop, &token, "").await;
+    assert!(matches!(answer, Body::PairingPending(_)), "{answer:?}");
+    view.follow(&mut client, |view| pending_number(view, &by_device.id).is_some()).await;
+    let number = pending_number(&view, &by_device.id).expect("waiting");
+    unconfirmed.ok(Request::ApproveDevice(v1::ApproveDevice { device_id: by_device.id.clone(), number, ..Default::default() })).await;
+    let answer = laptop_app.receive().await.body.expect("an answer");
+    welcomed(&mut laptop_app, answer).await;
+    view.follow(&mut client, |view| shown(view, &by_device.id).is_some_and(|device| device.allowed_ms > 0)).await;
+    let listed = shown(&view, &by_device.id).expect("listed");
+    assert!(!listed.confirmed);
+    assert_eq!(
+        (listed.allowed_by.as_str(), listed.allowed_by_device_id.as_str(), listed.allowed_by_name.as_str()),
+        ("device", unconfirmed_id.as_str(), "Borrowed tablet")
+    );
+    drop(laptop_app);
+
+    // Signed in again: the one it let in shows the owner's assertion first.
+    view.workspace = crate::claktory_account::sign_in(&mut client, &instance, "matt@example.com").await;
+    let (_, answer) = knock(&local, &laptop, &token, "").await;
+    assert_eq!(refused(&answer).0, ErrorCode::SignInRequired);
 }
 
 /// F-OK1's kill switch: once a release's floor is after the pinned service
@@ -293,13 +392,13 @@ fn confirmed_as(dir: &Path, id: &str) -> String {
 }
 
 /// A paired device's app through the tunnel, welcomed: paired with a code
-/// and allowed.
+/// and allowed by a program, so not confirmed by its Allow (#527 S3).
 async fn paired(dir: &Path, local: &Code, name: &str) -> (Client, String) {
     let (token, made) = factoryd::remote::pair(&home(dir), name).expect("paired");
     let device = new_device().await;
     let (mut app, answer) = knock(local, &device, &token, "").await;
     assert!(matches!(answer, Body::PairingPending(_)), "{answer:?}");
-    factoryd::remote::approve(&home(dir), &made.id).expect("allowed");
+    factoryd::remote::approve_by(&home(dir), &made.id, &factoryd::remote::Allower::Program).expect("allowed");
     let answer = app.receive().await.body.expect("an answer");
     welcomed(&mut app, answer).await;
     (app, made.id)
@@ -357,4 +456,144 @@ async fn signing_in_on_a_paired_device_confirms_that_device_alone() {
     let workspace = sign_in(&mut client, &instance, "matt@example.com").await;
     assert!(workspace.remote.expect("remote").devices.iter().all(|device| device.id != tablet_id || !device.confirmed));
     assert_eq!(confirmed_as(&dir, &waiting.id), "");
+}
+
+/// What the Mac app sends to sign in to the account through its own
+/// Claktory (#529), with the public half of `key`.
+fn vouch(key: &ed25519_dalek::SigningKey) -> Request {
+    Request::VouchDevice(v1::VouchDevice {
+        account_key: claktory_account::protocol::b64(key.verifying_key().as_bytes()),
+        name: "Matt's MacBook".into(),
+        platform: "macos".into(),
+        version: "test".into(),
+    })
+}
+
+/// #529 (Fugo's condition 3): only this computer's own app signs in to the
+/// account through this Claktory. A device through the tunnel is refused
+/// whoever it is, the loopback port lets no one ask without the app's
+/// token, and the app is refused while the Claktory isn't signed in.
+/// (Rivet's reach: `rivet_reach`, which leaves VouchDevice to the person;
+/// pipes send no requests.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_this_computers_own_app_signs_in_through_this_claktory() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let (addr, factory) = open(&dir, &instance.url).await;
+    factory.set_tunnel_online_wait(Duration::from_millis(100));
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+
+    // Not signed in: nothing to sign in through.
+    let (code, reason) = refused(&client.request(vouch(&key)).await.body);
+    assert_eq!(code, ErrorCode::SignInRequired, "{reason}");
+
+    let relays = v1::SetRemoteAccess { relays: vec!["http://127.0.0.1:9/".into()], set_relays: true, ..Default::default() };
+    apply_request(&mut client, &mut view, Request::SetRemoteAccess(relays)).await;
+    view.workspace = sign_in(&mut client, &instance, "matt@example.com").await;
+    let local = parse(&local_pairing(&dir).await);
+    let account = account_id(&dir);
+
+    // A device of the owner's, through the tunnel: never.
+    let device = new_device().await;
+    let (mut phone, answer) = knock(&local, &device, "", &assertion(&instance, &account, &device)).await;
+    welcomed(&mut phone, answer).await;
+    let (code, reason) = refused(&phone.request(vouch(&key)).await.body);
+    assert_eq!(code, ErrorCode::Unauthorized, "{reason}");
+
+    // The loopback port without the app's token: not even let in to ask.
+    let mut stranger = Client::open(addr).await;
+    let hello =
+        v1::Hello { protocol_version: PROTOCOL_VERSION, client_version: "test".into(), token: "not-the-apps".into(), ..Default::default() };
+    stranger.send(v1::ClientMessage { id: 1, body: Some(Request::Hello(hello)) }).await;
+    assert!(matches!(stranger.receive().await.body, Some(Body::Error(_))), "a Hello without the app's token is refused");
+
+    // This computer's own app: the service is asked, and gives a code
+    // (or, from before the vouch, says it can't).
+    let Body::DeviceVouched(vouched) = client.request(vouch(&key)).await.body else { panic!("expected DeviceVouched") };
+    assert!(vouched.refused == "unavailable" || (vouched.refused.is_empty() && !vouched.code.is_empty()), "{vouched:?}");
+}
+
+/// A call to the account service as a device, signed by its account key
+/// `key`: the answer's status and body.
+async fn as_device(instance: &Instance, key: &ed25519_dalek::SigningKey, path: &str, body: serde_json::Value) -> (u16, serde_json::Value) {
+    use claktory_account::protocol as api;
+    let body = serde_json::to_vec(&body).expect("json");
+    let time = jiff::Timestamp::now().as_second();
+    let answer = reqwest::Client::new()
+        .post(format!("{}{path}", instance.url))
+        .header("authorization", format!("Device {}", api::b64(key.verifying_key().as_bytes())))
+        .header(api::TIME_HEADER, time.to_string())
+        .header(api::SIGNATURE_HEADER, api::sign_request(key, "POST", path, time, &body))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("the account service");
+    let status = answer.status().as_u16();
+    (status, answer.json().await.unwrap_or_default())
+}
+
+/// #529 end to end: the Mac app signs in to the account through its own
+/// Claktory, with no emailed code, and another Claktory of the account
+/// that it was paired with by a code alone then takes it as the owner's.
+/// A code given for one key signs in no other, and signing the Claktory
+/// out signs its app out too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_mac_app_signs_in_through_its_own_claktory_and_another_claktory_confirms_it() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let (_mac_factory, mut mac, mut mac_view, _) = signed_in(&dir, &instance).await;
+    let server_dir = temp_dir();
+    let (_server_factory, mut server, mut server_view, server_code) = signed_in(&server_dir, &instance).await;
+    let server_view = &mut server_view;
+
+    // Paired with the server by a code and let in by a program: it shows
+    // the owner's assertion before it connects (#527 S3).
+    let (token, made) = factoryd::remote::pair(&home(&server_dir), "Mac").expect("paired");
+    let tunnel = new_device().await;
+    let (mut app, answer) = knock(&server_code, &tunnel, &token, "").await;
+    assert!(matches!(answer, Body::PairingPending(_)), "{answer:?}");
+    factoryd::remote::approve_by(&home(&server_dir), &made.id, &factoryd::remote::Allower::Program).expect("allowed");
+    let answer = app.receive().await.body.expect("an answer");
+    assert_eq!(refused(&answer).0, ErrorCode::SignInRequired, "not the owner's yet");
+    drop(app);
+
+    // The Mac app asks its own Claktory for a code for its account key.
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let Body::DeviceVouched(vouched) = mac.request(vouch(&key)).await.body else { panic!("expected DeviceVouched") };
+    assert!(vouched.refused.is_empty() && !vouched.code.is_empty(), "{vouched:?}");
+    assert_eq!((vouched.service.as_str(), vouched.email.as_str()), (instance.url.as_str(), "matt@example.com"));
+    let verify = serde_json::json!({"request_id": vouched.request_id, "code": vouched.code});
+
+    // Another key can't use it.
+    let other = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
+    let (status, _) = as_device(&instance, &other, "/v1/devices/sign-in/verify", verify.clone()).await;
+    assert_eq!(status, 401, "a code for one key signs in no other");
+
+    // The key it was given for signs in, and gets an assertion for its
+    // tunnel key to the server, as a phone that signed in itself does.
+    let (status, signed) = as_device(&instance, &key, "/v1/devices/sign-in/verify", verify.clone()).await;
+    assert_eq!(status, 200, "{signed}");
+    assert_eq!(signed["email"], "matt@example.com");
+    let (status, _) = as_device(&instance, &key, "/v1/devices/sign-in/verify", verify).await;
+    assert_ne!(status, 200, "a code works once");
+    let (status, issued) =
+        as_device(&instance, &key, "/v1/devices/assertion", serde_json::json!({"device_key": tunnel.id().to_string()})).await;
+    assert_eq!(status, 200, "{issued}");
+    let said = issued["assertion"].as_str().expect("an assertion").to_owned();
+
+    // The server takes it as the owner's from its next Hello, with no
+    // code.
+    let (mut app, answer) = knock(&server_code, &tunnel, &token, &said).await;
+    assert_eq!(welcomed(&mut app, answer).await.confirm_by_ms, 0);
+    server_view.follow(&mut server, |view| remote(view).devices.iter().any(|device| device.id == made.id && device.confirmed)).await;
+    drop(app);
+
+    // Signing the Mac's Claktory out signs its app out of the account too.
+    apply_request(&mut mac, &mut mac_view, Request::AccountSignOut(v1::AccountSignOut {})).await;
+    let (status, _) =
+        as_device(&instance, &key, "/v1/devices/assertion", serde_json::json!({"device_key": new_device().await.id().to_string()})).await;
+    assert_eq!(status, 401, "signed out with the Claktory that signed it in");
 }

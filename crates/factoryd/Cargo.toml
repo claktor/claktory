@@ -84,6 +84,11 @@ tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "t
 tokio-tungstenite = "0.30.0"
 # Vault backups hold a tar (`vault/backup.rs`).
 tar = "0.4"
+# The Mac release is a .tar.xz (#454): its app's name is read in Rust, with no
+# xz on the computer (`app_archive.rs`, friend bug #56). Pure Rust.
+lzma-rs = "0.3"
+# And a gzipped one's, as before it; already linked through factory-agent.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 # The person's initials (person.rs), by grapheme; already linked through iroh.
 unicode-segmentation = "1"
 # Reports' text, normalised before it's kept (pipes/handoff/schema.rs).
@@ -121,6 +126,11 @@ qa-provider = ["factory-agent/qa-provider"]
 # QA only (E11 row 6): a Claktory that claims another's account when told
 # to (src/qa_lies.rs); a release build refuses it (scripts/check-qa-lies.sh).
 qa-lies = []
+# QA only (#435 W6, Fugo 41161): the vault fills on Google's, Apple's and
+# Microsoft's sign-in before its ship gate opens, for the early Google
+# sign-in test (src/errands/fill.rs); a release build refuses it
+# (scripts/check-qa-lies.sh).
+qa-idp-fill = []
 
 [dev-dependencies]
 # A local account service to sign in at (tests/all/account.rs).

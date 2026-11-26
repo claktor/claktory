@@ -139,16 +139,16 @@ fn catalog_luna() -> Model {
 }
 
 #[tokio::test]
-async fn the_registry_lists_the_four_providers_and_their_models() {
+async fn the_registry_lists_the_five_providers_and_their_models() {
     let dir = tempfile::tempdir().unwrap();
     let registry = registry(dir.path(), &[]);
     let ids: Vec<&str> = registry.providers().iter().map(|provider| provider.id).collect();
-    assert_eq!(ids, ["anthropic", "openai", "openai-codex", "openrouter"]);
+    assert_eq!(ids, ["anthropic", "openai", "openai-codex", "openrouter", "grok"]);
     assert_eq!(registry.get_model("openai", "gpt-5.5").map(|model| model.max_tokens), Some(128_000));
     assert_eq!(registry.get_model("openai-codex", "gpt-5.6-luna"), Some(catalog_luna()));
     assert!(registry.get_model("openai", "nope").is_none());
     assert!(registry.get_models(Some("nope")).is_empty());
-    assert_eq!(registry.get_models(None).len(), 38 + 8 + 356 + 15);
+    assert_eq!(registry.get_models(None).len(), 38 + 8 + 356 + 15 + 4);
     let codex = registry.provider("openai-codex").unwrap();
     assert_eq!(codex.oauth.as_ref().map(|oauth| oauth.name()), Some("OpenAI (ChatGPT Plus/Pro)"));
     assert!(codex.api.is_some() && codex.api_key.is_none());
@@ -157,6 +157,9 @@ async fn the_registry_lists_the_four_providers_and_their_models() {
     assert_eq!(openrouter.api_key.as_ref().map(|key| key.name().to_owned()).as_deref(), Some("OpenRouter API key"));
     let anthropic = registry.provider("anthropic").unwrap();
     assert_eq!(anthropic.oauth.as_ref().map(|oauth| oauth.name()), Some("Anthropic (Claude Pro/Max)"));
+    let grok = registry.provider("grok").unwrap();
+    assert_eq!(grok.oauth.as_ref().map(|oauth| oauth.name()), Some("Grok (SuperGrok or X Premium+)"));
+    assert!(grok.api_key.is_none(), "a subscription only");
     assert_eq!(anthropic.api_key.as_ref().map(|key| key.name().to_owned()).as_deref(), Some("Anthropic API key"));
     assert!(registry.providers().iter().all(|provider| provider.api.is_some()));
 }

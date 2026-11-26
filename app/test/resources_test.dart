@@ -1,3 +1,4 @@
+import 'package:factory_app/forms.dart' show AgentListField;
 import 'package:factory_app/identity.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/resources.dart';
@@ -426,5 +427,89 @@ void main() {
     await settle(tester);
     expect(harness.last.updateSettings.buildCacheGb, 40);
     expect(harness.last.updateSettings.hasRamPercent(), isFalse);
+  });
+
+  testWidgets('Settings says who hears the alerts and why one is not told, '
+      'and changes who (friend bug #54)', (tester) async {
+    final snapshot = resourcesWorkspace();
+    snapshot.agents.addAll([
+      Agent(id: 'rivet', name: 'Rivet', modelAvailable: true),
+      Agent(id: 'mista', name: 'Mista', projectId: 'p1', modelAvailable: true),
+    ]);
+    snapshot.settings
+      ..name = 'Mac Studio'
+      ..resourceAlertsToAdmins = true
+      ..resourceAlertAgents.addAll([
+        ResourceAlertAgent(agentId: 'rivet', told: true, admin: true),
+        ResourceAlertAgent(
+          agentId: 'mista',
+          held: ResourceAlertHeld.RESOURCE_ALERT_HELD_RESOURCES_OFF,
+        ),
+      ]);
+    final harness = Harness(snapshot);
+    await harness.show(tester, size: const Size(1200, 1600));
+    harness.page.value = AppPage.settings;
+    await settle(tester);
+    final heard = find.text('Who hears');
+    await tester.scrollUntilVisible(
+      heard,
+      200,
+      scrollable: find
+          .descendant(
+            of: find.byType(SettingsView),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    expect(
+      find.text('Rivet tells you when Mac Studio runs low. Alert when:'),
+      findsOneWidget,
+    );
+    expect(
+      find.text("Resources is off for Mista, so it isn't told."),
+      findsOneWidget,
+    );
+    final field = find.byType(AgentListField);
+    expect(
+      find.descendant(of: field, matching: find.text('Mista')),
+      findsOneWidget,
+      reason: 'the chosen agent, as a chip',
+    );
+
+    // The whole row in sight.
+    await tester.ensureVisible(find.text('Memory'));
+    await settle(tester);
+    // Admin agents off.
+    await tester.tap(find.bySemanticsLabel('Admin agents'));
+    await settle(tester);
+    expect(harness.last.updateSettings.resourceAlertsToAdmins, isFalse);
+    expect(harness.last.updateSettings.hasResourceAlertAgents(), isFalse);
+
+    // Builder chosen too: the whole list goes, in the sidebar's order.
+    await tester.tap(find.descendant(of: field, matching: find.text('Mista')));
+    await settle(tester);
+    await tester.tap(find.text('Builder').last);
+    await settle(tester);
+    expect(harness.last.updateSettings.resourceAlertAgents.agentIds, [
+      'a1',
+      'mista',
+    ]);
+
+    // Nobody told: Claktory says so itself.
+    final nobody = snapshot.deepCopy();
+    nobody.settings
+      ..resourceAlertsToAdmins = false
+      ..resourceAlertAgents.removeAt(0);
+    await harness.apply(tester, nobody);
+    expect(
+      find.text('Claktory notifies you when Mac Studio runs low. Alert when:'),
+      findsOneWidget,
+    );
+    expect(
+      find.text(
+        'No agent can hear the alerts now, so Claktory notifies you itself.',
+      ),
+      findsOneWidget,
+    );
   });
 }

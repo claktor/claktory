@@ -114,6 +114,17 @@ class HistoryController extends ChangeNotifier {
   /// At the end, following what happens now.
   var live = false;
 
+  /// The one project shown, by id; null for all of them. The person's
+  /// choice while History is open, never kept.
+  String? project;
+
+  /// Shows only [id]'s project (null: all of them).
+  void showProject(String? id) {
+    if (id == project) return;
+    project = id;
+    notifyListeners();
+  }
+
   /// Loads the overview and the first page, then the rest in the
   /// background, and watches for what's new.
   Future<void> open() async {
@@ -437,8 +448,14 @@ class HistoryController extends ChangeNotifier {
     time.value = next;
   }
 
-  /// The chapters, in order.
-  List<HistoryChapter> get chapters => timeline?.chapters ?? const [];
+  /// The chapters, in order; with [project], only those of its own.
+  List<HistoryChapter> get chapters {
+    final all = timeline?.chapters ?? const <HistoryChapter>[];
+    final project = this.project;
+    final scene = this.scene;
+    if (project == null || scene == null) return all;
+    return scene.chaptersIn(all, project);
+  }
 
   /// To the next chapter after the playhead ([forward]) or the one before.
   void chapter({required bool forward}) {

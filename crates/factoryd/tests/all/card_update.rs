@@ -244,3 +244,66 @@ async fn an_agent_changes_its_own_proposal_to_rivet() {
     let record = records.iter().find(|record| record.kind() == NeedsYouRecordKind::Proposal).expect("listed");
     assert_eq!((record.title.as_str(), record.updates), ("Add two backend agents.", 1));
 }
+
+#[tokio::test]
+async fn a_review_card_follows_its_file_and_an_approval_of_the_file_before_is_refused() {
+    let dir = temp_dir();
+    let (factory, mut client, mut view) = setup(&dir).await;
+    factoryd::review_watch::set_times_for_test(&factory, std::time::Duration::from_millis(50), std::time::Duration::from_millis(400));
+    let file = dir.join("site/report.md");
+    std::fs::write(&file, "# Report\n\nFirst draft.\n").expect("the file");
+    let said = call(&mut client, &mut view, "builder", "ask_person", serde_json::json!({"title": "Review the report", "body": "B", "review": "report.md"})).await;
+    let id = id_in(&said);
+    let (seq, asked) = card(&view, &id);
+    assert_eq!(asked.revision, 1);
+    let settle = || tokio::time::sleep(std::time::Duration::from_millis(1200));
+
+    // Saved again unchanged: nothing marks it.
+    std::fs::write(&file, "# Report\n\nFirst draft.\n").expect("saved again");
+    settle().await;
+    let shown = client.ping(b"after the same save").await;
+    assert!(!format!("{shown:?}").contains("This file changed"), "marked for the same content");
+    assert_eq!(card(&view, &id).1.revision, 1);
+
+    // Saved ten times in a burst: marked once, when it went quiet, in
+    // Claktory's words, not the agent's.
+    for at in 0..10 {
+        std::fs::write(&file, format!("# Report\n\nDraft {at}.\n")).expect("saved");
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    }
+    view.follow(&mut client, |view| card(view, &id).1.revision == 2).await;
+    settle().await;
+    let _ = client.ping(b"after the burst").await;
+    let (seq_now, marked) = card(&view, &id);
+    assert_eq!(seq_now, seq, "redrawn in place");
+    assert_eq!(
+        (marked.revision, marked.update_note.as_str(), marked.update_reason.as_str(), marked.state()),
+        (2, "This file changed since Builder asked. Approving means it as it reads now.", "", AskPersonState::Pending)
+    );
+    assert!(marked.updated_ms > 0);
+    assert_eq!(view.agent("builder").waiting_seqs, [seq], "it doesn't count again");
+
+    // Its agent's own changes still count from ten: a file change isn't one.
+    let said = call(&mut client, &mut view, "builder", "ask_update", serde_json::json!({"id": id, "body": "The second draft."})).await;
+    assert!(said.ends_with(" It can be changed 9 more times."), "{said}");
+    let (_, updated) = card(&view, &id);
+    assert_eq!((updated.revision, updated.update_note.as_str()), (3, ""), "the agent's change is its own");
+
+    // An approval of the file before is refused; of the file now, kept.
+    assert_eq!(reply_to(&mut client, &mut view, answer(seq, "", Some(2))).await, Err("This card changed. Look at it again.".to_owned()));
+    std::fs::write(&file, "# Report\n\nFinal.\n").expect("saved");
+    view.follow(&mut client, |view| card(view, &id).1.revision == 4).await;
+    assert_eq!(reply_to(&mut client, &mut view, answer(seq, "", Some(3))).await, Err("This card changed. Look at it again.".to_owned()));
+    assert_eq!(reply_to(&mut client, &mut view, answer(seq, "", Some(4))).await, Ok(()));
+    // Its agent was told, quietly, with the answer.
+    let told = |view: &View| {
+        view.entries.iter().any(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.text.contains("changed while question") && event.text.contains("reviews it as it reads now")))
+    };
+    view.follow(&mut client, |view| told(view) && idle(view, "builder")).await;
+
+    // Answered, it follows the file no more.
+    std::fs::write(&file, "# Report\n\nAfter.\n").expect("saved");
+    settle().await;
+    let _ = client.ping(b"after the answer").await;
+    assert_eq!(card(&view, &id).1.revision, 4);
+}

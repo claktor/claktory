@@ -1,7 +1,8 @@
 // The app strip on an iPhone (C5): the pinned apps' chips in the menu,
 // under its header. A chip opens its app's view as a page over the
-// agent's conversation (put in its layout, so the Mac has it too), and so
-// does an app chosen from All apps; one already open is pushed as it is.
+// agent's conversation, never in its layout, which the person's other
+// devices share (Bruno 42883); so does an app chosen from All apps. Back
+// pops it.
 
 import 'package:factory_app/app_views/app_view.dart';
 import 'package:factory_app/layout.dart' show chatKind;
@@ -79,13 +80,15 @@ Future<void> _openMenu(WidgetTester tester) async {
   expect(find.byType(Sidebar), findsOneWidget);
 }
 
-Iterable<ViewNode> _appLeaves(Harness harness) => [
-  for (final message in harness.backend.sent)
-    if (message.hasSetLayout()) ..._leaves(message.setLayout.root),
-].where((node) => node.leaf.kind == appKind);
+Iterable<ClientMessage> _layouts(Harness harness) =>
+    harness.backend.sent.where((m) => m.hasSetLayout());
 
-Iterable<ViewNode> _leaves(ViewNode node) =>
-    node.hasSplit() ? node.split.children.expand(_leaves) : [node];
+/// Back, at the page's top left: the conversation again.
+Future<void> _back(WidgetTester tester) async {
+  await tester.tap(find.bySemanticsLabel('Back').last);
+  await pumpFrames(tester, const Duration(seconds: 1));
+  expect(find.byType(AppView), findsNothing);
+}
 
 void main() {
   testWidgets('a chip in the menu opens its view as a page over the '
@@ -102,15 +105,18 @@ void main() {
     expect(tester.getSize(chip).height, greaterThanOrEqualTo(44));
     await tester.tap(chip);
     await pumpFrames(tester, const Duration(seconds: 1));
-    // In the agent's layout, so every device has it, and pushed here.
-    expect(_appLeaves(harness).single.leaf.appId, 'charts');
+    // A page here, and nothing in the agent's layout.
+    expect(_layouts(harness), isEmpty);
     expect(find.byType(Sidebar), findsNothing);
     expect(tester.widget<AppView>(find.byType(AppView)).appId, 'charts');
     expect(harness.backend.sent.where((m) => m.hasSelectAgent()), isEmpty);
+    await _back(tester);
+    expect(_layouts(harness), isEmpty);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('a view open already is pushed as it is, not opened twice', (
+  testWidgets('a view open already in the layout: a page all the same, the '
+      'layout untouched', (
     tester,
   ) async {
     final harness = await _phone(
@@ -143,9 +149,10 @@ void main() {
     await pumpFrames(tester, const Duration(seconds: 1));
     await tester.tap(find.text('Notes').last);
     await pumpFrames(tester, const Duration(seconds: 1));
-    expect(_appLeaves(harness).single.leaf.appId, 'notes');
+    expect(_layouts(harness), isEmpty);
     expect(find.byType(Sidebar), findsNothing);
     expect(tester.widget<AppView>(find.byType(AppView)).appId, 'notes');
+    await _back(tester);
     expect(tester.takeException(), isNull);
   });
 

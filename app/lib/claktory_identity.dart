@@ -21,6 +21,13 @@ String claktoryName(Backend backend) {
   return backend.target?.label ?? thisMacName;
 }
 
+/// [claktoryName] as it reads inside a sentence ("Save the recovery key
+/// for nixos"): "this Mac" while this Mac's own has no name yet.
+String claktoryNameInText(Backend backend) {
+  final name = claktoryName(backend);
+  return name == thisMacName ? 'this Mac' : name;
+}
+
 /// A Claktory's color (`Settings.color`, one of the agent colors' names),
 /// found the same way as [claktoryName]; empty until one is known.
 String claktoryColorName(Backend backend) {

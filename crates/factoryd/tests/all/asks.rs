@@ -180,7 +180,7 @@ async fn a_reply_is_told_as_the_persons_words_never_as_a_yes() {
     let (seq, _) = shown.expect("a card");
     let empty = apply_request(&mut client, &mut view, reply(seq, " ")).await;
     let Body::Error(error) = empty else { panic!("{empty:?}") };
-    assert_eq!(error.message, "Write a reply, or approve or dismiss the question.");
+    assert_eq!(error.message, "Write a reply or attach a file, or approve or dismiss the question.");
 
     // Sent with dismiss too, it's still a reply: the reply wins.
     let mut both = v1::AnswerAsk { agent_id: "builder".into(), seq, reply: true, dismiss: true, ..Default::default() };
@@ -519,7 +519,7 @@ async fn a_procedure_goes_one_step_at_a_time_and_counts_once() {
     let said = told(&mut client, &mut view, 4).await;
     assert!(
         said.starts_with(
-            "The person couldn't do step 1 of 3 of \"Set up signing\": Open Settings → Signing.\n\nTheir comment:\n\nThere's no Signing.\n\nThat stops it there. Steps 2 to 3 weren't shown to them."
+            "The person can't or won't do step 1 of 3 of \"Set up signing\": Open Settings → Signing.\n\nTheir comment:\n\nThere's no Signing.\n\nIt stops there, waiting for you, and nothing was marked done. Steps 2 to 3 weren't shown to them. If they can't, find a way without them and rewrite the steps on this card: ask_reply (id 2) with steps, step 1 rewritten, and a short answer, and it opens again at step 1. If their words say they won't, respect it: stop the card, and don't do that step another way. To stop: ask_reply (id 2) with resolve: true and a short word for them, and the card shows it stopped at step 1; then use your best judgment"
         ),
         "{said}"
     );

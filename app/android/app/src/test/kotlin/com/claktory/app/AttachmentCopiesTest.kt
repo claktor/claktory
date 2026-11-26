@@ -136,4 +136,21 @@ class AttachmentCopiesTest {
         assertTrue(File(recent[0]).exists())
         assertArrayEquals(ByteArray(1), File(recent[0]).readBytes())
     }
+    @Test
+    fun `an adopted file moves into a folder of its own under its new name`() {
+        val photo = folder.newFile("capture.jpg").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        val path = copies().adopt(photo, "Photo 2026-05-11 at 14.32.05.jpg")
+        assertEquals("Photo 2026-05-11 at 14.32.05.jpg", File(path).name)
+        assertArrayEquals(byteArrayOf(1, 2, 3), File(path).readBytes())
+        assertFalse("moved, not copied", photo.exists())
+        assertEquals(listOf(File(path).parentFile), pickFolders())
+    }
+
+    @Test
+    fun `an adopted file over the limit is refused and stays where it was`() {
+        val photo = folder.newFile("capture.jpg").apply { writeBytes(ByteArray(10)) }
+        refused("too_large") { copies(maxSize = 9).adopt(photo, "Photo.jpg") }
+        assertTrue(photo.exists())
+        assertTrue(pickFolders().isEmpty())
+    }
 }

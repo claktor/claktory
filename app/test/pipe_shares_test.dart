@@ -7,15 +7,16 @@
 // 127.0.0.1), Copy address and Hide; and a pipe moved into or out of a
 // group with shares, or a group deleted, saying what that changes.
 import 'package:factory_app/connections.dart' show parsePairingCode;
-import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/devices.dart' show thisDeviceKind;
 import 'package:factory_app/loopback_forward.dart';
+import 'package:factory_app/mobile/share_browser.dart';
 import 'package:factory_app/pipe_shares.dart';
 import 'package:factory_app/pipes.dart' show pipeColor;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -43,6 +44,7 @@ PipeShare _theirs({
   bool hidden = false,
   String problem = '',
   bool unopened = false,
+  int expires = 0,
 }) => PipeShare(
   id: 's1',
   name: 'Dashboard',
@@ -54,11 +56,13 @@ PipeShare _theirs({
   address: 'http://s-abc.localhost:3000/',
   fallbackAddress: 'http://127.0.0.1:3000/',
   unopened: unopened,
+  expiresMs: Int64(expires),
 );
 
 PipeShare _mine({
   String group = 'g1',
   List<String> pipes = const ['p3', 'p4'],
+  int expires = 0,
 }) => PipeShare(
   id: 'm1',
   mine: true,
@@ -67,6 +71,7 @@ PipeShare _mine({
   pipeIds: pipes,
   groupId: group,
   live: true,
+  expiresMs: Int64(expires),
 );
 
 Workspace _workspace({
@@ -123,6 +128,26 @@ SharePipeWebsite _shared(Harness harness) => harness.backend.sent
     .sharePipeWebsite;
 
 void main() {
+  test('the time a share has left, in the largest whole unit, rounded up', () {
+    final now = DateTime(2026, 6, 1, 12);
+    String? left(Duration d) => shareEnds(
+      PipeShare(expiresMs: Int64(now.add(d).millisecondsSinceEpoch)),
+      now,
+    );
+    expect(shareEnds(PipeShare(), now), isNull);
+    expect(left(const Duration(seconds: 20)), 'Ends in 1 minute');
+    expect(left(const Duration(minutes: 59, seconds: 1)), 'Ends in 1 hour');
+    expect(
+      left(const Duration(minutes: 58, seconds: 30)),
+      'Ends in 59 minutes',
+    );
+    expect(left(const Duration(hours: 1)), 'Ends in 1 hour');
+    expect(left(const Duration(hours: 24)), 'Ends in 24 hours');
+    expect(left(const Duration(hours: 48)), 'Ends in 48 hours');
+    expect(left(const Duration(days: 7)), 'Ends in 7 days');
+    expect(left(-const Duration(seconds: 1)), 'Ending now');
+  });
+
   late List<Uri> opened;
   setUp(() {
     opened = [];
@@ -248,6 +273,30 @@ void main() {
         expect(onLine(find.textContaining('Ana shares Dashboard.')), findsOne);
         expect(onLine(find.text('Open')), findsNothing);
       });
+    });
+
+    testWidgets('one that ends says the time it has left, counting down '
+        '(friend bug #46)', (tester) async {
+      var now = DateTime(2026, 6, 1, 12);
+      shareClock = () => now;
+      addTearDown(() => shareClock = DateTime.now);
+      await _show(
+        tester,
+        _workspace(
+          shares: [
+            _theirs(
+              expires: now
+                  .add(const Duration(minutes: 2))
+                  .millisecondsSinceEpoch,
+            ),
+          ],
+          selected: 'p3',
+        ),
+      );
+      expect(find.text('Ends in 2 minutes'), findsOneWidget);
+      now = now.add(const Duration(seconds: 75));
+      await tester.pump(const Duration(seconds: 30));
+      expect(find.text('Ends in 1 minute'), findsOneWidget);
     });
 
     testWidgets('Copy address copies it; Hide hides it', (tester) async {
@@ -448,24 +497,212 @@ void main() {
         );
       });
 
-      testWidgets("on a phone it says it can't open it there yet", (
-        tester,
-      ) async {
-        final harness = await elsewhere(tester);
-        expect(
-          find.text(
-            'Opening shared websites on this $thisDeviceKind isn’t available '
-            'yet. Open it on a computer connected to your Claktory.',
-          ),
-          findsOneWidget,
-        );
-        expect(
-          tester.widget<Button>(find.widgetWithText(Button, 'Open')).onPressed,
-          isNull,
-        );
-        expect(find.text('Copy address'), findsNothing);
-        expect(find.text('Hide'), findsOneWidget);
-        expect(harness.backend.forwardedPorts, isEmpty);
+      // W6: on Android it opens in a Custom Tab that keeps Claktory up,
+      // at the share's own host and this device's port, never 127.0.0.1.
+      group('on Android', () {
+        late List<Uri> tabs;
+        late String how;
+        setUp(() {
+          tabs = [];
+          how = 'custom_tab';
+          openShareTab = (url) async {
+            if (how == 'no_browser' || how == 'bad_url') {
+              throw PlatformException(code: how);
+            }
+            tabs.add(url);
+            return how;
+          };
+        });
+
+        testWidgets('Open forwards it and opens it in a tab; nothing to '
+            'copy', (tester) async {
+          final harness = await elsewhere(tester);
+          expect(find.text('Copy address'), findsNothing);
+          await tester.tap(find.text('Open'));
+          await settle(tester);
+          expect(harness.backend.forwardedTargets, [3000]);
+          expect(
+            tabs.single.toString(),
+            'http://s-abc.localhost:${sharePortFor('s1')}/__claktory_open'
+            '?k=once',
+          );
+          expect(opened, isEmpty, reason: 'not the system browser');
+          expect(find.text(shareBrowserNote), findsNothing);
+        });
+
+        testWidgets('in a browser that keeps nothing up, it says it stops '
+            'loading when you leave', (tester) async {
+          how = 'browser';
+          await elsewhere(tester);
+          await tester.tap(find.text('Open'));
+          await settle(tester);
+          expect(find.text(shareBrowserNote), findsOneWidget);
+        });
+
+        testWidgets('with no browser, it says so', (tester) async {
+          how = 'no_browser';
+          await elsewhere(tester);
+          await tester.tap(find.text('Open'));
+          await settle(tester);
+          expect(
+            find.textContaining("There's no browser on this"),
+            findsOneWidget,
+          );
+        });
+
+        testWidgets("an address it can't open names the website", (
+          tester,
+        ) async {
+          how = 'bad_url';
+          await elsewhere(tester);
+          await tester.tap(find.text('Open'));
+          await settle(tester);
+          expect(
+            find.text("Dashboard can't open on this $thisDeviceKind."),
+            findsOneWidget,
+          );
+        });
+      });
+
+      // W6 on iPhone and iPad (#505): in Safari's view over the app,
+      // which stays in front with the forward, at the share's own host.
+      group('on an iPhone or iPad', () {
+        late List<Uri> pages;
+        late List<Uri?> fallbacks;
+        late String how;
+        MockStreamHandlerEventSink? sink;
+        setUp(() {
+          pages = [];
+          how = 'in_app';
+          sink = null;
+          inAppShareBrowser.debugReset();
+          fallbacks = [];
+          openShareOver = (url, fallback) async {
+            fallbacks.add(fallback);
+            if (how == 'no_browser' || how == 'no_localhost') {
+              throw PlatformException(code: how);
+            }
+            pages.add(url);
+            sink?.success({'visible': true});
+            return how;
+          };
+        });
+        tearDown(inAppShareBrowser.debugReset);
+
+        Future<Harness> iPhone(WidgetTester tester) async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+          addTearDown(() => debugDefaultTargetPlatformOverride = null);
+          tester.binding.defaultBinaryMessenger.setMockStreamHandler(
+            const EventChannel('factory/share-browser/events'),
+            MockStreamHandler.inline(
+              onListen: (_, events) {
+                sink = events;
+                events.success({'visible': false});
+              },
+            ),
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger.setMockStreamHandler(
+              const EventChannel('factory/share-browser/events'),
+              null,
+            ),
+          );
+          return elsewhere(tester);
+        }
+
+        testWidgets('Open forwards it and opens it over the app; nothing to '
+            'copy', (tester) async {
+          final harness = await iPhone(tester);
+          expect(find.textContaining('isn’t available'), findsNothing);
+          expect(find.text('Copy address'), findsNothing);
+          expect(find.text('Hide'), findsOneWidget);
+          await tester.tap(find.text('Open'));
+          await settle(tester);
+          expect(harness.backend.forwardedTargets, [3000]);
+          expect(
+            pages.single.toString(),
+            'http://s-abc.localhost:${sharePortFor('s1')}/__claktory_open'
+            '?k=once',
+          );
+          // Its fallback, should the system not find that address here:
+          // the one the Claktory made, at this device's port.
+          expect(
+            fallbacks.single.toString(),
+            'http://127.0.0.1:${sharePortFor('s1')}/__claktory_open?k=once',
+          );
+          expect(opened, isEmpty, reason: 'not Safari itself');
+          expect(inAppShareBrowser.shows(harness.backend, 's1'), isTrue);
+          // It stays in front: nothing says it stops when you leave.
+          expect(find.text(shareBrowserNote), findsNothing);
+        });
+
+        testWidgets("a page that didn't load says why once the person is "
+            'back', (tester) async {
+          final harness = await iPhone(tester);
+          await tester.tap(find.text('Open'));
+          await settle(tester);
+          sink!.success({'visible': true, 'loaded': false});
+          await settle(tester);
+          // Still on the page: nothing said yet.
+          expect(find.textContaining("didn't open"), findsNothing);
+          sink!.success({'visible': false});
+          await settle(tester);
+          expect(
+            find.text("Dashboard didn't open. Try again."),
+            findsOneWidget,
+          );
+          expect(inAppShareBrowser.shows(harness.backend, 's1'), isFalse);
+        });
+
+        testWidgets('offline by then, it names the Claktory, and the line goes '
+            'once it is back', (tester) async {
+          final harness = await iPhone(tester);
+          harness.backend.workspace.apply(
+            _workspace(shares: [_theirs()], selected: 'p3')
+              ..settings = Settings(name: 'Studio'),
+          );
+          await settle(tester);
+          await tester.tap(find.text('Open'));
+          await settle(tester);
+          sink!.success({'visible': true, 'loaded': false});
+          harness.backend.connected.value = false;
+          sink!.success({'visible': false});
+          await settle(tester);
+          expect(find.text("Can't reach Studio right now."), findsOneWidget);
+          harness.backend.connected.value = true;
+          await settle(tester);
+          expect(find.text("Can't reach Studio right now."), findsNothing);
+        });
+
+        testWidgets("where the system can't find a share's own address, it "
+            'says so and opens nothing else', (tester) async {
+          how = 'no_localhost';
+          final harness = await iPhone(tester);
+          await tester.tap(find.text('Open'));
+          await settle(tester);
+          expect(
+            find.text(
+              "This $thisDeviceKind can't open shared websites on this "
+              'network yet.',
+            ),
+            findsOneWidget,
+          );
+          expect(pages, isEmpty);
+          expect(opened, isEmpty, reason: 'never 127.0.0.1 in Safari instead');
+          expect(inAppShareBrowser.shows(harness.backend, 's1'), isFalse);
+        });
+
+        testWidgets("when it can't show the page, it says so", (tester) async {
+          how = 'no_browser';
+          final harness = await iPhone(tester);
+          await tester.tap(find.text('Open'));
+          await settle(tester);
+          expect(
+            find.text("Dashboard can't open on this $thisDeviceKind."),
+            findsOneWidget,
+          );
+          expect(inAppShareBrowser.shows(harness.backend, 's1'), isFalse);
+        });
       });
     });
 
@@ -542,7 +779,10 @@ void main() {
         'asking', (tester) async {
       final harness = await settings(tester, [_mine()]);
       expect(find.text('Metrics · port 8080'), findsOneWidget);
-      expect(find.text('With the group “Friends”'), findsOneWidget);
+      expect(
+        find.text('With the group “Friends” · Until you stop it'),
+        findsOneWidget,
+      );
       await tester.tap(find.text('Stop'));
       await settle(tester);
       expect(find.text('Stop sharing Metrics?'), findsOneWidget);
@@ -670,7 +910,96 @@ void main() {
       expect(share.name, 'Dashboard');
       expect(share.pipeIds.toSet(), {'p3', 'p5'});
       expect(share.groupId, isEmpty);
+      // 24 hours unless changed (friend bug #46).
+      expect(share.lastsS, Int64(86400));
       expect(find.text('Share a website'), findsNothing);
+    });
+
+    testWidgets('Share a website… asks how long it lasts: 1 hour, 24 hours, '
+        '7 days or until it is stopped (friend bug #46)', (tester) async {
+      final harness = await settings(tester, []);
+      await tester.tap(find.text('Share a website…'));
+      await settle(tester);
+      expect(find.text('After 24 hours'), findsOneWidget);
+      await tester.tap(find.text('After 24 hours'));
+      await settle(tester);
+      for (final choice in ['After 1 hour', 'After 7 days', 'Never']) {
+        expect(find.text(choice), findsOneWidget);
+      }
+      await tester.tap(find.text('Never'));
+      await settle(tester);
+      expect(find.text('It stays shared until you stop it.'), findsOneWidget);
+      await tester.enterText(_field(0), '3000');
+      await tester.enterText(_field(1), 'Dashboard');
+      await tester.pump(const Duration(milliseconds: 500));
+      await tester.tap(find.text('Share'));
+      await settle(tester);
+      expect(_shared(harness).lastsS, Int64.ZERO);
+    });
+
+    testWidgets('a share of this side says the time it has left, and Change '
+        'end… sets it again from now (friend bug #46)', (tester) async {
+      final now = DateTime(2026, 6, 1, 12);
+      shareClock = () => now;
+      addTearDown(() => shareClock = DateTime.now);
+      final harness = await settings(tester, [
+        _mine(
+          expires: now
+              .add(const Duration(hours: 2, minutes: 30))
+              .millisecondsSinceEpoch,
+        ),
+      ]);
+      expect(
+        find.text('With the group “Friends” · Ends in 3 hours'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Change end…'));
+      await settle(tester);
+      expect(
+        find.text('When should Metrics stop being shared?'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('After 7 days'));
+      await settle(tester);
+      final set = harness.last.setPipeShareExpiry;
+      expect((set.shareId, set.lastsS), ('m1', Int64(604800)));
+    });
+
+    testWidgets('a time chosen after the share ended still goes, and the '
+        "backend's refusal is said (#46, Abbacchio row 1551)", (tester) async {
+      final now = DateTime(2026, 6, 1, 12);
+      shareClock = () => now;
+      addTearDown(() => shareClock = DateTime.now);
+      final harness = await settings(tester, [
+        _mine(
+          expires: now.add(const Duration(minutes: 1)).millisecondsSinceEpoch,
+        ),
+      ]);
+      await tester.tap(find.text('Change end…'));
+      await settle(tester);
+      // The share ends while the sheet is open: its row leaves.
+      await harness.apply(tester, _workspace(shares: [], selected: 'p3'));
+      expect(find.text('Metrics · port 8080'), findsNothing);
+      harness.backend.refuse = "That website isn't shared any more.";
+      await tester.tap(find.text('After 1 hour'));
+      await settle(tester);
+      expect(harness.last.setPipeShareExpiry.shareId, 'm1');
+      expect(find.text("Couldn't change when Metrics ends"), findsOneWidget);
+      expect(find.text("That website isn't shared any more."), findsOneWidget);
+    });
+
+    testWidgets('Stop after the share ended still says why it could not', (
+      tester,
+    ) async {
+      final harness = await settings(tester, [_mine()]);
+      await tester.tap(find.text('Stop'));
+      await settle(tester);
+      await harness.apply(tester, _workspace(shares: [], selected: 'p3'));
+      harness.backend.refuse = "That website isn't shared any more.";
+      await tester.tap(find.text('Stop sharing'));
+      await settle(tester);
+      expect(harness.last.stopPipeShare.shareId, 'm1');
+      expect(find.text("Couldn't stop sharing Metrics"), findsOneWidget);
     });
 
     testWidgets('a port something answers on says what, so it is the one '

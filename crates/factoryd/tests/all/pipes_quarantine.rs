@@ -248,7 +248,7 @@ async fn a_secret_given_to_a_liaison_isnt_usable_and_a_pipe_reader_marks_no_one(
     aws(&mut client, &mut view).await;
     let id = view.workspace.vault.clone().expect("vault").secrets[0].id.clone();
     for agent in ["liaison", "bo"] {
-        let grant = v1::GrantSecret { id: id.clone(), agent_id: agent.into(), proof: None };
+        let grant = v1::GrantSecret { id: id.clone(), agent_id: agent.into(), proof: None, fill_only: false };
         apply_request(&mut client, &mut view, client_message::Body::GrantSecret(grant)).await;
     }
     view.follow(&mut client, |view| {

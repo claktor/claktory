@@ -25,6 +25,7 @@ import 'mobile/header.dart';
 import 'mobile/lines.dart' show ActionLine, ControlsLine;
 import 'mobile/metrics.dart';
 import 'mobile/needs_you_button.dart';
+import 'mobile/typing_above.dart';
 import 'model_step.dart' show showConnectModel;
 import 'panes.dart';
 import 'pipe_reports.dart' show ReadsReportsMark;
@@ -153,66 +154,75 @@ class _AgentViewState extends State<AgentView> {
     final workspace = backend.workspace.workspace;
     // The conversation: one of the agent's panes. On a phone the message
     // box takes at most 30% of what's in view above the keyboard.
+    // On a phone the box steps aside while a field in the conversation (a
+    // card's) has the keyboard (TypingAbove).
     final chat = LayoutBuilder(
-      builder: (context, constraints) => Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Expanded(
-            child: _TapAwayKeyboard(
-              enabled: widget._phone,
-              child: AgentTints(
-                own: agentColor(agent.color),
-                byId: {
-                  for (final other in backend.workspace.workspace.agents)
-                    other.id: agentColor(other.color),
-                },
-                agents: {
-                  for (final other in backend.workspace.workspace.agents)
-                    other.id: identityOf(other),
-                },
-                // Following a message to its sender can be undone with Back.
-                open: (id) =>
-                    AppScope.scope(context).history.follow(agent.id, id),
-                child: _conversationOf(agent, backend),
+      builder: (context, constraints) => TypingAbove(
+        enabled: widget._phone,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: TypingAboveArea(
+                child: _TapAwayKeyboard(
+                  enabled: widget._phone,
+                  child: AgentTints(
+                    own: agentColor(agent.color),
+                    byId: {
+                      for (final other in backend.workspace.workspace.agents)
+                        other.id: agentColor(other.color),
+                    },
+                    agents: {
+                      for (final other in backend.workspace.workspace.agents)
+                        other.id: identityOf(other),
+                    },
+                    // Following a message to its sender can be undone with Back.
+                    open: (id) =>
+                        AppScope.scope(context).history.follow(agent.id, id),
+                    child: _conversationOf(agent, backend),
+                  ),
+                ),
               ),
             ),
-          ),
-          _bottom(constraints, [
-            // Its browser sessions: waiting, running, just ended.
-            BrowserSessionStrip(agentId: agent.id),
-            ArchivedLine(agent: agent),
-            // Back to its own provider once it has room (#341).
-            UsageSwitchLine(id: agent.id),
-            // One line above the box, so the box never changes as the
-            // agent starts and stops: reconnecting, else working with
-            // Stop.
-            ReconnectingLine(
-              otherwise: _working
-                  ? WorkingLine(
-                      onStop: _stop,
-                      wait: usageWaitLine(agent),
-                      waiting: agent.id,
-                    )
-                  : const SizedBox.shrink(),
-            ),
-            // The same box while what it shows from the Workspace is.
-            Kept(
-              inputs: [
-                agent,
-                workspace.models.isEmpty,
-                workspace.speechModel,
-                constraints.maxHeight,
-              ],
-              builder: (_) => MessageBox(
-                target: AgentMessageTarget(agent, backend),
-                onSent: () => _follow.value++,
-                maxFieldHeight: constraints.maxHeight.isFinite
-                    ? constraints.maxHeight * 0.3
-                    : null,
+            _bottom(constraints, [
+              // Its browser sessions: waiting, running, just ended.
+              BrowserSessionStrip(agentId: agent.id),
+              ArchivedLine(agent: agent),
+              // Back to its own provider once it has room (#341).
+              UsageSwitchLine(id: agent.id),
+              // One line above the box, so the box never changes as the
+              // agent starts and stops: reconnecting, else working with
+              // Stop.
+              ReconnectingLine(
+                otherwise: _working
+                    ? WorkingLine(
+                        onStop: _stop,
+                        wait: usageWaitLine(agent),
+                        waiting: agent.id,
+                      )
+                    : const SizedBox.shrink(),
               ),
-            ),
-          ]),
-        ],
+              // The same box while what it shows from the Workspace is.
+              TypingAboveBox(
+                child: Kept(
+                  inputs: [
+                    agent,
+                    workspace.models.isEmpty,
+                    workspace.speechModel,
+                    constraints.maxHeight,
+                  ],
+                  builder: (_) => MessageBox(
+                    target: AgentMessageTarget(agent, backend),
+                    onSent: () => _follow.value++,
+                    maxFieldHeight: constraints.maxHeight.isFinite
+                        ? constraints.maxHeight * 0.3
+                        : null,
+                  ),
+                ),
+              ),
+            ]),
+          ],
+        ),
       ),
     );
     // Files dragged over the window go to this agent: the pane says so.
@@ -260,13 +270,17 @@ class _AgentViewState extends State<AgentView> {
                   ],
                   builder: (_) => _Header(
                     agent: agent,
-                    // The conversation's find, below the header.
-                    onFind: () => FindSessions.instance
-                        .within(
-                          context,
-                          only: (target) => target is ConversationFind,
-                        )
-                        ?.open(),
+                    // The pane last tapped in this view, as ⌘F finds in
+                    // (Settings beside it, say: ST14); else the
+                    // conversation's, below the header, rather than a pane
+                    // that's only beside it.
+                    onFind: () =>
+                        (FindSessions.instance.pressedWithin(context) ??
+                                FindSessions.instance.within(
+                                  context,
+                                  only: (target) => target is ConversationFind,
+                                ))
+                            ?.open(),
                   ),
                 ),
           // A phone shows one pane at a time: the conversation is the

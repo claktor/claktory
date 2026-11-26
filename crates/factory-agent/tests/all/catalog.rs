@@ -196,7 +196,7 @@ fn only_a_provider_at_its_own_address_fetches_its_models() {
     let plain = Registry::with_providers(store(), with_env(&[]), default_providers());
     assert!(plain.fetches_models("openrouter"));
     // Friend bug #14: Anthropic's, OpenAI's and Codex's too.
-    assert!(["anthropic", "openai", "openai-codex"].iter().all(|id| plain.fetches_models(id)));
+    assert!(["anthropic", "openai", "openai-codex", "grok"].iter().all(|id| plain.fetches_models(id)));
     assert!(!plain.fetches_models("google"));
     let pointed = Registry::with_providers(store(), with_env(&[("OPENROUTER_BASE_URL", "http://127.0.0.1:7500/v1")]), default_providers());
     assert!(!pointed.fetches_models("openrouter"), "a sandbox's qa-model isn't OpenRouter");
@@ -207,5 +207,5 @@ fn only_a_provider_at_its_own_address_fetches_its_models() {
         provider.base_url = "http://127.0.0.1:9/v1";
     }
     let elsewhere = Registry::with_providers(store(), with_env(&[]), providers);
-    assert!(["anthropic", "openai", "openai-codex", "openrouter"].iter().all(|id| !elsewhere.fetches_models(id)));
+    assert!(["anthropic", "openai", "openai-codex", "openrouter", "grok"].iter().all(|id| !elsewhere.fetches_models(id)));
 }

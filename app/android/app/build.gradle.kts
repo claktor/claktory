@@ -141,6 +141,10 @@ dependencies {
     // core-3.5.3.jar SHA-256 8d8064c1636fdaef7189dd9055c7d59950a8940a12f2293956446ec3c109fd82
     // (its SHA-1, ca1349214a356cd7958651b2d5a0e1f3811a9c4b, is Maven Central's published one).
     implementation("com.google.zxing:core:3.5.3")
+    // Custom Tabs with a session for shared websites (ShareBrowser.kt, W6):
+    // the version url_launcher_android already puts in every build, whose
+    // dependencies (androidx.core and the rest) come with it.
+    implementation("androidx.browser:browser:1.9.0") { isTransitive = false }
     testImplementation("junit:junit:4.13.2")
     // Android's org.json is a stub in local unit tests; the stores' tests
     // run against the reference implementation of the same API.

@@ -199,6 +199,22 @@ async fn a_website_the_person_shares_is_listed_stopped_and_shared_again_only_on_
     assert_eq!(said, "Stopped sharing \"Metrics\" with the pipe it reached: it isn't shared any more.");
     assert!(lines(&factory, &pipe).contains(&"Rivet stopped sharing Metrics.".to_owned()));
     view.follow(&mut client, |view| view.workspace.pipe_shares.is_empty()).await;
+
+    // A card shares for the hours it said (#46): what the person approved.
+    let args = json!({"pipe": "Website", "port": port, "name": "Board", "hours": 48, "reason": "Ana needs it for two days."});
+    let asked = call(&mut client, &mut view, "rivet", "pipes_share", &args.to_string()).await;
+    assert!(asked.starts_with("Asked "), "{asked}");
+    let (seq, card) = cards(&view).pop().expect("a card");
+    assert!(card.action_description.ends_with("It stays shared for 2 days, then stops by itself. You can change that or stop it sooner under Shared websites in the pipe's settings."), "{}", card.action_description);
+    let now = factoryd::transcript::now_ms();
+    apply_request(&mut client, &mut view, select("rivet")).await;
+    let answered = apply_request(&mut client, &mut view, answer(seq, false)).await;
+    assert!(!matches!(answered, Body::Error(_)), "{answered:?}");
+    view.follow(&mut client, |view| view.workspace.pipe_shares.len() == 1).await;
+    let ends = view.workspace.pipe_shares[0].expires_ms;
+    assert!((now + 48 * 3_600_000..now + 48 * 3_600_000 + 60_000).contains(&ends), "{ends}");
+    let listed = call(&mut client, &mut view, "rivet", "pipes_shares", r#"{"pipe": "Website"}"#).await;
+    assert!(listed.contains("\"Board\"") && listed.contains(" until ") && !listed.contains(" stops it"), "{listed}");
     drop(site);
 }
 

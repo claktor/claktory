@@ -177,6 +177,10 @@ pub(crate) fn registry_over(file: std::path::PathBuf, base_url: &str) -> Registr
         for model in &mut provider.models {
             model.base_url = base_url.to_owned();
         }
+        // Grok signs in at its own host: the mock's too.
+        if provider.id == "grok" {
+            provider.oauth = Some(Arc::new(factory_agent::providers::grok::oauth::GrokOAuth { issuer: base_url.to_owned() }));
+        }
     }
     let env: Env = Arc::new(|_| None);
     Registry::with_providers(FileCredentialStore::new(file), env, providers)

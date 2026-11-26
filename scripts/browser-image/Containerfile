@@ -6,7 +6,7 @@ FROM ${BASE}
 ARG VERSION
 COPY --chmod=0755 runner /opt/claktory-browser/runner
 COPY --chmod=0755 entry.sh /usr/local/sbin/claktory-browser-entry
-LABEL org.opencontainers.image.source=https://github.com/claktor/claktory \
+LABEL org.opencontainers.image.source=https://github.com/claktory/claktory \
       org.opencontainers.image.version=${VERSION} \
       org.opencontainers.image.description="Claktory's agent browser"
 ENTRYPOINT ["/usr/local/sbin/claktory-browser-entry"]

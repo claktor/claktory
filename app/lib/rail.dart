@@ -33,7 +33,7 @@ import 'selection.dart';
 import 'usage_wait.dart' show atWork;
 import 'voice_keep.dart' show keptClaktoryKey, keptVoiceCount;
 import 'inbox.dart' show needsYouCount;
-import 'waiting.dart' show waitingLabel;
+import 'waiting.dart' show NeedsYouMark;
 import 'your_claktories.dart' show DeviceSignInDialog;
 
 /// The rail of Claktories at the window's far left, as thin as the
@@ -74,8 +74,18 @@ class Claktory {
   /// app dials it by; null until it's known (or with no rail).
   AccountCheck? get account => match?.call().check(target?.endpointId);
 
-  /// Not shown to be the person's own: marked wherever it shows.
-  bool get offAccount => account?.marked ?? false;
+  /// Known not to be on the person's account (its list read, and it isn't
+  /// there): marked wherever it shows. Signed out, or the list unreadable,
+  /// nothing is known, so nothing is marked (#529, S2: never a mark the
+  /// person can't act on).
+  bool get offAccount => account == AccountCheck.notTheirs;
+
+  /// Whether its details (its form) say anything of the account: known not
+  /// on it, couldn't be checked, or this app signed out (with Sign in…).
+  bool get accountNoted {
+    final check = account;
+    return check != null && check != AccountCheck.theirs;
+  }
 
   late final login = LoginLauncher(
     workspace: backend.workspace,
@@ -440,14 +450,11 @@ class _Glance {
     connection = Connection(backend);
     problem = connection.problem ? connection.line : null;
     offAccount = claktory.offAccount;
-    alarming = claktory.account?.alarming ?? false;
   }
 
-  /// Not shown to be on the person's Claktory account: marked.
+  /// Known not to be on the person's Claktory account: marked, its tile
+  /// ringed in `danger`.
   late final bool offAccount;
-
-  /// Marked in `danger` (not signed out): its tile's ring.
-  late final bool alarming;
 
   late final bool connected;
   late final bool working;
@@ -474,8 +481,10 @@ class _Glance {
   ]);
 }
 
-/// What a Claktory not shown to be the person's own is marked with: a
-/// short label and what it means (Trish's words).
+/// What a Claktory known not to be the person's own is marked with: a
+/// short label and what it means (Trish's words). Nothing for any other
+/// state: signed out or unreadable, nothing is known, so nothing is
+/// marked (#529, S2); only its details say so ([OffAccountMark.details]).
 ({String label, String meaning})? accountWords(AccountCheck? check) =>
     switch (check) {
       AccountCheck.notTheirs => (
@@ -484,22 +493,7 @@ class _Glance {
             "It may belong to someone else. If it's yours, sign it in to "
             'your Claktory account.',
       ),
-      AccountCheck.signedOut => (
-        // The app, not a machine (Matt read "This Mac" as the Claktory's
-        // own computer), and a sign-in apart from the Claktory's own
-        // (Trish, #529).
-        label: "This app isn't signed in to your Claktory account",
-        meaning:
-            "That's separate from the Claktory's own sign-in. Sign in so "
-            'this app can recognize your Claktories.',
-      ),
-      AccountCheck.unreadable => (
-        label: "Couldn't check your account",
-        meaning:
-            "Couldn't reach your Claktory account. Claktory tries again by "
-            'itself.',
-      ),
-      AccountCheck.theirs || null => null,
+      _ => null,
     };
 
 /// [claktory]'s name as VoiceOver reads it: with its mark ("nixos, not on
@@ -511,27 +505,26 @@ String claktoryLabel(String name, Claktory claktory) {
   return '$name, ${label[0].toLowerCase()}${label.substring(1)}';
 }
 
-/// The mark of a Claktory not shown to be the person's own, wherever it
+/// The mark of a Claktory known not to be the person's own, wherever it
 /// shows by name (the rail's card, the phone's drawer and list, its form):
-/// a 12px shield-alert and the label in caption `danger` (`textMuted`
-/// while signed out), and, [explained],
+/// a 12px shield-alert and the label in caption `danger`, and, [explained],
 /// what it means under it in caption `textMuted`. Nothing for one that's
-/// theirs, or before the account's list is read.
+/// theirs, or that can't be checked (#529, S2), except in its [details].
 class OffAccountMark extends StatelessWidget {
   const OffAccountMark({
     super.key,
     required this.claktory,
     this.explained = false,
-    this.signIn = false,
+    this.details = false,
   });
 
   final Claktory claktory;
   final bool explained;
 
-  /// Signed out, "Sign in…" under it, to sign this device in (#388): where
-  /// it can be tapped (a phone's drawer, the Claktory's form), never on a
-  /// row or tile that's a button itself.
-  final bool signIn;
+  /// Its details (the Claktory's form): what's known of the account there
+  /// too, in muted words. That it couldn't be checked, or, while this app
+  /// is signed out, a way to sign in (Trish's words).
+  final bool details;
 
   @override
   Widget build(BuildContext context) {
@@ -541,14 +534,36 @@ class OffAccountMark extends StatelessWidget {
       listenable: match(),
       builder: (context, _) {
         final check = claktory.account;
+        final palette = Palette.of(context);
+        final caption = TypeScale.of(context).caption;
+        final muted = caption.copyWith(color: palette.textMuted);
+        if (details && check == AccountCheck.unreadable) {
+          return Text(
+            "Couldn't check whether ${claktoryName(claktory.backend)} is on "
+            'your Claktory account. Claktory tries again by itself.',
+            style: muted,
+          );
+        }
+        if (details && check == AccountCheck.signedOut) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Sign in to your Claktory account in this app to check which '
+                'Claktories are on it.',
+                style: muted,
+              ),
+              const SizedBox(height: Space.xs),
+              Button(
+                label: 'Sign in…',
+                onPressed: () => showAccountSignIn(context),
+              ),
+            ],
+          );
+        }
         final words = accountWords(check);
         if (words == null) return const SizedBox.shrink();
-        final palette = Palette.of(context);
-        // Signed out, nothing could be checked: neutral, not `danger`.
-        final color = check?.alarming == true
-            ? palette.danger
-            : palette.textMuted;
-        final caption = TypeScale.of(context).caption;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
@@ -565,7 +580,7 @@ class OffAccountMark extends StatelessWidget {
                       child: ExtensionGlyph(
                         icon: 'shield-alert',
                         name: '!',
-                        color: color,
+                        color: palette.danger,
                         size: 12,
                       ),
                     ),
@@ -573,21 +588,9 @@ class OffAccountMark extends StatelessWidget {
                   TextSpan(text: words.label),
                 ],
               ),
-              style: caption.copyWith(color: color),
+              style: caption.copyWith(color: palette.danger),
             ),
-            if (explained)
-              Text(
-                words.meaning,
-                style: caption.copyWith(color: palette.textMuted),
-              ),
-            if (signIn && check == AccountCheck.signedOut)
-              Padding(
-                padding: const EdgeInsets.only(top: Space.xs),
-                child: Button(
-                  label: 'Sign in…',
-                  onPressed: () => showAccountSignIn(context),
-                ),
-              ),
+            if (explained || details) Text(words.meaning, style: muted),
           ],
         );
       },
@@ -596,8 +599,7 @@ class OffAccountMark extends StatelessWidget {
 }
 
 /// Signs this device in to the person's Claktory account, from a
-/// Claktory's mark while signed out (#388): it closes once signed in, and
-/// the marks follow.
+/// Claktory's details while signed out (#388): it closes once signed in.
 Future<void> showAccountSignIn(BuildContext context) => showModal(
   context,
   (context, close) => DeviceSignInDialog(
@@ -723,6 +725,13 @@ class _RailTile extends StatelessWidget {
       builder: (context, _) {
         final glance = _Glance(claktory);
         final name = claktoryName(claktory.backend);
+        final touch = touchFirst(context);
+        void openForm() => unawaited(
+          showModal(
+            context,
+            (context, close) => ClaktoryForm(claktory: claktory, close: close),
+          ),
+        );
         return SizedBox(
           width: railWidth,
           height: 28,
@@ -751,9 +760,6 @@ class _RailTile extends StatelessWidget {
               ),
               HoverCard(
                 beside: true,
-                // Signed out, the card has Sign in… to click (#529): it
-                // stays while the pointer moves onto it.
-                interactive: claktory.account == AccountCheck.signedOut,
                 card: (context) => Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
@@ -778,11 +784,7 @@ class _RailTile extends StatelessWidget {
                     ),
                     if (glance.offAccount) ...[
                       const SizedBox(height: Space.xs),
-                      OffAccountMark(
-                        claktory: claktory,
-                        explained: true,
-                        signIn: true,
-                      ),
+                      OffAccountMark(claktory: claktory, explained: true),
                     ],
                   ],
                 ),
@@ -790,19 +792,28 @@ class _RailTile extends StatelessWidget {
                   button: true,
                   selected: selected,
                   label: claktoryLabel(name, claktory),
-                  child: Pressable(
-                    onTap: selected ? null : onTap,
-                    onSecondaryTap: () => showModal(
-                      context,
-                      (context, close) =>
-                          ClaktoryForm(claktory: claktory, close: close),
-                    ),
-                    builder: (context, hovered) => _Tile(
-                      claktory: claktory,
-                      name: name,
-                      glance: glance,
-                      selected: selected,
-                      hovered: hovered,
+                  onLongPress: touch ? openForm : null,
+                  // Touch and hold: the form on the hold itself, as a
+                  // context menu opens, for a finger with no secondary
+                  // click (an iPad, Zucchero's row 642); a pointer's
+                  // secondary click as before.
+                  child: GestureDetector(
+                    onLongPress: touch
+                        ? () {
+                            unawaited(Haptics.selection());
+                            openForm();
+                          }
+                        : null,
+                    child: Pressable(
+                      onTap: selected ? null : onTap,
+                      onSecondaryTap: openForm,
+                      builder: (context, hovered) => _Tile(
+                        claktory: claktory,
+                        name: name,
+                        glance: glance,
+                        selected: selected,
+                        hovered: hovered,
+                      ),
                     ),
                   ),
                 ),
@@ -869,7 +880,7 @@ class _Tile extends StatelessWidget {
                 // Not on the person's account: a `danger` ring, whatever
                 // else it shows.
                 border: Border.all(
-                  color: glance.alarming
+                  color: glance.offAccount
                       ? palette.danger
                       : selected || own != null
                       ? const Color(0x00000000)
@@ -914,12 +925,21 @@ class _Tile extends StatelessWidget {
                     ),
                   ),
           ),
-          // Its connection first (can't, or connecting), then what waits
-          // for the person, then its news.
-          if (glance.problem != null ||
-              glance.connecting ||
-              glance.waiting > 0 ||
-              glance.unseen)
+          // What waits for the person there, counted (#529, MC10), unless
+          // its connection says more (can't, or connecting).
+          if (glance.problem == null &&
+              !glance.connecting &&
+              glance.waiting > 0)
+            Positioned(
+              right: -6,
+              top: -6,
+              child: NeedsYouMark(
+                count: glance.waiting,
+                label: '$name, ${glance.waiting} in Needs you',
+              ),
+            )
+          // Its connection first (can't, or connecting), then its news.
+          else if (glance.problem != null || glance.connecting || glance.unseen)
             Positioned(
               right: -3,
               top: -3,
@@ -928,8 +948,6 @@ class _Tile extends StatelessWidget {
                     glance.problem ??
                     (glance.connecting
                         ? glance.connection.line
-                        : glance.waiting > 0
-                        ? waitingLabel(name, glance.waiting)
                         : '$name has something new'),
                 child: Container(
                   width: 11,
@@ -944,8 +962,6 @@ class _Tile extends StatelessWidget {
                       : Dot(
                           color: glance.problem != null
                               ? palette.danger
-                              : glance.waiting > 0
-                              ? palette.signal
                               : palette.text,
                           size: 7,
                         ),
@@ -988,6 +1004,120 @@ class _LaptopPainter extends CustomPainter {
   bool shouldRepaint(_LaptopPainter old) => old.color != color;
 }
 
+/// Asks before removing [claktory] from this device, wherever that's
+/// chosen (its form, the chooser's rows: one act, one question, MC8), and
+/// removes it on Remove: this device leaves its devices when it can be
+/// reached, and forgets its key, its kept files and recordings.
+Future<void> confirmRemoveClaktory(BuildContext context, Claktory claktory) =>
+    showModal(
+      context,
+      (context, close) => RemoveClaktoryQuestion(
+        claktory: claktory,
+        onCancel: close,
+        onRemoved: close,
+      ),
+    );
+
+/// "Remove {name}?": what it means, how to connect again, and the
+/// recordings not sent yet that go with it (Sale's row 76). When this is
+/// the only device connected there, it says so, and the way back that's
+/// left (#529, MC9, Trish's words).
+class RemoveClaktoryQuestion extends StatefulWidget {
+  const RemoveClaktoryQuestion({
+    super.key,
+    required this.claktory,
+    required this.onCancel,
+    required this.onRemoved,
+  });
+
+  final Claktory claktory;
+  final VoidCallback onCancel;
+  final VoidCallback onRemoved;
+
+  @override
+  State<RemoveClaktoryQuestion> createState() => _RemoveClaktoryQuestionState();
+}
+
+class _RemoveClaktoryQuestionState extends State<RemoveClaktoryQuestion> {
+  /// Recordings kept on this device for it, not sent yet.
+  var _unsent = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    final target = widget.claktory.target;
+    if (target != null) unawaited(_count(target));
+  }
+
+  Future<void> _count(RemoteFactory target) async {
+    final unsent = await keptVoiceCount(keptClaktoryKey(target));
+    if (mounted && unsent != _unsent) setState(() => _unsent = unsent);
+  }
+
+  void _remove() {
+    final target = widget.claktory.target;
+    if (target == null) return widget.onCancel();
+    // It forgets this device's key, so its pairing is of no more use:
+    // leave its devices too, when it can be reached.
+    final backend = widget.claktory.backend;
+    if (backend.connected.value && backend.deviceId.isNotEmpty) {
+      fireAndLog(backend.unpairDevice(backend.deviceId));
+    }
+    AppScope.scope(context).connections.forget(target);
+    widget.onRemoved();
+  }
+
+  /// Whether no other device is connected to it (paired, its code used),
+  /// this computer's own app counted as one; null when that can't be
+  /// known (not connected now).
+  bool? get _onlyDevice {
+    final backend = widget.claktory.backend;
+    if (!backend.connected.value) return null;
+    return !backend.workspace.workspace.remote.devices.any(
+      (device) => device.id != backend.deviceId && device.codeExpiresMs == 0,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final name = claktoryName(widget.claktory.backend);
+    final String body;
+    if (_onlyDevice == true) {
+      body =
+          'This $thisDeviceKind is the only device connected to $name. Its '
+          'agents and work stay there. '
+          '${widget.claktory.account == AccountCheck.theirs ? 'To connect again, choose it under On your account in Add a Claktory.' : 'To connect again, run factoryd pair in a terminal on $name.'}';
+    } else if (_onlyDevice == false) {
+      body =
+          'This $thisDeviceKind disconnects from it. Its agents and work '
+          'stay on $name. To connect again, add this $thisDeviceKind on '
+          '$name in Settings → Devices.';
+    } else {
+      // Not connected now, so whether another device is there can't be
+      // known: both ways back, since either may be the one left (Squalo's
+      // V1). Turned away for another account, neither works until that
+      // changes, so it says so.
+      final otherAccount = widget.claktory.backend.otherAccount.value != null;
+      body =
+          'This $thisDeviceKind disconnects from $name. Its agents and work '
+          'stay there. To connect again, add this $thisDeviceKind in '
+          'Settings → Devices on $name, or run factoryd pair in a terminal '
+          'there'
+          '${widget.claktory.account == AccountCheck.theirs ? ', or choose $name under On your account in Add a Claktory' : ''}.'
+          '${otherAccount ? " While $name is on another Claktory account, it won't let this $thisDeviceKind in." : ''}';
+    }
+    return FormFrame(
+      title: 'Remove $name?',
+      body: '$body${unsentGoesToo(_unsent)}',
+      fields: const [],
+      error: null,
+      submitLabel: 'Remove',
+      onSubmit: _remove,
+      onCancel: widget.onCancel,
+    );
+  }
+}
+
 /// A Claktory's name and color, the same on every device, and removing
 /// it from this one.
 class ClaktoryForm extends StatefulWidget {
@@ -1001,7 +1131,6 @@ class ClaktoryForm extends StatefulWidget {
 }
 
 class _ClaktoryFormState extends State<ClaktoryForm> {
-  late final Connections _connections = AppScope.scope(context).connections;
   Backend get _backend => widget.claktory.backend;
   late final _name = TextEditingController(
     text: _backend.workspace.workspace.settings.name,
@@ -1042,61 +1171,31 @@ class _ClaktoryFormState extends State<ClaktoryForm> {
     }
   }
 
-  /// Recordings kept on this device for it, not sent yet: removing it
-  /// deletes them too, so the question says so (Sale's row 76).
-  var _unsent = 0;
-
-  Future<void> _confirmRemove(RemoteFactory target) async {
-    setState(() => _confirmingRemove = true);
-    final unsent = await keptVoiceCount(keptClaktoryKey(target));
-    if (mounted && unsent != _unsent) setState(() => _unsent = unsent);
-  }
-
-  void _remove(RemoteFactory target) {
-    // It forgets this device's key, so its pairing is of no more use:
-    // leave its devices too, when it can be reached.
-    final backend = widget.claktory.backend;
-    if (backend.connected.value && backend.deviceId.isNotEmpty) {
-      fireAndLog(backend.unpairDevice(backend.deviceId));
-    }
-    _connections.forget(target);
-    widget.close();
-  }
-
   @override
   Widget build(BuildContext context) {
     final target = widget.claktory.target;
     final name = claktoryName(_backend);
     if (_confirmingRemove && target != null) {
-      return FormFrame(
-        title: 'Remove $name?',
-        body:
-            'This $thisDeviceKind disconnects from it. Its agents and work '
-            'stay on $name. To connect again, add this '
-            '$thisDeviceKind on $name in Settings → Devices.'
-            '${unsentGoesToo(_unsent)}',
-        fields: const [],
-        error: null,
-        submitLabel: 'Remove',
-        onSubmit: () => _remove(target),
+      return RemoveClaktoryQuestion(
+        claktory: widget.claktory,
         onCancel: () => setState(() => _confirmingRemove = false),
+        onRemoved: widget.close,
       );
     }
     final remove = target == null
         ? null
-        : Button(label: 'Remove…', onPressed: () => _confirmRemove(target));
+        : Button(
+            label: 'Remove…',
+            onPressed: () => setState(() => _confirmingRemove = true),
+          );
     // Its name and color are its own: they change only while connected.
     if (!_backend.connected.value) {
       return FormFrame(
         title: name,
         body: 'Connect to $name to change its name or color.',
         fields: [
-          if (widget.claktory.offAccount)
-            OffAccountMark(
-              claktory: widget.claktory,
-              explained: true,
-              signIn: true,
-            ),
+          if (widget.claktory.accountNoted)
+            OffAccountMark(claktory: widget.claktory, details: true),
         ],
         error: null,
         submitLabel: 'Done',
@@ -1109,12 +1208,8 @@ class _ClaktoryFormState extends State<ClaktoryForm> {
     return FormFrame(
       title: name,
       fields: [
-        if (widget.claktory.offAccount)
-          OffAccountMark(
-            claktory: widget.claktory,
-            explained: true,
-            signIn: true,
-          ),
+        if (widget.claktory.accountNoted)
+          OffAccountMark(claktory: widget.claktory, details: true),
         Field(
           label: 'Name',
           note: 'Shown on every device connected to it.',
@@ -1160,15 +1255,53 @@ class _BackToList extends InheritedWidget {
 /// sidebar's color, over a step that covers the rest (the name step, say),
 /// so another Claktory is always in reach. Nothing where there's no list to
 /// go back to.
-class ClaktoriesBackStrip extends StatelessWidget {
+class ClaktoriesBackStrip extends StatefulWidget {
   const ClaktoriesBackStrip({super.key});
 
   @override
+  State<ClaktoriesBackStrip> createState() => _ClaktoriesBackStripState();
+}
+
+class _ClaktoriesBackStripState extends State<ClaktoriesBackStrip> {
+  PhoneBack? _back;
+  BackHandle? _handle;
+  VoidCallback? _backToList;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _backToList = ClaktoriesScope.of(context) == null
+        ? null
+        : context.dependOnInheritedWidgetOfExactType<_BackToList>()?.back;
+    final policy = PhonePlatformPolicy.of(context);
+    final next = _backToList != null && policy.touch && !policy.drawerEdgeSwipe
+        ? PhoneBack.maybeOf(context)
+        : null;
+    if (identical(next, _back)) return;
+    _handle?.release();
+    _back = next;
+    // A full-screen step has no PhoneNavigator to pop. Its visible
+    // Claktories action is also Android's way out, below sheets and IME.
+    // Keep the token through rebuilds so a cancelled or stale gesture
+    // cannot change destination or fall through to the system.
+    _handle = next?.registerNavigation(
+      CallbackBackToken(
+        onBack: () {
+          if (mounted) _backToList?.call();
+        },
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _handle?.release();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    if (context.dependOnInheritedWidgetOfExactType<_BackToList>() == null ||
-        ClaktoriesScope.of(context) == null) {
-      return const SizedBox.shrink();
-    }
+    if (_backToList == null) return const SizedBox.shrink();
     final palette = Palette.of(context);
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -1204,7 +1337,8 @@ class ClaktoriesBackRow extends StatelessWidget {
       builder: (context, _) => _BackRow(
         label: 'Claktories',
         news: others.any((other) => _Glance(other).unseen),
-        waiting: others.any((other) => _Glance(other).waiting > 0),
+        waiting: [for (final other in others) _Glance(other).waiting]
+            .fold(0, (sum, count) => sum + count),
         onTap: back.back,
         // How the one showing is connected, at the top of its agents.
         trailing: PhoneConnectionWord(shown.backend),
@@ -1218,7 +1352,7 @@ class _BackRow extends StatelessWidget {
     required this.label,
     required this.onTap,
     this.news = false,
-    this.waiting = false,
+    this.waiting = 0,
     this.trailing,
   });
 
@@ -1226,9 +1360,9 @@ class _BackRow extends StatelessWidget {
   final VoidCallback onTap;
   final bool news;
 
-  /// Something waits for the person's answer there: a `signal` dot, in
-  /// place of the news dot.
-  final bool waiting;
+  /// How much waits for the person's answer there: counted, in place of
+  /// the news dot (#529, MC10).
+  final int waiting;
 
   /// At its end, such as [PhoneConnectionWord].
   final Widget? trailing;
@@ -1239,7 +1373,9 @@ class _BackRow extends StatelessWidget {
     return Unselectable(
       child: Semantics(
         button: true,
-        label: 'Back to $label',
+        label: waiting > 0
+            ? 'Back to $label, $waiting in Needs you'
+            : 'Back to $label',
         child: Pressable(
           onTap: onTap,
           // The whole row takes the tap, not only its words.
@@ -1267,12 +1403,12 @@ class _BackRow extends StatelessWidget {
                       ),
                     ),
                   ),
-                  if (waiting || news) ...[
+                  if (waiting > 0) ...[
                     const SizedBox(width: Space.s),
-                    Dot(
-                      color: waiting ? palette.signal : palette.text,
-                      size: 7,
-                    ),
+                    NeedsYouMark(count: waiting, label: ''),
+                  ] else if (news) ...[
+                    const SizedBox(width: Space.s),
+                    Dot(color: palette.text, size: 7),
                   ],
                   if (trailing case final trailing?)
                     Expanded(
@@ -1293,6 +1429,9 @@ class _BackRow extends StatelessWidget {
 
 /// On a phone, the connection of the Claktory showing, in a word with its
 /// mark ("Connected", "Reconnecting…"); a tap opens [ConnectionDialog].
+/// Nothing while the Claktory turns this device away: the screen under it
+/// says why, and it won't try again, so "Connecting…" would be untrue
+/// (Sale row 173).
 class PhoneConnectionWord extends StatelessWidget {
   const PhoneConnectionWord(this.backend, {super.key});
 
@@ -1302,8 +1441,16 @@ class PhoneConnectionWord extends StatelessWidget {
   Widget build(BuildContext context) => ListenableBuilder(
     // Follows the connection itself: the drawer's header rebuilds only
     // with the Workspace (#388).
-    listenable: Connection.of(backend),
-    builder: (context, _) => _word(context),
+    listenable: Listenable.merge([
+      Connection.of(backend),
+      backend.signInRequired,
+      backend.otherAccount,
+    ]),
+    builder: (context, _) =>
+        backend.signInRequired.value != null ||
+            backend.otherAccount.value != null
+        ? const SizedBox.shrink()
+        : _word(context),
   );
 
   Widget _word(BuildContext context) {
@@ -1761,9 +1908,6 @@ class ClaktoryList extends StatelessWidget {
               style: DenseType.title.copyWith(color: palette.text),
             ),
           ),
-          // Signed out, every row says so: what it means and Sign in…, once,
-          // here, since a row is a button of its own (#529).
-          _SignedOutNote(claktories: claktories),
           for (final claktory in claktories.all)
             _ListRow(
               key: ValueKey(claktory.key),
@@ -1818,48 +1962,6 @@ class ClaktoryList extends StatelessWidget {
       ),
     );
   }
-}
-
-/// Above the phone's list of Claktories while this app isn't signed in to
-/// the person's Claktory account, so its Claktories are marked so: what
-/// that means, and Sign in….
-class _SignedOutNote extends StatelessWidget {
-  const _SignedOutNote({required this.claktories});
-
-  final Claktories claktories;
-
-  @override
-  Widget build(BuildContext context) => ListenableBuilder(
-    listenable: claktories.accountMatch,
-    builder: (context, _) {
-      final marked = claktories.all.any(
-        (claktory) => claktory.account == AccountCheck.signedOut,
-      );
-      final words = accountWords(AccountCheck.signedOut);
-      if (!marked || words == null) return const SizedBox.shrink();
-      final palette = Palette.of(context);
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(Space.s, 0, Space.s, Space.l),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Short, as a glance takes it (Trish).
-            Text(
-              "This app isn't signed in to your Claktory account, so it "
-              "can't recognize your Claktories.",
-              style: DenseType.caption.copyWith(color: palette.textMuted),
-            ),
-            const SizedBox(height: Space.s),
-            Button(
-              label: 'Sign in…',
-              onPressed: () => showAccountSignIn(context),
-            ),
-          ],
-        ),
-      );
-    },
-  );
 }
 
 class _ListRow extends StatelessWidget {

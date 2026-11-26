@@ -900,6 +900,9 @@ class _ExpandedPaneState extends State<ExpandedPane> {
     return KeyEventResult.ignored;
   }
 
+  // Not wrapped in a BlockSemantics: in the window's overlay that hid the
+  // pane's own controls from VoiceOver too (Zucchero's row 665). What's
+  // under it stays readable meanwhile (ST14), until that's hidden properly.
   @override
   Widget build(BuildContext context) => ValueListenableBuilder(
     valueListenable: windowControls,

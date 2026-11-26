@@ -47,6 +47,23 @@ fn review_wrong(email: &str) -> String {
     db::email_key("review-wrong", email)
 }
 
+/// A Claktory's sign-in, move or relay token for a review email is refused
+/// unless its backend key is the review box's (`--review-claktory-key`;
+/// without one, every one is refused), so the details the stores hold get
+/// no other Claktory on the relay (#319, Fugo 34608). Other emails pass.
+/// Every way a Claktory joins an account goes through it (Fugo 46276).
+pub(super) fn review_box_only(service: &Service, email: &str, backend_key: &str) -> Result<(), ApiError> {
+    if service.review(email).is_none() {
+        return Ok(());
+    }
+    let pinned = service.config.review_claktory_key.as_deref();
+    if pinned.is_some() && verifying_key(backend_key).map(|key| b64(key.to_bytes())).as_deref() == pinned {
+        return Ok(());
+    }
+    tracing::warn!("review account: a Claktory refused, not the review box");
+    Err(review_refused())
+}
+
 /// Records a sign-in and emails its code; the request's id. The review
 /// account's is verified by its fixed code instead, and nothing is sent;
 /// refused for the rest of the hour once its email had 5 wrong codes.
@@ -89,7 +106,8 @@ pub(super) fn check_code(service: &Service, request_id: &str, code: &str, kind: 
         db::delete_request(&conn, &request.id)?;
         return Err(expired());
     }
-    let review = service.review(&request.email);
+    // A vouch's code is never the review account's fixed one (#529).
+    let review = if kind == "vouch" { None } else { service.review(&request.email) };
     let (by_email, by_ip) = (review_wrong(&request.email), format!("review-wrong-ip:{ip}"));
     let wrong = [(by_email.as_str(), 3600, review::WRONG_PER_HOUR), (by_ip.as_str(), 3600, review::WRONG_PER_HOUR)];
     let right = match review {
@@ -144,6 +162,10 @@ pub(super) async fn sign_in_start(service: &Service, call: &Call) -> Result<Repl
     {
         return Err(ApiError::invalid("A field is missing or out of range."));
     }
+    if db::backend_key_retired(&service.db(), &body.backend_key)? {
+        return Err(key_retired());
+    }
+    review_box_only(service, &email, &body.backend_key)?;
     sign_in_limits(service, &email, &call.ip)?;
     let request = db::Request {
         id: String::new(),
@@ -169,10 +191,19 @@ pub(super) fn sign_in_verify(service: &Service, call: &Call) -> Result<Reply, Ap
         .filter(|key| seal_share(&[0; 32], key, "check", 0).is_some())
         .ok_or_else(|| ApiError::invalid("eph_pub isn't a key to seal to."))?;
     let request = check_code(service, &body.request_id, &body.code, "claktory", &call.ip)?;
-    let proven = holds_key(service, call, request.claktory_id.as_deref().unwrap_or_default())?;
+    // Retired after its sign-in started: the code is spent.
+    if db::backend_key_retired(&service.db(), request.backend_key.as_deref().unwrap_or_default())? {
+        db::delete_request(&service.db(), &request.id)?;
+        return Err(key_retired());
+    }
+    let proven = if service.review(&request.email).is_some() {
+        review_box_signed(service, call, &request)?
+    } else {
+        holds_key(service, call, request.claktory_id.as_deref().unwrap_or_default())?
+    };
     let token = b64(*random_32());
     let now = service.now();
-    let registered = db::register(&mut service.db(), &request, &token, now, proven)?;
+    let registered = db::register(&mut service.db(), &request, &token, now, proven, service.config.user_apps.is_some())?;
     if let (db::Registered::Done { .. }, Some(location)) = (&registered, service.locate(&call.ip)) {
         let conn = service.db();
         if let Some(claktory) = db::claktory(&conn, request.claktory_id.as_deref().unwrap_or_default())? {
@@ -210,6 +241,52 @@ pub(super) fn sign_in_verify(service: &Service, call: &Call) -> Result<Reply, Ap
     }))
 }
 
+/// A sign-in with a backend key its Claktory signed out with (#524).
+fn key_retired() -> ApiError {
+    ApiError::new(StatusCode::CONFLICT, "backend_key_retired", "This Claktory signed out with this key. Sign in again with a new one.")
+}
+
+/// A review email's verify (#319, Fugo 46276): the request must name the
+/// review box's key and be signed by it (Claktory-Time and
+/// Claktory-Signature, as factoryd signs every verify), since the key is
+/// public and naming it proves nothing: else a holder of the stores' pair
+/// could take the box's registration or fill the account. Refused, the
+/// code is spent (`403 review_account`); a clock that's off or a signature
+/// seen before is refused as for signed requests, leaving the code to use
+/// again. Whether it's the same Claktory as its registration here, as
+/// `holds_key` says: the box signed in before with this key.
+fn review_box_signed(service: &Service, call: &Call, request: &db::Request) -> Result<bool, ApiError> {
+    let backend_key = request.backend_key.as_deref().unwrap_or_default();
+    let refused = |error: ApiError| -> Result<bool, ApiError> {
+        db::delete_request(&service.db(), &request.id)?;
+        Err(error)
+    };
+    // The box's key may also have changed since the sign-in started.
+    if let Err(error) = review_box_only(service, &request.email, backend_key) {
+        return refused(error);
+    }
+    let Some(key) = verifying_key(backend_key) else { return refused(ApiError::invalid("backend_key isn't a key.")) };
+    match signed_by(service, call, &key, review_refused) {
+        Ok(()) => {}
+        Err(error) if error.body.error == "review_account" => {
+            tracing::warn!("review account: a Claktory's verify refused, not signed by the review box");
+            return refused(error);
+        }
+        Err(error) => return Err(error),
+    }
+    let existing = db::claktory(&service.db(), request.claktory_id.as_deref().unwrap_or_default())?;
+    Ok(existing.is_some_and(|existing| existing.backend_key == backend_key))
+}
+
+/// What a review email's Claktory that isn't the review box is told.
+fn review_refused() -> ApiError {
+    ApiError::new(
+        StatusCode::FORBIDDEN,
+        "review_account",
+        "Use your own email to sign in this Claktory. This one works only on devices.",
+    )
+}
+
 /// Whether a sign-in's verify is signed (Claktory-Time and
 /// Claktory-Signature, without a token) by the backend key the Claktory
 /// with that id has now: only it may move to another account. Unsigned, or
@@ -220,9 +297,11 @@ fn holds_key(service: &Service, call: &Call, claktory_id: &str) -> Result<bool, 
     if call.header(SIGNATURE_HEADER).is_none() {
         return Ok(false);
     }
-    let Some(key) = db::claktory(&service.db(), claktory_id)?.and_then(|existing| verifying_key(&existing.backend_key)) else {
+    let Some(existing) = db::claktory(&service.db(), claktory_id)? else { return Ok(false) };
+    let Some(key) = verifying_key(&existing.backend_key) else { return Ok(false) };
+    if db::backend_key_retired(&service.db(), &existing.backend_key)? {
         return Ok(false);
-    };
+    }
     match signed_by(service, call, &key, ApiError::unauthorized) {
         Ok(()) => Ok(true),
         Err(error) if error.body.error == "unauthorized" => Ok(false),
@@ -233,11 +312,7 @@ fn holds_key(service: &Service, call: &Call, claktory_id: &str) -> Result<bool, 
 /// The Claktory a signed request is from: its token, its time and its
 /// backend key's signature checked, and seen only once.
 pub(super) fn authenticate(service: &Service, call: &Call) -> Result<db::Claktory, ApiError> {
-    let token = call.header("authorization").and_then(|value| value.strip_prefix("Bearer ")).ok_or_else(ApiError::unauthorized)?;
-    let claktory = db::claktory_by_token(&service.db(), token.trim())?.ok_or_else(ApiError::unauthorized)?;
-    let key = verifying_key(&claktory.backend_key).ok_or_else(ApiError::unauthorized)?;
-    signed_by(service, call, &key, ApiError::unauthorized)?;
-    service.verified(call, &claktory.backend_key)?;
+    let (claktory, _) = signed_with_token(service, call)?;
     if claktory.revoked_at.is_some() {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
@@ -246,6 +321,34 @@ pub(super) fn authenticate(service: &Service, call: &Call) -> Result<db::Claktor
         ));
     }
     Ok(claktory)
+}
+
+/// `authenticate`, removed Claktories too, with the token it came with.
+fn signed_with_token<'a>(service: &Service, call: &'a Call) -> Result<(db::Claktory, &'a str), ApiError> {
+    let token = call.header("authorization").and_then(|value| value.strip_prefix("Bearer ")).ok_or_else(ApiError::unauthorized)?;
+    let token = token.trim();
+    let claktory = db::claktory_by_token(&service.db(), token)?.ok_or_else(ApiError::unauthorized)?;
+    let key = verifying_key(&claktory.backend_key).ok_or_else(ApiError::unauthorized)?;
+    signed_by(service, call, &key, ApiError::unauthorized)?;
+    service.verified(call, &claktory.backend_key)?;
+    Ok((claktory, token))
+}
+
+/// `POST /v1/claktories/sign-out` (#524): a Claktory signs itself out. Its
+/// registration ends as a removal at claktory.com/account does (its app
+/// grants, pipe statements, relay tokens and endpoints with it), its token
+/// no longer works, and its backend key is retired. One removed already is
+/// signed out all the same. Then, past the database's lock, the user-apps
+/// worker hears of it, so its agents' grants go (E11-4).
+pub(super) async fn sign_out(service: &Service, call: &Call) -> Result<Reply, ApiError> {
+    let (claktory, token) = signed_with_token(service, call)?;
+    let apps = service.config.user_apps.is_some();
+    db::sign_out_claktory(&mut service.db(), &claktory, token, apps, service.now())?;
+    tracing::info!("signed out: Claktory {} of account {}", claktory.id, claktory.account_id);
+    if apps {
+        super::apps::claktory_removed(service, &claktory.account_id, &claktory.id, claktory.epoch, 0).await;
+    }
+    Ok(Reply::json(&serde_json::json!({})))
 }
 
 /// Checks a signed request's time, its signature by `key` and that it's
@@ -490,9 +593,15 @@ pub(super) async fn move_claktory(service: &Service, call: &Call) -> Result<Repl
     let name = clean_name(&body.name);
     let from = clean_name(&body.from);
     let now = service.now();
+    // The review box moves to no other key than the one pinned.
+    let account_email = db::account_email(&service.db(), &claktory.account_id)?;
+    if let Some(email) = account_email {
+        review_box_only(service, &email, &body.backend_key)?;
+    }
     let email = {
         let conn = service.db();
-        if !db::moved(&conn, &claktory.id, &body.backend_key, &body.machine_token, &name, &body.version, &body.platform)? {
+        let apps = service.config.user_apps.is_some().then_some(now);
+        if !db::moved(&conn, &claktory.id, &body.backend_key, &body.machine_token, &name, &body.version, &body.platform, apps)? {
             return Err(ApiError::invalid("That token is in use."));
         }
         db::touch(&conn, &claktory, service.locate(&call.ip).as_ref(), now)?;

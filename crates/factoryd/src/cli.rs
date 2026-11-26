@@ -119,6 +119,10 @@ fn usage(command: Option<&str>) -> String {
     if named.is_empty() { USAGE.to_owned() } else { format!("{header}\n{}", named.join("\n")) }
 }
 
+/// What these commands call themselves in their Hello (client_version),
+/// so the backend tells them from an app (`remote::Asker`).
+pub(crate) const CLIENT_NAME: &str = "factoryd-cli";
+
 /// Runs `args` (after `factoryd`, `--dev` included) if it's one of these
 /// commands; None for anything else, which the caller handles as before.
 pub fn dispatch(args: &[String]) -> Option<ExitCode> {
@@ -347,7 +351,7 @@ impl Client {
         let token = local_token(home);
         let hello = v1::Hello {
             protocol_version: PROTOCOL_VERSION,
-            client_version: format!("factoryd-cli {}", env!("CARGO_PKG_VERSION")),
+            client_version: format!("{CLIENT_NAME} {}", env!("CARGO_PKG_VERSION")),
             token: token.clone().unwrap_or_default(),
             ..Default::default()
         };
@@ -970,7 +974,14 @@ async fn decide_device(client: &mut Client, verb: &str, wanted: &str, flags: &Fl
     }
     let id = device.id.clone();
     let request = match verb {
-        "allow" if waiting => client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone(), number }),
+        // On a terminal, a person compared the digits: the device is the
+        // owner's by this Allow; from a program it shows the owner's
+        // assertion first (#527 S3).
+        "allow" if waiting => client_message::Body::ApproveDevice(v1::ApproveDevice {
+            device_id: id.clone(),
+            number,
+            from_terminal: flags.interactive && std::io::stdout().is_terminal(),
+        }),
         "allow" if device.code_expires_ms > crate::transcript::now_ms() => {
             return Answer::fail(
                 Exit::NeedsHuman,

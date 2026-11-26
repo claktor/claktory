@@ -369,7 +369,7 @@ async fn aws_connects_with_the_proposals_exact_statements_and_gives_narrowed_ses
     apply_request(
         &mut client,
         &mut view,
-        Request::GrantSecret(v1::GrantSecret { id: made.id.clone(), agent_id: "builder".into(), proof: None }),
+        Request::GrantSecret(v1::GrantSecret { id: made.id.clone(), agent_id: "builder".into(), proof: None, fill_only: false }),
     )
     .await;
     let output =

@@ -240,6 +240,10 @@ struct Reports {
     last: Option<Report>,
     /// Time of last full (non-incremental) report.
     last_full: Instant,
+    /// Claktory: the home relay chosen last, kept across full reports (which
+    /// clear `last`), so the hysteresis below holds on them too (friend bug
+    /// #52).
+    preferred: Option<RelayUrl>,
 }
 
 impl Default for Reports {
@@ -249,6 +253,7 @@ impl Default for Reports {
             prev: Default::default(),
             last: Default::default(),
             last_full: Instant::now(),
+            preferred: None,
         }
     }
 }
@@ -429,7 +434,7 @@ impl Client {
                 }
             }
         }
-        self.add_report_history_and_set_preferred_relay(&mut report);
+        self.add_report_history_and_set_preferred_relay(&mut report, do_full);
         debug!(
             ?report,
             duration = ?now.elapsed(),
@@ -746,11 +751,16 @@ impl Client {
     }
 
     /// Adds `r` to the set of recent Reports and mutates `r.preferred_relay` to contain the best recent one.
-    fn add_report_history_and_set_preferred_relay(&mut self, r: &mut Report) {
-        let mut prev_relay = None;
+    ///
+    /// Claktory: `full` says `r` probed every relay, so a relay missing from
+    /// it is taken as gone.
+    fn add_report_history_and_set_preferred_relay(&mut self, r: &mut Report, full: bool) {
+        // Claktory: the home relay before this report, even after a full
+        // report cleared `last` (upstream reads it from `last`, so every full
+        // report, every 5 minutes and at each network change, skipped the
+        // hysteresis: friend bug #52).
+        let prev_relay = self.reports.preferred.clone();
         if let Some(ref last) = self.reports.last {
-            prev_relay.clone_from(&last.preferred_relay);
-
             // If we don't have new information, copy this from the last report
             if r.mapping_varies_by_dest_ipv4.is_none() {
                 r.mapping_varies_by_dest_ipv4 = last.mapping_varies_by_dest_ipv4;
@@ -805,6 +815,20 @@ impl Client {
                 }
             }
 
+            // Claktory: an incremental report often measures one relay only,
+            // the kept QAD connection's, so a home missing from it isn't gone:
+            // its best latency of the last MAX_AGE stands in, rather than
+            // none, which skipped the hysteresis (friend bug #52). A full
+            // report probes every relay, so there a missing home is gone, and
+            // one not measured in MAX_AGE is gone either way.
+            if old_relay_cur_latency.is_zero()
+                && !full
+                && let Some(prev) = prev_relay.as_ref()
+                && let Some(best) = best_recent.get(prev)
+            {
+                old_relay_cur_latency = best;
+            }
+
             // If we're changing our preferred relay but the old one's still
             // accessible and the new one's not much better, just stick with
             // where we are.
@@ -817,6 +841,11 @@ impl Client {
             }
         }
 
+        // Claktory: a report that chose none (no relay answered) leaves the
+        // home as it was.
+        if r.preferred_relay.is_some() {
+            self.reports.preferred.clone_from(&r.preferred_relay);
+        }
         self.reports.prev.insert(now, r.clone());
         self.reports.last = Some(r.clone());
     }
@@ -1346,7 +1375,7 @@ mod tests {
             for s in &mut tt.steps {
                 // trigger the timer
                 tokio::time::advance(Duration::from_secs(s.after)).await;
-                client.add_report_history_and_set_preferred_relay(s.r.as_mut().unwrap());
+                client.add_report_history_and_set_preferred_relay(s.r.as_mut().unwrap(), true);
             }
             let last_report = tt.steps.last().unwrap().r.clone().unwrap();
             let got = client.reports.prev.len();
@@ -1357,6 +1386,74 @@ mod tests {
             assert_eq!(got, want, "preferred_relay");
         }
 
+        Ok(())
+    }
+    /// Claktory (friend bug #52): the home relay changes only for a clear
+    /// gain, on full reports too, and an incremental report that measured
+    /// only another relay doesn't take the home for gone; a full report
+    /// without it does.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_preferred_relay_hysteresis_holds_across_full_and_partial_reports() -> Result {
+        fn relay_url(i: u16) -> RelayUrl {
+            format!("http://{i}.com").parse().unwrap()
+        }
+        fn report(a: &[(u16, u64)]) -> Report {
+            let mut report = Report::default();
+            for &(id, ms) in a {
+                report.relay_latency.update_relay(
+                    relay_url(id),
+                    Duration::from_millis(ms),
+                    Probe::QadIpv4,
+                );
+            }
+            report
+        }
+
+        let tls_config = CaTlsConfig::insecure_skip_verify()
+            .client_config(default_provider())
+            .expect("infallible");
+        let mut client = Client::new(
+            DnsResolver::new(),
+            RelayMap::empty(),
+            Options::new(tls_config),
+            Default::default(),
+        );
+        // Each step as get_report takes it: a full one clears `last` first.
+        fn step(client: &mut Client, full: bool, latencies: &[(u16, u64)]) -> Option<RelayUrl> {
+            if full {
+                client.reports.last = None;
+            }
+            let mut r = report(latencies);
+            client.add_report_history_and_set_preferred_relay(&mut r, full);
+            r.preferred_relay
+        }
+
+        // Two relays at 200 and 230 ms, within 2/3 of each other.
+        assert_eq!(step(&mut client, true, &[(1, 200), (2, 230)]), Some(relay_url(1)));
+        // A full report a little later reads 2 faster, but not by a third.
+        tokio::time::advance(Duration::from_secs(20)).await;
+        let _ = step(&mut client, true, &[(1, 240), (2, 190)]);
+        assert_eq!(client.reports.preferred, Some(relay_url(1)), "full: kept");
+        // Incremental reports measuring only 2 keep 1 too.
+        for _ in 0..10 {
+            tokio::time::advance(Duration::from_secs(22)).await;
+            assert_eq!(step(&mut client, false, &[(2, 185)]), Some(relay_url(1)));
+        }
+        // A clear gain switches, from a partial report as from a full one.
+        tokio::time::advance(Duration::from_secs(22)).await;
+        assert_eq!(step(&mut client, false, &[(2, 100)]), Some(relay_url(2)));
+        tokio::time::advance(Duration::from_secs(22)).await;
+        assert_eq!(step(&mut client, true, &[(1, 90), (2, 110)]), Some(relay_url(2)));
+
+        // The home gone: a full report without it moves on at once.
+        tokio::time::advance(Duration::from_secs(22)).await;
+        assert_eq!(step(&mut client, true, &[(1, 300)]), Some(relay_url(1)));
+        // Back to 1 as home: an incremental report missing it keeps it while
+        // it was measured in the last 5 minutes, then lets it go.
+        tokio::time::advance(Duration::from_secs(22)).await;
+        assert_eq!(step(&mut client, false, &[(2, 250)]), Some(relay_url(1)));
+        tokio::time::advance(Duration::from_secs(6 * 60)).await;
+        assert_eq!(step(&mut client, false, &[(2, 250)]), Some(relay_url(2)));
         Ok(())
     }
 }

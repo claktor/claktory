@@ -230,10 +230,9 @@ void main() {
     );
   });
 
-  for (final (name, page) in [
-    ('Needs you', AppPage.inbox),
-    ('Settings', AppPage.settings),
-  ]) {
+  // Needs you is one card a screen on a phone (#514): no page to search,
+  // its header's end is ˄ ˅.
+  for (final (name, page) in [('Settings', AppPage.settings)]) {
     testWidgets('$name: Search in its header opens its find', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);

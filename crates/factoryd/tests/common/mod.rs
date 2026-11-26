@@ -289,8 +289,8 @@ pub fn code_token(code: &str) -> String {
     code.trim().split(['?', '&']).find_map(|part| part.strip_prefix("t=")).expect("a token in the code").to_owned()
 }
 
-/// A provider with one model, which answers "echo: <the prompt>" streamed in
-/// two pieces and reports 1200 tokens of context. Asked for a summary, it
+/// A provider with one model, which answers "echo: <the prompt>" (Claktory's
+/// tags in it defused, as a kept reply's are) streamed in two pieces and reports 1200 tokens of context. Asked for a summary, it
 /// writes one. A prompt ending in "hang" never gets an answer.
 ///
 /// Sign in through the browser by pasting a redirect address with
@@ -591,7 +591,9 @@ impl Models for Scripted {
             } else if prompt.starts_with("done: ") {
                 prompt.clone()
             } else {
-                format!("echo: {prompt}")
+                // A real model never writes Claktory's own tags back: the
+                // echo has them defused, as Claktory keeps a reply (G7).
+                format!("echo: {}", factory_agent::text::defuse_tags(&prompt))
             };
             let half = (0..=reply.len() / 2).rev().find(|at| reply.is_char_boundary(*at)).unwrap_or(0);
             let (first, second) = reply.split_at(half);
@@ -1034,6 +1036,9 @@ pub struct View {
     pub queued: Option<v1::QueuedMessages>,
     /// Every highlight sent, in order.
     pub highlights: Vec<v1::Highlight>,
+    /// What came for the conversation this connection watches
+    /// (ServerMessage.watched, #514), in order, kept apart.
+    pub watched: Vec<Body>,
 }
 
 impl View {
@@ -1115,9 +1120,16 @@ impl View {
     pub async fn follow(&mut self, client: &mut Client, mut done: impl FnMut(&View) -> bool) {
         while !done(self) {
             let message = client.receive().await;
-            if let Some(body) = &message.body {
-                self.apply(body);
-            }
+            self.take(message);
+        }
+    }
+
+    /// One message: the watched conversation's kept apart (#514).
+    pub fn take(&mut self, message: ServerMessage) {
+        match message.body {
+            Some(body) if message.watched => self.watched.push(body),
+            Some(body) => self.apply(&body),
+            None => {}
         }
     }
 }
@@ -1125,10 +1137,8 @@ impl View {
 /// Applies a request's pre-ack events to `view` and returns the reply.
 pub async fn apply_request(client: &mut Client, view: &mut View, body: client_message::Body) -> Body {
     let reply = client.request(body).await;
-    for event in &reply.events {
-        if let Some(body) = &event.body {
-            view.apply(body);
-        }
+    for event in reply.events {
+        view.take(event);
     }
     reply.body
 }

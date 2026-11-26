@@ -73,9 +73,13 @@ pub(super) fn token(service: &Service, call: &Call) -> Result<Reply, ApiError> {
     let now = service.now();
     {
         let conn = service.db();
-        if db::account_email(&conn, &claktory.account_id)?.is_none() {
+        let Some(email) = db::account_email(&conn, &claktory.account_id)? else {
             return Err(ApiError::new(StatusCode::FORBIDDEN, "revoked", "This Claktory's account is gone. Sign in on it again."));
-        }
+        };
+        drop(conn);
+        // A review account's Claktory under any key but the review box's,
+        // one signed in before the pin, say, gets no relay (#319, Fugo 46276).
+        api::review_box_only(service, &email, &claktory.backend_key)?;
     }
     service.limit(&[(&format!("relay-token:{}", claktory.id), 86_400, TOKENS_PER_DAY)])?;
     // A new endpoint today counts toward the account's; one it had a token

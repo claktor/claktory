@@ -132,6 +132,12 @@ pub enum Request {
     /// nobody may add it to a group meanwhile, so its KeyPackages go. It
     /// puts new ones up when it signs back in. 204 when done.
     SignedOut { account_id: String, account_key: String, time: i64 },
+    /// A Claktory's registration under `epoch` ended (E11-4): it was
+    /// removed at the account page, signed itself out, or signed in again
+    /// (to this account or another). Its agents' grants under that epoch or
+    /// an earlier one go, so nothing of its reaches the person's
+    /// conversations meanwhile. 204 when done.
+    ClaktoryRemoved { account_id: String, claktory_id: String, epoch: u64, time: i64 },
 }
 
 #[derive(Serialize, Deserialize, Debug)]

@@ -817,6 +817,7 @@ class _AddFriendFormState extends State<AddFriendForm> {
           text.contains('add-friend#') && friendIdFrom(text).isNotEmpty
           ? null
           : "This isn't a friend ID.",
+      onPasteInstead: pasteCodeInto(_code),
     );
     if (scanned != null && mounted) _code.text = friendIdFrom(scanned);
   }

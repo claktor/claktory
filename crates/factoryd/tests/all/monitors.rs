@@ -153,7 +153,7 @@ async fn a_time_monitor_fires_with_its_prompt_and_waits_while_the_agent_works() 
         Some(Kind::Assistant(assistant)) => Some(assistant.text.clone()),
         _ => None,
     });
-    assert!(read.expect("a reply").starts_with("echo: <event source=\"monitor\" from=\"hourly\" id=\"m1\">"));
+    assert!(read.expect("a reply").starts_with("echo: &lt;event source=\"monitor\" from=\"hourly\" id=\"m1\">"));
 
     // Working: the next fire waits until it's done.
     apply_request(&mut client, &mut view, send_message("lead", "hang")).await;
@@ -572,12 +572,13 @@ async fn export_secret(client: &mut Client, view: &mut View, agent: &str) -> Str
         description: "Reads the usage export.".into(),
         entries: vec![entry("TOKEN", "tok-0123456789abcdef", false), entry("KEYFILE", "key-material-0123456789", true)],
         ask_each_time: false,
+        sites: Vec::new(),
     };
     apply_request(client, view, client_message::Body::CreateSecret(secret)).await;
     let other = v1::CreateSecret { name: "Other".into(), entries: vec![entry("OTHER", "other-0123456789", false)], ..Default::default() };
     apply_request(client, view, client_message::Body::CreateSecret(other)).await;
     let id = view.workspace.vault.clone().expect("vault").secrets.iter().find(|secret| secret.name == "Export").expect("Export").id.clone();
-    let grant = v1::GrantSecret { id: id.clone(), agent_id: agent.into(), proof: None };
+    let grant = v1::GrantSecret { id: id.clone(), agent_id: agent.into(), proof: None, fill_only: false };
     apply_request(client, view, client_message::Body::GrantSecret(grant)).await;
     id
 }
@@ -633,7 +634,7 @@ async fn a_check_can_name_only_its_own_agents_secrets_never_ones_that_ask_each_t
     }
     // Another agent's monitor, even with a secret that agent has.
     let id = view.workspace.vault.clone().expect("vault").secrets.iter().find(|secret| secret.name == "Export").expect("Export").id.clone();
-    let grant = v1::GrantSecret { id, agent_id: "worker".into(), proof: None };
+    let grant = v1::GrantSecret { id, agent_id: "worker".into(), proof: None, fill_only: false };
     apply_request(&mut client, &mut view, client_message::Body::GrantSecret(grant)).await;
     let for_worker = serde_json::json!({"monitors": [{"name": "x", "prompt": "y", "when": check(serde_json::json!(["Export"])), "agent": "worker"}]});
     let refused = call(&mut client, &mut view, "lead", "monitors_add", &for_worker.to_string()).await;
@@ -647,7 +648,7 @@ async fn a_check_can_name_only_its_own_agents_secrets_never_ones_that_ask_each_t
     };
     apply_request(&mut client, &mut view, client_message::Body::CreateSecret(asks)).await;
     let id = view.workspace.vault.clone().expect("vault").secrets.iter().find(|secret| secret.name == "Deploy").expect("Deploy").id.clone();
-    let grant = v1::GrantSecret { id, agent_id: "lead".into(), proof: None };
+    let grant = v1::GrantSecret { id, agent_id: "lead".into(), proof: None, fill_only: false };
     apply_request(&mut client, &mut view, client_message::Body::GrantSecret(grant)).await;
     let refused = call(&mut client, &mut view, "lead", "monitors_add", &add("x", check(serde_json::json!(["Export", "Deploy"])))).await;
     assert!(refused.starts_with("Deploy asks the person each time it's used, and nobody is there to ask when a check runs"), "{refused}");
@@ -879,4 +880,61 @@ async fn a_clock_set_back_leaves_no_monitor_silent_for_the_step() {
     let names: Vec<String> = fires(&view).iter().map(|fire| fire.summary.clone()).collect();
     assert_eq!(names.len(), 2, "{names:?}");
     assert!(names.contains(&"m1 hourly fired".to_owned()) && names.contains(&"m2 cron fired".to_owned()), "{names:?}");
+}
+
+/// Friend bug #55: an archived project's agents' monitors pause, and no one
+/// can message those agents; an admin agent still lists and cancels them,
+/// as the person does in the Monitors panel, without bringing the project
+/// back. Nothing fires or wakes the agent meanwhile; others can't name it.
+#[tokio::test]
+async fn an_admin_or_the_person_cancels_an_archived_agents_monitors_and_nothing_runs() {
+    let (_dir, _factory, mut client, mut view) = setup().await;
+    let added = call(
+        &mut client,
+        &mut view,
+        "lead",
+        "monitors_add",
+        r#"{"monitors": [{"name": "nightly", "prompt": "Check the build.", "when": {"every": "1h"}}, {"name": "weekly", "prompt": "Sum up.", "when": {"every": "7d"}}]}"#,
+    )
+    .await;
+    assert!(added.starts_with("Added"), "{added}");
+    let rivet = v1::UpdateAgent { agent_id: "rivet".into(), model: Some(crate::common::MODEL.into()), effort: Some("off".into()), ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(rivet)).await;
+    apply_request(&mut client, &mut view, create_agent("", "Ana", "")).await;
+    let archive = v1::UpdateProject { project_id: "site".into(), name: None, archived: Some(true), before_id: None };
+    apply_request(&mut client, &mut view, client_message::Body::UpdateProject(archive)).await;
+
+    // Rivet lists and cancels them; firing one is refused.
+    let listed = call(&mut client, &mut view, "rivet", "monitors_list", r#"{"agent": "lead"}"#).await;
+    assert!(listed.contains("nightly") && listed.contains("weekly"), "{listed}");
+    let fired = call(&mut client, &mut view, "rivet", "monitors_change", r#"{"agent": "lead", "changes": [{"id": "m1", "action": "fire"}]}"#).await;
+    assert!(fired.contains("can't fire while its agent's project is archived") && fired.ends_with("Nothing changed."), "{fired}");
+    let cancelled = call(&mut client, &mut view, "rivet", "monitors_change", r#"{"agent": "lead", "changes": [{"id": "m1", "action": "cancel"}]}"#).await;
+    assert_eq!(cancelled, "m1 cancelled.");
+    // Adding one for it is still refused, and an agent that isn't an admin can't name it.
+    let add = r#"{"monitors": [{"name": "x", "prompt": "x", "when": {"in": "1h"}, "agent": "lead"}]}"#;
+    let refused = call(&mut client, &mut view, "rivet", "monitors_add", add).await;
+    assert!(!refused.starts_with("Added"), "{refused}");
+    let refused = call(&mut client, &mut view, "ana", "monitors_list", r#"{"agent": "lead"}"#).await;
+    assert!(refused.starts_with("No agent you can message is called \"lead\""), "{refused}");
+
+    // The person cancels the other in the Monitors panel, which shows it held.
+    let Body::MonitorList(list) =
+        apply_request(&mut client, &mut view, client_message::Body::ListMonitors(v1::ListMonitors { agent_id: "lead".into(), ..Default::default() })).await
+    else {
+        panic!("a list")
+    };
+    let weekly = list.monitors.iter().find(|shown| shown.monitor.as_ref().is_some_and(|monitor| monitor.name == "weekly")).expect("weekly");
+    assert_eq!(weekly.held(), v1::MonitorHeld::ProjectArchived);
+    let cancel = v1::ChangeMonitor { agent_id: "lead".into(), monitor_id: 2, action: v1::MonitorAction::Cancel.into() };
+    assert!(matches!(apply_request(&mut client, &mut view, client_message::Body::ChangeMonitor(cancel)).await, Body::Ack(_)));
+    let again = v1::ChangeMonitor { agent_id: "lead".into(), monitor_id: 2, action: v1::MonitorAction::Cancel.into() };
+    assert!(matches!(apply_request(&mut client, &mut view, client_message::Body::ChangeMonitor(again)).await, Body::Error(_)), "ended");
+    let listed = call(&mut client, &mut view, "rivet", "monitors_list", r#"{"agent": "lead"}"#).await;
+    assert_eq!(listed.lines().filter(|line| line.starts_with("m")).count(), 0, "{listed}");
+
+    // The agent never woke.
+    apply_request(&mut client, &mut view, select("lead")).await;
+    assert!(fires(&view).is_empty());
+    assert!(idle(&view, "lead"));
 }

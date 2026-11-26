@@ -881,6 +881,14 @@ impl Transcript {
         self.replace_shown(Kind::AskPerson(ask))
     }
 
+    /// Says which device the card at `seq` was decided from (#514,
+    /// `crate::answered_on`); the changed entry, or None if it isn't shown.
+    pub fn set_answered_on(&mut self, seq: u64, on: v1::AnsweredOn) -> Option<Entry> {
+        let entry = self.in_memory_mut().find(|entry| entry.seq == seq)?;
+        entry.answered_on = Some(on);
+        Some(entry.clone())
+    }
+
     /// Adds a harness notice. Notices are for display only and aren't saved.
     pub fn notice(&mut self, text: impl Into<String>, level: NoticeLevel) -> Entry {
         self.shown_only = true;
@@ -1338,7 +1346,7 @@ impl Transcript {
     }
 
     fn push(&mut self, timestamp_ms: i64, kind: Kind) -> Entry {
-        let entry = Entry { seq: self.len(), timestamp_ms, kind: Some(kind), reply: 0, replied_to: None };
+        let entry = Entry { seq: self.len(), timestamp_ms, kind: Some(kind), reply: 0, replied_to: None, answered_on: None };
         self.entries.push(entry.clone());
         self.track(&entry);
         entry
@@ -1348,7 +1356,7 @@ impl Transcript {
     fn push_part(&mut self, timestamp_ms: i64, kind: Kind) -> Entry {
         let seq = self.len();
         let reply = *self.live.reply.get_or_insert(seq);
-        let entry = Entry { seq, timestamp_ms, kind: Some(kind), reply, replied_to: None };
+        let entry = Entry { seq, timestamp_ms, kind: Some(kind), reply, replied_to: None, answered_on: None };
         self.entries.push(entry.clone());
         entry
     }

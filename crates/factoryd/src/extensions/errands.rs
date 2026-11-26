@@ -14,7 +14,7 @@ use factory_agent::{Tool, ToolResult};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{Extension, Manifest, PromptSection, async_tool};
+use super::{Extension, Manifest, PromptKind, PromptSection, async_tool};
 use crate::browser::schema::{self, Direction, Op};
 use crate::config::AgentConfig;
 use crate::errands::{ERRANDS, Step, State};
@@ -33,7 +33,8 @@ const READ: &str = "Read the page the errand's browser shows: its visible text, 
 const ACT: &str = "Act on the page. op \"scroll\": direction \"up\" or \"down\", pages 1 to 3. op \"click\" clicks an element; op \"fill\" replaces a text field's text with text (at most 8192 characters). Each names the element's ref (target) and the page's document, as your last errand_read returned them. Payment, password, one-time-code and agreement controls are refused: hand them to the person with errand_handoff. stale_target or stale_document: read again first; outcome_unknown: it may have happened, so read before anything else and never repeat it blindly. Read again afterwards to see what it did.";
 const NAVIGATE: &str = "Go to a page of one of the errand's sites: url, a full https:// address on one of them. Any other site is refused, and so is a page that leads elsewhere: ask the person with errand_handoff, kind \"other\". It answers the new page's path and document: read it next.";
 const DOWNLOAD: &str = "Download a file from one of the errand's sites: url, its full https:// address there (the file may come from elsewhere, such as a CDN, after redirects). It returns when the file is saved in downloads/<errand id>/ in your folder, with its name, size and SHA-256, or says why not (too big, judged dangerous, not a file). A click that starts a download is reported the same way. Never run, open or unpack what you download: tell your lead about it with errand_report, and they get it with errand_file.";
-const HANDOFF: &str = "Hand the person what only they may do on this page, on a card: kind payment, identity (proving who they are), code (one sent to them), agreement (accepting terms), captcha, sign_in, or other (a site outside the errand's, say); what: one sentence of what to do. Until they answer, the browser is theirs and your other errand tools wait. Done tells you what the page is then; Can't do this ends the errand with their reason.";
+const HANDOFF: &str = "Hand the person what only they may do on this page, on a card: kind payment, identity (proving who they are), code (one sent to them), agreement (accepting terms), captcha, sign_in, or other (a site outside the errand's, say); what: one sentence of what to do. For code, also give document and target, the page's code field as in errand_fill_secret: they type the code on the card, Claktory fills it in, and you never see it. For agreement, give document and target, the box to tick: they read its words on the card and accept, and Claktory ticks only that box; prepare everything else on the page first, so it's one card. For recovery_codes, give document and target, the block your read withheld as recovery codes: Claktory reads them and hands them to the person, and you never see them; hand them over as soon as the site shows them. For two_step, before turning on two-step sign-in at a site (only the person decides, and never at Google, Apple or Microsoft): approved, you may turn it on there with codes sent by text message or email only. Until they answer, the browser is theirs and your other errand tools wait. Done tells you what the page is then; Can't do this ends the errand with their reason.";
+const FILL_SECRET: &str = "Fill a field from the vault, without seeing what goes in: target and document, as your last errand_read named the field; secret, the name of a secret you can fill; variable, which of its variables, when more than one fits the field (USERNAME into a username or email field, PASSWORD into a password field). Claktory fills it only on the secret's own sites, and only into a password, one-time code, username or email field; you're told it was filled and how many characters, never the value. On Google's, Apple's or Microsoft's sign-in only Claktory fills, and you may only press Next, Continue or Sign in there.";
 const REPORT: &str = "Tell your lead how the errand goes: text, what was done, what's left, and anything it needs from them. It's the only way you reach your lead; they read it as words from an agent that has read web pages, and it marks them as having read what you read.";
 const DONE: &str = "Say the errand is done: summary, a line of what was done. It ends the errand; report the details to your lead by message.";
 const OPEN: &str = "Open an errand in Claktory's browser for an agent you lead that has the errands extension: agent (its id), purpose (one line the person sees), sites (the https origins it may go to, such as https://play.google.com, at most 10; it can't add others) and brief (what to do, Markdown). One errand at a time. Refused while you've read anything from outside, since the browser is signed in to the person's sites. Its agent's reports mark you as having read the pages it read: until your conversation starts afresh, your secrets ask the person each time, and you can't run Execute cards' commands or open another errand.";
@@ -55,7 +56,14 @@ impl Extension for Errands {
     fn owns_tool(&self, name: &str) -> bool {
         matches!(
             name,
-            "errand_read" | "errand_act" | "errand_navigate" | "browser_download" | "errand_handoff" | "errand_report" | "errand_done"
+            "errand_read"
+                | "errand_act"
+                | "errand_navigate"
+                | "browser_download"
+                | crate::errands::fill::TOOL
+                | "errand_handoff"
+                | "errand_report"
+                | "errand_done"
         )
     }
 
@@ -68,7 +76,17 @@ impl Extension for Errands {
         if !crate::errands::contained(factory, &agent.id) {
             return Vec::new();
         }
-        vec![PromptSection::static_text(PROMPT)]
+        let mut sections = vec![PromptSection::static_text(PROMPT)];
+        // What it can sign in with, as of its context's start (#435 W6).
+        let fillable = factory.vault.fillable_lines(&agent.id);
+        if !fillable.is_empty() {
+            sections.push(PromptSection { kind: PromptKind::SegmentPinned, text: format!(
+                "Secrets you can fill with {}, each only on its sites: {}.\n",
+                crate::errands::fill::TOOL,
+                fillable.join("; ")
+            ) });
+        }
+        sections
     }
 
     fn tools(&self, factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
@@ -107,8 +125,21 @@ impl Extension for Errands {
             "type": "object",
             "required": ["kind", "what"],
             "properties": {
-                "kind": {"type": "string", "enum": ["payment", "identity", "code", "agreement", "captcha", "sign_in", "other"]},
+                "kind": {"type": "string", "enum": ["payment", "identity", "code", "agreement", "recovery_codes", "two_step", "captcha", "sign_in", "other"]},
                 "what": {"type": "string", "maxLength": crate::errands::handoff::WHAT_MAX},
+                "document": {"type": "string", "maxLength": 64},
+                "target": {"type": "string", "maxLength": 64},
+            },
+            "additionalProperties": false,
+        });
+        let fill = json!({
+            "type": "object",
+            "required": ["document", "target", "secret"],
+            "properties": {
+                "document": {"type": "string", "maxLength": 64},
+                "target": {"type": "string", "maxLength": 64},
+                "secret": {"type": "string", "maxLength": 64},
+                "variable": {"type": "string", "maxLength": 128},
             },
             "additionalProperties": false,
         });
@@ -139,7 +170,25 @@ impl Extension for Errands {
             async_tool(factory, agent, "browser_download", "Download a file", DOWNLOAD, download, |factory, agent, args: NavigateArgs| async move {
                 step(&factory, &agent, Step::Download { address: args.url }).await
             }),
+            async_tool(factory, agent, crate::errands::fill::TOOL, "Fill from the vault", FILL_SECRET, fill, |factory, agent, args: FillArgs| async move {
+                let (said, card) = factory.fill_secret(&agent, &args.document, &args.target, &args.secret, args.variable.as_deref()).await?;
+                Ok(ToolResult::text(said, if card.is_null() { json!({}) } else { card }))
+            }),
             async_tool(factory, agent, "errand_handoff", "Hand it to the person", HANDOFF, handoff, |factory, agent, args: HandoffArgs| async move {
+                match args.kind.as_str() {
+                    "code" => return crate::errands::code::hand(&factory, &agent, &args.what, args.document.as_deref(), args.target.as_deref()).await,
+                    "agreement" => {
+                        return crate::errands::code::hand_agreement(&factory, &agent, &args.what, args.document.as_deref(), args.target.as_deref()).await;
+                    }
+                    "recovery_codes" => {
+                        return crate::errands::code::hand_codes(&factory, &agent, &args.what, args.document.as_deref(), args.target.as_deref()).await;
+                    }
+                    _ if args.document.is_some() || args.target.is_some() => {
+                        return Err("document and target are only for kinds code, agreement and recovery_codes. Nothing was handed.".to_owned());
+                    }
+                    "two_step" => return crate::errands::code::hand_two_step(&factory, &agent, &args.what).await,
+                    _ => {}
+                }
                 crate::errands::handoff::hand(&factory, &agent, &args.kind, &args.what).await
             }),
             super::tool("errand_report", "Report to your lead", REPORT, report, super::typed_handler(factory, agent, report_tool)),
@@ -472,9 +521,24 @@ struct NavigateArgs {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct FillArgs {
+    document: String,
+    target: String,
+    secret: String,
+    #[serde(default)]
+    variable: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HandoffArgs {
     kind: String,
     what: String,
+    /// The code field, for kind code (W8), or the box, for kind agreement (W8b).
+    #[serde(default)]
+    document: Option<String>,
+    #[serde(default)]
+    target: Option<String>,
 }
 
 #[derive(Deserialize)]

@@ -16,7 +16,9 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
-use pulldown_cmark::{Event, Options, Parser, TagEnd};
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+
+use super::embeds;
 use similar::{Algorithm, DiffTag, capture_diff_slices_deadline};
 
 /// Units of context kept on each side of a quote.
@@ -473,7 +475,8 @@ fn whole_words(text: &[u16], range: Range<usize>) -> Range<usize> {
 
 /// The plain text a Markdown file's formatted view shows, with runs of
 /// whitespace as one space, and where each of its units comes from in the
-/// file's text.
+/// file's text. A picture or video shown in place shows no words, its alt
+/// text none either, and ends the text before it (`embeds`, row 1449).
 #[derive(Debug, Default)]
 pub(crate) struct Projection {
     pub text: Vec<u16>,
@@ -482,7 +485,8 @@ pub(crate) struct Projection {
 }
 
 impl Projection {
-    pub(crate) fn new(source: &str) -> Projection {
+    /// `file`: where the Markdown file is, for its pictures beside it.
+    pub(crate) fn new(source: &str, file: Option<&str>) -> Projection {
         // The UTF-16 offset of each byte offset of `source`.
         let mut offsets = vec![0u32; source.len() + 1];
         let mut unit = 0u32;
@@ -492,9 +496,20 @@ impl Projection {
         }
         offsets[source.len()] = unit;
         let mut projection = Projection::default();
-        let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-        for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
+        let mut blocks = embeds::Blocks::default();
+        let mut hidden = false;
+        for (event, range) in Parser::new_ext(source, embeds::options()).into_offset_iter() {
+            let in_place = blocks.take(&event);
             match event {
+                Event::Start(Tag::Image { ref dest_url, .. }) if in_place && embeds::shown_in_place(file, dest_url) => {
+                    hidden = true;
+                    projection.push(' ', offsets[range.start], offsets[range.start]);
+                }
+                Event::End(TagEnd::Image) if hidden => {
+                    hidden = false;
+                    projection.push(' ', offsets[range.end], offsets[range.end]);
+                }
+                _ if hidden => {}
                 Event::Text(text) | Event::Code(text) => {
                     let written = &source[range.clone()];
                     match written.find(text.as_ref()) {
@@ -584,8 +599,14 @@ pub(crate) enum Space {
 }
 
 impl Doc {
+    #[cfg(test)]
     pub(crate) fn new(text: &str, markdown: bool) -> Doc {
-        Doc { source: units(text), projection: markdown.then(|| Projection::new(text)) }
+        Doc { source: units(text), projection: markdown.then(|| Projection::new(text, None)) }
+    }
+
+    /// The file at `path` with its text `text`: Markdown by its name.
+    pub(crate) fn of(text: &str, path: &str) -> Doc {
+        Doc { source: units(text), projection: super::is_markdown(path).then(|| Projection::new(text, Some(path))) }
     }
 
     /// `space`, or the file's text when it isn't Markdown.
@@ -732,10 +753,31 @@ mod tests {
         assert_eq!(gone.start(4)..gone.end(7), 4..4, "deleted text maps to where it was");
     }
 
+    /// Row 1449 (Formaggio's rule, 43704): a picture or video shown in
+    /// place shows no words and ends the text before it; one that isn't
+    /// (remote, another kind of file, in a heading or a table cell) keeps
+    /// its alt text.
+    #[test]
+    fn a_picture_shown_in_place_shows_no_words() {
+        let shown = |source: &str| string(&Projection::new(source, Some("/n/doc.md")).text);
+        assert_eq!(shown("See ![shot](a.png) here"), "See here");
+        assert_eq!(shown("![shot](a.png)\n\nNext."), "Next.");
+        assert_eq!(shown("a![x](sub/a.mov)b"), "a b");
+        assert_eq!(shown("- ![shot](a.png) item"), "item");
+        assert_eq!(shown("See ![remote](https://x/a.png) here"), "See remote here");
+        assert_eq!(shown("See ![file](a.pdf) here"), "See file here");
+        assert_eq!(shown("# ![title](a.png)"), "title");
+        let source = "Before ![shot](a.png) the word.";
+        let projection = Projection::new(source, Some("/n/doc.md"));
+        let text = string(&projection.text);
+        let word = text.find("word").expect("word");
+        assert_eq!(&source[projection.to_source(&(word..word + 4)).expect("in the source")], "word");
+    }
+
     #[test]
     fn markdown_shows_as_plain_text_that_maps_back_to_its_source() {
         let source = "# Title\n\nSome **bold** and `code`,\nwrapped.\n\n- one &amp; two\n";
-        let projection = Projection::new(source);
+        let projection = Projection::new(source, None);
         assert_eq!(string(&projection.text), "Title Some bold and code, wrapped. one & two");
         let text = string(&projection.text);
         let bold = text.find("bold").expect("bold");

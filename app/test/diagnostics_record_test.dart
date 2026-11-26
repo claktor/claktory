@@ -70,6 +70,7 @@ void main() {
       'path',
       'reconnect',
       'ready',
+      'recording',
     ]);
     // The notifications area's (setting up pushes on an iPhone).
     expect(NotificationsKey.values.map((key) => key.wire), [

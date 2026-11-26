@@ -267,6 +267,50 @@ void main() {
     expect(File('${staged.app}/Contents/Info.plist').existsSync(), isTrue);
   }, skip: !onMac);
 
+  test('relayed, it goes in small pieces and gently; direct again, at the '
+      "link's pace (friend bug #51)", () async {
+    final pieces = Pieces(archiveOf(temp, 'dev.factory.app'));
+    final relayed = ValueNotifier(true);
+    // 1 KiB at a time, 20 KiB a second, while relayed.
+    const gentle = AppUpdater(
+      pollEvery: Duration(milliseconds: 5),
+      retryEvery: Duration(milliseconds: 5),
+      firstPiece: 4096,
+      leastPiece: 1024,
+      mostPiece: 4096,
+      relayedPiece: 1024,
+      relayedRate: 20 * 1024,
+    );
+    final watch = Stopwatch()..start();
+    Duration? turnedDirect;
+    pieces.before = (offset) {
+      // The path turns direct once 8 KiB have been asked for.
+      if (offset >= 8 * 1024 && relayed.value) {
+        relayed.value = false;
+        turnedDirect = watch.elapsed;
+      }
+    };
+    final staged = await gentle.stage(
+      fetch: pieces.call,
+      version: '2026.12.01-1200',
+      bundlePath: bundle,
+      relayed: relayed,
+    );
+    expect(File('${staged.app}/Contents/Info.plist').existsSync(), isTrue);
+    final relayedSizes = pieces.sizes.take(8).toList();
+    expect(relayedSizes, everyElement(lessThanOrEqualTo(1024)));
+    // 8 KiB at 20 KiB a second: the first piece at once, the rest spaced.
+    expect(
+      turnedDirect,
+      greaterThanOrEqualTo(const Duration(milliseconds: 300)),
+    );
+    expect(
+      pieces.sizes.skip(8),
+      contains(4096),
+      reason: 'direct again, pieces grow back to the most',
+    );
+  }, skip: !onMac);
+
   test('from a backend that sends 1 MiB whatever is asked, pieces go one at a '
       'time at its size', () async {
     final pieces = Pieces(

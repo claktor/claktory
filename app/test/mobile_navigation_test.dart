@@ -3,7 +3,6 @@
 // conversation with Back, and what the drawer finds.
 import 'package:factory_app/agent_view.dart';
 import 'package:factory_app/controls.dart' show GlyphButton, TextField;
-import 'package:factory_app/inbox.dart' show InboxView;
 import 'package:factory_app/mobile/drawer.dart';
 import 'package:factory_app/mobile/navigation.dart';
 import 'package:factory_app/pipes.dart' show PipeView;
@@ -12,8 +11,11 @@ import 'package:factory_app/scope.dart';
 import 'package:factory_app/settings_view.dart';
 import 'package:factory_app/sidebar.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'package:factory_app/mobile/needs_you_phone.dart' show PhoneNeedsYou;
 
 import 'harness.dart';
 import 'phone_test.dart' show menuButton, phone, workspace;
@@ -229,6 +231,9 @@ void main() {
 
   testWidgets('Needs you leads the drawer as on a Mac: one row with the '
       'count, which pushes the Needs you page', (tester) async {
+    // An iPhone's Needs you, focus mode (Android keeps the list for now).
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final snapshot = workspace();
     snapshot.agents[1].waitingSeqs.add(Int64(7));
     final harness = await _show(tester, snapshot);
@@ -254,7 +259,7 @@ void main() {
     await tester.tap(_inDrawer('Needs you'));
     await pumpFrames(tester);
     expect(harness.page.value, AppPage.inbox);
-    expect(find.byType(InboxView), findsOneWidget);
+    expect(find.byType(PhoneNeedsYou), findsOneWidget);
     expect(find.byType(Sidebar), findsNothing);
     await tester.tap(find.bySemanticsLabel('Back'));
     await pumpFrames(tester);

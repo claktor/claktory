@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'identity.dart';
+import 'primary_key.dart';
 
 /// Zooms and pans a [ZoomCanvas] from outside it: a pane header's buttons,
 /// say. Its [scale] is what the canvas shows now.
@@ -238,19 +239,12 @@ class _ZoomCanvasState extends State<ZoomCanvas> {
         }
         return CallbackShortcuts(
           bindings: {
-            const SingleActivator(LogicalKeyboardKey.equal, meta: true): () =>
+            primaryKey(LogicalKeyboardKey.equal): () => _zoomBy(1.25),
+            primaryKey(LogicalKeyboardKey.equal, shift: true): () =>
                 _zoomBy(1.25),
-            const SingleActivator(
-              LogicalKeyboardKey.equal,
-              meta: true,
-              shift: true,
-            ): () =>
-                _zoomBy(1.25),
-            const SingleActivator(LogicalKeyboardKey.add, meta: true): () =>
-                _zoomBy(1.25),
-            const SingleActivator(LogicalKeyboardKey.minus, meta: true): () =>
-                _zoomBy(1 / 1.25),
-            const SingleActivator(LogicalKeyboardKey.digit0, meta: true): _fit,
+            primaryKey(LogicalKeyboardKey.add): () => _zoomBy(1.25),
+            primaryKey(LogicalKeyboardKey.minus): () => _zoomBy(1 / 1.25),
+            primaryKey(LogicalKeyboardKey.digit0): _fit,
           },
           child: Focus(
             focusNode: _focus,
@@ -261,11 +255,11 @@ class _ZoomCanvasState extends State<ZoomCanvas> {
               child: Listener(
                 // A click takes the keys for zooming.
                 onPointerDown: (_) => _focus.requestFocus(),
-                // ⌘-scroll zooms about the pointer; a plain scroll pans,
-                // and a pinch zooms, as InteractiveViewer does.
+                // ⌘-scroll (Ctrl-scroll off Apple's) zooms about the
+                // pointer; a plain scroll pans, and a pinch zooms, as
+                // InteractiveViewer does.
                 onPointerSignal: (event) {
-                  if (event is PointerScrollEvent &&
-                      HardwareKeyboard.instance.isMetaPressed) {
+                  if (event is PointerScrollEvent && primaryPressed) {
                     _zoomTo(
                       _scale * (event.scrollDelta.dy < 0 ? 1.1 : 1 / 1.1),
                       at: event.localPosition,

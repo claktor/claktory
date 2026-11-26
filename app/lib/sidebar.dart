@@ -759,29 +759,33 @@ class _QuietPlus extends StatelessWidget {
         glyph: (color) => ExtensionGlyph(icon: 'plus', name: '+', color: color),
       );
     }
-    return HoverCard(
-      card: (context) => Text(tip),
-      child: Semantics(
-        button: true,
-        label: tip,
-        child: Pressable(
-          onTap: onTap,
-          builder: (context, hovered) => AnimatedContainer(
-            duration: Motion.fast,
-            curve: Curves.easeOut,
-            width: 20,
-            height: 20,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: hovered ? palette.hover : const Color(0x00000000),
-              borderRadius: BorderRadius.circular(Radii.control),
-            ),
-            child: Transform.scale(
-              scale: 0.875,
-              child: ExtensionGlyph(
-                icon: 'plus',
-                name: '+',
-                color: hovered ? palette.textMuted : palette.textFaint,
+    return _FingerTarget(
+      // At its row's end: nothing after it that takes a tap.
+      after: 0,
+      child: HoverCard(
+        card: (context) => Text(tip),
+        child: Semantics(
+          button: true,
+          label: tip,
+          child: Pressable(
+            onTap: onTap,
+            builder: (context, hovered) => AnimatedContainer(
+              duration: Motion.fast,
+              curve: Curves.easeOut,
+              width: 20,
+              height: 20,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: hovered ? palette.hover : const Color(0x00000000),
+                borderRadius: BorderRadius.circular(Radii.control),
+              ),
+              child: Transform.scale(
+                scale: 0.875,
+                child: ExtensionGlyph(
+                  icon: 'plus',
+                  name: '+',
+                  color: hovered ? palette.textMuted : palette.textFaint,
+                ),
               ),
             ),
           ),
@@ -1626,37 +1630,100 @@ class _FilesButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    return HoverCard(
-      card: (context) => const Text(_tip),
-      child: Semantics(
-        button: true,
-        label: _tip,
-        child: Pressable(
-          onTap: () => openFiles(
-            context,
-            project,
-            phone: PhoneProjects.of(context)?.files,
-          ),
-          builder: (context, hovered) => AnimatedContainer(
-            duration: Motion.fast,
-            curve: Curves.easeOut,
-            width: 20,
-            height: 20,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: hovered ? palette.hover : const Color(0x00000000),
-              borderRadius: BorderRadius.circular(Radii.control),
+    return _FingerTarget(
+      // The gap after it, when it ends the row.
+      after: Space.xs,
+      child: HoverCard(
+        card: (context) => const Text(_tip),
+        child: Semantics(
+          button: true,
+          label: _tip,
+          child: Pressable(
+            onTap: () => openFiles(
+              context,
+              project,
+              phone: PhoneProjects.of(context)?.files,
             ),
-            child: Transform.scale(
-              scale: 0.875,
-              child: FileGlyph(
-                color: shown || hovered ? palette.textMuted : palette.textFaint,
+            builder: (context, hovered) => AnimatedContainer(
+              duration: Motion.fast,
+              curve: Curves.easeOut,
+              width: 20,
+              height: 20,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: hovered ? palette.hover : const Color(0x00000000),
+                borderRadius: BorderRadius.circular(Radii.control),
+              ),
+              child: Transform.scale(
+                scale: 0.875,
+                child: FileGlyph(
+                  color: shown || hovered
+                      ? palette.textMuted
+                      : palette.textFaint,
+                ),
               ),
             ),
           ),
         ),
       ),
     );
+  }
+}
+
+/// A small button in a row (20 points square) that a finger can hit: with
+/// touch, a tap within a finger's target of it ([Touch.target] wide, ending
+/// [after] points past it, and as tall as its row lets it be) counts as on
+/// it (#540, Sale). It looks and lays out as before; with a pointer alone,
+/// only the button itself.
+class _FingerTarget extends SingleChildRenderObjectWidget {
+  const _FingerTarget({required this.after, required super.child});
+
+  /// The room after the button within the [Row] it's in: a tap past the
+  /// row's own end never reaches it (the padding around the row doesn't
+  /// count), so the target reaches back before it instead.
+  final double after;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderFingerTarget(after: after, touch: touchFirst(context));
+
+  @override
+  void updateRenderObject(BuildContext context, RenderObject renderObject) {
+    (renderObject as _RenderFingerTarget)
+      ..after = after
+      ..touch = touchFirst(context);
+  }
+}
+
+class _RenderFingerTarget extends RenderProxyBox {
+  _RenderFingerTarget({required this.after, required this.touch});
+
+  double after;
+  bool touch;
+
+  @override
+  bool hitTest(BoxHitTestResult result, {required Offset position}) {
+    final child = this.child;
+    if (!touch || child == null) {
+      return super.hitTest(result, position: position);
+    }
+    final side = math.min(
+      after,
+      math.max(0.0, (Touch.target - size.width) / 2),
+    );
+    final dy = math.max(0.0, (Touch.target - size.height) / 2);
+    final area = Rect.fromLTRB(
+      math.min(0, size.width + side - Touch.target),
+      -dy,
+      size.width + side,
+      size.height + dy,
+    );
+    if (!area.contains(position)) return false;
+    // Anywhere in it is the button's middle.
+    final middle = size.center(Offset.zero);
+    if (!child.hitTest(result, position: middle)) return false;
+    result.add(BoxHitTestEntry(this, position));
+    return true;
   }
 }
 

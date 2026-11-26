@@ -1,8 +1,12 @@
+import 'dart:async';
+
 import 'package:factory_app/account.dart' show openAccountPage, privacyPage;
 import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/device_account.dart';
 import 'package:factory_app/loopback_forward.dart' show linkLauncher;
-import 'package:factory_app/connections.dart' show parsePairingCode;
+import 'package:factory_app/connections.dart'
+    show RemoteFactory, parsePairingCode;
+import 'package:factory_app/devices.dart' show thisDeviceKind;
 import 'package:factory_app/people/e2ee.dart' show e2eeFor;
 import 'package:factory_app/pairing.dart' show DeviceNumberField;
 import 'package:factory_app/phone.dart' show PairScreen;
@@ -154,6 +158,94 @@ void main() {
     expect(find.byKey(const ValueKey('device-email')), findsOneWidget);
   });
 
+  test("the sign-in names the Claktory's email, masked, when it's known "
+      '(#529, MC13)', () {
+    expect(maskedEmail('matt@gmail.com'), 'm…@gmail.com');
+    expect(maskedEmail('not an email'), '');
+    expect(maskedEmail('@gmail.com'), '');
+    expect(
+      signInWithIntro(
+        'Home',
+        ClaktoryAccount(
+          state: ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SIGNED_IN,
+          email: 'matt@gmail.com',
+        ),
+      ),
+      'Sign in with m…@gmail.com, the email Home is signed in with.',
+    );
+    // Not signed in, or nothing said: the words without it.
+    for (final account in [
+      ClaktoryAccount(),
+      ClaktoryAccount(
+        state: ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_AWAITING_CODE,
+        email: 'matt@gmail.com',
+      ),
+    ]) {
+      expect(
+        signInWithIntro('Home', account),
+        'Sign in with the email Home is signed in with.',
+      );
+    }
+  });
+
+  test('signing out names the Claktories that stop connecting (#529, MC5)', () {
+    expect(stopConnecting([], 'iPhone'), '');
+    expect(
+      stopConnecting(['nixos'], 'iPhone'),
+      'nixos stops connecting on this iPhone until you sign in again.',
+    );
+    expect(
+      stopConnecting(['Mac Studio', 'nixos'], 'iPhone'),
+      'Mac Studio and nixos stop connecting on this iPhone until you sign in '
+      'again.',
+    );
+    expect(
+      stopConnecting(['A', 'B', 'C', 'D'], 'Mac'),
+      'A, B and 2 more stop connecting on this Mac until you sign in again.',
+    );
+  });
+
+  testWidgets('with no messages, signing out still asks when Claktories '
+      'found through the account would stop connecting (#529, MC5)', (
+    tester,
+  ) async {
+    final api = FakeAccountApi();
+    final account = DeviceAccount(key: 'k' * 64, open: (_, _) => api);
+    await signIn(account);
+    final harness = Harness(Workspace(), localBackend: false, account: account);
+    harness.connections
+      ..use(
+        RemoteFactory.fromAccount(
+          AccountClaktory(id: 'n', name: 'nixos', endpointId: 'c' * 64),
+        ),
+      )
+      // One paired with a code lets this device in signed out too.
+      ..use(parsePairingCode('factory://?t=${'a' * 64}&e=${'d' * 64}&name=pi'));
+    await harness.show(
+      tester,
+      home: Builder(
+        builder: (context) => Button(
+          label: 'Go',
+          onPressed: () => unawaited(signOutOfAccount(context, account)),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Go'));
+    await pumpFrames(tester);
+    expect(find.text('Sign out of your Claktory account?'), findsOneWidget);
+    expect(
+      find.text(
+        'nixos stops connecting on this $thisDeviceKind until you sign in '
+        'again.',
+      ),
+      findsOneWidget,
+    );
+    expect(account.signedIn, isTrue, reason: 'only once asked');
+    await tester.tap(find.text('Sign out').last);
+    await pumpFrames(tester);
+    expect(account.signedIn, isFalse);
+  });
+
   group('signing out with messages here (row 671)', () {
     tearDown(() => e2eeFor = null);
 
@@ -294,9 +386,9 @@ void main() {
     await phone(tester, signedIn: true, none: true);
     expect(
       find.text(
-        'No Claktories on this account yet. Claktory runs on a Mac or a '
-        'Linux server: install it there from claktory.com/download and sign '
-        'in with this email, and it shows up here.',
+        'No Claktories on this account yet. Install Claktory on a Mac or a '
+        'Linux server (or Windows, in preview) from claktory.com/download '
+        'and sign in with this email, and it shows up here.',
         findRichText: true,
       ),
       findsOneWidget,
@@ -363,7 +455,25 @@ void main() {
     await pumpFrames(tester);
     expect(find.text('Home was signed out'), findsOneWidget);
     expect(find.text('Sign in to connect to Home'), findsNothing);
-    expect(find.text(said), findsOneWidget);
+    // Where to sign it in, in the app: on its screen, or with no screen,
+    // connected again by factoryd pair's code (#529, MC4; the account
+    // commands are the person's alone, Fugo 46047).
+    expect(
+      find.text(
+        'Sign Home in to your Claktory account again, in Settings → Account '
+        'on Home. Then try again here.',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.text(
+        'No screen on Home? Run factoryd pair in a terminal there and '
+        'connect this iPhone with the code it shows. Then sign Home in from '
+        'here, in its Settings → Account.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('factoryd account'), findsNothing);
     // Not this device's sign-in: the Claktory's.
     expect(find.byKey(const ValueKey('device-email')), findsNothing);
     expect(find.text('Sign out'), findsNothing);
@@ -434,7 +544,9 @@ void main() {
     tester.platformDispatcher.textScaleFactorTestValue = 3.1;
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
     await pumpFrames(tester);
-    final words = find.textContaining('Sign in to your Claktory account in this app by ');
+    final words = find.textContaining(
+      'Sign in to your Claktory account in this app by ',
+    );
     expect(MediaQuery.textScalerOf(tester.element(words)).scale(10), 20);
     expect(tester.takeException(), isNull);
   });

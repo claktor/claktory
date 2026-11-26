@@ -75,8 +75,13 @@ Future<void> _tapLabel(WidgetTester tester, String label) async {
   await tester.pump();
 }
 
-Future<Harness> _mac(WidgetTester tester, String kind, String path) async {
-  debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+Future<Harness> _mac(
+  WidgetTester tester,
+  String kind,
+  String path, {
+  TargetPlatform platform = TargetPlatform.macOS,
+}) async {
+  debugDefaultTargetPlatformOverride = platform;
   addTearDown(() => debugDefaultTargetPlatformOverride = null);
   final harness = Harness(snapshot(layout: beside(kind, path)));
   harness.backend.files
@@ -157,6 +162,29 @@ void main() {
       await _work(tester, () => debugSharesFolder!.listSync().isEmpty);
     });
   }
+
+  testWidgets('on Windows, the viewer downloads to Downloads too, with Show '
+      'in Explorer and no Share…', (tester) async {
+    final harness = await _mac(
+      tester,
+      'text',
+      _plan,
+      platform: TargetPlatform.windows,
+    );
+    expect(find.bySemanticsLabel('Share…'), findsNothing);
+    await _tapLabel(tester, 'Download');
+    await _work(tester, () => _shows('Downloaded'));
+    await settle(tester);
+    expect(find.text('plan.md is in your Downloads folder.'), findsOneWidget);
+    final saved = File('${downloads.path}/plan.md');
+    expect(saved.readAsBytesSync(), harness.backend.files[_plan]!.data);
+    expect(find.text('Show in Finder'), findsNothing);
+    await tester.tap(find.text('Show in Explorer'));
+    await tester.pump();
+    expect(shown, [
+      [saved.path],
+    ]);
+  });
 
   testWidgets('downloaded again, it goes beside the first as "name 2"', (
     tester,

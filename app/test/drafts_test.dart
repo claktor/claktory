@@ -132,6 +132,27 @@ void main() {
     expect(storage.saved, {'a1': 'Keep'});
   });
 
+  test('a starter composed twice is written once; another goes on a new '
+      'line (Sale, row 163)', () {
+    final drafts = Drafts(MemoryDraftStorage());
+    drafts.compose('rivet', 'Set up a new project for ');
+    drafts.compose('rivet', 'Set up a new project for ');
+    expect(drafts.of('rivet'), 'Set up a new project for ');
+    expect(drafts.takeFocus('rivet'), isTrue, reason: 'the box still takes it');
+    drafts.compose('rivet', 'Add an agent to Site: ');
+    expect(
+      drafts.of('rivet'),
+      'Set up a new project for \nAdd an agent to Site: ',
+    );
+    // Something written after it: the starter goes after that.
+    drafts.set('rivet', 'Set up a new project for my blog');
+    drafts.compose('rivet', 'Set up a new project for ');
+    expect(
+      drafts.of('rivet'),
+      'Set up a new project for my blog\nSet up a new project for ',
+    );
+  });
+
   test('nothing is dropped before the backend sends the workspace', () async {
     final storage = MemoryDraftStorage()..saved = {'a1': 'Keep'};
     final drafts = await Drafts.load(storage);

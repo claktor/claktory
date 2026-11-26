@@ -19,9 +19,11 @@ import java.util.concurrent.Executors
  * factory/device, as on the iPhone (ios/Runner/AppDelegate.swift): what
  * this phone keeps (connections, drafts) and what it is (capabilities),
  * which build of the app is installed (appVersionCode), and its time
- * zone's IANA name (timeZone: "Europe/London", for Claktory's browser).
+ * zone's IANA name (timeZone: "Europe/London", for Claktory's browser),
+ * and where it came from ([AppSource]: appSource, openAppSource).
  * The stores read and write off the main thread, one call at a time, and
  * answer on it. The attach menu and its pickers are [AttachmentPicker]'s,
+ * Take photo's camera [PhotoCapture]'s,
  * the camera's permission [CameraAccess]'s, QR codes [QrCodes]', web
  * sign-in [WebAuth]'s, the share sheet [ShareSheet]'s.
  */
@@ -32,6 +34,7 @@ class DeviceChannel(
     private val camera: CameraAccess? = null,
     private val webAuth: WebAuth? = null,
     private val share: ShareSheet? = null,
+    private val photos: PhotoCapture? = null,
 ) :
     MethodChannel.MethodCallHandler, AutoCloseable {
     private val channel = MethodChannel(messenger, "factory/device")
@@ -60,6 +63,8 @@ class DeviceChannel(
             }
             "capabilities" -> result.success(capabilities(context.resources.configuration))
             "timeZone" -> result.success(timeZone())
+            "appSource" -> result.success(AppSource.of(context))
+            "openAppSource" -> result.success(AppSource.open(context, call.arguments as? String))
             "appVersionCode" -> try {
                 result.success(appVersionCode(context))
             } catch (error: Exception) {
@@ -72,7 +77,8 @@ class DeviceChannel(
                 result.success(null)
             }
             "qrCode" -> result.success(QrCodes.modules(call.arguments as? String ?: ""))
-            "pickAttachments" -> attachments?.pick(result) ?: result.notImplemented()
+            "pickAttachments" -> attachments?.pick(result, call.arguments) ?: result.notImplemented()
+            "takePhoto" -> photos?.take(result) ?: result.notImplemented()
             "webAuth" -> webAuth?.core?.start(
                 (call.arguments as? Map<*, *>)?.get("url") as? String,
                 (call.arguments as? Map<*, *>)?.get("scheme") as? String,

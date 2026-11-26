@@ -55,6 +55,9 @@ async fn agents_list_and_stop_background_tasks_and_admins_hear_of_long_ones() {
     let started = call(&mut client, &mut view, "builder", "bash", r#"{"command":"sleep 30","run_in_background":true}"#).await;
     assert!(started.starts_with("Started task-1"), "{started}");
     assert_eq!(call(&mut client, &mut view, "builder", "tasks_list", "{}").await, "task-1 builder: sleep 30 — running <1m");
+    // Its header counts it (area 4 §8.9); no one else's does.
+    view.follow(&mut client, |view| view.agent("builder").tasks_running == 1).await;
+    assert_eq!(view.agent("writer").tasks_running, 0);
 
     // Others see only their own, unless they see all.
     assert_eq!(call(&mut client, &mut view, "writer", "tasks_list", r#"{"agent":"builder"}"#).await, "You can see only your own tasks.");
@@ -80,6 +83,7 @@ async fn agents_list_and_stop_background_tasks_and_admins_hear_of_long_ones() {
     apply_request(&mut client, &mut view, select("builder")).await;
     view.follow(&mut client, |view| events(view).iter().any(|line| line.contains("task-1 finished")) && idle(view, "builder")).await;
     assert!(events(&view).iter().any(|line| line.contains("task-1 finished (stopped by Rivet, ")), "{:?}", events(&view));
+    view.follow(&mut client, |view| view.agent("builder").tasks_running == 0).await;
     let all = call(&mut client, &mut view, "builder", "tasks_list", r#"{"all":true}"#).await;
     assert!(all.starts_with("task-1 builder: sleep 30 — stopped by Rivet after"), "{all}");
     assert!(call(&mut client, &mut view, "builder", "tasks_stop", r#"{"task":"task-1"}"#).await.contains("no running task"));

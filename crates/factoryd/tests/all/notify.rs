@@ -107,7 +107,7 @@ async fn a_question_and_an_alert_notify_the_connected_apps() {
 
     notes.clear();
     let said = call(&mut client, &mut view, &mut notes, "builder", "notify_person", alert("The site is down")).await;
-    assert_eq!(said, "Sent: the person gets it as a notification.");
+    assert_eq!(said, "Sent: the person gets it as a notification, and it waits in their Needs you until they read it.");
     let [sent] = notes.as_slice() else { panic!("{notes:?}") };
     assert_eq!(sent.kind(), NotifyKind::Alert);
     assert_eq!(sent.body, "The site is down\n500s since 10:02.");
@@ -161,14 +161,14 @@ async fn the_settings_and_each_agents_choice_decide() {
 
     apply_request(&mut client, &mut view, settings(|settings| settings.alerts = false)).await;
     let said = call(&mut client, &mut view, &mut notes, "builder", "notify_person", alert("Down")).await;
-    assert_eq!(said, "Not sent: the person turned agents' alerts off.");
+    assert_eq!(said, "Not sent as a notification: the person turned agents' alerts off. It waits in their Needs you until they read it.");
     let notify = |mode| {
         client_message::Body::UpdateAgent(v1::UpdateAgent { agent_id: "builder".into(), notify: Some(mode as i32), ..Default::default() })
     };
     apply_request(&mut client, &mut view, notify(v1::NotifyMode::Always)).await;
     assert_eq!(view.agent("builder").notify(), v1::NotifyMode::Always);
     let said = call(&mut client, &mut view, &mut notes, "builder", "notify_person", alert("Down")).await;
-    assert_eq!(said, "Sent: the person gets it as a notification.");
+    assert_eq!(said, "Sent: the person gets it as a notification, and it waits in their Needs you until they read it.");
     // Kept in factory.db: a backend rolled back to would refuse a
     // config.json with keys it doesn't know.
     // Agents' prompts aside, which may name notify_person (Rivet's does).
@@ -184,7 +184,7 @@ async fn the_settings_and_each_agents_choice_decide() {
     notes.clear();
     call(&mut client, &mut view, &mut notes, "builder", "ask_person", ask("Deploy?")).await;
     let said = call(&mut client, &mut view, &mut notes, "builder", "notify_person", alert("Down")).await;
-    assert_eq!(said, "Not sent: the person turned notifications from you off.");
+    assert_eq!(said, "Not sent as a notification: the person turned notifications from you off. It waits in their Needs you until they read it.");
     assert!(notes.is_empty(), "{notes:?}");
 
     // Only who.
@@ -320,6 +320,16 @@ async fn an_agent_that_read_a_web_page_never_puts_its_words_in_a_notification() 
         assert_eq!((note.title.as_str(), note.body.as_str()), ("Bo", "Bo has something for you"));
         assert!(!format!("{note:?}").contains("MARKER"), "{note:?}");
     }
+    // Nor in Needs you, nor in History once read: only who.
+    let withheld: Vec<v1::Alert> = view.workspace.alerts.clone();
+    assert_eq!(withheld.len(), 2);
+    for alert in &withheld {
+        assert!(alert.withheld && alert.title.is_empty() && alert.text.is_empty() && alert.from_name == "Bo", "{alert:?}");
+    }
+    let ids: Vec<&str> = withheld.iter().map(|alert| alert.id.as_str()).collect();
+    apply_request(&mut client, &mut view, read_alerts(&ids)).await;
+    let history = client.request(client_message::Body::ListNeedsYouHistory(v1::ListNeedsYouHistory::default())).await;
+    assert!(!format!("{:?}", history.body).contains("MARKER"), "{:?}", history.body);
 
     // A message from the other side held for review says which pipe, by
     // the name the person gave it; never what it says, nor the other
@@ -537,13 +547,22 @@ async fn a_disk_that_cant_be_written_is_told_to_every_device_without_saving_anyt
     assert!(payload["body"].as_str().is_some_and(|body| body.contains("read-only")), "{payload}");
     assert_eq!(push["urgency"], "urgent");
     let told = client
-        .wait_for(|body| match body {
-            Body::Notify(notify) if notify.collapse == "disk" => Some(notify.clone()),
-            _ => None,
+        .wait_for(|body| {
+            view.apply(body);
+            match body {
+                Body::Notify(notify) if notify.collapse == "disk" => Some(notify.clone()),
+                _ => None,
+            }
         })
         .await;
     assert!(told.urgent && told.kind() == NotifyKind::Alert, "{told:?}");
     assert_eq!(kept()["local"]["ctr"], 64, "nothing saved");
+    // Kept in Needs you, which the notification and the push open.
+    assert!(!told.alert_id.is_empty());
+    assert_eq!(payload["target"]["alert"].as_str(), Some(told.alert_id.as_str()), "{payload}");
+    view.follow(&mut client, |view| view.workspace.alerts.iter().any(|alert| alert.id == told.alert_id)).await;
+    let alert = view.workspace.alerts.iter().find(|alert| alert.id == told.alert_id).expect("kept");
+    assert!(alert.agent_id.is_empty() && alert.urgent && alert.title.ends_with("can't save anything"), "{alert:?}");
 
     // The next push, as after a restart, starts past what was saved ahead.
     client.ok(client_message::Body::SendTestNotification(v1::SendTestNotification {})).await;
@@ -554,4 +573,125 @@ async fn a_disk_that_cant_be_written_is_told_to_every_device_without_saving_anyt
     let (_, payload) = open(&key, &relay.next(3).await);
     assert_eq!(payload["ctr"], 65, "read again: past every counter saved ahead");
     assert_eq!(kept()["local"]["ctr"], 128);
+}
+
+fn read_alerts(ids: &[&str]) -> client_message::Body {
+    client_message::Body::ReadAlerts(v1::ReadAlerts { ids: ids.iter().map(|id| (*id).to_owned()).collect() })
+}
+
+/// Bruno 44235: every alert waits in Needs you until the person reads it,
+/// then is in History with when and on which device.
+#[tokio::test]
+async fn an_alert_waits_in_needs_you_until_the_person_reads_it() {
+    let (dir, factory, mut client, mut view) = setup(v1::DeviceKind::Desktop).await;
+    let mut notes = Vec::new();
+    let mut urgent = alert("The site is down");
+    urgent["urgent"] = true.into();
+    let said = call(&mut client, &mut view, &mut notes, "builder", "notify_person", urgent).await;
+    assert_eq!(said, "Sent: the person gets it as a notification, and it waits in their Needs you until they read it.");
+    let call_seq = view
+        .entries
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.kind {
+            Some(Kind::ToolCall(call)) if call.name == "notify_person" => Some(entry.seq),
+            _ => None,
+        })
+        .expect("the call");
+    let [kept] = view.workspace.alerts.as_slice() else { panic!("{:?}", view.workspace.alerts) };
+    assert_eq!((kept.agent_id.as_str(), kept.from_name.as_str()), ("builder", "Builder"));
+    assert_eq!((kept.title.as_str(), kept.text.as_str()), ("The site is down", "500s since 10:02."));
+    assert!(kept.urgent && !kept.withheld && kept.sent_ms > 0, "{kept:?}");
+    assert_eq!(kept.seq, call_seq);
+    assert_eq!(view.workspace.alerts_unread, 1);
+    // Its notification opens it.
+    let [sent] = notes.as_slice() else { panic!("{notes:?}") };
+    assert_eq!((sent.alert_id.as_str(), sent.seq), (kept.id.as_str(), call_seq));
+    let kept = kept.clone();
+
+    // Kept across a restart.
+    drop(client);
+    drop(factory);
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    assert_eq!(view.workspace.alerts, std::slice::from_ref(&kept));
+
+    // Read: gone from Needs you, in History with when and where.
+    assert!(matches!(apply_request(&mut client, &mut view, read_alerts(&["unknown", &kept.id])).await, Body::Ack(_)));
+    assert!(view.workspace.alerts.is_empty() && view.workspace.alerts_unread == 0, "{:?}", view.workspace.alerts);
+    let history = client.request(client_message::Body::ListNeedsYouHistory(v1::ListNeedsYouHistory::default())).await;
+    let Body::NeedsYouHistory(history) = history.body else { panic!("{:?}", history.body) };
+    let record = history.records.iter().find(|record| record.kind() == v1::NeedsYouRecordKind::Alert).expect("the record");
+    assert_eq!(record.outcome(), v1::NeedsYouOutcome::Read);
+    assert_eq!((record.agent_id.as_str(), record.agent_name.as_str(), record.title.as_str()), ("builder", "Builder", "The site is down"));
+    assert_eq!(record.alert.as_ref(), Some(&kept));
+    assert_eq!((record.asked_ms, record.seq), (kept.sent_ms, call_seq));
+    assert!(record.decided_ms >= kept.sent_ms);
+    let on = record.answered_on.as_ref().expect("where it was read");
+    assert_eq!((on.device_id.as_str(), on.at_ms), ("local", record.decided_ms));
+    assert!(!on.device_name.is_empty());
+    // A search finds it by its text.
+    let search = v1::ListNeedsYouHistory { query: "500s since".into(), ..Default::default() };
+    let history = client.request(client_message::Body::ListNeedsYouHistory(search)).await;
+    let Body::NeedsYouHistory(history) = history.body else { panic!("{:?}", history.body) };
+    assert_eq!(history.records.len(), 1);
+
+    // Reading it again changes nothing.
+    assert!(matches!(apply_request(&mut client, &mut view, read_alerts(&[&kept.id])).await, Body::Ack(_)));
+}
+
+/// Nothing is lost: an alert held by the hourly cap, or not sent at all,
+/// waits in Needs you all the same; and an alert is no question.
+#[tokio::test]
+async fn alerts_held_or_not_sent_wait_in_needs_you_too() {
+    let (_dir, _factory, mut client, mut view) = setup(v1::DeviceKind::Desktop).await;
+    let mut notes = Vec::new();
+    for number in 1..=7 {
+        call(&mut client, &mut view, &mut notes, "builder", "notify_person", alert(&format!("Alert {number}"))).await;
+    }
+    assert_eq!(notes.len(), 6, "the cap");
+    assert_eq!(view.workspace.alerts.len(), 7);
+    assert_eq!(view.workspace.alerts_unread, 7);
+    assert_eq!(view.workspace.alerts.last().map(|alert| alert.title.as_str()), Some("Alert 7"));
+    assert!(view.agent("builder").waiting_seqs.is_empty(), "not a card");
+
+    apply_request(&mut client, &mut view, settings(|settings| settings.alerts = false)).await;
+    let said = call(&mut client, &mut view, &mut notes, "builder", "notify_person", alert("Off")).await;
+    assert!(said.ends_with("It waits in their Needs you until they read it."), "{said}");
+    assert_eq!(view.workspace.alerts_unread, 8);
+
+    // Read together.
+    let ids: Vec<String> = view.workspace.alerts.iter().map(|alert| alert.id.clone()).collect();
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+    apply_request(&mut client, &mut view, read_alerts(&ids)).await;
+    assert_eq!(view.workspace.alerts_unread, 0);
+}
+
+/// The tool's text is a line or so: anything longer is for a review card.
+#[tokio::test]
+async fn an_alerts_text_is_a_sentence_at_most() {
+    let (_dir, _factory, mut client, mut view) = setup(v1::DeviceKind::Desktop).await;
+    let mut notes = Vec::new();
+    let long = serde_json::json!({"title": "Report", "text": "x".repeat(301)});
+    let said = call(&mut client, &mut view, &mut notes, "builder", "notify_person", long).await;
+    assert!(said.contains("at most 300 characters") && said.contains("ask_person with review") && said.ends_with("Nothing was sent."), "{said}");
+    assert!(notes.is_empty() && view.workspace.alerts.is_empty());
+    let most = serde_json::json!({"title": "Report", "text": "x".repeat(300)});
+    let said = call(&mut client, &mut view, &mut notes, "builder", "notify_person", most).await;
+    assert!(said.starts_with("Sent"), "{said}");
+}
+
+/// A member quarantined for a pipe sends no alert at all, so nothing it
+/// read reaches a notification, Needs you or History (Fugo 45952).
+#[tokio::test]
+async fn a_quarantined_member_sends_no_alert() {
+    let (_dir, _factory, mut client, mut view, pipe) = crate::pipes::setup(false).await;
+    let mut notes = Vec::new();
+    let quarantine = v1::UpdatePipe { pipe_id: pipe, quarantined: Some(v1::PipeMembers { agent_ids: vec!["bo".into()] }), ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::UpdatePipe(quarantine)).await;
+    view.follow(&mut client, |view| view.agent("bo").quarantined).await;
+    let said = call(&mut client, &mut view, &mut notes, "bo", "notify_person", alert(MARKER)).await;
+    assert!(!said.starts_with("Sent") && !said.starts_with("Not"), "{said}");
+    assert!(notes.is_empty() && view.workspace.alerts.is_empty(), "{notes:?}");
 }

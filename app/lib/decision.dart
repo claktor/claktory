@@ -103,6 +103,9 @@ class DecisionComment extends StatefulWidget {
     this.onSubmit,
     this.note,
     this.keep,
+    this.attach,
+    this.files,
+    this.holdsFiles = false,
   });
 
   final TextEditingController controller;
@@ -132,12 +135,26 @@ class DecisionComment extends StatefulWidget {
   /// kept from before opens the field, for it to come back to.
   final DictationFor? keep;
 
+  /// Files with the comment (#511): the paperclip, beside the mic, and the
+  /// files waiting, under the field; none on cards that take no files.
+  final Widget? attach;
+  final Widget? files;
+
+  /// Files wait to go with it: the field shows, with them.
+  final bool holdsFiles;
+
   @override
   State<DecisionComment> createState() => _DecisionCommentState();
 }
 
 class _DecisionCommentState extends State<DecisionComment> {
-  late var _open = widget.controller.text.isNotEmpty;
+  late var _open = widget.controller.text.isNotEmpty || widget.holdsFiles;
+
+  @override
+  void didUpdateWidget(DecisionComment old) {
+    super.didUpdateWidget(old);
+    if (widget.holdsFiles && !_open) _open = true;
+  }
 
   /// The field's, asked for once it opens: autofocus does nothing while
   /// something else in the scope has focus (a PDF's pane after a reload).
@@ -245,6 +262,7 @@ class _DecisionCommentState extends State<DecisionComment> {
             focusNode: _focus,
             enabled: widget.enabled,
             keep: widget.keep,
+            trailing: widget.attach,
             child: CallbackShortcuts(
               bindings: {
                 const SingleActivator(LogicalKeyboardKey.enter): ?onSubmitted,
@@ -268,6 +286,7 @@ class _DecisionCommentState extends State<DecisionComment> {
             ),
           ),
         ),
+        ?widget.files,
         // With Submit, the line beside it says what happens once typed.
         if (submit == null) ...[
           const SizedBox(height: Space.xs),

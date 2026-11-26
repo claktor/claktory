@@ -12,14 +12,19 @@
 // - A share another Claktory shares, under the pipe's header: Open, Copy
 //   address, Hide.
 // - What moving a pipe into or out of a group changes in what it gets.
+// - How long a share lasts (friend bug #46): chosen when it's shared, 24
+//   hours unless changed, shown on it as the time left, and changed from
+//   this side's share in a pipe's settings.
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'android/share_browser_lifecycle.dart';
 import 'backend.dart';
 import 'claktory_identity.dart' show claktoryName;
 import 'controls.dart';
@@ -30,6 +35,7 @@ import 'loopback_forward.dart';
 import 'mobile/input.dart' show InputKind;
 import 'mobile/lines.dart' show ActionLine;
 import 'mobile/metrics.dart' show TypeScale;
+import 'mobile/share_browser.dart' show inAppShareBrowser;
 import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'pipe_groups.dart' show pipeGroupsIn;
 import 'pipes.dart' show pipeColor, pipePeerName, pipesIn;
@@ -133,9 +139,119 @@ Future<void> shareWebsite(
   (context, close) => ShareWebsiteForm(pipe: pipe, group: group, close: close),
 );
 
+/// How long a share can last, as Share a website… and Change end… offer
+/// them (friend bug #46): seconds from now, 0 for until it's stopped.
+const shareLengths = [
+  SelectOption(3600, 'After 1 hour'),
+  SelectOption(86400, 'After 24 hours'),
+  SelectOption(604800, 'After 7 days'),
+  SelectOption(0, 'Never'),
+];
+
+/// What Share a website… chooses to begin with: 24 hours.
+const defaultShareLength = 86400;
+
+/// The time a share has left, at [now]: "Ends in 3 hours"; null when it
+/// lasts until it's stopped.
+String? shareEnds(PipeShare share, DateTime now) {
+  if (share.expiresMs <= 0) return null;
+  final left = share.expiresMs.toInt() - now.millisecondsSinceEpoch;
+  if (left <= 0) return 'Ending now';
+  String of(int n, String one, String many) => n == 1 ? '1 $one' : '$n $many';
+  final minutes = (left / Duration.millisecondsPerMinute).ceil();
+  if (minutes < 60) return 'Ends in ${of(minutes, 'minute', 'minutes')}';
+  final hours = (left / Duration.millisecondsPerHour).ceil();
+  if (hours <= 48) return 'Ends in ${of(hours, 'hour', 'hours')}';
+  final days = (left / Duration.millisecondsPerDay).ceil();
+  return 'Ends in ${of(days, 'day', 'days')}';
+}
+
+/// The clock the time a share has left counts from; tests replace it.
+DateTime Function() shareClock = DateTime.now;
+
+/// Rebuilds [builder] with the time now, every half minute while [share]
+/// has an end, so the time left it shows keeps counting down.
+class ShareCountdown extends StatefulWidget {
+  const ShareCountdown({super.key, required this.share, required this.builder});
+
+  final PipeShare share;
+  final Widget Function(BuildContext context, DateTime now) builder;
+
+  @override
+  State<ShareCountdown> createState() => _ShareCountdownState();
+}
+
+class _ShareCountdownState extends State<ShareCountdown> {
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    _schedule();
+  }
+
+  @override
+  void didUpdateWidget(ShareCountdown old) {
+    super.didUpdateWidget(old);
+    if ((old.share.expiresMs > 0) != (widget.share.expiresMs > 0)) _schedule();
+  }
+
+  void _schedule() {
+    _tick?.cancel();
+    _tick = widget.share.expiresMs > 0
+        ? Timer.periodic(const Duration(seconds: 30), (_) {
+            if (mounted) setState(() {});
+          })
+        : null;
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.builder(context, shareClock());
+}
+
+/// Asks how long [share], this side's, should last from now, and sets it.
+/// The choice is sent even when the share's row is gone meanwhile (the
+/// share ended while the sheet was open), so the backend's refusal is
+/// said rather than nothing happening.
+Future<void> changeShareEnd(BuildContext context, PipeShare share) async {
+  final backend = AppScope.of(context);
+  final origin = _Origin(context);
+  final name = visibleCodes(share.name);
+  final lasts = await showActions<int>(
+    context,
+    title: 'When should $name stop being shared?',
+    message: 'Counted from now. People on its pipes can open it until then.',
+    actions: [
+      for (final length in shareLengths)
+        SheetAction(length.label, length.value),
+    ],
+  );
+  if (lasts == null) return;
+  try {
+    await backend.setPipeShareExpiry(share.id, lasts);
+  } on RequestFailure catch (failure) {
+    final here = origin.context;
+    if (here == null || !here.mounted) return;
+    await showActions<void>(
+      here,
+      title: "Couldn't change when $name ends",
+      message: failure.message,
+      actions: const [],
+      cancelLabel: 'OK',
+    );
+  }
+}
+
 /// Stops [share] once the person says so.
 Future<void> stopShare(BuildContext context, PipeShare share) async {
   final backend = AppScope.of(context);
+  final origin = _Origin(context);
   final sure = await showActions<bool>(
     context,
     title: 'Stop sharing ${visibleCodes(share.name)}?',
@@ -144,18 +260,38 @@ Future<void> stopShare(BuildContext context, PipeShare share) async {
         'a new address.',
     actions: const [SheetAction('Stop sharing', true, destructive: true)],
   );
-  if (sure != true || !context.mounted) return;
+  if (sure != true) return;
   try {
     await backend.stopPipeShare(share.id);
   } on RequestFailure catch (failure) {
-    if (!context.mounted) return;
+    final here = origin.context;
+    if (here == null || !here.mounted) return;
     await showActions<void>(
-      context,
+      here,
       title: "Couldn't stop sharing ${visibleCodes(share.name)}",
       message: failure.message,
       actions: const [],
       cancelLabel: 'OK',
     );
+  }
+}
+
+/// Where a share's row asked from: the row while it's there, else the list
+/// it was in, else the app's own navigator, so an answer that comes after
+/// the share left the screen still has somewhere to be said.
+class _Origin {
+  _Origin(this.row)
+    : list = row.findAncestorStateOfType<ScrollableState>()?.context,
+      root = Navigator.maybeOf(row, rootNavigator: true)?.context;
+  final BuildContext row;
+  final BuildContext? list;
+  final BuildContext? root;
+
+  BuildContext? get context {
+    for (final here in [row, list, root]) {
+      if (here != null && here.mounted) return here;
+    }
+    return null;
   }
 }
 
@@ -188,6 +324,9 @@ class _ShareWebsiteFormState extends State<ShareWebsiteForm> {
   /// "" for chosen pipes ([_pipes]), else the group it follows.
   late var _target = widget.group?.id ?? '';
   late final _pipes = {if (widget.pipe case final pipe?) pipe.id};
+
+  /// How long it lasts, in seconds; 0 until it's stopped.
+  var _lasts = defaultShareLength;
 
   /// What the Claktory said of the port typed, once it has.
   PipeSharePort? _check;
@@ -286,6 +425,7 @@ class _ShareWebsiteFormState extends State<ShareWebsiteForm> {
           name: name,
           pipeIds: _target.isEmpty ? _pipes.intersection(open) : const [],
           groupId: _target,
+          lastsS: Int64(_lasts),
         ),
       );
       widget.close();
@@ -417,6 +557,19 @@ class _ShareWebsiteFormState extends State<ShareWebsiteForm> {
                     ),
                   ),
             ],
+          ),
+        ),
+        Field(
+          label: 'Ends',
+          note: _lasts == 0
+              ? 'It stays shared until you stop it.'
+              : 'It stops being shared then. You can change this later in '
+                    'the pipe’s settings.',
+          child: Select<int>(
+            value: _lasts,
+            title: 'Ends',
+            options: shareLengths,
+            onChanged: (lasts) => setState(() => _lasts = lasts),
           ),
         ),
         Container(
@@ -562,10 +715,16 @@ class _ShareLine extends StatelessWidget {
   final PipeShare share;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => ShareCountdown(
+    share: share,
+    builder: (context, now) => _build(context, now),
+  );
+
+  Widget _build(BuildContext context, DateTime now) {
     final palette = Palette.of(context);
     final workspace = AppScope.of(context).workspace.workspace;
     final name = visibleCodes(share.name);
+    final ends = shareEnds(share, now);
     final String title;
     final String note;
     if (share.mine) {
@@ -580,38 +739,53 @@ class _ShareLine extends StatelessWidget {
           : others <= 0
           ? 'With this pipe'
           : 'With this pipe and $others other${others == 1 ? '' : 's'}';
-      note = share.live ? reach : '$reach · Waits while its pipes are paused';
+      note = [
+        reach,
+        if (!share.live) 'Waits while its pipes are paused',
+        ends ?? 'Until you stop it',
+      ].join(' · ');
     } else {
       title = '$name, from ${pipePeerName(pipe)}';
-      note = share.hidden
-          ? 'Hidden from the top of the pipe'
-          : 'At the top of the pipe';
+      note = [
+        share.hidden
+            ? 'Hidden from the top of the pipe'
+            : 'At the top of the pipe',
+        ?ends,
+      ].join(' · ');
     }
-    return Row(
-      children: [
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(title, style: TextStyles.body.copyWith(color: palette.text)),
-              Text(
-                note,
-                style: TextStyles.caption.copyWith(color: palette.textMuted),
+    return ActionLine(
+      lead: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: TextStyles.body.copyWith(color: palette.text)),
+          Text(
+            note,
+            style: TextStyles.caption.copyWith(color: palette.textMuted),
+          ),
+        ],
+      ),
+      gap: Space.m,
+      action: share.mine
+          ? Row(
+              mainAxisSize: MainAxisSize.min,
+              spacing: Space.xs,
+              children: [
+                Button(
+                  label: 'Change end…',
+                  onPressed: () => changeShareEnd(context, share),
+                ),
+                Button(
+                  label: 'Stop',
+                  onPressed: () => stopShare(context, share),
+                ),
+              ],
+            )
+          : Button(
+              label: share.hidden ? 'Show' : 'Hide',
+              onPressed: () => fireAndLog(
+                AppScope.of(context).hidePipeShare(share.id, !share.hidden),
               ),
-            ],
-          ),
-        ),
-        const SizedBox(width: Space.m),
-        if (share.mine)
-          Button(label: 'Stop', onPressed: () => stopShare(context, share))
-        else
-          Button(
-            label: share.hidden ? 'Show' : 'Hide',
-            onPressed: () => fireAndLog(
-              AppScope.of(context).hidePipeShare(share.id, !share.hidden),
             ),
-          ),
-      ],
     );
   }
 }
@@ -682,6 +856,27 @@ Future<bool> _askSafari() async {
 /// Opens a share's page in the browser; tests replace it.
 Future<bool> Function(Uri url) openSharePage = launchUrl;
 
+/// Opens a share's page on Android (W6, Risotto's factory/share-browser):
+/// in a Custom Tab that keeps Claktory running while it's on screen
+/// ("custom_tab"), or in a browser that can't ("browser"); throws
+/// PlatformException `no_browser` or `bad_url`. Tests replace it.
+Future<String?> Function(Uri url) openShareTab = (url) =>
+    const MethodChannel('factory/share-browser')
+        .invokeMethod<String>('open', {'url': '$url'});
+
+/// Opens a share's page on an iPhone or iPad (#505,
+/// ios/Runner/ShareBrowser.swift): in Safari's view over the app, at the
+/// share's own address, or at [fallback] (127.0.0.1, the same port) when
+/// the system can't find it on this device; "in_app", or throws
+/// PlatformException `no_localhost`, `no_browser` or `bad_url`. Tests
+/// replace it.
+Future<String?> Function(Uri url, Uri? fallback) openShareOver =
+    (url, fallback) => const MethodChannel('factory/share-browser')
+        .invokeMethod<String>('open', {
+          'url': '$url',
+          if (fallback != null) 'fallback': '$fallback',
+        });
+
 /// A website [pipe]'s other side shares: who shares what, where it opens
 /// (or why it can't now), and Open, Copy address and Hide.
 class ReceivedShare extends StatefulWidget {
@@ -713,6 +908,10 @@ mixin _ShareOpening<W extends StatefulWidget> on State<W> {
   /// connected again (Abbacchio's row 1350).
   var _offline = false;
 
+  /// Said under it once it opened in a browser that doesn't keep Claktory
+  /// running (Android, W6).
+  String? _note;
+
   /// Asks the browser again when the app comes back to the front: the
   /// person may have chosen another in System Settings meanwhile.
   late final _lifecycle = AppLifecycleListener(
@@ -726,6 +925,7 @@ mixin _ShareOpening<W extends StatefulWidget> on State<W> {
     super.initState();
     _lifecycle;
     unawaited(_askBrowser());
+    inAppShareBrowser.addListener(_pageChanged);
   }
 
   @override
@@ -741,6 +941,7 @@ mixin _ShareOpening<W extends StatefulWidget> on State<W> {
   @override
   void dispose() {
     _backend?.connected.removeListener(_connectedChanged);
+    inAppShareBrowser.removeListener(_pageChanged);
     _lifecycle.dispose();
     _copiedTimer?.cancel();
     super.dispose();
@@ -815,8 +1016,16 @@ mixin _ShareOpening<W extends StatefulWidget> on State<W> {
       _share.id,
       Uri.parse(opened.url).port,
     );
+    _fallbackHere = opened.fallbackUrl.isEmpty
+        ? null
+        : withPort(opened.fallbackUrl, port);
     return withPort(url, port);
   }
+
+  /// The address [_serve] opened's fallback (127.0.0.1) at this device's
+  /// port: where an iPhone or iPad opens it when the system can't find the
+  /// share's own address (#505, Fugo 38931).
+  String? _fallbackHere;
 
   Future<void> _open() async {
     setState(() {
@@ -824,8 +1033,15 @@ mixin _ShareOpening<W extends StatefulWidget> on State<W> {
       _show(null);
     });
     try {
-      final url = await _serve(AppScope.of(context));
-      if (!await openSharePage(Uri.parse(url)) && mounted) {
+      final backend = AppScope.of(context);
+      final url = await _serve(backend);
+      if (defaultTargetPlatform == TargetPlatform.android &&
+          backend.forwards.remote()) {
+        await _openTab(backend, Uri.parse(url));
+      } else if (defaultTargetPlatform == TargetPlatform.iOS &&
+          backend.forwards.remote()) {
+        await _openInApp(backend, Uri.parse(url));
+      } else if (!await openSharePage(Uri.parse(url)) && mounted) {
         setState(() => _show("Your browser didn't open. Try again."));
       }
     } on RequestFailure catch (failure) {
@@ -834,6 +1050,90 @@ mixin _ShareOpening<W extends StatefulWidget> on State<W> {
       if (mounted) setState(() => _show(_forwardProblem(failure)));
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Android (W6): a tab over Claktory, which keeps Claktory's connection,
+  /// and so the forward, up while it's on screen; the Claktory serving it is
+  /// the one that stays up (Doppio's shareBrowserOpening).
+  Future<void> _openTab(Backend backend, Uri url) async {
+    final opening = shareBrowserOpening(backend);
+    try {
+      final how = await openShareTab(url);
+      if (how != 'custom_tab') {
+        shareBrowserOpenFailed(opening);
+        if (mounted) setState(() => _note = shareBrowserNote);
+      } else if (mounted) {
+        setState(() => _note = null);
+      }
+    } on PlatformException catch (error) {
+      shareBrowserOpenFailed(opening);
+      if (mounted) {
+        setState(
+          () => _show(
+            error.code == 'no_browser'
+                ? "There's no browser on this $thisDeviceKind to open it in."
+                : "${visibleCodes(_share.name)} can't open on this "
+                      '$thisDeviceKind.',
+          ),
+        );
+      }
+    }
+  }
+
+  /// iPhone and iPad (#505, ios/Runner/ShareBrowser.swift): Safari's view
+  /// over the app, which stays in front, its connection and the forward
+  /// with it, until Done brings the person back here.
+  Future<void> _openInApp(Backend backend, Uri url) async {
+    final id = _share.id;
+    inAppShareBrowser.opening(backend, id);
+    try {
+      final fallback = _fallbackHere;
+      final how = await openShareOver(
+        url,
+        fallback == null ? null : Uri.parse(fallback),
+      );
+      if (how != 'in_app') inAppShareBrowser.openFailed(backend, id);
+      if (mounted) setState(() => _note = null);
+    } on PlatformException catch (error) {
+      inAppShareBrowser.openFailed(backend, id);
+      if (!mounted) return;
+      // The system can't find a shared website's own address on this
+      // network (iOS before 26, WebKit bug 160504) and there was no
+      // fallback to open instead: said, and nothing opens (Bruno 38928,
+      // Fugo 38931).
+      setState(
+        () => _show(
+          error.code == 'no_localhost'
+              ? "This $thisDeviceKind can't open shared websites on this "
+                    'network yet.'
+              : "${visibleCodes(_share.name)} can't open on this "
+                    '$thisDeviceKind.',
+        ),
+      );
+    }
+  }
+
+  /// Back from its page (Done) after the page didn't load: why, plainly,
+  /// under it (#505), as an Open that failed here would say it.
+  void _pageChanged() {
+    final backend = _backend;
+    if (backend == null ||
+        !mounted ||
+        !inAppShareBrowser.takeFailure(backend, _share.id)) {
+      return;
+    }
+    final error = backend.forwards.shareLastError(_share.id);
+    if (!backend.connected.value) {
+      _failed(const RequestFailure('Connection lost.'));
+    } else {
+      setState(
+        () => _show(
+          error.isNotEmpty
+              ? error
+              : "${visibleCodes(_share.name)} didn't open. Try again.",
+        ),
+      );
     }
   }
 
@@ -895,34 +1195,34 @@ class _ReceivedShareState extends State<ReceivedShare>
     final forwards = AppScope.of(context).forwards;
     return ListenableBuilder(
       listenable: forwards,
-      builder: (context, _) => _build(context, forwards),
+      builder: (context, _) => ShareCountdown(
+        share: widget.share,
+        builder: (context, now) => _build(context, forwards, now),
+      ),
     );
   }
 
-  Widget _build(BuildContext context, LoopbackForwards forwards) {
+  Widget _build(BuildContext context, LoopbackForwards forwards, DateTime now) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     final backend = AppScope.of(context);
     final share = widget.share;
     // On a computer showing a Claktory on another machine it opens through
-    // this one (#503); a phone or tablet can't yet: its browser would take
-    // the front, leaving the app behind.
-    final away = forwards.remote() && cantOpenSharesHere;
+    // this one (#503), and on a phone or tablet over the app (W6).
+    // A phone or tablet: no address to copy, which would work only while
+    // Claktory runs (W6).
+    final touch = forwards.remote() && sharesOnTouchDevice;
     final address = _address(forwards);
     final forwardProblem = forwards.shareProblem(share.id);
     final problem = share.listenerProblem;
     final (String line, Color color) = !share.live
         ? ('Waits while the pipe is paused.', palette.textMuted)
-        : away
-        ? (
-            'Opening shared websites on this $thisDeviceKind isn’t available '
-                'yet. Open it on a computer connected to your Claktory.',
-            palette.textMuted,
-          )
         : problem.isNotEmpty
         ? (problem, palette.danger)
         : forwardProblem != null
         ? (_forwardProblem(forwardProblem), palette.danger)
+        : touch
+        ? (_note ?? '', palette.textMuted)
         : address == null
         ? ('', palette.textMuted)
         : (
@@ -932,7 +1232,7 @@ class _ReceivedShareState extends State<ReceivedShare>
                 : visibleCodes(address),
             palette.textMuted,
           );
-    final usable = share.live && !away;
+    final usable = share.live;
     // Not opened yet from this Claktory (W2): it stands out, in the pipe
     // card's wash and border, until it is.
     final fresh = share.unopened && share.live;
@@ -968,8 +1268,11 @@ class _ReceivedShareState extends State<ReceivedShare>
             ),
             if (line.isNotEmpty)
               Text(line, style: type.caption.copyWith(color: color)),
-            // Said once: Open's failure is often the forward's problem the
-            // line already says (Abbacchio, row 1360).
+            if (shareEnds(share, now) case final ends?)
+              Text(
+                ends,
+                style: type.caption.copyWith(color: palette.textMuted),
+              ),
             // Said once: Open's failure is often the forward's problem the
             // line already says (Abbacchio, row 1360).
             if (_error case final error? when error != line)
@@ -986,7 +1289,7 @@ class _ReceivedShareState extends State<ReceivedShare>
               primary: true,
               onPressed: usable && !_busy ? _open : null,
             ),
-            if (!away)
+            if (!touch)
               Button(
                 label: _copied ? 'Copied' : 'Copy address',
                 onPressed: usable && !_busy ? _copy : null,
@@ -1061,9 +1364,6 @@ class _AnnouncedShareState extends State<_AnnouncedShare>
       listenable: forwards,
       builder: (context, _) {
         final palette = Palette.of(context);
-        // An iPhone or iPad showing a Claktory elsewhere can't open it yet:
-        // the line alone (the share under the header says why).
-        if (forwards.remote() && cantOpenSharesHere) return widget.line;
         final touch = forwards.remote() && sharesOnTouchDevice;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.center,
@@ -1102,3 +1402,7 @@ class _AnnouncedShareState extends State<_AnnouncedShare>
     );
   }
 }
+
+/// Under a share opened on Android in a browser that doesn't keep Claktory
+/// running (W6).
+const shareBrowserNote = 'It stops loading when you leave Claktory.';

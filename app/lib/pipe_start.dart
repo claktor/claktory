@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
+import 'card_answer.dart' show CardAnswer, PublishesAnswer, noComment;
 import 'characters/character.dart';
 import 'controls.dart';
 import 'decision.dart';
@@ -42,7 +43,8 @@ class PipeStartCard extends StatefulWidget {
   State<PipeStartCard> createState() => _PipeStartCardState();
 }
 
-class _PipeStartCardState extends State<PipeStartCard> {
+class _PipeStartCardState extends State<PipeStartCard>
+    with PublishesAnswer {
   PipeStart get start => widget.start;
 
   bool get _accept => start.kind == PipeStartKind.PIPE_START_KIND_ACCEPT;
@@ -90,6 +92,7 @@ class _PipeStartCardState extends State<PipeStartCard> {
       context,
       title: 'Scan a pipe invite',
       check: pipeInviteCheck,
+      onPasteInstead: pasteCodeInto(_code, then: _read),
     );
     if (code == null || !mounted) return;
     _code.text = code;
@@ -105,7 +108,11 @@ class _PipeStartCardState extends State<PipeStartCard> {
     super.dispose();
   }
 
-  Future<void> _run(Future<void> Function(Backend backend) request) async {
+  /// [rethrowing] for focus mode's keys (#514): refused, it throws too.
+  Future<void> _run(
+    Future<void> Function(Backend backend) request, {
+    bool rethrowing = false,
+  }) async {
     if (_busy) return;
     setState(() {
       _busy = true;
@@ -115,12 +122,27 @@ class _PipeStartCardState extends State<PipeStartCard> {
       await request(AppScope.of(context));
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
+      if (rethrowing) rethrow;
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
-  void _makeInvite() => _run((backend) async {
+  /// Make invite is on its way: the dock stays on the card for its code.
+  var _making = false;
+
+  Future<void> _makeInvite({bool rethrowing = false}) async {
+    setState(() => _making = true);
+    try {
+      await _createInvite(rethrowing: rethrowing);
+    } finally {
+      if (mounted) setState(() => _making = false);
+    }
+  }
+
+  Future<void> _createInvite({required bool rethrowing}) => _run(
+    rethrowing: rethrowing,
+    (backend) async {
     final invite = await backend.createPipeInvite(
       _project,
       _name.text.trim(),
@@ -128,34 +150,88 @@ class _PipeStartCardState extends State<PipeStartCard> {
       startId: start.id,
     );
     if (mounted) setState(() => _invite = invite);
-  });
+    },
+  );
 
-  void _read() => _run((backend) async {
-    final preview = await backend.readPipeInvite(_code.text.trim());
-    if (!mounted) return;
-    setState(() => _preview = preview);
-  });
+  Future<void> _read({bool rethrowing = false}) => _run(
+    rethrowing: rethrowing,
+    (backend) async {
+      final preview = await backend.readPipeInvite(_code.text.trim());
+      if (!mounted) return;
+      setState(() => _preview = preview);
+    },
+  );
 
-  void _connect() => _run((backend) async {
-    final preview = _preview;
-    if (preview == null) return;
-    // The backend opens the new pipe itself, where both approve.
-    await backend.acceptPipeInvite(
-      preview.code,
-      _project,
-      name: _name.text.trim(),
-      purpose: _purpose.text.trim(),
-      startId: start.id,
-    );
-  });
+  Future<void> _connect({bool rethrowing = false}) => _run(
+    rethrowing: rethrowing,
+    (backend) async {
+      final preview = _preview;
+      if (preview == null) return;
+      // The backend opens the new pipe itself, where both approve.
+      await backend.acceptPipeInvite(
+        preview.code,
+        _project,
+        name: _name.text.trim(),
+        purpose: _purpose.text.trim(),
+        startId: start.id,
+      );
+    },
+  );
 
-  void _dismiss() => _run(
+  Future<void> _dismiss({String? reason, bool rethrowing = false}) => _run(
+    rethrowing: rethrowing,
     (backend) => backend.dismissPipeStart(
       start.agentId,
       start.id,
-      comment: _comment.text.trim(),
+      comment: noComment(reason, _comment.text),
     ),
   );
+
+  /// The step showing's own button for the dock's yes (#514): Make invite,
+  /// Continue with a code pasted, then Connect. An invite keeps the dock on
+  /// the card from Make invite on, since its code shows there once, after
+  /// it's made; a dismissal moves on.
+  @override
+  CardAnswer? answerNow() {
+    if (_invite != null) {
+      return CardAnswer(
+        key: 'pipeStart/${start.id}',
+        docked: false,
+        yes: '',
+        no: '',
+        keep: true,
+      );
+    }
+    if (!_waiting) return null;
+    final (String yes, Future<void> Function()? onYes) = !_accept
+        ? (
+            'Make invite',
+            _name.text.trim().isEmpty || _project.isEmpty
+                ? null
+                : () => _makeInvite(rethrowing: true),
+          )
+        : _preview == null
+        ? (
+            'Continue',
+            _code.text.trim().isEmpty ? null : () => _read(rethrowing: true),
+          )
+        : ('Connect', _project.isEmpty ? null : () => _connect(rethrowing: true));
+    return CardAnswer(
+      key: 'pipeStart/${start.id}',
+      docked: false,
+      yes: yes,
+      // The preview's Back is no no: it only goes back a step.
+      no: _preview == null ? 'Dismiss' : '',
+      typed: false,
+      busy: _busy,
+      error: _error,
+      keep: _making,
+      onYes: _busy ? null : onYes,
+      onNo: _busy || _preview != null
+          ? null
+          : (reason) => _dismiss(reason: reason, rethrowing: true),
+    );
+  }
 
   Future<void> _copy(String code, int expiresMs) async {
     await copyInviteCode(code, expiresMs: expiresMs);
@@ -166,8 +242,13 @@ class _PipeStartCardState extends State<PipeStartCard> {
   Widget build(BuildContext context) {
     final store = AppScope.of(context).workspace;
     return ListenableBuilder(
-      listenable: store,
-      builder: (context, _) => _card(context, store),
+      // What's typed turns the dock's yes on and off.
+      listenable: Listenable.merge([store, _name, _code]),
+      builder: (context, _) {
+        final card = _card(context, store);
+        publishAnswer();
+        return card;
+      },
     );
   }
 

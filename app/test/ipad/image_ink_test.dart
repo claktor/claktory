@@ -434,7 +434,7 @@ void main() {
     await _ready(native);
     await _drew(native, 1);
     await settle(tester);
-    expect(find.text('Your drawing goes with your answer.'), findsOneWidget);
+    expect(find.text('Your drawing goes with it.'), findsOneWidget);
 
     await tester.enterText(
       find.descendant(

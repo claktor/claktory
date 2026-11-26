@@ -1,5 +1,6 @@
 // Scanning a code with the camera wherever one is entered (friend bug #2):
-// scanCode asks for the camera as it opens, takes the first code its check
+// scanCode says why before the camera's first use, then asks (area 5a,
+// P7), takes the first code its check
 // accepts, says why another can't be used, and says how to allow a refused
 // camera, with Open Settings, starting once it's allowed.
 import 'dart:async';
@@ -9,6 +10,7 @@ import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/scan_code.dart';
 import 'package:factory_app/scanner.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -20,14 +22,18 @@ String? _check(String text) =>
     text.startsWith('code:') ? null : "That isn't a code for this.";
 
 /// Opens the scanner from the conversation; its result completes [result].
-Future<Completer<String?>> _scan(WidgetTester tester) async {
+Future<Completer<String?>> _scan(
+  WidgetTester tester, {
+  VoidCallback? onPasteInstead,
+}) async {
   final result = Completer<String?>();
   final context = tester.element(find.byType(AgentView).first);
   unawaited(
     scanCode(
       context,
-      title: 'Scan the code',
+      title: 'Scan a code',
       check: _check,
+      onPasteInstead: onPasteInstead,
     ).then(result.complete),
   );
   await pumpFrames(tester);
@@ -44,8 +50,22 @@ void main() {
     await harness.show(tester, size: phone);
     await pumpFrames(tester);
     final result = await _scan(tester);
-    expect(harness.camera.asked, 1);
+    // Why first (area 5a, P7): nothing asked until Continue.
+    expect(harness.camera.asked, 0);
     expect(find.text('Scan the code'), findsOneWidget);
+    // Any code, not only a Claktory's own (Zucchero 44139).
+    expect(
+      find.text(
+        'Claktory uses the camera to read the code. '
+        'Your iPhone asks next.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('camera')), findsNothing);
+    await tester.tap(find.text('Continue'));
+    await pumpFrames(tester);
+    expect(harness.camera.asked, 1);
+    expect(find.text('Scan a code'), findsOneWidget);
     expect(find.byKey(const ValueKey('camera')), findsOneWidget);
     // Square, at most half the screen's height.
     final picture = tester.getSize(find.byKey(const ValueKey('camera')));
@@ -60,7 +80,7 @@ void main() {
     harness.camera.scan('code:43');
     await pumpFrames(tester);
     expect(await result.future, 'code:42');
-    expect(find.text('Scan the code'), findsNothing);
+    expect(find.text('Scan a code'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 
@@ -75,7 +95,7 @@ void main() {
     await tester.tap(find.bySemanticsLabel('Close').last);
     await pumpFrames(tester);
     expect(await result.future, isNull);
-    expect(find.text('Scan the code'), findsNothing);
+    expect(find.text('Scan a code'), findsNothing);
   });
 
   testWidgets('a refused camera says how to allow it, with Open Settings, '
@@ -88,21 +108,25 @@ void main() {
     await pumpFrames(tester);
     final result = await _scan(tester);
     expect(harness.camera.asked, 0);
+    expect(find.text('The camera is off for Claktory'), findsOneWidget);
+    // No Paste code instead here, so the words don't offer it.
     expect(
-      find.text('To scan, allow camera access in Settings → Claktory.'),
+      find.text("Turn it on in Settings on this iPhone."),
       findsOneWidget,
     );
     await tester.tap(find.text('Open Settings'));
     await pumpFrames(tester);
     expect(harness.camera.settingsOpened, 1);
     // A finger's size, both.
-    for (final label in ['Open Settings', 'Back']) {
-      final button = find.ancestor(
-        of: find.text(label),
-        matching: find.byType(Button),
-      );
-      expect(tester.getSize(button).height, greaterThanOrEqualTo(44));
-    }
+    final settings = find.ancestor(
+      of: find.text('Open Settings'),
+      matching: find.byType(Button),
+    );
+    expect(tester.getSize(settings).height, greaterThanOrEqualTo(44));
+    expect(
+      tester.getSize(find.bySemanticsLabel('Not now')).height,
+      greaterThanOrEqualTo(44),
+    );
 
     // Allowed in Settings, and back in the app.
     harness.camera.state = CameraAccess.granted;
@@ -126,10 +150,10 @@ void main() {
     await pumpFrames(tester);
     final result = await _scan(tester);
     expect(
-      find.text('To scan, allow Claktory to use the camera in Settings.'),
+      find.text("Turn it on in Android's Settings."),
       findsOneWidget,
     );
-    await tester.tap(find.text('Back'));
+    await tester.tap(find.text('Not now'));
     await pumpFrames(tester);
     expect(await result.future, isNull);
   });
@@ -141,7 +165,7 @@ void main() {
     await harness.show(tester, size: const Size(1180, 820));
     await pumpFrames(tester);
     final result = await _scan(tester);
-    expect(find.text('Scan the code'), findsOneWidget);
+    expect(find.text('Scan a code'), findsOneWidget);
     expect(find.byKey(const ValueKey('camera')), findsOneWidget);
     harness.camera.scan('code:9');
     await pumpFrames(tester);
@@ -152,6 +176,84 @@ void main() {
     await pumpFrames(tester);
     expect(await again.future, isNull);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('refused, with a field to paste in: Paste code instead '
+      'closes it and pastes', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final harness = Harness(workspace());
+    harness.camera.state = CameraAccess.denied;
+    await harness.show(tester, size: phone);
+    await pumpFrames(tester);
+    var pasted = 0;
+    final result = await _scan(tester, onPasteInstead: () => pasted++);
+    expect(
+      find.text(
+        "Turn it on in Settings on this iPhone, or paste the code instead.",
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Not now'), findsNothing);
+    await tester.tap(find.text('Paste code instead'));
+    await pumpFrames(tester);
+    expect(await result.future, isNull);
+    expect(pasted, 1);
+  });
+
+  testWidgets('on an iPad, the camera kept from the app: Cancel and Paste '
+      'code instead, until it comes back', (tester) async {
+    asIPad();
+    final harness = Harness(workspace());
+    harness.camera.state = CameraAccess.granted;
+    await harness.show(tester, size: const Size(1180, 820));
+    await pumpFrames(tester);
+    var pasted = 0;
+    final result = await _scan(tester, onPasteInstead: () => pasted++);
+    expect(find.text('Paste code instead'), findsNothing);
+    final camera = tester.element(find.byKey(const ValueKey('camera')));
+    const CameraAvailability('Make Claktory full screen').dispatch(camera);
+    await pumpFrames(tester);
+    expect(find.text('Paste code instead'), findsOneWidget);
+    expect(find.text('Cancel'), findsOneWidget);
+    const CameraAvailability(null).dispatch(camera);
+    await pumpFrames(tester);
+    expect(find.text('Paste code instead'), findsNothing);
+    const CameraAvailability('Make Claktory full screen').dispatch(camera);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Paste code instead'));
+    await pumpFrames(tester);
+    expect(await result.future, isNull);
+    expect(pasted, 1);
+  });
+
+  testWidgets('a field with no Paste of its own: what the clipboard has '
+      'goes in, then it reads it', (tester) async {
+    var clipboard = 'code:5';
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async => call.method == 'Clipboard.getData'
+          ? <String, Object?>{'text': clipboard}
+          : null,
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
+    final field = TextEditingController();
+    addTearDown(field.dispose);
+    var read = 0;
+    pasteCodeInto(field, then: () => read++)();
+    await tester.pump();
+    expect(field.text, 'code:5');
+    expect(read, 1);
+    clipboard = '  ';
+    pasteCodeInto(field, then: () => read++)();
+    await tester.pump();
+    expect(field.text, 'code:5', reason: 'nothing to paste: left as it was');
+    expect(read, 1);
   });
 
   testWidgets('Scan is offered with a camera, even a refused one, and not '

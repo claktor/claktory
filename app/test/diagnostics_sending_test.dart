@@ -133,6 +133,9 @@ class _Tunnels implements Tunnels {
   /// Called as each opens.
   void Function()? opening;
 
+  /// How many were opened.
+  var opened = 0;
+
   @override
   Future<Tunnel> open({
     required String deviceKey,
@@ -141,6 +144,7 @@ class _Tunnels implements Tunnels {
     List<String> addresses = const [],
   }) async {
     opening?.call();
+    opened++;
     return last = FakeTunnel(port)..status = first ?? tunnelStatus();
   }
 
@@ -465,6 +469,39 @@ void main() {
       },
     );
   }
+
+  // Friend bug #53: a Mac connected for hours had nothing to send when
+  // Advanced diagnostics were turned on, so it seemed to start only after
+  // a relaunch. Turned on while connected, it says so at once; off and on
+  // again, the same.
+  test('turned on while connected, the device sends how its connection '
+      'goes at once, without reconnecting', () async {
+    far.share = false;
+    final recorder = DiagnosticsRecorder(folder);
+    final app = backend(recorder)
+      ..diagnosticsEvery = const Duration(minutes: 5);
+    app.connectTo(parsePairingCode(_code));
+    unawaited(app.run());
+    await until(() => app.connected.value);
+    expect(recorder.on, isFalse);
+    final connections = tunnels.opened;
+
+    far.turn(true);
+    await until(() => far.received.any((e) => e.kind == 'recording'));
+    final said = far.received.lastWhere((e) => e.kind == 'recording');
+    expect(said.area, 'connection');
+    expect(said.detail, contains('route='));
+    expectAllowed(far.received);
+    expect(tunnels.opened, connections, reason: 'never reconnected');
+
+    far.turn(false);
+    await until(() => !recorder.on);
+    far.received.clear();
+    far.turn(true);
+    await until(() => far.received.any((e) => e.kind == 'recording'));
+    expect(tunnels.opened, connections);
+    await app.close();
+  });
 
   test('turned off on the Claktory, the device stops recording and deletes '
       'what it kept', () async {

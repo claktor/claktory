@@ -26,6 +26,7 @@ pub(crate) mod anchor;
 pub(crate) mod apps;
 pub(crate) mod relay_token;
 pub(crate) mod reports;
+pub(crate) mod vouch;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -115,7 +116,38 @@ struct Saved {
     /// were last changed for: a Claktory that moved here changes them once
     /// (`after_move`), so the copy it moved from can't use them.
     move_epoch: u64,
+    /// Sign-outs the service hasn't heard of yet (#524), one per service:
+    /// told when it can be reached (`tell_sign_outs`).
+    signing_out: Vec<SigningOut>,
 }
+
+/// A sign-out to tell a service of: the sign-in it ends. The backend key
+/// is the one that signed in, which the sign-out replaced here.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct SigningOut {
+    service: String,
+    service_key: String,
+    machine_token: String,
+    /// The backend key's seed, hex.
+    backend_key: String,
+    /// When it signed out here, in ms since 1970.
+    since_ms: i64,
+    /// Tries that didn't reach it, for the wait before the next.
+    tries: u32,
+}
+
+impl SigningOut {
+    fn key(&self) -> Option<SigningKey> {
+        let bytes = Zeroizing::new(unhex(&self.backend_key)?);
+        Some(SigningKey::from_bytes(&<[u8; 32]>::try_from(bytes.as_slice()).ok()?))
+    }
+}
+
+/// The service's path for a Claktory's sign-out.
+const SIGN_OUT_PATH: &str = "/v1/claktories/sign-out";
+/// How long a sign-out waits for the service before it's queued.
+const SIGN_OUT_WAIT: Duration = Duration::from_secs(5);
 
 const ASKED: &str = "asked";
 
@@ -177,6 +209,8 @@ struct Inner {
     /// Each signed request's last time, by a digest of what else it signs
     /// (`stamp`), for the last `MAX_SKEW` seconds.
     stamped: std::collections::HashMap<[u8; 32], i64>,
+    /// When the sign-outs not yet told are tried again.
+    next_sign_out: Instant,
 }
 
 /// The time to sign a request with, `now` by the service's clock: now, or
@@ -399,6 +433,7 @@ impl State {
             endpoints_sent: None,
             reseal_due: None,
             stamped: Default::default(),
+            next_sign_out: now,
         };
         let http = reqwest::Client::builder()
             .timeout(CALL_TIMEOUT)
@@ -472,6 +507,41 @@ impl State {
         self.lock().saved.claktory_id.clear();
         let _ = std::fs::remove_file(self.dir.join("claktory.key"));
         self.save();
+    }
+
+    /// A new backend key for the same id, made at the next `identity`: the
+    /// old one signed out (#524), and the service retires it.
+    fn new_key(&self) {
+        if let Err(error) = std::fs::remove_file(self.dir.join("claktory.key"))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::error!(%error, "could not replace the backend key");
+        }
+    }
+
+    /// Tells the service of a sign-out: whether that's done (it heard, or
+    /// had nothing left to end), or still to do.
+    async fn tell_signed_out(&self, out: &SigningOut) -> bool {
+        let (Some(service_key), Some(key)) = (api::verifying_key(&out.service_key), out.key()) else {
+            tracing::error!(service = out.service, "a sign-out kept without its keys can't be sent; dropped");
+            return true;
+        };
+        let signer = Some((out.machine_token.as_str(), &key));
+        let sent = self.send_waiting(&out.service, Some(&service_key), "POST", SIGN_OUT_PATH, b"{}".to_vec(), signer, Some(SIGN_OUT_WAIT));
+        match sent.await {
+            Ok(_) => {
+                tracing::info!(service = out.service, "the account service heard of the sign-out");
+                true
+            }
+            // Its token no longer works: signed out there already (the
+            // answer was lost), or signed in again since. Nothing to end.
+            Err(Failure::Refused(401, body)) if body.error == "unauthorized" => true,
+            Err(Failure::Refused(403, body)) if body.error == "revoked" => true,
+            Err(failure) => {
+                tracing::info!(service = out.service, %failure, "couldn't tell the account service of the sign-out yet");
+                false
+            }
+        }
     }
 
     /// L, the vault's share kept here, made the first time.
@@ -719,7 +789,12 @@ impl State {
             service,
             name,
             last_contact_ms: saved.last_contact_ms,
-            problem: inner.problem.clone(),
+            problem: match inner.saved.signing_out.first() {
+                Some(out) if inner.problem.is_empty() && !saved.signed_in() && inner.pending.is_none() => {
+                    format!("Signed out. Claktory tells {} as soon as it can reach it.", service_name(&out.service))
+                }
+                _ => inner.problem.clone(),
+            },
             code_expires_ms: inner.pending.as_ref().map_or(0, |pending| pending.expires_ms),
             last_sign_in_json: saved.last_sign_in_json.clone(),
             last_check_in_json: saved.last_check_in_json.clone(),
@@ -867,6 +942,11 @@ pub(crate) async fn sign_in(factory: &Arc<Factory>, email: &str) -> Result<(), R
     let Some(verifying) = api::verifying_key(&service_key) else {
         return Err(sign_in_error(&service, Failure::Unreachable("a bad service key".to_owned())));
     };
+    // A sign-out there not told yet goes first, so the sign-in it ended
+    // ends before this one starts.
+    if account.lock().saved.signing_out.iter().any(|out| out.service == service) {
+        tell_sign_outs(factory, true).await;
+    }
     let (claktory_id, key) = account.identity()?;
     let start = SignInStart {
         email,
@@ -886,13 +966,20 @@ async fn send_code(
     service_key: &str,
     key_from: Option<i64>,
     verifying: &VerifyingKey,
-    start: SignInStart,
+    mut start: SignInStart,
 ) -> Result<(), RequestError> {
     let account = &factory.account;
-    let started: SignInStarted = account
-        .call(service, Some(verifying), "POST", "/v1/sign-in/start", &start, None)
-        .await
-        .map_err(|failure| sign_in_error(service, failure))?;
+    let mut asked = account.call(service, Some(verifying), "POST", "/v1/sign-in/start", &start, None).await;
+    // A backend key this Claktory signed out with (#524), back from a
+    // backup, say: the service won't take it again, so a new one.
+    if matches!(&asked, Err(Failure::Refused(_, body)) if body.error == "backend_key_retired") {
+        tracing::info!(service, "the account service retired this backend key; signing in with a new one");
+        account.new_key();
+        let (_, key) = account.identity()?;
+        start.backend_key = api::b64(key.verifying_key().to_bytes());
+        asked = account.call(service, Some(verifying), "POST", "/v1/sign-in/start", &start, None).await;
+    }
+    let started: SignInStarted = asked.map_err(|failure| sign_in_error(service, failure))?;
     {
         let mut inner = account.lock();
         inner.saved.last_sign_in_json = serde_json::to_string_pretty(&start).unwrap_or_default();
@@ -949,10 +1036,19 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<String,
     // Signed with the backend key, which proves to the service that it's
     // this Claktory: signed out of another account, it moves to this one
     // with this code, rather than being turned away as taken.
+    // A sign-out there the service hasn't heard of left the sign-in it
+    // ended registered with the key it signed in with: that one proves it.
     let (_, key) = account.identity()?;
-    let signer = Some(("", &key));
+    let signed_out_with = account.lock().saved.signing_out.iter().find(|out| out.service == pending.service).and_then(SigningOut::key);
+    let signer = Some(("", signed_out_with.as_ref().unwrap_or(&key)));
     let signed_in: SignedIn = match account.call(&pending.service, Some(&verifying), "POST", "/v1/sign-in/verify", &asked, signer).await {
         Ok(signed_in) => signed_in,
+        Err(Failure::Refused(_, body)) if body.error == "backend_key_retired" => {
+            account.lock().pending = None;
+            account.new_key();
+            changed(factory);
+            return Err(refused(ErrorCode::InvalidRequest, "That code no longer works. Sign in again."));
+        }
         Err(Failure::Refused(_, body)) if body.error == "claktory_taken" => {
             account.lock().pending = None;
             account.new_identity();
@@ -988,6 +1084,9 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<String,
         inner.saved.name = pending.start.name.clone();
         inner.saved.revoked = false;
         inner.saved.signed_in_ms = now_ms();
+        // Signed in there again: the sign-in a sign-out not told yet ended
+        // has a new token now, so nothing's left to tell.
+        inner.saved.signing_out.retain(|out| out.service != pending.service);
         if inner.saved.periods_until == 0 {
             inner.saved.periods_until = now_s() / 3600 * 3600;
         }
@@ -1039,12 +1138,40 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<String,
     Ok(signed_in.account_id)
 }
 
-/// AccountSignOut: no more calls to the service. An open vault opens by
-/// itself again, with a key on disk.
+/// AccountSignOut: the service is told first (#524), so the sign-in ends
+/// there too: its token, backend key, app grants and relay tokens no longer
+/// work for anyone holding a copy. When it can't be reached, it's told
+/// later (`tell_sign_outs`), and the app says so meanwhile. Here it signs
+/// out either way, with a new backend key for the next sign-in. An open
+/// vault opens by itself again, with a key on disk.
 pub(crate) async fn sign_out(factory: &Arc<Factory>) -> Result<(), RequestError> {
     enabled(factory)?;
     let account = &factory.account;
     let _busy = account.busy.lock().await;
+    let out = {
+        let inner = account.lock();
+        let saved = &inner.saved;
+        saved.signed_in().then(|| SigningOut {
+            service: saved.service.clone(),
+            service_key: saved.service_key.clone(),
+            machine_token: saved.machine_token.clone(),
+            backend_key: String::new(),
+            since_ms: now_ms(),
+            tries: 0,
+        })
+    };
+    if let Some(mut out) = out {
+        let (_, key) = account.identity()?;
+        out.backend_key = hex(key.as_bytes());
+        if !account.tell_signed_out(&out).await {
+            let mut inner = account.lock();
+            inner.saved.signing_out.retain(|kept| kept.service != out.service);
+            inner.saved.signing_out.push(out);
+            inner.next_sign_out = Instant::now() + sign_out_wait(0);
+            account.wake.notify_one();
+        }
+        account.new_key();
+    }
     factory.vault.drop_account()?;
     {
         let mut inner = account.lock();
@@ -1065,6 +1192,45 @@ pub(crate) async fn sign_out(factory: &Arc<Factory>) -> Result<(), RequestError>
     relay_token::signed_out(factory);
     factory.vault_changed();
     Ok(())
+}
+
+/// How long after `tries` failed tries a sign-out is sent again: a minute,
+/// then twice as long each time, up to an hour.
+fn sign_out_wait(tries: u32) -> Duration {
+    Duration::from_secs((60_u64 << tries.min(6)).min(3600))
+}
+
+/// Tells the services the sign-outs they haven't heard of yet, if it's
+/// time (all of them with `now`). Called with `busy` held.
+async fn tell_sign_outs(factory: &Arc<Factory>, now: bool) {
+    let account = &factory.account;
+    let due = {
+        let inner = account.lock();
+        let due = now || inner.next_sign_out <= Instant::now();
+        if due { inner.saved.signing_out.clone() } else { Vec::new() }
+    };
+    if due.is_empty() {
+        return;
+    }
+    let mut told = Vec::new();
+    for out in &due {
+        if account.tell_signed_out(out).await {
+            told.push(out.service.clone());
+        }
+    }
+    {
+        let mut inner = account.lock();
+        inner.saved.signing_out.retain(|kept| !told.contains(&kept.service));
+        for kept in &mut inner.saved.signing_out {
+            kept.tries = kept.tries.saturating_add(1);
+        }
+        let tries = inner.saved.signing_out.iter().map(|kept| kept.tries).min().unwrap_or(0);
+        inner.next_sign_out = Instant::now() + sign_out_wait(tries);
+    }
+    account.save();
+    if !told.is_empty() {
+        changed(factory);
+    }
 }
 
 /// SkipAccountSignIn, from apps that offered Not now: refused, since every
@@ -1717,12 +1883,14 @@ async fn tick(factory: &Arc<Factory>) -> Duration {
     }
     let account = &factory.account;
     let _busy = account.busy.lock().await;
-    let (signed_in, revoked) = {
+    tell_sign_outs(factory, false).await;
+    let (signed_in, revoked, sign_outs) = {
         let inner = account.lock();
-        (inner.saved.signed_in(), inner.saved.revoked)
+        let sign_outs = (!inner.saved.signing_out.is_empty()).then(|| inner.next_sign_out.saturating_duration_since(Instant::now()));
+        (inner.saved.signed_in(), inner.saved.revoked, sign_outs)
     };
     if !signed_in || revoked {
-        return IDLE;
+        return sign_outs.map_or(IDLE, |due| due.clamp(Duration::from_millis(100), IDLE));
     }
     // Moved here: new credentials first, so nothing more goes out with the old.
     let rotating = !after_move(factory).await;
@@ -1757,6 +1925,9 @@ async fn tick(factory: &Arc<Factory>) -> Duration {
     }
     if let Some(due) = inner.reseal_due {
         next = next.min(due.saturating_duration_since(now));
+    }
+    if let Some(due) = sign_outs {
+        next = next.min(due);
     }
     next.max(Duration::from_millis(100))
 }

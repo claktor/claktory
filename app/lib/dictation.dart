@@ -231,8 +231,20 @@ class Dictation extends StatefulWidget {
   State<Dictation> createState() => DictationFieldState();
 }
 
+/// Hold-to-say (#514): a field's mic started by holding a key or a button
+/// instead of a tap, and finished when it's let go; the words land in the
+/// field to read before sending. Get it from a [Dictation]'s GlobalKey.
+abstract interface class DictationHold {
+  /// Held: it records, as the mic does.
+  Future<void> holdStart();
+
+  /// Let go: what was said goes in at the caret. Let go before the
+  /// recording started, it ends as soon as it does.
+  void holdEnd();
+}
+
 @visibleForTesting
-class DictationFieldState extends State<Dictation> {
+class DictationFieldState extends State<Dictation> implements DictationHold {
   /// The answer being said into this field, or one said into it before it
   /// was built again (#409): it goes on when the field goes, the floating
   /// bar finishing it.
@@ -259,6 +271,24 @@ class DictationFieldState extends State<Dictation> {
   final _recordingFocus = FocusNode(debugLabel: 'Dictation');
 
   DictationState get state => _state;
+
+  /// Let go while the recording was still starting (hold-to-say).
+  var _letGo = false;
+
+  @override
+  Future<void> holdStart() {
+    _letGo = false;
+    return _record();
+  }
+
+  @override
+  void holdEnd() {
+    if (_state == DictationState.recording && _voice.recording) {
+      unawaited(_done());
+    } else {
+      _letGo = true;
+    }
+  }
 
   @override
   void initState() {
@@ -389,6 +419,10 @@ class DictationFieldState extends State<Dictation> {
     if (!mounted) return;
     unawaited(Haptics.light());
     _recordingFocus.requestFocus();
+    if (_letGo) {
+      _letGo = false;
+      await _done();
+    }
   }
 
   Future<void> _cancel() => _session.cancel();

@@ -313,7 +313,7 @@ async fn cloudflare_connects_with_pkce_and_gives_agents_only_narrow_tokens_it_re
     let given = apply_request(
         &mut client,
         &mut view,
-        Request::GrantSecret(v1::GrantSecret { id: pages.id.clone(), agent_id: "builder".into(), proof: None }),
+        Request::GrantSecret(v1::GrantSecret { id: pages.id.clone(), agent_id: "builder".into(), proof: None, fill_only: false }),
     )
     .await;
     assert!(matches!(given, Body::VaultSession(_)), "{given:?}");

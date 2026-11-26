@@ -161,7 +161,7 @@ fn moved_error(home: &Home) -> Body {
         machine: moved.machine.clone(),
         deleted_ms: moved.deleted_ms,
     };
-    Body::Error(v1::Error { code: ErrorCode::Moved.into(), message: said(&moved), moved: Some(away) })
+    Body::Error(v1::Error { code: ErrorCode::Moved.into(), message: said(&moved), moved: Some(away), ..Default::default() })
 }
 
 /// The token of this computer's own pairing code, as the move fenced it.

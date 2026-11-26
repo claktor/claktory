@@ -58,7 +58,9 @@ List<String> _cut(WidgetTester tester) => [
 void main() {
   testWidgets('at the largest text on a phone, a row wraps its name and '
       'what it asks, answered or not', (tester) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    // Android's phone, which keeps Needs you's list; an iPhone's shows one
+    // card a screen (#514, mobile_needs_you_test at the largest text).
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     tester.platformDispatcher.textScaleFactorTestValue = _ax5;
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);

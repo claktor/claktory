@@ -14,12 +14,12 @@ use crate::support::*;
 use crate::web::{field, post_form, web_sign_in};
 
 /// This process's user, as the worker checks its peers.
-fn uid(dir: &Path) -> u32 {
+pub(crate) fn uid(dir: &Path) -> u32 {
     std::fs::metadata(dir).expect("the folder").uid()
 }
 
 /// A worker listening at `dir/apps.sock`, answering only `root_uid`.
-fn worker(dir: &Path, root_uid: u32) -> PathBuf {
+pub(crate) fn worker(dir: &Path, root_uid: u32) -> PathBuf {
     worker_on(dir, root_uid, claktory_user_apps::dms::space::Disk::of(&dir.join("apps.db")))
 }
 
@@ -34,7 +34,7 @@ fn worker_on(dir: &Path, root_uid: u32, disk: claktory_user_apps::dms::space::Di
 }
 
 /// A service whose worker listens at `socket` as `uid`.
-async fn with_apps(socket: Option<PathBuf>, uid: u32) -> Instance {
+pub(crate) async fn with_apps(socket: Option<PathBuf>, uid: u32) -> Instance {
     let user_apps = socket.map(|socket| UserApps { socket, uid });
     start_with(Config { trust_proxy: true, user_apps, ..Config::default() }).await
 }
@@ -61,7 +61,7 @@ fn sealed(group: &[u8], epoch: u64, text: &str) -> Value {
 }
 
 /// A backend-signed GET, with no body.
-async fn get(instance: &Instance, claktory: &Claktory, path: &str) -> Answer {
+pub(crate) async fn get(instance: &Instance, claktory: &Claktory, path: &str) -> Answer {
     // A second apart, so the same call twice isn't taken for a replay.
     instance.advance(1);
     let time = instance.now();
@@ -891,4 +891,129 @@ async fn a_sign_out_while_the_worker_is_down_reaches_it_once_it_answers() {
     instance.advance(60);
     assert_eq!(instance.service.retry_app_sign_outs().await, 1);
     assert_eq!((held().len(), queued()), (0, 0));
+}
+
+/// The Claktories whose agents hold grants in the worker's own records
+/// (not as a caller lists them, which leaves out registrations ended), and
+/// the account's `groups` events there.
+fn worker_grants(dir: &Path) -> (Vec<String>, i64) {
+    let apps = rusqlite::Connection::open(dir.join("apps.db")).expect("the worker's records");
+    let mut statement = apps.prepare("SELECT claktory_id FROM grants ORDER BY claktory_id").expect("query");
+    let held = statement.query_map([], |row| row.get(0)).expect("rows").collect::<Result<_, _>>().expect("grants");
+    let groups = apps.query_row("SELECT COUNT(*) FROM dm_account_events WHERE kind = 'groups'", [], |row| row.get(0)).expect("events");
+    (held, groups)
+}
+
+/// Registrations ended that the worker is still to hear of.
+fn removals_queued(instance: &Instance) -> i64 {
+    rusqlite::Connection::open(&instance.db)
+        .expect("the service's database")
+        .query_row("SELECT COUNT(*) FROM apps_claktory_removals", [], |row| row.get(0))
+        .expect("queued")
+}
+
+/// A DM grant for `agent` of `claktory`, made by it.
+async fn grant_dms(instance: &Instance, claktory: &Claktory, agent: &str) {
+    let grant = json!({"app": "dms", "agent": {"id": agent, "incarnation": "inc-1"}, "scopes": ["dm.read", "dm.send"],
+                       "resources": [{"kind": "conversation", "id": "c1"}]});
+    let made = instance.signed(claktory, "PUT", "/v1/apps/grants", &grant, None).await;
+    assert_eq!(made.status, 200, "{}", made.text());
+}
+
+/// Removes `claktory` at claktory.com/account.
+async fn remove_at_account_page(instance: &Instance, claktory: &Claktory) {
+    let cookie = web_sign_in(instance, "matt@example.com", "192.0.2.51").await;
+    let csrf = field(&crate::web::get(instance, "/account", &cookie).await.text(), "csrf");
+    let done = post_form(instance, "/account/remove", &cookie, &format!("csrf={csrf}&claktory={}&confirm=yes", claktory.id)).await;
+    assert_eq!(done.status, 303, "{}", done.text());
+}
+
+/// E11-4 (Fugo 40857): a Claktory removed at claktory.com/account loses its
+/// agents' grants at the worker at once, not only as the account's callers
+/// see them, and the account's feed says its groups changed, so the
+/// person's devices take it out of the conversations it reached. Another
+/// Claktory's grants stay.
+#[tokio::test]
+async fn a_claktory_removed_at_the_account_page_loses_its_grants_at_the_worker() {
+    let dir = tempfile::tempdir().expect("a folder");
+    let socket = worker(dir.path(), uid(dir.path()));
+    let instance = with_apps(Some(socket), uid(dir.path())).await;
+    let mut studio = Claktory::new("198.51.100.30");
+    instance.sign_in(&mut studio, "matt@example.com", "Mac mini").await;
+    let mut laptop = Claktory::new("198.51.100.31");
+    instance.sign_in(&mut laptop, "matt@example.com", "MacBook").await;
+    let phone = Device::new("192.0.2.80");
+    instance.sign_in_device(&phone, "matt@example.com", "Matt's iPhone").await;
+    grant_dms(&instance, &studio, "june").await;
+    grant_dms(&instance, &laptop, "june").await;
+    let (held, groups) = worker_grants(dir.path());
+    assert_eq!(held, sorted([&studio.id, &laptop.id]));
+
+    remove_at_account_page(&instance, &studio).await;
+    assert_eq!(worker_grants(dir.path()), (vec![laptop.id.clone()], groups + 1), "gone at the worker, nothing listed first");
+    assert_eq!(removals_queued(&instance), 0, "the worker heard");
+    let listed = instance.device_signed(&phone, "GET", "/v1/apps/grants", None, None).await.value();
+    let listed: Vec<&str> = listed["grants"].as_array().expect("grants").iter().filter_map(|grant| grant["claktory_id"].as_str()).collect();
+    assert_eq!(listed, [laptop.id.as_str()]);
+    // Its agents' calls never reach the worker again.
+    assert_eq!(get(&instance, &studio, "/v1/apps/dms/agent/conversations?agent=june&incarnation=inc-1").await.error(), "revoked");
+}
+
+/// E11-4: the worker down when a Claktory is removed: the removal goes
+/// ahead (its grants are dead to every caller meanwhile), and the worker
+/// drops them once it answers, asked again after a minute, not before.
+#[tokio::test]
+async fn a_claktory_removed_while_the_worker_is_down_loses_its_grants_once_it_answers() {
+    let dir = tempfile::tempdir().expect("a folder");
+    let socket = worker(dir.path(), uid(dir.path()));
+    let instance = with_apps(Some(socket.clone()), uid(dir.path())).await;
+    let mut studio = Claktory::new("198.51.100.30");
+    instance.sign_in(&mut studio, "matt@example.com", "Mac mini").await;
+    grant_dms(&instance, &studio, "june").await;
+
+    std::fs::remove_file(&socket).expect("the socket");
+    remove_at_account_page(&instance, &studio).await;
+    assert_eq!((worker_grants(dir.path()).0.len(), removals_queued(&instance)), (1, 1));
+
+    worker(dir.path(), uid(dir.path()));
+    assert_eq!(instance.service.retry_app_claktory_removals().await, 0, "not due yet");
+    instance.advance(60);
+    assert_eq!(instance.service.retry_app_claktory_removals().await, 1);
+    assert_eq!((worker_grants(dir.path()).0.len(), removals_queued(&instance)), (0, 0));
+    instance.advance(3600);
+    assert_eq!(instance.service.retry_app_claktory_removals().await, 0, "nothing left to ask");
+}
+
+/// E11-4: a Claktory that signs in again without signing out (offline when
+/// it did) ends the registration it had: the grants under it go, those its
+/// agents got under the new one stay.
+#[tokio::test]
+async fn a_claktory_signed_in_again_loses_only_the_grants_of_its_old_registration() {
+    let dir = tempfile::tempdir().expect("a folder");
+    let socket = worker(dir.path(), uid(dir.path()));
+    let instance = with_apps(Some(socket), uid(dir.path())).await;
+    let mut studio = Claktory::new("198.51.100.30");
+    instance.sign_in(&mut studio, "matt@example.com", "Mac mini").await;
+    grant_dms(&instance, &studio, "june").await;
+
+    instance.advance(60);
+    instance.sign_in(&mut studio, "matt@example.com", "Mac mini").await;
+    assert_eq!(removals_queued(&instance), 1, "told with the rest, within the minute");
+    grant_dms(&instance, &studio, "may").await;
+    assert_eq!(instance.service.retry_app_claktory_removals().await, 1);
+    let apps = rusqlite::Connection::open(dir.path().join("apps.db")).expect("the worker's records");
+    let agents: Vec<String> = apps
+        .prepare("SELECT agent_id FROM grants")
+        .expect("query")
+        .query_map([], |row| row.get(0))
+        .expect("rows")
+        .collect::<Result<_, _>>()
+        .expect("grants");
+    assert_eq!(agents, ["may"]);
+}
+
+fn sorted<const N: usize>(ids: [&String; N]) -> Vec<String> {
+    let mut ids: Vec<String> = ids.into_iter().cloned().collect();
+    ids.sort();
+    ids
 }

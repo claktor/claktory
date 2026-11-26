@@ -62,6 +62,33 @@ void main() {
     expect(harness.last.answerAsk.revision, 3);
   });
 
+  testWidgets("a review card whose file changed while it waited says so in "
+      "Claktory's words, never as the agent's reason, and Approve is for "
+      'the file as it reads now (Ghiaccio 46899)', (tester) async {
+    const note =
+        'This file changed since Builder asked. Approving means it as it '
+        'reads now.';
+    final harness = _asking(
+      AskPerson(
+        id: 'ask7',
+        title: 'Is the merch page right?',
+        reviewPath: '/w/merch.md',
+        state: AskPersonState.ASK_PERSON_STATE_PENDING,
+        revision: 2,
+        updatedMs: Int64(1000),
+        updateNote: note,
+      ),
+    );
+    await harness.show(tester);
+    await settle(tester);
+    expect(_inCard(find.textContaining('Updated · ')), findsOneWidget);
+    expect(_inCard(find.text(note)), findsOneWidget);
+    expect(_inCard(find.text("Builder's reason")), findsNothing);
+    await tester.tap(_inCard(find.text('Approve')));
+    await settle(tester);
+    expect(harness.last.answerAsk.revision, 2);
+  });
+
   testWidgets('a card never changed says nothing of it', (tester) async {
     final harness = _asking(_ask());
     await harness.show(tester);

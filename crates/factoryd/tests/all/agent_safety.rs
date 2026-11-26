@@ -8,7 +8,7 @@
 //! (what an agent's CLI or its own script gets on the loopback port), or
 //! through `factoryd` run as a command in its shell. They fail until their
 //! block lands, ignored with the block's name ("#546 A", "#546 B", "#546
-//! moves"); its owner removes the ignore when it goes in.
+//! moves", "D", "G8"); its owner removes the ignore when it goes in.
 //!
 //! Every test checks first that the tool connection is held to Tool
 //! authority (`gated`), so run against a backend without the gate it stops
@@ -408,7 +408,7 @@ async fn a_tool_connection_cant_allow_a_waiting_device_even_with_its_digits() {
     view.follow(&mut client, |view| pending(view).len() == 1).await;
     let right = crate::remote::number(&code, &device.id().to_string());
 
-    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone(), number: right.clone() });
+    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone(), number: right.clone(), ..Default::default() });
     let deny = client_message::Body::DenyDevice(v1::DenyDevice { device_id: id.clone() });
     for request in [allow.clone(), deny] {
         let answer = agent.request(request).await;
@@ -679,7 +679,7 @@ async fn no_file_under_home_opens_a_persons_connection() {
     // A device paired, one waiting, and a pipe invite out.
     let (code, id, device, _link, mut socket) = crate::remote::waiting_device(&mut client, &mut view, "Phone").await;
     let right = crate::remote::number(&code, &device.id().to_string());
-    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id, number: right });
+    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id, number: right, ..Default::default() });
     assert!(matches!(apply_request(&mut client, &mut view, allow).await, Body::Ack(_)));
     assert!(matches!(crate::remote::next(&mut socket).await, Some(Body::Welcome(_))));
     let (_code, _id, _device, _link, _waiting) = crate::remote::waiting_device(&mut client, &mut view, "Tablet").await;
@@ -927,7 +927,7 @@ async fn factoryd_device_commands_from_an_agent_change_nothing() {
     let (mut client, mut view) = person(addr, &factory).await;
     let (code, paired, device, _link, mut socket) = crate::remote::waiting_device(&mut client, &mut view, "Phone").await;
     let right = crate::remote::number(&code, &device.id().to_string());
-    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: paired.clone(), number: right });
+    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: paired.clone(), number: right, ..Default::default() });
     assert!(matches!(apply_request(&mut client, &mut view, allow).await, Body::Ack(_)));
     assert!(matches!(crate::remote::next(&mut socket).await, Some(Body::Welcome(_))));
     let (code, waiting, device, _link, _waiting_socket) = crate::remote::waiting_device(&mut client, &mut view, "Tablet").await;
@@ -2215,4 +2215,297 @@ async fn an_agents_commands_cant_export_claktory() {
     // Claktory still answers.
     let ping = client_message::Body::UpdateSettings(v1::UpdateSettings::default());
     assert!(matches!(apply_request(&mut client, &mut view, ping).await, Body::Ack(_)));
+}
+
+
+// G8 (Fugo 46025, 46029; Ghiaccio 46021; Bruno 46017; no cards, per Matt's
+// card 283): an agent can't make itself an admin. Under D only an agent
+// that's an admin when its command spawns can write this Claktory's own
+// config.json, by any path (a rewrite, a rename over it, rm and recreate,
+// the temp name factoryd writes it through, a hard link made before); its
+// file tools read the same flag per call. Nothing but config.json makes an
+// agent an admin. Other homes' config.json (the dev Claktory, qa.sh
+// sandboxes) stay writable. A command spawned as an admin keeps the write
+// until it ends; tests use a fresh one. Ignored with D.
+
+/// Makes Ana an admin, in config.json's own words (Python on `a`, the agents
+/// by id).
+const ANA_ADMIN: &str = "a['ana'].setdefault('extensions', {}).setdefault('agents', {})['admin'] = True";
+
+/// A made-up value for the vault's one secret: nothing real.
+const MADE_UP: &str = "g8-made-up-value-0123456789abcdef";
+
+/// Puts the vault's one secret in, for an admin to give.
+async fn a_secret(client: &mut Client, view: &mut View) {
+    let entry = v1::SecretEntry { variable: "CLOUDFLARE_API_TOKEN".into(), value: MADE_UP.into(), file: false };
+    let secret = v1::CreateSecret { name: "Cloudflare".into(), entries: vec![entry], ..Default::default() };
+    apply_request(client, view, client_message::Body::CreateSecret(secret)).await;
+}
+
+/// Rivet on the scripted model, so its commands run.
+async fn rivet_runs(client: &mut Client, view: &mut View) {
+    let rivet = v1::UpdateAgent { agent_id: "rivet".into(), model: Some(MODEL.into()), effort: Some("off".into()), ..Default::default() };
+    apply_request(client, view, client_message::Body::UpdateAgent(rivet)).await;
+}
+
+/// What `agent` gets trying to give the vault's secret to `to`: only an
+/// admin can. Through extension_call, which runs any tool of the extensions
+/// the agent has on now, so a change since its context began counts.
+async fn gives(client: &mut Client, view: &mut View, agent: &str, to: &str) -> String {
+    let args = serde_json::json!({"tool": "secrets_grant", "args": {"secret": "Cloudflare", "agents": [to]}});
+    crate::pipes::call(client, view, agent, "extension_call", &args.to_string()).await
+}
+
+/// `agent`'s extension `id` as the Workspace shows it.
+fn shown(view: &View, agent: &str, id: &str) -> Option<v1::AgentExtension> {
+    let agent = view.workspace.agents.iter().find(|shown| shown.id == agent)?;
+    agent.extensions.iter().find(|extension| extension.id == id).cloned()
+}
+
+fn admin_shown(view: &View, agent: &str) -> bool {
+    shown(view, agent, "agents").and_then(|extension| extension.options.get("admin").map(|value| value.on)).unwrap_or(false)
+}
+
+/// Has `by`'s command change config.json: `change` is Python on `a`, the
+/// agents by id, and `c`, the whole file. A new name rides along; the
+/// Workspace showing it is the sign the edit was read.
+async fn edit_config(client: &mut Client, view: &mut View, dir: &Path, by: &str, change: &str, mark: &str) {
+    let config = home(dir).root().join("config.json");
+    let script = format!(
+        "python3 - <<'PY'\nimport json\np = '{}'\nc = json.load(open(p))\na = {{x['id']: x for x in c['agents']}}\n{change}\nc['name'] = '{mark}'\njson.dump(c, open(p, 'w'), indent=2)\nprint('EDITED')\nPY",
+        config.display()
+    );
+    let edited = crate::pipes::call(client, view, by, "bash", &serde_json::json!({"command": script}).to_string()).await;
+    assert!(edited.contains("EDITED"), "{by} couldn't edit config.json: {edited}");
+    view.follow(client, |view| view.workspace.settings.as_ref().is_some_and(|settings| settings.name == mark)).await;
+}
+
+/// The person makes `agent` an admin, or not, in the app's agent settings.
+fn admin_from_app(agent: &str, on: bool) -> client_message::Body {
+    let change = v1::ExtensionChange {
+        id: "agents".into(),
+        option_id: "admin".into(),
+        value: Some(v1::OptionValue { on, ..Default::default() }),
+        ..Default::default()
+    };
+    client_message::Body::UpdateAgent(v1::UpdateAgent { agent_id: agent.into(), extension: Some(change), ..Default::default() })
+}
+
+/// Every way a command could write `config` (Fugo 46025, 46029), as one
+/// script printing "OK <way>" or "DENIED <way>" per line. A hard link made
+/// before containment has a test of its own.
+fn config_writes(config: &Path) -> String {
+    let config = config.display();
+    [
+        format!(": >> '{config}'"),
+        format!("python3 -c \"import json; p='{config}'; c=json.load(open(p)); c['name']='Rewritten'; json.dump(c, open(p, 'w'))\""),
+        format!("cp '{config}' \"$TMPDIR/g8-config\" && mv -f \"$TMPDIR/g8-config\" '{config}'"),
+        format!("cp '{config}' '{config}.g8' 2>/dev/null; rm -f '{config}' && cp \"$TMPDIR/g8-keep\" '{config}'"),
+        format!(": > '{config}.tmp'"),
+        format!("ln -s /tmp/g8-elsewhere '{config}.tmp'"),
+        format!("ln '{config}' \"$TMPDIR/g8-link\""),
+    ]
+    .iter()
+    .enumerate()
+    .map(|(way, command)| format!("( {command} ) >/dev/null 2>&1 && echo 'OK {way}' || echo 'DENIED {way}'"))
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+/// Asserts every way in `output` was denied, and config.json is as it was.
+fn none_wrote(who: &str, output: &str, config: &Path, before: &[u8]) {
+    let wrote: Vec<&str> = output.lines().filter(|line| line.starts_with("OK ")).collect();
+    assert!(wrote.is_empty() && output.lines().filter(|line| line.starts_with("DENIED ")).count() == 7, "{who} wrote config.json: {output}");
+    assert_eq!(std::fs::read(config).expect("config.json is there"), before, "{who} changed config.json");
+    assert!(!config.with_file_name("config.json.tmp").exists(), "{who} planted config.json.tmp");
+}
+
+/// A contained site with the vault's secret.
+async fn g8_contained() -> (PathBuf, PathBuf, SocketAddr, std::sync::Arc<factoryd::Factory>, Client, View) {
+    let (dir, user, addr, factory, mut client, mut view) = contained_site().await;
+    a_secret(&mut client, &mut view).await;
+    (dir, user, addr, factory, client, view)
+}
+
+/// What a command of Ana's that writes "x" through `link` leaves in
+/// config.json, against `before`.
+async fn through_link(client: &mut Client, view: &mut View, config: &Path, link: &Path, before: &[u8], when: &str) {
+    ana_runs(client, view, &format!("printf x >> '{}'", link.display())).await;
+    assert_eq!(std::fs::read(config).expect("config.json"), before, "written through a hard link made {when}");
+}
+
+/// G8: an agent that isn't an admin can't write this Claktory's config.json
+/// in any way: rewrite, rename over, rm and recreate, factoryd's temp name
+/// (empty or a symlink), or a hard link made from inside.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "D"]
+async fn a_non_admins_commands_cant_write_config_json() {
+    let (dir, _user, _addr, _factory, mut client, mut view) = g8_contained().await;
+    let config = home(&dir).root().join("config.json");
+    let before = std::fs::read(&config).expect("config.json");
+    let output = ana_runs(&mut client, &mut view, &format!("cp '{}' \"$TMPDIR/g8-keep\"\n{}", config.display(), config_writes(&config))).await;
+    none_wrote("Ana", &output, &config, &before);
+    let given = gives(&mut client, &mut view, "ana", "bo").await;
+    assert!(!given.starts_with("Gave"), "{given}");
+}
+
+/// G8: nor with its file tools, which read the same flag per call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "D"]
+async fn a_non_admins_file_tools_cant_write_config_json() {
+    let (dir, _user, _addr, _factory, mut client, mut view) = g8_contained().await;
+    let config = home(&dir).root().join("config.json");
+    let before = std::fs::read(&config).expect("config.json");
+    let name = view.workspace.settings.as_ref().map(|settings| settings.name.clone()).unwrap_or_default();
+    let write = serde_json::json!({"path": config, "content": "{}\n"});
+    crate::pipes::call(&mut client, &mut view, "ana", "write_file", &write.to_string()).await;
+    let edit = serde_json::json!({"path": config, "edits": [{"oldText": format!("\"{name}\""), "newText": "\"Edited\"", "replaceAll": null}]});
+    crate::pipes::call(&mut client, &mut view, "ana", "edit_file", &edit.to_string()).await;
+    assert_eq!(std::fs::read(&config).expect("config.json"), before, "Ana's file tools changed config.json");
+}
+
+/// G8: holding the Claktory manual doesn't make the file writable (D said
+/// "admin and manual agents"; now admins only, Ghiaccio 46021).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "D"]
+async fn an_agent_with_the_manual_that_isnt_an_admin_cant_write_config_json() {
+    let (dir, _user, _addr, _factory, mut client, mut view) = g8_contained().await;
+    let manual = v1::ExtensionChange { id: "memory:factory".into(), enabled: Some(true), ..Default::default() };
+    let on = client_message::Body::UpdateAgent(v1::UpdateAgent { agent_id: "ana".into(), extension: Some(manual), ..Default::default() });
+    assert!(matches!(apply_request(&mut client, &mut view, on).await, Body::Ack(_)));
+    let config = home(&dir).root().join("config.json");
+    let before = std::fs::read(&config).expect("config.json");
+    let output = ana_runs(&mut client, &mut view, &format!("cp '{}' \"$TMPDIR/g8-keep\"\n{}", config.display(), config_writes(&config))).await;
+    none_wrote("Ana, with the manual", &output, &config, &before);
+    let write = serde_json::json!({"path": config, "content": "{}\n"});
+    crate::pipes::call(&mut client, &mut view, "ana", "write_file", &write.to_string()).await;
+    assert_eq!(std::fs::read(&config).expect("config.json"), before, "Ana's write_file changed config.json");
+}
+
+/// G8: an admin still sets Claktory up with no card: Rivet's edit makes Ana
+/// an admin at once, and she can give.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "D"]
+async fn an_admins_edit_still_makes_an_agent_an_admin_at_once() {
+    let (dir, _user, _addr, _factory, mut client, mut view) = g8_contained().await;
+    rivet_runs(&mut client, &mut view).await;
+    edit_config(&mut client, &mut view, &dir, "rivet", ANA_ADMIN, "Set up").await;
+    view.follow(&mut client, |view| admin_shown(view, "ana")).await;
+    let given = gives(&mut client, &mut view, "ana", "bo").await;
+    assert!(given.starts_with("Gave"), "Ana, made an admin by Rivet, can't give: {given}");
+}
+
+/// G8: the write follows the agent's admin at spawn: once the person turns
+/// Rivet's admin off in the app, its next command can't write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "D"]
+async fn a_demoted_admins_next_command_cant_write_config_json() {
+    let (dir, _user, _addr, _factory, mut client, mut view) = g8_contained().await;
+    rivet_runs(&mut client, &mut view).await;
+    edit_config(&mut client, &mut view, &dir, "rivet", "pass", "Rivet can").await;
+    assert!(matches!(apply_request(&mut client, &mut view, admin_from_app("rivet", false)).await, Body::Ack(_)));
+    view.follow(&mut client, |view| !admin_shown(view, "rivet")).await;
+    let config = home(&dir).root().join("config.json");
+    let before = std::fs::read(&config).expect("config.json");
+    let script = format!("cp '{}' \"$TMPDIR/g8-keep\"\n{}", config.display(), config_writes(&config));
+    let output = crate::pipes::call(&mut client, &mut view, "rivet", "bash", &serde_json::json!({"command": script}).to_string()).await;
+    none_wrote("Rivet, no longer an admin", &output, &config, &before);
+}
+
+/// G8: the person's own way stays immediate: the app's agent settings make
+/// Bo an admin at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "D"]
+async fn the_apps_agent_settings_still_make_an_admin_at_once() {
+    let (_dir, _user, _addr, _factory, mut client, mut view) = g8_contained().await;
+    assert!(matches!(apply_request(&mut client, &mut view, admin_from_app("bo", true)).await, Body::Ack(_)));
+    view.follow(&mut client, |view| admin_shown(view, "bo")).await;
+    let given = gives(&mut client, &mut view, "bo", "ana").await;
+    assert!(given.starts_with("Gave"), "Bo, made an admin in the app, can't give: {given}");
+}
+
+/// G8 (Fugo 46025, 3): nothing but config.json makes an agent an admin:
+/// uncontained, Ana writes admin into files of her own folder and rows of
+/// every settings table in factory.db, and still isn't one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "D"]
+async fn nothing_but_config_json_makes_an_agent_an_admin() {
+    let (dir, _addr, _factory, mut client, mut view) = site().await;
+    a_secret(&mut client, &mut view).await;
+    let own = home(&dir).root().join("agents/ana");
+    let db = home(&dir).root().join("factory.db");
+    let script = format!(
+        "mkdir -p '{own}' && printf '{{\"admin\": true, \"extensions\": {{\"agents\": {{\"admin\": true}}}}}}' > '{own}/config.json' && printf 'true' > '{own}/admin'\npython3 - <<'PY'\nimport sqlite3\ndb = sqlite3.connect('{db}')\ntables = [row[0] for row in db.execute(\"SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE '%settings%'\")]\nfor table in tables:\n    cols = [row[1] for row in db.execute(f'PRAGMA table_info({{table}})')]\n    for key in ['admin', 'agents.admin', 'ana.admin', 'agents.ana.admin']:\n        try:\n            db.execute(f'INSERT OR REPLACE INTO {{table}} ({{cols[0]}}, {{cols[1]}}) VALUES (?, ?)', (key, 1))\n        except Exception:\n            pass\ndb.commit()\nprint('PLANTED', len(tables))\nPY",
+        own = own.display(),
+        db = db.display()
+    );
+    let planted = ana_runs(&mut client, &mut view, &script).await;
+    assert!(planted.contains("PLANTED"), "{planted}");
+    let given = gives(&mut client, &mut view, "ana", "bo").await;
+    assert!(!given.starts_with("Gave"), "Ana's own files or factory.db made her an admin: {given}");
+    assert!(!admin_shown(&view, "ana"));
+}
+
+/// G8 (Bruno 46017, Fugo 46029): only this Claktory's own config.json is
+/// denied: another home's (a qa.sh sandbox, the dev Claktory) stays
+/// writable for an agent that isn't an admin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "D"]
+async fn another_homes_config_json_stays_writable() {
+    let (dir, _user, _addr, _factory, mut client, mut view) = g8_contained().await;
+    let sandbox = dir.join("site/sandboxes/qa/home/config.json");
+    std::fs::create_dir_all(sandbox.parent().expect("its folder")).expect("a sandbox home");
+    std::fs::write(&sandbox, "{\"name\": \"Sandbox\"}\n").expect("its config.json");
+    let script = format!(
+        "python3 -c \"import json; p='{0}'; c=json.load(open(p)); c['name']='Edited'; json.dump(c, open(p, 'w'))\" && echo SANDBOX-OK || echo SANDBOX-DENIED",
+        sandbox.display()
+    );
+    let output = ana_runs(&mut client, &mut view, &script).await;
+    assert!(output.contains("SANDBOX-OK"), "a sandbox's config.json isn't writable: {output}");
+    assert!(std::fs::read_to_string(&sandbox).expect("read").contains("Edited"));
+}
+
+/// G8 (Ghiaccio 46032): a hard link to config.json made before containment
+/// writes nothing to it: factoryd gives config.json a new inode when it
+/// turns containment on, and at a start that finds it linked (nlink > 1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "D"]
+async fn a_hard_link_made_before_containment_writes_nothing_to_config_json() {
+    let dir;
+    let user;
+    {
+        let (made, _addr, factory, mut client, mut view) = site().await;
+        dir = made;
+        user = dir.join("user");
+        std::fs::create_dir_all(user.join("Library/LaunchAgents")).expect("the person's home");
+        for file in DENIED_READS {
+            let path = home(&dir).root().join(file);
+            if !path.exists() {
+                std::fs::create_dir_all(path.parent().expect("a folder")).expect("its folder");
+                std::fs::write(&path, "seeded by the test\n").expect("seed");
+            }
+        }
+        let config = home(&dir).root().join("config.json");
+        // Made while containment was off, as any command could.
+        let early = dir.join("site/early-link.json");
+        std::fs::hard_link(&config, &early).expect("a hard link");
+        set_user_home(&factory, &user);
+        set_sandbox_executable(&factory);
+        contain(&mut client, &mut view).await;
+        contained(&mut client, &mut view, &dir).await;
+        let before = std::fs::read(&config).expect("config.json");
+        through_link(&mut client, &mut view, &config, &early, &before, "before containment was turned on").await;
+    }
+    // One made by something outside while Claktory was stopped, found at
+    // the next start.
+    let config = home(&dir).root().join("config.json");
+    let late = dir.join("site/late-link.json");
+    std::fs::hard_link(&config, &late).expect("a hard link");
+    let (addr, factory) = start(&dir).await;
+    set_user_home(&factory, &user);
+    set_sandbox_executable(&factory);
+    let (mut client, mut view) = person(addr, &factory).await;
+    contained(&mut client, &mut view, &dir).await;
+    let before = std::fs::read(&config).expect("config.json");
+    through_link(&mut client, &mut view, &config, &late, &before, "while Claktory was stopped").await;
 }

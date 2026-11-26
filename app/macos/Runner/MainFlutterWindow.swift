@@ -62,6 +62,14 @@ class MainFlutterWindow: NSWindow {
     // The keys of end-to-end direct messages, in the data-protection
     // keychain (DmKeys.swift).
     DmKeys.register(with: flutterViewController.engine.binaryMessenger)
+    // This Mac's account key once its own Claktory signed the app in (#529):
+    // kept as a phone's, in the data-protection keychain, this device only.
+    DmKeys.register(
+      with: flutterViewController.engine.binaryMessenger,
+      store: DmKeyStore(
+        group: DmKeyStore.entitledGroup(), dataProtection: true,
+        service: "com.claktory.account-key"),
+      channel: "factory/account-key")
     // The system's notifications, and whether the person is using the app
     // (Notifications.swift).
     Notifications.register(with: flutterViewController.engine.binaryMessenger, window: self)
@@ -636,17 +644,39 @@ class MainFlutterWindow: NSWindow {
     return (urls ?? []).map(\.path)
   }
 
+  /// Where the drag is, in the app's own coordinates (points from the
+  /// window's content's top left), so a card under it takes what's dropped
+  /// even when its field doesn't have the keys (#511).
+  private func dragPoint(_ sender: NSDraggingInfo) -> [String: Double] {
+    guard let view = contentView else { return [:] }
+    let point = view.convert(sender.draggingLocation, from: nil)
+    let y = view.isFlipped ? point.y : view.bounds.height - point.y
+    return ["x": Double(point.x), "y": Double(y)]
+  }
+
+  /// Where the drag was last said to be, so a still pointer says nothing.
+  private var lastDragPoint: [String: Double] = [:]
+
   @objc func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
     let count = files(in: sender).count
     guard count > 0 else { return [] }
-    // How many, for the window's drop overlay to say: where they'd go, or
-    // why they can't go anywhere here (app/lib/drop.dart).
-    windowChannel?.invokeMethod("filesOver", arguments: count)
+    // How many and where, for the window's drop overlay to say: where
+    // they'd go, or why they can't go anywhere here (app/lib/drop.dart).
+    lastDragPoint = dragPoint(sender)
+    windowChannel?.invokeMethod(
+      "filesOver", arguments: (["count": count] as [String: Any]).merging(lastDragPoint) { a, _ in a })
     return takesFiles ? .copy : []
   }
 
   @objc func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-    takesFiles && !files(in: sender).isEmpty ? .copy : []
+    let count = files(in: sender).count
+    let point = dragPoint(sender)
+    if count > 0 && point != lastDragPoint {
+      lastDragPoint = point
+      windowChannel?.invokeMethod(
+        "filesOver", arguments: (["count": count] as [String: Any]).merging(point) { a, _ in a })
+    }
+    return takesFiles && count > 0 ? .copy : []
   }
 
   @objc func draggingExited(_ sender: NSDraggingInfo?) {
@@ -659,7 +689,8 @@ class MainFlutterWindow: NSWindow {
       windowChannel?.invokeMethod("filesOver", arguments: 0)
       return false
     }
-    windowChannel?.invokeMethod("filesDropped", arguments: paths)
+    windowChannel?.invokeMethod(
+      "filesDropped", arguments: (["paths": paths] as [String: Any]).merging(dragPoint(sender)) { a, _ in a })
     return true
   }
 
@@ -724,8 +755,9 @@ class MainFlutterWindow: NSWindow {
 /// The share menu for files on this Mac (`shareFiles` on factory/device):
 /// `paths`, pointing at `rect` (the Share button or row, in the Flutter
 /// view's points from its top left). Answers true once a service shared
-/// them, false if the person closed the menu or the service failed; the
-/// app deletes the files then.
+/// them, false if the person closed the menu or the service failed (the
+/// app deletes the files then), and an "unavailable" error when the menu
+/// can't open: no file left, or no window to show it on.
 final class ShareFiles: NSObject, NSSharingServicePickerDelegate, NSSharingServiceDelegate {
   /// The share showing now, kept until it answers.
   private static var current: ShareFiles?
@@ -734,7 +766,17 @@ final class ShareFiles: NSObject, NSSharingServicePickerDelegate, NSSharingServi
   static func show(_ args: [String: Any], in view: NSView, _ result: @escaping FlutterResult) {
     let urls = (args["paths"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
       .filter { FileManager.default.fileExists(atPath: $0.path) }
-    guard !urls.isEmpty, view.window != nil else { return result(false) }
+    // Saying why, rather than a false the app would read as the person
+    // closing it (Matt's History video, Bruno 44170).
+    guard !urls.isEmpty else {
+      return result(
+        FlutterError(code: "unavailable", message: "the file is no longer there.", details: nil))
+    }
+    guard view.window != nil else {
+      return result(
+        FlutterError(
+          code: "unavailable", message: "Claktory's window isn't open.", details: nil))
+    }
     current?.answer(false)
     let share = ShareFiles()
     share.result = result

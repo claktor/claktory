@@ -12,6 +12,8 @@ import 'changelog.dart';
 import 'chats.dart' show ChatView, selectedChat;
 import 'claktory_identity.dart' show claktoryName;
 import 'connections.dart';
+import 'history/export_job.dart' show ReplayJobBanner;
+import 'inbox.dart' show InboxView;
 import 'links.dart' show confirmPairing;
 import 'controls.dart';
 import 'conversation_versions.dart' show showVersions;
@@ -36,7 +38,17 @@ import 'mobile/local_network.dart' show connectNewClaktory;
 import 'mobile/metrics.dart' show PhoneType, TypeScale, withoutInsets;
 import 'mobile/navigation.dart';
 import 'mobile/page_find.dart';
+import 'mobile/device_permissions.dart' show CameraPermission;
+import 'mobile/permission.dart'
+    show
+        PermissionAccess,
+        PermissionContent,
+        PermissionFlow,
+        PermissionWayOut,
+        registerPermissionHost;
 import 'mobile/platform_policy.dart';
+import 'mobile/needs_you_phone.dart' show PhoneNeedsYou;
+import 'mobile/quick_actions.dart' show PhoneQuickActions;
 import 'mobile/review_bar.dart';
 import 'mobile/share.dart' show globalRectOf, shareText;
 import 'mobile/presentation.dart'
@@ -46,6 +58,8 @@ import 'pasted_code.dart';
 import 'panes.dart' show AppPane, appKind, pageOfKind, paneGlyph, paneTitle;
 import 'pipes.dart' show PipeView, selectedPipe;
 import 'protocol/factory/v1/factory.pb.dart';
+import 'rail.dart'
+    show ClaktoriesBackStrip, ClaktoriesScope, confirmRemoveClaktory;
 import 'scanner.dart';
 import 'screens.dart' show ScreenOpener;
 import 'scope.dart';
@@ -53,7 +67,6 @@ import 'settings_view.dart';
 import 'shell.dart' show NoAgentView, turnedAway;
 import 'pane_chrome.dart';
 import 'viewers/registry.dart';
-import 'inbox.dart' show InboxView;
 import 'usage_view.dart';
 import 'your_claktories.dart';
 
@@ -71,8 +84,13 @@ class PhoneShell extends StatelessWidget {
   Widget build(BuildContext context) {
     // Over a Claktory's window the drawer is the list of Claktories'
     // (rail.dart), so it stays as Claktories switch; else its own.
-    if (PhoneDrawerHost.of(context) != null) return const _PhoneScreens();
-    return const PhoneDrawerHost(child: _PhoneScreens());
+    // The Home Screen's quick action opens Needs you here (#514).
+    if (PhoneDrawerHost.of(context) != null) {
+      return const PhoneQuickActions(child: _PhoneScreens());
+    }
+    return const PhoneDrawerHost(
+      child: PhoneQuickActions(child: _PhoneScreens()),
+    );
   }
 }
 
@@ -108,6 +126,13 @@ class _Entry {
   final Completer<Object?>? done;
 }
 
+/// How many phone layouts are up (an iPad's windows can each be one).
+var _phoneScreensUp = 0;
+
+/// Whether the app is laid out as on a phone now, for what decides
+/// outside the widgets (a tapped notification, notifications.dart).
+bool get phoneLayoutShowing => _phoneScreensUp > 0;
+
 class _PhoneScreens extends StatefulWidget {
   const _PhoneScreens();
 
@@ -142,6 +167,17 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
   /// as it goes down.
   String? _panelAgent;
 
+  /// Stops this screen being where a permission asked for away from any
+  /// screen shows (notifications after the first pairing).
+  late final VoidCallback _unhostPermissions;
+
+  @override
+  void initState() {
+    super.initState();
+    _unhostPermissions = registerPermissionHost(context);
+    _phoneScreensUp++;
+  }
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -166,6 +202,8 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
 
   @override
   void dispose() {
+    _phoneScreensUp--;
+    _unhostPermissions();
     if (_attached) _host?.detach(this);
     _opened?.removeListener(_toFront);
     _page?.removeListener(_pageChanged);
@@ -233,24 +271,30 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
       _gone(entry);
     }
     if (id == null || _stack.any((entry) => entry.id == id)) return;
-    _stack.add(
-      _Entry(
-        id: id,
-        // Their fields (a reply, an answer) stay above the keyboard.
-        overKeyboard: page == AppPage.settings || page == AppPage.inbox,
-        builder: (context) => switch (page) {
-          AppPage.settings => const SettingsView(),
-          AppPage.marketplace => const MarketplaceView(),
-          AppPage.changelog => const ChangelogView(),
-          AppPage.map => const MapView(),
-          AppPage.usage => const UsageView(),
-          AppPage.monitors => const MonitorsOverview(),
-          AppPage.inbox => const InboxView(),
-          AppPage.agent => const SizedBox.shrink(),
-        },
-      ),
-    );
+    _stack.add(_pageEntry(page));
   }
+
+  /// [page]'s place on the stack, over the conversation.
+  _Entry _pageEntry(AppPage page) => _Entry(
+    id: 'page:${page.name}',
+    // Their fields (a reply, an answer) stay above the keyboard.
+    overKeyboard: page == AppPage.settings || page == AppPage.inbox,
+    builder: (context) => switch (page) {
+      AppPage.settings => const SettingsView(),
+      AppPage.marketplace => const MarketplaceView(),
+      AppPage.changelog => const ChangelogView(),
+      AppPage.map => const MapView(),
+      AppPage.usage => const UsageView(),
+      AppPage.monitors => const MonitorsOverview(),
+      // On an iPhone (and a narrow iPad), focus mode itself, one card a
+      // screen (#514 §7); Android keeps its list until its own design.
+      AppPage.inbox =>
+        defaultTargetPlatform == TargetPlatform.iOS
+            ? const PhoneNeedsYou()
+            : const InboxView(),
+      AppPage.agent => const SizedBox.shrink(),
+    },
+  );
 
   /// [entry] went, by Back, a swipe or from here: what it showed closes.
   void _gone(_Entry entry, [Object? result]) {
@@ -525,6 +569,14 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
       if (_workbenchFocus != null) _pageOfPane = page;
       return;
     }
+    // A project's Files pane (beside the conversation on a Mac or a wide
+    // iPad) is the phone's Files page here, as the drawer's ⋯ → Files
+    // opens it, never a viewer that can't show it (#540, Sale): Back goes
+    // to the conversation and leaves the pane in the layout.
+    if (pane != null && pane.leaf.kind == 'files') {
+      showFiles(pane.leaf.path);
+      return;
+    }
 
     setState(() {
       _stack.removeWhere((entry) => entry.id.startsWith('viewer:'));
@@ -596,6 +648,19 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
       focus.focusedIn(agent.id, layoutOf(agent)),
     );
     if (routes.length < 2) return;
+    // A page's pane (the Map beside the conversation) is its page here,
+    // in front from this very frame: a frame of the conversation alone
+    // would let the pane's page go, and with it where it was (Sale's row
+    // 149). The page's value follows after the frame, as it can't change
+    // in a build.
+    final pane = find(layoutOf(agent), routes.last);
+    final page = pane == null ? null : pageOfKind(pane.leaf.kind);
+    if (page != null) {
+      _pageOfPane = page;
+      if (!_stack.any((entry) => entry.id == 'page:${page.name}')) {
+        _stack.add(_pageEntry(page));
+      }
+    }
     _soon(() => _showViewer(agent.id, routes.last));
   }
 
@@ -691,21 +756,32 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
         backend.pairing,
         backend.connected,
         backend.signInRequired,
+        backend.otherAccount,
       ]),
       builder: (context, _) {
         if (scope.connections.current == null && !backend.localBackend) {
           _soon(_detach);
           return const _Screen(overKeyboard: true, child: PairScreen());
         }
+        // Another account's Claktory (#529, S4): what it said, before any
+        // sign-in.
+        if (backend.otherAccount.value != null) {
+          _soon(_detach);
+          return const _Screen(backStrip: true, child: OtherAccountView());
+        }
         final waiting = scope.connections.current;
         // Let in only once this phone's signed in to the account.
         if (backend.signInRequired.value != null && waiting != null) {
           _soon(_detach);
+          // ‹ Claktories over it, to the others, which this one doesn't
+          // block (Zucchero row 647); giving up on one found through the
+          // account asks first, as Remove… does everywhere.
           return _Screen(
             overKeyboard: true,
+            backStrip: true,
             child: SignInRequiredView(
               onCancel: waiting.fromAccount
-                  ? () => scope.connections.forget(waiting)
+                  ? () => unawaited(_remove(context, waiting))
                   : null,
             ),
           );
@@ -714,6 +790,7 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
         if (backend.pairing.value != null && waiting != null) {
           _soon(_detach);
           return _Screen(
+            backStrip: true,
             child: PairingWaitView(
               onCancel: () => scope.connections.forget(waiting),
             ),
@@ -805,8 +882,9 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
           ],
         );
         // What the account needs from the person (a device to allow, this
-        // one to confirm) along the top, over whatever page is in front.
-        return DeviceBanners(child: screens);
+        // one to confirm), and a History video being made, along the top,
+        // over whatever page is in front.
+        return DeviceBanners(child: ReplayJobBanner(child: screens));
       },
     );
   }
@@ -928,11 +1006,16 @@ class _Screen extends StatelessWidget {
     required this.child,
     this.overKeyboard = false,
     this.edgeToEdge = false,
+    this.backStrip = false,
     this.find,
   });
 
   final Widget child;
   final bool overKeyboard;
+
+  /// "‹ Claktories" across its top, back to the list, when there's one
+  /// (a screen in place of a Claktory's, which mustn't hide the others).
+  final bool backStrip;
 
   /// The whole screen, its safe areas left in the [MediaQuery] for what's
   /// over the content ([_Entry.edgeToEdge]).
@@ -956,6 +1039,35 @@ class _Screen extends StatelessWidget {
       keyboard: overKeyboard,
       child: PhoneFindHost(key: find, child: child),
     );
+    final bottom = overKeyboard ? math.max(safe.bottom, keyboard) : safe.bottom;
+    if (backStrip) {
+      return ColoredBox(
+        color: Palette.of(context).canvas,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // The strip keeps clear of the status bar itself; where there's
+            // none (one Claktory), room for the status bar.
+            Stack(
+              children: [
+                SizedBox(height: safe.top),
+                const ClaktoriesBackStrip(),
+              ],
+            ),
+            Expanded(
+              child: Padding(
+                padding: EdgeInsets.only(
+                  left: safe.left,
+                  right: safe.right,
+                  bottom: bottom,
+                ),
+                child: inner,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     return ColoredBox(
       color: Palette.of(context).canvas,
       child: Padding(
@@ -963,12 +1075,24 @@ class _Screen extends StatelessWidget {
           left: safe.left,
           right: safe.right,
           top: safe.top,
-          bottom: overKeyboard ? math.max(safe.bottom, keyboard) : safe.bottom,
+          bottom: bottom,
         ),
         child: inner,
       ),
     );
   }
+}
+
+/// Removes [target] after the rail's own question, never without it; with
+/// no Claktory for it in the list, as it is.
+Future<void> _remove(BuildContext context, RemoteFactory target) async {
+  final found = ClaktoriesScope.of(context)?.all
+      .where((claktory) => claktory.target == target)
+      .firstOrNull;
+  if (found == null) {
+    return AppScope.scope(context).connections.forget(target);
+  }
+  await confirmRemoveClaktory(context, found);
 }
 
 /// What a project's row does on a phone: its Files open as a page of their
@@ -1247,22 +1371,48 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) _check();
   }
 
-  /// Finds out whether the camera may be used, asking the person ([ask])
-  /// when they haven't answered yet.
-  Future<void> _check({bool ask = false}) async {
+  /// Finds out whether the camera may be used, asking nothing: its screen
+  /// asks, after saying why ([_cameraPermission]).
+  Future<void> _check() async {
     if (!mounted) return;
-    final camera = AppScope.scope(context).camera;
-    var access = await camera.access();
-    if (!mounted) return;
-    if (ask && access == CameraAccess.undetermined) {
-      // Refused, it's asked again rather than assumed for good: Android
-      // can still ask after a first no (undetermined), and only a second
-      // one, or an iPhone's, sends the person to Settings (denied).
-      access = await camera.request()
-          ? CameraAccess.granted
-          : await camera.access();
-    }
-    if (mounted && access != _access) setState(() => _access = access);
+    final access = await AppScope.scope(context).camera.access();
+    if (!mounted || access == _access) return;
+    setState(() {
+      _access = access;
+      if (access != CameraAccess.undetermined &&
+          access != CameraAccess.denied) {
+        _cameraFlow = null;
+      }
+    });
+  }
+
+  /// The camera's permission, while its screen explains or says it's off.
+  PermissionFlow? _cameraFlow;
+
+  /// The camera's screen before it's allowed (area 5a, P7): the first time,
+  /// why, with Continue, which brings the system's prompt; refused, how to
+  /// turn it on, or paste the code instead.
+  Widget _cameraPermission(BuildContext context, CameraAccess access) {
+    final flow = _cameraFlow ??= PermissionFlow(
+      CameraPermission(AppScope.scope(context).camera),
+      from: access == CameraAccess.denied
+          ? PermissionAccess.denied
+          : PermissionAccess.undetermined,
+    );
+    return PermissionContent(
+      key: ObjectKey(flow),
+      flow: flow,
+      fill: true,
+      wayOut: PermissionWayOut(
+        'Paste code instead',
+        () => setState(() => _pasting = true),
+      ),
+      onDone: () {
+        // Allowed, or set aside: the screen follows the camera from here.
+        _cameraFlow = null;
+        unawaited(_check());
+      },
+    );
   }
 
   Future<void> _paste() async {
@@ -1353,18 +1503,15 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
           ),
         ],
       );
-    } else if (_pasting || access == CameraAccess.unavailable) {
-      body = _pasteForm(context, noCamera: access == CameraAccess.unavailable);
+    } else if (_pasting || _pasteOnly) {
+      body = _pasteForm(context, noCamera: _pasteOnly);
     } else if (access == CameraAccess.granted) {
       body = _scanner(context);
     } else if (access == CameraAccess.denied ||
-        access == CameraAccess.restricted) {
-      body = _cameraRefused(
-        context,
-        restricted: access == CameraAccess.restricted,
-      );
-    } else if (access == CameraAccess.undetermined) {
-      body = _scanFirst(context);
+        access == CameraAccess.undetermined) {
+      body = _cameraPermission(context, access!);
+    } else if (access == CameraAccess.restricted) {
+      body = _cameraRestricted(context);
     } else {
       // Finding out whether there's a camera.
       body = const SizedBox(height: 120);
@@ -1377,9 +1524,45 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
         ? 'start'
         : withAccount
         ? 'account'
-        : _pasting || access == CameraAccess.unavailable
+        : _pasting || _pasteOnly
         ? 'paste'
         : '$access';
+    // The camera's own screen says what it is: no heading over it.
+    final explains =
+        !start &&
+        !withAccount &&
+        !_pasting &&
+        !_pasteOnly &&
+        (access == CameraAccess.undetermined || access == CameraAccess.denied);
+    // The camera's own screen fills the height: its words in the middle,
+    // Continue at the foot, under the thumb (area 5a, P7).
+    if (explains) {
+      return Padding(
+        key: ValueKey(screen),
+        padding: const EdgeInsets.all(Space.xl),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (_backToStart)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: _BackButton(onBack: _toStart),
+                  ),
+                Expanded(child: body),
+                const SizedBox(height: Space.s),
+                _Link(
+                  'Sign in with your email instead',
+                  onTap: () => setState(() => _withAccount = true),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
     return Center(
       child: SingleChildScrollView(
         key: ValueKey(screen),
@@ -1400,23 +1583,22 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
               // Wraps between words, never inside one: at the largest text
               // size in a 320-point window (Slide Over) it's drawn just
               // small enough for "Claktory" to fit (Sale's #363 finding a).
-              FittedHeading(
-                'Connect to your Claktory',
-                style: TypeScale.of(context).title
-                    .copyWith(color: palette.text),
-              ),
+              if (!explains)
+                FittedHeading(
+                  'Connect to your Claktory',
+                  style: TypeScale.of(context).title
+                      .copyWith(color: palette.text),
+                ),
               if (start) ...[
                 const SizedBox(height: Space.s),
                 Text(
-                  defaultTargetPlatform == TargetPlatform.android
-                      ? 'Claktory runs on a Mac or a Linux server. Set it up '
-                            'there, then connect this $thisDeviceKind to it.'
-                      : 'Claktory runs on a Mac. Set it up there, then '
-                            'connect this $thisDeviceKind to it.',
+                  'Claktory runs on a Mac or a Linux server (or Windows, in '
+                  'preview). Set it up there, then connect this '
+                  '$thisDeviceKind to it.',
                   style: TypeScale.of(context).body
                       .copyWith(color: palette.textMuted),
                 ),
-              ] else if (!withAccount) ...[
+              ] else if (!withAccount && !explains) ...[
                 const SizedBox(height: Space.s),
                 Text(
                   _pasteOnly || _pasting
@@ -1437,7 +1619,7 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
                       .copyWith(color: palette.textMuted),
                 ),
               ],
-              const SizedBox(height: Space.xl),
+              SizedBox(height: explains ? Space.l : Space.xl),
               body,
               if (!withAccount && !start)
                 _Link(
@@ -1506,31 +1688,18 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _cameraRefused(BuildContext context, {required bool restricted}) {
+  /// Restrictions keep the camera off (Screen Time, a managed device):
+  /// Settings can't help, so pasting is the way.
+  Widget _cameraRestricted(BuildContext context) {
     final palette = Palette.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Text(
-          restricted
-              ? "The camera isn't available on this $thisDeviceKind. Paste "
-                    'the code instead.'
-              : defaultTargetPlatform == TargetPlatform.android
-              ? 'To scan, allow Claktory to use the camera in Settings.'
-              : 'To scan, allow camera access in Settings → Claktory.',
+          "The camera isn't available on this $thisDeviceKind. Paste the "
+          'code instead.',
           style: TypeScale.of(context).body.copyWith(color: palette.text),
         ),
-        const SizedBox(height: Space.l),
-        if (!restricted)
-          Align(
-            alignment: Alignment.centerRight,
-            child: Button(
-              label: 'Open Settings',
-              primary: true,
-              onPressed: () =>
-                  fireAndLog(AppScope.scope(context).camera.openSettings()),
-            ),
-          ),
         const SizedBox(height: Space.m),
         _Link(
           'Paste code instead',
@@ -1541,7 +1710,8 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
   }
 
   /// The first screen while this device has no Claktory (#363): Send me
-  /// the link, to set Claktory up on a Mac; then, for one already set up,
+  /// the link, to set Claktory up on a Mac or a Linux server (or Windows);
+  /// then, for one already set up,
   /// Sign in with your email first, and scanning or pasting a code.
   Widget _start(BuildContext context, {required bool camera}) {
     final palette = Palette.of(context);
@@ -1551,8 +1721,8 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
         _withAccount = account;
         _pasting = paste;
       });
-      // Straight to the camera, asked for now that the person chose it.
-      if (!account && !paste) unawaited(_check(ask: true));
+      // The camera's screen: why first, the first time (area 5a, P7).
+      if (!account && !paste) unawaited(_check());
     }
 
     return Column(
@@ -1564,10 +1734,8 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
             onPressed: () => unawaited(
               shareText(
                 button,
-                defaultTargetPlatform == TargetPlatform.android
-                    ? 'Set up Claktory on your Mac or Linux server: '
-                          '$downloadLink'
-                    : 'Set up Claktory on your Mac: $downloadLink',
+                'Set up Claktory on your Mac or Linux server (or Windows, in '
+                'preview): $downloadLink',
                 from: globalRectOf(button),
               ),
             ),
@@ -1594,21 +1762,6 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
       ],
     );
   }
-
-  /// Before the camera is asked for: the person starts it, so the system's
-  /// prompt comes when they expect it.
-  Widget _scanFirst(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    children: [
-      Button(
-        label: 'Scan code',
-        primary: true,
-        onPressed: () => _check(ask: true),
-      ),
-      const SizedBox(height: Space.m),
-      _Link('Paste code instead', onTap: () => setState(() => _pasting = true)),
-    ],
-  );
 
   Widget _pasteForm(BuildContext context, {required bool noCamera}) {
     final palette = Palette.of(context);

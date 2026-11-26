@@ -187,7 +187,7 @@ async fn the_map_shows_where_agents_are_whom_they_message_and_what_they_reach() 
     let secret = map.nodes.iter().find(|node| node.kind() == MapNodeKind::Secret).expect("the secret").clone();
     assert_eq!((secret.label.as_str(), secret.detail.as_str()), ("Cloudflare", "The claktory.com zone."));
     assert!(edges(&map, MapEdgeKind::Secret).is_empty(), "nobody has it yet");
-    let grant = v1::GrantSecret { id: secret.ref_id.clone(), agent_id: "sam".into(), proof: None };
+    let grant = v1::GrantSecret { id: secret.ref_id.clone(), agent_id: "sam".into(), proof: None, fill_only: false };
     let events = client.request(Request::GrantSecret(grant)).await.events;
     let map = last_workspace(&events).and_then(|workspace| workspace.map.clone()).expect("a new map");
     assert_eq!(edges(&map, MapEdgeKind::Secret), [(format!("secret:{}", secret.ref_id), "agent:sam".to_owned(), false)]);

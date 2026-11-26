@@ -6,7 +6,8 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import '../files_test.dart' show filesButtons, layoutsSent, snapshot;
+import '../files_test.dart'
+    show filesButtons, layoutsSent, snapshot, withFilesOf;
 import '../harness.dart';
 import 'as_ipad.dart';
 
@@ -67,5 +68,55 @@ void main() {
     await tester.tap(find.text('Files'));
     await pumpFrames(tester);
     _expectFilesOf(harness, 'p1');
+  });
+
+  testWidgets("the heading's Files button takes a finger's tap around it, "
+      'a finger tall and wide, looking as it did', (tester) async {
+    final harness = await _show(tester, const Size(1194, 834), focused: 'p1');
+    final button = tester.getRect(filesButtons());
+    expect(button.size, const Size(20, 20), reason: 'as it looks');
+    // 28 points before its middle and 11 below: off the glyph, within 44
+    // wide, which reaches back before it as the row ends 4 points after it
+    // (Sale, row 162).
+    await tester.tapAt(button.center + const Offset(-28, 11));
+    await pumpFrames(tester);
+    _expectFilesOf(harness, 'p1');
+  });
+
+  testWidgets("the Projects heading's + takes a finger's tap around it", (
+    tester,
+  ) async {
+    final harness = await _show(tester, const Size(1194, 834));
+    final plus = find.bySemanticsLabel('Ask Rivet to set it up').first;
+    final rect = tester.getRect(plus);
+    expect(rect.size, const Size(20, 20));
+    // At the row's end: all 44 before it, 32 before its middle.
+    await tester.tapAt(rect.center + const Offset(-32, 11));
+    await pumpFrames(tester);
+    // Rivet's conversation, the words waiting in its message box.
+    expect(
+      harness.backend.sent
+          .where((m) => m.hasSelectAgent())
+          .map((m) => m.selectAgent.agentId),
+      contains('rivet'),
+    );
+    // Rivet's highlight fades.
+    await tester.pump(const Duration(seconds: 6));
+  });
+
+  testWidgets('with a pointer alone (a Mac), only the button itself', (
+    tester,
+  ) async {
+    final harness = Harness(snapshot(layout: withFilesOf('p1'), focused: 'p1'));
+    await harness.show(tester, size: const Size(1194, 834));
+    await pumpFrames(tester);
+    final button = tester.getRect(filesButtons());
+    await tester.tapAt(button.center + const Offset(-18, 11));
+    await pumpFrames(tester);
+    expect(layoutsSent(harness), isEmpty);
+    expect(
+      harness.backend.highlights.glows.map((glow) => glow.key),
+      isNot(contains('pane:a1:f1')),
+    );
   });
 }

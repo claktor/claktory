@@ -1,6 +1,7 @@
 import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
+import 'card_answer.dart' show CardAnswer, PublishesAnswer;
 import 'claktory_identity.dart' show claktoryName;
 import 'controls.dart';
 import 'identity.dart';
@@ -59,11 +60,12 @@ class KeepAwakeCard extends StatefulWidget {
   State<KeepAwakeCard> createState() => _KeepAwakeCardState();
 }
 
-class _KeepAwakeCardState extends State<KeepAwakeCard> {
+class _KeepAwakeCardState extends State<KeepAwakeCard> with PublishesAnswer {
   var _busy = false;
   String? _failure;
 
-  Future<void> _answer(bool on) async {
+  /// [rethrowing] for focus mode's keys (#514): refused, it throws too.
+  Future<void> _answer(bool on, {bool rethrowing = false}) async {
     final backend = AppScope.of(context);
     setState(() {
       _busy = true;
@@ -73,14 +75,28 @@ class _KeepAwakeCardState extends State<KeepAwakeCard> {
       await backend.setKeepAwake(on);
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _failure = failure.message);
+      if (rethrowing) rethrow;
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
   @override
+  CardAnswer answerNow() => CardAnswer(
+    key: 'keepAwake',
+    docked: false,
+    yes: 'Keep it awake',
+    no: 'Let it sleep',
+    busy: _busy,
+    error: _failure,
+    onYes: _busy ? null : () => _answer(true, rethrowing: true),
+    onNo: _busy ? null : (_) => _answer(false, rethrowing: true),
+  );
+
+  @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    publishAnswer();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [

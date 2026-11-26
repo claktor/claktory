@@ -303,25 +303,7 @@ pub(crate) fn check(factory: &Arc<Factory>) {
 
 /// No admin agent can take it: Claktory notifies the person itself.
 fn tell_person(factory: &Factory, config: &Config, what: String) {
-    let settings = crate::notify::settings(factory);
-    let note = crate::notify::Note {
-        kind: v1::NotifyKind::Alert,
-        source: "host".to_owned(),
-        who: config.claktory_name(),
-        what,
-        tainted: false,
-        urgent: false,
-        mode: crate::notify::Mode::Default,
-        from_phone: false,
-        agent_id: String::new(),
-        pipe_id: String::new(),
-        chat_id: String::new(),
-        seq: 0,
-        device_id: String::new(),
-        waits: String::new(),
-        share_id: String::new(),
-    };
-    let delivered = crate::notify::deliver(factory, config, &settings, note);
+    let delivered = crate::notify::host_alert(factory, config, &what);
     tracing::info!(?delivered, "told the person about a newer model itself: no admin agent can take it");
 }
 

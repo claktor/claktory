@@ -615,6 +615,110 @@ async fn switching_accounts_takes_one_code() {
     assert_eq!(instance.count("SELECT COUNT(*) FROM accounts"), 2);
 }
 
+/// The service's record of the one Claktory: whether it's removed, whether
+/// its token was ended, and the backend keys retired (#524).
+fn signed_out_there(instance: &Instance) -> (i64, i64, i64) {
+    (
+        instance.count("SELECT count(*) FROM claktories WHERE revoked_at IS NOT NULL"),
+        instance.count("SELECT count(*) FROM claktories WHERE token_hash LIKE 'signed-out:%'"),
+        instance.count("SELECT count(*) FROM retired_backend_keys"),
+    )
+}
+
+/// #524: signing out ends the sign-in at the service too, so a copy of its
+/// token and backend key is worth nothing; the next sign-in, the same
+/// Claktory there, has a new backend key.
+#[tokio::test]
+async fn signing_out_tells_the_service_and_the_next_sign_in_has_a_new_key() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let key = || std::fs::read_to_string(dir.join("home/account/claktory.key")).unwrap_or_default();
+    let (addr, _factory) = open(&dir, &instance.url).await;
+    let (mut client, _, _) = Client::connect(addr).await;
+    sign_in(&mut client, &instance, "matt@example.com").await;
+    let signed_in_with = key();
+    let events = client.ok(Request::AccountSignOut(v1::AccountSignOut {})).await;
+    let state = account(last_workspace(&events).expect("workspace"));
+    assert_eq!((state.state(), state.problem.as_str()), (AccountState::SignedOut, ""), "told at once");
+    assert_eq!(signed_out_there(&instance), (1, 1, 1));
+    let saved = std::fs::read_to_string(dir.join("home/account/account.json")).expect("account.json");
+    assert!(saved.contains("\"signing_out\": []"), "nothing left to tell: {saved}");
+
+    instance.advance(61);
+    let workspace = sign_in(&mut client, &instance, "matt@example.com").await;
+    assert_eq!(account(&workspace).state(), AccountState::SignedIn);
+    assert_ne!(key(), signed_in_with, "a new backend key");
+    assert_eq!(instance.count("SELECT count(*) FROM claktories WHERE revoked_at IS NULL AND epoch = 2"), 1, "the same Claktory");
+}
+
+/// #524: signed out while the service can't be reached, it's signed out here
+/// at once, the app says the service will be told, and it's told when it can
+/// be: at the next start, or before signing in there again.
+#[tokio::test]
+async fn a_sign_out_the_service_cant_hear_is_told_when_it_can_be_reached() {
+    let dir = temp_dir();
+    let mut instance = Instance::start(&dir).await;
+    let told = "Signed out. Claktory tells 127.0.0.1 as soon as it can reach it.";
+    // Started again while it's down, so no connection to it is kept open.
+    let signed_out_while_down = async |instance: &Instance| {
+        instance.stop();
+        let (addr, factory) = open(&dir, &instance.url).await;
+        let (mut client, _, _) = Client::connect(addr).await;
+        let events = client.ok(Request::AccountSignOut(v1::AccountSignOut {})).await;
+        let state = account(last_workspace(&events).expect("workspace"));
+        assert_eq!((state.state(), state.problem.as_str()), (AccountState::SignedOut, told));
+        (factory, client)
+    };
+    {
+        let (addr, _factory) = open(&dir, &instance.url).await;
+        let (mut client, _, _) = Client::connect(addr).await;
+        sign_in(&mut client, &instance, "matt@example.com").await;
+    }
+    drop(signed_out_while_down(&instance).await);
+    assert_eq!(signed_out_there(&instance), (0, 0, 0));
+    // Started again, with the service back: told at once.
+    instance.restart().await;
+    let (addr, _factory) = open(&dir, &instance.url).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let workspace = until(&mut client, workspace, |workspace| account(workspace).problem.is_empty()).await;
+    assert_eq!(account(&workspace).state(), AccountState::SignedOut);
+    assert_eq!(signed_out_there(&instance), (1, 1, 1));
+
+    // Again, and this time signing in there tells it first.
+    instance.advance(61);
+    sign_in(&mut client, &instance, "matt@example.com").await;
+    drop(client);
+    drop(_factory);
+    // The same Claktory, which tried once at its start and waits a minute.
+    let (_factory, mut client) = signed_out_while_down(&instance).await;
+    instance.restart().await;
+    instance.advance(61);
+    let workspace = sign_in(&mut client, &instance, "ana@example.com").await;
+    let state = account(&workspace);
+    assert_eq!((state.state(), state.problem.as_str()), (AccountState::SignedIn, ""));
+    assert_eq!(instance.count("SELECT count(*) FROM retired_backend_keys"), 2);
+    assert_eq!(instance.count("SELECT count(*) FROM claktories"), 1, "the same Claktory, at ana's account");
+}
+
+/// #524: a backend key the service retired (back from a backup, say) is
+/// replaced by a new one when signing in, without the person noticing.
+#[tokio::test]
+async fn a_retired_backend_key_is_replaced_at_sign_in() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let path = dir.join("home/account/claktory.key");
+    let (addr, _factory) = open(&dir, &instance.url).await;
+    let (mut client, _, _) = Client::connect(addr).await;
+    sign_in(&mut client, &instance, "matt@example.com").await;
+    let backed_up = std::fs::read(&path).expect("the key");
+    client.ok(Request::AccountSignOut(v1::AccountSignOut {})).await;
+    std::fs::write(&path, &backed_up).expect("restored");
+    instance.advance(61);
+    let workspace = sign_in(&mut client, &instance, "matt@example.com").await;
+    assert_eq!(account(&workspace).state(), AccountState::SignedIn);
+    assert_ne!(std::fs::read(&path).expect("the key"), backed_up);
+}
+
 /// Moved to another computer (#217): at its first start there, a Claktory
 /// changes its token and backend key at the service, so the copy it moved
 /// from can't use them; its vault still opens with the same share.

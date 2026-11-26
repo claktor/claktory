@@ -121,6 +121,9 @@ pub enum RequestError {
     /// A monitor the agent doesn't have.
     #[error("{0}")]
     NoMonitor(String),
+    /// Access an agent can't give up (`crate::given_up`), and why.
+    #[error("{0}")]
+    GiveUp(String),
     #[error("no paired device \"{0}\"")]
     UnknownDevice(String),
     /// The code of an agent's pairing (ShowPairingCode) that no longer
@@ -250,6 +253,7 @@ impl RequestError {
             | RequestError::Command(_)
             | RequestError::Fork(_)
             | RequestError::Monitor(_)
+            | RequestError::GiveUp(_)
             | RequestError::Remote(_)
             | RequestError::Proposal(_)
             | RequestError::Ask(_)
@@ -317,6 +321,10 @@ pub struct AgentChange<'a> {
     pub fallback_model: Option<&'a str>,
     /// Whether it notifies the person (`crate::notify`).
     pub notify: Option<v1::NotifyMode>,
+    /// Who or what changed its model, and why, as the agent's "Your model is
+    /// now …" says it (friend bug #43): "Matt changed it on Matt's Mac".
+    /// None says only the model.
+    pub why: Option<&'a str>,
 }
 
 /// What a client starts from: the state now, and the events that follow it.
@@ -465,6 +473,9 @@ pub struct Factory {
     pub(crate) pipe_shares: crate::pipes::shares::State,
     /// The Map last recorded for History (#458).
     pub(crate) map_history: crate::history::record::Recorder,
+    /// What History's overview counted of the events, kept between
+    /// overviews (`crate::history::Kept`).
+    pub(crate) history: crate::history::Kept,
     /// Transcribes voice messages (`crate::speech::voice`).
     pub(crate) voices: crate::speech::voice::Voices,
     /// The person's chats (`crate::chats`).
@@ -498,6 +509,10 @@ pub struct Factory {
     /// Each device's connections, waiting for where it was reading
     /// (`crate::presentation`).
     pub(crate) presentations: crate::presentation::Hub,
+    /// The devices in Needs you's focus mode (#514).
+    pub(crate) focus_mode: crate::focus_mode::FocusMode,
+    /// The conversations connections watch without selecting them (#514).
+    pub(crate) watches: crate::watch::Hub,
     /// The backend's own diagnostic events, on their way to factory.db
     /// (`crate::diagnostics`).
     pub(crate) diagnostics: crate::diagnostics::Recorder,
@@ -534,6 +549,11 @@ pub(crate) struct Inner {
     /// Background tasks being stopped, by (agent, task): who stopped them
     /// (see `extensions::tasks`).
     pub(crate) stopping: HashMap<(String, String), String>,
+    /// Who or what last changed each agent's model, by agent id: the model
+    /// it changed to and why (`AgentChange::why`), for its "Your model is
+    /// now …" (friend bug #43). In memory only: after a restart the note
+    /// says only the model.
+    pub(crate) model_why: HashMap<String, (String, String)>,
 }
 
 /// A message waiting for an agent: one the person sent, or an event.
@@ -855,6 +875,7 @@ impl Factory {
             explorers: BTreeMap::new(),
             view: None,
             stopping: HashMap::new(),
+            model_why: HashMap::new(),
             agents: HashMap::new(),
         };
         let (events, _) = broadcast::channel(EVENT_BUFFER);
@@ -927,6 +948,7 @@ impl Factory {
             pipes: crate::pipes::Pipes::default(),
             pipe_shares: crate::pipes::shares::State::default(),
             map_history: crate::history::record::Recorder::default(),
+            history: crate::history::Kept::default(),
             voices: crate::speech::voice::Voices::new(),
             chats,
             usage_switches,
@@ -941,6 +963,8 @@ impl Factory {
             browser: crate::browser::Browser::default(),
             agent_browser: crate::browser_host::Host::default(),
             presentations: crate::presentation::Hub::default(),
+            focus_mode: crate::focus_mode::FocusMode::default(),
+            watches: crate::watch::Hub::default(),
             diagnostics: crate::diagnostics::Recorder::default(),
             unarchived: tokio::sync::Notify::new(),
             key_color,
@@ -962,6 +986,8 @@ impl Factory {
         crate::pipes::start(&factory);
         // History: the Map from before recording began, reconstructed once.
         crate::history::backfill::spawn(&factory.home);
+        // And its overview's counts, ahead of the first time it opens.
+        crate::history::spawn_warm(&factory);
         factory.watch_trial();
         factory.refresh_explorer().await;
         {
@@ -1005,6 +1031,8 @@ impl Factory {
         }
         tokio::spawn(crate::account::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::annotations::monitor(Arc::downgrade(&factory)));
+        // Review cards follow their file (Bruno 46189).
+        tokio::spawn(crate::review_watch::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::apps::monitor(Arc::downgrade(&factory)));
         tokio::spawn(crate::speech::model::check(Arc::downgrade(&factory)));
         tokio::spawn(crate::speech::voice::work(Arc::downgrade(&factory)));
@@ -1399,6 +1427,8 @@ impl Factory {
         crate::extensions::agents::provenance::forget(&self.store, id)?;
         crate::user_apps::forget(self, id)?;
         crate::apps::access::forget(&self.store, id)?;
+        crate::answered_on::forget(&self.store, id)?;
+        self.watches.gone(&crate::watch::agent_key(id));
         self.usage_switches.forget(&self.store, id);
         self.forget_presence(id)?;
         match tokio::fs::remove_dir_all(self.home.agent_dir(id)).await {
@@ -1466,6 +1496,8 @@ impl Factory {
             checklist,
             notification_change,
             when_app_quits,
+            resource_alerts_to_admins,
+            resource_alert_agents,
         } = request;
         // The sidebar's sections, folded or open: the workspace's UI state
         // (#249), not settings, so a fold alone leaves config.json alone.
@@ -1514,7 +1546,9 @@ impl Factory {
             && cache_ttl.is_none()
             && name.is_none()
             && color.is_none()
-            && default_fallback_model.is_none();
+            && default_fallback_model.is_none()
+            && resource_alerts_to_admins.is_none()
+            && resource_alert_agents.is_none();
         if only_folds {
             return Ok(());
         }
@@ -1551,6 +1585,32 @@ impl Factory {
             }
             if let Some(budget) = build_cache_gb {
                 config.resources.build_cache_gb = budget;
+            }
+            // Who hears the Resources alerts (friend bug #54).
+            if let Some(on) = resource_alerts_to_admins {
+                config.resources.alerts_to_admins = on;
+            }
+            if let Some(chosen) = &resource_alert_agents {
+                let mut ids: Vec<String> = Vec::new();
+                for id in chosen.agent_ids.iter().map(|id| id.trim()) {
+                    if config.agent(id).is_none() {
+                        return Err(RequestError::UnknownAgent(id.to_owned()));
+                    }
+                    if !ids.iter().any(|kept| kept == id) {
+                        ids.push(id.to_owned());
+                    }
+                }
+                // Chosen, it can look into what it hears: Resources goes on.
+                for agent in config.agents.iter_mut().filter(|agent| ids.contains(&agent.id)) {
+                    if !crate::extensions::enabled(agent, crate::extensions::resources::ID) {
+                        agent
+                            .extensions
+                            .entry(crate::extensions::resources::ID.to_owned())
+                            .or_default()
+                            .insert("enabled".to_owned(), serde_json::Value::Bool(true));
+                    }
+                }
+                config.resources.alert_agents = ids;
             }
             if let Some(name) = user_name {
                 config.user.name = name.trim().to_owned();
@@ -1687,6 +1747,15 @@ impl Factory {
     /// `crate::usage_switch` switches it with.
     pub(crate) async fn update_agent_keeping_switch(&self, id: &str, change: AgentChange<'_>) -> Result<(), RequestError> {
         let notify = change.notify;
+        // Why, before the agent can see the change; said only while its model
+        // is still the one this change gave it.
+        if let Some(model) = change.model {
+            let mut inner = self.lock();
+            match change.why {
+                Some(why) => inner.model_why.insert(id.to_owned(), (model.to_owned(), why.to_owned())),
+                None => inner.model_why.remove(id),
+            };
+        }
         self.edit_config(|config| {
             if let Some(project) = change.project
                 && !project.is_empty()
@@ -1710,6 +1779,8 @@ impl Factory {
                 fallback_model,
                 // Kept in factory.db, after the change (`crate::notify`).
                 notify: _,
+                // Kept above, before the change.
+                why: _,
             } = change;
             if let Some(extension) = extension {
                 // Errands only for an agent the person contained for them.
@@ -2083,6 +2154,10 @@ impl Factory {
                 tracing::error!(agent = %id, %error, "could not read proposals to connect services; decided ones show as pending")
             }
         }
+        // Which device each decided card was decided from (#514).
+        if let Err(error) = crate::answered_on::restore(&self.store, id, &mut transcript) {
+            tracing::error!(agent = %id, %error, "could not read which devices its cards were decided from");
+        }
         let mut inner = self.lock();
         let runtime = inner.agents.entry(id.to_owned()).or_default();
         runtime.used_ms = crate::transcript::now_ms();
@@ -2135,6 +2210,9 @@ impl Factory {
             let result = edit(&mut config)?;
             config.keep_colors(Some(&inner.config));
             config.follow_default_prompts();
+            // An agent deleted, moved out of its project or archived with
+            // it is unpinned (`crate::pins`).
+            config.prune_pins();
             config.validate()?;
             let text = config.to_json_keeping_form(self.home.root(), &read)?;
             self.apply_config(&mut inner, config);
@@ -2175,7 +2253,7 @@ impl Factory {
                 let before = self.lock().config.clone();
                 config.keep_colors(Some(&before));
             }
-            if config.follow_default_prompts() | colorless {
+            if config.follow_default_prompts() | config.prune_pins() | colorless {
                 self.save_filled_in(&text, config).await;
             }
         }
@@ -2192,6 +2270,13 @@ impl Factory {
                 }
                 for unknown in crate::extensions::unknown_settings(&config) {
                     tracing::warn!(%unknown, "config.json: ignoring an extension setting");
+                }
+                // A model written into config.json: the agent hears where it came from.
+                for agent in &config.agents {
+                    if inner.config.agent(&agent.id).is_some_and(|before| before.model != agent.model) {
+                        let why = "it was changed in Claktory's settings file".to_owned();
+                        inner.model_why.insert(agent.id.clone(), (agent.model.clone(), why));
+                    }
                 }
                 self.apply_config(&mut inner, config);
             }
@@ -2611,14 +2696,13 @@ impl Factory {
         }
         drop(sent);
         crate::chats::broadcast_queue(self, inner);
+        self.watches.queues(inner);
     }
 
     /// What waits for the selected agent, for clients.
     fn queued_of(&self, inner: &Inner) -> Option<v1::QueuedMessages> {
         let id = inner.state.selected_agent.as_deref()?;
-        let queue = inner.agents.get(id).map_or(&[][..], |runtime| &runtime.queue[..]);
-        let messages = queue.iter().map(queued_message).collect();
-        Some(v1::QueuedMessages { agent_id: id.to_owned(), messages })
+        Some(queued_for(inner, id))
     }
 
     /// Sends a transcript change to clients if the agent is the selected one.
@@ -2633,6 +2717,16 @@ impl Factory {
             Change::Delta { seq, .. } => *seq,
         };
         let revision = self.transcript_log.changed(agent_id, seq).unwrap_or_default();
+        // To connections watching it without selecting it (#514).
+        let key = crate::watch::agent_key(agent_id);
+        if self.watches.watched(&key) {
+            let agent_id = agent_id.to_owned();
+            let body = match &change {
+                Change::Entry(entry) => Body::Entry(v1::EntryUpdate { agent_id, entry: Some(entry.clone()) }),
+                Change::Delta { seq, text } => Body::Delta(v1::EntryDelta { agent_id, seq: *seq, text: text.clone() }),
+            };
+            self.watches.send(&key, body);
+        }
         if inner.state.selected_agent.as_deref() != Some(agent_id) {
             return;
         }
@@ -2714,6 +2808,15 @@ impl Factory {
             tracing::error!(%error, "could not read the checklist items waiting on the person");
             Default::default()
         });
+        // Its header's counts (area 4 §8.9).
+        let checklist_open = crate::extensions::checklist::open_counts(&self.store).unwrap_or_else(|error| {
+            tracing::error!(%error, "could not count the checklists' open items");
+            Default::default()
+        });
+        let tasks_running = self.store.running_counts().unwrap_or_else(|error| {
+            tracing::error!(%error, "could not count the running tasks");
+            Default::default()
+        });
         let switching = crate::usage_switch::view(self, inner);
         let pools_in_use = crate::usage_switch::pools_in_use(self, inner);
         for agent in &inner.config.agents {
@@ -2769,6 +2872,14 @@ impl Factory {
                 contained: self.pipes.errand_agent(&agent.id),
                 pipe_id: self.pipes.bound_pipe(&agent.id),
                 fallback_model: agent.fallback_model.clone(),
+                checklist_open: crate::extensions::enabled(agent, crate::extensions::checklist::ID)
+                    .then(|| checklist_open.get(&agent.id).copied())
+                    .flatten()
+                    .unwrap_or(0),
+                tasks_running: crate::extensions::enabled(agent, crate::extensions::tasks::ID)
+                    .then(|| tasks_running.get(&agent.id).copied())
+                    .flatten()
+                    .unwrap_or(0),
                 notify: crate::notify::settings(self).mode(&agent.id).to_proto().into(),
                 unread_copies: unread_copies.get(&agent.id).copied().unwrap_or_default(),
                 usage_wait_alternative: switching.alternative(&agent.id),
@@ -2813,8 +2924,11 @@ impl Factory {
         let (pipes, selected_pipe_id) = crate::pipes::view(self, inner);
         let (chats, selected_chat_id) = crate::chats::view(self, inner, &switching);
         let provider_waits = crate::provider_waits::view(inner, &agents, &chats);
+        let (alerts, alerts_unread) = self.notify.alerts.view(self);
         v1::Workspace {
             provider_waits,
+            alerts,
+            alerts_unread,
             os: std::env::consts::OS.to_owned(),
             map: Some(crate::map::build(config, &self.home, &vault, &apps)),
             apps,
@@ -2920,6 +3034,8 @@ impl Factory {
                 panel_width: config.display.panel_width,
                 zoom: config.display.zoom.iter().map(|(device, zoom)| (device.clone(), *zoom)).collect(),
                 file_cache: config.display.file_cache.clone(),
+                focus_mode: self.focus_mode.devices(self),
+                pinned_agents: config.pinned_agents.clone(),
                 user_name: config.user.name.clone(),
                 vault_unlock_minutes: config.vault.unlock_minutes,
                 idle_compaction: config.compaction.idle,
@@ -2937,6 +3053,8 @@ impl Factory {
                 notifications: Some(crate::notify::settings(self).to_proto()),
                 checklist: Some(crate::extensions::checklist::Times::read(&self.store).proto()),
                 when_app_quits: self.service.when_app_quits().into(),
+                resource_alerts_to_admins: config.resources.alerts_to_admins,
+                resource_alert_agents: crate::extensions::resources::hearers(config, &inner.models),
             }),
         }
     }
@@ -2995,6 +3113,7 @@ fn unreadable(id: &str, problem: Option<&TranscriptError>) -> v1::Transcript {
         kind: Some(v1::entry::Kind::Notice(notice)),
         reply: 0,
         replied_to: None,
+        answered_on: None,
     };
     v1::Transcript { agent_id: id.to_owned(), entries: vec![entry], has_earlier: false, ..Default::default() }
 }
@@ -3021,6 +3140,13 @@ pub(crate) fn queued_message(queued: &Queued) -> v1::QueuedMessage {
 }
 
 /// The agent's transcript as a snapshot sends it: its latest entries.
+/// What waits for agent `id`, for clients.
+pub(crate) fn queued_for(inner: &Inner, id: &str) -> v1::QueuedMessages {
+    let queue = inner.agents.get(id).map_or(&[][..], |runtime| &runtime.queue[..]);
+    let messages = queue.iter().map(queued_message).collect();
+    v1::QueuedMessages { agent_id: id.to_owned(), messages }
+}
+
 pub(crate) fn transcript_of(inner: &Inner, id: &str) -> Option<v1::Transcript> {
     let transcript = inner.agents.get(id)?.transcript.as_ref()?;
     let (entries, has_earlier) = transcript.recent();

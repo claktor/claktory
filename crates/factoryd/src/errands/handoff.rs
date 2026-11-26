@@ -19,9 +19,11 @@ use crate::transcript::now_ms;
 /// The tool that hands the person a moment on a card.
 pub(crate) const TOOL: &str = "errand_handoff";
 
-/// The tools whose result can be a handoff card: errand_handoff, and the
-/// steps that find a check that the visitor is a person.
-pub(crate) const TOOLS: [&str; 5] = [TOOL, "errand_read", "errand_act", "errand_navigate", "browser_download"];
+/// The tools whose result can be an errand's card: errand_handoff, the
+/// steps that find a check that the visitor is a person, and a fill that
+/// is the browser's first sign-in at an identity provider
+/// (`super::code::signed_in`).
+pub(crate) const TOOLS: [&str; 6] = [TOOL, "errand_read", "errand_act", "errand_navigate", "browser_download", super::fill::TOOL];
 
 /// The most characters of what the agent says the person should do.
 pub(crate) const WHAT_MAX: usize = 300;
@@ -50,6 +52,8 @@ pub(crate) fn heading(kind: v1::ErrandHandoffKind) -> &'static str {
         v1::ErrandHandoffKind::Agreement => "Your turn: an agreement to accept",
         v1::ErrandHandoffKind::Captcha => "Your turn: a check that you're a person",
         v1::ErrandHandoffKind::SignIn => "Your turn: sign in",
+        v1::ErrandHandoffKind::RecoveryCodes => "Your turn: recovery codes to save",
+        v1::ErrandHandoffKind::TwoStep => "Your turn: two-step sign-in",
         _ => "Your turn in the browser",
     }
 }
@@ -69,7 +73,7 @@ fn logged(kind: v1::ErrandHandoffKind) -> &'static str {
 
 /// Text from a page or an agent, made one plain line: control and
 /// invisible characters out, at most `max` characters.
-fn plain_line(text: &str, max: usize) -> String {
+pub(super) fn plain_line(text: &str, max: usize) -> String {
     let clean: String =
         text.chars().map(|c| if c.is_control() || factory_agent::text::hidden(c) { ' ' } else { c }).collect();
     clean.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(max).collect()
@@ -148,7 +152,7 @@ async fn hand_over(factory: &Arc<Factory>, agent: &str, kind: v1::ErrandHandoffK
         "{what}\n\nErrand: {}.{on} Show me opens the browser; press Done when you've finished, or Can't do this to end the errand.",
         errand.purpose
     );
-    let handoff = HandoffRow { kind: kind as i32, what: what.clone(), origin: origin.clone(), title, seq: 0, errand: errand.id.clone() };
+    let handoff = HandoffRow { kind: kind as i32, what: what.clone(), origin: origin.clone(), title, seq: 0, errand: errand.id.clone(), numeric: false, agreement: String::new() };
     let action = serde_json::to_string(&crate::card_actions::Action::Handoff { handoff: Box::new(handoff.clone()) })
         .map_err(|error| format!("Couldn't hand it over: {error}"))?;
     let id = {
@@ -183,6 +187,22 @@ pub(crate) fn in_details(details: &serde_json::Value) -> Option<v1::ErrandHandof
 /// The person answered handoff card `ask` of `agent`'s: Done (`done`), or
 /// Can't do this with `reason`.
 pub(crate) async fn answered(factory: &Arc<Factory>, agent: &str, handoff: &HandoffRow, done: bool, reason: &str) {
+    // A code card fills its field from the person's answer, an agreement
+    // card ticks its box (`super::code`).
+    let acts = handoff.kind == v1::ErrandHandoffKind::Code as i32
+        || (handoff.kind == v1::ErrandHandoffKind::Agreement as i32 && !handoff.agreement.is_empty());
+    if done && acts {
+        return Box::pin(super::code::answered(factory, agent, handoff, done, reason)).await;
+    }
+    // I saved them on a recovery-codes card (Keep in Secrets comes on its
+    // own request).
+    if done && handoff.kind == v1::ErrandHandoffKind::RecoveryCodes as i32 {
+        return Box::pin(super::code::codes_saved(factory, agent, handoff, None)).await;
+    }
+    // Approved two-step sign-in: the errand may turn it on there.
+    if done && handoff.kind == v1::ErrandHandoffKind::TwoStep as i32 {
+        return Box::pin(super::code::two_step_approved(factory, agent, handoff)).await;
+    }
     let person = factory.lock().config.person_capitalized().to_owned();
     let Some(errand) = factory.errands.get(&handoff.errand) else { return };
     if State::from_wire(errand.state) != State::PersonsTurn {

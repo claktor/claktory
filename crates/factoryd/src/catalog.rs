@@ -5,7 +5,9 @@
 //! none has (`factory_agent::providers::listing`). The last one fetched is
 //! kept in the home folder, so its models are there from the start, before
 //! the provider answers. Read every 12 hours while the provider is signed
-//! in, or now when the person asks (RefreshModels).
+//! in, or now when the person asks (RefreshModels), and when they look at
+//! the models or accounts (ProvidersShown) if it's more than 15 minutes old
+//! (friend bug #41).
 //!
 //! After each read, and as Claktory starts, a newer version of a model
 //! agents run on is announced to Rivet once (`crate::upgrades`, #404).
@@ -32,6 +34,11 @@ const REFRESH: Duration = Duration::from_secs(12 * 60 * 60);
 const CHECK: Duration = Duration::from_secs(10 * 60);
 /// How long after a fetch that failed it tries again by itself.
 const RETRY: Duration = Duration::from_secs(60 * 60);
+/// How old a list may be when the person looks at the models
+/// (ProvidersShown) before it's read again.
+const SHOWN: Duration = Duration::from_secs(15 * 60);
+/// How long after a failed read a look tries again.
+const SHOWN_RETRY: Duration = Duration::from_secs(60);
 
 pub(crate) const SCHEMA: &str = "
 -- Models added by their id, as their provider's list didn't have them
@@ -199,6 +206,22 @@ async fn fetch(factory: &Arc<Factory>, provider: &str) -> Result<(), String> {
         }
     }
     result.map(|_| ())
+}
+
+/// ProvidersShown (friend bug #41): the person looks at the models, so each
+/// signed-in provider's list read more than `SHOWN` ago is read again now,
+/// unless it's being read or a read failed within `SHOWN_RETRY`. Each read
+/// shows in Workspace as it goes.
+pub(crate) async fn shown(factory: &Arc<Factory>) {
+    let now = factory_agent::clock::now_ms();
+    for provider in providers(factory) {
+        let status = factory.catalog.status().get(&provider).cloned().unwrap_or_default();
+        let stale = now.saturating_sub(status.fetched_ms) >= SHOWN.as_millis() as u64;
+        let retry_due = status.failed_at.is_none_or(|at| at.elapsed() >= SHOWN_RETRY);
+        if stale && retry_due && !status.fetching && fetchable(factory, &provider) {
+            let _ = fetch(factory, &provider).await;
+        }
+    }
 }
 
 /// RefreshModels: reads the provider's list now (every fetchable one's for

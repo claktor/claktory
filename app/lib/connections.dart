@@ -330,7 +330,10 @@ class Connections extends ChangeNotifier {
   /// When the store itself can't be read, the Connections are empty and
   /// [readFailure] says why: nothing is written over the store until
   /// it's read after all or the person starts over ([startOver]).
-  static Future<Connections> load(ConnectionStorage storage) async {
+  static Future<Connections> load(
+    ConnectionStorage storage, {
+    AccountKeyVault vault = const AccountKeyVault(),
+  }) async {
     final StoredConnections kept;
     try {
       kept = await storage.read();
@@ -348,10 +351,15 @@ class Connections extends ChangeNotifier {
     final current = parse(kept.current);
     if (current != null && !saved.contains(current)) saved.add(current);
     bool known(String code) => saved.any((target) => target.code == code);
+    // A Mac signed in through its own Claktory keeps its account key in
+    // the keychain, apart (#529).
+    final vaulted = DeviceAccount.keyInVault(kept.account)
+        ? await vault.read()
+        : null;
     return Connections(storage, current, saved, {
       for (final MapEntry(:key, :value) in kept.keys.entries)
         if (known(key)) key: value,
-    }, DeviceAccount.kept(kept.account));
+    }, DeviceAccount.kept(kept.account, vaulted: vaulted));
   }
 
   final ConnectionStorage _storage;

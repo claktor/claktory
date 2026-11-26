@@ -764,6 +764,57 @@ in the same folder. The shell can't read through the provider either.
 
 Still owed: sending to real apps (Gmail, Messages, Drive) on a phone.
 
+### Take photo (Bruno 46437)
+
+The attach menu's Take photo, first in the menu, as on the iPhone. The app
+explains the camera before Android asks for it, using the shared
+permission sheet, so the choice goes back to the app before anything
+opens:
+
+- **`pickAttachments {camera: true, rect?}`:** only the message box's
+  and a card's paperclips pass `camera`. With it, on a phone with a
+  camera and a camera app, the menu starts with Take photo. Choosing it
+  closes the menu and fails the pick with `take_photo`.
+- **`takePhoto {rect?}`:** the app calls it once the camera is allowed.
+  It answers `[path]` or `[]` (cancelled, a camera app that wrote
+  nothing, or a second call while one is open). Its errors are
+  `camera_denied` (Android refuses an image capture intent to an app that
+  declares `CAMERA` without holding it), `camera_unavailable`, then
+  `too_large`, `no_space` and `copy_failed`. `rect` is ignored.
+- **How:** the phone's own camera app (`ACTION_IMAGE_CAPTURE`, found
+  through `<queries>`) writes to `cache/claktory-camera/<random>.jpg`
+  through `CameraFiles`. That is its own `FileProvider` and authority
+  (`.camera`, `res/xml/camera_paths.xml`), not exported, with a write
+  grant for that one address only, so it never reaches the files
+  `ShareFiles` serves.
+- **Once taken:** the app removes the JPEG's GPS tags (some camera apps
+  tag where a photo was taken; the iPhone's picture has none). A file
+  whose EXIF can't be written fails rather than going with its location.
+  It then moves the photo into the Attachments folder as
+  "Photo 2026-05-11 at 14.32.05.jpg", in local time. The app never reads
+  the camera app's own result data.
+- **When Android ends the app** while the camera app is up, the photo has
+  no one to answer. Its file goes with the sweep of files over a day old.
+
+Proof:
+- `PhotoCaptureTest` (JVM): the name, the sweep and the tag list.
+- `AttachmentCopiesTest` (JVM): adopt.
+- `PhotoCaptureTest` (instrumentation, API 36):
+  - the menu offers Take photo only when asked, and hands the choice back;
+  - a stand-in camera app writes a GPS-tagged photo through the address
+    it was handed (the `.camera` authority, a write grant, the address
+    in ClipData), and the result is one attachment with no GPS tags, the
+    rest of its EXIF kept, and the camera's file gone;
+  - cancelled and empty results answer `[]` and leave nothing behind;
+  - a second call answers `[]`;
+  - without the camera allowed, it answers `camera_denied`.
+- The emulator's own camera app, by hand (`-e camera_by_hand true`): a
+  75 KB photo was attached.
+
+Still owed:
+- a real phone's camera apps, including one that tags location;
+- a phone short of memory that ends the app mid-photo.
+
 While the release app is installed beside Claktory Dev on the same
 emulator, `factory://` has two handlers. Android then shows a chooser,
 so `WebLinksTest`'s pairing-code case can't pass. The chooser left open
@@ -1025,7 +1076,8 @@ on a phone, still owed for every item.
 
 | Channel | Android | iPhone's |
 |---|---|---|
-| `factory/device` `pickAttachments` | `AttachmentPicker.kt`: the menu (Choose photos or videos, Choose files, Paste image), the photo picker or `ACTION_OPEN_DOCUMENT`, copies in the cache, ≤ 2 GB each; no storage permission | `Attach` |
+| `factory/device` `pickAttachments` | `AttachmentPicker.kt`: the menu (Take photo when asked, Choose photos or videos, Choose files, Paste image), the photo picker or `ACTION_OPEN_DOCUMENT`, copies in the cache, ≤ 2 GB each; no storage permission | `Attach` |
+| `factory/device` `takePhoto` | `PhotoCapture.kt`: the phone's camera app through `ACTION_IMAGE_CAPTURE` into `CameraFiles` (write grant, one address), GPS tags removed, moved into the Attachments folder | `Attach` |
 | `factory/recorder` (+`/events`) | `VoiceRecorder.kt`: `MediaRecorder`, AAC in .m4a, 16 kHz mono, 32 kbps, ten minutes; audio focus; a call or leaving the screen interrupts, keeping the file | `Recorder.swift` |
 | `factory/audio` (+`/events`) | `AudioPlayback.kt`: `MediaPlayer`, transient audio focus; a call, unplugged headphones or leaving the screen pause | `AudioPlayer.swift` |
 | `claktory/video` | `VideoPlayback.kt`: `MediaPlayer` into a `SurfaceProducer` texture; the file's turn reported as `quarterTurns` unless the texture turns frames itself | `VideoPlayers.swift` |

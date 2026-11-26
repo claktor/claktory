@@ -25,15 +25,19 @@
 //! folder tagged as a cache (CACHEDIR.TAG). Never one git tracks a file in,
 //! and never anything else git ignores (.env files, local data).
 //!
-//! Nothing is cleared while something works there: an agent of the folder
-//! running a tool call, or with a background task or watch running, a cache
-//! written in the last few minutes, or a Rust build holding its lock. An
-//! agent that's working but between steps (waiting on its model) doesn't
-//! hold it for a trim: busy agents are seldom idle, and their caches grow
-//! most. A whole cache waits until its agents are idle, since its next
-//! build is cold. The last checks, the trim and the clearing itself happen
-//! under Factory's lock, which a tool call's start takes before the tool
-//! runs, so none starts in between.
+//! A trim, and the stale objects, need only the target to be quiet: no Rust
+//! build holding its lock, and nothing written in it for `TRIM_QUIET`
+//! (two minutes), whatever its agents are doing, background tasks and
+//! watches included. Busy agents nearly always have one running, and their
+//! caches grow most (Polpo's disk.md, item 1); nothing running uses what a
+//! trim takes (incremental state, test binaries a newer build replaced, and
+//! on macOS a running executable keeps working once unlinked). A whole
+//! cache is cleared only while nothing works there: no agent of the folder
+//! running, nor with a background task or watch running, nothing written
+//! in it for a few minutes, and no Rust build holding its lock, since its
+//! next build is cold. The last checks and the clearing itself happen under
+//! Factory's lock, which a tool call's start takes before the tool runs, so
+//! none starts in between.
 //!
 //! The dev Claktory (`~/.factory-dev`) looks only inside its own data
 //! folder: its agents' checkouts and its projects there. A project folder
@@ -73,6 +77,10 @@ const DEPTH: usize = 4;
 
 /// A cache written this recently is in use.
 const RECENT: Duration = Duration::from_secs(5 * 60);
+
+/// A Rust target written this recently isn't trimmed: a build may be
+/// between two of its steps.
+const TRIM_QUIET: Duration = Duration::from_secs(2 * 60);
 
 /// Rust's object files older than this are left over from earlier builds.
 const STALE_OBJECTS: Duration = Duration::from_secs(3 * 3600);
@@ -227,11 +235,11 @@ fn measure(dir: &Path, deadline: Instant) -> Cache {
     Cache { path: dir.to_path_buf(), bytes, partial, newest }
 }
 
-/// Whether something is building in the cache now: written lately, or a
-/// Rust build holds its lock.
-fn in_use(cache: &Cache) -> bool {
+/// Whether something is building in the cache now: written within
+/// `recent`, or a Rust build holds its lock.
+fn in_use(cache: &Cache, recent: Duration) -> bool {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs() as i64);
-    if now - cache.newest < RECENT.as_secs() as i64 {
+    if now - cache.newest < recent.as_secs() as i64 {
         return true;
     }
     cargo_locked(&cache.path)
@@ -471,11 +479,12 @@ fn occupied(factory: &Factory) -> HashSet<String> {
     busy
 }
 
-/// Whether a build wrote in `dir` lately, by its folders' times down to
-/// `target/debug/deps` (a file made or removed in a folder changes its
-/// time): quick enough to ask under Factory's lock, just before clearing.
-fn written_lately(dir: &Path) -> bool {
-    let Some(lately) = SystemTime::now().checked_sub(RECENT) else { return true };
+/// Whether a build wrote in `dir` within `recent`, by its folders' times
+/// down to `target/debug/deps` (a file made or removed in a folder changes
+/// its time): quick enough to ask under Factory's lock, just before
+/// clearing.
+fn written_lately(dir: &Path, recent: Duration) -> bool {
+    let Some(lately) = SystemTime::now().checked_sub(recent) else { return true };
     let mut stack = vec![(dir.to_path_buf(), 0)];
     while let Some((at, depth)) = stack.pop() {
         let Ok(metadata) = std::fs::symlink_metadata(&at) else { continue };
@@ -580,25 +589,17 @@ pub(crate) fn sweep(factory: &Arc<Factory>) {
     let deadline = Instant::now() + SWEEP_BUDGET;
     let mut places = places(factory);
     let mut seen = HashSet::new();
-    let tasks = occupied(factory);
     for place in &mut places {
         let (caches, leftovers) = find(&place.path);
         for leftover in leftovers {
             delete_later(leftover);
         }
-        // Stale objects first, where nothing works: they cost no rebuild,
-        // and no build uses them, so a tool call starting meanwhile is fine.
-        let workers = workers(factory, place);
-        let quiet = !workers.iter().any(|agent| tasks.contains(agent)) && {
-            let inner = factory.lock();
-            !workers.iter().any(|agent| mid_tool(&inner, agent))
-        };
-        if quiet {
-            for cache in caches.iter().filter(|cache| !cargo_locked(cache)) {
-                let (count, bytes) = sweep_objects(cache);
-                if count > 0 {
-                    tracing::info!(cache = %cache.display(), count, bytes, "deleted stale build objects");
-                }
+        // Stale objects first, whatever the agents do: they cost no
+        // rebuild, and no build uses them, only one running now might.
+        for cache in caches.iter().filter(|cache| !cargo_locked(cache)) {
+            let (count, bytes) = sweep_objects(cache);
+            if count > 0 {
+                tracing::info!(cache = %cache.display(), count, bytes = %gb(bytes), "deleted stale build objects");
             }
         }
         place.caches = caches.into_iter().filter(|cache| seen.insert(cache.clone())).map(|cache| measure(&cache, deadline)).collect();
@@ -614,37 +615,27 @@ pub(crate) fn sweep(factory: &Arc<Factory>) {
                 continue;
             }
             let workers = workers(factory, place);
-            let tasks = occupied(factory);
-            if let Some(agent) = workers.iter().find(|agent| tasks.contains(*agent)) {
-                tracing::info!(place = %place.path.display(), %agent, total, "build caches over budget; left while an agent's task or watch runs");
-                continue;
-            }
-            // Trims first, largest first: the next build isn't a cold one.
+            // Trims first, largest first, whatever the place's agents are
+            // doing: only a quiet target, and the next build isn't a cold
+            // one (Polpo's disk.md, item 1).
             for cache in &mut place.caches {
                 if total <= budget {
                     break;
                 }
-                if in_use(cache) || !rust_target(&cache.path) {
+                if in_use(cache, TRIM_QUIET) || !rust_target(&cache.path) {
                     continue;
                 }
                 let found = trimmable(&cache.path, deadline);
                 if found.is_empty() {
                     continue;
                 }
-                // The last checks, and the trim, under the lock a tool
-                // call's start waits for, as for clearing below.
-                let inner = factory.lock();
-                if let Some(agent) = workers.iter().find(|agent| mid_tool(&inner, agent)) {
-                    tracing::info!(place = %place.path.display(), %agent, total, "build caches over budget; left while an agent runs a tool");
-                    break;
-                }
-                if written_lately(&cache.path) || cargo_locked(&cache.path) {
+                // Asked again just before: a build may have started.
+                if written_lately(&cache.path, TRIM_QUIET) || cargo_locked(&cache.path) {
                     continue;
                 }
                 let freed = trim(factory, &cache.path, &found);
-                drop(inner);
                 if freed > 0 {
-                    tracing::info!(cache = %cache.path.display(), bytes = cache.bytes, freed, budget, "trimmed a build cache over budget");
+                    tracing::info!(cache = %cache.path.display(), size = %gb(cache.bytes), freed = %gb(freed), budget = %gb(budget), "trimmed a build cache over budget");
                     cache.bytes = cache.bytes.saturating_sub(freed);
                     total = total.saturating_sub(freed);
                 }
@@ -653,19 +644,24 @@ pub(crate) fn sweep(factory: &Arc<Factory>) {
                 place.caches.sort_by_key(|cache| std::cmp::Reverse(cache.bytes));
                 continue;
             }
-            // Whole caches only while the place's agents are idle: the next
-            // build there is cold.
+            // Whole caches only while nothing works there: the next build
+            // is cold. Not while one of its agents runs, nor has a
+            // background task or a watch running.
+            let tasks = occupied(factory);
             if let Some(agent) = {
                 let inner = factory.lock();
-                workers.iter().find(|agent| inner.agents.get(agent.as_str()).is_some_and(|runtime| runtime.running)).cloned()
+                workers
+                    .iter()
+                    .find(|agent| tasks.contains(*agent) || inner.agents.get(agent.as_str()).is_some_and(|runtime| runtime.running))
+                    .cloned()
             } {
-                tracing::info!(place = %place.path.display(), %agent, total, "build caches over budget after a trim; left while an agent works");
+                tracing::info!(place = %place.path.display(), %agent, total = %gb(total), budget = %gb(budget), "build caches over budget after a trim; left while an agent works or its task or watch runs");
                 place.caches.sort_by_key(|cache| std::cmp::Reverse(cache.bytes));
                 continue;
             }
             let mut kept = Vec::new();
             for cache in std::mem::take(&mut place.caches) {
-                if total <= budget || in_use(&cache) {
+                if total <= budget || in_use(&cache, RECENT) {
                     kept.push(cache);
                     continue;
                 }
@@ -674,17 +670,17 @@ pub(crate) fn sweep(factory: &Arc<Factory>) {
                 // one, and none starts until the cache is moved aside.
                 let mut inner = factory.lock();
                 if let Some(agent) = workers.iter().find(|agent| mid_tool(&inner, agent)) {
-                    tracing::info!(place = %place.path.display(), %agent, total, "build caches over budget; left while an agent runs a tool");
+                    tracing::info!(place = %place.path.display(), %agent, total = %gb(total), "build caches over budget; left while an agent runs a tool");
                     kept.push(cache);
                     continue;
                 }
-                if written_lately(&cache.path) || cargo_locked(&cache.path) {
+                if written_lately(&cache.path, RECENT) || cargo_locked(&cache.path) {
                     kept.push(cache);
                     continue;
                 }
                 match clear(factory, &cache.path) {
                     Ok(()) => {
-                        tracing::info!(cache = %cache.path.display(), bytes = cache.bytes, budget, "cleared a build cache over budget");
+                        tracing::info!(cache = %cache.path.display(), size = %gb(cache.bytes), budget = %gb(budget), "cleared a build cache over budget");
                         total -= cache.bytes;
                         tell(factory, Some((factory, &mut inner)), place, &workers, &cache);
                     }

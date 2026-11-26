@@ -88,6 +88,21 @@ ALTER TABLE pipe_share_pipes ADD COLUMN first_reached INTEGER NOT NULL DEFAULT 0
 ALTER TABLE pipe_share_pipes ADD COLUMN last_reached INTEGER NOT NULL DEFAULT 0;
 ";
 
+/// When a share ends (#46, friend bug #46), in ms since 1970; 0 for never,
+/// as every share from before this. Mine: this Claktory stops it then, on
+/// its own clock. Theirs: when its sharer said it ends, shown only.
+pub(crate) const EXPIRY: &str = "
+ALTER TABLE pipe_shares ADD COLUMN expires INTEGER NOT NULL DEFAULT 0;
+";
+
+/// The longest a share may be set to last: a year (the app offers an hour,
+/// a day, a week, or never).
+const LONGEST_S: i64 = 366 * 24 * 3600;
+/// The longest an agent's card may share for (Fugo 46375): a week, 24 hours
+/// unless it says; never "never".
+pub(crate) const CARD_HOURS_MOST: u32 = 168;
+pub(crate) const CARD_HOURS: u32 = 24;
+
 /// Connections at once per share and peer.
 const MOST_STREAMS: usize = 64;
 /// Bytes a second per share and peer, each way, over a direct path and a
@@ -119,6 +134,8 @@ pub(crate) struct State {
     live: Mutex<HashMap<u64, Live>>,
     next: AtomicU64,
     gauges: Mutex<HashMap<(String, String), Arc<Gauge>>>,
+    /// Wakes the loop that ends shares on time (`ends`) when an end changes.
+    ends_changed: Arc<tokio::sync::Notify>,
 }
 
 /// A stream this side serves, cut at once when its share or pipe stops.
@@ -176,9 +193,11 @@ struct Share {
     pipe: String,
     remote: String,
     peer: String,
+    /// When it ends (`EXPIRY`); 0 never.
+    expires: i64,
 }
 
-const COLUMNS: &str = "id, mine, name, port, grp, created, pipe, remote, peer";
+const COLUMNS: &str = "id, mine, name, port, grp, created, pipe, remote, peer, expires";
 
 impl Share {
     fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Share> {
@@ -192,6 +211,7 @@ impl Share {
             pipe: row.get(6)?,
             remote: row.get(7)?,
             peer: row.get(8)?,
+            expires: row.get(9)?,
         })
     }
 }
@@ -459,6 +479,10 @@ pub(crate) fn share(factory: &Arc<Factory>, request: &v1::SharePipeWebsite) -> R
     if let Some(why) = port_problem(factory, request.port) {
         return refuse(why);
     }
+    let expires = match end_for(request.lasts_s) {
+        Ok(expires) => expires,
+        Err(why) => return refuse(why),
+    };
     let name = shown(&request.name);
     if name.is_empty() {
         return refuse("Give it a name: what the other side sees it called.".to_owned());
@@ -505,20 +529,103 @@ pub(crate) fn share(factory: &Arc<Factory>, request: &v1::SharePipeWebsite) -> R
         port: u16::try_from(request.port).unwrap_or_default(),
         group,
         created: now_ms(),
+        expires,
         ..Share::default()
     };
     execute(
         factory,
-        "INSERT INTO pipe_shares (id, mine, name, port, grp, created) VALUES (?1, 1, ?2, ?3, ?4, ?5)",
-        params![share.id, share.name, share.port, share.group, share.created],
+        "INSERT INTO pipe_shares (id, mine, name, port, grp, created, expires) VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6)",
+        params![share.id, share.name, share.port, share.group, share.created, share.expires],
     );
     let mut reached = 0;
     for pipe in &pipes {
         reached += usize::from(offer(factory, &share, pipe));
     }
-    tracing::info!(share = %share.id, port = share.port, pipes = reached, "shared a website");
+    tracing::info!(share = %share.id, port = share.port, pipes = reached, expires = share.expires, "shared a website");
+    factory.pipe_shares.ends_changed.notify_one();
     changed(factory);
     Ok(())
+}
+
+/// When a share asked to last `lasts_s` seconds from now ends (#46): 0 for
+/// never (0); why not for a time before now or past a year.
+fn end_for(lasts_s: i64) -> Result<i64, String> {
+    match lasts_s {
+        0 => Ok(0),
+        lasts if lasts < 0 => Err("Choose how long it lasts: a time from now, or until it's stopped.".to_owned()),
+        lasts if lasts > LONGEST_S => Err("A website can be shared for at most a year, or until it's stopped.".to_owned()),
+        lasts => Ok(now_ms() + lasts * 1000),
+    }
+}
+
+/// Whether `share` has run out of time now (#46): only by this Claktory's
+/// clock, never by what the other side says.
+fn run_out(share: &Share, now: i64) -> bool {
+    share.mine && share.expires > 0 && now >= share.expires
+}
+
+/// SetPipeShareExpiry: the person changes how long a share of theirs lasts,
+/// from now (`lasts_s`; 0 for until it's stopped). The other side is told
+/// the new end, to show.
+pub(crate) fn set_expiry(factory: &Arc<Factory>, request: &v1::SetPipeShareExpiry) -> Result<(), RequestError> {
+    let Some(share) = get(factory, &request.share_id).filter(|share| share.mine && !run_out(share, now_ms())) else {
+        return Err(RequestError::Command("That website isn't shared any more.".to_owned()));
+    };
+    let expires = end_for(request.lasts_s).map_err(RequestError::Command)?;
+    execute(factory, "UPDATE pipe_shares SET expires = ?2 WHERE id = ?1", params![share.id, expires]);
+    let said = match expires {
+        0 => format!("{} is now shared until you stop it.", share.name),
+        at => format!("{} is now shared until {}.", share.name, when(at)),
+    };
+    for reach in reaches(factory, &share.id).into_iter().filter(|reach| !reach.ended) {
+        if let Err(error) = crate::pipe_link::share(factory, &reach.pipe, &share.id, Some((&share.name, share.port, expires))) {
+            tracing::debug!(%error, "could not tell a pipe a website's new end");
+        }
+        super::line(factory, &reach.pipe, said.clone());
+    }
+    tracing::info!(share = %share.id, expires, "changed when a shared website ends");
+    factory.pipe_shares.ends_changed.notify_one();
+    changed(factory);
+    Ok(())
+}
+
+/// Ends shares of mine whose time ran out, as Stop does, each pipe's chat
+/// saying so; sleeps until the next one's end, or until an end changes.
+/// Streams check the end themselves too (`allowed`), so a late wake never
+/// lengthens one.
+async fn ends(factory: Weak<Factory>) {
+    loop {
+        let Some(strong) = factory.upgrade() else { return };
+        let now = now_ms();
+        let mine: Vec<Share> = all(&strong).into_iter().filter(|share| share.mine && share.expires > 0).collect();
+        for share in mine.iter().filter(|share| run_out(share, now)) {
+            for reach in reaches(&strong, &share.id) {
+                let said = (!reach.ended).then(|| format!("{} stopped being shared: its time was up.", share.name));
+                withdraw(&strong, share, &reach.pipe, said, None);
+            }
+            forget(&strong, &share.id);
+            tracing::info!(share = %share.id, port = share.port, "a shared website's time was up");
+        }
+        if mine.iter().any(|share| run_out(share, now)) {
+            changed(&strong);
+        }
+        let next = mine.iter().filter(|share| !run_out(share, now)).map(|share| share.expires).min();
+        let wait = next.map_or(Duration::from_secs(3600), |at| Duration::from_millis(u64::try_from(at - now).unwrap_or(0)));
+        // Only the bell is kept while it waits, never Claktory itself.
+        let bell = strong.pipe_shares.ends_changed.clone();
+        drop(strong);
+        tokio::select! {
+            () = bell.notified() => {}
+            () = tokio::time::sleep(wait.min(Duration::from_secs(3600))) => {}
+        }
+    }
+}
+
+/// The end the other side said a website of theirs has (`until_ms`), to
+/// show (#46): ms since 1970, 0 when it said none or nothing sensible.
+pub(crate) fn heard_end(until: Option<&serde_json::Value>) -> i64 {
+    let now = now_ms();
+    until.and_then(serde_json::Value::as_i64).filter(|until| *until > now && *until - now <= LONGEST_S * 1000).unwrap_or(0)
 }
 
 /// Offers `share` on `pipe`, if that pipe can take it now (open or paused,
@@ -540,7 +647,7 @@ fn offer(factory: &Arc<Factory>, share: &Share, pipe: &str) -> bool {
     if known {
         return false;
     }
-    if let Err(error) = crate::pipe_link::share(factory, pipe, &share.id, Some((&share.name, share.port))) {
+    if let Err(error) = crate::pipe_link::share(factory, pipe, &share.id, Some((&share.name, share.port, share.expires))) {
         tracing::error!(%error, "could not offer a website on a pipe");
         return false;
     }
@@ -668,7 +775,7 @@ pub(crate) fn refresh(factory: &Arc<Factory>, pipe: &str, id: &str) -> Result<St
     if crate::pipe_link::pinned(factory, pipe).is_none_or(|pinned| pinned != reach.peer) {
         return Err("The pipe's other side isn't the Claktory it was shared with.".to_owned());
     }
-    crate::pipe_link::share(factory, pipe, &share.id, Some((&share.name, share.port))).map_err(|error| error.to_string())?;
+    crate::pipe_link::share(factory, pipe, &share.id, Some((&share.name, share.port, share.expires))).map_err(|error| error.to_string())?;
     tracing::info!(share = %share.id, %pipe, "offered a shared website again");
     Ok(share.name)
 }
@@ -684,16 +791,43 @@ pub(crate) fn on_pipe_by_port(factory: &Factory, pipe: &str, port: u16) -> Optio
 }
 
 /// The person approved sharing an ended share of mine with `pipe` again
-/// (#502): it's offered there afresh, the same share. Its name, or why not.
-pub(crate) fn share_again(factory: &Arc<Factory>, id: &str, pipe: &str) -> Result<String, String> {
-    let share = get(factory, id).filter(|share| share.mine).ok_or("That website isn't shared any more.")?;
+/// (#502): it's offered there afresh, the same share, with the same end
+/// (#46: never longer without a new card, Fugo 46375). Its name and how
+/// long it lasts (`ends_words`), or why not.
+pub(crate) fn share_again(factory: &Arc<Factory>, id: &str, pipe: &str) -> Result<(String, String), String> {
+    let share = get(factory, id).filter(|share| share.mine && !run_out(share, now_ms())).ok_or("That website isn't shared any more.")?;
     execute(factory, "DELETE FROM pipe_share_pipes WHERE share = ?1 AND pipe = ?2 AND ended = 1", params![share.id, pipe]);
     if !offer(factory, &share, pipe) {
         return Err("It couldn't be offered on that pipe now.".to_owned());
     }
     tracing::info!(share = %share.id, %pipe, "shared a website again");
     changed(factory);
-    Ok(share.name)
+    let ends = ends_words(factory, share.expires);
+    Ok((share.name, ends))
+}
+
+/// How long a share of mine ending at `expires` lasts, for a card or an
+/// agent: "until 27 Nov 18:00" or "until the person stops it".
+pub(crate) fn ends_words(factory: &Factory, expires: i64) -> String {
+    match expires {
+        0 => format!("until {} stops it", factory.lock().config.person()),
+        at => format!("until {}", when(at)),
+    }
+}
+
+/// The end of the share of mine `id`, for its card (#46); None when it's
+/// gone or its time is up.
+pub(crate) fn expires_of(factory: &Factory, id: &str) -> Option<i64> {
+    get(factory, id).filter(|share| share.mine && !run_out(share, now_ms())).map(|share| share.expires)
+}
+
+/// "1 hour", "24 hours", "7 days": a card's hours in words.
+pub(crate) fn hours_words(hours: u32) -> String {
+    match hours {
+        1 => "1 hour".to_owned(),
+        hours if hours > 24 && hours % 24 == 0 => format!("{} days", hours / 24),
+        hours => format!("{hours} hours"),
+    }
 }
 
 /// The other side's streams reached a share of mine over `pipe`: when,
@@ -929,7 +1063,7 @@ pub(crate) fn too_old(factory: &Arc<Factory>, pipe: &str, id: &str) {
 // ---- Shared with this side (theirs) ----
 
 /// The other side offered a website over `pipe` (`peer`, its pinned key).
-pub(crate) fn offered(factory: &Arc<Factory>, pipe: &str, peer: &str, remote: &str, name: &str, port: u16) {
+pub(crate) fn offered(factory: &Arc<Factory>, pipe: &str, peer: &str, remote: &str, name: &str, port: u16, until: i64) {
     if !id_like(remote) {
         return;
     }
@@ -942,13 +1076,13 @@ pub(crate) fn offered(factory: &Arc<Factory>, pipe: &str, peer: &str, remote: &s
         return;
     }
     if let Some(known) = known {
-        execute(factory, "UPDATE pipe_shares SET name = ?2, port = ?3 WHERE id = ?1", params![known.id, name, port]);
+        execute(factory, "UPDATE pipe_shares SET name = ?2, port = ?3, expires = ?4 WHERE id = ?1", params![known.id, name, port, until]);
     } else {
         let id = random_id();
         execute(
             factory,
-            "INSERT INTO pipe_shares (id, mine, name, port, created, pipe, remote, peer) VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, name, port, now_ms(), pipe, remote, peer],
+            "INSERT INTO pipe_shares (id, mine, name, port, created, pipe, remote, peer, expires) VALUES (?1, 0, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, name, port, now_ms(), pipe, remote, peer, until],
         );
         super::line_for_share(factory, pipe, format!("{} shares {name}.", who(factory, pipe)), &id);
         if let Some(share) = get(factory, &id) {
@@ -1304,7 +1438,7 @@ async fn line(receive: &mut RecvStream) -> Option<String> {
 /// it reaches that key over; else why not, for the other side.
 fn allowed(factory: &Factory, id: &str, peer: &str) -> Result<(Share, String), String> {
     let gone = || "This website isn't shared with you now.".to_owned();
-    let share = get(factory, id).filter(|share| share.mine).ok_or_else(gone)?;
+    let share = get(factory, id).filter(|share| share.mine && !run_out(share, now_ms())).ok_or_else(gone)?;
     let pipe = reaches(factory, &share.id)
         .into_iter()
         .find(|reach| !reach.ended && reach.peer == peer && pipe_live(factory, &reach.pipe, peer))
@@ -1435,9 +1569,19 @@ pub(crate) async fn connect(port: u16) -> Option<TcpStream> {
 
 // ---- What agents read (#502) ----
 
-/// A time as agents read it, in this computer's time zone.
+/// A time as agents and the person read it, in this computer's time zone:
+/// "18:00" today, "27 Nov 18:00" another day this year, "3 Jan 2027 18:00"
+/// another year (Abbacchio's row 1553).
 fn when(ms: i64) -> String {
-    crate::transcript::local_time(ms, "%Y-%m-%d %H:%M")
+    use crate::transcript::local_time;
+    let now = crate::transcript::now_ms();
+    if local_time(ms, "%Y-%m-%d") == local_time(now, "%Y-%m-%d") {
+        local_time(ms, "%H:%M")
+    } else if local_time(ms, "%Y") == local_time(now, "%Y") {
+        local_time(ms, "%-d %b %H:%M")
+    } else {
+        local_time(ms, "%-d %b %Y %H:%M")
+    }
 }
 
 /// What's shared over `pipe` both ways, a line each, for agents (#502,
@@ -1497,8 +1641,12 @@ pub(crate) fn listing(factory: &Factory, pipe: &str, program: bool) -> Vec<Strin
             } else {
                 format!("nothing answers on port {} now", share.port)
             };
+            let ends = match share.expires {
+                0 => format!("until {person} stops it"),
+                at => format!("until {}", when(at)),
+            };
             lines.push(format!(
-                "- Shared by {person}: \"{}\" (id {}), port {}, shared since {}{group}; {state}; {opened}; {answering}.",
+                "- Shared by {person}: \"{}\" (id {}), port {}, shared since {} {ends}{group}; {state}; {opened}; {answering}.",
                 super::agents::escape(&share.name),
                 share.id,
                 share.port,
@@ -1521,8 +1669,12 @@ pub(crate) fn listing(factory: &Factory, pipe: &str, program: bool) -> Vec<Strin
                 0 => format!("{person} hasn't opened it yet"),
                 at => format!("{person} first opened it {}", when(at)),
             };
+            let ends = match share.expires {
+                0 => String::new(),
+                at => format!(", until {} as they said", when(at)),
+            };
             lines.push(format!(
-                "- Shared by {}: a website (id {}) {}, shared since {}; {state}; {opened}.",
+                "- Shared by {}: a website (id {}) {}, shared since {}{ends}; {state}; {opened}.",
                 record.peer_who(),
                 share.id,
                 theirs_name(&share.name),
@@ -1571,6 +1723,7 @@ pub(crate) fn view(factory: &Factory) -> Vec<v1::PipeShare> {
                     group_id: share.group,
                     created_ms: share.created,
                     live,
+                    expires_ms: share.expires,
                     ..v1::PipeShare::default()
                 }
             } else {
@@ -1591,6 +1744,9 @@ pub(crate) fn view(factory: &Factory) -> Vec<v1::PipeShare> {
                     listener_problem: status.problem,
                     hidden: status.hidden,
                     unopened,
+                    expires_ms: share.expires,
+                    last_failure_ms: status.last_failure_ms,
+                    last_failure: status.last_failure,
                     ..v1::PipeShare::default()
                 }
             }
@@ -1602,6 +1758,7 @@ pub(crate) fn view(factory: &Factory) -> Vec<v1::PipeShare> {
 /// theirs opened before listen again, so their addresses keep working.
 pub(crate) fn start(factory: &Arc<Factory>) {
     super::share_listener::restore(factory);
+    tokio::spawn(ends(Arc::downgrade(factory)));
 }
 
 /// Tests: a stream to a website shared with this side, as the receiving
@@ -1628,7 +1785,14 @@ pub fn unnamed_listener_for_test(port: u16) {
 /// Tests: the other side of `pipe` (pinned to `peer`) offers a website.
 #[doc(hidden)]
 pub fn offered_for_test(factory: &Arc<Factory>, pipe: &str, peer: &str, remote: &str, name: &str) {
-    offered(factory, pipe, peer, remote, name, 3000);
+    offered(factory, pipe, peer, remote, name, 3000, 0);
+}
+
+/// Tests: a share of mine's time is up now, without waking what ends
+/// shares on time, as when it wakes late (#46).
+#[doc(hidden)]
+pub fn run_out_for_test(factory: &Factory, id: &str) {
+    execute(factory, "UPDATE pipe_shares SET expires = ?2 WHERE id = ?1", params![id, now_ms() - 1]);
 }
 
 /// Tests: what agents read of the websites shared over `pipe`.

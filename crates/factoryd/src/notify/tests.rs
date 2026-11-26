@@ -82,7 +82,7 @@ fn a_long_body_is_cut_and_spaces_kept_single() {
 }
 
 fn entry(seq: u64, kind: EntryKind, replied_to: Option<u64>) -> v1::Entry {
-    v1::Entry { seq, timestamp_ms: 0, kind: Some(kind), reply: 0, replied_to }
+    v1::Entry { seq, timestamp_ms: 0, kind: Some(kind), reply: 0, replied_to, answered_on: None }
 }
 
 fn person(text: &str, kind: v1::DeviceKind) -> EntryKind {

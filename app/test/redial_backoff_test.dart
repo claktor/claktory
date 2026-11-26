@@ -9,6 +9,7 @@ import 'dart:io';
 
 import 'package:factory_app/backend.dart';
 import 'package:factory_app/connections.dart';
+import 'package:factory_app/network.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/state.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -212,6 +213,160 @@ void main() {
     backend.resumed();
     await until(() => backend.connected.value, seconds: 3);
     await backend.close();
+  });
+
+  group('kept trying in the background (W6)', () {
+    tearDown(() => deviceNetwork.value = null);
+
+    test('told to, one keeps trying while the app is in the background; '
+        'the others wait until it is back', () async {
+      final other = _Far();
+      await other.start();
+      addTearDown(() => other.server.close(force: true));
+      final kept = _backend(tunnel);
+      final waiting = _backend(FakeTunnel(other.server.port));
+      unawaited(kept.run());
+      unawaited(waiting.run());
+      await _wait(300);
+      kept
+        ..hidden()
+        ..keepTryingWhileHidden = true;
+      waiting.hidden();
+      await _wait(300);
+      final keptBefore = far.tries.length;
+      final waitingBefore = other.tries.length;
+      await _wait(600);
+      expect(far.tries.length, greaterThan(keptBefore + 3));
+      expect(other.tries.length, waitingBefore, reason: 'parked');
+
+      // Told to stop: it waits for the app too.
+      kept.keepTryingWhileHidden = false;
+      await _wait(300);
+      final stopped = far.tries.length;
+      await _wait(400);
+      expect(far.tries.length, stopped);
+      await kept.close();
+      await waiting.close();
+    });
+
+    test('suspended, told to keep trying, its connection opens again; '
+        'nothing says the app came back', () async {
+      far.away = false;
+      final backend = _backend(tunnel);
+      unawaited(backend.run());
+      await until(() => backend.connected.value);
+      backend
+        ..hidden()
+        ..suspend();
+      await until(() => !backend.connected.value);
+      backend.keepTryingWhileHidden = true;
+      await until(() => backend.connected.value, seconds: 3);
+      // Still in the background: a check (as after sleep) is its own.
+      expect(backend.lastFailure.value, isNull);
+      await backend.close();
+    });
+
+    test('its network let through again, only the one told to keep '
+        'trying tries at once', () async {
+      final other = _Far();
+      await other.start();
+      addTearDown(() => other.server.close(force: true));
+      deviceNetwork.value = const NetworkPath(satisfied: true);
+      final kept = _backend(tunnel)
+        ..onScreen = false
+        ..awayRetryMost = const Duration(seconds: 30);
+      final waiting = _backend(FakeTunnel(other.server.port))
+        ..onScreen = false
+        ..awayRetryMost = const Duration(seconds: 30);
+      unawaited(kept.run());
+      unawaited(waiting.run());
+      await _wait(2500);
+      kept
+        ..hidden()
+        ..keepTryingWhileHidden = true;
+      waiting.hidden();
+      deviceNetwork.value = const NetworkPath(satisfied: true, blocked: true);
+      await _wait(200);
+      final keptBefore = far.tries.length;
+      final waitingBefore = other.tries.length;
+      deviceNetwork.value = const NetworkPath(satisfied: true);
+      await until(() => far.tries.length > keptBefore, seconds: 1);
+      await _wait(200);
+      expect(other.tries.length, waitingBefore);
+      await kept.close();
+      await waiting.close();
+    });
+  });
+
+  group('back after a browser tab kept it connected (#505, Sale row 175)', () {
+    /// Connected, then hidden for 40 seconds by the clock resumed reads,
+    /// told to keep trying meanwhile when [kept] (a shared website's tab
+    /// over the app), and whatever [away] does then.
+    Future<(Backend, int)> trip({
+      required bool kept,
+      Future<void> Function(Backend backend)? away,
+    }) async {
+      far.away = false;
+      final backend = _backend(tunnel);
+      unawaited(backend.run());
+      await until(() => backend.connected.value);
+      backend.hidden();
+      if (kept) {
+        backend.keepTryingWhileHidden = true;
+        await _wait(100);
+        // The tab says it closed before the app says it's back.
+        backend.keepTryingWhileHidden = false;
+      }
+      await away?.call(backend);
+      final before = far.tries.length;
+      backend.resumed(now: DateTime.now().add(const Duration(seconds: 40)));
+      return (backend, before);
+    }
+
+    test('kept connected, it is only checked: no new connection', () async {
+      final (backend, before) = await trip(kept: true);
+      await _wait(500);
+      expect(far.tries.length, before, reason: 'nothing dialled afresh');
+      expect(backend.connected.value, isTrue);
+      expect(far.sockets.where((s) => s.closeCode != null), isEmpty);
+      await backend.close();
+    });
+
+    test('dropped while away, it connects afresh', () async {
+      final (backend, before) = await trip(
+        kept: true,
+        away: (backend) async {
+          for (final socket in far.sockets) {
+            await socket.close();
+          }
+          await until(() => !backend.connected.value);
+        },
+      );
+      await until(() => backend.connected.value, seconds: 3);
+      expect(far.tries.length, greaterThan(before));
+      await backend.close();
+    });
+
+    test('suspended after the tab closed, it connects afresh', () async {
+      final (backend, before) = await trip(
+        kept: true,
+        away: (backend) async {
+          backend.suspend();
+          await until(() => !backend.connected.value);
+        },
+      );
+      await until(() => backend.connected.value, seconds: 3);
+      expect(far.tries.length, greaterThan(before));
+      await backend.close();
+    });
+
+    test('hidden as long without a tab, it connects afresh, as '
+        'before', () async {
+      final (backend, before) = await trip(kept: false);
+      await until(() => far.tries.length > before, seconds: 3);
+      await until(() => backend.connected.value, seconds: 3);
+      await backend.close();
+    });
   });
 
   test('work held counts until it ends, however it ends', () async {

@@ -241,6 +241,18 @@ impl Worker {
                     error(503, "unavailable", "Something went wrong. Try again later.")
                 }
             },
+            Request::ClaktoryRemoved { account_id, claktory_id, epoch, time } => {
+                let _ = crate::dms::sync::touched();
+                let removed = grants::claktory_removed(&mut self.db(), &account_id, &claktory_id, epoch, time.saturating_mul(1000));
+                self.wake(&crate::dms::sync::touched());
+                match removed {
+                    Ok(_) => (204, Vec::new()),
+                    Err(failure) => {
+                        tracing::error!("dropping a removed Claktory's grants: {failure}");
+                        error(503, "unavailable", "Something went wrong. Try again later.")
+                    }
+                }
+            }
             Request::PurgeAccount { account_id, time } => {
                 let mut db = self.db();
                 if let Err(refused) = grants::purge_account(&mut db, &account_id) {
@@ -664,6 +676,57 @@ mod tests {
             statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).expect("rows").collect::<Result<_, _>>().expect("leaves")
         };
         assert_eq!(left, [("phone".to_owned(), 1000), ("mac".to_owned(), 2000)]);
+    }
+
+    /// E11-4: the service says a Claktory's registration ended; the grants
+    /// its agents hold under that epoch or before go at once, with a
+    /// `groups` event for the account. Another Claktory's stay, and so do
+    /// its own under a later epoch (signed in again before the notice
+    /// came: the service retries).
+    #[test]
+    fn a_removed_claktory_s_grants_go() {
+        let dir = tempfile::tempdir().expect("a folder");
+        let worker = Worker::open(&dir.path().join("apps.db"), Keys::from_bytes([7; 32])).expect("the worker");
+        let time = 1_795_183_320;
+        let give = |claktory: &str, epoch: u64, agent: &str| {
+            let caller = Caller::Backend { account_id: "acct".into(), claktory_id: claktory.into(), epoch, agent: None };
+            let put = serde_json::json!({"app": "dms", "agent": {"id": agent, "incarnation": "i"}, "scopes": ["dm.read"],
+                                         "resources": [{"kind": "conversation", "id": "c1"}]});
+            let request = Request::Call { method: "PUT".into(), path: "/v1/apps/grants".into(), query: String::new(), time, caller };
+            let (status, body) = worker.answer(request, put.to_string().as_bytes());
+            assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+        };
+        give("mac", 1, "june");
+        give("mac", 2, "may");
+        give("studio", 1, "june");
+        let held = || -> Vec<(String, String)> {
+            let conn = worker.db();
+            let mut statement = conn.prepare("SELECT claktory_id, agent_id FROM grants ORDER BY claktory_id, agent_id").expect("query");
+            statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).expect("rows").collect::<Result<_, _>>().expect("grants")
+        };
+        let groups = || -> i64 {
+            let conn = worker.db();
+            conn.query_row("SELECT COUNT(*) FROM dm_account_events WHERE account = 'acct' AND kind = 'groups'", [], |row| row.get(0))
+                .expect("events")
+        };
+        let before = groups();
+
+        let removed = Request::ClaktoryRemoved { account_id: "acct".into(), claktory_id: "mac".into(), epoch: 1, time: time + 60 };
+        assert_eq!(worker.answer(removed.clone(), &[]).0, 204);
+        let left = |pairs: &[(&str, &str)]| pairs.iter().map(|(c, a)| (c.to_string(), a.to_string())).collect::<Vec<_>>();
+        assert_eq!(held(), left(&[("mac", "may"), ("studio", "june")]));
+        assert_eq!(groups(), before + 1, "the account's Claktories and devices look at their groups again");
+        // Told again (the service retries until it hears 204): nothing more.
+        assert_eq!(worker.answer(removed, &[]).0, 204);
+        assert_eq!((held().len(), groups()), (2, before + 1));
+        // Another account's notice touches nothing of this one's.
+        let other = Request::ClaktoryRemoved { account_id: "other".into(), claktory_id: "studio".into(), epoch: 9, time: time + 60 };
+        assert_eq!(worker.answer(other, &[]).0, 204);
+        assert_eq!(held().len(), 2);
+        // Its registration under epoch 2 ends too: the later grant goes.
+        let later = Request::ClaktoryRemoved { account_id: "acct".into(), claktory_id: "mac".into(), epoch: 2, time: time + 120 };
+        assert_eq!(worker.answer(later, &[]).0, 204);
+        assert_eq!(held(), left(&[("studio", "june")]));
     }
 
     #[test]

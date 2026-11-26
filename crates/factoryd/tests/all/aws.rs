@@ -368,7 +368,7 @@ async fn aws_connects_with_the_device_flow_and_a_role_s_credentials_are_kept_the
     assert_eq!(names, ["AWS_ACCESS_KEY_ID", "AWS_DEFAULT_REGION", "AWS_REGION", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]);
     assert_eq!(center.count("/federation/credentials"), 1);
     let granted =
-        client.request(Request::GrantSecret(v1::GrantSecret { id: made.id.clone(), agent_id: "builder".into(), proof: None })).await;
+        client.request(Request::GrantSecret(v1::GrantSecret { id: made.id.clone(), agent_id: "builder".into(), proof: None, fill_only: false })).await;
     assert!(!matches!(granted.body, Body::Error(_)), "{:?}", granted.body);
 
     // Due (they expire within 2 minutes): renewed before the command gets them.

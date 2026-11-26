@@ -932,3 +932,40 @@ pub fn parse_codex(usage: &Value, now: u64) -> Vec<UsageLimit> {
     limits.sort_by_key(|limit| limit.id != "weekly");
     limits
 }
+
+/// Grok's plan meter (#493): the proxy's `billing?format=credits`, which
+/// xAI's command-line tool reads, asked as the tool's sign-in. Its usage
+/// pool for the period (weekly on SuperGrok) and when the period ends.
+pub fn grok(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<AccountUsage, Error>> {
+    Box::pin(async move {
+        let what = "Grok usage";
+        if !crate::providers::grok::allowed(&base_url) {
+            return Err(crate::providers::grok::not_allowed(&base_url));
+        }
+        let token = auth.api_key.as_deref().ok_or_else(|| Error::Other(format!("{what}: not signed in")))?;
+        let mut request = client().get(format!("{}/billing?format=credits", base_url.trim_end_matches('/'))).bearer_auth(token);
+        for (name, value) in &auth.headers {
+            request = request.header(name, value);
+        }
+        let usage = get_json(what, request).await?;
+        Ok(AccountUsage { limits: parse_grok(&usage), resets: Vec::new() })
+    })
+}
+
+/// The meter's `config`: `creditUsagePercent` of the `currentPeriod`
+/// (`type` USAGE_PERIOD_TYPE_WEEKLY, say), which resets at its `end`. No
+/// limits when it says no percent.
+pub fn parse_grok(usage: &Value) -> Vec<UsageLimit> {
+    let config = &usage["config"];
+    let Some(used) = config["creditUsagePercent"].as_f64() else { return Vec::new() };
+    let period = &config["currentPeriod"];
+    let kind = period["type"].as_str().unwrap_or_default().trim_start_matches("USAGE_PERIOD_TYPE_").to_ascii_lowercase();
+    let (id, label) = match kind.as_str() {
+        "daily" => ("daily", "Daily"),
+        "weekly" => ("weekly", "Weekly"),
+        "monthly" => ("monthly", "Monthly"),
+        _ => ("usage", "Usage"),
+    };
+    let resets_at = period["end"].as_str().and_then(parse_iso_ms).unwrap_or(0);
+    vec![limit(id, label, used, resets_at)]
+}

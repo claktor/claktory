@@ -6,6 +6,7 @@ const OPENAI: &str = include_str!("data/openai.json");
 const OPENAI_CODEX: &str = include_str!("data/openai-codex.json");
 const OPENROUTER: &str = include_str!("data/openrouter.json");
 const ANTHROPIC: &str = include_str!("data/anthropic.json");
+const GROK: &str = include_str!("data/grok.json");
 
 /// Model data is grouped by API in one file per provider.
 pub fn models(provider: &str) -> Vec<Model> {
@@ -14,6 +15,7 @@ pub fn models(provider: &str) -> Vec<Model> {
         "openai-codex" => OPENAI_CODEX,
         "openrouter" => OPENROUTER,
         "anthropic" => ANTHROPIC,
+        "grok" => GROK,
         _ => return Vec::new(),
     };
     let groups: Value = serde_json::from_str(text).unwrap_or(Value::Null);

@@ -17,7 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 /// What the mock was asked: (path, the request's model).
-type Seen = Arc<Mutex<Vec<(String, String)>>>;
+pub(crate) type Seen = Arc<Mutex<Vec<(String, String)>>>;
 
 /// Claude (account "a") at its limit until `reset` (unix seconds, 0 for
 /// never), OpenRouter answering every request.
@@ -481,6 +481,13 @@ async fn goes_back_by_itself_once_claude_has_room_and_stays_when_it_bounces() {
     let switched = view.agent("builder").usage_switch.clone().expect("switched");
     assert!(switched.goes_back && !switched.ready, "{switched:?}");
     assert_eq!(switched.goes_back_at_ms, resets_at, "when Claude's limit resets");
+    // Friend bug #43: it hears who moved it, and why.
+    let told = || crate::common::describe(&view.entries).into_iter().filter(|line| line.starts_with("event from Claktory")).collect::<Vec<_>>();
+    assert!(
+        told().iter().any(|line| line.contains(" (the person chose OpenRouter on ") && line.contains(", while your Claude usage is at its limit)")),
+        "{:?}",
+        told()
+    );
 
     // Claude has room again, as Helper's Try now finds: Builder goes back.
     reset.store(i64::try_from(now_ms() / 1000).expect("now") - 1, Ordering::SeqCst);
@@ -497,6 +504,13 @@ async fn goes_back_by_itself_once_claude_has_room_and_stays_when_it_bounces() {
         "{:?}",
         notices(&view)
     );
+    apply_request(&mut client, &mut view, send_message("builder", "back?")).await;
+    let back = "(Claktory switched you back by itself, since your Claude usage has room again)";
+    until(&mut client, &mut view, "builder told why it's back", |view| {
+        crate::common::describe(&view.entries).iter().any(|line| line.starts_with("event from Claktory") && line.contains(back))
+    })
+    .await;
+    until(&mut client, &mut view, "builder answered on Claude", |view| view.agent("builder").status() == v1::AgentStatus::Idle).await;
 
     // At the limit again at once: continued again, it stays there until
     // this limit resets.

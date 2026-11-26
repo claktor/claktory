@@ -26,7 +26,7 @@ const NAME_LIMIT: usize = 200;
 pub const CODEX_CLIENT_VERSION: &str = "0.150.0";
 
 /// The providers whose list Claktory reads from them.
-pub const PROVIDERS: [&str; 4] = ["anthropic", "openai", "openai-codex", "openrouter"];
+pub const PROVIDERS: [&str; 5] = ["anthropic", "openai", "openai-codex", "openrouter", "grok"];
 
 /// The provider's name in a sentence.
 pub fn name(provider: &str) -> &str {
@@ -35,6 +35,7 @@ pub fn name(provider: &str) -> &str {
         "openai" => "OpenAI",
         "openai-codex" => "OpenAI Codex",
         "openrouter" => "OpenRouter",
+        "grok" => "Grok",
         other => other,
     }
 }
@@ -57,10 +58,13 @@ pub fn valid_id(provider: &str, id: &str) -> bool {
 /// else fails with a sentence.
 pub async fn fetch(provider: &str, base_url: &str, auth: &RequestAuth) -> Result<Vec<u8>, crate::Error> {
     let base = base_url.trim_end_matches('/');
+    if provider == "grok" && !crate::providers::grok::allowed(base) {
+        return Err(crate::providers::grok::not_allowed(base));
+    }
     let url = match provider {
         "openrouter" => return catalog::fetch_openrouter().await.map_err(crate::Error::Other),
         "anthropic" => format!("{base}/v1/models?limit=1000"),
-        "openai" => format!("{base}/models"),
+        "openai" | "grok" => format!("{base}/models"),
         "openai-codex" => format!("{base}/codex/models?client_version={CODEX_CLIENT_VERSION}"),
         other => return Err(crate::Error::Other(format!("{other}'s models can't be read"))),
     };
@@ -175,6 +179,18 @@ pub async fn check(provider: &str, base_url: &str, auth: &RequestAuth, id: &str)
         "openrouter" => {
             let body = catalog::fetch_openrouter().await?;
             catalog::openrouter_model(&body, id)
+        }
+        "grok" => {
+            let body = fetch(provider, base_url, auth).await.map_err(|error| error.to_string())?;
+            let listing: Value = serde_json::from_slice(&body).map_err(|_| format!("{who}'s answer couldn't be read."))?;
+            let entries = listing.get("data").and_then(Value::as_array).ok_or_else(|| format!("{who}'s answer couldn't be read."))?;
+            let entry = entries.iter().find(|entry| entry_id(provider, entry) == Some(id)).ok_or_else(none)?;
+            let bundled = catalog::models(provider);
+            if let Some(mut model) = bundled.iter().find(|model| model.id == id).cloned() {
+                apply(provider, &mut model, entry);
+                return Ok(model);
+            }
+            new_model(provider, id, entry, &bundled).ok_or_else(|| format!("Claktory can't tell how to run {who}'s “{id}” yet."))
         }
         other => Err(format!("Claktory can't check {other}'s models.")),
     }
@@ -296,6 +312,7 @@ fn apply(provider: &str, model: &mut Model, entry: &Value) {
     match provider {
         "anthropic" => apply_anthropic(model, entry),
         "openai-codex" => apply_codex(model, entry),
+        "grok" => apply_grok(model, entry),
         _ => {}
     }
 }
@@ -310,6 +327,33 @@ fn positive(entry: &Value, key: &str) -> Option<u64> {
 
 fn set_image(model: &mut Model, image: bool) {
     model.input = if image { vec!["text".to_owned(), "image".to_owned()] } else { vec!["text".to_owned()] };
+}
+
+/// Grok's proxy's list: its context size, and the efforts it takes
+/// (`reasoning_efforts`, each `value` one of OpenAI's levels).
+fn apply_grok(model: &mut Model, entry: &Value) {
+    if let Some(context) = positive(entry, "context_window") {
+        model.context_window = context;
+    }
+    if let Some(efforts) = entry.get("reasoning_efforts").and_then(Value::as_array) {
+        let values: Vec<&str> = efforts.iter().filter_map(|effort| effort.get("value").and_then(Value::as_str)).collect();
+        if !values.is_empty() {
+            model.reasoning = true;
+            let map = model.thinking_level_map.get_or_insert_with(Map::new);
+            map.insert("off".into(), Value::Null);
+            map.insert("minimal".into(), if values.contains(&"minimal") { "minimal".into() } else { "low".into() });
+            for level in ["low", "medium", "high"] {
+                if !values.contains(&level) {
+                    map.insert(level.into(), Value::Null);
+                }
+            }
+            if values.contains(&"xhigh") {
+                map.insert("xhigh".into(), "xhigh".into());
+            } else {
+                map.remove("xhigh");
+            }
+        }
+    }
 }
 
 /// Anthropic's `ModelInfo`: context size, longest answer, image input and
@@ -415,6 +459,7 @@ fn new_model(provider: &str, id: &str, entry: &Value, bundled: &[Model]) -> Opti
     model.id = id.to_owned();
     model.name = entry
         .get("display_name")
+        .or_else(|| entry.get("name").filter(|_| provider == "grok"))
         .and_then(Value::as_str)
         .map(|name| name.chars().filter(|c| !c.is_control()).take(NAME_LIMIT).collect::<String>().trim().to_owned())
         .filter(|name| !name.is_empty())

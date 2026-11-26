@@ -2,6 +2,7 @@
 //! protocol defined in `proto/factory/v1/factory.proto`.
 
 mod account;
+mod answered_on;
 mod annotations;
 mod app_archive;
 pub mod apps;
@@ -38,8 +39,10 @@ pub mod log_file;
 mod extensions;
 pub mod factory;
 mod find;
+mod focus_mode;
 pub mod fork;
 mod forward;
+mod given_up;
 pub mod home;
 mod idle;
 mod ink;
@@ -70,6 +73,7 @@ mod onboarding;
 pub mod open_files;
 mod patch;
 mod person;
+mod pins;
 pub mod pipe_link;
 pub mod pipes;
 mod presentation;
@@ -79,6 +83,8 @@ mod proposals;
 mod provider_waits;
 pub mod remote;
 mod repeats;
+#[doc(hidden)]
+pub mod review_watch;
 mod rivet_reach;
 mod runner;
 mod runs;
@@ -102,6 +108,7 @@ mod usage_switch;
 pub mod user_apps;
 pub mod vault;
 mod waits;
+mod watch;
 
 pub use account::analytics::{backend_started, backend_stopped};
 /// For tests: anchors a test's own account service to roots of its own.
@@ -115,4 +122,8 @@ pub use connection::{ConnectionError, serve};
 #[doc(hidden)]
 pub use extensions::swarm::check_for_test as swarm_check_for_test;
 pub use factory::Factory;
+/// For tests: History's events counted ahead, as a while after a start,
+/// and how many its kept counts hold.
+#[doc(hidden)]
+pub use history::{counted_for_test as history_counted_for_test, warm_for_test as history_warm_for_test};
 pub use runner::set_filter_executable;

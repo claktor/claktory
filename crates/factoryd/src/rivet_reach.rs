@@ -42,6 +42,8 @@ const VOICE: &str = "the person's own words";
 const DRAWING: &str = "the person's own drawing";
 const CHAT: &str = "chats are the person's, and agents can't see them";
 const BROWSER: &str = "Claktory's browser (its live view, turns, errands' log, who's contained for errands, and its time zone and languages) is the person's own: never a tool's or a pipe's (Fugo, #435)";
+const CODES: &str = "a site's recovery codes are the person's alone: shown only on their device, never to an agent, a tool or a pipe (Fugo, #435 W8b)";
+const ALERTS: &str = "reading an alert is the person's: an agent never clears one from their Needs you (Bruno 44235)";
 const HISTORY: &str = "History is the person's own, on their devices: never an agent's or a pipe's (Fugo, #458)";
 
 /// Everything a request can change, and how Rivet does it. Only the tests
@@ -60,7 +62,9 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         Body::SetHighlights(_) => vec![Config(&["highlights"])],
         Body::SetZoom(_) => vec![Config(&["display.zoom"])],
         Body::SetFileCache(_) => vec![Config(&["display.file_cache"])],
+        Body::PinAgent(_) | Body::UnpinAgent(_) => vec![Config(&["pinned_agents"])],
         Body::GetHistoryOverview(_) | Body::GetHistoryEvents(_) | Body::WatchHistory(_) => vec![Person(HISTORY)],
+        Body::ReadAlerts(_) => vec![Person(ALERTS)],
         Body::WatchAgentBrowser(_)
         | Body::AgentBrowserFrameAck(_)
         | Body::AgentBrowserInput(_)
@@ -70,7 +74,11 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         | Body::OpenAgentBrowser(_)
         | Body::DeleteAgentBrowserData(_)
         | Body::SetAgentBrowserLocale(_)
+        | Body::SignOutAgentBrowserAccount(_)
         | Body::ListTimeZones(_) => vec![Person(BROWSER)],
+        // A site's recovery codes from an errand (#435 W8b, Fugo 42966):
+        // only the person sees or keeps them.
+        Body::ShowRecoveryCodes(_) | Body::KeepRecoveryCodes(_) => vec![Person(CODES)],
         // Page text (Fugo 36686): never read untainted through View.
         Body::ListErrandLog(_) => vec![Person(BROWSER)],
         // The person's while Claktory's browser is off for everyone (#435):
@@ -83,6 +91,8 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         Body::SetRemoteAccess(_) => vec![Config(&["remote.relays"])],
         // What a connection shows, reads and transfers.
         Body::SelectAgent(_)
+        | Body::WatchTranscript(_)
+        | Body::SetFocusMode(_)
         | Body::FocusProject(_)
         | Body::ExpandFolder(_)
         | Body::ShowAllFiles(_)
@@ -197,6 +207,7 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         | Body::DeleteSecret(_)
         | Body::RevealSecret(_)
         | Body::SetSecretAskEachTime(_)
+        | Body::SetSecretSites(_)
         | Body::SetAppSecret(_)
         | Body::SecretRequestDone(_) => vec![Person(VAULT)],
         Body::DecideProposal(_)
@@ -216,6 +227,7 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         | Body::ApproveDevice(_)
         | Body::DenyDevice(_)
         | Body::ConfirmDevice(_)
+        | Body::DismissAllowNotice(_)
         | Body::ConfirmMove(_)
         | Body::SetOnboarding(_) => vec![Person(CARD)],
         // A pipe's waiting reports, and letting a reader go: on a card the
@@ -233,6 +245,9 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         Body::StopPipeShare(_) => vec![Tool(&["pipes_settings", "pipes_shares"])],
         Body::HidePipeShare(_) => vec![Tool(&["pipes_shares"])],
         Body::OpenPipeShare(_) => vec![Person("only the person opens a website shared with them, in their own browser")],
+        // An agent's card shares for its hours (#46, Fugo 46375); only the
+        // person changes how long one lasts.
+        Body::SetPipeShareExpiry(_) => vec![Person("only the person changes how long a website of theirs stays shared (#46)")],
         Body::CheckPipeSharePort(_) => vec![View],
         Body::SendMessage(_)
         | Body::RetryVoiceMessage(_)
@@ -273,6 +288,9 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         Body::SetAppRunning(_) => vec![Tool(&["apps_set_running"])],
         Body::CheckForUpdates(_) => vec![Tool(&["updates_check"])],
         Body::RefreshModels(_) => vec![Tool(&["models_refresh"])],
+        // Reads what's stale when the person looks (friend bug #41): what
+        // they see, which models_refresh reads for Rivet.
+        Body::ProvidersShown(_) => vec![View],
         Body::DeleteBranch(_) => vec![Tool(&["conversation_delete"])],
         Body::TryAgainNow(_) => vec![Tool(&["models_try_now"])],
         // Restarting Claktory under its background service (friend bug #24).
@@ -294,6 +312,8 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         // Deleting a closed pipe on a card too (#471 G8).
         Body::SetPipeState(_) => vec![Tool(&["pipes_settings"])],
         Body::SetAccountService(_) => vec![Person("which account service Claktory signs in at is the person's, as signing in is")],
+        // Only this computer's own app signs itself in to the account (#529).
+        Body::VouchDevice(_) => vec![Person("only this computer's own app signs itself in to the account through this Claktory")],
     }
 }
 
@@ -363,6 +383,8 @@ fn update_settings(request: &v1::UpdateSettings) -> Vec<Reach> {
         checklist: _,
         notification_change: _,
         when_app_quits: _,
+        resource_alerts_to_admins: _,
+        resource_alert_agents: _,
     } = request;
     vec![
         Config(&[
@@ -375,6 +397,8 @@ fn update_settings(request: &v1::UpdateSettings) -> Vec<Reach> {
             "resources.disk_free_percent",
             "resources.cpu_percent",
             "resources.build_cache_gb",
+            "resources.alerts_to_admins",
+            "resources.alert_agents",
             "display.sidebar_width",
             "display.panel_width",
             "user.name",

@@ -209,6 +209,25 @@ sign --entitlements "$ENTITLEMENTS" "$APP"
 
 codesign --verify --strict --deep "$APP"
 codesign --verify --strict "$DIR/factoryd"
+# Nothing the backend trusts by its signature may be open to injection
+# (#546 A, Fugo via Giorno 43915): the app on app.sock is trusted by its code
+# signature, which holds only while no library or debugger can get into it.
+# So no signed code in the release may carry an entitlement that lets one in.
+INJECTABLE="com.apple.security.cs.allow-dyld-environment-variables com.apple.security.cs.disable-library-validation com.apple.security.get-task-allow"
+while IFS= read -r -d '' code; do
+  { codesign -d --entitlements - --xml "$code" 2>/dev/null || true; } | python3 -c '
+import plistlib, sys
+raw = sys.stdin.buffer.read()
+ents = plistlib.loads(raw) if raw.strip() else {}
+bad = " and ".join(k for k in sys.argv[2].split() if ents.get(k) is True)
+if bad:
+    sys.exit(sys.argv[1] + " carries " + bad + ": code with it can be injected into, so the backend could not trust it; not releasing")
+' "${code#"$DIR"/}" "$INJECTABLE" || exit 1
+done < <(
+  { printf '%s\0' "$APP" "$DIR/factoryd" ${SUPERVISOR:+"$SUPERVISOR"} ${APPS_HOST:+"$APPS_HOST"} ${SPEECH:+"$SPEECH"} ${VIDEO:+"$VIDEO"}
+    find "$APP/Contents" \( -name '*.app' -o -name '*.framework' -o -name '*.dylib' -o -type f -perm -u+x \) -print0 2>/dev/null; }
+)
+echo "no signed code in it allows injection (library validation, dyld variables, get-task-allow)"
 echo "signed with $IDENTITY"
 
 STAGE="$(mktemp -d)"

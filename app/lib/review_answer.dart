@@ -12,6 +12,7 @@
 // fetched as it waits; where to go back to is navigation, in memory.
 
 import 'dart:async';
+import 'dart:io' show FileSystemException;
 
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -19,6 +20,7 @@ import 'package:flutter/widgets.dart';
 import 'ask_card.dart' show AskThread;
 import 'backend.dart';
 import 'card_answer.dart' show CardDrafts, cardKey;
+import 'card_files.dart';
 import 'characters/character.dart';
 import 'controls.dart';
 import 'decision.dart' show CommentTyped, SubmitButton;
@@ -481,18 +483,32 @@ Future<void> _sendReview(
   required bool reply,
   required List<Attachment> attachments,
 }) async {
+  // The files the person added (#511), the card's own: sent up first, each
+  // once, after [attachments] (a PDF's drawings).
+  final card = cardFilesKey(agentId, review.ask.id);
+  final files = [
+    ...attachments,
+    ...await CardUploads.of(backend)
+        .send(backend, agentId, card, backend.attachments.of(card)),
+  ];
   Future<void> send(AskPerson ask) => backend.answerAsk(
     agentId,
     review.seq,
     text: text,
     dismiss: dismiss,
     reply: reply,
-    attachments: attachments,
+    attachments: files,
     revision: ask.revision,
     talkSeen: ask.thread.length,
   );
+  void sent() {
+    backend.attachments.take(card);
+    CardUploads.of(backend).sent(card);
+  }
+
   try {
     await send(review.ask);
+    sent();
   } on RequestFailure catch (failure) {
     if (connectionLost(failure)) rethrow;
     // Fetched again, the bar shows the card as it is now; when that fails
@@ -508,6 +524,7 @@ Future<void> _sendReview(
         fresh.seq == review.seq &&
         fresh.ask.revision != review.ask.revision) {
       await send(fresh.ask);
+      sent();
       return;
     }
     rethrow;
@@ -521,6 +538,14 @@ String reviewFailure(RequestFailure failure) => connectionLost(failure)
     ? "Couldn't send your answer. Try again."
     : failure.message;
 
+/// [agentId]'s review is answered: what its card showed is spent, and
+/// which card was chosen. All an answer in focus mode does (#514), where
+/// the agent's panes stay as they are; [finishReview] does it too.
+void forgetReview(String agentId) {
+  _talkSeen.removeWhere((key, _) => key.startsWith('$agentId/'));
+  _chosen.remove(agentId);
+}
+
 /// After [agentId]'s review of [path] is answered: its pane closes (and
 /// with it the expanded view), and the person is back where they pressed
 /// Review, when they did.
@@ -533,9 +558,7 @@ Future<void> finishReview(
   final backend = scope.backend;
   final back = _return;
   _return = null;
-  // Answered: what its card showed is spent, and which card was chosen.
-  _talkSeen.removeWhere((key, _) => key.startsWith('$agentId/'));
-  _chosen.remove(agentId);
+  forgetReview(agentId);
   final agent = backend.workspace.agent(agentId);
   if (agent != null) {
     final root = layoutOf(agent);
@@ -862,9 +885,20 @@ class _ReviewBarState extends State<ReviewBar> {
       if (mounted) {
         setState(() => _failed = reviewFailure(failure));
       }
+    } on FileSystemException catch (error) {
+      // A file to go with it couldn't be read (#511).
+      if (mounted) setState(() => _failed = cardFilesFailure(error));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  /// Where the files added to the answer wait (#511): the card's, so
+  /// what was added on it comes here too.
+  String get _files => cardFilesKey(widget.agentId, widget.review.ask.id);
+
+  void _filesNote(String? note) {
+    if (mounted) setState(() => _failed = note);
   }
 
   /// Return sends what's typed: a written answer, or on an approval the
@@ -955,85 +989,100 @@ class _ReviewBarState extends State<ReviewBar> {
           const SizedBox(height: Space.s),
           // Typed or said: the mic puts what's said in, to check before
           // sending; Dismiss and Send step aside while it records.
-          Dictation(
-            controller: _text,
-            focusNode: _focus,
+          CardFileDrop(
+            card: _files,
+            label: 'your answer to $name',
             enabled: !_busy,
-            // As the ask's card keeps it: it comes back to either.
-            keep: DictationFor(
-              cardKey(widget.agentId, ask.id),
-              ask.title.isEmpty
-                  ? 'Your answer to $name'
-                  : 'Your answer to $name: ${ask.title}',
-              select: (backend) => backend.selectAgent(widget.agentId),
-            ),
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                // Typed on an approval: one Submit in place of both, the
-                // words a reply, neither a yes nor a no (#370).
-                CommentTyped(
-                  controller: _text,
-                  builder: (context, typed) => Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (typed && !_wantsText)
-                        _Sized(
-                          touch: touch,
-                          child: SubmitButton(
-                            onPressed: off
-                                ? null
-                                : () => _answer(dismiss: false, reply: true),
-                          ),
-                        )
-                      else ...[
-                        _Sized(
-                          touch: touch,
-                          child: Button(
-                            label: 'Dismiss',
-                            onPressed: off
-                                ? null
-                                : () => _answer(dismiss: true),
-                          ),
-                        ),
-                        const SizedBox(width: Space.xs),
-                        _Sized(
-                          touch: touch,
-                          child: Button(
-                            label: _wantsText ? 'Send' : 'Approve',
-                            primary: true,
-                            onPressed: off || (_wantsText && !typed)
-                                ? null
-                                : () => _answer(dismiss: false),
-                          ),
-                        ),
-                      ],
-                    ],
+            onNote: _filesNote,
+            child: Dictation(
+              controller: _text,
+              focusNode: _focus,
+              enabled: !_busy,
+              // As the ask's card keeps it: it comes back to either.
+              keep: DictationFor(
+                cardKey(widget.agentId, ask.id),
+                ask.title.isEmpty
+                    ? 'Your answer to $name'
+                    : 'Your answer to $name: ${ask.title}',
+                select: (backend) => backend.selectAgent(widget.agentId),
+              ),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  // Files with the answer (#511).
+                  CardAttachButton(
+                    card: _files,
+                    enabled: !_busy,
+                    onNote: _filesNote,
                   ),
-                ),
-              ],
-            ),
-            child: CallbackShortcuts(
-              bindings: {
-                const SingleActivator(LogicalKeyboardKey.enter): _return,
-                const SingleActivator(LogicalKeyboardKey.numpadEnter): _return,
-              },
-              child: Semantics(
-                hint: 'Return sends it to $name.',
-                child: TextField(
-                  controller: _text,
-                  focusNode: _focus,
-                  placeholder: 'Your answer to $name',
-                  minLines: 1,
-                  maxLines: 6,
-                  textInputAction: TextInputAction.send,
-                  onSubmitted: (_) => _return(),
-                  semanticsLabel: 'Your answer to $name',
+                  const SizedBox(width: Space.xs),
+                  // Typed on an approval: one Submit in place of both, the
+                  // words a reply, neither a yes nor a no (#370).
+                  CommentTyped(
+                    controller: _text,
+                    builder: (context, typed) => Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (typed && !_wantsText)
+                          _Sized(
+                            touch: touch,
+                            child: SubmitButton(
+                              onPressed: off
+                                  ? null
+                                  : () => _answer(dismiss: false, reply: true),
+                            ),
+                          )
+                        else ...[
+                          _Sized(
+                            touch: touch,
+                            child: Button(
+                              label: 'Dismiss',
+                              onPressed: off
+                                  ? null
+                                  : () => _answer(dismiss: true),
+                            ),
+                          ),
+                          const SizedBox(width: Space.xs),
+                          _Sized(
+                            touch: touch,
+                            child: Button(
+                              label: _wantsText ? 'Send' : 'Approve',
+                              primary: true,
+                              onPressed: off || (_wantsText && !typed)
+                                  ? null
+                                  : () => _answer(dismiss: false),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              child: CallbackShortcuts(
+                bindings: {
+                  const SingleActivator(LogicalKeyboardKey.enter): _return,
+                  const SingleActivator(LogicalKeyboardKey.numpadEnter):
+                      _return,
+                },
+                child: Semantics(
+                  hint: 'Return sends it to $name.',
+                  child: TextField(
+                    controller: _text,
+                    focusNode: _focus,
+                    placeholder: 'Your answer to $name',
+                    minLines: 1,
+                    maxLines: 6,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => _return(),
+                    semanticsLabel: 'Your answer to $name',
+                  ),
                 ),
               ),
             ),
           ),
+          CardFileChips(card: _files, busy: _busy),
           if (note != null || reviewHasLineComments(widget.path)) ...[
             const SizedBox(height: Space.xs),
             Text(

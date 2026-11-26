@@ -22,11 +22,13 @@ pub(crate) mod env;
 pub(crate) mod generate;
 pub(crate) mod given_up;
 pub mod handoff;
+pub(crate) mod held_codes;
 pub(crate) mod import;
 pub mod memory;
 pub(crate) mod recovery;
 pub(crate) mod requests;
 pub(crate) mod signins;
+pub(crate) mod sites;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -218,6 +220,25 @@ ALTER TABLE variables ADD COLUMN binary INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE requests ADD COLUMN replied INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE connect_proposals ADD COLUMN replied INTEGER NOT NULL DEFAULT 0;
 ",
+    "
+-- #435 W6, agent-browser.md §5.3: the sites a secret may be filled into in
+-- Claktory's browser, as a JSON list of exact https origins ('' for none),
+-- and their MAC with the grants' key (`sites::message`), so editing
+-- vault.db can't bind a secret to another site.
+ALTER TABLE secrets ADD COLUMN sites TEXT NOT NULL DEFAULT '';
+ALTER TABLE secrets ADD COLUMN sites_mac BLOB NOT NULL DEFAULT x'';
+-- A grant that only lets its agent fill the secret into those sites, never
+-- give it to a command; part of the grant's MAC when set.
+ALTER TABLE grants ADD COLUMN fill_only INTEGER NOT NULL DEFAULT 0;
+-- The account Claktory's browser signed in with at each identity provider
+-- (Google, Apple, Microsoft): one each (Fugo 40552), until the person signs
+-- it out or deletes the browser's data.
+CREATE TABLE browser_accounts (
+    provider TEXT PRIMARY KEY,
+    secret TEXT NOT NULL,
+    since INTEGER NOT NULL
+);
+",
 ];
 
 /// How long a command's approval stays armed between the gate that passed
@@ -377,15 +398,28 @@ fn open_dek(vmk: &[u8; 32], sealed: &[u8], vault_id: &str, id: &str, version: &s
     crypto::open_key(vmk, sealed, &dek_aad(vault_id, id, version, false)).map(|dek| (dek, true))
 }
 
-/// What a grant's MAC covers; its aliases (JSON) only when it has any, so
-/// grants from before them still check.
-fn grant_message(vault_id: &str, secret: &str, agent: &str, granted: i64, aliases: &str) -> Vec<u8> {
+/// What a grant's MAC covers; its aliases (JSON) only when it has any, and
+/// "fill" only when it's fill-only, so grants from before them still check
+/// (and an older Claktory, which doesn't know fill-only grants, ignores
+/// one rather than giving it to commands).
+fn grant_message(vault_id: &str, secret: &str, agent: &str, granted: i64, aliases: &str, fill_only: bool) -> Vec<u8> {
     let granted = granted.to_string();
     let mut parts = vec!["grant", vault_id, secret, agent, &granted];
     if !aliases.is_empty() {
         parts.push(aliases);
     }
+    if fill_only {
+        parts.push("fill");
+    }
     aad(&parts)
+}
+
+/// A grant whose MAC checks.
+struct Grant {
+    aliases: BTreeMap<String, String>,
+    /// Only to fill into the secret's sites in Claktory's browser
+    /// (`sites`), never to a command or an app.
+    fill_only: bool,
 }
 
 /// A grant's aliases as kept: '' for none.
@@ -484,11 +518,30 @@ pub(crate) fn schema_version() -> i64 {
     MIGRATIONS.len() as i64 + 1
 }
 
+/// What `kept` names the note that the vault's free pages were wiped once.
+const WIPED: &str = "free-pages-wiped";
+
 fn open_db(path: &Path) -> Result<Connection, VaultError> {
     let db = Connection::open(path)?;
     db.busy_timeout(std::time::Duration::from_secs(5))?;
+    // What's deleted (a secret, recovery codes) is overwritten, never left
+    // sealed in a free page (Fugo, LOW).
+    db.pragma_update(None, "secure_delete", true)?;
     crate::store::migrate(&db, SCHEMA, MIGRATIONS)?;
     Ok(db)
+}
+
+/// Once per vault: rewrites the file, so pages freed before secure_delete
+/// was on hold nothing of what was deleted. Logged when it can't.
+fn wipe_free_pages(db: &Connection) {
+    let wiped: bool = db.query_row("SELECT COUNT(*) > 0 FROM kept WHERE name = ?1", [WIPED], |row| row.get(0)).unwrap_or(true);
+    if wiped {
+        return;
+    }
+    let done = db.execute_batch("VACUUM").and_then(|()| db.execute("INSERT OR REPLACE INTO kept (name, sealed) VALUES (?1, x'')", [WIPED]));
+    if let Err(error) = done {
+        tracing::warn!(%error, "the vault's free pages weren't wiped; trying again at the next start");
+    }
 }
 
 impl Vault {
@@ -522,6 +575,7 @@ impl Vault {
             return Ok(());
         }
         let db = open_db(&path)?;
+        wipe_free_pages(&db);
         let (vault_id, locked_mode): (String, bool) =
             db.query_row("SELECT vault_id, locked_mode FROM vault WHERE id = 1", [], crate::store::row2)?;
         let mut inner = self.lock();
@@ -896,7 +950,7 @@ impl Vault {
         db.execute("DELETE FROM variables WHERE secret = ?1", [id])?;
         for (position, value) in (0i64..).zip(values) {
             let sealed = crypto::seal(&dek, value.value.as_bytes(), &aad(&["value", vault_id, id, &version, &value.variable]));
-            let hint = if value.binary { String::new() } else { hint(&value.value) };
+            let hint = if value.binary || value.variable == held_codes::CODES_VARIABLE { String::new() } else { hint(&value.value) };
             db.execute(
                 "INSERT INTO variables (secret, position, name, file, hint, short, sealed_value, binary) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![id, position, value.variable, value.file, hint, value.value.len() < SHORT, sealed, value.binary],
@@ -1010,6 +1064,17 @@ impl Vault {
     /// `grant`, with other names `agent`'s commands get the secret's values
     /// under (`aliases`: name → the secret's variable), checked.
     pub(crate) fn grant_as(&self, id: &str, agent: &str, by: &str, aliases: &BTreeMap<String, String>) -> Result<String, VaultError> {
+        self.grant_with(id, agent, by, aliases, false)
+    }
+
+    /// `grant`, letting `agent` only fill the secret into its sites in
+    /// Claktory's browser (agent-browser.md §5.3): its commands can't have
+    /// it. Replaces a full grant it held.
+    pub(crate) fn grant_fill_only(&self, id: &str, agent: &str, by: &str) -> Result<String, VaultError> {
+        self.grant_with(id, agent, by, &BTreeMap::new(), true)
+    }
+
+    fn grant_with(&self, id: &str, agent: &str, by: &str, aliases: &BTreeMap<String, String>, fill_only: bool) -> Result<String, VaultError> {
         let mut inner = self.lock();
         let key = Self::grant_key(&inner)?;
         let db = Self::db(&inner)?;
@@ -1037,10 +1102,10 @@ impl Vault {
         }
         let aliases = aliases_text(aliases);
         let now = now_ms();
-        let mac = crypto::mac(&key, &grant_message(&inner.vault_id, &id, agent, now, &aliases));
+        let mac = crypto::mac(&key, &grant_message(&inner.vault_id, &id, agent, now, &aliases, fill_only));
         db.execute(
-            "INSERT OR REPLACE INTO grants (secret, agent, granted, mac, aliases) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, agent, now, mac, aliases],
+            "INSERT OR REPLACE INTO grants (secret, agent, granted, mac, aliases, fill_only) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, agent, now, mac, aliases, fill_only],
         )?;
         Self::log(db, &id, &name, "grant", agent, "", by)?;
         inner.state = None;
@@ -1252,12 +1317,16 @@ impl Vault {
                 }
                 secret.variables.push(variable);
             }
-            let mut grants = db.prepare("SELECT agent, granted, mac, aliases FROM grants WHERE secret = ?1 ORDER BY granted")?;
-            for row in grants.query_map([&secret.id], crate::store::row4::<String, i64, Vec<u8>, String>)? {
-                let (agent, granted, mac, aliases) = row?;
+            let mut grants = db.prepare("SELECT agent, granted, mac, aliases, fill_only FROM grants WHERE secret = ?1 ORDER BY granted")?;
+            let rows = grants
+                .query_map([&secret.id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Vec<u8>>(2)?, row.get::<_, String>(3)?, row.get::<_, bool>(4)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            for (agent, granted, mac, aliases, fill_only) in rows {
                 // Locked, grants can't be checked, and can't be used either.
                 if let Some(key) = &grant_key
-                    && !crypto::mac_matches(key, &grant_message(&inner.vault_id, &secret.id, &agent, granted, &aliases), &mac)
+                    && !crypto::mac_matches(key, &grant_message(&inner.vault_id, &secret.id, &agent, granted, &aliases, fill_only), &mac)
                 {
                     secret.warnings.push(format!("A grant to {agent} was changed outside Claktory, so it's ignored."));
                     continue;
@@ -1271,8 +1340,10 @@ impl Vault {
                     granted_ms: granted,
                     running_tasks: 0,
                     aliases: aliases_of(&aliases).into_iter().collect(),
+                    fill_only,
                 });
             }
+            Self::sites_view(inner, db, &mut secret)?;
             Self::connection_view(db, &mut secret)?;
             secrets.push(secret);
         }
@@ -1289,22 +1360,26 @@ impl Vault {
         Ok((state, recent))
     }
 
-    /// Whether `agent` holds a grant of the secret with the right MAC.
+    /// Whether `agent` holds a grant of the secret with the right MAC that
+    /// lets it use the values (not a fill-only one).
     fn is_granted(inner: &Inner, key: &Key, secret: &str, agent: &str) -> Result<bool, VaultError> {
-        Ok(Self::grant_of(inner, key, secret, agent)?.is_some())
+        Ok(Self::grant_of(inner, key, secret, agent)?.is_some_and(|grant| !grant.fill_only))
     }
 
-    /// `agent`'s grant of the secret, if it holds one with the right MAC:
-    /// its aliases.
-    fn grant_of(inner: &Inner, key: &Key, secret: &str, agent: &str) -> Result<Option<BTreeMap<String, String>>, VaultError> {
-        let row: Option<(i64, Vec<u8>, String)> = Self::db(inner)?
-            .query_row("SELECT granted, mac, aliases FROM grants WHERE secret = ?1 AND agent = ?2", [secret, agent], crate::store::row3)
+    /// `agent`'s grant of the secret, if it holds one with the right MAC.
+    fn grant_of(inner: &Inner, key: &Key, secret: &str, agent: &str) -> Result<Option<Grant>, VaultError> {
+        let row: Option<(i64, Vec<u8>, String, bool)> = Self::db(inner)?
+            .query_row(
+                "SELECT granted, mac, aliases, fill_only FROM grants WHERE secret = ?1 AND agent = ?2",
+                [secret, agent],
+                crate::store::row4,
+            )
             .optional()?;
         Ok(row
-            .filter(|(granted, mac, aliases)| {
-                crypto::mac_matches(key, &grant_message(&inner.vault_id, secret, agent, *granted, aliases), mac)
+            .filter(|(granted, mac, aliases, fill_only)| {
+                crypto::mac_matches(key, &grant_message(&inner.vault_id, secret, agent, *granted, aliases, *fill_only), mac)
             })
-            .map(|(_, _, aliases)| aliases_of(&aliases)))
+            .map(|(_, _, aliases, fill_only)| Grant { aliases: aliases_of(&aliases), fill_only }))
     }
 
     /// The secrets granted to `agent`, by id, as it's told of them: "Name
@@ -1322,7 +1397,7 @@ impl Vault {
             let rows = statement.query_map([agent], crate::store::row4::<String, String, String, bool>)?.collect::<Result<Vec<_>, _>>()?;
             let mut granted = BTreeMap::new();
             for (id, name, description, ask) in rows {
-                let Some(aliases) = Self::grant_of(&inner, &key, &id, agent)? else { continue };
+                let Some(Grant { aliases, fill_only }) = Self::grant_of(&inner, &key, &id, agent)? else { continue };
                 let variables = db
                     .prepare("SELECT name, file FROM variables WHERE secret = ?1 ORDER BY position")?
                     .query_map([&id], crate::store::row2::<String, bool>)?
@@ -1343,7 +1418,16 @@ impl Vault {
                 } else {
                     ""
                 };
-                granted.insert(id, format!("{name} (sets {}){about}{asks}", variables.join(", ")));
+                // Where it may be filled in Claktory's browser, if anywhere.
+                let sites = Self::sites_of(&inner, &key, &id)?;
+                let fills = match (fill_only, sites.is_empty()) {
+                    (true, true) => "; fill only, and bound to no site yet, so it can't be filled anywhere".to_owned(),
+                    (true, false) => format!("; fill only: browser_fill_secret puts it into {}, never a command", sites.join(", ")),
+                    (false, true) => String::new(),
+                    (false, false) => format!("; browser_fill_secret also puts it into {}", sites.join(", ")),
+                };
+                let asks = if fill_only { "" } else { asks };
+                granted.insert(id, format!("{name} (sets {}{fills}){about}{asks}", variables.join(", ")));
             }
             Ok(granted)
         };
@@ -1416,9 +1500,14 @@ impl Vault {
                 db.query_row("SELECT id, name FROM secrets WHERE name = ?1", [asked.trim()], crate::store::row2).optional()?;
             let Some((id, name)) = found else { return Err(Refusal::NotYours(asked.trim().to_owned())) };
             // Said as for a name the vault doesn't have: nothing shows through.
-            let Some(aliases) = Self::grant_of(&inner, &key, &id, agent)? else {
+            let Some(Grant { aliases, fill_only }) = Self::grant_of(&inner, &key, &id, agent)? else {
                 return Err(Refusal::NotYours(asked.trim().to_owned()));
             };
+            if fill_only {
+                return Err(Refusal::Said(format!(
+                    "{name} is yours only to fill into its sites in Claktory's browser, with browser_fill_secret: no command can have it."
+                )));
+            }
             if Self::asks(db, &id)? && !Self::is_armed(&inner, agent, &name) {
                 return Err(Refusal::Said(format!(
                     "{name} asks the person each time it's used, and this command wasn't allowed: run it with bash's `secrets`, and they're asked."
@@ -1574,6 +1663,30 @@ impl Vault {
         inner.state = None;
         Ok(())
     }
+
+    /// The identity providers Claktory's browser is signed in to (#435),
+    /// by name ("Google"): the secret's id and its name now (empty when
+    /// it's gone), and when it first signed in there. Empty without a vault.
+    pub(crate) fn browser_accounts(&self) -> Vec<BrowserAccount> {
+        let inner = self.lock();
+        let Some(db) = inner.db.as_ref() else { return Vec::new() };
+        query(
+            db,
+            "SELECT b.provider, b.secret, COALESCE(s.name, ''), b.since FROM browser_accounts b LEFT JOIN secrets s ON s.id = b.secret ORDER BY b.since",
+            [],
+            |row| Ok(BrowserAccount { provider: row.get(0)?, secret_id: row.get(1)?, secret_name: row.get(2)?, since: row.get(3)? }),
+        )
+        .unwrap_or_default()
+    }
+}
+
+/// An identity provider the browser is signed in to (`Vault::browser_accounts`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BrowserAccount {
+    pub provider: String,
+    pub secret_id: String,
+    pub secret_name: String,
+    pub since: i64,
 }
 
 #[cfg(test)]
@@ -1594,19 +1707,19 @@ mod tests {
 
     const CHEAP: &str = "argon2id m=1024 t=1 p=1";
 
-    fn temp() -> PathBuf {
+    pub(super) fn temp() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("vault-test-{}", crypto::hex(&crypto::random::<8>())));
         std::fs::create_dir_all(&dir).expect("temp dir");
         dir
     }
 
-    fn vault(dir: &Path) -> Vault {
+    pub(super) fn vault(dir: &Path) -> Vault {
         let vault = Vault::open(dir.join("vault"));
         vault.set_passphrase_params(CHEAP);
         vault
     }
 
-    fn value(variable: &str, value: &str) -> Value {
+    pub(super) fn value(variable: &str, value: &str) -> Value {
         Value { variable: variable.to_owned(), value: Zeroizing::new(value.to_owned()), file: false, binary: false }
     }
 
@@ -1683,6 +1796,32 @@ mod tests {
         assert!(vault.resolve("bo", &names).is_err());
         vault.arm("bo", &names);
         assert_eq!(vault.resolve("bo", &names).expect("allowed")[0].value.as_str(), "a-new-value-123456");
+    }
+
+    #[test]
+    fn a_deleted_secret_leaves_nothing_of_it_in_the_file() {
+        let dir = temp();
+        let vault = vault(&dir);
+        vault.create(Some("correct horse battery"), false).expect("create");
+        // A value long enough to find, sealed: look for its sealed bytes.
+        let id = vault.create_secret("Long", "", &[value("X", &"v".repeat(4096))], "").expect("made");
+        let sealed: Vec<u8> = {
+            let inner = vault.lock();
+            Vault::db(&inner).unwrap().query_row("SELECT sealed_value FROM variables WHERE secret = ?1", [&id], |row| row.get(0)).unwrap()
+        };
+        let file = || std::fs::read(dir.join("vault/vault.db")).unwrap();
+        let held = |bytes: &[u8]| bytes.windows(64).any(|window| window == &sealed[..64]);
+        assert!(held(&file()), "the sealed value is in the file");
+        vault.delete_secret(&id).expect("deleted");
+        assert!(!held(&file()), "deleted, its sealed bytes are gone");
+        // Opened again: wiped once, noted.
+        drop(vault);
+        let again = Vault::open(dir.join("vault"));
+        let inner = again.lock();
+        let noted: bool = Vault::db(&inner).unwrap().query_row("SELECT COUNT(*) > 0 FROM kept WHERE name = ?1", [WIPED], |row| row.get(0)).unwrap();
+        assert!(noted);
+        drop(inner);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

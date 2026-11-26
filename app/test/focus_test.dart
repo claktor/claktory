@@ -1,5 +1,6 @@
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/tunnel_client.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
@@ -86,12 +87,7 @@ void main() {
       expect(find.text('‹ All projects'), findsOneWidget);
       expect(find.text('Builder'), findsWidgets);
       // This Rivet is no admin agent, so it isn't pinned.
-      for (final elsewhere in [
-        'Rivet',
-        'Writer',
-        'Site',
-        'Workspace',
-      ]) {
+      for (final elsewhere in ['Rivet', 'Writer', 'Site', 'Workspace']) {
         expect(find.text(elsewhere), findsNothing, reason: elsewhere);
       }
       // The Projects section's heading stays, over the focused project.
@@ -163,6 +159,8 @@ void main() {
     expect(harness.last.focusProject.projectId, 'docs');
   });
 
+  // A desktop's banner, whose Update replaces this app too.
+  final desktop = TargetPlatformVariant.only(TargetPlatform.macOS);
   group('updates', () {
     testWidgets('an older backend is updated in place, and the version shows', (
       tester,
@@ -187,7 +185,7 @@ void main() {
       );
       expect(harness.quits, 0);
       expect(find.text('Updating…'), findsOneWidget);
-    });
+    }, variant: desktop);
 
     testWidgets('an older app is replaced too, and quits so it can be', (
       tester,
@@ -201,7 +199,7 @@ void main() {
       await settle(tester);
       expect(harness.last.installUpdate.appPath, '/Applications/Factory.app');
       expect(harness.quits, 1);
-    });
+    }, variant: desktop);
 
     testWidgets('a refused update says why and can be tried again', (
       tester,
@@ -218,7 +216,7 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('Try again'), findsOneWidget);
-    });
+    }, variant: desktop);
 
     /// A Factory on another machine, its backend at [version] and its
     /// latest release [latest], shown by an app at [app].
@@ -295,6 +293,37 @@ void main() {
         ]);
         expect(harness.quits, 1);
       },
+      variant: desktop,
+    );
+
+    testWidgets(
+      "on another machine's Factory reached by a relay, the app's download "
+      'is told so, to go gently (friend bug #51)',
+      (tester) async {
+        final harness = await showRemote(
+          tester,
+          version: '2026.11.18-1700',
+          app: '2026.11.18-1600',
+        );
+        harness.backend.tunnel.value = const TunnelStatus(
+          phase: TunnelPhase.connected,
+          path: TunnelPath.relayed,
+          error: '',
+          failure: TunnelFailure.none,
+          relayConnected: true,
+          relayUpMs: 0,
+          relayTrouble: TunnelRelayTrouble.none,
+          received: 0,
+          linkReceived: 0,
+          dialTimeoutMs: 0,
+          reach: TunnelReach.none,
+        );
+        await tester.tap(find.text('Update'));
+        await tester.pump();
+        expect(harness.updater.relayedAtStart, isTrue);
+        await tester.pump(const Duration(milliseconds: 500));
+      },
+      variant: desktop,
     );
 
     testWidgets(
@@ -328,6 +357,7 @@ void main() {
         expect(harness.updater.replaced, hasLength(1));
         expect(harness.quits, greaterThanOrEqualTo(1));
       },
+      variant: desktop,
     );
 
     testWidgets(
@@ -357,6 +387,7 @@ void main() {
         expect(harness.quits, 1);
         debugDefaultTargetPlatformOverride = null;
       },
+      variant: desktop,
     );
 
     testWidgets(
@@ -383,6 +414,7 @@ void main() {
         await tester.pump(const Duration(milliseconds: 500));
         expect(harness.quits, 1);
       },
+      variant: desktop,
     );
 
     testWidgets(
@@ -406,6 +438,7 @@ void main() {
         expect(harness.updater.replaced, isEmpty);
         expect(harness.quits, 0);
       },
+      variant: desktop,
     );
 
     testWidgets(
@@ -423,6 +456,7 @@ void main() {
         expect(harness.last.installUpdate.appPath, '');
         expect(harness.quits, 0);
       },
+      variant: desktop,
     );
 
     testWidgets('nothing is offered to up-to-date or unstamped builds', (
@@ -440,7 +474,7 @@ void main() {
         await harness.show(tester);
         expect(find.text('Update'), findsNothing, reason: '$version / $app');
       }
-    });
+    }, variant: desktop);
 
     testWidgets('an app-only release says agents keep working', (tester) async {
       final harness = Harness(
@@ -461,7 +495,7 @@ void main() {
       await tester.tap(find.text('Update'));
       await settle(tester);
       expect(harness.last.installUpdate.appPath, '/Applications/Factory.app');
-    });
+    }, variant: desktop);
 
     testWidgets('a backend update tells working agents carry on', (
       tester,
@@ -480,7 +514,7 @@ void main() {
         find.textContaining('The working agent picks up where it left off.'),
         findsOneWidget,
       );
-    });
+    }, variant: desktop);
 
     testWidgets('an undone update says why and offers to try again', (
       tester,
@@ -502,6 +536,6 @@ void main() {
       await tester.tap(find.text('Try again'));
       await settle(tester);
       expect(harness.last.hasInstallUpdate(), isTrue);
-    });
+    }, variant: desktop);
   });
 }

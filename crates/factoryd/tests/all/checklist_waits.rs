@@ -116,7 +116,10 @@ async fn an_item_waiting_on_another_opens_again_when_that_one_is_done() {
     ack(apply_request(&mut client, &mut view, checklist_on("worker")).await);
     call(&mut client, &mut view, "lead", "checklist_add", r#"{"items":["Ship the release","Tidy the docs","Write the notes"]}"#).await;
     call(&mut client, &mut view, "worker", "checklist_add", r#"{"items":["Build the APK","Old task"]}"#).await;
+    // Each header counts what's not done or dropped (area 4 §8.9).
+    view.follow(&mut client, |view| view.agent("lead").checklist_open == 3 && view.agent("worker").checklist_open == 2).await;
     call(&mut client, &mut view, "worker", "checklist_update", r#"{"updates":[{"id":2,"status":"done"}]}"#).await;
+    view.follow(&mut client, |view| view.agent("worker").checklist_open == 1).await;
 
     // What a wait on an item can't be.
     let update = |args: &str| format!(r#"{{"updates":[{{"id":1,"status":"blocked","waits_on":"item"{args}}}]}}"#);
@@ -603,6 +606,44 @@ async fn a_reply_to_a_question_about_an_item_counts_as_answered_and_is_never_ask
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     apply_request(&mut client, &mut view, select("worker")).await;
     assert!(events(&view, "Ask the person again").is_empty());
+
+    // A secret request dismissed with words counts as answered too
+    // (needs-you-cards §7): the words often say what to ask for instead.
+    call(&mut client, &mut view, "worker", "checklist_add", r#"{"items":["Deploy it"]}"#).await;
+    call(&mut client, &mut view, "worker", "checklist_update", r#"{"updates":[{"id":2,"status":"blocked","waits_on":"person_action"}]}"#)
+        .await;
+    let need = r#"{"name":"Hetzner token","variables":[{"name":"HCLOUD_TOKEN"}],"reason":"To deploy.","item":"2"}"#;
+    call(&mut client, &mut view, "worker", "secrets_request", need).await;
+    view.follow(&mut client, |view| waiting(view).len() == 1).await;
+    let request_id = view
+        .entries
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            Some(Kind::SecretRequest(request)) if request.secret_name == "Hetzner token" => Some(request.id.clone()),
+            _ => None,
+        })
+        .expect("the request");
+    let dismiss = v1::DecideSecretRequest {
+        agent_id: "worker".into(),
+        request_id,
+        approve: false,
+        comment: "Which project is it for?".into(),
+        ..Default::default()
+    };
+    ack(apply_request(&mut client, &mut view, client_message::Body::DecideSecretRequest(dismiss)).await);
+    let said = told(&mut client, &mut view, "worker", "The person dismissed your request for Hetzner token").await;
+    assert!(
+        said.text.starts_with("The person dismissed your request for Hetzner token and says:\n\nWhich project is it for?\n\nRead what they say.")
+            && said.text.ends_with(
+                "It was about #2 \"Deploy it\", still blocked on the person. If this settles it, update #2 now; \
+                 if something is still missing, say what in a note."
+            ),
+        "{}",
+        said.text
+    );
+    view.follow(&mut client, |view| waiting(view).is_empty()).await;
+    let item = panel(&mut client, &mut view, "worker").await[1].clone();
+    assert_eq!((item.dismissed_ms, item.reask_at_ms), (0, 0), "{item:?}");
 }
 
 /// Friend bug #19: an item marked done or dropped while a card about it

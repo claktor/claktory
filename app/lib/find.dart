@@ -201,6 +201,24 @@ class FindSessions {
     return null;
   }
 
+  /// The session of the pane last tapped or clicked in inside [context] (a
+  /// view whose panes can be searched), while it's still on show: what a
+  /// Find button of the view's own searches, so it finds in the pane being
+  /// read rather than always the same one (Squalo's ST14). Null when none
+  /// was, or it's gone.
+  FindSession? pressedWithin(BuildContext context) {
+    final pressed = _pressed;
+    if (pressed == null || !_sessions.value.contains(pressed)) return null;
+    final scope = pressed._scope;
+    if (!scope.mounted || !scope._inSight()) return null;
+    var inside = false;
+    scope.context.visitAncestorElements((element) {
+      if (element == context) inside = true;
+      return !inside;
+    });
+    return inside ? pressed : null;
+  }
+
   /// The session of a pane inside [context] (a view whose body can be
   /// searched, for a button of its own outside the pane), if any; with
   /// [only], the one whose target it picks (the conversation's, not a pane

@@ -1,8 +1,12 @@
+import 'dart:io' show FileSystemException;
+
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'avatar.dart';
 import 'backend.dart';
+import 'card_answer.dart';
+import 'card_files.dart';
 import 'characters/character.dart';
 import 'command_card.dart';
 import 'controls.dart';
@@ -19,7 +23,13 @@ import 'mobile/lines.dart';
 import 'mobile/metrics.dart';
 import 'outbox.dart' show connectionLost, decisionWaiting;
 import 'pipes.dart'
-    show PipeApprovalAsk, PipeApprovalAskView, PipeTrustAsk, PipeTrustAskView;
+    show
+        PipeApprovalAsk,
+        PipeApprovalAskView,
+        PipeTrustAsk,
+        PipeTrustAskView,
+        pipePeerClaktory,
+        pipesLimiting;
 import 'mobile/navigation.dart' show PhoneRoutes;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'review_answer.dart' show rememberReviewReturn, rememberReviewTalk;
@@ -70,8 +80,33 @@ class AskPersonCard extends StatefulWidget {
   State<AskPersonCard> createState() => _AskPersonCardState();
 }
 
-class _AskPersonCardState extends State<AskPersonCard> {
-  final _text = TextEditingController();
+class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
+  /// The card's key: its draft's, its files' and its recordings'.
+  String get _key => cardKey(widget.agentId, widget.ask.id);
+
+  /// What's typed on the card: its draft, the same field wherever it shows
+  /// (its review bar, focus mode's dock) while the app runs (Q11, #514).
+  TextEditingController get _text =>
+      dockDraft(_key) ?? CardDrafts.of(_backend!).field(_key);
+
+  /// The draft listened to, for a dock's Submit as words come and go.
+  TextEditingController? _listened;
+  var _typed = false;
+
+  void _listen() {
+    final text = _text;
+    if (identical(text, _listened)) return;
+    _listened?.removeListener(_typing);
+    _listened = text..addListener(_typing);
+    _typed = text.text.trim().isNotEmpty;
+  }
+
+  void _typing() {
+    final typed = _listened?.text.trim().isNotEmpty ?? false;
+    if (typed == _typed) return;
+    _typed = typed;
+    if (inDock && mounted) setState(() {});
+  }
 
   /// The written answer's focus, or a step's what's in the way: never
   /// both on the card at once.
@@ -99,6 +134,92 @@ class _AskPersonCardState extends State<AskPersonCard> {
   /// again (#494).
   var _confirming = false;
 
+  /// Where the files the person adds to what they write here wait (#511).
+  String get _filesKey => _key;
+
+  /// Files wait to go with what's written here.
+  bool get _holdsFiles =>
+      _backend?.attachments.of(_filesKey).isNotEmpty ?? false;
+
+  /// The files waiting, sent up to the agent (each once): what the answer
+  /// names.
+  /// None on a pipe's cards, which offer none: a trust card's comment goes
+  /// to the pipe's lead (Fugo).
+  Future<List<Attachment>> _files(Backend backend) async =>
+      widget.ask.hasPipeTrust() || widget.ask.hasPipeApproval()
+      ? const []
+      : CardUploads.of(backend).send(
+          backend,
+          widget.agentId,
+          _filesKey,
+          backend.attachments.of(_filesKey),
+        );
+
+  /// What didn't go in as files were added, said in the card's line.
+  void _filesNote(String? note) {
+    if (!mounted) return;
+    setState(() {
+      _error = note;
+      _waiting = false;
+    });
+  }
+
+  /// The paperclip beside a field of the card's.
+  Widget _attach() =>
+      CardAttachButton(card: _filesKey, enabled: !_busy, onNote: _filesNote);
+
+  /// The files waiting, under the field, with where else they may go.
+  Widget _chips() =>
+      CardFileChips(card: _filesKey, busy: _busy, note: _passOn());
+
+  /// On the card of an agent that talks to a pipe's other side (its
+  /// liaison, or one limited to it), whom it may pass the files to; with
+  /// the card's own label of what it read (Fugo's ask on #511).
+  Widget? _passOn() {
+    final backend = _backend;
+    if (backend == null) return null;
+    final workspace = backend.workspace.workspace;
+    final agent = backend.workspace.agent(widget.agentId);
+    final name = agent?.name ?? 'The agent';
+    final pipes = {
+      for (final pipe in pipesLimiting(workspace, widget.agentId))
+        pipe.id: pipe,
+      for (final pipe in workspace.pipes)
+        if (agent != null && pipe.id == agent.pipeId) pipe.id: pipe,
+    }.values.toList();
+    final read = taintLine(widget.ask.taint, agent: name);
+    if (pipes.isEmpty && read == null) return null;
+    final palette = Palette.of(context);
+    final peers = [for (final pipe in pipes) pipePeerClaktory(pipe)];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (peers.isNotEmpty)
+          Text(
+            '$name can pass these files on to '
+            '${peers.length < 2 ? peers.single : '${peers.sublist(0, peers.length - 1).join(', ')} or ${peers.last}'}.',
+            style: TypeScale.of(context).caption
+                .copyWith(color: palette.textMuted),
+          ),
+        TaintLabel(taint: widget.ask.taint, agent: name),
+      ],
+    );
+  }
+
+  /// While [field] has the keys on a Mac, files dropped or pasted on the
+  /// window come here.
+  Widget _dropping(String name, Widget field) => CardFileDrop(
+    card: _filesKey,
+    label: 'your answer to $name',
+    enabled: !_busy,
+    onNote: _filesNote,
+    child: field,
+  );
+
+  void _filesChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void didUpdateWidget(AskPersonCard old) {
     super.didUpdateWidget(old);
@@ -118,7 +239,9 @@ class _AskPersonCardState extends State<AskPersonCard> {
   @override
   void dispose() {
     _backend?.connected.removeListener(_connectedChanged);
-    _text.dispose();
+    _backend?.attachments.removeListener(_filesChanged);
+    // The draft stays with the card's key, for wherever it shows next.
+    _listened?.removeListener(_typing);
     _focus.dispose();
     super.dispose();
   }
@@ -139,16 +262,19 @@ class _AskPersonCardState extends State<AskPersonCard> {
     int? revision,
     int? talkSeen,
     bool confirmed = false,
+    String? reason,
   }) async {
-    final text = _text.text.trim();
+    // A no's reason from focus mode's dock goes with what's typed.
+    final text = dismiss ? noComment(reason, _text.text) : _text.text.trim();
     if (_busy ||
         (step == null && !dismiss && widget.ask.wantsText && text.isEmpty)) {
+      if (_dock) throw const AnswerNotSent();
       return;
     }
     final seen = revision ?? widget.ask.revision;
     final talk = talkSeen ?? widget.ask.thread.length;
     await _send(
-      (backend) => backend.answerAsk(
+      (backend) async => backend.answerAsk(
         widget.agentId,
         widget.seq,
         // Dismissed, what's typed goes too, as the person's comment.
@@ -159,6 +285,8 @@ class _AskPersonCardState extends State<AskPersonCard> {
         talkSeen: talk,
         from: widget.from,
         confirmed: confirmed,
+        // Its files (#511); none with Execute, which has no field.
+        attachments: confirmed ? const [] : await _files(backend),
       ),
       () => _answer(
         dismiss: dismiss,
@@ -167,6 +295,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
         revision: seen,
         talkSeen: talk,
         confirmed: confirmed,
+        reason: reason,
       ),
       again: again,
       said: text.isNotEmpty
@@ -189,14 +318,19 @@ class _AskPersonCardState extends State<AskPersonCard> {
     int? talkSeen,
   }) async {
     final text = _text.text.trim();
-    if (_busy || text.isEmpty) return;
+    // Words, or files alone (#511).
+    if (_busy || (text.isEmpty && !_holdsFiles)) {
+      if (_dock) throw const AnswerNotSent();
+      return;
+    }
     final seen = revision ?? widget.ask.revision;
     final talk = talkSeen ?? widget.ask.thread.length;
     await _send(
-      (backend) => backend.answerAsk(
+      (backend) async => backend.answerAsk(
         widget.agentId,
         widget.seq,
         text: text,
+        attachments: await _files(backend),
         reply: true,
         revision: seen,
         talkSeen: talk,
@@ -204,7 +338,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
       ),
       () => _reply(again: true, revision: seen, talkSeen: talk),
       again: again,
-      said: text,
+      said: text.isEmpty ? 'Reply' : text,
     );
   }
 
@@ -220,10 +354,11 @@ class _AskPersonCardState extends State<AskPersonCard> {
     final seen = revision ?? widget.ask.revision;
     final talk = talkSeen ?? widget.ask.thread.length;
     await _send(
-      (backend) => backend.answerAsk(
+      (backend) async => backend.answerAsk(
         widget.agentId,
         widget.seq,
         text: text,
+        attachments: await _files(backend),
         resolve: true,
         revision: seen,
         talkSeen: talk,
@@ -251,7 +386,11 @@ class _AskPersonCardState extends State<AskPersonCard> {
     final backend = AppScope.of(context);
     if (identical(backend, _backend)) return;
     _backend?.connected.removeListener(_connectedChanged);
-    _backend = backend..connected.addListener(_connectedChanged);
+    _backend?.attachments.removeListener(_filesChanged);
+    _backend = backend
+      ..connected.addListener(_connectedChanged)
+      ..attachments.addListener(_filesChanged);
+    _listen();
   }
 
   /// The connection is back: the answer that waited for it goes.
@@ -282,12 +421,19 @@ class _AskPersonCardState extends State<AskPersonCard> {
     var now = false;
     try {
       await request(backend);
+      // Sent, its files with it (#511).
+      backend.attachments.take(_filesKey);
+      CardUploads.of(backend).sent(_filesKey);
       // Sent: should its agent reply and reopen the card, the field starts
       // empty under the thread, which now holds these words.
       if (mounted) {
         _text.clear();
         setState(() => _setAside = null);
       }
+    } on FileSystemException catch (error) {
+      // A file to go with it couldn't be read (moved or deleted).
+      if (mounted) setState(() => _error = cardFilesFailure(error));
+      if (_dock) throw const AnswerNotSent();
     } on RequestFailure catch (failure) {
       if (!mounted) return;
       if (again && failure.message.startsWith('This question was already')) {
@@ -304,15 +450,19 @@ class _AskPersonCardState extends State<AskPersonCard> {
             _waiting = true;
           });
         }
+        // It goes by itself once the connection's back; the card says so.
+        if (_dock) throw const AnswerNotSent();
         return;
       }
       // Its agent changed the card meanwhile: the answer is set aside,
       // shown with the change, and what's typed stays to send again.
       if (failure.message.startsWith(cardChanged)) {
         setState(() => _setAside = said);
+        if (_dock) throw const AnswerNotSent();
         return;
       }
       setState(() => _error = failure.message);
+      if (_dock) rethrow;
     } finally {
       if (mounted) setState(() => _busy = false);
       if (now && mounted) retry();
@@ -327,8 +477,138 @@ class _AskPersonCardState extends State<AskPersonCard> {
       ? palette.textMuted
       : palette.danger;
 
+  /// A question answered in a dock (focus mode's): its field, yes and no
+  /// drawn there, not on the card. Not Execute, a procedure or a pipe's
+  /// card, whose controls stay their own.
+  bool get _docked {
+    final ask = widget.ask;
+    return inDock &&
+        !ask.hasCommand() &&
+        ask.steps.isEmpty &&
+        !ask.hasPipeTrust() &&
+        !ask.hasPipeApproval();
+  }
+
+  /// For focus mode's keys and dock (#514): as the card's own buttons.
+  @override
+  CardAnswer? answerNow() {
+    final ask = widget.ask;
+    final pending =
+        ask.state == AskPersonState.ASK_PERSON_STATE_PENDING ||
+        ask.state == AskPersonState.ASK_PERSON_STATE_UNSPECIFIED;
+    if (!pending || ask.withdrawn) return null;
+    final key = 'agent:${widget.agentId}/${widget.seq}';
+    final busy = _busy;
+    final Future<void> Function(String? reason)? dismiss = busy
+        ? null
+        : (reason) => _fromDock(() => _answer(dismiss: true, reason: reason));
+    if (ask.steps.isNotEmpty) {
+      final at = currentStep(ask);
+      if (at == null) return null;
+      return CardAnswer(
+        key: key,
+        docked: false,
+        yes: 'Done',
+        no: "Can't do this",
+        busy: busy,
+        error: _waiting ? null : _error,
+        status: _waiting ? _error : null,
+        onYes: busy
+            ? null
+            : () => _fromDock(() => _answer(dismiss: false, step: at)),
+        onNo: busy
+            ? null
+            : (reason) => _fromDock(
+                () => _answer(dismiss: true, step: at, reason: reason),
+              ),
+      );
+    }
+    if (ask.hasCommand()) {
+      return CardAnswer(
+        key: key,
+        docked: false,
+        yes: _confirming ? 'Run anyway' : 'Execute',
+        no: 'Dismiss',
+        pressTwice: true,
+        busy: busy,
+        error: _waiting ? null : _error,
+        status: _waiting ? _error : null,
+        onYes: busy ? null : () => _fromDock(_executeNow),
+        onNo: dismiss,
+      );
+    }
+    final typed = _typed;
+    if (ask.hasPipeTrust() || ask.hasPipeApproval()) {
+      // Trust and Approve stay the card's own buttons, after its digits
+      // or its warning (FS14, Fugo's rule C): never a key.
+      return CardAnswer(
+        key: key,
+        docked: false,
+        yes: ask.hasPipeTrust() ? 'Trust' : 'Approve',
+        no: 'Dismiss',
+        typed: typed,
+        busy: busy,
+        error: _waiting ? null : _error,
+        status: _waiting ? _error : null,
+        onSubmit: busy ? null : () => _fromDock(_reply),
+        onNo: dismiss,
+      );
+    }
+    final wantsText = ask.wantsText;
+    final name = _backend?.workspace.agent(widget.agentId)?.name ?? 'the agent';
+    return CardAnswer(
+      key: key,
+      docked: true,
+      field: _text,
+      placeholder: wantsText
+          ? 'Your answer'
+          : 'A comment for $name, if you like',
+      wantsText: wantsText,
+      yes: wantsText ? 'Answer' : 'Approve',
+      no: 'Dismiss',
+      // Words on an approval are a reply (#370); on a written answer,
+      // they're the answer.
+      typed: typed && !wantsText,
+      busy: busy,
+      error: _waiting ? null : _error,
+      status: _waiting ? _error : null,
+      filesKey: _filesKey,
+      onYes: busy || (wantsText && !typed)
+          ? null
+          : () => _fromDock(() => _answer(dismiss: false)),
+      onSubmit: busy ? null : () => _fromDock(_reply),
+      onNo: dismiss,
+    );
+  }
+
+  /// An answer from focus mode's keys on its way (#514): refused, it
+  /// throws; held for the connection, or set aside as the card changed,
+  /// it throws [AnswerNotSent], the card saying why.
+  var _dock = false;
+
+  Future<void> _fromDock(Future<void> Function() run) async {
+    _dock = true;
+    try {
+      await run();
+    } finally {
+      _dock = false;
+    }
+  }
+
+  /// Execute, as its button does: with warnings, the first asks again.
+  Future<void> _executeNow() async {
+    if (widget.ask.command.warnings.isNotEmpty && !_confirming) {
+      setState(() => _confirming = true);
+      if (_dock) throw const AnswerNotSent();
+      return;
+    }
+    await _answer(dismiss: false, confirmed: true);
+  }
+
   @override
   Widget build(BuildContext context) {
+    _listen();
+    publishAnswer();
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     final ask = widget.ask;
@@ -456,6 +736,9 @@ class _AskPersonCardState extends State<AskPersonCard> {
                   ? ''
                   : ask.updateReason,
               name: name,
+              // Claktory's own words when it marked the card itself: its
+              // file changed while it waited (Ghiaccio 46899).
+              note: ask.updateNote,
               setAside: _setAside,
             ),
           ],
@@ -505,7 +788,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
   /// What a recording for this card is kept as until its words come
   /// (#401): it comes back here after a relaunch.
   DictationFor _keep(String name) => DictationFor(
-    'ask/${widget.agentId}/${widget.ask.id}',
+    _key,
     widget.ask.title.isEmpty
         ? 'Your answer to $name'
         : 'Your answer to $name: ${widget.ask.title}',
@@ -533,14 +816,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
   /// exactly the command shown, once; with Claktory's warnings, a second
   /// tap to confirm. No reply: the backend refuses one on it.
   List<Widget> _execute(Palette palette, TypeScale type, String name) {
-    final warned = widget.ask.command.warnings.isNotEmpty;
-    void execute() {
-      if (warned && !_confirming) {
-        setState(() => _confirming = true);
-        return;
-      }
-      _answer(dismiss: false, confirmed: true);
-    }
+    void execute() => _executeNow();
 
     return [
       ActionLine(
@@ -630,34 +906,55 @@ class _AskPersonCardState extends State<AskPersonCard> {
         if (widget.ask.thread.isNotEmpty) ..._talk(type, reply: false),
       ];
     }
+    // In focus mode's dock (#514): the field, yes and no are the dock's;
+    // the card keeps what Approve means after a talk, how it's going, and
+    // the files waiting.
+    if (_docked) {
+      return [
+        ..._afterTalk(palette, type, name, below: false),
+        if (_error case final error?)
+          Text(
+            error,
+            style: type.caption.copyWith(color: _statusColor(palette)),
+          ),
+        _chips(),
+        if (widget.ask.thread.isNotEmpty) ..._talk(type, reply: wantsText),
+      ];
+    }
     return [
       // A written answer has its box; an approval, a comment under its
       // buttons for either.
       if (wantsText) ...[
         // Or said: the mic puts what's said in, to check before sending.
         // What's typed stays when the card scrolls away and back.
-        KeepWhileTyped(
-          controller: _text,
-          child: Dictation(
+        _dropping(
+          name,
+          KeepWhileTyped(
             controller: _text,
-            focusNode: _focus,
-            enabled: !_busy,
-            keep: _keep(name),
-            child: CallbackShortcuts(
-              bindings: {
-                const SingleActivator(LogicalKeyboardKey.enter): () =>
-                    _answer(dismiss: false),
-              },
-              child: TextField(
-                controller: _text,
-                focusNode: _focus,
-                placeholder: 'Your answer',
-                minLines: 1,
-                maxLines: 8,
+            child: Dictation(
+              controller: _text,
+              focusNode: _focus,
+              enabled: !_busy,
+              keep: _keep(name),
+              // Files with it (#511).
+              trailing: _attach(),
+              child: CallbackShortcuts(
+                bindings: {
+                  const SingleActivator(LogicalKeyboardKey.enter): () =>
+                      _answer(dismiss: false),
+                },
+                child: TextField(
+                  controller: _text,
+                  focusNode: _focus,
+                  placeholder: 'Your answer',
+                  minLines: 1,
+                  maxLines: 8,
+                ),
               ),
             ),
           ),
         ),
+        _chips(),
         const SizedBox(height: Space.s),
       ],
       // What Approve means after a talk on the card (#492), above it.
@@ -702,13 +999,20 @@ class _AskPersonCardState extends State<AskPersonCard> {
         },
       ),
       if (!wantsText)
-        // Return in it is Submit, once something is typed.
-        DecisionComment(
-          controller: _text,
-          agent: name,
-          enabled: !_busy,
-          onSubmit: _reply,
-          keep: _keep(name),
+        // Return in it is Submit, once something is typed. Files with it
+        // (#511) go with Approve, Dismiss or Submit.
+        _dropping(
+          name,
+          DecisionComment(
+            controller: _text,
+            agent: name,
+            enabled: !_busy,
+            onSubmit: _reply,
+            keep: _keep(name),
+            attach: _attach(),
+            files: _chips(),
+            holdsFiles: _holdsFiles,
+          ),
         ),
       if (widget.ask.thread.isNotEmpty) ..._talk(type, reply: wantsText),
     ];
@@ -773,7 +1077,8 @@ class _AskPersonCardState extends State<AskPersonCard> {
             if (reply)
               Button(
                 label: 'Reply',
-                onPressed: _busy || !typed ? null : _reply,
+                // Words, or files alone (#511).
+                onPressed: _busy || !(typed || _holdsFiles) ? null : _reply,
               ),
             Button(label: 'Resolve', onPressed: _busy ? null : _resolve),
           ],
@@ -833,22 +1138,28 @@ class _AskPersonCardState extends State<AskPersonCard> {
         if (_cant) ...[
           // What's in the way, for the agent to decide what's next; typed
           // or said. What's typed stays when the card scrolls away and back.
-          KeepWhileTyped(
-            controller: _text,
-            child: Dictation(
+          _dropping(
+            name,
+            KeepWhileTyped(
               controller: _text,
-              focusNode: _focus,
-              enabled: !_busy,
-              keep: _keep(name),
-              child: TextField(
+              child: Dictation(
                 controller: _text,
                 focusNode: _focus,
-                placeholder: "What's in the way? (optional)",
-                minLines: 1,
-                maxLines: 6,
+                enabled: !_busy,
+                keep: _keep(name),
+                // Files with it (#511): a screenshot of what's in the way.
+                trailing: _attach(),
+                child: TextField(
+                  controller: _text,
+                  focusNode: _focus,
+                  placeholder: "What's in the way? (optional)",
+                  minLines: 1,
+                  maxLines: 6,
+                ),
               ),
             ),
           ),
+          _chips(),
           const SizedBox(height: Space.s),
           ActionLine(
             lead: Text(
@@ -896,12 +1207,18 @@ class _AskPersonCardState extends State<AskPersonCard> {
               ],
             ),
           ),
-          DecisionComment(
-            controller: _text,
-            agent: name,
-            enabled: !_busy,
-            onSubmitted: () => _answer(dismiss: false, step: at),
-            keep: _keep(name),
+          _dropping(
+            name,
+            DecisionComment(
+              controller: _text,
+              agent: name,
+              enabled: !_busy,
+              onSubmitted: () => _answer(dismiss: false, step: at),
+              keep: _keep(name),
+              attach: _attach(),
+              files: _chips(),
+              holdsFiles: _holdsFiles,
+            ),
           ),
           if (ask.thread.isNotEmpty) ..._talk(type, reply: true),
         ],
@@ -971,6 +1288,8 @@ class _AskPersonCardState extends State<AskPersonCard> {
         const SizedBox(height: Space.xs),
         Text(ask.answer, style: type.body.copyWith(color: palette.text)),
       ],
+      // And their files with it (#511).
+      if (talked) CardSentFiles(ask.answerAttachments),
       // What was in the way.
       if (stopped != null && stopped.$2.comment.isNotEmpty) ...[
         const SizedBox(height: Space.xs),
@@ -979,6 +1298,7 @@ class _AskPersonCardState extends State<AskPersonCard> {
           style: type.body.copyWith(color: palette.textMuted),
         ),
       ],
+      if (stopped != null) CardSentFiles(stopped.$2.commentAttachments),
       const SizedBox(height: Space.xs),
       _StepsToggle(
         label: 'Steps',
@@ -1081,6 +1401,8 @@ class _AskPersonCardState extends State<AskPersonCard> {
           ),
         ),
       ],
+      // And the files that went with it (#511; a review's drawings).
+      CardSentFiles(ask.answerAttachments),
     ];
   }
 }
@@ -1181,7 +1503,13 @@ class AskThread extends StatelessWidget {
                           ),
                           style: type.caption,
                         ),
-                        Markdown(proseCodes(message.text), color: palette.text),
+                        if (message.text.isNotEmpty)
+                          Markdown(
+                            proseCodes(message.text),
+                            color: palette.text,
+                          ),
+                        // The person's files on that turn (#511).
+                        CardSentFiles(message.attachments),
                       ],
                     ),
                   ),
@@ -1284,11 +1612,17 @@ class UpdatedLine extends StatelessWidget {
     required this.updatedMs,
     required this.reason,
     this.name = '',
+    this.note = '',
     this.setAside,
   });
 
   final int updatedMs;
   final String reason;
+
+  /// Claktory's words for a change it made itself (a review card's file
+  /// changed while it waited): shown as Claktory's, never as the agent's
+  /// reason.
+  final String note;
 
   /// The agent's name, for its reason's label; none without it.
   final String name;
@@ -1330,13 +1664,17 @@ class UpdatedLine extends StatelessWidget {
         if (said != null) ...[
           if (updatedMs > 0) const SizedBox(height: Space.xs),
           Text(
-            changedAfterAnswer(who),
+            note.isNotEmpty ? fileChangedAfterAnswer : changedAfterAnswer(who),
             style: type.body.copyWith(color: palette.text),
           ),
           Text(
             youSaid(said),
             style: type.body.copyWith(color: palette.textMuted),
           ),
+        ],
+        if (note.isNotEmpty) ...[
+          const SizedBox(height: Space.xs),
+          Text(note, style: type.body.copyWith(color: palette.textMuted)),
         ],
         if (reason.isNotEmpty) ...[
           const SizedBox(height: Space.xs),
@@ -1362,6 +1700,10 @@ const updatedMark = 'Updated';
 /// their answer was set aside, not lost (#473).
 String changedAfterAnswer(String name) =>
     '$name changed this after your answer.';
+
+/// The person answered a review card whose file changed meanwhile: their
+/// answer was set aside, not lost.
+const fileChangedAfterAnswer = 'The file changed after your answer.';
 
 /// What they answered, as they answered it.
 String youSaid(String said) => 'You said: “$said”';
@@ -1653,6 +1995,12 @@ class _StepLine extends StatelessWidget {
                 step.comment,
                 style: type.caption.copyWith(color: palette.textFaint),
               ),
+            ),
+          // The files with its comment (#511).
+          if (step.commentAttachments.isNotEmpty)
+            Padding(
+              padding: const EdgeInsetsDirectional.only(start: Space.m),
+              child: CardSentFiles(step.commentAttachments),
             ),
         ],
       ),

@@ -217,6 +217,8 @@ void main() {
 
     // This one asks first.
     final sent = harness.backend.sent.length;
+    await tester.ensureVisible(find.text('Remove').first);
+    await pumpFrames(tester);
     await tester.tap(find.text('Remove').first);
     await pumpFrames(tester);
     expect(find.text('Remove this device?'), findsOneWidget);

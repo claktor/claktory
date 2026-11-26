@@ -9,6 +9,34 @@ import UIKit
 @testable import Runner
 
 struct RunnerTests {
+  /// The paperclip's menu is a popover on an iPad, which UIKit ends the app
+  /// for when it comes from nowhere (Zucchero row 630): it points at the
+  /// paperclip's rect, or at the middle with no arrow.
+  /// Take Photo's file is named for when it was taken, as a Mac names a
+  /// screenshot, so two photos never both read Photo.jpg.
+  @Test func takenPhotoNamedForItsTime() throws {
+    let date = try #require(
+      Calendar.current.date(
+        from: DateComponents(year: 2026, month: 11, day: 26, hour: 21, minute: 4, second: 33)))
+    #expect(Attach.photoTime.string(from: date) == "2026-11-26 at 21.04.33")
+  }
+
+  @MainActor @Test func attachMenuHasSomewhereToComeFrom() throws {
+    let view = UIView(frame: CGRect(x: 0, y: 0, width: 1024, height: 1366))
+    let menu = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
+    Attach.anchor(menu, in: view, rect: [900, 1300, 44, 44])
+    let popover = try #require(menu.popoverPresentationController)
+    #expect(popover.sourceView === view)
+    #expect(popover.sourceRect == CGRect(x: 900, y: 1300, width: 44, height: 44))
+
+    let unplaced = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
+    Attach.anchor(unplaced, in: view, rect: nil)
+    let middle = try #require(unplaced.popoverPresentationController)
+    #expect(middle.sourceView === view)
+    #expect(middle.sourceRect == CGRect(x: 512, y: 683, width: 0, height: 0))
+    #expect(middle.permittedArrowDirections == [])
+  }
+
   /// The keys of end-to-end direct messages (factory/dm-keys, E6): kept in
   /// the app's own keychain group, given back, replaced and deleted; absent
   /// is nil; names and sizes as Android's; the store's folder.
@@ -469,7 +497,7 @@ struct CommandMenuTests {
     #expect(rebuilds() == 1)
 
     let keys = menu.keyCommands(action: #selector(AppDelegate.runWorkbenchCommand(_:)))
-    #expect(keys.map(\.title) == ["Hide Sidebar", "Next Pane", "Previous Pane", "Panes…", "Find…"])
+    #expect(keys.map(\.title) == ["Hide Sidebar", "Next Pane", "Previous Pane", "Panes…", "Find"])
     #expect(keys.map { $0.propertyList as? String } == ["sidebar", "next-pane", "previous-pane", "panes", "find"])
     #expect(keys.map(\.input) == ["s", "\t", "\t", "p", "f"])
     #expect(keys[0].modifierFlags == [.command, .control])
@@ -481,6 +509,17 @@ struct CommandMenuTests {
     #expect(menu.isEnabled("sidebar"))
     #expect(!menu.isEnabled("nonsense"))
     #expect(!menu.isEnabled(nil))
+  }
+
+  @Test func specialKeysAreTheInputsUIKitNames() throws {
+    let inputs = try #require(try Self.fixture("special_keys")["inputs"] as? [String: String])
+    #expect(inputs["arrowUp"] == UIKeyCommand.inputUpArrow)
+    #expect(inputs["arrowDown"] == UIKeyCommand.inputDownArrow)
+    #expect(inputs["arrowLeft"] == UIKeyCommand.inputLeftArrow)
+    #expect(inputs["arrowRight"] == UIKeyCommand.inputRightArrow)
+    #expect(inputs["enter"] == "\r")
+    #expect(inputs["backspace"] == UIKeyCommand.inputDelete)
+    #expect(inputs["tab"] == "\t")
   }
 
   @Test func rebuildsOnlyWhenWhatItShowsChanges() async throws {

@@ -160,6 +160,17 @@ bool _sameRects(List<Rect> a, List<Rect> b) {
 
 /// A pad's height, and its width with no name.
 const padHeight = 20.0;
+
+/// How far a pipe's line reaches up out of its pad, to the ring where
+/// somewhere else begins: the Map's own (map.dart's portalReach).
+const pipeReach = mapCell * 2;
+
+/// Where a pipe's line meets its pad: its top border, over its portal
+/// (the pad's border, padding and half the glyph in from its left; a pad
+/// of only its portal, its middle).
+Offset pipeTop(Rect pad) => pad.width <= padHeight + 0.5
+    ? Offset(pad.center.dx, pad.top)
+    : Offset(pad.left + 11.5, pad.top);
 const _padBare = 4.0 + 12 + 4 + 8 + 2;
 const _padMaxWidth = 150.0;
 
@@ -387,11 +398,98 @@ class HistoryScene {
     return best;
   }
 
+  /// How many agents were there at [t], and how many of them were working
+  /// then ([log]'s runs): in [project] only, when given.
+  ({int working, int total}) agentsAt(
+    HistoryLog log,
+    double t, {
+    String? project,
+  }) {
+    var total = 0;
+    var working = 0;
+    for (final MapEntry(key: node, value: list) in _chipsOf.entries) {
+      if (node <= 0 || list.isEmpty) continue;
+      if (chips[list.first].chip.node.kind != MapNodeKind.MAP_NODE_KIND_AGENT) {
+        continue;
+      }
+      if (spanAt(timeline.nodeSpans[node - 1], t) == null) continue;
+      if (project != null) {
+        final i = list.length == 1 ? list.first : chipAt(node, t);
+        if (!chipInProject(i, t, project)) continue;
+      }
+      total++;
+      if (log.running(node, t)) working++;
+    }
+    return (working: working, total: total);
+  }
+
   /// Where [node]'s pad is, for a pipe; -1 for none.
   int padOf(int node) => pads.indexWhere((pad) => pad.node == node);
 
-  /// What shows at [t].
-  SceneFrame at(double t) {
+  /// Whether chip [i] is in [project] (a project's id) at [t]: an agent
+  /// while it was there (a moved agent's chip for its place there), or
+  /// anything else of that project's. HistoryLabel's project follows moves.
+  bool chipInProject(int i, double t, String project) {
+    final chip = chips[i];
+    if (chip.node <= 0) return false;
+    if (chip.place >= 0) return chip.chip.node.projectId == project;
+    // A label from before labels said where: where it is now.
+    final at = timeline.labelAt(chip.node, t).projectId;
+    return (at.isEmpty ? chip.chip.node.projectId : at) == project;
+  }
+
+  /// Whether node [node] (an index) was [project]'s at [t]: an agent while
+  /// it was there, anything else of that project's, or a pipe whose pad is
+  /// in its box.
+  bool nodeInProject(int node, double t, String project) {
+    if (node <= 0) return false;
+    final chip = chipAt(node, t);
+    if (chip >= 0) return chipInProject(chip, t, project);
+    final pad = padOf(node);
+    return pad >= 0 && pads[pad].box == projectBox(project);
+  }
+
+  /// The chapters [project] (a project's id) shows, so one project's
+  /// History or video names nothing else (Abbacchio's row 1584): those
+  /// naming something only when every node it names was the project's
+  /// then (its own beginning, its pipes, its agents joining or finishing a
+  /// goal), and of those naming nothing, only when recording began and the
+  /// versions of Claktory. The busiest hour is left out: the backend counts
+  /// it for the whole Claktory here.
+  List<HistoryChapter> chaptersIn(
+    List<HistoryChapter> chapters,
+    String project,
+  ) => [
+    for (final chapter in chapters)
+      if (chapter.nodeIds.isEmpty
+          ? chapter.kind == HistoryChapterKind.HISTORY_CHAPTER_KIND_RECORDING ||
+                chapter.kind == HistoryChapterKind.HISTORY_CHAPTER_KIND_RELEASE
+          : chapter.nodeIds.every((id) {
+              if (id == 'project:$project') return true;
+              final node = timeline.indexOf[id];
+              return node != null &&
+                  nodeInProject(node, chapter.atMs.toDouble(), project);
+            }))
+        chapter,
+  ];
+
+  /// [project]'s box (a project's id), or -1 when it has none.
+  int projectBox(String project) => boxes.indexWhere(
+    (box) =>
+        box.box.kind == MapBoxKind.project && box.box.id == 'project:$project',
+  );
+
+  /// The projects History has, by id, with their names, as laid out.
+  List<({String id, String label})> get projects => [
+    for (final box in boxes)
+      if (box.box.kind == MapBoxKind.project &&
+          box.box.id.startsWith('project:'))
+        (id: box.box.id.substring('project:'.length), label: box.box.label),
+  ];
+
+  /// What shows at [t]; with [project], only that project: its box, its
+  /// folders and pipes, and its agents while they were in it.
+  SceneFrame at(double t, {String? project}) {
     final frame = SceneFrame(
       chips.length,
       wires.length,
@@ -408,7 +506,8 @@ class HistoryScene {
 
     for (final MapEntry(key: node, value: list) in _chipsOf.entries) {
       if (node <= 0) {
-        // Not a node History knows: there all along.
+        // Not a node History knows: there all along (but in no project).
+        if (project != null) continue;
         for (final i in list) {
           frame.chips[i] = shown;
         }
@@ -417,6 +516,7 @@ class HistoryScene {
       final present = state(timeline.nodeSpans[node - 1]);
       if (present == hidden) continue;
       final i = list.length == 1 ? list.first : chipAt(node, t);
+      if (project != null && !chipInProject(i, t, project)) continue;
       frame.chips[i] = present;
       final label = timeline.labelAt(node, t);
       frame.labels[i] = label.label;
@@ -501,6 +601,12 @@ class HistoryScene {
     for (var i = 0; i < boxes.length; i++) {
       final parent = boxes[i].parent;
       if (parent >= 0 && frame.boxes[parent] == hidden) frame.boxes[i] = hidden;
+    }
+    if (project != null) {
+      final own = projectBox(project);
+      for (var i = 0; i < boxes.length; i++) {
+        if (i != own && boxes[i].parent != own) frame.boxes[i] = hidden;
+      }
     }
 
     for (var i = 0; i < pads.length; i++) {

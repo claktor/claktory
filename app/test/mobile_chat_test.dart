@@ -10,7 +10,7 @@ import 'package:cupertino_ui/cupertino_ui.dart'
 import 'package:factory_app/scope.dart' show AppPage;
 import 'package:factory_app/agent_view.dart';
 import 'package:factory_app/controls.dart' show GlyphButton;
-import 'package:factory_app/inbox.dart' show NeedsYouChip, NeedsYouList;
+import 'package:factory_app/inbox.dart' show NeedsYouChip;
 import 'package:factory_app/mobile/composer.dart';
 import 'package:factory_app/mobile/needs_you_button.dart';
 import 'package:factory_app/mobile/navigation.dart';
@@ -30,6 +30,8 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'package:factory_app/mobile/needs_you_phone.dart' show PhoneNeedsYou;
 
 import 'harness.dart';
 
@@ -801,17 +803,15 @@ void main() {
     // (Review) comes over it, and Back returns to it.
     expect(find.byType(PhoneSheet), findsNothing);
     expect(harness.page.value, AppPage.inbox);
-    expect(find.byType(NeedsYouList), findsOneWidget);
-    expect(
-      find.text('Proposes to Rivet: Add a designer agent'),
-      findsOneWidget,
-    );
+    // One card a screen, open (#514).
+    expect(find.byType(PhoneNeedsYou), findsOneWidget);
+    expect(find.textContaining('Add a designer agent'), findsWidgets);
 
     // Answered elsewhere: the page stays, saying so, for the person to close.
     await harness.apply(tester, waiting([]));
     await pumpFrames(tester);
     expect(harness.page.value, AppPage.inbox);
-    expect(find.text('Nothing is waiting for your answer.'), findsOneWidget);
+    expect(find.textContaining('Answered on'), findsOneWidget);
 
     // Back: the conversation, whose header has no such button now.
     await tester.tap(find.bySemanticsLabel('Back').last);

@@ -47,13 +47,19 @@ Future<T?> presentPopover<T>(
   // The window's overlay, which a window frozen for a move takes with it.
   final overlay = SheetOverlay.of(context);
   final box = context.findRenderObject() as RenderBox?;
-  final overlayBox = overlay.context.findRenderObject() as RenderBox?;
-  final anchor = box != null && box.hasSize && overlayBox != null
-      ? MatrixUtils.transformRect(
-          box.getTransformTo(overlayBox),
-          Offset.zero & box.size,
-        )
-      : null;
+  // Measured again whenever the window changes under it (the keyboard
+  // docking, a window resized, the iPad turned): the arrow follows.
+  Rect? anchor() {
+    final overlayBox = overlay.context.findRenderObject() as RenderBox?;
+    if (box == null || !box.attached || !box.hasSize || overlayBox == null) {
+      return null;
+    }
+    return MatrixUtils.transformRect(
+      box.getTransformTo(overlayBox),
+      Offset.zero & box.size,
+    );
+  }
+
   // The popover takes focus, so keys reach it rather than what's behind
   // it, except from a field while the keyboard on screen is up: taking it
   // there would drop the keyboard from under the window and move what the
@@ -90,7 +96,7 @@ Future<T?> presentPopover<T>(
   entry = OverlayEntry(
     builder: (context) {
       final popover = _Popover(
-        anchor: anchor,
+        measure: anchor,
         takesFocus: takesFocus,
         close: close,
         gone: gone,
@@ -105,7 +111,7 @@ Future<T?> presentPopover<T>(
 
 class _Popover extends StatefulWidget {
   const _Popover({
-    required this.anchor,
+    required this.measure,
     required this.takesFocus,
     required this.close,
     required this.gone,
@@ -114,7 +120,7 @@ class _Popover extends StatefulWidget {
 
   /// What it's about, in the overlay's coordinates; null: the window's
   /// middle.
-  final Rect? anchor;
+  final Rect? Function() measure;
 
   /// Whether it takes focus as it opens (see [presentPopover]).
   final bool takesFocus;
@@ -136,6 +142,17 @@ class _PopoverState extends State<_Popover>
   /// Where the arrow is, as laid out: on top (the popover under the
   /// anchor) or at the bottom, and how far along.
   final _arrowAt = ValueNotifier<({bool up, double x})?>(null);
+
+  /// Where what it's about is now ([_Popover.measure]).
+  late Rect? _anchor = widget.measure();
+
+  /// After a frame in which the window changed: where it's about is
+  /// measured again, and the popover follows.
+  void _remeasure(Duration _) {
+    if (!mounted) return;
+    final now = widget.measure();
+    if (now != null && now != _anchor) setState(() => _anchor = now);
+  }
 
   /// The popover's own focus, taken after its first frame when it takes
   /// focus at all (autofocus wouldn't: something behind it has focus).
@@ -182,7 +199,13 @@ class _PopoverState extends State<_Popover>
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    final safe = MediaQuery.paddingOf(context);
+    // The keyboard on screen, docked, takes its room too.
+    final padding = MediaQuery.paddingOf(context);
+    final safe = padding.copyWith(
+      bottom: math.max(padding.bottom, MediaQuery.viewInsetsOf(context).bottom),
+    );
+    MediaQuery.sizeOf(context);
+    WidgetsBinding.instance.addPostFrameCallback(_remeasure);
     final reduced = MediaQuery.disableAnimationsOf(context);
     final curve = CurvedAnimation(parent: _shown, curve: Curves.easeOut);
     final panel = Container(
@@ -221,7 +244,7 @@ class _PopoverState extends State<_Popover>
           ),
           CustomMultiChildLayout(
             delegate: _PopoverLayout(
-              anchor: widget.anchor,
+              anchor: _anchor,
               safe: safe,
               arrowAt: _arrowAt,
             ),

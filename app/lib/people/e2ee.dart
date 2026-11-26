@@ -695,6 +695,16 @@ enum DmKeyChange {
   /// isn't made until it is (Fugo).
   signOutFailed,
 
+  /// The new key's message waits for one of the person's own Claktories:
+  /// this device is connected to another account's (row 1453). It goes
+  /// once it connects to one of theirs.
+  waitsForOwnClaktory,
+
+  /// The worker refused the new key for today: an account's key changes
+  /// 3 times a day at most. The Lock out stays under way and carries on
+  /// by itself at [E2ee.keyChangeAtMs] (Fugo 43752).
+  keyWaitsForLimit,
+
   /// The worker or this device refused; [E2ee.problem] has the detail.
   /// Tried again from where it got to.
   failed,
@@ -1107,6 +1117,7 @@ class E2ee extends ChangeNotifier {
       ..._rejoinAfter.values,
       ..._signOutAfter.values,
       ?_syncFailedAfter,
+      ?keyChangeAtMs,
     ].any((ms) => ms > _syncedMs && ms <= now);
   }
 
@@ -1141,6 +1152,29 @@ class E2ee extends ChangeNotifier {
   /// while the app runs: not signed out again at each sync while a group
   /// still holds them (the service's removal limit answered 429).
   final _signedOut = <String>{};
+
+  /// The new key's bundles handed off from here while the app runs, as
+  /// `<retry id>/<leaf>`: each once (row 1453).
+  final _handedOff = <String>{};
+
+  /// The rotation's message came back from the log while a removal ran.
+  var _saidMeanwhile = false;
+
+  /// When a new key the worker refused for today ([DmKeyChange
+  /// .keyWaitsForLimit]) is tried again by itself, by [_nowMs]: the start
+  /// of the worker's next day (its limit counts whole days, UTC), a minute
+  /// past. Null when nothing waits for it.
+  int? keyChangeAtMs;
+
+  /// The device locked out was given the person's current key before it
+  /// was (a key change under way when it was locked out, finished first):
+  /// what the Lock out waiting for [keyChangeAtMs] says (Fugo 43752).
+  var keyHeldByLockedOut = false;
+
+  /// The worker's day after [nowMs] starts, a minute past.
+  static int _nextWorkerDay(int nowMs) =>
+      (nowMs ~/ Duration.millisecondsPerDay + 1) * Duration.millisecondsPerDay +
+      Duration.millisecondsPerMinute;
 
   /// Removed devices whose sign-out didn't go through, and when it may
   /// next be tried (by [_nowMs]).
@@ -1278,7 +1312,15 @@ class E2ee extends ChangeNotifier {
         );
       }
       _set(DmSetup.ready);
-      if (await device.rotation() case final rotation?) {
+      // A new key under way carries on, unless a Lock out is under way
+      // with it: that carries on below, and settles the key itself (one
+      // handed to a device locked out since is made again, never finished:
+      // Abbacchio's row 1462).
+      final rotation = await device.rotation();
+      if (rotation != null && ((await device.removal())?.newKey ?? false)) {
+        await finishRemoval();
+        await sync();
+      } else if (rotation != null) {
         await _carryOnKeyChange(device, rotation.kept, rotation.removed);
       } else {
         await sync();
@@ -2127,8 +2169,33 @@ class E2ee extends ChangeNotifier {
   Future<Map<String, String>> replacedDevices() async {
     final device = _device;
     if (device == null || setup != DmSetup.ready) return const {};
+    // Never one listed now, which is that device under the new key:
+    // Remove would take the device itself out (Abbacchio's row 1463). Nor
+    // one signed out from here (a Lock out) that's in no group here any
+    // more: nothing is left to remove. One still signed in (a start-over
+    // takes them out of the chats, never signs them out), or signed out
+    // and still in a group, stays, with its Remove (Fugo 43752).
+    final listed = {
+      for (final leaf
+          in device.deviceList(account: accountId)?.leaves ??
+              const <DmListed>[])
+        leaf.leafId,
+    };
+    final replaced = [
+      for (final each in await device.replacedDevices())
+        if (!listed.contains(each.leafId)) each,
+    ];
+    if (!replaced.any((each) => _signedOut.contains(each.leafId))) {
+      return {for (final each in replaced) each.leafId: each.name};
+    }
+    final inGroups = <String>{
+      for (final group in await device.groups())
+        ...await device.leafIds(groupId: group.groupId),
+    };
     return {
-      for (final each in await device.replacedDevices()) each.leafId: each.name,
+      for (final each in replaced)
+        if (!_signedOut.contains(each.leafId) || inGroups.contains(each.leafId))
+          each.leafId: each.name,
     };
   }
 
@@ -2375,7 +2442,14 @@ class E2ee extends ChangeNotifier {
     required List<String> keep,
     List<String> names = const [],
   }) async {
-    final stopped = await _changeKey(remove: remove, keep: keep, names: names);
+    var stopped = await _changeKey(remove: remove, keep: keep, names: names);
+    // Its message came back from the log while it stopped (E11-9): carried
+    // on, as the rotation is said.
+    if (stopped == DmKeyChange.failed && _saidMeanwhile) {
+      _saidMeanwhile = false;
+      stopped = await _changeKey(remove: remove, keep: keep, names: names);
+    }
+    _saidMeanwhile = false;
     // What stopped it, for Your devices to say (Fugo 41048).
     removalStop = removal == null ? null : stopped;
     _notify();
@@ -2392,9 +2466,10 @@ class E2ee extends ChangeNotifier {
     _changingKey = true;
     _removing++;
     removalStop = null;
+    keyChangeAtMs = null;
     _notify();
     try {
-      final pending = await device.rotation();
+      var pending = await device.rotation();
       // Kept from now until the new key is taken (R5b): a dialog closed
       // or the app quit part-way carries on at the next launch, even once
       // the device is off the list. With one under way, both together.
@@ -2412,35 +2487,28 @@ class E2ee extends ChangeNotifier {
         newKey: true,
       );
       final lockOut = removal!;
-      // Off the list, out of every group and signed out first, whatever
-      // the new key waits for: never held up by a fresh sign-in (Fugo
-      // 41048), even with a new key under way already.
-      for (final leaf in lockOut.remove) {
-        await removeDevice(leaf);
-        if (await signOutDevice(leaf) != null) {
-          return DmKeyChange.signOutFailed;
-        }
-      }
+      // A new key under way that the worker serves already (its answer
+      // lost, say) is the person's key: finished first, so the list
+      // changes below are signed under the key the worker has, not refused
+      // as stale against it (Abbacchio's row 1461). The Lock out stays
+      // under way past it.
+      var finishedFirst = false;
+      var dropped = false;
       if (pending != null) {
-        final dropped = pending.kept.any(lockOut.remove.contains);
-        if (!dropped) {
-          // Carried on as it was confirmed.
-          return await _carryOnKeyChange(device, pending.kept, pending.removed);
-        }
-        // One it was handed to is locked out now: made again without it.
-        // The worker has it already: finished first, then made again at
-        // once, so the device locked out never holds the key that stays
-        // the person's (Fugo 41322).
         final served = await routes.keys(accountId);
         if (listEquals(served?.identityKey, pending.identityPublic)) {
+          dropped = pending.kept.any(lockOut.remove.contains);
           final finished = await _carryOnKeyChange(
             device,
             pending.kept,
             pending.removed,
           );
           if (finished != null) return finished;
-          // Finishing it ended the Lock out in the store: kept as under
-          // way again for the key after.
+          _changingKey = true;
+          finishedFirst = true;
+          // What a new key the worker refuses for today says (Fugo 43752).
+          keyHeldByLockedOut = dropped;
+          pending = null;
           await _beginRemoval(
             device,
             remove: lockOut.remove,
@@ -2449,8 +2517,40 @@ class E2ee extends ChangeNotifier {
             newKey: true,
           );
         }
-        await keys.delete(DmKeyName.identityNext);
       }
+      // Off the list, out of every group and signed out first, whatever
+      // the new key waits for: never held up by a fresh sign-in (Fugo
+      // 41048), even with a new key under way already.
+      for (final leaf in lockOut.remove) {
+        await removeDevice(leaf);
+        // Signed out once is signed out for good: not asked again at each
+        // Try again, which spends the 10 an hour (Abbacchio's row 1453).
+        if (_signedOut.contains(leaf)) continue;
+        if (await signOutDevice(leaf) != null) {
+          return DmKeyChange.signOutFailed;
+        }
+        _signedOut.add(leaf);
+        // Signed out: no longer one to remove as on the old key.
+        await device.forgetReplaced(leafId: leaf);
+      }
+      if (pending != null) {
+        if (!pending.kept.any(lockOut.remove.contains)) {
+          // Carried on as it was confirmed.
+          return await _carryOnKeyChange(device, pending.kept, pending.removed);
+        }
+        // One it was handed to is locked out now, and the worker doesn't
+        // have it yet: made again without it.
+        await keys.delete(DmKeyName.identityNext);
+      } else if (finishedFirst && !dropped) {
+        // The key finished first was never handed to a device locked out
+        // now: it stays, and the Lock out is done.
+        await device.endRemoval();
+        removal = null;
+        return null;
+      }
+      // One the key finished first was handed to is locked out now: made
+      // again at once without it, so the device locked out never holds the
+      // key that stays the person's (Fugo 41322).
       return await _carryOnKeyChange(device, [
         for (final leaf in lockOut.keep)
           if (leaf != leafId) leaf,
@@ -2494,11 +2594,17 @@ class E2ee extends ChangeNotifier {
             .where((each) => each.kind == 'self')
             .firstOrNull;
         if (self == null) return DmKeyChange.failed;
-        for (final leaf in rotation.kept) {
-          await routes.handOff(leaf, rotation.sealed);
-        }
         // Its retry id is the new key's, so a crash sends the same one.
         final id = 'rotation-${dmB64(rotation.identityPublic)}';
+        // Each kept device's bundle once a launch, not at every Try again,
+        // which would spend the hand-offs it may have waiting (3 in 30
+        // minutes: Abbacchio's row 1453).
+        for (final leaf in rotation.kept) {
+          final handed = '$id/$leaf';
+          if (_handedOff.contains(handed)) continue;
+          await routes.handOff(leaf, rotation.sealed);
+          _handedOff.add(handed);
+        }
         await say(
           self.groupId,
           DmContent(
@@ -2511,7 +2617,18 @@ class E2ee extends ChangeNotifier {
             }),
           ),
         );
-        if (sending[id]?.state != DmSendState.sent) return DmKeyChange.failed;
+        // Taken (or back from the log already, which marks it said); one
+        // sent again under a new retry id goes by that one.
+        final sent = sending[current(id)];
+        if (sent?.state != DmSendState.sent &&
+            !((await device.rotation())?.said ?? false)) {
+          // Waiting for one of the person's own Claktories: said so, as
+          // Try again can't do it (Abbacchio's row 1453).
+          return sent?.problem == 'otherAccount' ||
+                  ownership == DmOwnership.notOurs
+              ? DmKeyChange.waitsForOwnClaktory
+              : DmKeyChange.failed;
+        }
         await device.rotationSaid();
       }
       try {
@@ -2519,19 +2636,46 @@ class E2ee extends ChangeNotifier {
           identityKey: rotation.identityPublic,
           deviceList: rotation.deviceList,
         );
-      } on UserAppError {
+      } on UserAppError catch (error) {
         // It may have gone through already (a crash, a lost answer).
         final served = await routes.keys(accountId);
         if (!listEquals(served?.identityKey, rotation.identityPublic)) {
+          if (error.problem == UserAppProblem.rateLimited) {
+            // The worker's 3 a day: kept under way, said, and carried on by
+            // itself once its day is over (Fugo 43752).
+            problem = error.toString();
+            keyChangeAtMs = _nextWorkerDay(_nowMs());
+            return DmKeyChange.keyWaitsForLimit;
+          }
           rethrow;
         }
       }
+      final lockedOut = await device.removal();
       await device.finishRotation(identityKey: next);
-      // The Lock out it finishes ended with it, in the store.
+      // The Lock out it finishes ended with it, in the store. One begun
+      // after this key was made (of a device it was handed to, say) isn't
+      // done by it: kept as under way, never dropped by a relaunch that
+      // finishes this key (Abbacchio's row 1462).
       removal = null;
+      final later = [
+        if (lockedOut != null)
+          for (final (i, leaf) in lockedOut.remove.indexed)
+            if (!rotation.removed.contains(leaf))
+              (leaf, i < lockedOut.names.length ? lockedOut.names[i] : ''),
+      ];
+      if (later.isNotEmpty) {
+        await _beginRemoval(
+          device,
+          remove: [for (final (leaf, _) in later) leaf],
+          names: [for (final (_, name) in later) name],
+          keep: lockedOut!.keep,
+          newKey: true,
+        );
+      }
       await keys.put(DmKeyName.identity, next);
       await keys.delete(DmKeyName.identityNext);
       next.fillRange(0, next.length, 0);
+      if (later.isEmpty) keyHeldByLockedOut = false;
       _ownKeyCheck = false;
       await _topUpKeyPackages(force: true);
       // Its Claktory enrolls again under the new key.
@@ -2593,8 +2737,32 @@ class E2ee extends ChangeNotifier {
         listEquals(served.identityKey, pending.identityPublic)) {
       return _takeNewKey(device, pending);
     }
+    // The key this device is making itself (its answer lost, say): its
+    // own change, finished where it's carried on, never someone else's.
+    final own = await device.rotation();
+    if (own != null && listEquals(served.identityKey, own.identityPublic)) {
+      return;
+    }
     if (pending != null) return;
+    // Over at the home, only once the person's own home has said where
+    // their self group is and it's read here: a kept device connected to
+    // another account's Claktory, or before the home's feed came, hasn't
+    // seen the rotation message yet, and waits for it (Abbacchio's row
+    // 1453, Fugo 43016's point 3).
+    if (_drained && !await _selfReadAtHome(device)) return;
     return _fail(DmFailure.identityReplaced);
+  }
+
+  /// Whether this device has read its self group as far as the person's
+  /// own home has it.
+  Future<bool> _selfReadAtHome(DmDevice device) async {
+    final self = groups.values.where((each) => each.kind == 'self').firstOrNull;
+    if (self == null || !_homeIsOurs || !homeIsHere) return false;
+    if (homeFeed.groups[self.groupId] == null) return false;
+    final here = (await device.groups())
+        .where((each) => dmB64(each.groupId) == self.groupId)
+        .firstOrNull;
+    return here != null && here.seq >= homeFeed.lastSeq(self.groupId);
   }
 
   /// Takes the new key [pending] named: its bundle from `me/handoffs`,
@@ -2902,7 +3070,19 @@ class E2ee extends ChangeNotifier {
       _syncAgain = true;
       return _syncing!;
     }
-    return _syncing = _syncLoop().whenComplete(() => _syncing = null);
+    return _syncing = _syncLoop()
+        .whenComplete(() => _syncing = null)
+        .then((_) => _afterSync());
+  }
+
+  /// After a sync: a new key the worker refused for today is carried on
+  /// once its day is over (Fugo 43752), outside the sync, which it runs
+  /// itself.
+  Future<void> _afterSync() async {
+    final at = keyChangeAtMs;
+    if (at == null || _nowMs() < at || _closed) return;
+    keyChangeAtMs = null;
+    await finishRemoval();
   }
 
   Future<void> _syncLoop() async {
@@ -3814,7 +3994,9 @@ class E2ee extends ChangeNotifier {
                   if (each.outcome == DmOutcome.committed) {
                     epoch = each.epoch.toInt();
                   }
-                  if (each.message case final message?) _confirmed(message);
+                  if (each.message case final message?) {
+                    await _confirmed(message);
+                  }
                 }
                 _rejoinTries.remove(group.groupId);
                 behind.remove(group.groupId);
@@ -3914,7 +4096,7 @@ class E2ee extends ChangeNotifier {
             break;
         }
         if (processed.message case final message?) {
-          _confirmed(message);
+          await _confirmed(message);
           // A device this one added asks for its history again; never one
           // marked as a departed device's (Fugo 40397).
           if (group.kind == 'self' &&
@@ -4101,10 +4283,41 @@ class E2ee extends ChangeNotifier {
     return null;
   }
 
-  void _confirmed(DmMessage message) {
+  Future<void> _confirmed(DmMessage message) async {
     if (!message.mine) return;
     sending.remove(message.content.clientMessageId);
     _takenBy.remove(message.content.clientMessageId);
+    // The person's rotation message back from the log: said, whatever
+    // answer was lost on the way, so it's never encrypted again under its
+    // id (E11-9, Fugo 43016: the home refuses other bytes as a conflict).
+    if (message.content.kind == 'rotation') await _rotationCameBack(message);
+  }
+
+  /// Marks the rotation under way as said when [message], this device's
+  /// own from the self group's log, is its message: the new key it names
+  /// is the rotation's.
+  Future<void> _rotationCameBack(DmMessage message) async {
+    final device = _device;
+    if (device == null) return;
+    try {
+      final rotation = await device.rotation();
+      if (rotation == null || rotation.said) return;
+      final said = jsonDecode(message.content.extraJson);
+      if (said is! Map || said['identity'] != dmB64(rotation.identityPublic)) {
+        return;
+      }
+      await device.rotationSaid();
+      // The Lock out it's for carries on by itself: what it waited for
+      // (one of the person's own Claktories) is here. One going now
+      // carries on once it stops.
+      if (removing) {
+        _saidMeanwhile = true;
+      } else if (removal != null) {
+        scheduleMicrotask(() => unawaited(finishRemoval()));
+      }
+    } catch (error) {
+      problem = '$error';
+    }
   }
 
   /// Which home (its endpoint, base64) took each of this device's messages

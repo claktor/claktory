@@ -56,7 +56,9 @@ pub(crate) enum Action {
     /// Fugo 33421): the port, the name the other side sees, and what
     /// listened there when it was asked, which must still be what listens.
     /// `again`: a share of the person's that ended on that pipe, shared
-    /// there again rather than made anew (#502).
+    /// there again rather than made anew (#502), keeping its end. `hours`:
+    /// how long a new one lasts (#46, Fugo 46375: 1 to 168, as the card
+    /// said); none on cards from before, which said until Stop.
     Share {
         pipe: String,
         port: u16,
@@ -64,6 +66,8 @@ pub(crate) enum Action {
         listener: Option<Listener>,
         #[serde(default)]
         again: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hours: Option<u32>,
     },
     /// Shows again a website the other side shares over a pipe, hidden
     /// here (#502, Fugo 35687): its id here, and the pipe's key when it was
@@ -94,6 +98,11 @@ pub(crate) enum Action {
     /// browser back to its agent, Can't do this ends the errand; answered
     /// by `crate::extensions::ask::answer` itself.
     Handoff { handoff: Box<crate::errands::HandoffRow> },
+    /// Signs Claktory's browser out of an identity provider (#435, Fugo
+    /// 41236): the card Claktory posts at the browser's first sign-in there
+    /// (`crate::errands::code`), for the account `secret` (its id), by
+    /// errand `errand`. Void once the browser's account there changed.
+    BrowserSignOut { provider: String, secret: String, errand: String },
 }
 
 /// Approving a pipe's card without its choices.
@@ -931,10 +940,15 @@ pub(crate) fn check(factory: &Factory, action: &str) -> Result<(), String> {
         Action::ApprovePipe(_) => Err(APPROVE_ON_THE_CARD.to_owned()),
         Action::TrustPipe(_) => Err(ACCEPT_ON_THE_CARD.to_owned()),
         Action::Execute(command) => crate::command_cards::check(&command),
+        // A recovery-codes card closes whatever became of its errand: its
+        // codes wait through restarts and the errand's end, and only the
+        // person's choice lets them go (Abbacchio 45722).
+        Action::Handoff { handoff } if handoff.kind == v1::ErrandHandoffKind::RecoveryCodes as i32 => Ok(()),
         Action::Handoff { handoff } => match factory.errands.get(&handoff.errand) {
             Some(errand) if errand.state == v1::ErrandState::PersonsTurn as i32 => Ok(()),
             _ => Err("That errand is over: dismiss this card.".to_owned()),
         },
+        Action::BrowserSignOut { provider, secret, .. } => crate::errands::code::check(factory, &provider, &secret),
     }
 }
 
@@ -971,10 +985,8 @@ pub(crate) async fn apply(factory: &Arc<Factory>, action: &str) -> Result<String
             })
         }
         Action::Share { pipe, again: Some(again), .. } => {
-            let name = crate::pipes::shares::share_again(factory, &again, &pipe)?;
-            Ok(format!(
-                "Shared {name} with the pipe again. It lasts until the person stops it, under Shared websites in the pipe's settings."
-            ))
+            let (name, ends) = crate::pipes::shares::share_again(factory, &again, &pipe)?;
+            Ok(format!("Shared {name} with the pipe again. It lasts {ends}, under Shared websites in the pipe's settings."))
         }
         Action::ReleaseReader { agent, fresh } => {
             let request = v1::SetReportReader { agent_id: agent.clone(), reads: false, fresh };
@@ -1008,9 +1020,17 @@ pub(crate) async fn apply(factory: &Arc<Factory>, action: &str) -> Result<String
             );
             Ok("It's shown again, and reachable on this computer once more.".to_owned())
         }
-        Action::Share { pipe, port, name, .. } => {
-            let request =
-                v1::SharePipeWebsite { port: u32::from(port), name: name.clone(), pipe_ids: vec![pipe.clone()], group_id: String::new() };
+        Action::Share { pipe, port, name, hours, .. } => {
+            // The hours the card said, and only those (Fugo 46375); a card
+            // from before said until Stop.
+            let hours = hours.map(|hours| hours.clamp(1, crate::pipes::shares::CARD_HOURS_MOST));
+            let request = v1::SharePipeWebsite {
+                port: u32::from(port),
+                name: name.clone(),
+                pipe_ids: vec![pipe.clone()],
+                group_id: String::new(),
+                lasts_s: hours.map_or(0, |hours| i64::from(hours) * 3600),
+            };
             crate::pipes::shares::share(factory, &request).map_err(|error| match error {
                 crate::factory::RequestError::Command(text) => text,
                 other => other.to_string(),
@@ -1019,15 +1039,18 @@ pub(crate) async fn apply(factory: &Arc<Factory>, action: &str) -> Result<String
                 || "the pipe".to_owned(),
                 |record| format!("the pipe {}", crate::pipes::handoff::label(&record).trim_start_matches("pipe ")),
             );
-            Ok(format!(
-                "Shared {name} (http://localhost:{port}) with {label}. It lasts until the person stops it, under Shared websites in the pipe's settings."
-            ))
+            let lasts = match hours {
+                Some(hours) => format!("for {}, unless the person stops it or changes that", crate::pipes::shares::hours_words(hours)),
+                None => "until the person stops it".to_owned(),
+            };
+            Ok(format!("Shared {name} (http://localhost:{port}) with {label}. It lasts {lasts}, under Shared websites in the pipe's settings."))
         }
         Action::ApprovePipe(_) => Err(APPROVE_ON_THE_CARD.to_owned()),
         Action::TrustPipe(_) => Err(ACCEPT_ON_THE_CARD.to_owned()),
         // Run by the card's answer itself, never from here.
         Action::Execute(_) => Err("A command runs only from its card's Execute.".to_owned()),
         Action::Handoff { .. } => Err("A handoff is answered on its card.".to_owned()),
+        Action::BrowserSignOut { provider, errand, .. } => crate::errands::code::sign_out(factory, &provider, &errand).await,
     }
 }
 

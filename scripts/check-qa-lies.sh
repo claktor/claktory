@@ -13,6 +13,7 @@ cd "$(dirname "$0")/.."
 checks=(
   claktory-user-apps:qa-lies
   factoryd:qa-lies
+  factoryd:qa-idp-fill
 )
 
 failed=0

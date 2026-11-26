@@ -202,6 +202,121 @@ async fn a_procedure_they_couldnt_finish_is_talked_over_and_asked_again() {
     assert!(card(&view, &id).1.replied);
 }
 
+/// The steps' talk, as the card keeps it: who, what, and the step it's on.
+fn talk_steps(dir: &std::path::Path, id: &str) -> Vec<(bool, String, Option<u64>)> {
+    let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("factory.db");
+    let talk: String = db.query_row("SELECT talk FROM asks WHERE id = ?1", [id], |row| row.get(0)).expect("talk");
+    let talk: Vec<serde_json::Value> = serde_json::from_str(&talk).expect("json");
+    talk.iter()
+        .map(|turn| (turn["agent"].as_bool().unwrap_or(false), turn["text"].as_str().unwrap_or("").to_owned(), turn["step"].as_u64()))
+        .collect()
+}
+
+/// #533: words sent on a step leave it waiting, with nothing marked done;
+/// the card waits on its agent, which fixes the step or answers, and it
+/// opens again at that step. Can't do this is fixed on the same card too.
+#[tokio::test]
+async fn words_on_a_step_leave_it_waiting_for_the_agent_to_fix_or_answer() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    let steps = serde_json::json!({"title": "Rotate the key", "body": "The old one leaked.", "steps": ["Open Keychain.", "Delete the old key.", "Add the new one."]});
+    let id = id_in(&call(&mut client, &mut view, "ask_person", steps).await);
+    let (seq, _) = card(&view, &id);
+    let done = |at: u32, revision: u32| v1::AnswerAsk { agent_id: "builder".into(), seq, step: Some(at), revision: Some(revision), ..Default::default() };
+    let send = |text: &str, revision: u32| v1::AnswerAsk {
+        agent_id: "builder".into(),
+        seq,
+        reply: true,
+        text: text.into(),
+        revision: Some(revision),
+        ..Default::default()
+    };
+    assert_eq!(answered(&mut client, &mut view, done(0, 1)).await, Ok(()));
+    view.follow(&mut client, |view| events(view).len() == 1 && idle(view, "builder")).await;
+
+    // Said of a step that isn't the one waiting: refused.
+    let elsewhere = v1::AnswerAsk { step: Some(2), ..send("Wrong one.", 1) };
+    assert_eq!(answered(&mut client, &mut view, elsewhere).await, Err("That isn't the step waiting: look at the card again.".to_owned()));
+
+    // Sent on step 2, with no talk yet: nothing marked, and it waits on Builder.
+    assert_eq!(answered(&mut client, &mut view, send("The menu isn't there.", 1)).await, Ok(()));
+    let (_, sent) = card(&view, &id);
+    let states: Vec<_> = sent.steps.iter().map(v1::AskStep::state).collect();
+    assert_eq!((sent.state(), sent.replied, states), (AskPersonState::Answered, true, vec![AskStepState::Done, AskStepState::Pending, AskStepState::Pending]));
+    assert!(view.agent("builder").waiting_seqs.is_empty(), "it waits on its agent now");
+    view.follow(&mut client, |view| events(view).len() == 2 && idle(view, "builder")).await;
+    let (told, quiet) = events(&view).pop().expect("told");
+    assert!(!quiet);
+    assert!(
+        told.starts_with(&format!(
+            "The person replied on step 2 of 3 of \"Rotate the key\": Delete the old key.\n\nTheir words:\n\nThe menu isn't there.\n\nStep 2 still waits; nothing was marked done. If the step is wrong, fix it on the card with ask_reply (id {id}, steps: the steps, step 2 rewritten) and a short answer; if it only needs an answer, ask_reply with text. They're shown step 2 again either way."
+        )),
+        "{told}"
+    );
+
+    // Fixed with steps: open again at step 2, rewritten, the talk on it.
+    let fixed = serde_json::json!({"id": id, "text": "It moved to the sidebar.", "steps": ["Open Keychain.", "Delete the old key from the sidebar.", "Add the new one."]});
+    let said = call(&mut client, &mut view, "ask_reply", fixed).await;
+    assert!(said.starts_with(&format!("Answered on question {id}, \"Rotate the key\": it's open again in the person's Needs you at step 2 of 3")), "{said}");
+    let (_, open) = card(&view, &id);
+    let states: Vec<_> = open.steps.iter().map(v1::AskStep::state).collect();
+    assert_eq!((open.state(), states), (AskPersonState::Pending, vec![AskStepState::Done, AskStepState::Pending, AskStepState::Pending]));
+    assert_eq!(open.steps[1].text, "Delete the old key from the sidebar.");
+    assert_eq!(open.thread.iter().map(|turn| turn.step).collect::<Vec<_>>(), [2, 2], "each turn says its step");
+    assert_eq!(view.agent("builder").waiting_seqs, [seq]);
+    assert_eq!(
+        talk_steps(&dir, &id),
+        [(false, "The menu isn't there.".to_owned(), Some(2)), (true, "It moved to the sidebar.".to_owned(), Some(2))]
+    );
+
+    // Answered with words only: open again at the same step, unchanged.
+    assert_eq!(answered(&mut client, &mut view, send("Which sidebar?", open.revision)).await, Ok(()));
+    view.follow(&mut client, |view| events(view).len() == 3 && idle(view, "builder")).await;
+    call(&mut client, &mut view, "ask_reply", serde_json::json!({"id": id, "text": "Keychain Access's, on the left."})).await;
+    let (_, open) = card(&view, &id);
+    assert_eq!((open.state(), open.steps[1].text.as_str(), open.steps[1].state()), (AskPersonState::Pending, "Delete the old key from the sidebar.", AskStepState::Pending));
+    // And Done goes on as ever.
+    assert_eq!(answered(&mut client, &mut view, done(1, open.revision)).await, Ok(()));
+    view.follow(&mut client, |view| events(view).len() == 4 && idle(view, "builder")).await;
+    assert!(events(&view).pop().expect("told").0.starts_with("The person did step 2 of 3"));
+
+    // Can't do this, without words: fixed on the same card, at that step.
+    let cant = v1::AnswerAsk { dismiss: true, ..done(2, card(&view, &id).1.revision) };
+    assert_eq!(answered(&mut client, &mut view, cant).await, Ok(()));
+    view.follow(&mut client, |view| events(view).len() == 5 && idle(view, "builder")).await;
+    let (told, _) = events(&view).pop().expect("told");
+    assert!(told.contains(&format!("If they can't, find a way without them and rewrite the steps on this card: ask_reply (id {id}) with steps, step 3 rewritten")), "{told}");
+    let again = serde_json::json!({"id": id, "text": "Use the new key from 1Password.", "steps": ["Open Keychain.", "Delete the old key from the sidebar.", "Add the new key from 1Password."]});
+    let said = call(&mut client, &mut view, "ask_reply", again).await;
+    assert!(said.contains("at step 3 of 3"), "{said}");
+    let (_, open) = card(&view, &id);
+    let states: Vec<_> = open.steps.iter().map(v1::AskStep::state).collect();
+    assert_eq!((open.state(), states), (AskPersonState::Pending, vec![AskStepState::Done, AskStepState::Done, AskStepState::Pending]));
+    assert_eq!(talk_steps(&dir, &id).last().cloned(), Some((true, "Use the new key from 1Password.".to_owned(), Some(3))));
+
+    // Can't do this again, and this time the agent stops: the card stays
+    // as it was, stopped at step 3 for good, the agent's words on it.
+    let cant = v1::AnswerAsk { dismiss: true, ..done(2, card(&view, &id).1.revision) };
+    assert_eq!(answered(&mut client, &mut view, cant).await, Ok(()));
+    view.follow(&mut client, |view| events(view).len() == 6 && idle(view, "builder")).await;
+    let stop = serde_json::json!({"id": id, "text": "I'll do it from the server instead.", "resolve": true});
+    let said = call(&mut client, &mut view, "ask_reply", stop.clone()).await;
+    assert!(said.starts_with(&format!("Stopped question {id}, \"Rotate the key\", at step 3 of 3, for good")), "{said}");
+    let (_, stopped) = card(&view, &id);
+    let states: Vec<_> = stopped.steps.iter().map(v1::AskStep::state).collect();
+    assert_eq!((stopped.state(), stopped.resolved), (AskPersonState::Dismissed, true));
+    assert_eq!(states, [AskStepState::Done, AskStepState::Done, AskStepState::Cant]);
+    assert_eq!(talk_steps(&dir, &id).last().cloned(), Some((true, "I'll do it from the server instead.".to_owned(), Some(3))));
+    // Over: neither stopped nor opened again a second time.
+    assert!(call(&mut client, &mut view, "ask_reply", stop).await.contains("it's over"));
+    let reopen = serde_json::json!({"id": id, "text": "Try again.", "steps": ["Open Keychain.", "Delete the old key from the sidebar.", "Add it."]});
+    assert!(call(&mut client, &mut view, "ask_reply", reopen).await.contains("it's over"));
+}
+
 #[tokio::test]
 async fn a_comment_on_a_step_is_answered_on_the_card_while_it_waits() {
     let dir = temp_dir();
@@ -411,4 +526,125 @@ async fn the_agent_closes_a_card_the_talk_settled_with_its_last_words() {
     assert!(early.contains("take it back with ask_withdraw"), "{early}");
     let worded = call(&mut client, &mut view, "ask_reply", serde_json::json!({"id": id, "text": "x", "resolve": true, "title": "T"})).await;
     assert!(worded.starts_with("Closing a card changes nothing on it"), "{worded}");
+}
+
+/// One of Builder's uploads, as the app makes it before answering with it.
+fn upload(dir: &std::path::Path, name: &str, mime: &str) -> v1::Attachment {
+    let folder = dir.join("home/agents/builder/uploads/2026-11-26");
+    std::fs::create_dir_all(&folder).expect("uploads");
+    let path = folder.join(name);
+    std::fs::write(&path, b"\x89PNG\r\n\x1a\n").expect("file");
+    v1::Attachment { path: path.display().to_string(), name: name.into(), size: 8, mime: mime.into() }
+}
+
+#[tokio::test]
+async fn files_go_with_every_answer_on_a_card_and_stay_on_its_talk() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    let shot = upload(&dir, "error.png", "image/png");
+    let log = upload(&dir, "build.log", "text/plain");
+
+    // A reply needs words or a file; a file alone will do (#511).
+    let id = id_in(&call(&mut client, &mut view, "ask_person", serde_json::json!({"title": "Why does the build fail?", "body": "B"})).await);
+    let (seq, _) = card(&view, &id);
+    let reply = |attachments: Vec<v1::Attachment>, revision: u32| v1::AnswerAsk {
+        agent_id: "builder".into(),
+        seq,
+        reply: true,
+        attachments,
+        revision: Some(revision),
+        from: AskAnsweredFrom::NeedsYou.into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        answered(&mut client, &mut view, reply(Vec::new(), 1)).await,
+        Err("Write a reply or attach a file, or approve or dismiss the question.".to_owned())
+    );
+    // Only Builder's uploads.
+    let stray = v1::Attachment { path: dir.join("site/x.png").display().to_string(), name: "x.png".into(), ..Default::default() };
+    std::fs::write(dir.join("site/x.png"), b"x").expect("stray");
+    let refused = answered(&mut client, &mut view, reply(vec![stray.clone()], 1)).await.expect_err("refused");
+    assert!(refused.ends_with("isn't one of this agent's uploads."), "{refused}");
+    assert_eq!(answered(&mut client, &mut view, reply(vec![shot.clone(), log.clone()], 1)).await, Ok(()));
+    let (_, replied) = card(&view, &id);
+    assert_eq!(replied.answer_attachments.iter().map(|file| file.name.as_str()).collect::<Vec<_>>(), ["error.png", "build.log"]);
+    view.follow(&mut client, |view| events(view).len() == 1 && idle(view, "builder")).await;
+    let (told, quiet) = events(&view).pop().expect("told");
+    assert!(!quiet);
+    assert!(told.starts_with("The person replied to your question \"Why does the build fail?\", with files only."), "{told}");
+    assert!(
+        told.contains(&format!(
+            "The person attached 2 files; read them at their paths:\n- {} (\"error.png\", image/png, 8 bytes)\n- {} (\"build.log\", text/plain, 8 bytes)\nLook at images with read_image.",
+            shot.path, log.path
+        )),
+        "{told}"
+    );
+    assert!(told.contains(&format!("If what they sent needs an answer from you, reply on the card with ask_reply (id {id})")), "{told}");
+
+    // Answered on, the files stay on the talk, with the turn they came with.
+    call(&mut client, &mut view, "ask_reply", serde_json::json!({"id": id, "text": "The log says the disk is full."})).await;
+    let (_, open) = card(&view, &id);
+    assert!(open.answer_attachments.is_empty());
+    let files: Vec<Vec<&str>> = open.thread.iter().map(|message| message.attachments.iter().map(|file| file.path.as_str()).collect()).collect();
+    assert_eq!(files, [vec![shot.path.as_str(), log.path.as_str()], vec![]]);
+
+    // Resolved with a file and no words: kept, named, and not quiet.
+    let resolve = v1::AnswerAsk { agent_id: "builder".into(), seq, resolve: true, attachments: vec![log.clone()], revision: Some(2), ..Default::default() };
+    assert_eq!(answered(&mut client, &mut view, resolve).await, Ok(()));
+    let (_, ended) = card(&view, &id);
+    assert_eq!((ended.resolved, ended.answer_attachments.len(), ended.thread[0].attachments.len()), (true, 1, 2));
+    view.follow(&mut client, |view| events(view).len() == 2 && idle(view, "builder")).await;
+    let (told, quiet) = events(&view).pop().expect("told");
+    assert!(!quiet, "a Resolve with a file wakes the agent");
+    assert!(told.contains(&format!("Carry on with what you agreed.\n\nThe person attached a file; read it at its path:\n- {}", log.path)), "{told}");
+
+    // Approved with a picture: named, after their comment.
+    let id = id_in(&call(&mut client, &mut view, "ask_person", serde_json::json!({"title": "Ship this design?", "body": "B"})).await);
+    let (seq, _) = card(&view, &id);
+    let yes = v1::AnswerAsk { agent_id: "builder".into(), seq, text: "With this logo.".into(), attachments: vec![shot.clone()], revision: Some(1), ..Default::default() };
+    assert_eq!(answered(&mut client, &mut view, yes).await, Ok(()));
+    view.follow(&mut client, |view| events(view).len() == 3 && idle(view, "builder")).await;
+    let (told, _) = events(&view).pop().expect("told");
+    assert!(told.contains(&format!("With this logo.\n\nThe person attached a file; read it at its path:\n- {} (", shot.path)), "{told}");
+
+    // A step answered with a file: kept on the step, named, and answered on.
+    let steps = serde_json::json!({"title": "Set up signing", "body": "B", "steps": ["Open Settings.", "Add the key."]});
+    let id = id_in(&call(&mut client, &mut view, "ask_person", steps).await);
+    let (seq, _) = card(&view, &id);
+    let done = v1::AnswerAsk { agent_id: "builder".into(), seq, step: Some(0), attachments: vec![shot.clone()], revision: Some(1), ..Default::default() };
+    assert_eq!(answered(&mut client, &mut view, v1::AnswerAsk { attachments: vec![stray], ..done.clone() }).await.map_err(|_| ()), Err(()));
+    assert_eq!(answered(&mut client, &mut view, done).await, Ok(()));
+    let (_, waiting) = card(&view, &id);
+    assert_eq!((waiting.steps[0].state(), waiting.steps[0].comment_attachments.len()), (AskStepState::Done, 1));
+    view.follow(&mut client, |view| events(view).len() == 4 && idle(view, "builder")).await;
+    let (told, _) = events(&view).pop().expect("told");
+    assert!(told.contains(&format!("did step 1 of 2 of \"Set up signing\": Open Settings.\n\nThe person attached a file; read it at its path:\n- {}", shot.path)), "{told}");
+    let said = call(&mut client, &mut view, "ask_reply", serde_json::json!({"id": id, "text": "That's the right screen."})).await;
+    assert!(said.starts_with(&format!("Answered on question {id}")), "{said}");
+    let (_, open) = card(&view, &id);
+    assert_eq!((open.thread[0].attachments.len(), open.steps[0].comment_attachments.len()), (1, 1));
+
+    // A written-answer card with a talk: a reply can be files alone, an
+    // answer still needs words (Abbacchio 45289).
+    let id = id_in(&call(&mut client, &mut view, "ask_person", serde_json::json!({"title": "Which branch?", "body": "B", "wants_text": true})).await);
+    let (seq, _) = card(&view, &id);
+    let answer = v1::AnswerAsk { agent_id: "builder".into(), seq, text: "The one in this log?".into(), revision: Some(1), ..Default::default() };
+    assert_eq!(answered(&mut client, &mut view, answer).await, Ok(()));
+    view.follow(&mut client, |view| events(view).len() == 5 && idle(view, "builder")).await;
+    call(&mut client, &mut view, "ask_reply", serde_json::json!({"id": id, "text": "Which log?"})).await;
+    let (_, talking) = card(&view, &id);
+    assert!(!talking.thread.is_empty());
+    let files = v1::AnswerAsk { agent_id: "builder".into(), seq, attachments: vec![log.clone()], revision: Some(talking.revision), ..Default::default() };
+    assert_eq!(
+        answered(&mut client, &mut view, files.clone()).await,
+        Err("Write an answer, or dismiss the question.".to_owned())
+    );
+    assert_eq!(answered(&mut client, &mut view, v1::AnswerAsk { reply: true, from: AskAnsweredFrom::NeedsYou.into(), ..files }).await, Ok(()));
+    view.follow(&mut client, |view| events(view).len() == 6 && idle(view, "builder")).await;
+    let (told, _) = events(&view).pop().expect("told");
+    assert!(told.contains(&format!("The person attached a file; read it at its path:\n- {}", log.path)), "{told}");
 }

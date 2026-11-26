@@ -300,6 +300,20 @@ async fn only_an_app_that_shows_the_command_runs_it_and_nothing_waits_for_a_term
     let dismiss = v1::AnswerAsk { agent_id: "builder".into(), seq, dismiss: true, ..Default::default() };
     assert!(matches!(apply_request(&mut client, &mut view, client_message::Body::AnswerAsk(dismiss)).await, Body::Ack(_)));
     assert!(run(&view, seq).is_none());
+
+    // Words go only with a dismissal (#533 N5), and its agent hears them;
+    // Execute runs exactly what it shows, never with words beside it.
+    let seq = ask_to_run(&mut client, &mut view, "make clean", None).await;
+    let worded = v1::AnswerAsk { agent_id: "builder".into(), seq, confirmed: true, text: "and then deploy".into(), ..Default::default() };
+    let refused = apply_request(&mut client, &mut view, client_message::Body::AnswerAsk(worded)).await;
+    assert_eq!(error(&refused), "Execute runs the command and nothing else: execute it without a comment, or dismiss it with one.");
+    assert!(run(&view, seq).is_none() && card(&view, seq).state() == AskPersonState::Pending);
+    let reason = v1::AnswerAsk { agent_id: "builder".into(), seq, dismiss: true, text: "Not on main: use the worktree.".into(), ..Default::default() };
+    assert!(matches!(apply_request(&mut client, &mut view, client_message::Body::AnswerAsk(reason)).await, Body::Ack(_)));
+    view.follow(&mut client, |view| events(view).iter().any(|event| event.contains("Not on main")) && idle(view, "builder")).await;
+    let said = events(&view).into_iter().find(|event| event.contains("Not on main")).expect("told");
+    assert!(said.contains("dismissed \"") && said.contains("so nothing was changed.\n\nTheir comment:\n\nNot on main: use the worktree."), "{said}");
+    assert!(run(&view, seq).is_none());
 }
 
 /// At its timeout the command is stopped with everything it started, even a

@@ -9,6 +9,7 @@ import 'backend.dart';
 import 'characters/character.dart';
 import 'chats.dart' show ChatGlyph, chatTitle, openChat;
 import 'controls.dart';
+import 'needs_you_alerts.dart' show withheldTitle;
 import 'find.dart' show FindScope;
 import 'forms.dart' show AgentSettingsForm;
 import 'identity.dart';
@@ -398,6 +399,11 @@ String historyOutcome(
       when record.agentReason.isNotEmpty =>
     '${agent ?? 'The agent'} closed it: settled in the talk',
   NeedsYouOutcome.NEEDS_YOU_OUTCOME_RESOLVED => 'Resolved',
+  // An alert, where it was read (§3.9): "Read on Matt's iPhone".
+  NeedsYouOutcome.NEEDS_YOU_OUTCOME_READ
+      when record.answeredOn.deviceName.isNotEmpty =>
+    'Read on ${record.answeredOn.deviceName}',
+  NeedsYouOutcome.NEEDS_YOU_OUTCOME_READ => 'Read',
   _ => '',
 };
 
@@ -462,8 +468,13 @@ class HistoryRow extends StatelessWidget {
             record.agentId.isEmpty) ||
         // A change to an app's access the person made, or an undo.
         (_ofApp(record) && record.agentId.isEmpty);
+    final alert =
+        record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_ALERT;
     final who = yours
         ? 'You'
+        // Claktory's own alert, by the name it was sent with.
+        : alert && record.agentId.isEmpty
+        ? (record.alert.fromName.isEmpty ? 'Claktory' : record.alert.fromName)
         : record.chatId.isNotEmpty
         ? (chat == null ? 'A chat' : chatTitle(chat))
         : _ofPipe(record) && agentName == null
@@ -543,6 +554,8 @@ class HistoryRow extends StatelessWidget {
                 child: Center(
                   child: agent != null
                       ? AgentCharacter(agent: agent, size: 24)
+                      : alert && record.agentId.isEmpty
+                      ? CogGlyph(color: palette.textMuted)
                       : record.chatId.isNotEmpty
                       ? ChatGlyph(color: palette.textMuted)
                       : pipe != null || _ofPipe(record)
@@ -583,6 +596,16 @@ class HistoryRow extends StatelessWidget {
                         ),
                       ),
                     ),
+                    // A withheld alert says only who sent it.
+                    if (alert && record.alert.withheld)
+                      Text(
+                        withheldTitle(who),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyles.body.copyWith(
+                          color: palette.textMuted,
+                        ),
+                      ),
                     if (record.title.isNotEmpty)
                       Text(
                         // A grant's sentence names agents, apps and paths:

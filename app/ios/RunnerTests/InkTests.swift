@@ -1052,7 +1052,10 @@ struct InkTests {
     paper.view().frame = window.bounds
     window.layoutIfNeeded()
     let interrupted = try #require(events.named("strokeInterrupted").first)
-    #expect(interrupted["reason"] as? String == "resize")
+    // Turning the window can change its traits before its size (an iPhone's
+    // size classes do), so either reason may come first; Dart treats both
+    // as a layout change.
+    #expect(["resize", "rotate"].contains(interrupted["reason"] as? String))
     #expect(interrupted["kept"] as? Bool == true)
     #expect(interrupted["page_1based"] as? Int == 3)
     await Self.settle()

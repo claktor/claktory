@@ -14,6 +14,7 @@ import 'attachments.dart';
 import 'background_grace.dart';
 import 'connections.dart';
 import 'loopback_forward.dart';
+import 'mobile/share_browser.dart' show inAppShareBrowser;
 import 'diagnostics_record.dart';
 import 'device_account.dart'
     show AccountServiceError, AccountServiceUnreachable, DeviceAccount;
@@ -148,6 +149,31 @@ class _Abandoned implements Exception {
 /// drops, and routes what the backend sends into the stores. The app keeps
 /// one for each Claktory it's connected to, all live at once (rail.dart). Speaks the
 /// protocol in proto/factory/v1/factory.proto.
+/// The websites pipes' peers share that a device showing a Claktory on
+/// another machine forwards, each id with its port there ([Backend]'s
+/// `_keepShares`): those opened there (listening), live and not hidden; on
+/// a phone or tablet ([touch]) only those it forwards already ([forwarded])
+/// or whose page is open over the app now ([shown]: on an iPhone or iPad,
+/// forwarded again once its tunnel was made afresh, #505).
+@visibleForTesting
+Map<String, int> sharesToForward(
+  Workspace workspace, {
+  required bool touch,
+  required bool Function(String id) forwarded,
+  required bool Function(String id) shown,
+}) {
+  final wanted = <String, int>{};
+  for (final share in workspace.pipeShares) {
+    if (share.mine || !share.live || share.hidden || !share.listening) {
+      continue;
+    }
+    if (touch && !forwarded(share.id) && !shown(share.id)) continue;
+    final port = Uri.tryParse(share.address)?.port ?? 0;
+    if (port > 0) wanted[share.id] = port;
+  }
+  return wanted;
+}
+
 class Backend implements AppViewTransport {
   Backend({
     required this.workspace,
@@ -267,6 +293,14 @@ class Backend implements AppViewTransport {
     kind: KeptKind.chat,
   );
 
+  /// The conversation focus mode's Context follows without selecting it
+  /// ([watchTranscript], #514), apart from the selected one: an agent's or
+  /// a chat's entries and what waits for it, or a pipe's messages.
+  final watchedTranscript = TranscriptStore();
+  final watchedQueued = QueuedStore();
+  final watchedPipe = PipeChat();
+  WatchTranscript? _watch;
+
   /// Opens a screen an agent asked to show (its show_screen tool) in the
   /// window showing this Claktory, answering whether it did
   /// (screens.dart). Null while no window shows it: the answer is no.
@@ -283,6 +317,11 @@ class Backend implements AppViewTransport {
   /// Needs you opens on History next, once: a History row was opened, so
   /// coming back finds the list it was opened from (row 684).
   var needsYouHistoryNext = false;
+
+  /// The card Needs you shows next, by its NeedsYouItem key, once (a
+  /// notification tapped): focus mode, or a phone's Needs you, goes to it
+  /// when it's there and clears it.
+  final needsYouCard = ValueNotifier<String?>(null);
 
   /// The app to open in the Marketplace's Apps tab next, by its id, once:
   /// its row opens, comes into view and clears it.
@@ -767,7 +806,7 @@ class Backend implements AppViewTransport {
     while (!_closed && _backingOff && !_tryNow) {
       final left = since.add(_awayDelay).difference(DateTime.now());
       if (left <= Duration.zero) break;
-      if (_hiddenAt != null || _suspended) {
+      if (_parked || _suspended) {
         await _wake.future;
         continue;
       }
@@ -782,6 +821,31 @@ class Backend implements AppViewTransport {
   /// Whether the connection is closed while the app is in the background
   /// ([suspend]), until it's back.
   var _suspended = false;
+
+  /// Whether it keeps trying while the app is in the background, on its
+  /// usual schedule (the quick one on screen, its backoff off screen),
+  /// rather than waiting until the app is back (W6, Android: the Claktory
+  /// a share came from, while its page is open in a browser tab over the
+  /// app, so its network coming back after the screen was off brings it
+  /// back). The app stays in the background as far as everything else
+  /// goes: nothing says it resumed. Set true, it undoes [suspend].
+  bool get keepTryingWhileHidden => _keepTrying;
+  var _keepTrying = false;
+  set keepTryingWhileHidden(bool value) {
+    if (value == _keepTrying || _closed) return;
+    _keepTrying = value;
+    if (value && _hiddenAt != null) _keptWhileHidden = true;
+    if (!value) return;
+    if (_suspended) {
+      _suspended = false;
+      _log('kept trying in the background: its connection opens again');
+    }
+    _wakeUp();
+  }
+
+  /// In the background and not told to keep trying there: nothing dials
+  /// until the app is back.
+  bool get _parked => _hiddenAt != null && !_keepTrying;
 
   /// Closes the connection while the app is in the background, tunnel and
   /// all, so nothing goes out until it's back ([resumed] makes it afresh):
@@ -827,6 +891,13 @@ class Backend implements AppViewTransport {
   /// When the app went to the background, while it's there.
   DateTime? _hiddenAt;
 
+  /// Told to keep trying at some point during this time in the background
+  /// (a shared website open in a browser tab over the app, #505): its
+  /// connection was kept live, so coming back needn't make it afresh
+  /// (Risotto, Sale row 175). Kept as a latch, since the tab may say it
+  /// closed before the app says it's back.
+  var _keptWhileHidden = false;
+
   AndroidBackgroundConnection? _android;
 
   /// The app went to the background: iOS suspends it soon, and the
@@ -834,6 +905,7 @@ class Backend implements AppViewTransport {
   void hidden() {
     if (_hiddenAt != null) return;
     _hiddenAt = DateTime.now();
+    _keptWhileHidden = _keepTrying;
     _log('to the background');
     _note(ConnectionKind.lifecycle, {ConnectionKey.app: AppLife.background});
     _android?.hidden();
@@ -856,6 +928,8 @@ class Backend implements AppViewTransport {
     _android?.resumed();
     final hiddenAt = _hiddenAt;
     _hiddenAt = null;
+    final kept = _keptWhileHidden;
+    _keptWhileHidden = false;
     _leftInBackground = false;
     final suspended = _suspended;
     _suspended = false;
@@ -892,6 +966,14 @@ class Backend implements AppViewTransport {
     }
     if (BackgroundGrace.heldThrough(away)) {
       _log('back within the grace: checking the connection');
+      check();
+      return;
+    }
+    // Kept connected while away (a browser tab over the app held it up):
+    // most likely still alive, so only checked; a check unanswered makes
+    // it afresh as usual.
+    if (kept && connected.value) {
+      _log('kept connected while away: checking the connection');
       check();
       return;
     }
@@ -941,7 +1023,7 @@ class Backend implements AppViewTransport {
       _backWatch = null;
       if (_closed ||
           connected.value ||
-          _hiddenAt != null ||
+          _parked ||
           _backingOff ||
           refused.value != null ||
           signInRequired.value != null) {
@@ -1038,7 +1120,7 @@ class Backend implements AppViewTransport {
     // In the background (Android keeps the app running there, its network
     // cut in Doze), the tunnel is left as it is: coming back tells it, so
     // a rebuild meanwhile would only be thrown away.
-    if (_hiddenAt != null) {
+    if (_parked) {
       if (!_leftInBackground) _log('in the background: the tunnel waits');
       _leftInBackground = true;
       return;
@@ -1051,7 +1133,7 @@ class Backend implements AppViewTransport {
       _tunnelBack = null;
       if (_closed ||
           connected.value ||
-          _hiddenAt != null ||
+          _parked ||
           _backingOff ||
           !identical(_tunnel, open)) {
         return;
@@ -1203,6 +1285,12 @@ class Backend implements AppViewTransport {
   /// otherwise. Like [refused], nothing's tried until [retry].
   final signInRequired = ValueNotifier<String?>(null);
 
+  /// This Claktory is signed in to another Claktory account than this
+  /// device (ERROR_CODE_OTHER_ACCOUNT, #529 S4): what it said, which says
+  /// which case; null otherwise. [refused] is set with it, so nothing's
+  /// tried until [retry].
+  final otherAccount = ValueNotifier<String?>(null);
+
   /// While this device isn't confirmed as the owner's on this Claktory,
   /// when its grace to confirm ends (`Welcome.confirm_by_ms`); null when it
   /// needn't confirm.
@@ -1330,20 +1418,24 @@ class Backend implements AppViewTransport {
 
   /// The websites pipes' peers share that this device forwards (#503): on
   /// a computer showing a Claktory on another machine, each one opened
-  /// there (listening), live and not hidden, for as long as that lasts;
-  /// none on a phone or tablet, which can't open them yet.
+  /// there (listening), live and not hidden, for as long as that lasts; on
+  /// a phone or tablet only those opened on it (W6), so nothing listens in
+  /// the background for the others, and on an iPhone or iPad the one whose
+  /// page is open over the app again once its tunnel was made afresh (back
+  /// from the Home Screen, #505), so reloading it works.
   void _keepShares(Workspace workspace) {
-    final wanted = <String, int>{};
-    if (target != null && !cantOpenSharesHere) {
-      for (final share in workspace.pipeShares) {
-        if (share.mine || !share.live || share.hidden || !share.listening) {
-          continue;
-        }
-        final port = Uri.tryParse(share.address)?.port ?? 0;
-        if (port > 0) wanted[share.id] = port;
-      }
-    }
-    unawaited(forwards.keepShares(wanted));
+    unawaited(
+      forwards.keepShares(
+        target == null
+            ? const {}
+            : sharesToForward(
+                workspace,
+                touch: sharesOnTouchDevice,
+                forwarded: (id) => forwards.sharePort(id) != null,
+                shown: (id) => inAppShareBrowser.shows(this, id),
+              ),
+      ),
+    );
   }
 
   Timer? _tunnelWatch;
@@ -1369,6 +1461,7 @@ class Backend implements AppViewTransport {
     KeptVoices.of(this);
     _note(ConnectionKind.lifecycle, {ConnectionKey.app: AppLife.started});
     deviceNetwork.addListener(_networkKnown);
+    deviceNetwork.addListener(_watchBlocked);
     _network ??= deviceNetworkMoves.listen((path) {
       _note(ConnectionKind.network, {ConnectionKey.net: netKind(path)});
       networkMoved();
@@ -1473,7 +1566,7 @@ class Backend implements AppViewTransport {
             if (_tunnelServed &&
                 identical(tunnel, _tunnel) &&
                 tunnel.status.failure != TunnelFailure.refused &&
-                _hiddenAt == null) {
+                !_parked) {
               _log("the tunnel's port didn't answer: opening it afresh");
               _freshTunnel();
               _retryDelay = _minRetryDelay;
@@ -1716,7 +1809,7 @@ class Backend implements AppViewTransport {
         _log('not on screen: next try in ${_awayDelay.inSeconds}s at most');
       }
       final failedAt = DateTime.now();
-      if (_hiddenAt != null) {
+      if (_parked) {
         _log('in the background: trying again once the app is back');
         await _wake.future;
       } else {
@@ -1895,6 +1988,7 @@ class Backend implements AppViewTransport {
     );
     refused.value = null;
     signInRequired.value = null;
+    otherAccount.value = null;
     confirmBy.value = null;
     pairing.value = null;
     movedAway.value = null;
@@ -2145,6 +2239,7 @@ class Backend implements AppViewTransport {
   void retry() {
     refused.value = null;
     signInRequired.value = null;
+    otherAccount.value = null;
     _retryDelay = _minRetryDelay;
     _wakeUp();
   }
@@ -2169,6 +2264,7 @@ class Backend implements AppViewTransport {
     _sleepWatch?.cancel();
     unawaited(_network?.cancel());
     deviceNetwork.removeListener(_networkKnown);
+    deviceNetwork.removeListener(_watchBlocked);
     _wakeUp();
     await _socket?.close();
     await forwards.stopAll();
@@ -2972,6 +3068,35 @@ class Backend implements AppViewTransport {
     ),
   );
 
+  /// A recovery-codes card's codes (#435 W8b), to this device only, while
+  /// the card at [seq] waits. Kept only by the card on screen, never in
+  /// the Workspace. Refused (gone), the reason is in words to show.
+  Future<List<String>> showRecoveryCodes(String agentId, int seq) async {
+    final reply = await _call(
+      ClientMessage(
+        showRecoveryCodes: ShowRecoveryCodes(agentId: agentId, seq: Int64(seq)),
+      ),
+    );
+    if (!reply.hasRecoveryCodes()) {
+      throw const RequestFailure('Claktory sent no codes.');
+    }
+    return reply.recoveryCodes.codes.toList();
+  }
+
+  /// Keep in Secrets on a recovery-codes card (#435 W8b): a new secret
+  /// given to no agent, and the card ends. Refused (the vault locked), the
+  /// reason is in words; the card still waits.
+  Future<void> keepRecoveryCodes(String agentId, int seq) => _request(
+    ClientMessage(
+      keepRecoveryCodes: KeepRecoveryCodes(agentId: agentId, seq: Int64(seq)),
+    ),
+  );
+
+  /// The person read these alerts (Workspace.alerts): they opened one, or
+  /// chose Mark as read. Each leaves Needs you for History.
+  Future<void> readAlerts(List<String> ids) =>
+      _request(ClientMessage(readAlerts: ReadAlerts(ids: ids)));
+
   /// Adds a goal of the person's, in their words, to [agentId]'s
   /// checklist.
   Future<void> addGoal(String agentId, String text) => _request(
@@ -3652,6 +3777,75 @@ class Backend implements AppViewTransport {
 
   var _watching = '';
 
+  /// Needs you's focus mode on or off for this device (#514): kept by the
+  /// backend, in Settings.focus_mode by [focusDeviceId].
+  Future<void> setFocusMode(bool on) =>
+      _request(ClientMessage(setFocusMode: SetFocusMode(on: on)));
+
+  /// This device in Settings.focus_mode: its paired id, or "local" for
+  /// this computer's own app.
+  String get focusDeviceId => deviceId.isEmpty ? 'local' : deviceId;
+
+  /// Follows [target]'s conversation (an agent's, a chat's or a pipe's)
+  /// on this connection without selecting it, into [watchedTranscript],
+  /// [watchedQueued] and [watchedPipe]; null stops. Asked again on the
+  /// next connection, as the backend forgets it.
+  Future<void> watchTranscript(WatchTranscript? target) {
+    _watch = target;
+    return _request(
+      ClientMessage(watchTranscript: target ?? WatchTranscript()),
+    );
+  }
+
+  /// [message] is the watched conversation's (ServerMessage.watched):
+  /// into its own stores, never the selected one's. False for anything
+  /// else so tagged.
+  bool _watched(ServerMessage message) {
+    switch (message.whichBody()) {
+      case ServerMessage_Body.transcript:
+        watchedTranscript.load(message.transcript);
+      case ServerMessage_Body.entry:
+        watchedTranscript.update(message.entry);
+      case ServerMessage_Body.delta:
+        watchedTranscript.delta(message.delta);
+      case ServerMessage_Body.queuedMessages:
+        watchedQueued.apply(message.queuedMessages);
+      case ServerMessage_Body.chatTranscript:
+        final chat = message.chatTranscript;
+        watchedTranscript.load(
+          Transcript(
+            agentId: chat.chatId,
+            entries: chat.entries,
+            hasEarlier: chat.hasEarlier,
+          ),
+        );
+      case ServerMessage_Body.chatEntry:
+        watchedTranscript.update(
+          EntryUpdate(
+            agentId: message.chatEntry.chatId,
+            entry: message.chatEntry.entry,
+          ),
+        );
+      case ServerMessage_Body.chatDelta:
+        final delta = message.chatDelta;
+        watchedTranscript.delta(
+          EntryDelta(agentId: delta.chatId, seq: delta.seq, text: delta.text),
+        );
+      case ServerMessage_Body.chatQueuedMessages:
+        watchedQueued.apply(
+          QueuedMessages(
+            agentId: message.chatQueuedMessages.chatId,
+            messages: message.chatQueuedMessages.messages,
+          ),
+        );
+      case ServerMessage_Body.pipeTranscript:
+        watchedPipe.load(message.pipeTranscript);
+      default:
+        return false;
+    }
+    return true;
+  }
+
   Future<void> showAllFiles(String projectId, bool showAll) => _request(
     ClientMessage(
       showAllFiles: ShowAllFiles(projectId: projectId, showAll: showAll),
@@ -3921,6 +4115,17 @@ class Backend implements AppViewTransport {
   /// Stops one of this side's shares on every pipe at once.
   Future<void> stopPipeShare(String shareId) =>
       _request(ClientMessage(stopPipeShare: StopPipeShare(shareId: shareId)));
+
+  /// How long one of this side's shares lasts from now, in seconds; 0
+  /// keeps it until it's stopped (friend bug #46).
+  Future<void> setPipeShareExpiry(String shareId, int lastsS) => _request(
+    ClientMessage(
+      setPipeShareExpiry: SetPipeShareExpiry(
+        shareId: shareId,
+        lastsS: Int64(lastsS),
+      ),
+    ),
+  );
 
   /// The one-time addresses that open a share another Claktory shares with
   /// this one in the browser, its server here started if it wasn't.
@@ -4478,6 +4683,33 @@ class Backend implements AppViewTransport {
     ClientMessage(confirmDevice: ConfirmDevice(assertion: assertion)),
   );
 
+  /// This Mac's own Claktory, signed in to the person's account, asks it
+  /// for a one-time code that signs this app in as a device with the
+  /// account key whose public half is [accountKey] (base64url), #529. Only
+  /// this computer's own app may ask; the refusals are [RequestFailure]s
+  /// with their codes.
+  Future<DeviceVouched> vouchDevice({
+    required String accountKey,
+    required String name,
+    required String platform,
+    required String version,
+  }) async {
+    final reply = await _call(
+      ClientMessage(
+        vouchDevice: VouchDevice(
+          accountKey: accountKey,
+          name: name,
+          platform: platform,
+          version: version,
+        ),
+      ),
+    );
+    if (!reply.hasDeviceVouched()) {
+      throw const RequestFailure('Claktory sent no answer to the sign-in.');
+    }
+    return reply.deviceVouched;
+  }
+
   /// Lets in the device waiting with [deviceId]'s code
   /// (RemoteAccess.pending_devices), with the [number] the person typed
   /// off its screen: it's paired from now on. A wrong number is refused,
@@ -4606,6 +4838,7 @@ class Backend implements AppViewTransport {
       _log('undecodable frame: ${error.message}');
       return;
     }
+    if (message.watched && _watched(message)) return;
     switch (message.whichBody()) {
       case ServerMessage_Body.welcome:
         _welcomed = true;
@@ -4654,6 +4887,7 @@ class Backend implements AppViewTransport {
         _sendDiagnosticsEvery();
         // The backend forgets a watch when the connection closes.
         if (_watching.isNotEmpty) fireAndLog(watchFiles(_watching));
+        if (_watch case final watch?) fireAndLog(watchTranscript(watch));
         // And whether the person is using it.
         if (_active) fireAndLog(sendActive(true));
       case ServerMessage_Body.ack:
@@ -4684,6 +4918,13 @@ class Backend implements AppViewTransport {
             message.error.code == ErrorCode.ERROR_CODE_SIGN_IN_REQUIRED) {
           // Refused until this device signs in: neither will it.
           signInRequired.value = message.error.message;
+        } else if (toHello &&
+            message.error.code == ErrorCode.ERROR_CODE_OTHER_ACCOUNT) {
+          // Another account's Claktory (#529, S4): nothing's tried until
+          // Try again, as when refused, but nothing here is forgotten.
+          // What it said shows on its own screen (OtherAccountView).
+          otherAccount.value = message.error.message;
+          refused.value = message.error.message;
         } else if (toHello &&
             message.error.code == ErrorCode.ERROR_CODE_MOVED) {
           // Moved away: its screen shows where to, and the connection
@@ -4811,7 +5052,13 @@ class Backend implements AppViewTransport {
       case ServerMessage_Body.agentBrowserViewMoved:
       case ServerMessage_Body.errandLog:
       case ServerMessage_Body.timeZones:
+      // A recovery-codes card's, to this connection only (#435 W8b): to
+      // the card that asked, never kept here.
+      case ServerMessage_Body.recoveryCodes:
         // Claktory's browser (#435): the live view comes with P5.
+        _pending.remove(message.replyTo.toInt())?.complete(message);
+      case ServerMessage_Body.deviceVouched:
+        // VouchDevice's answer, to this app only (#529).
         _pending.remove(message.replyTo.toInt())?.complete(message);
       case ServerMessage_Body.dmFeed:
         // DmSend's receipt, DmFollow's pages, or pushed as things come.
@@ -4844,6 +5091,8 @@ class Backend implements AppViewTransport {
         pipeChat.load(message.pipeTranscript);
       case ServerMessage_Body.pipeMessageUpdate:
         pipeChat.update(message.pipeMessageUpdate);
+        // Every connection's: the watched pipe's too.
+        watchedPipe.update(message.pipeMessageUpdate);
       case ServerMessage_Body.chatTranscript:
         final chat = message.chatTranscript;
         chatTranscript.load(
@@ -4946,6 +5195,22 @@ class Backend implements AppViewTransport {
   /// `network` event with app=started: the network at launch, not a move.
   var _netTold = false;
 
+  /// Whether the system last said it blocks this app's network.
+  var _wasBlocked = false;
+
+  /// The system lets this app's network through again (W6): a Claktory
+  /// told to keep trying in the background tries at once, as for a network
+  /// move. The others wait as before: it isn't a move.
+  void _watchBlocked() {
+    final blocked = deviceNetwork.value?.blocked ?? false;
+    final unblocked = _wasBlocked && !blocked;
+    _wasBlocked = blocked;
+    if (unblocked && _keepTrying) {
+      _log('its network is let through again: trying now');
+      networkMoved();
+    }
+  }
+
   void _networkKnown() {
     final path = deviceNetwork.value;
     if (path == null || _netTold || _tries == 0) return;
@@ -5015,10 +5280,24 @@ class Backend implements AppViewTransport {
   void _shareDiagnostics(bool share) {
     final record = diagnostics;
     if (record == null) return;
+    final turnedOn = share && !record.on;
     if (record.on != share) {
       _log('advanced diagnostics ${share ? 'on: recording' : 'off'}');
     }
     record.share(share);
+    // Turned on while connected: the connection as it is now, sent at once.
+    // A device whose connection stays up (a Mac on its own Claktory) had
+    // nothing to send until its next reconnect, so it seemed to start only
+    // after a relaunch (friend bug #53).
+    if (turnedOn && connected.value) {
+      _note(ConnectionKind.recording, {
+        ConnectionKey.route: _tryRoute == ConnectionRoute.tunnel
+            ? _pathRoute(_tunnel?.status.path ?? TunnelPath.none)
+            : _tryRoute,
+        if (deviceNetwork.value case final net?)
+          ConnectionKey.net: netKind(net),
+      });
+    }
     if (share) unawaited(_sendDiagnostics());
   }
 

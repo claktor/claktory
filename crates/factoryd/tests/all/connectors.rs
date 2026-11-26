@@ -421,7 +421,7 @@ async fn an_agent_suggests_a_service_the_person_connects_it_and_only_a_narrower_
         let bytes = std::fs::read(dir.join(file)).unwrap_or_default();
         assert!(!bytes.windows(12).any(|window| window == b"demo-access-"), "{file} holds a token");
     }
-    let give = |id: &str| Request::GrantSecret(v1::GrantSecret { id: id.into(), agent_id: "builder".into(), proof: None });
+    let give = |id: &str| Request::GrantSecret(v1::GrantSecret { id: id.into(), agent_id: "builder".into(), proof: None, fill_only: false });
     let granted = apply_request(&mut client, &mut view, give(&connection.id)).await;
     assert!(failure(&granted).starts_with("Agents can't be given Demo (matt@example.com) itself."), "{granted:?}");
 

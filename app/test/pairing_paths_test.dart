@@ -12,8 +12,9 @@ import 'package:flutter_test/flutter_test.dart';
 /// connections.use), and why each is allowed: how many in each file.
 const _allowed = {
   // _show: This Mac, a saved Claktory, one on the account; a pasted code
-  // only after confirmPairing (_connectPasted). Forget's back to this Mac.
-  'lib/devices.dart': 2,
+  // only after confirmPairing (_connectPasted). (Its rows' Remove… is the
+  // rail's, which forgets, and the rail shows what's left: #529, MC8.)
+  'lib/devices.dart': 1,
   // _connect: one on the account; a pasted code only after confirmPairing
   // (_connectPasted).
   'lib/connect_step.dart': 1,

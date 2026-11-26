@@ -91,6 +91,8 @@ impl Factory {
             tracing::error!(agent, task = %task.id, %error, "could not record a background task");
         }
         crate::extensions::tasks::refresh_view(self);
+        // Its count of running tasks (Agent.tasks_running).
+        self.broadcast_workspace(&self.lock());
     }
 
     /// A background task ended: recorded, and its agent gets an event.
@@ -113,6 +115,7 @@ impl Factory {
         };
         self.deliver_event(agent, done.text(), event);
         crate::extensions::tasks::refresh_view(self);
+        self.broadcast_workspace(&self.lock());
     }
 
     /// Before the backend stops (on SIGTERM, from its supervisor at a

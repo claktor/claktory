@@ -15,10 +15,14 @@ import 'package:factory_app/name_step.dart';
 import 'package:factory_app/mobile/drawer.dart';
 import 'package:factory_app/phone.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/devices.dart' show thisDeviceKind;
 import 'package:factory_app/rail.dart';
+import 'package:factory_app/waiting.dart' show NeedsYouMark;
 import 'package:factory_app/sidebar.dart';
 import 'package:factory_app/tunnel_client.dart';
 import 'package:factory_app/voice_keep.dart';
+import 'package:flutter/foundation.dart'
+    show debugDefaultTargetPlatformOverride;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/rendering.dart' show RenderParagraph;
@@ -34,6 +38,9 @@ const _miniKey =
     'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd';
 final _nixos = 'factory://?t=${'a' * 64}&name=nixos&e=$_nixosKey';
 final _mini = 'factory://?t=${'b' * 64}&name=mac-mini&e=$_miniKey';
+
+/// A Claktory not on the default account.
+final _pi = 'factory://?t=${'e' * 64}&name=pi&e=${'f' * 64}';
 
 Workspace _workspace(
   String agent, {
@@ -422,6 +429,146 @@ void main() {
     );
   });
 
+  group('Remove, when this is the only device connected there (#529, '
+      'MC9)', () {
+    Future<void> ask(
+      WidgetTester tester, {
+      required List<PairedDevice> devices,
+      DeviceAccount? account,
+      String? code,
+    }) async {
+      code ??= _pi;
+      final app = _App(
+        account: account,
+        snapshots: {
+          code: _workspace('Pi')..remote = RemoteAccess(devices: devices),
+        },
+      );
+      app.connections
+        ..use(parsePairingCode(code))
+        ..use(null);
+      await app.show(tester);
+      app.backends[code]!.deviceId = 'this';
+      final name = parsePairingCode(code)!.name;
+      await tester.tap(
+        find.bySemanticsLabel(RegExp('^$name')),
+        buttons: kSecondaryButton,
+      );
+      await pumpFrames(tester);
+      await tester.tap(find.text('Remove…'));
+      await pumpFrames(tester);
+    }
+
+    final me = PairedDevice(id: 'this', name: 'Mac');
+
+    testWidgets('the only one: the terminal is the way back', (tester) async {
+      await ask(
+        tester,
+        devices: [
+          me,
+          // A code made but never used is no way in.
+          PairedDevice(id: 'new', name: 'iPad', codeExpiresMs: Int64(1)),
+        ],
+      );
+      expect(
+        find.text(
+          'This $thisDeviceKind is the only device connected to pi. Its '
+          'agents and work '
+          'stay there. To connect again, run factoryd pair in a terminal on '
+          'pi.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('the only one, on the account: Add a Claktory is', (
+      tester,
+    ) async {
+      await ask(tester, devices: [me], code: _nixos);
+      expect(
+        find.text(
+          'This $thisDeviceKind is the only device connected to nixos. Its '
+          'agents and '
+          'work stay there. To connect again, choose it under On your '
+          'account in Add a Claktory.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('another device there: add this one again from it', (
+      tester,
+    ) async {
+      await ask(
+        tester,
+        devices: [
+          me,
+          PairedDevice(id: 'phone', name: 'iPhone'),
+        ],
+      );
+      expect(
+        find.text(
+          'This $thisDeviceKind disconnects from it. Its agents and work stay '
+          'on pi. To connect again, add this $thisDeviceKind on pi in '
+          'Settings → Devices.',
+        ),
+        findsOneWidget,
+      );
+    });
+  });
+
+  testWidgets("the chooser's Remove… is the rail's, question and all "
+      '(#529, MC8, MC13)', (tester) async {
+    final app = _App();
+    app.connections
+      ..use(parsePairingCode(_nixos))
+      ..use(null);
+    await app.show(tester);
+    await tester.tap(_labeled('Add a Claktory'));
+    await pumpFrames(tester);
+    expect(find.text('Your Claktories'), findsOneWidget);
+    expect(find.text('Running here'), findsOneWidget);
+    final row = find.text('Running elsewhere');
+    expect(row, findsOneWidget);
+    expect(find.text('Forget'), findsNothing);
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    addTearDown(mouse.removePointer);
+    await mouse.addPointer(location: Offset.zero);
+    await mouse.moveTo(tester.getCenter(row));
+    await pumpFrames(tester);
+    await tester.tap(find.text('Remove…'));
+    await pumpFrames(tester);
+    expect(find.text('Remove nixos?'), findsOneWidget);
+    expect(app.connections.saved, hasLength(1), reason: 'only once asked');
+    await tester.tap(find.text('Remove'));
+    await pumpFrames(tester);
+    expect(app.connections.saved, isEmpty);
+  });
+
+  testWidgets('a touch-only iPad at full width: touch and hold a tile opens '
+      "its form, and the chooser's Remove… shows without a pointer (Zucchero "
+      'row 642)', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final app = _App();
+    app.connections
+      ..use(parsePairingCode(_nixos))
+      ..use(null);
+    await app.show(tester, size: const Size(1180, 820));
+    await tester.longPress(_labeled('nixos'));
+    await pumpFrames(tester);
+    expect(find.text('Shown on every device connected to it.'), findsOneWidget);
+    await tester.tap(find.text('Cancel').last);
+    await pumpFrames(tester);
+
+    await tester.tap(_labeled('Add a Claktory'));
+    await pumpFrames(tester);
+    expect(find.text('Remove…'), findsOneWidget);
+    await tester.tap(find.text('Remove…'));
+    await pumpFrames(tester);
+    expect(find.text('Remove nixos?'), findsOneWidget);
+  });
+
   test('with none kept, the question says nothing of recordings', () {
     expect(unsentGoesToo(0), '');
     expect(
@@ -472,12 +619,90 @@ void main() {
     app.connections.use(null);
     await app.show(tester);
 
+    // Counted, not a dot (#529, MC10).
+    expect(_labeled('nixos, 2 in Needs you'), findsOneWidget);
     expect(
-      _labeled('nixos has 2 things waiting for your answer'),
+      find.descendant(of: find.byType(NeedsYouMark), matching: find.text('2')),
       findsOneWidget,
     );
     expect(_labeled('nixos has something new'), findsNothing);
   });
+
+  testWidgets('on a phone, "‹ Claktories" counts what waits in the others '
+      '(#529, MC10)', (tester) async {
+    final app = _App(
+      localBackend: false,
+      snapshots: {
+        // Over its name step, the row back to the Claktories.
+        _nixos: _workspace('Nix', waiting: [4, 9])..settings.userName = '',
+        _mini: _workspace('Mini', waiting: [2]),
+      },
+    );
+    app.connections
+      ..use(parsePairingCode(_mini))
+      ..use(parsePairingCode(_nixos));
+    await app.show(tester, size: const Size(390, 844));
+    expect(find.text("What's your name?"), findsOneWidget);
+    // Only the others: nixos shows, mini has 1.
+    expect(_labeled('Back to Claktories, 1 in Needs you'), findsOneWidget);
+  });
+
+  for (final turned in ['sign-in', 'other account']) {
+    testWidgets('on a phone, a Claktory that turns this one away ($turned) '
+        'while its name step is up shows why at once (Sale row 173)', (
+      tester,
+    ) async {
+      final app = _App(
+        localBackend: false,
+        snapshots: {
+          _nixos: _workspace('Nix')..settings.userName = '',
+          _mini: _workspace('Mini'),
+        },
+      );
+      app.connections
+        ..use(parsePairingCode(_mini))
+        ..use(parsePairingCode(_nixos));
+      await app.show(tester, size: const Size(390, 844));
+      expect(find.text("What's your name?"), findsOneWidget);
+      final backend = app.backends[_nixos]!;
+      backend.connected.value = false;
+      if (turned == 'sign-in') {
+        backend.signInRequired.value =
+            'This Claktory lets this device in only once it shows it is yours.';
+      } else {
+        backend.otherAccount.value = 'Open a pipe with them.';
+      }
+      await pumpFrames(tester);
+      expect(find.text("What's your name?"), findsNothing);
+      expect(find.byType(ClaktoriesBackRow), findsOneWidget);
+      // Nor does it say it's connecting: it won't try again.
+      expect(find.textContaining('Connecting'), findsNothing);
+    });
+
+    testWidgets('on a phone, a Claktory that turns this one away ($turned) '
+        'keeps "‹ Claktories" to the others (Zucchero row 647)', (
+      tester,
+    ) async {
+      final app = _App(
+        localBackend: false,
+        snapshots: {_nixos: _workspace('Nix'), _mini: _workspace('Mini')},
+      );
+      app.connections
+        ..use(parsePairingCode(_mini))
+        ..use(parsePairingCode(_nixos));
+      await app.show(tester, size: const Size(390, 844));
+      final backend = app.backends[_nixos]!;
+      backend.connected.value = false;
+      if (turned == 'sign-in') {
+        backend.signInRequired.value =
+            'This Claktory lets this device in only once it shows it is yours.';
+      } else {
+        backend.otherAccount.value = 'Open a pipe with them.';
+      }
+      await pumpFrames(tester);
+      expect(find.byType(ClaktoriesBackRow), findsOneWidget);
+    });
+  }
 
   testWidgets("a tile counts what waits in a Claktory's chats and pipes too, "
       'as Needs you does', (tester) async {
@@ -493,10 +718,7 @@ void main() {
     app.connections.use(null);
     await app.show(tester);
 
-    expect(
-      _labeled('nixos has 3 things waiting for your answer'),
-      findsOneWidget,
-    );
+    expect(_labeled('nixos, 3 in Needs you'), findsOneWidget);
   });
 
   testWidgets("a tile doesn't wave for an agent only waiting out its usage "
@@ -615,9 +837,7 @@ void main() {
     expect(_labeled('mac-mini has something new'), findsOneWidget);
 
     // Another: its agents, in the drawer still open.
-    await tester.tap(
-      _labeled("mac-mini, this app isn't signed in to your Claktory account"),
-    );
+    await tester.tap(_labeled('mac-mini'));
     await pumpFrames(tester);
     expect(app.connections.current?.code, _mini);
     expect(
@@ -632,13 +852,8 @@ void main() {
     (back as dynamic).back();
     await pumpFrames(tester);
     expect(find.byType(ClaktoryList), findsOneWidget);
-    expect(
-      _labeled("nixos, this app isn't signed in to your Claktory account"),
-      findsOneWidget,
-    );
-    await tester.tap(
-      _labeled("nixos, this app isn't signed in to your Claktory account"),
-    );
+    expect(_labeled('nixos'), findsOneWidget);
+    await tester.tap(_labeled('nixos'));
     await pumpFrames(tester);
     expect(find.byType(ClaktoryList), findsNothing);
     expect(app.connections.current?.code, _nixos);
@@ -1075,20 +1290,16 @@ void main() {
       );
     });
 
-    testWidgets("signed out, none can be checked, and each says so", (
-      tester,
-    ) async {
+    testWidgets('signed out, nothing is known, so nothing is marked: no '
+        "label, no ring, nothing on its card; its form says so, with Sign "
+        'in… (#529, S2)', (tester) async {
       final app = _App(account: DeviceAccount());
       app.connections
         ..use(parsePairingCode(_nixos))
         ..use(null);
       await app.show(tester);
       expect(_labeled('This Mac'), findsOneWidget);
-      expect(
-        _labeled("nixos, this app isn't signed in to your Claktory account"),
-        findsOneWidget,
-      );
-      // Neutral: no `danger` ring, the words in `textMuted`.
+      expect(_labeled('nixos'), findsOneWidget);
       final palette = Palette.of(tester.element(find.byType(ClaktoryRail)));
       final tile = find.ancestor(
         of: find.text('N'),
@@ -1103,45 +1314,26 @@ void main() {
         ((box.decoration as BoxDecoration?)?.border as Border?)?.top.color,
         isNot(palette.danger),
       );
-      // Its card, on hover, says what it means and signs in from there,
-      // the pointer moved onto it (#529).
+      // Its card, on hover: its name and connection only.
       final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
       addTearDown(mouse.removePointer);
       await mouse.addPointer(location: Offset.zero);
       await mouse.moveTo(tester.getCenter(find.text('N')));
       await pumpFrames(tester, const Duration(seconds: 1));
-      final cardSignIn = find.text('Sign in…');
-      expect(cardSignIn, findsOneWidget);
-      await mouse.moveTo(tester.getCenter(cardSignIn));
-      await pumpFrames(tester, const Duration(seconds: 1));
-      await mouse.down(tester.getCenter(cardSignIn));
-      await mouse.up();
-      await pumpFrames(tester);
-      expect(find.text('Sign in to your Claktory account'), findsOneWidget);
-      await tester.tap(find.text('Cancel').last);
+      expect(find.textContaining('Claktory account'), findsNothing);
+      expect(find.text('Sign in…'), findsNothing);
       await mouse.moveTo(Offset.zero);
       await pumpFrames(tester, const Duration(seconds: 1));
-      expect(find.text('Sign in to your Claktory account'), findsNothing);
-      await tester.tap(
-        _labeled("nixos, this app isn't signed in to your Claktory account"),
-        buttons: kSecondaryButton,
-      );
+      // Its details: what's known, and the way to sign in.
+      await tester.tap(_labeled('nixos'), buttons: kSecondaryButton);
       await pumpFrames(tester);
-      final signedOut = find.textContaining(
-        "This app isn't signed in to your Claktory account",
-        findRichText: true,
-      );
-      expect(signedOut, findsOneWidget);
       expect(
         find.text(
-          "That's separate from the Claktory's own sign-in. Sign in so this "
-          'app can recognize your Claktories.',
+          'Sign in to your Claktory account in this app to check which '
+          'Claktories are on it.',
         ),
         findsOneWidget,
       );
-      final label = tester.widget<RichText>(signedOut);
-      expect(label.text.style?.color, palette.textMuted);
-      // With the way to sign in (#388).
       await tester.tap(find.text('Sign in…'));
       await pumpFrames(tester);
       expect(find.text('Sign in to your Claktory account'), findsOneWidget);
@@ -1151,13 +1343,20 @@ void main() {
       );
     });
 
-    testWidgets('on a phone, signed out, the list of Claktories says what it '
-        'means once, with Sign in… (#529)', (tester) async {
+    testWidgets('on a phone, signed out, neither the list, its rows nor the '
+        "drawer's header mark anything (#529, S2)", (tester) async {
       final app = _App(localBackend: false, account: DeviceAccount());
       app.connections
         ..use(parsePairingCode(_mini))
         ..use(parsePairingCode(_nixos));
       await app.show(tester, size: const Size(390, 844));
+      tester
+          .state<PhoneDrawerHostState>(find.byType(PhoneDrawerHost))
+          .openDrawer();
+      await pumpFrames(tester);
+      expect(find.textContaining('Claktory account'), findsNothing);
+      expect(find.text('Sign in…'), findsNothing);
+      expect(_labeled('nixos'), findsOneWidget);
       final back = tester.widget(
         find.byWidgetPredicate(
           (w) => w.runtimeType.toString() == '_BackToList',
@@ -1166,29 +1365,12 @@ void main() {
       (back as dynamic).back();
       await pumpFrames(tester);
       expect(find.byType(ClaktoryList), findsOneWidget);
-      expect(
-        find.text(
-          "This app isn't signed in to your Claktory account, so it can't "
-          'recognize your Claktories.',
-        ),
-        findsOneWidget,
-      );
-      // Each row still says so; the way to sign in is once, above them.
-      expect(
-        find.textContaining(
-          "This app isn't signed in to your Claktory account",
-          findRichText: true,
-        ),
-        findsNWidgets(3),
-      );
-      await tester.tap(find.text('Sign in…'));
-      await pumpFrames(tester);
-      expect(find.text('Sign in to your Claktory account'), findsOneWidget);
+      expect(find.textContaining('Claktory account'), findsNothing);
+      expect(find.text('Sign in…'), findsNothing);
     });
 
-    testWidgets("on a phone, signed out, the drawer's header offers Sign "
-        'in, and its connection word follows the connection by itself '
-        '(#388)', (tester) async {
+    testWidgets("on a phone, the drawer header's connection word follows the "
+        'connection by itself (#388)', (tester) async {
       final app = _App(localBackend: false, account: DeviceAccount());
       app.connections.use(parsePairingCode(_nixos));
       await app.show(tester, size: const Size(390, 844));
@@ -1198,25 +1380,6 @@ void main() {
       await pumpFrames(tester);
       final header = find.byWidgetPredicate(
         (w) => w.runtimeType.toString() == '_DrawerHeader',
-      );
-      expect(
-        find.descendant(
-          of: header,
-          matching: find.textContaining(
-            "This app isn't signed in to your Claktory account",
-            findRichText: true,
-          ),
-        ),
-        findsOneWidget,
-      );
-      final signIn = find.descendant(
-        of: header,
-        matching: find.text('Sign in…'),
-      );
-      expect(signIn, findsOneWidget);
-      expect(
-        tester.getSize(signIn).height,
-        lessThanOrEqualTo(tester.getSize(header).height),
       );
       Finder word(String text) =>
           find.descendant(of: header, matching: find.text(text));
@@ -1230,10 +1393,6 @@ void main() {
       backend.connected.value = true;
       await pumpFrames(tester);
       expect(word('Connected'), findsOneWidget);
-
-      await tester.tap(signIn);
-      await pumpFrames(tester);
-      expect(find.text('Sign in to your Claktory account'), findsOneWidget);
     });
 
     testWidgets("on a phone, the drawer's header and the list say so too", (

@@ -256,7 +256,7 @@ async fn set(factory: Arc<Factory>, caller: String, args: SetArgs) -> Result<Too
             crate::catalog::ensure(&factory, model, crate::catalog::Check::WhenItCan).await.err().filter(|why| !why.starts_with("Sign in"))
         }
     };
-    let (id, name, before, model, effort, warning) = {
+    let (id, name, before, model, effort, warning, why) = {
         let inner = factory.lock();
         super::caller(&inner.config, &caller)?;
         let agent = agent(&inner.config, &args.agent)?;
@@ -279,9 +279,19 @@ async fn set(factory: Arc<Factory>, caller: String, args: SetArgs) -> Result<Too
         let now = factory_agent::clock::now_ms();
         let warning = provider.and_then(|provider| busy(provider, now, false).map(|why| format!("{} {why}", provider.name)));
         let before = (agent.model.clone(), agent.effort.clone());
-        (agent.id.clone(), agent.name.clone(), before, model.clone(), effort, warning)
+        // What it hears (friend bug #43): who changed it, and why.
+        let who = match inner.config.agent(&caller) {
+            _ if caller == agent.id => "you".to_owned(),
+            Some(by) => by.name.clone(),
+            None => caller.clone(),
+        };
+        let why = match reason {
+            "" => format!("{who} changed it with models_set"),
+            reason => format!("{who} changed it with models_set: {reason}"),
+        };
+        (agent.id.clone(), agent.name.clone(), before, model.clone(), effort, warning, why)
     };
-    let change = AgentChange { model: Some(&model.id), effort: effort.as_deref(), ..Default::default() };
+    let change = AgentChange { model: Some(&model.id), effort: effort.as_deref(), why: Some(&why), ..Default::default() };
     factory.update_agent(&id, change).await.map_err(|error| format!("{error} Nothing was changed."))?;
     let effort = effort.unwrap_or(before.1.clone());
     let made = Made { agent: &id, by: &caller, reason, before: (&before.0, &before.1), after: (&model.id, &effort), name: &model.name };
@@ -440,7 +450,11 @@ pub(crate) fn change_of(call: &v1::ToolCall) -> Option<String> {
 
 /// UndoModelChange: the person puts back the model and effort a change
 /// replaced, while the agent still runs on what it set.
-pub(crate) async fn undo(factory: &Arc<Factory>, request: &v1::UndoModelChange) -> Result<(), crate::factory::RequestError> {
+pub(crate) async fn undo(
+    factory: &Arc<Factory>,
+    request: &v1::UndoModelChange,
+    from: &factory_agent::SentFrom,
+) -> Result<(), crate::factory::RequestError> {
     use crate::factory::RequestError;
     let refused = |text: String| RequestError::Usage(text);
     let gone = || refused("This change can't be found.".to_owned());
@@ -463,7 +477,18 @@ pub(crate) async fn undo(factory: &Arc<Factory>, request: &v1::UndoModelChange) 
     if (model.as_str(), effort.as_str()) != (change.model_after.as_str(), change.effort_after.as_str()) {
         return Err(refused(format!("{} model changed since, so it was left as it is.", crate::apps::changes::possessive(&name))));
     }
-    let back = AgentChange { model: Some(&change.model_before), effort: Some(&change.effort_before), ..Default::default() };
+    let (whose, person) = {
+        let inner = factory.lock();
+        let whose = match inner.config.agent(&change.by) {
+            _ if change.by == change.agent => "your".to_owned(),
+            Some(by) => crate::apps::changes::possessive(&by.name),
+            None => crate::apps::changes::possessive(&change.by),
+        };
+        (whose, inner.config.person().to_owned())
+    };
+    let why = crate::usage_switch::by_person(&person, from, &format!("put it back, undoing {whose} models_set"));
+    let back =
+        AgentChange { model: Some(&change.model_before), effort: Some(&change.effort_before), why: Some(&why), ..Default::default() };
     factory.update_agent(&change.agent, back).await?;
     factory.store.db().execute(
         "UPDATE model_changes SET undone = ?2 WHERE id = ?1",

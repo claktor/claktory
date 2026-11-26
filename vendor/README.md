@@ -104,6 +104,24 @@ every Claktory endpoint, phone, Mac app and backend, has the same fixes.
 `// Claktory:` or `/// Claktory:`):
 - `src/net_report.rs` (`run_probe_v4`, `run_probe_v6`): the kept QAD
   connection's observer starts with `Some(report.clone())`, not `None`.
+- `src/net_report.rs` (`Reports::preferred`,
+  `add_report_history_and_set_preferred_relay`, friend bug #52): the home
+  relay changes only for a clear gain (the new one under 2/3 of the old one's
+  latency) or when the old one is gone. Upstream skips that hysteresis on
+  every full report, which clears the report it reads the old home from
+  (every 5 minutes and at each network change), and on an incremental report
+  that measured only another relay, which since the QAD fix above is most of
+  them: a friend's backend changed home 573 times in 50 hours between two
+  relays at 133 and 230 ms. Here the old home is kept apart
+  from the last report, and an incremental report without it uses its best
+  latency of the last 5 minutes; a full report without it, or none measured
+  in 5 minutes, takes it for gone. Its test:
+  `net_report::tests::test_preferred_relay_hysteresis_holds_across_full_and_partial_reports`
+  (fails upstream). Like the crate's own tests, it needs upstream's
+  dev-dependencies, so it runs outside the workspace: `git archive HEAD
+  vendor/iroh | tar -x -C DIR`, put crates.io's iroh 1.5.0 `Cargo.toml`
+  there without its `[[example]]`, `[[test]]` and `[[bench]]` entries and
+  with an empty `[workspace]`, then `cargo test --lib net_report::` in it.
 - `src/socket/transports/relay/actor.rs`: `MIN_HEALTH_CHECK_TIMEOUT` (3 s) and
   `health_check_timeout`, used for both health-check pings instead of
   `PingTracker::new_ping`'s own timeout.

@@ -1,7 +1,5 @@
 // Links that open Claktory: `claktory://add?code=<pairing code>` adds the
-// Claktory the code is for (after asking), so an agent setting one up on a
-// server can hand this Mac its code with `open "claktory://add?code=…"`;
-// and a pairing code itself (`factory://?t=…&e=…`, or the same as
+// Claktory the code is for (after asking); and a pairing code itself (`factory://?t=…&e=…`, or the same as
 // `claktory://`), which the iPhone's
 // Camera opens from a Mac's QR code. The Mac's app takes them
 // (AppDelegate.swift), the iPhone's (SceneDelegate) and Android's
@@ -185,8 +183,12 @@ Future<bool> confirmPairing(BuildContext context, RemoteFactory target) async {
         Text.rich(
           TextSpan(
             children: [
+              // What the code's four groups are for, with no noun of
+              // their own: "code" is only what's pasted or scanned (Trish
+              // 41557). Its name only in the line under it, quoted, its
+              // own words (Fugo), so not twice.
               TextSpan(
-                text: 'Its code: ',
+                text: 'Check that it matches what it showed there: ',
                 style: TextStyle(color: palette.textMuted),
               ),
               TextSpan(
@@ -195,10 +197,6 @@ Future<bool> confirmPairing(BuildContext context, RemoteFactory target) async {
                   fontFamily: TextStyles.mono,
                   color: palette.text,
                 ),
-              ),
-              TextSpan(
-                text: ' Check it matches the one shown there.',
-                style: TextStyle(color: palette.textMuted),
               ),
             ],
           ),

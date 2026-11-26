@@ -4,7 +4,9 @@
 import 'package:factory_app/controls.dart';
 import 'package:factory_app/identity.dart' show Motion;
 import 'package:factory_app/sight.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart' show PointerDeviceKind;
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -142,5 +144,35 @@ void main() {
       TickerMode.valuesOf(tester.element(find.text('window'))).enabled,
       isTrue,
     );
+  });
+
+  testWidgets('on Windows the runner tells sight and less motion too', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    addTearDown(Sight.debugReset);
+    const channel = MethodChannel('factory/sight');
+    final messenger = tester.binding.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'state') {
+        return {'shown': true, 'reduceMotion': true};
+      }
+      return null;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    Sight.start();
+    await tester.pump();
+    expect(Sight.shown.value, isTrue);
+    expect(Sight.reduceMotion.value, isTrue);
+    // The session locked: nothing moves until it's back.
+    await messenger.handlePlatformMessage(
+      'factory/sight',
+      const StandardMethodCodec().encodeMethodCall(
+        const MethodCall('sight', {'shown': false, 'reduceMotion': true}),
+      ),
+      (_) {},
+    );
+    expect(Sight.shown.value, isFalse);
   });
 }

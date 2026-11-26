@@ -301,3 +301,100 @@ async fn rivets_app_grants_are_named_by_app_and_agent_never_by_its_reason() {
     assert_eq!(list(&mut client, "launch", 0, 0).await.records.len(), 1);
     assert_eq!(list(&mut client, "marker", 0, 0).await.records.len(), 4);
 }
+
+/// History says a card's own outcome (#533 §7, Lucy's rule 9): the step a
+/// procedure ended at, how many it had, and whether its agent stopped it
+/// there after Can't do this; and how a secret request was approved: a
+/// secret given, added on the card, generated, imported, or left to the
+/// admin agent, and whether a generated or imported one went to no one.
+#[tokio::test]
+async fn history_says_where_a_procedure_ended_and_how_a_secret_was_given() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, _, _) = Client::connect(addr).await;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("now").as_millis() as i64;
+    let minute = 60_000;
+    let step = |state: &str, decided: i64| serde_json::json!({"text": "Do it", "state": state, "comment": "", "decided": decided});
+    let db = rusqlite::Connection::open(home_of(addr).db_path()).expect("factory.db");
+    let asks = [
+        ("All done", "answered", 0, 0, Some(vec![step("done", 1), step("done", 2), step("done", 3)])),
+        ("Stopped", "dismissed", 0, 1, Some(vec![step("done", 1), step("cant", 2), step("", 0)])),
+        ("Waiting for its agent", "dismissed", 0, 0, Some(vec![step("done", 1), step("cant", 2), step("", 0)])),
+        ("Dismissed midway", "dismissed", 0, 0, Some(vec![step("done", 1), step("", 0), step("", 0)])),
+        ("Replied on a step", "dismissed", 1, 0, Some(vec![step("done", 9), step("done", 5), step("", 0)])),
+        ("No steps", "answered", 0, 0, None),
+    ];
+    for (at, (title, state, replied, resolved, steps)) in asks.iter().enumerate() {
+        let steps = steps.as_ref().map(|steps| serde_json::to_string(steps).expect("json"));
+        db.execute(
+            "INSERT INTO asks (agent, title, body, wants_text, created, state, answer, decided, replied, resolved, steps)
+             VALUES ('builder', ?1, '', 0, ?2, ?3, '', ?4, ?5, ?6, ?7)",
+            params![title, now - 30 * minute, state, now - (20 - at as i64) * minute, replied, resolved, steps],
+        )
+        .expect("an ask");
+    }
+    let vault = rusqlite::Connection::open(home_of(addr).root().join("vault/vault.db")).expect("vault.db");
+    let requests = [
+        ("Gave", "granted", "", "Hetzner prod", ""),
+        ("Added", "granted", r#"{"name":"Added","added":true}"#, "Added", ""),
+        ("Generated", "generated", r#"{"name":"Generated","generate":"ssh-ed25519"}"#, "Generated", ""),
+        ("Imported", "granted", r#"{"name":"Imported","imports":[{"variable":"KS","path":"/tmp/ks"}]}"#, "Imported", ""),
+        ("Generated for it", "granted", r#"{"name":"Generated for it","generate":"password"}"#, "Generated for it", ""),
+        (
+            "Imported for no one",
+            "generated",
+            r#"{"name":"Imported for no one","imports":[{"variable":"KS","path":"/tmp/ks"}]}"#,
+            "Imported for no one",
+            "",
+        ),
+        ("Left to Rivet", "approved", "", "", "rivet"),
+        ("Rivet found it", "granted", "", "Cloudflare", "rivet"),
+        ("Dismissed", "dismissed", "", "", ""),
+    ];
+    for (at, (name, state, new_secret, given_name, admin)) in requests.iter().enumerate() {
+        let decided = now - (10 - at as i64) * minute;
+        vault
+            .execute(
+                "INSERT INTO requests (id, agent, secret, secret_name, new_secret, reason, state, created, decided, given_name, admin, approved)
+                 VALUES (?1, 'builder', '', ?1, ?2, '', ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![name, new_secret, state, decided - minute, if *state == "approved" { 0 } else { decided }, given_name, admin, decided],
+            )
+            .expect("a request");
+    }
+
+    let all = list(&mut client, "", 0, 0).await;
+    let record = |title: &str| all.records.iter().find(|record| record.title == title).unwrap_or_else(|| panic!("{title}: {all:?}"));
+    let procedure = |title: &str| {
+        let record = record(title);
+        (record.outcome(), record.step, record.steps, record.step_stopped)
+    };
+    assert_eq!(procedure("All done"), (Outcome::Answered, 3, 3, false));
+    assert_eq!(procedure("Stopped"), (Outcome::Resolved, 2, 3, true));
+    assert_eq!(procedure("Waiting for its agent"), (Outcome::Dismissed, 2, 3, false));
+    assert_eq!(procedure("Dismissed midway"), (Outcome::Dismissed, 2, 3, false));
+    assert_eq!(procedure("Replied on a step"), (Outcome::Replied, 1, 3, false), "the step done last");
+    assert_eq!(procedure("No steps"), (Outcome::Answered, 0, 0, false));
+
+    use v1::NeedsYouSecretOutcome as Secret;
+    let secret = |title: &str| {
+        let record = record(title);
+        (
+            record.outcome(),
+            record.secret_outcome(),
+            record.secret_given_name.as_str(),
+            record.subject_agent_id.as_str(),
+            record.secret_to_no_one,
+        )
+    };
+    assert_eq!(secret("Gave"), (Outcome::Approved, Secret::Gave, "Hetzner prod", "", false));
+    assert_eq!(secret("Added"), (Outcome::Approved, Secret::Added, "Added", "", false));
+    assert_eq!(secret("Generated"), (Outcome::Approved, Secret::Generated, "Generated", "", true), "generated: to no one");
+    assert_eq!(secret("Generated for it"), (Outcome::Approved, Secret::Generated, "Generated for it", "", false));
+    assert_eq!(secret("Imported"), (Outcome::Approved, Secret::Imported, "Imported", "", false));
+    assert_eq!(secret("Imported for no one"), (Outcome::Approved, Secret::Imported, "Imported for no one", "", true));
+    assert_eq!(secret("Left to Rivet"), (Outcome::Approved, Secret::Admin, "", "rivet", false));
+    assert_eq!(secret("Rivet found it"), (Outcome::Approved, Secret::Admin, "", "rivet", false));
+    assert_eq!(secret("Dismissed"), (Outcome::Dismissed, Secret::Unspecified, "", "", false));
+    // Every other card says nothing of steps or secrets.
+    assert_eq!((record("Gave").step, record("All done").secret_outcome()), (0, Secret::Unspecified));
+}

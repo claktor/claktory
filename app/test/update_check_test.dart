@@ -4,7 +4,7 @@
 
 import 'package:factory_app/android/android_app_updates.dart'
     show androidAppInstallPage;
-import 'package:factory_app/controls.dart' show Button;
+import 'package:factory_app/controls.dart' show Button, GlyphButton;
 import 'package:factory_app/mobile/platform_policy.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
@@ -368,6 +368,66 @@ void main() {
       );
       // The Mac's own app is replaced with it: Update is offered.
       expect(_button('Update'), findsWidgets);
+    });
+  });
+
+  group("an iPad whose app is behind (Matt's iPad, Bruno 45175)", () {
+    Future<Harness> iPad(
+      WidgetTester tester, {
+      required String claktory,
+    }) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      addTearDown(() {
+        debugDefaultTargetPlatformOverride = null;
+        resetAppBehindNote();
+      });
+      final harness = Harness(
+        _workspace(
+          UpdateCheckState.UPDATE_CHECK_STATE_UP_TO_DATE,
+          version: 'v0.1.23',
+          latest: 'v0.1.23',
+        )..version = claktory,
+      )..appVersion = 'v0.1.22';
+      await harness.show(tester, size: const Size(1180, 820));
+      await pumpFrames(tester);
+      return harness;
+    }
+
+    Finder close() => find.byWidgetPredicate(
+      (widget) => widget is GlyphButton && widget.label == 'Close',
+    );
+
+    testWidgets('with its Claktory up to date: no Update, a note that its app '
+        'comes from the App Store or TestFlight, which Close puts away', (
+      tester,
+    ) async {
+      final harness = await iPad(tester, claktory: 'v0.1.23');
+      expect(find.text('Claktory v0.1.23 is ready.'), findsNothing);
+      expect(_button('Update'), findsNothing);
+      final note = find.text(
+        'A newer Claktory app (v0.1.23) is in the App Store or TestFlight. '
+        'Your Claktory is already up to date.',
+      );
+      expect(note, findsOneWidget);
+      await tester.tap(close());
+      await pumpFrames(tester);
+      expect(note, findsNothing);
+      expect(harness.backend.sent.where((m) => m.hasInstallUpdate()), isEmpty);
+    });
+
+    testWidgets('with its Claktory behind too: Update updates only the '
+        'Claktory', (tester) async {
+      final harness = await iPad(tester, claktory: 'v0.1.22');
+      expect(find.textContaining('A newer Claktory app'), findsNothing);
+      final update = find.descendant(
+        of: find.byType(UpdateBanner),
+        matching: _button('Update'),
+      );
+      expect(update, findsOneWidget);
+      await tester.tap(update);
+      await pumpFrames(tester);
+      expect(harness.last.installUpdate.appPath, isEmpty);
+      expect(harness.quits, 0, reason: "its app isn't Claktory's to replace");
     });
   });
 }

@@ -33,15 +33,52 @@ const TERMINATED: Duration = Duration::from_secs(10);
 const CLOSE: &[u8] = br#"{"id":2147483647,"method":"Browser.close"}"#;
 
 /// Flags that must never reach Chrome: a debugging port, remote origins,
-/// extensions loaded from a folder, or no sandbox.
-const NEVER: [&str; 6] = [
+/// extensions loaded from a folder, no sandbox, or anything that weakens
+/// the web's security (Fugo 41700). The managed policy hides Chrome's
+/// warning bar for every flag (CommandLineFlagSecurityWarningsEnabled
+/// false), so nothing would show one: this list and `ALLOWED` hold instead.
+const NEVER: [&str; 15] = [
     "--remote-debugging-port",
     "--remote-debugging-address",
     "--remote-allow-origins",
     "--load-extension",
     "--enable-unsafe-extension-debugging",
     "--no-sandbox",
+    "--disable-web-security",
+    "--test-type",
+    "--ignore-certificate-errors",
+    "--allow-running-insecure-content",
+    "--disable-site-isolation-trials",
+    "--disable-features",
+    "--enable-automation",
+    "--disable-setuid-sandbox",
+    "--single-process",
 ];
+
+/// Every flag the runner gives Chrome, by its exact text or, ending in
+/// `=`, its name (the value is the runner's own: the profile, the window,
+/// the language). `arguments` refuses anything else.
+const ALLOWED: [&str; 12] = [
+    "--user-data-dir=",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-sync",
+    "--password-store=basic",
+    "--lang=",
+    "--window-position=0,0",
+    "--window-size=",
+    "--start-maximized",
+    "--enable-unsafe-swiftshader",
+    "--remote-debugging-pipe",
+    AUTOMATION_HIDDEN,
+];
+
+/// Driven, pages don't see `navigator.webdriver` (R11; Matt's decision,
+/// Fugo 41700): the debugging pipe turns Blink's AutomationControlled on,
+/// and only this flag turns it off (Emulation.setAutomationOverride can
+/// only turn it on: measured on Chrome 158, Ghiaccio 41672). Its warning
+/// bar is hidden by the managed policy, never by --test-type.
+const AUTOMATION_HIDDEN: &str = "--disable-blink-features=AutomationControlled";
 
 /// The first of `names` on PATH, or at an absolute path.
 pub(crate) fn find(names: &[&str]) -> Option<PathBuf> {
@@ -147,13 +184,22 @@ pub(crate) fn lang(person: &Person) -> String {
 ///   `intl.selected_languages`), what pages see in navigator.languages and
 ///   Accept-Language;
 /// - that Chrome exited cleanly (`profile.exit_type`), so a Chrome that was
-///   killed (its runner ended, the computer restarted) restores its tabs
-///   as `restore_on_startup` says rather than opening a new tab with
-///   "Restore pages?", which left a handoff on the wrong page (the
-///   end-to-end run on the box, 26 Nov).
+///   killed (its runner ended, the computer restarted) never opens a new
+///   tab with "Restore pages?", which left a handoff on the wrong page (the
+///   end-to-end run on the box, 26 Nov);
+/// - what it opens at startup (`session.restore_on_startup`): driven, never
+///   the pages it had (5, a new tab, and `about:blank` given), so no page's
+///   script runs before the host has set the browser up (R11.2, Fugo 40318:
+///   its sign-ins and cookies stay; the host goes back to the errand's page
+///   itself); undriven, the pages it had (1);
+/// - that the profile never signs in to Chrome itself (`signin.allowed`
+///   and `allowed_on_next_startup` false), so a sign-in on
+///   accounts.google.com stays the site's cookies and never becomes
+///   Chrome's account or its sync (Giorno 41237, Fugo 41236; the policy
+///   says so too: BrowserSignin 0, SyncDisabled).
 ///
 /// The rest stays as Chrome left it.
-pub(crate) fn prepare_preferences(profile: &Path, person: &Person) -> std::io::Result<()> {
+pub(crate) fn prepare_preferences(profile: &Path, person: &Person, mode: Mode) -> std::io::Result<()> {
     let path = profile.join("Default").join("Preferences");
     let mut preferences: serde_json::Value = match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| serde_json::json!({})),
@@ -181,6 +227,22 @@ pub(crate) fn prepare_preferences(profile: &Path, person: &Person) -> std::io::R
         }
         chrome_profile["exit_type"] = serde_json::Value::String("Normal".to_owned());
         chrome_profile["exited_cleanly"] = serde_json::Value::Bool(true);
+    }
+    let session = preferences.as_object_mut().map(|all| all.entry("session").or_insert_with(|| serde_json::json!({})));
+    if let Some(session) = session {
+        if !session.is_object() {
+            *session = serde_json::json!({});
+        }
+        session["restore_on_startup"] = serde_json::Value::from(if mode == Mode::Driven { NO_RESTORE } else { RESTORE });
+    }
+    let signin = preferences.as_object_mut().map(|all| all.entry("signin").or_insert_with(|| serde_json::json!({})));
+    if let Some(signin) = signin {
+        if !signin.is_object() {
+            *signin = serde_json::json!({});
+        }
+        // Chrome copies allowed_on_next_startup into allowed as it starts.
+        signin["allowed"] = serde_json::Value::Bool(false);
+        signin["allowed_on_next_startup"] = serde_json::Value::Bool(false);
     }
     // Private, as Chrome keeps it, and whole or not at all.
     let written = path.with_extension("claktory");
@@ -210,13 +272,29 @@ pub(crate) struct Launch<'a> {
     pub fence: Option<&'a OwnedFd>,
 }
 
+/// Whether `flag` is on the runner's list (`ALLOWED`).
+fn allowed(flag: &str) -> bool {
+    ALLOWED.iter().any(|known| if known.ends_with('=') { flag.starts_with(known) && flag.len() > known.len() } else { flag == *known })
+}
+
+/// `--user-data-dir=` and `profile`.
+fn profile_flag(profile: &Path) -> OsString {
+    let mut flag = OsString::from("--user-data-dir=");
+    flag.push(profile);
+    flag
+}
+
+/// `session.restore_on_startup`: the pages it had, or a new tab.
+const RESTORE: i64 = 1;
+const NO_RESTORE: i64 = 5;
+
 /// Chrome's arguments, all of them: fixed but for the window's size, the
-/// profile, the pipe when driven, and the page after `--`.
+/// profile, the pipe when driven, and the page after `--`: driven, always
+/// `about:blank` (R11.2: the host takes it to a page once it has set the
+/// browser up); undriven, the person's page, if any.
 pub(crate) fn arguments(launch: &Launch<'_>) -> Result<Vec<OsString>, String> {
-    let mut profile = OsString::from("--user-data-dir=");
-    profile.push(launch.profile);
     let mut arguments: Vec<OsString> = vec![
-        profile,
+        profile_flag(launch.profile),
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
         "--disable-sync".into(),
@@ -240,13 +318,24 @@ pub(crate) fn arguments(launch: &Launch<'_>) -> Result<Vec<OsString>, String> {
     ];
     if launch.mode == Mode::Driven {
         arguments.push("--remote-debugging-pipe".into());
-    }
-    if let Some(url) = launch.url {
+        arguments.push(AUTOMATION_HIDDEN.into());
+        arguments.push("--".into());
+        arguments.push("about:blank".into());
+    } else if let Some(url) = launch.url {
         arguments.push("--".into());
         arguments.push(checked_url(url)?.into());
     }
     if let Some(never) = arguments.iter().find(|argument| NEVER.iter().any(|flag| argument.to_string_lossy().starts_with(flag))) {
         return Err(format!("refused a flag Chrome must never get: {}", never.to_string_lossy()));
+    }
+    let flags = arguments.iter().take_while(|argument| *argument != "--");
+    if let Some(other) = flags.clone().find(|argument| !allowed(&argument.to_string_lossy())) {
+        return Err(format!("refused a flag that isn't on the runner's list: {}", other.to_string_lossy()));
+    }
+    // One profile, the runner's own.
+    let profiles: Vec<&OsString> = flags.filter(|argument| argument.to_string_lossy().starts_with("--user-data-dir=")).collect();
+    if profiles.len() != 1 || profiles[0].as_os_str() != profile_flag(launch.profile) {
+        return Err("refused a profile other than the runner's".to_owned());
     }
     Ok(arguments)
 }
@@ -305,7 +394,7 @@ impl Chrome {
     pub fn launch(launch: &Launch<'_>, events: Sender<Event>, generation: u64) -> Result<Chrome, String> {
         let arguments = arguments(launch)?;
         clear_singletons(launch.profile);
-        prepare_preferences(launch.profile, launch.person).map_err(|error| format!("couldn't prepare the browser's settings: {error}"))?;
+        prepare_preferences(launch.profile, launch.person, launch.mode).map_err(|error| format!("couldn't prepare the browser's settings: {error}"))?;
         let log = File::create(launch.tmp.join("chrome.log")).map_err(|error| format!("couldn't make Chrome's log: {error}"))?;
         let log_too = log.try_clone().map_err(|error| format!("couldn't make Chrome's log: {error}"))?;
         let mut command = Command::new(launch.binary);
@@ -556,12 +645,26 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("claktory-languages-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("Default")).unwrap();
         std::fs::write(dir.join("Default/Preferences"), r#"{"session":{"restore_on_startup":1},"intl":{"selected_languages":"x","spellcheck":"y"},"profile":{"exit_type":"Crashed","name":"Person 1"}}"#).unwrap();
-        prepare_preferences(&dir, &with(&["de-DE", "de"])).unwrap();
-        let written: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("Default/Preferences")).unwrap()).unwrap();
+        prepare_preferences(&dir, &with(&["de-DE", "de"]), Mode::Undriven).unwrap();
+        let read = || -> serde_json::Value { serde_json::from_slice(&std::fs::read(dir.join("Default/Preferences")).unwrap()).unwrap() };
+        let written = read();
         assert_eq!((written["intl"]["accept_languages"].as_str(), written["intl"]["selected_languages"].as_str()), (Some("de-DE,de"), Some("de-DE,de")));
         assert_eq!((written["session"]["restore_on_startup"].as_i64(), written["intl"]["spellcheck"].as_str()), (Some(1), Some("y")));
-        // A Chrome that was killed restores its tabs all the same.
+        // A Chrome that was killed never asks to restore pages.
         assert_eq!((written["profile"]["exit_type"].as_str(), written["profile"]["name"].as_str()), (Some("Normal"), Some("Person 1")));
+        // Driven, it restores no pages (R11.2), and undriven again it does.
+        prepare_preferences(&dir, &with(&["de-DE", "de"]), Mode::Driven).unwrap();
+        assert_eq!(read()["session"]["restore_on_startup"].as_i64(), Some(NO_RESTORE));
+        prepare_preferences(&dir, &with(&["de-DE", "de"]), Mode::Undriven).unwrap();
+        assert_eq!(read()["session"]["restore_on_startup"].as_i64(), Some(RESTORE));
+        // Never signed in to Chrome itself, whatever a kept profile said.
+        assert_eq!(written["signin"]["allowed"].as_bool(), Some(false));
+        std::fs::write(dir.join("Default/Preferences"), r#"{"signin":{"allowed":true,"allowed_on_next_startup":true}}"#).unwrap();
+        prepare_preferences(&dir, &with(&["en-US"]), Mode::Driven).unwrap();
+        assert_eq!((read()["signin"]["allowed"].as_bool(), read()["signin"]["allowed_on_next_startup"].as_bool()), (Some(false), Some(false)));
+        std::fs::write(dir.join("Default/Preferences"), r#"{"signin":"yes"}"#).unwrap();
+        prepare_preferences(&dir, &with(&["en-US"]), Mode::Driven).unwrap();
+        assert_eq!(read()["signin"]["allowed"].as_bool(), Some(false));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -571,13 +674,33 @@ mod tests {
         let driven = arguments(&launch(&display, Mode::Driven, Some("https://play.google.com/console"))).unwrap();
         let driven: Vec<String> = driven.iter().map(|argument| argument.to_string_lossy().into_owned()).collect();
         assert!(driven.contains(&"--remote-debugging-pipe".to_owned()) && driven.contains(&"--enable-unsafe-swiftshader".to_owned()));
-        assert_eq!(&driven[driven.len() - 2..], ["--", "https://play.google.com/console"]);
+        // Driven, always a blank page first, whatever it was asked for (R11.2).
+        assert_eq!(&driven[driven.len() - 2..], ["--", "about:blank"]);
+        let undriven = arguments(&launch(&display, Mode::Undriven, Some("https://play.google.com/console"))).unwrap();
+        let undriven_page: Vec<String> = undriven.iter().map(|argument| argument.to_string_lossy().into_owned()).collect();
+        assert_eq!(&undriven_page[undriven_page.len() - 2..], ["--", "https://play.google.com/console"]);
         let undriven = arguments(&launch(&display, Mode::Undriven, None)).unwrap();
         assert!(!undriven.iter().any(|argument| argument.to_string_lossy().contains("remote-debugging")));
-        for every in [&driven] {
+        for every in [&driven, &undriven_page] {
             for flag in NEVER {
                 assert!(!every.iter().any(|argument| argument.starts_with(flag)), "{flag}");
             }
+            // Every flag is on the runner's list, and the profile is its own.
+            for flag in every.iter().take_while(|argument| *argument != "--") {
+                assert!(allowed(flag), "{flag}");
+            }
+            assert_eq!(every.iter().filter(|argument| argument.starts_with("--user-data-dir=")).count(), 1);
+        }
+        // Driven, pages don't see webdriver (R11); undriven, nothing hides it
+        // since nothing turns it on.
+        assert!(driven.contains(&AUTOMATION_HIDDEN.to_owned()));
+        assert!(!undriven_page.contains(&AUTOMATION_HIDDEN.to_owned()));
+        // Nothing on the list could weaken Chrome.
+        for known in ALLOWED {
+            assert!(!NEVER.iter().any(|never| known.starts_with(never)), "{known}");
+        }
+        for flag in ["--disable-web-security", "--test-type", "--disable-features=IsolateOrigins,site-per-process", "--no-sandbox", "--enable-automation", "--user-data-dir=/tmp/other", "--lang=", "--window-size", "--disable-blink-features=Other"] {
+            assert!(!allowed(flag) || flag.starts_with("--user-data-dir="), "{flag}");
         }
         for url in [
             "--remote-debugging-port=9222",

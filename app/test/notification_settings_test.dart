@@ -601,4 +601,21 @@ void main() {
       UpdateAgent(agentId: agent.id, notify: NotifyMode.NOTIFY_MODE_NEVER),
     );
   });
+
+  testWidgets("a Windows PC shows its own notifications, as a Mac does", (
+    tester,
+  ) async {
+    late DeviceNotifications? device;
+    await tester.pumpWidget(
+      Builder(
+        builder: (context) {
+          device = DeviceNotifications.of(context);
+          return const SizedBox();
+        },
+      ),
+    );
+    expect(device, isA<MacNotificationPermission>());
+    expect(device!.name, 'This PC');
+    expect(device!.pushes, isFalse);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 }

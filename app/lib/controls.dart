@@ -1197,21 +1197,39 @@ class _SelectState<T> extends State<Select<T>> {
   Widget _buildMenu(BuildContext context, Palette palette) {
     // As wide as the field itself; this state's context is the field.
     final field = this.context.findRenderObject();
-    final width = field is RenderBox && field.hasSize ? field.size.width : null;
+    final box = field is RenderBox && field.hasSize ? field : null;
+    final width = box?.size.width;
+    // Below the field, unless there's no room there and more above (a bar
+    // at the window's foot, such as History's: Abbacchio's row 1564), and
+    // never taller than the room it opens into.
+    var up = false;
+    var most = _menuHeight;
+    final theater = Overlay.maybeOf(this.context)?.context.findRenderObject();
+    final overlay = theater is RenderBox ? theater : null;
+    if (box != null && overlay != null && overlay.hasSize && box.attached) {
+      final top = box.localToGlobal(Offset.zero, ancestor: overlay).dy;
+      final menu = math.min(
+        _menuHeight,
+        widget.options.length * _rowHeight + 2 * Space.xs + 2,
+      );
+      final below = overlay.size.height - top - box.size.height - 2 * Space.xs;
+      final above = top - 2 * Space.xs;
+      up = below < menu && above > below;
+      most = math.max(_rowHeight, math.min(_menuHeight, up ? above : below));
+      if (!up && below < _rowHeight) most = _menuHeight;
+    }
     return CompositedTransformFollower(
       link: _link,
-      targetAnchor: Alignment.bottomLeft,
-      offset: const Offset(0, Space.xs),
+      targetAnchor: up ? Alignment.topLeft : Alignment.bottomLeft,
+      followerAnchor: up ? Alignment.bottomLeft : Alignment.topLeft,
+      offset: Offset(0, up ? -Space.xs : Space.xs),
       child: Align(
-        alignment: Alignment.topLeft,
+        alignment: up ? Alignment.bottomLeft : Alignment.topLeft,
         child: TapRegion(
           groupId: _tapRegion,
           child: Container(
             width: width,
-            constraints: const BoxConstraints(
-              maxHeight: _menuHeight,
-              minWidth: 200,
-            ),
+            constraints: BoxConstraints(maxHeight: most, minWidth: 200),
             padding: const EdgeInsets.all(Space.xs),
             decoration: BoxDecoration(
               color: palette.sidebar,

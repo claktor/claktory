@@ -104,12 +104,12 @@
   function rawName(el) {
     const by = el.getAttribute('aria-labelledby');
     if (by) {
-      const parts = by.split(/\s+/).map((id) => document.getElementById(id)).filter(Boolean).map(textOf);
+      const parts = by.split(/\s+/).map((id) => document.getElementById(id)).filter((e) => e && !withheldWhy(e)).map(textOf);
       if (parts.join('').trim()) return parts.join(' ');
     }
     const aria = el.getAttribute('aria-label');
     if (aria && aria.trim()) return aria;
-    if (el.labels && el.labels.length) return Array.from(el.labels).map(textOf).join(' ');
+    if (el.labels && el.labels.length) return Array.from(el.labels).filter((e) => !withheldWhy(e)).map(textOf).join(' ');
     // An editable region's text is what someone typed: a value, never a name.
     if (!editable(el) && textOf(el).trim()) return textOf(el);
     if (el.getAttribute('title')) return el.getAttribute('title');
@@ -139,6 +139,8 @@
   const SENSITIVE_FIELD = /password|passcode|passkey|one-time|verification code|security code|\bcvc\b|\bcvv\b|card number|\biban\b|account number|routing|\bpin\b/i;
   const SENSITIVE_ACTION = /\bpay\b|payment|purchase|\bbuy\b|checkout|place order|confirm order|delete account|close account|transfer|send money/i;
   function sensitive(el) {
+    const kept = withheldWhy(el);
+    if (kept) return kept;
     if (fileLabel(el)) return 'file picker';
     // A download link is the person's, except in an errand (#435 R9),
     // whose reader sets __claktoryDownloads in its own isolated world: a
@@ -159,6 +161,118 @@
     } else if (SENSITIVE_ACTION.test(words)) return 'looks like a payment or account change';
     return null;
   }
+
+  // Recovery codes a site shows once (#435 W8b, Fugo 40691): a block whose
+  // words are mostly code-shaped (4 or more), on a page about recovery or
+  // backup codes, is withheld whole: no text of it is read, and it's offered
+  // only as a ref, for errand_handoff kind recovery_codes, which Claktory
+  // reads itself. An authenticator's setup key (Fugo 42966) is withheld the
+  // same way, and never offered: an otpauth:// address anywhere, or a
+  // base32 run of 16 characters or more on a page about a setup key. Both
+  // are heuristics that err toward withholding. Once withheld, a block stays
+  // withheld in every later read of the page, with anything inside it
+  // off-limits and not offered.
+  const CODE_WORD = /^(?=\S*\d)[A-Za-z0-9]{3,12}(?:-[A-Za-z0-9]{3,12})?$/;
+  const CODES_ABOUT = /recovery|backup|codes\b/i;
+  const CODES_WHY = "recovery codes: the person's (errand_handoff, kind recovery_codes)";
+  // A base32 key: 16 characters or more, one case, in groups (spaces or
+  // hyphens between them allowed), standing alone. Anywhere, with at least
+  // two of the digits 2-7, as no word has. On a page about a setup key
+  // (`about`), with none needed (Secco 43242: random base32 has fewer than
+  // two in 16 characters one time in six) when it's one run with no
+  // separators, as no word is, or when one of its groups has no vowel, as
+  // no word has; else one digit (so a sentence of four-letter words isn't
+  // taken for a key).
+  const KEY_RUN = /(?<![A-Za-z0-9])(?:[A-Za-z2-7]{4}[ -]?){4,}[A-Za-z2-7]*(?![A-Za-z0-9])/g;
+  const hasKey = (text, about) => /otpauth:\/\//i.test(text) || (text.replace(/\s+/g, ' ').match(KEY_RUN) || []).some((run) => {
+    const groups = run.trim().split(/[ -]/).filter(Boolean);
+    const bare = groups.join('');
+    if (bare.length < 16 || (bare !== bare.toUpperCase() && bare !== bare.toLowerCase())) return false;
+    const digits = (bare.match(/[2-7]/g) || []).length;
+    if (digits >= 2) return true;
+    if (!about) return false;
+    return groups.length === 1 || digits >= 1 || groups.some((g) => !/[aeiouy]/i.test(g));
+  });
+  const KEY_ABOUT = /setup key|secret key|can.t scan|enter this key|authenticator|two-step|2-step|two-factor|2fa/i;
+  const KEY_WHY = "an authenticator's setup key: never the agent's (choose codes by text message or email instead)";
+  let withheld = []; // {el: WeakRef, why} of the blocks withheld so far on this page
+  const words = (text) => text.split(/\s+/).map((w) => w.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, '')).filter(Boolean);
+  const codeWords = (text) => words(text).filter((w) => CODE_WORD.test(w)).length;
+  const OTPAUTH_ATTRIBUTES = ['href', 'src', 'alt', 'title', 'value', 'data', 'content', 'aria-label'].map((a) => `[${a}*="otpauth:" i]`).join(',');
+  const otpauth = (el) => /otpauth:/i.test(Array.from(el.attributes || [], (a) => a.value).join(' '));
+  // Elements the page scan looks at, at most; past them, on a page about
+  // codes or a key, nothing of the rest is read or offered (`cutoff`).
+  const SCAN_LIMIT = 5000;
+  let cutoff = null; // the first node the scan didn't reach, on such a page
+  const pastCutoff = (node) => !!cutoff && cutoff.isConnected &&
+    (node === cutoff || cutoff.contains(node) || !!(cutoff.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING));
+  function codeBlocks() {
+    const kept = withheld.map((w) => ({el: w.el.deref(), why: w.why})).filter((w) => w.el && w.el.isConnected);
+    const covered = (el) => kept.some((k) => k.el === el || k.el.contains(el));
+    const root = document.body || document.documentElement;
+    const all = root ? root.textContent || '' : '';
+    cutoff = null;
+    if (root && CODES_ABOUT.test(all + ' ' + document.title)) {
+      // How many words, and code words, each element holds, counted from
+      // its text nodes up (its textContent runs list items together).
+      const counts = new Map();
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let seen = 0;
+      let node = walker.nextNode();
+      for (; node && seen < SCAN_LIMIT; node = walker.nextNode(), seen++) {
+        const n = codeWords(node.nodeValue), w = words(node.nodeValue).length;
+        if (!w) continue;
+        for (let e = node.parentElement; e && e !== document.documentElement; e = e.parentElement) {
+          const c = counts.get(e) || {codes: 0, words: 0};
+          c.codes += n; c.words += w;
+          counts.set(e, c);
+        }
+      }
+      if (node) cutoff = node;
+      const qualifies = (el) => { const c = counts.get(el); return !!c && c.codes >= 4 && c.codes * 2 >= c.words; };
+      for (const el of counts.keys()) {
+        // The widest block that qualifies: its parent doesn't.
+        if (qualifies(el) && !(el.parentElement && qualifies(el.parentElement)) && !covered(el)) kept.push({el, why: CODES_WHY});
+      }
+    }
+    const about = KEY_ABOUT.test(all + ' ' + document.title);
+    if (root && (about || /otpauth:/i.test(all) || document.querySelector(OTPAUTH_ATTRIBUTES))) {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+      let seen = 0;
+      let node = walker.nextNode();
+      for (; node && seen < SCAN_LIMIT; node = walker.nextNode(), seen++) {
+        const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+        if (!el || covered(el)) continue;
+        let key;
+        if (node.nodeType === Node.TEXT_NODE) {
+          key = /otpauth:\/\//i.test(node.nodeValue) || (about && hasKey(node.nodeValue, true));
+        } else {
+          key = otpauth(el) || (about && (
+            // A key drawn a group per element ("JBSW" "Y3DP" …): the
+            // smallest element whose whole text holds it.
+            (smallKey(el) && !Array.from(el.children).some(smallKey)) ||
+            // In a field's value (a read-only box showing the key).
+            ((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && hasKey(el.value || '', true)) ||
+            // A picture that may be its QR code (Fugo 42966 4(a)).
+            squarePicture(el)));
+        }
+        if (key) kept.push({el, why: KEY_WHY});
+      }
+      if (node && (!cutoff || (node.compareDocumentPosition(cutoff) & Node.DOCUMENT_POSITION_FOLLOWING))) cutoff = node;
+    }
+    withheld = kept.map((w) => ({el: new WeakRef(w.el), why: w.why}));
+    return kept;
+  }
+  const smallKey = (el) => { const t = el.textContent || ''; return t.length <= 200 && hasKey(t, true); };
+  const squarePicture = (el) => {
+    if (!['IMG', 'svg', 'CANVAS', 'PICTURE', 'OBJECT'].includes(el.tagName)) return false;
+    const r = el.getBoundingClientRect();
+    return r.width >= 100 && r.height >= 100 && Math.max(r.width, r.height) <= 1.25 * Math.min(r.width, r.height);
+  };
+  const withheldWhy = (el) => {
+    for (const w of withheld) { const block = w.el.deref(); if (block && block.contains(el)) return w.why; }
+    return null;
+  };
 
   // Where a click goes when it leaves the page: another origin, a new tab.
   function leaves(el) {
@@ -232,9 +346,23 @@
     let notListed = 0;
     let elementBytes = 2;
     const elementBudget = Math.floor(budget / 2);
+    const found = codeBlocks();
+    const blocks = found.map((w) => w.el);
+    for (const {el, why} of found) {
+      // A setup key is never offered, even as a ref.
+      if (why !== CODES_WHY) continue;
+      const id = ref();
+      const item = {ref: id, role: 'region', name: 'recovery codes (withheld)', sensitive: CODES_WHY};
+      if (!inViewport(el.getBoundingClientRect())) item.offscreen = true;
+      elementBytes += utf8(JSON.stringify(item)) + 1;
+      refs.set(id, {el: new WeakRef(el), fp: fingerprint(el)});
+      elements.push(item);
+    }
     for (const el of document.querySelectorAll(INTERACTIVE)) {
       if (elements.length && elements.length % 50 === 0 && overdue()) break;
       if (!visible(el)) continue;
+      // Inside recovery codes: not offered at all, so no name of it is read.
+      if (withheldWhy(el) || otpauth(el) || pastCutoff(el)) continue;
       const r = role(el);
       if (r === 'hidden' || (r === 'label' && !fileLabel(el))) continue;
       if (elements.length >= ELEMENTS_LIMIT) { notListed++; continue; }
@@ -289,6 +417,8 @@
           if (tag === 'IFRAME' || tag === 'FRAME' || tag === 'OBJECT' || tag === 'EMBED') { notes.frames++; return NodeFilter.FILTER_REJECT; }
           if (tag === 'CANVAS') { notes.canvases++; return NodeFilter.FILTER_REJECT; }
           if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return NodeFilter.FILTER_REJECT;
+          // Recovery codes: never read.
+          if (blocks.includes(node) || pastCutoff(node)) return NodeFilter.FILTER_REJECT;
           if (node.shadowRoot) notes.open_shadow_roots++;
           else if (node instanceof HTMLElement && chrome.dom && chrome.dom.openOrClosedShadowRoot(node)) notes.closed_shadow_roots++;
           if (!visible(node)) return NodeFilter.FILTER_REJECT;
@@ -302,6 +432,7 @@
     let seen = 0;
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       if (++seen % 100 === 0 && overdue()) break;
+      if (pastCutoff(node)) { truncated = true; break; }
       let piece = node.nodeValue.replace(/\s+/g, ' ');
       if (!piece.trim()) continue;
       for (const m of marks(node.nodeValue)) if (m !== 'line_break') textMarks.add(m);
@@ -319,6 +450,7 @@
       textBytes -= bytes;
       textJson -= json;
     }
+    if (cutoff) answer.unsupported.push('the page is too long to check for recovery codes or a setup key past its start: the rest isn\'t read');
     if (late) {
       truncated = true;
       answer.unsupported.push('the page is too big to read whole in time: only its start was read');
@@ -496,6 +628,16 @@
     if (cmd.op === 'describe' && kind && typeof cmd.target === 'string') return describe(cmd.target, kind, text);
     if (cmd.op === 'watch' && typeof cmd.target === 'string') return watch(cmd.target);
     if (cmd.op === 'act' && kind && typeof cmd.target === 'string') return act(cmd.target, kind, text);
+    // An errand's fill from the vault (#435 W6): the target, still the one
+    // read and where the person would see it, held for Claktory to fill by
+    // node. Only in an errand's own isolated world, which sets
+    // __claktoryFills; the page can't reach that world's globalThis.
+    if (cmd.op === 'element' && globalThis.__claktoryFills && typeof cmd.target === 'string') {
+      const t = check(cmd.target);
+      if (t.error) return t;
+      globalThis.__claktoryElement = t.el;
+      return {};
+    }
     return {error: 'bad_command'};
   }
 

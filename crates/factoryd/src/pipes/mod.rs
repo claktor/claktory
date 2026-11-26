@@ -22,6 +22,7 @@ pub(crate) mod groups;
 pub mod handoff;
 pub mod identity;
 pub(crate) mod lead;
+pub(crate) mod leave;
 pub(crate) mod quarantine;
 pub(crate) mod sealed;
 pub(crate) mod senders;
@@ -324,6 +325,10 @@ pub(crate) struct Record {
     /// not (Rivet in the workspace), as it never reads the pipe. Never
     /// quarantined as well.
     pub send_only: Vec<String>,
+    /// Agents that gave up leading it (#236's pipe_leave, only:
+    /// "leading"): never made its lead again unless the person chooses
+    /// one so.
+    pub declined_lead: Vec<String>,
     /// Quarantine came to this pipe: made since, or its liaisons were
     /// quarantined once at start (a person's release after stays).
     pub quarantine_set: bool,
@@ -2060,6 +2065,8 @@ pub(crate) fn update(factory: &Arc<Factory>, request: &v1::UpdatePipe) -> Result
             }
         }
         if let Some(lead) = lead {
+            // The person's choice outweighs an agent's giving it up.
+            record.declined_lead.retain(|id| *id != lead);
             record.lead = lead;
         }
         if let Some(limits) = &request.limits {
@@ -2278,6 +2285,7 @@ fn delete(factory: &Factory, id: &str) {
         }
     }
     drop(db);
+    factory.watches.gone(&crate::watch::pipe_key(id));
     factory.broadcast_workspace(&factory.lock());
 }
 

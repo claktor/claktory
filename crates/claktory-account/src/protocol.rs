@@ -26,6 +26,9 @@ pub const SIGNATURE_HEADER: &str = "Claktory-Signature";
 pub const MAX_SKEW: i64 = 300;
 /// How long an emailed code works, in seconds.
 pub const CODE_LIFETIME: i64 = 15 * 60;
+/// How long a Claktory's vouch for the app on its computer works (#529),
+/// in seconds.
+pub const VOUCH_LIFETIME: i64 = 300;
 /// Wrong codes a sign-in may have before it must start again.
 pub const CODE_TRIES: u32 = 5;
 /// A Claktory's name, at most, in characters.

@@ -223,3 +223,35 @@ async fn a_providers_list_is_read_on_request_and_a_model_it_lacks_is_added_once_
         view.workspace.models
     );
 }
+
+/// Friend bug #41: the person looking at the models (ProvidersShown) reads
+/// again a list more than 15 minutes old, and leaves a newer one be.
+#[tokio::test]
+async fn a_stale_list_is_read_again_when_the_person_looks_at_the_models() {
+    let dir = temp_dir();
+    let models = Listing::new();
+    let (mut client, mut view, factory) = start(&dir, models.clone()).await;
+    view.follow(&mut client, |view| scripted(view).models_fetched_ms > 0 && listed(view, "scripted/listed").is_some()).await;
+    let shown = || Request::ProvidersShown(v1::ProvidersShown {});
+
+    // Just read: nothing to do.
+    assert!(matches!(apply_request(&mut client, &mut view, shown()).await, Body::Ack(_)));
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(models.reads.load(Ordering::Relaxed), 1);
+    drop(client);
+    drop(factory);
+
+    // Kept from 20 minutes ago (not yet due by itself, at 12 hours): read
+    // again once the person looks.
+    let kept = crate::common::home(&dir).root().join("scripted-models.json");
+    let twenty_minutes_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(20 * 60);
+    std::fs::File::options().write(true).open(&kept).expect("kept").set_modified(twenty_minutes_ago).expect("aged");
+    let again = Listing::new();
+    let (mut client, mut view, _factory) = start(&dir, again.clone()).await;
+    let before = scripted(&view).models_fetched_ms;
+    // Not read by itself at the start: it isn't due.
+    assert_eq!(again.reads.load(Ordering::Relaxed), 0);
+    assert!(matches!(apply_request(&mut client, &mut view, shown()).await, Body::Ack(_)));
+    view.follow(&mut client, |view| scripted(view).models_fetched_ms > before && !scripted(view).models_fetching).await;
+    assert_eq!(again.reads.load(Ordering::Relaxed), 1);
+}

@@ -347,8 +347,10 @@ class ErrorCode extends $pb.ProtobufEnum {
       ErrorCode._(14, _omitEnumNames ? '' : 'ERROR_CODE_UNREACHABLE');
 
   /// Hello refused: this device has to show a (fresh) device assertion. A
-  /// paired device whose grace to confirm is over, or a device that found
-  /// this Claktory through its account with an assertion missing or expired.
+  /// paired device not confirmed as the owner's (let in by a program, say:
+  /// PairedDevice.confirmed), a device that found this Claktory through its
+  /// account with an assertion missing, or one whose assertion doesn't
+  /// verify (expired, for another key).
   /// The app signs in to the account (or gets a new assertion) and connects
   /// again. Connection closes.
   static const ErrorCode ERROR_CODE_SIGN_IN_REQUIRED =
@@ -358,6 +360,13 @@ class ErrorCode extends $pb.ProtobufEnum {
   /// copy left here runs nothing.
   static const ErrorCode ERROR_CODE_MOVED =
       ErrorCode._(16, _omitEnumNames ? '' : 'ERROR_CODE_MOVED');
+
+  /// Hello refused (#527 S4): this Claktory is signed in to an account, and
+  /// the device's assertion is for another one. A Claktory is one person's:
+  /// to work with someone else's agents, open a pipe. The message says
+  /// whether the device was let in here before. Connection closes.
+  static const ErrorCode ERROR_CODE_OTHER_ACCOUNT =
+      ErrorCode._(17, _omitEnumNames ? '' : 'ERROR_CODE_OTHER_ACCOUNT');
 
   static const $core.List<ErrorCode> values = <ErrorCode>[
     ERROR_CODE_UNSPECIFIED,
@@ -377,10 +386,11 @@ class ErrorCode extends $pb.ProtobufEnum {
     ERROR_CODE_UNREACHABLE,
     ERROR_CODE_SIGN_IN_REQUIRED,
     ERROR_CODE_MOVED,
+    ERROR_CODE_OTHER_ACCOUNT,
   ];
 
   static final $core.List<ErrorCode?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 16);
+      $pb.ProtobufEnum.$_initByValueList(values, 17);
   static ErrorCode? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -898,6 +908,47 @@ class MonitorState extends $pb.ProtobufEnum {
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const MonitorState._(super.value, super.name);
+}
+
+class ResourceAlertHeld extends $pb.ProtobufEnum {
+  static const ResourceAlertHeld RESOURCE_ALERT_HELD_UNSPECIFIED =
+      ResourceAlertHeld._(
+          0, _omitEnumNames ? '' : 'RESOURCE_ALERT_HELD_UNSPECIFIED');
+
+  /// Its Resources extension is off.
+  static const ResourceAlertHeld RESOURCE_ALERT_HELD_RESOURCES_OFF =
+      ResourceAlertHeld._(
+          1, _omitEnumNames ? '' : 'RESOURCE_ALERT_HELD_RESOURCES_OFF');
+
+  /// Its project is archived.
+  static const ResourceAlertHeld RESOURCE_ALERT_HELD_ARCHIVED =
+      ResourceAlertHeld._(
+          2, _omitEnumNames ? '' : 'RESOURCE_ALERT_HELD_ARCHIVED');
+
+  /// Its model can't run.
+  static const ResourceAlertHeld RESOURCE_ALERT_HELD_NO_MODEL =
+      ResourceAlertHeld._(
+          3, _omitEnumNames ? '' : 'RESOURCE_ALERT_HELD_NO_MODEL');
+
+  /// No agent has this id any more.
+  static const ResourceAlertHeld RESOURCE_ALERT_HELD_NO_AGENT =
+      ResourceAlertHeld._(
+          4, _omitEnumNames ? '' : 'RESOURCE_ALERT_HELD_NO_AGENT');
+
+  static const $core.List<ResourceAlertHeld> values = <ResourceAlertHeld>[
+    RESOURCE_ALERT_HELD_UNSPECIFIED,
+    RESOURCE_ALERT_HELD_RESOURCES_OFF,
+    RESOURCE_ALERT_HELD_ARCHIVED,
+    RESOURCE_ALERT_HELD_NO_MODEL,
+    RESOURCE_ALERT_HELD_NO_AGENT,
+  ];
+
+  static final $core.List<ResourceAlertHeld?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 4);
+  static ResourceAlertHeld? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ResourceAlertHeld._(super.value, super.name);
 }
 
 /// What happens to Claktory on its Mac when the Mac app quits (friend bug
@@ -2930,6 +2981,30 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
       NeedsYouRecordKind._(
           18, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_SECRET_GIVEN_UP');
 
+  /// An agent gave up access it had, on its own (#236): no card, no
+  /// approval. Outcome CHANGED, agent_id the agent, title Claktory's
+  /// sentence ("Mista left the pipe "Launch"", "Mista stopped reading the
+  /// pipe "Launch"", "Mista stopped leading the pipe "Launch"", "Mista gave
+  /// up Charts", "Mista gave up messaging Ana"), agent_reason its why. What
+  /// it gave up: pipe_id (pipe_leave), app_id (apps_give_up) or
+  /// subject_agent_id, the agent it no longer messages
+  /// (agents_give_up_reach). seq is the call's entry in its conversation.
+  /// Getting it back is the person's: in the pipe's settings, the app's, or
+  /// the agent's.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_GIVEN_UP =
+      NeedsYouRecordKind._(
+          20, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_GIVEN_UP');
+
+  /// An alert the person read (Alert; ReadAlerts): outcome READ, agent_id
+  /// the agent that sent it (empty for Claktory's own), title its title
+  /// (empty when withheld), alert the whole of it, asked_ms when it was
+  /// sent, decided_ms when it was read, answered_on the device it was read
+  /// on. seq is the notify_person call's entry in its agent's conversation
+  /// (0 for Claktory's own, or once it's no longer there).
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_ALERT =
+      NeedsYouRecordKind._(
+          21, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_ALERT');
+
   static const $core.List<NeedsYouRecordKind> values = <NeedsYouRecordKind>[
     NEEDS_YOU_RECORD_KIND_UNSPECIFIED,
     NEEDS_YOU_RECORD_KIND_QUESTION,
@@ -2950,10 +3025,12 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
     NEEDS_YOU_RECORD_KIND_PIPE_MEMBER,
     NEEDS_YOU_RECORD_KIND_PROPOSAL_GRANT,
     NEEDS_YOU_RECORD_KIND_SECRET_GIVEN_UP,
+    NEEDS_YOU_RECORD_KIND_GIVEN_UP,
+    NEEDS_YOU_RECORD_KIND_ALERT,
   ];
 
   static final $core.List<NeedsYouRecordKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 18);
+      $pb.ProtobufEnum.$_initByValueList(values, 21);
   static NeedsYouRecordKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
@@ -2999,6 +3076,10 @@ class NeedsYouOutcome extends $pb.ProtobufEnum {
   static const NeedsYouOutcome NEEDS_YOU_OUTCOME_RESOLVED =
       NeedsYouOutcome._(9, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_RESOLVED');
 
+  /// An alert the person read: opened, or Got it (ALERT only).
+  static const NeedsYouOutcome NEEDS_YOU_OUTCOME_READ =
+      NeedsYouOutcome._(10, _omitEnumNames ? '' : 'NEEDS_YOU_OUTCOME_READ');
+
   static const $core.List<NeedsYouOutcome> values = <NeedsYouOutcome>[
     NEEDS_YOU_OUTCOME_UNSPECIFIED,
     NEEDS_YOU_OUTCOME_ANSWERED,
@@ -3010,14 +3091,67 @@ class NeedsYouOutcome extends $pb.ProtobufEnum {
     NEEDS_YOU_OUTCOME_REPLIED,
     NEEDS_YOU_OUTCOME_WITHDRAWN,
     NEEDS_YOU_OUTCOME_RESOLVED,
+    NEEDS_YOU_OUTCOME_READ,
   ];
 
   static final $core.List<NeedsYouOutcome?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 9);
+      $pb.ProtobufEnum.$_initByValueList(values, 10);
   static NeedsYouOutcome? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 
   const NeedsYouOutcome._(super.value, super.name);
+}
+
+/// How an agent's secret request was approved (NeedsYouRecord.secret_outcome).
+class NeedsYouSecretOutcome extends $pb.ProtobufEnum {
+  static const NeedsYouSecretOutcome NEEDS_YOU_SECRET_OUTCOME_UNSPECIFIED =
+      NeedsYouSecretOutcome._(
+          0, _omitEnumNames ? '' : 'NEEDS_YOU_SECRET_OUTCOME_UNSPECIFIED');
+
+  /// The person gave it a secret they had (secret_given_name). Also every
+  /// grant recorded before Claktory told the cases apart.
+  static const NeedsYouSecretOutcome NEEDS_YOU_SECRET_OUTCOME_GAVE =
+      NeedsYouSecretOutcome._(
+          1, _omitEnumNames ? '' : 'NEEDS_YOU_SECRET_OUTCOME_GAVE');
+
+  /// The person added a new secret on the card, with its value, and gave it.
+  static const NeedsYouSecretOutcome NEEDS_YOU_SECRET_OUTCOME_ADDED =
+      NeedsYouSecretOutcome._(
+          2, _omitEnumNames ? '' : 'NEEDS_YOU_SECRET_OUTCOME_ADDED');
+
+  /// The vault generated it (a key or a password no one sees): given to the
+  /// agent, or to no one when the request said so.
+  static const NeedsYouSecretOutcome NEEDS_YOU_SECRET_OUTCOME_GENERATED =
+      NeedsYouSecretOutcome._(
+          3, _omitEnumNames ? '' : 'NEEDS_YOU_SECRET_OUTCOME_GENERATED');
+
+  /// Claktory read it from files on this computer into the vault.
+  static const NeedsYouSecretOutcome NEEDS_YOU_SECRET_OUTCOME_IMPORTED =
+      NeedsYouSecretOutcome._(
+          4, _omitEnumNames ? '' : 'NEEDS_YOU_SECRET_OUTCOME_IMPORTED');
+
+  /// The person approved the need and left it to the admin agent
+  /// (subject_agent_id) to find a matching secret or collect a new one.
+  static const NeedsYouSecretOutcome NEEDS_YOU_SECRET_OUTCOME_ADMIN =
+      NeedsYouSecretOutcome._(
+          5, _omitEnumNames ? '' : 'NEEDS_YOU_SECRET_OUTCOME_ADMIN');
+
+  static const $core.List<NeedsYouSecretOutcome> values =
+      <NeedsYouSecretOutcome>[
+    NEEDS_YOU_SECRET_OUTCOME_UNSPECIFIED,
+    NEEDS_YOU_SECRET_OUTCOME_GAVE,
+    NEEDS_YOU_SECRET_OUTCOME_ADDED,
+    NEEDS_YOU_SECRET_OUTCOME_GENERATED,
+    NEEDS_YOU_SECRET_OUTCOME_IMPORTED,
+    NEEDS_YOU_SECRET_OUTCOME_ADMIN,
+  ];
+
+  static final $core.List<NeedsYouSecretOutcome?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 5);
+  static NeedsYouSecretOutcome? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const NeedsYouSecretOutcome._(super.value, super.name);
 }
 
 class ReportFieldType extends $pb.ProtobufEnum {
@@ -3410,6 +3544,23 @@ class ErrandHandoffKind extends $pb.ProtobufEnum {
   static const ErrandHandoffKind ERRAND_HANDOFF_KIND_OTHER =
       ErrandHandoffKind._(7, _omitEnumNames ? '' : 'ERRAND_HANDOFF_KIND_OTHER');
 
+  /// Recovery codes a site showed once (#435 W8b): Claktory read them off
+  /// the page, and the agent never saw them. The card shows them only on
+  /// ShowRecoveryCodes, and has two answers: I saved them (AnswerAsk,
+  /// approved, no text) and Keep in Secrets (KeepRecoveryCodes). No
+  /// dismissing, replying or words: its codes go only when the person says.
+  static const ErrandHandoffKind ERRAND_HANDOFF_KIND_RECOVERY_CODES =
+      ErrandHandoffKind._(
+          8, _omitEnumNames ? '' : 'ERRAND_HANDOFF_KIND_RECOVERY_CODES');
+
+  /// Turning on two-step sign-in at a site: the person's call. Approved,
+  /// the agent may turn it on there with codes sent by text message or
+  /// email only, never an authenticator app or a security key. Can't do
+  /// this ends the errand.
+  static const ErrandHandoffKind ERRAND_HANDOFF_KIND_TWO_STEP =
+      ErrandHandoffKind._(
+          9, _omitEnumNames ? '' : 'ERRAND_HANDOFF_KIND_TWO_STEP');
+
   static const $core.List<ErrandHandoffKind> values = <ErrandHandoffKind>[
     ERRAND_HANDOFF_KIND_UNSPECIFIED,
     ERRAND_HANDOFF_KIND_PAYMENT,
@@ -3419,10 +3570,12 @@ class ErrandHandoffKind extends $pb.ProtobufEnum {
     ERRAND_HANDOFF_KIND_CAPTCHA,
     ERRAND_HANDOFF_KIND_SIGN_IN,
     ERRAND_HANDOFF_KIND_OTHER,
+    ERRAND_HANDOFF_KIND_RECOVERY_CODES,
+    ERRAND_HANDOFF_KIND_TWO_STEP,
   ];
 
   static final $core.List<ErrandHandoffKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 7);
+      $pb.ProtobufEnum.$_initByValueList(values, 9);
   static ErrandHandoffKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 

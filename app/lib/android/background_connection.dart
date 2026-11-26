@@ -3,12 +3,16 @@ import 'package:flutter/widgets.dart';
 
 import '../backend.dart';
 import 'background_policy.dart';
+import 'share_browser_lifecycle.dart';
 
 /// Binds Android's short background grace to the shared transport. The
 /// existing app lifecycle calls hidden/resumed on every Backend; a newly
 /// created connection also checks whether the app is already hidden.
 class AndroidBackgroundConnection {
-  factory AndroidBackgroundConnection(Backend backend) {
+  factory AndroidBackgroundConnection(
+    Backend backend, {
+    AndroidShareBrowserLifecycle? browser,
+  }) {
     final work = _BackgroundWork(backend);
     final state = WidgetsBinding.instance.lifecycleState;
     if (state == AppLifecycleState.hidden ||
@@ -20,10 +24,22 @@ class AndroidBackgroundConnection {
     return AndroidBackgroundConnection._(
       AndroidBackgroundPolicy(busy: work, suspend: backend.suspend),
       work,
+      backend,
+      browser ??
+          (defaultTargetPlatform == TargetPlatform.android
+              ? androidShareBrowserLifecycle
+              : null),
     );
   }
 
-  AndroidBackgroundConnection._(this._policy, this._work) {
+  AndroidBackgroundConnection._(
+    this._policy,
+    this._work,
+    this._backend,
+    this._browser,
+  ) {
+    _unwatch = _browser?.watch(_browserChanged);
+    _browserChanged();
     final state = WidgetsBinding.instance.lifecycleState;
     if (state == AppLifecycleState.hidden ||
         state == AppLifecycleState.paused) {
@@ -36,11 +52,25 @@ class AndroidBackgroundConnection {
     required ValueListenable<bool> busy,
     required VoidCallback suspend,
   }) : _policy = AndroidBackgroundPolicy(busy: busy, suspend: suspend),
-       _work = null;
+       _work = null,
+       _backend = null,
+       _browser = null;
 
   final AndroidBackgroundPolicy _policy;
   final _BackgroundWork? _work;
+  final Backend? _backend;
+  final AndroidShareBrowserLifecycle? _browser;
+  VoidCallback? _unwatch;
   var _disposed = false;
+
+  void _browserChanged() {
+    if (_disposed) return;
+    final backend = _backend;
+    if (backend == null) return;
+    final visible = _browser?.visibleFor(backend) ?? false;
+    _policy.externalVisible(visible);
+    backend.keepTryingWhileHidden = visible;
+  }
 
   void hidden() => _policy.hidden();
 
@@ -49,6 +79,12 @@ class AndroidBackgroundConnection {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    _unwatch?.call();
+    final backend = _backend;
+    if (backend != null) {
+      _browser?.forget(backend);
+      backend.keepTryingWhileHidden = false;
+    }
     _policy.dispose();
     _work?.dispose();
   }

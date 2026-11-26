@@ -164,6 +164,69 @@ async fn websites_shared_between_two_claktories() {
     a_shared_website_reaches_the_other_side_while_its_pipe_is_open().await;
     a_third_claktory_pinned_to_another_pipe_gets_nothing().await;
     the_other_side_opens_it_in_a_browser_at_its_own_address().await;
+    a_shared_website_stops_when_its_time_is_up().await;
+}
+
+/// #46: a share lasts as long as asked, its end shown on both sides; the
+/// person changes it from now; once it's up, this side stops it as Stop
+/// does, its streams cut even before the timer wakes (Fugo 46375).
+async fn a_shared_website_stops_when_its_time_is_up() {
+    let (mut a, mut b) = paired().await;
+    let port = echo_server().await;
+    let a_pipe = a.pipe().id;
+    let now = factoryd::transcript::now_ms();
+    let share =
+        v1::SharePipeWebsite { port: u32::from(port), name: "Dashboard".into(), pipe_ids: vec![a_pipe.clone()], lasts_s: 3600, ..Default::default() };
+    assert!(matches!(a.request(Request::SharePipeWebsite(share)).await, Body::Ack(_)));
+    let mine = a.shares().into_iter().find(|share| share.mine).expect("A's share");
+    assert!((now + 3_600_000..now + 3_610_000).contains(&mine.expires_ms), "{mine:?}");
+    // B shows the end A said.
+    b.until(|view| view.workspace.pipe_shares.iter().any(|share| !share.mine && share.live)).await;
+    let theirs = b.shares().into_iter().find(|share| !share.mine).expect("B's");
+    assert_eq!(theirs.expires_ms, mine.expires_ms);
+    // Longer or shorter, from now; Never (0) for until it's stopped; nothing
+    // past a year, nor before now.
+    for wrong in [-1, 367 * 24 * 3600] {
+        let change = v1::SetPipeShareExpiry { share_id: mine.id.clone(), lasts_s: wrong };
+        assert!(matches!(a.request(Request::SetPipeShareExpiry(change)).await, Body::Error(_)), "{wrong}");
+    }
+    let change = v1::SetPipeShareExpiry { share_id: mine.id.clone(), lasts_s: 7200 };
+    assert!(matches!(a.request(Request::SetPipeShareExpiry(change)).await, Body::Ack(_)));
+    let longer = a.shares().into_iter().find(|share| share.mine).expect("A's share").expires_ms;
+    assert!(longer >= now + 7_200_000, "{longer}");
+    assert!(a.said("Dashboard is now shared until ") && !a.said("Dashboard is now shared until you"));
+    b.until(|view| view.workspace.pipe_shares.iter().any(|share| !share.mine && share.expires_ms == longer)).await;
+    let change = v1::SetPipeShareExpiry { share_id: mine.id.clone(), lasts_s: 0 };
+    assert!(matches!(a.request(Request::SetPipeShareExpiry(change)).await, Body::Ack(_)));
+    b.until(|view| view.workspace.pipe_shares.iter().any(|share| !share.mine && share.expires_ms == 0)).await;
+    assert_eq!(a.shares().into_iter().find(|share| share.mine).expect("A's share").expires_ms, 0);
+
+    // Its time is up while a stream is live and before the timer wakes:
+    // the stream is cut and no new one goes, on this Claktory's clock.
+    let (mut send, mut receive) = pipes::shares::stream_for_test(&b.factory, &theirs.id).await.expect("a stream");
+    send.write_all(b"live").await.expect("sent");
+    let mut back = [0u8; 4];
+    receive.read_exact(&mut back).await.expect("echoed");
+    pipes::shares::run_out_for_test(&a.factory, &mine.id);
+    let mut rest = [0u8; 1];
+    let ended = tokio::time::timeout(Duration::from_secs(5), receive.read(&mut rest)).await.expect("cut, not left hanging");
+    assert!(!matches!(ended, Ok(Some(n)) if n > 0), "nothing more comes");
+    assert!(through(&b, &theirs.id, "late").await.is_err());
+    let change = v1::SetPipeShareExpiry { share_id: mine.id.clone(), lasts_s: 3600 };
+    assert!(matches!(a.request(Request::SetPipeShareExpiry(change)).await, Body::Error(_)), "renewed after its end");
+
+    // Once it wakes (another share's end changed it), it stops as Stop
+    // does: gone from both sides, the chat saying why; and the short one
+    // after it, at its own end.
+    let other = echo_server().await;
+    let share = v1::SharePipeWebsite { port: u32::from(other), name: "Notes".into(), pipe_ids: vec![a_pipe.clone()], lasts_s: 2, ..Default::default() };
+    assert!(matches!(a.request(Request::SharePipeWebsite(share)).await, Body::Ack(_)));
+    a.until(|view| view.workspace.pipe_shares.iter().all(|share| share.name != "Dashboard")).await;
+    assert!(a.said("Dashboard stopped being shared: its time was up."));
+    b.until(|view| view.workspace.pipe_shares.iter().all(|share| share.name != "Dashboard")).await;
+    a.until(|view| view.workspace.pipe_shares.is_empty()).await;
+    b.until(|view| view.workspace.pipe_shares.is_empty()).await;
+    assert!(a.said("Notes stopped being shared: its time was up."));
 }
 
 /// C is pinned to A too, on a pipe of its own: asking for the website A

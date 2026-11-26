@@ -98,14 +98,22 @@ fn decoded(page: &v1::HistoryEvents, nodes: &[v1::HistoryNode]) -> Vec<(i64, v1:
 
 
 async fn overview(client: &mut Client) -> v1::HistoryOverview {
-    match client.request(client_message::Body::GetHistoryOverview(v1::GetHistoryOverview {})).await.body {
+    project_overview(client, "").await
+}
+
+async fn project_overview(client: &mut Client, project: &str) -> v1::HistoryOverview {
+    match client.request(client_message::Body::GetHistoryOverview(v1::GetHistoryOverview { project_id: project.into() })).await.body {
         Body::HistoryOverview(overview) => overview,
         other => panic!("expected the overview, got {other:?}"),
     }
 }
 
 async fn page(client: &mut Client, after: Vec<u8>, limit: u32, runs: bool) -> v1::HistoryEvents {
-    let ask = v1::GetHistoryEvents { after_cursor: after, until_ms: 0, limit, include_runs: runs };
+    project_page(client, after, limit, runs, "").await
+}
+
+async fn project_page(client: &mut Client, after: Vec<u8>, limit: u32, runs: bool, project: &str) -> v1::HistoryEvents {
+    let ask = v1::GetHistoryEvents { after_cursor: after, until_ms: 0, limit, include_runs: runs, project_id: project.into() };
     match client.request(client_message::Body::GetHistoryEvents(ask)).await.body {
         Body::HistoryEvents(page) => page,
         other => panic!("expected events, got {other:?}"),
@@ -269,7 +277,7 @@ async fn history_plays_back_who_wrote_to_whom_and_never_what() {
     assert!(again.history_version > overview.history_version);
 
     // Watching: what's new comes by itself.
-    client.ok(client_message::Body::WatchHistory(v1::WatchHistory { on: true })).await;
+    client.ok(client_message::Body::WatchHistory(v1::WatchHistory { on: true, project_id: String::new() })).await;
     let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("factory.db");
     db.execute(
         "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created) VALUES ('zoe', 'person', '', '', '', ?1, ?2)",
@@ -279,7 +287,7 @@ async fn history_plays_back_who_wrote_to_whom_and_never_what() {
     let pushed = client.wait_for(|body| if let Body::HistoryEvents(page) = body { Some(page.clone()) } else { None }).await;
     let pushed = decoded(&pushed, &again.nodes);
     assert_eq!(pushed.iter().map(|event| (event.1, event.3.clone())).collect::<Vec<_>>(), [(K::Person, vec![agent("zoe")])]);
-    client.ok(client_message::Body::WatchHistory(v1::WatchHistory { on: false })).await;
+    client.ok(client_message::Body::WatchHistory(v1::WatchHistory { on: false, project_id: String::new() })).await;
 }
 
 /// A chat is the person's own conversation, never part of History (#473):
@@ -346,4 +354,244 @@ async fn a_chat_is_never_in_history() {
     let events = decoded(&with_runs, &overview.nodes);
     assert!(events.iter().all(|event| !event.2.contains("chat") && event.3.iter().all(|to| !to.contains("chat"))), "{events:?}");
     assert!(with_runs.run_node.is_empty(), "no chat's run: {:?}", with_runs.run_node);
+}
+
+/// Every event, page by page from `after` (`limit` at a time), with runs
+/// when `runs`, one project's when `project` isn't empty.
+async fn every_page(client: &mut Client, nodes: &[v1::HistoryNode], after: Vec<u8>, limit: u32, runs: bool, project: &str) -> (Vec<Event>, Vec<String>) {
+    let (mut events, mut run_nodes, mut after) = (Vec::new(), Vec::new(), after);
+    loop {
+        let page = project_page(client, after, limit, runs, project).await;
+        assert!(limit == 0 || page.dt.len() <= limit as usize);
+        events.extend(decoded(&page, nodes));
+        run_nodes.extend(page.run_node.iter().map(|at| nodes[*at as usize - 1].node.clone().expect("node").id));
+        after = page.next_cursor;
+        if after.is_empty() {
+            return (events, run_nodes);
+        }
+    }
+}
+
+type Event = (i64, v1::HistoryEventKind, String, Vec<String>, u32);
+
+/// Pages come in time order even where a batch of list sends makes fewer
+/// events than the others' rows: the messages not read yet came after the
+/// cards read past them before.
+#[tokio::test]
+async fn pages_keep_time_order_through_list_sends() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, _, _) = Client::connect(addr).await;
+    let t0 = now() - 3 * 3_600_000;
+    let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("factory.db");
+    for send in 0..60 {
+        for to in ["a1", "a2", "a3", "a4", "a5"] {
+            db.execute(
+                "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created, send_id) VALUES (?1, 'agent', 'Mike', 'mike', '', 'hi', ?2, ?3)",
+                rusqlite::params![to, t0 + send * 1000, format!("s{send}")],
+            )
+            .expect("message");
+        }
+        db.execute(
+            "INSERT INTO asks (agent, title, body, wants_text, created, state, answer) VALUES ('mike', 't', 'b', 0, ?1, 'pending', '')",
+            [t0 + send * 1000 + 500],
+        )
+        .expect("card");
+    }
+    let overview = overview(&mut client).await;
+    let (events, _) = every_page(&mut client, &overview.nodes, Vec::new(), 100, false, "").await;
+    let ours: Vec<_> = events.iter().filter(|event| event.0 >= t0 && event.0 < t0 + 60_000).collect();
+    assert_eq!(ours.len(), 120, "60 list sends of 5, one event each, and 60 cards");
+    let times: Vec<i64> = events.iter().map(|event| event.0).collect();
+    assert!(times.is_sorted(), "{times:?}");
+    assert_eq!(events.len() as u64, overview.message_count);
+}
+
+/// One project's History: the events its agents sent or got while in it
+/// (a moved agent's in its project of the time), its runs, its histogram,
+/// count and cursors; the nodes stay whole. And it's counted again from
+/// what was kept when something new comes.
+#[tokio::test]
+async fn one_projects_history_is_its_agents_events_at_the_time() {
+    use v1::HistoryEventKind as K;
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    ack(apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await);
+    ack(apply_request(&mut client, &mut view, create_project("Lab", &dir.join("lab"))).await);
+    for (project, name) in [("site", "Mike"), ("site", "Sam"), ("lab", "Zoe")] {
+        ack(apply_request(&mut client, &mut view, create_agent(project, name, "")).await);
+    }
+    let all_before = overview(&mut client).await;
+    let site_before = project_overview(&mut client, "site").await;
+    let lab_before = project_overview(&mut client, "lab").await;
+    let t0 = now() - 3 * 3_600_000;
+    let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("factory.db");
+    let message = |agent: &str, source: &str, sender_id: &str, at: i64, send_id: Option<&str>| {
+        db.execute(
+            "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created, send_id) VALUES (?1, ?2, '', ?3, '', 'hi', ?4, ?5)",
+            rusqlite::params![agent, source, sender_id, at, send_id],
+        )
+        .expect("message");
+    };
+    let run = |agent: &str, at: i64| {
+        db.execute("INSERT INTO runs (agent, version, started, ended, outcome) VALUES (?1, 'dev', ?2, ?3, 'finished')", rusqlite::params![agent, at, at + 500])
+            .expect("run");
+    };
+    message("sam", "agent", "mike", t0, Some("s1"));
+    message("zoe", "person", "", t0 + 1000, None);
+    // A list send across projects: one event, in both, whole.
+    message("sam", "agent", "mike", t0 + 2000, Some("s2"));
+    message("zoe", "agent", "mike", t0 + 2000, Some("s2"));
+    message("mike", "task", "t1", t0 + 3000, None);
+    run("zoe", t0 + 1000);
+    run("mike", t0 + 3000);
+
+    let agent = |id: &str| format!("agent:{id}");
+    let site = project_overview(&mut client, "site").await;
+    let lab = project_overview(&mut client, "lab").await;
+    let all = overview(&mut client).await;
+    assert_eq!(all.message_count - all_before.message_count, 4);
+    assert_eq!(site.message_count - site_before.message_count, 3);
+    assert_eq!(lab.message_count - lab_before.message_count, 2);
+    for overview in [&site, &lab] {
+        assert_eq!(overview.nodes, all.nodes, "the nodes stay whole");
+        assert_eq!(overview.start_ms, all.start_ms);
+        assert_eq!(overview.histogram.len(), all.histogram.len());
+        assert_eq!(overview.histogram.iter().map(|count| u64::from(*count)).sum::<u64>(), overview.message_count);
+    }
+    let (events, runs) = every_page(&mut client, &site.nodes, site.cursors[0].cursor.clone(), 2, true, "site").await;
+    let ours: Vec<_> = events.iter().filter(|event| event.0 >= t0 && event.0 < t0 + 60_000).map(|event| (event.0, event.1, event.3.clone())).collect();
+    assert_eq!(
+        ours,
+        [(t0, K::Agent, vec![agent("sam")]), (t0 + 2000, K::Agent, vec![agent("sam"), agent("zoe")]), (t0 + 3000, K::Task, vec![agent("mike")])]
+    );
+    assert_eq!(events.len() as u64, site.message_count);
+    assert_eq!(runs, [agent("mike")]);
+    let (events, runs) = every_page(&mut client, &lab.nodes, Vec::new(), 0, true, "lab").await;
+    let ours: Vec<_> = events.iter().filter(|event| event.0 >= t0 && event.0 < t0 + 60_000).map(|event| (event.0, event.1)).collect();
+    assert_eq!(ours, [(t0 + 1000, K::Person), (t0 + 2000, K::Agent)]);
+    assert_eq!(runs, [agent("zoe")]);
+
+    // Zoe moves to Site: from then on what she gets is Site's; before, Lab's.
+    let moved = v1::UpdateAgent { agent_id: "zoe".into(), project_id: Some("site".into()), ..Default::default() };
+    ack(apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(moved)).await);
+    let after_move = now() + 1;
+    message("zoe", "person", "", after_move, None);
+    let site_now = project_overview(&mut client, "site").await;
+    let lab_now = project_overview(&mut client, "lab").await;
+    assert_eq!(site_now.message_count, site.message_count + 1);
+    assert_eq!(lab_now.message_count, lab.message_count);
+    let all_now = overview(&mut client).await;
+    assert_eq!(all_now.message_count, all.message_count + 1, "counted on from what was kept");
+
+    // Watching one project: another's events aren't sent.
+    client.ok(client_message::Body::WatchHistory(v1::WatchHistory { on: true, project_id: "lab".into() })).await;
+    message("mike", "person", "", now(), None);
+    message("zoe", "person", "", now(), None);
+    let lab_watch = project_overview(&mut client, "lab").await;
+    assert_eq!(lab_watch.message_count, lab.message_count, "neither is Lab's now");
+    // Past the watch's next look (every 2 s): had it sent them, they'd come
+    // before Site's below.
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    client.ok(client_message::Body::WatchHistory(v1::WatchHistory { on: true, project_id: "site".into() })).await;
+    message("sam", "person", "", now(), None);
+    let pushed = client.wait_for(|body| if let Body::HistoryEvents(page) = body { Some(page.clone()) } else { None }).await;
+    let pushed = decoded(&pushed, &all_now.nodes);
+    assert_eq!(pushed.iter().map(|event| event.3.clone()).collect::<Vec<_>>(), [vec![agent("sam")]]);
+}
+
+/// A while after a start every event is counted ahead, so the first
+/// overview reads only what's new; and it counts what came meanwhile.
+#[tokio::test]
+async fn the_events_are_counted_ahead_after_a_start() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    let (mut client, _, _) = Client::connect(addr).await;
+    let t0 = now() - 3_600_000;
+    let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("factory.db");
+    let message = |at: i64| {
+        db.execute("INSERT INTO messages (agent, source, sender, sender_id, summary, text, created) VALUES ('mike', 'person', '', '', '', 'hi', ?1)", [at])
+            .expect("message");
+    };
+    message(t0);
+    message(t0 + 1000);
+    assert_eq!(factoryd::history_counted_for_test(&factory), None, "nothing counted before it's time");
+    let counted = factoryd::history_warm_for_test(&factory);
+    assert!(counted >= 2, "{counted}");
+    assert_eq!(factoryd::history_counted_for_test(&factory), Some(counted));
+    message(t0 + 2000);
+    let overview = overview(&mut client).await;
+    assert_eq!(overview.message_count, counted + 1);
+}
+
+/// History at scale (Polpo's history-scale.md items 5 and 6): times the
+/// overview, once and again, and every page, on a Claktory filled by
+/// efficiency/tools/history_synth.py. Run on purpose, in release:
+/// `CLAKTORY_HISTORY_SCALE=<folder whose home/factory.db is filled> cargo
+/// test --release -p factoryd --test all history::at_scale -- --ignored --nocapture`.
+#[tokio::test]
+#[ignore = "needs a filled factory.db (CLAKTORY_HISTORY_SCALE)"]
+async fn at_scale() {
+    let Some(dir) = std::env::var_os("CLAKTORY_HISTORY_SCALE").map(std::path::PathBuf::from) else { return };
+    let timed = std::time::Instant::now();
+    let (addr, factory) = start(&dir).await;
+    println!("MEASURE started (migrations included): {:.2?}", timed.elapsed());
+    let timed = std::time::Instant::now();
+    let counted = factoryd::history_warm_for_test(&factory);
+    println!("MEASURE warmed (late indexes built, {counted} events counted): {:.2?}", timed.elapsed());
+    let (mut client, _, _) = Client::connect(addr).await;
+    let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("factory.db");
+    let scan = |sql: &str| {
+        let timed = std::time::Instant::now();
+        let rows: i64 = db.query_row(&format!("SELECT count(*) FROM ({sql})"), [], |row| row.get(0)).expect("scan");
+        (rows, timed.elapsed())
+    };
+    // The messages' read before and after, alone.
+    let before = "SELECT id, agent, source, sender_id, created, coalesce(send_id, ''), coalesce(quiet, 0), coalesce(reply_to, ''), coalesce(intent, ''),
+        CASE WHEN source = 'agent' AND coalesce(send_id, '') = '' THEN length(text) || ':' || substr(text, 1, 200) ELSE '' END
+        FROM messages NOT INDEXED WHERE id > 0 AND substr(agent, 1, 5) != 'chat:' ORDER BY id";
+    let after = "SELECT id, agent, source, sender_id, created, coalesce(send_id, ''), coalesce(quiet, 0), coalesce(reply_to, ''), coalesce(intent, '')
+        FROM messages INDEXED BY messages_history WHERE id > 0 AND substr(agent, 1, 5) != 'chat:' ORDER BY id";
+    for (name, sql) in [("before", before), ("after", after), ("before", before), ("after", after)] {
+        let (rows, took) = scan(sql);
+        println!("MEASURE messages read {name}: {rows} rows in {took:.2?}");
+    }
+    for (what, project) in [("whole, warmed", ""), ("again", ""), ("project factory", "factory"), ("project site", "site")] {
+        let timed = std::time::Instant::now();
+        let overview = project_overview(&mut client, project).await;
+        println!(
+            "MEASURE overview {what}: {:.2?} ({} events, {} nodes, {} cursors, {} bytes)",
+            timed.elapsed(),
+            overview.message_count,
+            overview.nodes.len(),
+            overview.cursors.len(),
+            prost::Message::encoded_len(&overview)
+        );
+    }
+    db.execute(
+        "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created) VALUES ('a000', 'person', '', '', '', 'hi', ?1)",
+        [now()],
+    )
+    .expect("message");
+    let timed = std::time::Instant::now();
+    let overview = overview(&mut client).await;
+    println!("MEASURE overview after one more message: {:.2?}", timed.elapsed());
+    for project in ["", "site"] {
+        let timed = std::time::Instant::now();
+        let (mut after, mut pages, mut events, mut bytes) = (Vec::new(), 0, 0, 0);
+        loop {
+            let page = project_page(&mut client, after, 0, true, project).await;
+            pages += 1;
+            events += page.dt.len();
+            bytes += prost::Message::encoded_len(&page);
+            after = page.next_cursor;
+            if after.is_empty() {
+                break;
+            }
+        }
+        println!("MEASURE every page{}: {:.2?} ({pages} pages, {events} events, {bytes} bytes)", if project.is_empty() { String::new() } else { format!(" of {project}") }, timed.elapsed());
+    }
+    assert!(overview.message_count > 0);
 }

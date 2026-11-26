@@ -433,6 +433,10 @@ pub(crate) fn seal_push(key: &[u8], ctr: u64, now: i64, claktory: &str, badge: u
         if !notify.share_id.is_empty() {
             payload["target"]["share"] = serde_json::Value::from(notify.share_id.clone());
         }
+        // The alert kept in Needs you, which a tap opens (Bruno 44235).
+        if !notify.alert_id.is_empty() {
+            payload["target"]["alert"] = serde_json::Value::from(notify.alert_id.clone());
+        }
         let bytes = serde_json::to_vec(&payload).ok()?;
         if bytes.len() <= BUCKETS[BUCKETS.len() - 1] {
             break bytes;

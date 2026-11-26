@@ -7,6 +7,8 @@ import 'package:crypto/crypto.dart' show sha256;
 import 'tunnel/api/account.dart' as rust;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart'
+    show MethodChannel, MissingPluginException, PlatformException;
 
 import 'tunnel_client.dart' show RustTunnels, newDeviceKey;
 
@@ -444,21 +446,39 @@ class DeviceAccount extends ChangeNotifier {
        _makeKey = makeKey ?? newAccountKey,
        _now = now ?? DateTime.now;
 
-  /// What [toKept] kept.
-  factory DeviceAccount.kept(Map<String, String> kept) => DeviceAccount(
-    key: kept['key'] ?? '',
-    service: kept['service'] ?? '',
-    email: kept['email'] ?? '',
-  );
+  /// What [toKept] kept. A key kept in [AccountKeyVault] (a Mac signed
+  /// in through its own Claktory, #529) is [vaulted]: null when it
+  /// couldn't be read, which leaves this device signed out.
+  factory DeviceAccount.kept(
+    Map<String, String> kept, {
+    String? vaulted,
+    DeviceAccountService Function(String key, String service)? open,
+  }) {
+    final inVault = kept['key_in'] == 'keychain';
+    final key = inVault ? vaulted ?? '' : kept['key'] ?? '';
+    return DeviceAccount(
+        key: key,
+        service: kept['service'] ?? '',
+        email: key.isEmpty ? '' : kept['email'] ?? '',
+        open: open,
+      )
+      .._vaulted = inVault && key.isNotEmpty
+      .._autoVouch = kept['auto'] != 'off';
+  }
+
+  /// Whether what [kept] keeps has its key in [AccountKeyVault].
+  static bool keyInVault(Map<String, String> kept) =>
+      kept['key_in'] == 'keychain';
 
   static DeviceAccountService _defaultService(String key, String service) =>
       DeviceAccountService(accountKey: key, service: service);
 
   /// What this device keeps: [StoredConnections.account].
   Map<String, String> toKept() => {
-    if (_key.isNotEmpty) 'key': _key,
+    if (_vaulted) 'key_in': 'keychain' else if (_key.isNotEmpty) 'key': _key,
     if (_service.isNotEmpty) 'service': _service,
     if (_email.isNotEmpty) 'email': _email,
+    if (!_autoVouch) 'auto': 'off',
   };
 
   /// Called when what's kept changed, to keep it.
@@ -467,6 +487,16 @@ class DeviceAccount extends ChangeNotifier {
   String _key;
   String _service;
   String _email;
+
+  /// [_key] is kept in [AccountKeyVault], not with the connections: it's
+  /// the one this Mac's own Claktory signed the app in with (#529).
+  var _vaulted = false;
+
+  /// Whether this Mac's app may be signed in through its own Claktory by
+  /// itself (#529): off once the person signed this device out, or another
+  /// device removed it (Fugo's condition 5), until it signs in again.
+  bool get autoVouch => _autoVouch;
+  var _autoVouch = true;
   final DeviceAccountService Function(String key, String service) _openService;
   final String Function() _makeKey;
   final DateTime Function() _now;
@@ -507,7 +537,7 @@ class DeviceAccount extends ChangeNotifier {
     required String platform,
     required String version,
   }) async {
-    if (_key.isEmpty) _key = _makeKey();
+    if (_key.isEmpty) _newKey();
     if (!signedIn) _service = service == defaultAccountService ? '' : service;
     _kept();
     Future<DeviceSignInStarted> send() => _unlessRemoved(
@@ -549,6 +579,61 @@ class DeviceAccount extends ChangeNotifier {
     _awaiting = null;
     _email = signedIn.email.isNotEmpty ? signedIn.email : awaiting.email;
     _removed = false;
+    _autoVouch = true;
+    _assertions.clear();
+    _kept();
+  }
+
+  /// The key to sign in through this Mac's own Claktory with (#529): the
+  /// one kept for it before, or a new one ([fresh]: always a new one,
+  /// after the service said the old one was another account's).
+  String vouchKey({bool fresh = false}) =>
+      !fresh && _vaulted && _key.isNotEmpty ? _key : _makeKey();
+
+  /// Not signed in through this Mac's own Claktory by itself any more
+  /// (#529): it said this device was removed.
+  void turnOffAutoVouch() {
+    if (!_autoVouch) return;
+    _autoVouch = false;
+    _kept();
+  }
+
+  /// Signs in with [key], kept in the vault, through the one-time [code]
+  /// for [requestId] this Mac's own Claktory got from its account service
+  /// [service] (#529): signed by [key], the proof it's this app's.
+  /// Throws [AccountServiceError] or [AccountServiceUnreachable] as
+  /// [verify] does; device_removed turns signing in by itself off.
+  Future<void> signInVouched({
+    required String key,
+    required String service,
+    required String requestId,
+    required String code,
+    String email = '',
+  }) async {
+    final normal = service == defaultAccountService ? '' : service;
+    final api = _openService(
+      key,
+      normal.isEmpty ? defaultAccountService : normal,
+    );
+    final ({String accountId, String email}) signedIn;
+    try {
+      signedIn = await api.verify(requestId: requestId, code: code.trim());
+    } on AccountServiceError catch (error) {
+      if (error.status == 403 && error.code == 'device_removed') {
+        _removed = true;
+        _autoVouch = false;
+        _kept();
+      }
+      rethrow;
+    }
+    _key = key;
+    _client = api;
+    _service = normal;
+    _vaulted = true;
+    _awaiting = null;
+    _email = signedIn.email.isNotEmpty ? signedIn.email : email;
+    _removed = false;
+    _autoVouch = true;
     _assertions.clear();
     _kept();
   }
@@ -571,10 +656,9 @@ class DeviceAccount extends ChangeNotifier {
     } on AccountServiceUnreachable {
       // Its key stays bound there until removed at claktory.com/account.
     } finally {
-      if (newKey) {
-        _key = _makeKey();
-        _client = null;
-      }
+      if (newKey) _newKey();
+      // The person's choice: not signed in again by itself (#529).
+      _autoVouch = false;
       _signedOut();
     }
   }
@@ -645,7 +729,10 @@ class DeviceAccount extends ChangeNotifier {
       if (error.status == 401 && error.code == 'unauthorized') {
         // Signed out from elsewhere, or removed: the apps behind the
         // service (DMs' worker) don't say which, so the service is asked.
-        if (await _removedHere()) _removed = true;
+        if (await _removedHere()) {
+          _removed = true;
+          _autoVouch = false;
+        }
         _signedOut();
       }
       // Another of the person's devices removed this one (row 199): signed
@@ -654,6 +741,7 @@ class DeviceAccount extends ChangeNotifier {
       // as a new device ([_unlessRemoved]).
       if (error.status == 403 && error.code == 'device_removed') {
         _removed = true;
+        _autoVouch = false;
         _signedOut();
       }
       rethrow;
@@ -697,12 +785,20 @@ class DeviceAccount extends ChangeNotifier {
     } on AccountServiceError catch (error) {
       if (error.status == 403 &&
           (error.code == 'device_removed' || _anotherAccounts(error))) {
-        _key = _makeKey();
-        _client = null;
+        if (error.code == 'device_removed') _autoVouch = false;
+        _newKey();
         _signedOut();
       }
       rethrow;
     }
+  }
+
+  /// A new key, kept with the connections as before: one the vault kept
+  /// is left there for the next sign-in through this Mac's Claktory.
+  void _newKey() {
+    _key = _makeKey();
+    _client = null;
+    _vaulted = false;
   }
 
   static bool _anotherAccounts(AccountServiceError error) =>
@@ -741,3 +837,54 @@ class DeviceCodeWait {
 
 /// A new account key: 32 random bytes as lowercase hex, like a device key.
 String newAccountKey() => newDeviceKey();
+
+/// Where a Mac keeps its account key once its own Claktory signed the app
+/// in (#529): the data-protection keychain, this device only, never
+/// synchronised (Fugo's condition 4), through `factory/account-key`, the
+/// same native store as the direct messages' keys (people/dm_keys.dart's
+/// contract, DmKeys.swift). Nowhere else: a build without the keychain
+/// group (Claktory Dev, signed ad hoc) can't keep it, and isn't signed in
+/// that way.
+class AccountKeyVault {
+  const AccountKeyVault({
+    this.channel = const MethodChannel('factory/account-key'),
+  });
+
+  final MethodChannel channel;
+
+  static const _name = 'account';
+
+  /// Whether this device can keep it: false where there's no store.
+  Future<bool> available() async {
+    try {
+      return await channel.invokeMethod<bool>('available') ?? false;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  /// The key kept (hex), or null when none is or it can't be read.
+  Future<String?> read() async {
+    try {
+      final bytes = await channel.invokeMethod<Uint8List>('get', {
+        'name': _name,
+      });
+      if (bytes == null || bytes.isEmpty) return null;
+      return utf8.decode(bytes);
+    } on PlatformException {
+      return null;
+    } on MissingPluginException {
+      return null;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  /// Keeps [key] (hex), replacing what was kept.
+  Future<void> write(String key) => channel.invokeMethod<void>('put', {
+    'name': _name,
+    'bytes': Uint8List.fromList(utf8.encode(key)),
+  });
+}

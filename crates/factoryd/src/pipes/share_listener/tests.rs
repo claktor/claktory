@@ -73,6 +73,7 @@ async fn listen() -> Share {
         cookies: Mutex::new(BTreeSet::new()),
         codes: Mutex::new(Vec::new()),
         save: Box::new(|_: &Gate| {}),
+        failed: Box::new(|_: Option<&str>| {}),
     });
     let streams = Arc::new(AtomicUsize::new(0));
     let counted = streams.clone();
@@ -117,6 +118,73 @@ async fn open(share: &Share, host: &str) -> String {
     let set = head.lines().find(|line| line.to_ascii_lowercase().starts_with("set-cookie:")).expect("a cookie").to_owned();
     assert!(set.contains("HttpOnly") && set.contains("SameSite=Strict") && set.contains("Path=/"), "{set}");
     set.split_once(':').unwrap().1.trim().split(';').next().unwrap().to_owned()
+}
+
+/// #505 (Sale rows 174–176, Fugo 46986): Android's Custom Tab opens the
+/// Open link as another site's navigation. Taken only as a GET of a
+/// document to the Open path with no Origin, checked before the code is
+/// spent; answered with Claktory's own page, which sets the key and moves to
+/// "/" as the share's own navigation, the code nowhere in it. Anything else
+/// cross-site stays refused, "/" included.
+#[tokio::test]
+async fn an_app_opened_link_opens_only_as_a_document_navigation_with_its_code() {
+    let share = listen().await;
+    let own = format!("s-test.localhost:{}", share.port);
+    let navigate = [("Sec-Fetch-Site", "cross-site"), ("Sec-Fetch-Mode", "navigate"), ("Sec-Fetch-Dest", "document")];
+    let code = share.gate.mint();
+    let path = format!("/__claktory_open?k={code}");
+
+    // Not a document navigation, a POST, with an Origin, or same-site:
+    // refused, and the code isn't spent.
+    let wrong: [(&str, Vec<(&str, &str)>); 6] = [
+        ("GET", vec![("Sec-Fetch-Site", "cross-site"), ("Sec-Fetch-Mode", "navigate"), ("Sec-Fetch-Dest", "iframe")]),
+        ("GET", vec![("Sec-Fetch-Site", "cross-site"), ("Sec-Fetch-Mode", "no-cors"), ("Sec-Fetch-Dest", "document")]),
+        ("GET", vec![("Sec-Fetch-Site", "cross-site"), ("Sec-Fetch-Mode", "navigate")]),
+        ("POST", navigate.to_vec()),
+        ("GET", [navigate.as_slice(), &[("Origin", "http://evil.localhost:9")]].concat()),
+        ("GET", vec![("Sec-Fetch-Site", "same-site"), ("Sec-Fetch-Mode", "navigate"), ("Sec-Fetch-Dest", "document")]),
+    ];
+    for (method, headers) in &wrong {
+        let (status, head, body) = send(share.port, method, &own, &path, None, headers).await;
+        assert_eq!(status, 403, "{method} {headers:?}: {head}");
+        assert!(body.contains("opens only from Claktory"), "{body}");
+        // Readable on a phone (#505 row 655).
+        assert!(body.contains("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"), "{body}");
+    }
+
+    // The navigation itself: Claktory's page, the key set as on a Mac, the
+    // code nowhere in it, nothing framing it, and the sharer never asked.
+    let before = share.streams.load(Ordering::SeqCst);
+    let (status, head, body) = send(share.port, "GET", &own, &path, None, &navigate).await;
+    assert_eq!(status, 200, "{head}");
+    let lower = head.to_ascii_lowercase();
+    assert!(lower.contains("content-security-policy: default-src 'none'; frame-ancestors 'none'"), "{head}");
+    assert!(lower.contains("x-frame-options: deny") && lower.contains("cache-control: no-store") && lower.contains("referrer-policy: no-referrer"), "{head}");
+    assert!(body.contains("http-equiv=\"refresh\" content=\"0;url=/\"") && body.contains("<a href=\"/\">"), "{body}");
+    assert!(!body.contains(&code) && !body.contains("<script") && !body.contains("style="), "{body}");
+    assert!(body.contains("name=\"viewport\""), "{body}");
+    let set = head.lines().find(|line| line.to_ascii_lowercase().starts_with("set-cookie:")).expect("a cookie").to_owned();
+    assert!(set.contains("HttpOnly") && set.contains("SameSite=Strict") && set.contains("Path=/"), "{set}");
+    let key = set.split_once(':').unwrap().1.trim().split(';').next().unwrap().to_owned();
+    assert_eq!(share.streams.load(Ordering::SeqCst), before, "the sharer was asked");
+
+    // Its own next navigation reaches the website with the key.
+    let same = [("Sec-Fetch-Site", "same-origin"), ("Sec-Fetch-Mode", "navigate"), ("Sec-Fetch-Dest", "document")];
+    let (status, _, body) = send(share.port, "GET", &own, "/", Some(&key), &same).await;
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("path=/"), "{body}");
+    // Spent: the same link again is refused.
+    let (status, _, _) = send(share.port, "GET", &own, &path, None, &navigate).await;
+    assert_eq!(status, 403);
+    // Cross-site anywhere else, even with the key: refused.
+    let (status, _, body) = send(share.port, "GET", &own, "/", Some(&key), &navigate).await;
+    assert_eq!(status, 403, "{body}");
+    // A code past its minute: refused.
+    let late = share.gate.mint();
+    share.gate.codes.lock().unwrap().iter_mut().for_each(|(_, until)| *until = Instant::now());
+    let (status, _, _) = send(share.port, "GET", &own, &format!("/__claktory_open?k={late}"), None, &navigate).await;
+    assert_eq!(status, 403);
+    share.cancel.cancel();
 }
 
 #[tokio::test]
@@ -311,8 +379,12 @@ async fn a_devices_forwarded_port_opens_the_same_share_with_the_same_checks() {
 
 #[tokio::test]
 async fn a_sharer_that_refuses_is_told_to_the_browser() {
+    let site = website().await;
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
+    // What the app is told: each failure's words, None once one goes through.
+    let told: Arc<Mutex<Vec<Option<String>>>> = Arc::default();
+    let heard = told.clone();
     let gate = Arc::new(Gate {
         share: "share-2".into(),
         host: "s-two".into(),
@@ -321,8 +393,21 @@ async fn a_sharer_that_refuses_is_told_to_the_browser() {
         cookies: Mutex::new(BTreeSet::new()),
         codes: Mutex::new(Vec::new()),
         save: Box::new(|_: &Gate| {}),
+        failed: Box::new(move |why: Option<&str>| heard.lock().unwrap().push(why.map(str::to_owned))),
     });
-    let connect: Connect = Arc::new(|| Box::pin(async { Err("Nothing is listening on port 3000 on Ana's Mac.".to_owned()) }));
+    // The sharer refuses until it's told to answer.
+    let refusing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let refuses = refusing.clone();
+    let connect: Connect = Arc::new(move || {
+        let refuses = refuses.load(Ordering::SeqCst);
+        Box::pin(async move {
+            if refuses {
+                return Err("Nothing is listening on port 3000 on Ana's Mac.".to_owned());
+            }
+            let socket = TcpStream::connect(site).await.map_err(|error| error.to_string())?;
+            Ok(Box::new(socket) as Box<dyn Io>)
+        })
+    });
     tokio::spawn(serve(listener, gate.clone(), connect, CancellationToken::new()));
     let own = format!("s-two.localhost:{port}");
     let code = gate.mint();
@@ -332,6 +417,11 @@ async fn a_sharer_that_refuses_is_told_to_the_browser() {
     let (status, _, body) = get(port, &own, "/", Some(&key)).await;
     assert_eq!(status, 502);
     assert!(body.contains("Nothing is listening on port 3000 on Ana&#39;s Mac.") || body.contains("Nothing is listening on port 3000 on Ana's Mac."), "{body}");
+    assert_eq!(told.lock().unwrap().last(), Some(&Some("Nothing is listening on port 3000 on Ana's Mac.".to_owned())));
+    // The next request that goes through clears it.
+    refusing.store(false, Ordering::SeqCst);
+    assert_eq!(get(port, &own, "/", Some(&key)).await.0, 200);
+    assert_eq!(told.lock().unwrap().last(), Some(&None));
 }
 
 #[test]

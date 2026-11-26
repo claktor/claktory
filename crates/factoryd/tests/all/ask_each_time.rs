@@ -18,10 +18,11 @@ async fn setup() -> (std::path::PathBuf, Client, View, String) {
         description: "Deploys.".into(),
         entries: vec![v1::SecretEntry { variable: "AWS_SECRET".into(), value: "wJalrXUtnFEMI-K7MDENG".into(), file: false }],
         ask_each_time: true,
+        sites: Vec::new(),
     };
     apply_request(&mut client, &mut view, client_message::Body::CreateSecret(secret)).await;
     let id = view.workspace.vault.clone().expect("vault").secrets[0].id.clone();
-    let grant = v1::GrantSecret { id: id.clone(), agent_id: "bo".into(), proof: None };
+    let grant = v1::GrantSecret { id: id.clone(), agent_id: "bo".into(), proof: None, fill_only: false };
     apply_request(&mut client, &mut view, client_message::Body::GrantSecret(grant)).await;
     (dir, client, view, id)
 }

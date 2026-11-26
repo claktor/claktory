@@ -271,10 +271,14 @@ impl Extension for Agents {
             provenance::tool(factory, agent),
             quiet::tool(factory, agent),
         ];
-        let (map, admin) = match factory.lock().config.agent(agent) {
-            Some(me) => (sees_map(me), crate::proposals::is_admin(me)),
-            None => (false, false),
+        let (map, admin, also) = match factory.lock().config.agent(agent) {
+            Some(me) => (sees_map(me), crate::proposals::is_admin(me), !agent_list(me, ID, "also").is_empty()),
+            None => (false, false, false),
         };
+        // Giving up messaging an agent of another project (#236).
+        if also && !admin {
+            tools.push(crate::given_up::reach_tool(factory, agent));
+        }
         if map {
             tools.push(map_tool(factory, agent));
         }

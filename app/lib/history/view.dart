@@ -20,8 +20,7 @@ import '../map_card.dart' show MapCardPlacement;
 import '../map_layout.dart';
 import '../mobile/drawer.dart' show largeText;
 import '../mobile/metrics.dart';
-import '../mobile/presentation.dart' show showPanel;
-import '../mobile/share.dart' show globalRectOf;
+import '../mobile/presentation.dart' show SheetAction, showActions, showPanel;
 import '../protocol/factory/v1/factory.pb.dart';
 import '../scope.dart';
 import '../selection.dart' show Unselectable;
@@ -161,13 +160,13 @@ class MapModeSwitch extends StatelessWidget {
 }
 
 /// Opens the video export for the History [key] shows (a [HistoryView]'s
-/// key), the share sheet pointing at [from]: from a phone's header.
-void shareReplay(BuildContext context, GlobalKey key, {Rect? from}) {
+/// key): from a phone's header.
+void shareReplay(BuildContext context, GlobalKey key) {
   final state = key.currentState;
   if (state is! _HistoryViewState) return;
   final controller = state._controller;
   if (controller == null || controller.timeline == null) return;
-  unawaited(showReplayExport(context, controller, from: from));
+  unawaited(showReplayExport(context, controller));
 }
 
 class HistoryView extends StatefulWidget {
@@ -262,7 +261,7 @@ class _HistoryViewState extends State<HistoryView>
   void _moved() {
     final scene = controller.scene;
     if (scene == null || !mounted) return;
-    final frame = scene.at(controller.time.value);
+    final frame = scene.at(controller.time.value, project: controller.project);
     if (!frame.sameAs(_frame)) {
       setState(() => _frame = frame);
       _settled = false;
@@ -633,6 +632,13 @@ class _Controls extends StatelessWidget {
                             // On a second line when it needs one.
                             child: _When(controller: controller, lines: 2),
                           ),
+                          if (_hasProjects(controller)) ...[
+                            const SizedBox(width: Space.s),
+                            SizedBox(
+                              width: 180,
+                              child: _ProjectSelect(controller: controller),
+                            ),
+                          ],
                           const SizedBox(width: Space.s),
                           SizedBox(
                             width: 210,
@@ -669,18 +675,14 @@ class _Controls extends StatelessWidget {
   /// the text (Sale's row 150: at 755 pt and Large, 125 pt was left and
   /// the chapter was cut). Narrower, they stack.
   static double rowWidth(BuildContext context) =>
-      360 + MediaQuery.textScalerOf(context).scale(540);
+      360 + MediaQuery.textScalerOf(context).scale(540) + 188;
 
   Widget _share() => Builder(
     builder: (context) => Button(
       label: 'Share replay…',
       onPressed: controller.timeline == null
           ? null
-          : () => showReplayExport(
-              context,
-              controller,
-              from: globalRectOf(context),
-            ),
+          : () => showReplayExport(context, controller),
     ),
   );
 
@@ -737,9 +739,78 @@ class _Controls extends StatelessWidget {
           children: [
             _NowButton(controller: controller),
             if (canExportReplay) _share(),
+            if (_hasProjects(controller))
+              SizedBox(
+                width: 220,
+                child: _ProjectSelect(controller: controller),
+              ),
           ],
         ),
       ],
+    ),
+  );
+}
+
+/// Whether History has a project to show on its own.
+bool _hasProjects(HistoryController controller) =>
+    controller.scene?.projects.isNotEmpty ?? false;
+
+/// The one project History shows, or all of them (Bruno 44372): to watch,
+/// scrub and share one project's history.
+class _ProjectSelect extends StatelessWidget {
+  const _ProjectSelect({required this.controller});
+
+  final HistoryController controller;
+
+  @override
+  Widget build(BuildContext context) => Select<String>(
+    value: controller.project ?? '',
+    title: 'Project',
+    options: [
+      const SelectOption('', 'All projects'),
+      for (final project in controller.scene?.projects ?? const [])
+        SelectOption(project.id, project.label),
+    ],
+    onChanged: (id) => controller.showProject(id.isEmpty ? null : id),
+  );
+}
+
+/// On a phone: which project it shows, from a sheet.
+class _ProjectButton extends StatelessWidget {
+  const _ProjectButton({required this.controller, required this.size});
+
+  final HistoryController controller;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) => GlyphButton(
+    label: 'Project',
+    active: controller.project != null,
+    onTap: () async {
+      final current = controller.project ?? '';
+      // The one shown checked.
+      Widget Function(Color)? mark(String id) => id == current
+          ? (color) => ExtensionGlyph(icon: 'check', name: '', color: color)
+          : null;
+      final chosen = await showActions<String>(
+        context,
+        title: 'Project',
+        actions: [
+          SheetAction('All projects', '', glyph: mark('')),
+          for (final project in controller.scene?.projects ?? const [])
+            SheetAction(project.label, project.id, glyph: mark(project.id)),
+        ],
+      );
+      if (chosen != null) {
+        controller.showProject(chosen.isEmpty ? null : chosen);
+      }
+    },
+    // In signal while it shows one project (Lucy).
+    glyph: (color) => ExtensionGlyph(
+      icon: 'list-filter',
+      name: '',
+      color: controller.project != null ? Palette.of(context).signal : color,
+      size: size,
     ),
   );
 }
@@ -800,14 +871,47 @@ class _When extends StatelessWidget {
             fontFeatures: const [FontFeature.tabularFigures()],
           ),
         );
+        final agents = controller.scene?.agentsAt(
+          controller.log,
+          t,
+          project: controller.project,
+        );
+        final working = agents == null || agents.total == 0
+            ? null
+            : agentsWorking(agents);
+        final more = controller.fetching || chapter != null;
+        // The one project shown, first (Lucy).
+        final project = controller.project;
+        final box = project == null || controller.scene == null
+            ? -1
+            : controller.scene!.projectBox(project);
         final about = [
+          if (box >= 0)
+            TextSpan(
+              text:
+                  '${controller.scene!.boxes[box].box.label}'
+                  '${reconstructed || working != null || more ? ' · ' : ''}',
+              style: type.caption.copyWith(
+                color: palette.text,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
           // First, so a narrow line never cuts it off (Zucchero's row 502).
           if (reconstructed)
             TextSpan(
-              text: chapter == null && !controller.fetching
+              text: working == null && !more
                   ? 'Pieced together'
                   : 'Pieced together · ',
               style: type.caption.copyWith(color: palette.textFaint),
+            ),
+          // As the video says it (Matt, through Bruno 44277).
+          if (working != null)
+            TextSpan(
+              text: more ? '$working · ' : working,
+              style: type.caption.copyWith(
+                color: palette.textMuted,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
             ),
           // Going where the events aren't in yet: quietly, in place of
           // the chapter.
@@ -920,7 +1024,7 @@ class _PhoneBar extends StatelessWidget {
             final room =
                 MediaQuery.sizeOf(context).width -
                 2 * Touch.gutter -
-                2 * Touch.target -
+                (_hasProjects(controller) ? 3 : 2) * Touch.target -
                 speedWidth -
                 2 * Space.xs;
             // Stacked only where it's narrow: turned, a phone has the room
@@ -951,6 +1055,9 @@ class _PhoneBar extends StatelessWidget {
                 size: glyph,
               ),
             );
+            final project = _hasProjects(controller)
+                ? _ProjectButton(controller: controller, size: glyph)
+                : null;
             return Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -969,6 +1076,7 @@ class _PhoneBar extends StatelessWidget {
                       const SizedBox(width: Space.s),
                       Expanded(child: speed),
                       const SizedBox(width: Space.s),
+                      ?project,
                       chapters,
                     ],
                   ),
@@ -988,6 +1096,7 @@ class _PhoneBar extends StatelessWidget {
                       ),
                       const SizedBox(width: Space.xs),
                       SizedBox(width: speedWidth, child: speed),
+                      ?project,
                       chapters,
                     ],
                   ),

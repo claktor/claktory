@@ -1854,12 +1854,21 @@ pub(crate) fn outbox_counts(factory: &impl Host) -> Result<BTreeMap<String, i64>
 }
 
 /// The whole routing table, one Route an endpoint (H2's gate and peers).
+/// Away from the home, only the route to the home: friends' homes admit
+/// only the person's home, and the person's other Claktories are bound
+/// there, so a Claktory that was the home never knocks on them again
+/// (Zucchero, row 612). The table stays, for when it's the home again.
 pub(crate) fn routes(factory: &impl Host) -> Result<Vec<Route>, Refusal> {
     factory.run(|step| {
         let mut rows: Vec<(String, String, Vec<u8>)> = {
             let mut statement = step.tx.prepare("SELECT endpoint, account, group_id FROM reach ORDER BY endpoint, group_id")?;
             statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect::<Result<_, _>>()?
         };
+        if let Some(placed) = meta(step.tx, "placed")?
+            && let Some(home) = String::from_utf8_lossy(&placed).strip_prefix("away:")
+        {
+            rows.retain(|(endpoint, _, _)| !home.is_empty() && endpoint.eq_ignore_ascii_case(home));
+        }
         // And the person's home, for what this Claktory hands on to it.
         if let Some(home) = handing_to(step)? {
             let groups: Vec<Vec<u8>> = {
@@ -3128,6 +3137,30 @@ mod tests {
         assert!(routes(&w.host).unwrap().is_empty());
         sweep(&w.host).unwrap();
         assert_eq!(w.host.run(|step| Ok(step.tx.query_row("SELECT COUNT(*) FROM handover", [], |row| row.get::<_, i64>(0))?)).unwrap(), 0);
+    }
+
+    /// Zucchero's row 612: a Claktory that isn't the home links to nothing
+    /// but the home, whatever routes a device gives it (friends' homes take
+    /// only the person's home), and they're there again once it's the home.
+    #[test]
+    fn away_from_the_home_it_links_only_to_the_home() {
+        let mut w = world();
+        let home = "a1a1";
+        let reply = w.ann.say(&mut w.ann_group, "hi Bo");
+        assert!(follow(&w.host, &Placed::Home, &[]).unwrap());
+        take_(&w.host, reply, device(&w.ann, "c1")).unwrap();
+        w.host.is_home = false;
+        assert!(follow(&w.host, &Placed::Away(Some(home.to_owned())), &[]).unwrap());
+        let bo = || vec![Route { account: "bo".to_owned(), endpoint: BO_HOME.to_owned(), group_ids: vec![GROUP.to_vec()] }];
+        set_routes(&w.host, bo()).unwrap();
+        let linked: Vec<String> = routes(&w.host).unwrap().into_iter().map(|route| route.endpoint).collect();
+        assert_eq!(linked, [home]);
+        assert!(follow(&w.host, &Placed::Away(None), &[]).unwrap());
+        assert!(routes(&w.host).unwrap().is_empty(), "no home named: no links");
+        w.host.is_home = true;
+        assert!(follow(&w.host, &Placed::Home, &[]).unwrap());
+        set_routes(&w.host, bo()).unwrap();
+        assert!(routes(&w.host).unwrap().iter().any(|route| route.endpoint == BO_HOME));
     }
 
     /// Row 595 (Fugo 41473): a friend's new home, proven by their signed

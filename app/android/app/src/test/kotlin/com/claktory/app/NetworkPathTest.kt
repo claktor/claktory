@@ -16,12 +16,19 @@ class NetworkPathTest {
         metered: Boolean = false,
         dataSaver: Boolean = false,
         network: Long? = null,
-    ) = NetworkPath.describe(transports, internet, metered, dataSaver, network)
+        blocked: Boolean = false,
+    ) = NetworkPath.describe(transports, internet, metered, dataSaver, network, blocked)
 
     @Test
     fun noNetworkIsUnsatisfiedWithNoInterfaces() {
         assertEquals(
-            mapOf("satisfied" to false, "interfaces" to emptyList<String>(), "expensive" to false, "constrained" to false),
+            mapOf(
+                "satisfied" to false,
+                "interfaces" to emptyList<String>(),
+                "expensive" to false,
+                "constrained" to false,
+                "blocked" to false,
+            ),
             event(null),
         )
     }
@@ -61,6 +68,21 @@ class NetworkPathTest {
             "up cellular expensive constrained",
             NetworkPath.summary(event(setOf(TRANSPORT_CELLULAR), metered = true, dataSaver = true)),
         )
+    }
+
+    @Test
+    fun aBlockIsSaidApartFromTheNetwork() {
+        // Kept off a network that's up (W6: Claktory hidden under a Custom Tab, the screen off).
+        val kept = event(setOf(TRANSPORT_WIFI), network = 7L, blocked = true)
+        assertEquals(true, kept["blocked"])
+        assertEquals(true, kept["satisfied"])
+        assertEquals("7", kept["network"])
+        assertEquals("up wifi blocked", NetworkPath.summary(kept))
+        // Let through again: the same network, only blocked differs.
+        val through = event(setOf(TRANSPORT_WIFI), network = 7L)
+        assertEquals(kept - "blocked", through - "blocked")
+        assertEquals(false, through["blocked"])
+        assertEquals(false, event(null)["blocked"])
     }
 
     @Test

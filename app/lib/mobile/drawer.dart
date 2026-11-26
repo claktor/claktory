@@ -915,7 +915,7 @@ class _DrawerHeader extends StatelessWidget {
                     // list, the form and VoiceOver have it whole.
                     MediaQuery.withClampedTextScaling(
                       maxScaleFactor: 1.6,
-                      child: OffAccountMark(claktory: shown, signIn: true),
+                      child: OffAccountMark(claktory: shown),
                     ),
                   if (connection)
                     Transform.translate(

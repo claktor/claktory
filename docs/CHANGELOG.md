@@ -6,6 +6,62 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.24
+Released 2026-11-26 23:33 UTC.
+Go through everything that needs you in focus mode, never miss an alert, and take photos for your agents right from Claktory on your phone.
+- Added: Focus mode goes through everything that needs you, one at a time. On a Mac, press ⌘⇧N: approve with ⌘↩, dismiss with ⌘⌫ and a quick reason, and the next one comes up as soon as Claktory has your answer, with its conversation beside it; hold ⌘↩ to say why. On your iPhone, Needs you shows one at a time, with who asks above it and Approve under your thumb; touch and hold Claktory's icon to open it from the Home Screen. On an iPad, focus mode fits the window, with the same keys on a keyboard, and a PDF or picture an agent asks you to review opens there for you to draw on with Apple Pencil. Your drawing goes with your answer.
+- Added: Take a photo from the paperclip on your iPhone, iPad or Android phone and send it to an agent.
+- Added: You can attach files when you answer an agent: with an approval or a dismissal, a written answer, a reply, a step, or when you resolve it. Use the paperclip by the field, or on a Mac drop them on the field or paste them while you type there. They show with your answer once it's sent.
+- Added: Before your iPhone or iPad asks to use the camera, the microphone or notifications, Claktory says why first. If you say no, it says what that stops and how to turn it on, and carries on by itself once you do.
+- Added: On a Mac whose Claktory is signed in to your Claktory account, the app signs in too, with no emailed code, so your other Claktories show there at once. If you sign the app out, it says which Claktories stop connecting until you sign in again, and Use this account signs it in again with one click.
+- Added: On iPhone, iPad and Android, Open on a website someone shares with you over a pipe opens it over Claktory (a browser tab on Android, Safari's view on iPhone and iPad), and Claktory stays connected while you look at it. If it doesn't load, Claktory says why once you're back.
+- Added: A website you share over a pipe now stops being shared after 24 hours unless you choose 1 hour, 7 days or never when you share it. Each shared website shows how long it has left, and Change end… in the pipe's settings gives it more time or less. (friend bug #46)
+- Added: You can choose which agents hear when this computer runs low on memory or disk, in Settings → Resources: admin agents such as Rivet, agents you pick, or both. (friend bug #54)
+- Added: Agents can give up access they no longer need, such as a pipe or an app. Needs you's History shows what they gave up and why, and only you can give it back.
+- Changed: Alerts from your agents and from Claktory now wait in Needs you until you read them, so you never lose one you missed, even one held back during quiet hours. Ones you've read move to History, which says when and on which device.
+- Changed: When setting up a service would have you click through its website, agents now offer to do it for you. You give them one sign-in; they use it once to make a key that can do only that job, then cancel the sign-in, so only that key stays.
+- Changed: Share replay saves your video as soon as it's made: on a Mac in Movies › Claktory, on an iPhone or iPad in Photos, with Show in Finder and Share… there. It's made in the background while you carry on, with its progress along the top of the window, and the share menu says why when it can't open. The video now shows how many agents were working and Claktory's mark, pipes and their messages are easier to see, and you can watch and share one project's History on its own.
+- Changed: History on the Map opens in a moment even after a year or more of work, and replays every message in the order it was sent.
+- Changed: A device you allow with its four digits is yours from then on, with no week to confirm it and no sign-in asked of it later. A device let in by a program has to sign in to your Claktory account before it connects. Each device in Settings → Devices keeps who allowed it and when.
+- Changed: Your Claktory turns away a device signed in to someone else's Claktory account, even one you allowed before, and a Claktory on someone else's account turns your device away. Your device says so, says a pipe is the way to work with their agents, and lets you try again or remove that Claktory. If that Claktory is yours, it says how to move it to your account, and Sign in… switches this device to that Claktory's account instead.
+- Changed: Remove… is the same everywhere, including Your Claktories, where it was Forget, and it asks first. When your device is the only one connected to that Claktory, it says how to connect again.
+- Changed: A Claktory's tile shows how many things wait for your answer there, and on a phone "‹ Claktories" counts what waits in the others.
+- Changed: When an agent changes a file it asked you to review, Claktory marks its question as updated by itself, so you can see the file changed, and Approve means the file as it reads now.
+- Changed: When you dismiss an agent's request for a secret and say why, the agent reads what you said and asks again for what you suggest, unless you said no. A dismissal with no words tells it not to ask again unless something changes.
+- Changed: When an agent's model changes, its conversation says who or what changed it: you on one of your devices, another agent such as Rivet and its reason, Claktory moving it to another provider at a usage limit and back, or the settings file. (friend bug #43)
+- Changed: Signing this Claktory out of your account now ends its sign-in at claktory.com too, so a copy of it there stops working. If claktory.com can't be reached, Claktory tells it as soon as it can.
+- Changed: On a phone, the message box steps aside while you type an answer in the conversation with the on-screen keyboard, so what you're answering has the room above it. It comes back as you left it, with your draft, as soon as the keyboard goes.
+- Changed: Needs you shows each agent's role beside its name.
+- Changed: When your Mac reaches its Claktory on another machine by an indirect route, the app's update now downloads gently, so your conversations keep flowing while it comes, and at full speed again once the route is direct. (friend bug #51)
+- Changed: `factoryd pair` also shows the characters the device you connect shows, so you can check they match, and says it works on a phone or iPad, or on a Mac.
+- Fixed: A Mac connected to a Claktory on Linux or Windows updates again. Claktory 0.1.23 couldn't unpack the new, smaller Mac update there, so the Mac kept asking and never updated; now it can, and a failed try waits a while before Claktory tries again. (friend bug #56)
+- Fixed: When an agent asks you to follow steps, you can tell it a step doesn't work as written without marking it done: type your words and choose Send, and the agent fixes the step or answers you, and its steps come back at that step. Can't do this now waits for the agent to fix the step too, instead of ending the steps for good.
+- Fixed: A Claktory no longer says your Mac or phone is signed out when it's only this app that isn't signed in to your Claktory account. A Claktory is marked "Not on your Claktory account" only when Claktory knows it isn't on your account; otherwise its form says what's known, with Sign in…, and connecting to a Claktory no longer warns that it isn't on your account when that couldn't be checked.
+- Fixed: A Claktory that was signed out of your Claktory account says how to sign it in again, including one with no screen.
+- Fixed: Saving or using a recovery key now names the Claktory it's for, such as "Save the recovery key for nixos", since each Claktory has its own, even on the same account.
+- Fixed: The first screen on an iPhone or iPad, Send me the link and an empty Your Claktories now say Claktory runs on a Mac or a Linux server, or on Windows in preview.
+- Fixed: Photos show at once. As you choose them, they appear in the message box or under your answer, reading "Adding photo…" until they're ready, and Send waits for them. As you send them, they show in the conversation straight away. Pictures in conversations also load much faster on your phone and over slow connections.
+- Fixed: A model your provider has just released shows in the model list as soon as you open it or Settings → Providers, instead of up to 12 hours later or only after Rivet refreshed the list. An OpenRouter key's credit is read again then too. (friend bug #41)
+- Fixed: Claktory no longer keeps switching between two of Claktory's servers at similar distances, so your devices stay reachable through the same one instead of moving every few minutes. (friend bug #52)
+- Fixed: Turning on Advanced diagnostics takes effect at once on a Mac that's already connected, as it does on your other devices. Before, the Mac sent nothing until you quit and reopened it. (friend bug #53)
+- Fixed: Rivet can now list and cancel the monitors of an agent in an archived project without bringing the project back, as you can on the Monitors page. Nothing runs or wakes the agent meanwhile. (friend bug #55)
+- Fixed: Build caches in your agents' checkouts now stay near the limit you set in Settings → Resources even while those agents keep background tasks running, so the busiest checkouts no longer fill your disk.
+- Fixed: An agent can no longer pass off its own words as a message from Claktory, another agent or you. If it starts writing one, its reply stops there, and it doesn't act on what it wrote.
+- Fixed: In focus mode, what you dismiss says Dismissed as the next one comes up, not Approved, and on your iPhone you can attach files to an answer in Needs you.
+- Fixed: On an iPad, the update banner no longer covers the whole screen over the sign-in step or the first questions, and no longer offers to update a Claktory that's already up to date when only the iPad's app is behind: a quiet line says a newer app is in the App Store or TestFlight instead, and you can close it.
+- Fixed: On an iPad, tapping a paperclip to attach files no longer closes Claktory. Its menu opens beside the paperclip, wherever you're writing: in the message box, in an answer to an agent and in a review.
+- Fixed: On an iPad, the sidebar's Files and + buttons are easier to hit with a finger, and Files open beside a conversation become the Files page when you make the window narrow, instead of a page that can't show them.
+- Fixed: On an iPad used with a finger, touch and hold a Claktory at the far left to rename it, change its color or remove it, and Your Claktories shows Remove… without a pointer.
+- Fixed: Tapping a + that asks Rivet more than once no longer repeats the same words in Rivet's message box.
+- Fixed: An agent's Find (the magnifier in its header) now searches the pane you last tapped, such as Settings open beside the conversation, instead of always the conversation.
+- Fixed: A picture shown in a Markdown file updates as soon as it changes, even when the file itself doesn't, and a comment on the file's text never lands on a picture's hidden description.
+- Fixed: When a Claktory turns your phone or iPad away while it's asking your name, the screen saying why shows at once, instead of "Connecting…" until you reopen the app.
+- Fixed: On Android, Back on a full-screen sign-in or setup page now goes back to your Claktories instead of leaving the app.
+- Fixed: On Android, repeated attempts to share files that can't be opened now update the notice already on screen, so you only have to close it once.
+- Fixed: Claktory's own messages on a shared website, such as when it isn't answering, are now readable on a phone instead of showing at desktop size.
+- Fixed: On a Mac, a menu near the bottom of the window, such as History's project and speed menus, now opens upward, so you can pick from it.
+- Fixed: The command Move… gives you for the other computer downloads Claktory from its current address on GitHub, without going through a redirect.
+
 ## v0.1.23
 Released 2026-11-26 15:30 UTC.
 Replay how your team grew on the Map, keep agents working with your laptop's lid closed, and install Claktory on Windows.

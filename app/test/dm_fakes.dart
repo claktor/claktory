@@ -2081,6 +2081,11 @@ class FakeDmDevice implements DmDevice {
   Future<void> skip({required List<int> groupId, required int seq}) async =>
       _groups[dmB64(groupId)]!.seq = seq;
 
+  /// Puts [member] (`account/leaf`) in [group] here, as a group that still
+  /// holds a device would.
+  void holdLeaf(String group, String member) =>
+      _groups[group]!.members = [..._groups[group]!.members, member];
+
   @override
   Future<List<String>> leafIds({required List<int> groupId}) async => [
     for (final m in _groups[dmB64(groupId)]?.members ?? const <String>[])
@@ -2418,10 +2423,19 @@ class FakeHome implements DmHomeLink {
 
   /// Answers the next send with this instead of storing it.
   pb.DmSendResult? answer;
+
+  /// Answers each send it gives a result for with that instead of storing
+  /// it (a CONFLICT for one id, say).
+  pb.DmSendResult? Function(pb.DmSend send)? answerFor;
+
+  /// Stores each send it says yes to, then loses the answer: the device
+  /// hears nothing back (E11-9).
+  bool Function(pb.DmSend send)? loseAnswer;
   var retryAfterMs = 0;
 
   final _log = <String, List<pb.DmEntry>>{};
   final _receipts = <String, pb.DmReceipt>{};
+  final _sentBytes = <String, String>{};
   final _taken = <String>{};
   final _pulled = <String, int>{};
   var _following = false;
@@ -2494,9 +2508,15 @@ class FakeHome implements DmHomeLink {
       answer = null;
       return receipt(once);
     }
+    if (answerFor?.call(send) case final result?) return receipt(result);
     if (!isHome) return receipt(pb.DmSendResult.DM_SEND_RESULT_NOT_HOME);
     final id = send.clientMessageId;
     if (_receipts[id] case final first? when id.isNotEmpty) {
+      // The same id with other bytes is a conflict, never a second message
+      // (the home's own rule).
+      if (_sentBytes[id] != dmB64(send.envelope)) {
+        return receipt(pb.DmSendResult.DM_SEND_RESULT_CONFLICT);
+      }
       return first.deepCopy()
         ..result = pb.DmSendResult.DM_SEND_RESULT_DUPLICATE;
     }
@@ -2510,8 +2530,12 @@ class FakeHome implements DmHomeLink {
       pb.DmSendResult.DM_SEND_RESULT_STORED,
       entry.seq.toInt(),
     );
-    if (id.isNotEmpty) _receipts[id] = stored;
+    if (id.isNotEmpty) {
+      _receipts[id] = stored;
+      _sentBytes[id] = dmB64(send.envelope);
+    }
     _push(group, [entry]);
+    if (loseAnswer?.call(send) ?? false) throw StateError('answer lost');
     return stored;
   }
 

@@ -298,3 +298,40 @@ async fn a_rust_target_is_trimmed_before_it_is_cleared() {
     view.follow(&mut client, |view| idle(view, "builder")).await;
     assert!(told(&view).is_empty(), "a trim isn't announced: {:?}", told(&view));
 }
+
+/// A busy agent nearly always has a background task or a watch running, and
+/// its checkout grows most: a Rust target there is trimmed all the same once
+/// it's quiet, but cleared whole only once nothing runs (Polpo's disk.md,
+/// item 1).
+#[tokio::test]
+async fn a_rust_target_is_trimmed_while_its_agent_s_task_runs_but_cleared_only_after() {
+    let dir = temp_dir();
+    let (factory, mut client, mut view, _repo, tree) = setup(&dir).await;
+    apply_request(&mut client, &mut view, client_message::Body::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
+    let task = r#"call bash {"command":"sleep 30","run_in_background":true}"#;
+    apply_request(&mut client, &mut view, send_message("builder", task)).await;
+    view.follow(&mut client, |view| idle(view, "builder")).await;
+
+    // Written just now (a build between two of its steps): left.
+    let target = tree.join("target");
+    built(&target.join(".rustc_info.json"), 10);
+    built(&target.join("debug/big"), 2_000_000);
+    std::fs::create_dir_all(target.join("debug/incremental/site-1/s-1")).expect("mkdir");
+    std::fs::write(target.join("debug/incremental/site-1/s-1/dep-graph.bin"), vec![7; 2_000_000]).expect("fresh");
+    factory.set_build_cache_every(Duration::from_millis(50));
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(target.join("debug/incremental").exists(), "a target written in the last two minutes isn't trimmed");
+
+    // Quiet: trimmed while the task runs, and the rest left.
+    factory.set_build_cache_every(Duration::from_secs(3600));
+    rust_build(&target);
+    factory.set_build_cache_every(Duration::from_millis(50));
+    eventually("trimming while Builder's task runs", || !target.join("debug/incremental").exists()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(target.join("debug/big").exists(), "not cleared while Builder's task runs");
+
+    // Once the task is stopped, still over the budget: cleared.
+    let stop = v1::StopTask { agent_id: "builder".into(), task_id: "task-1".into() };
+    apply_request(&mut client, &mut view, client_message::Body::StopTask(stop)).await;
+    eventually("clearing after the task ended", || !target.exists()).await;
+}

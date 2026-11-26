@@ -23,6 +23,7 @@
 //! its notifications say only "<agent> has something for you". A pipe's
 //! held messages never carry what the other side wrote.
 
+pub(crate) mod alerts;
 pub(crate) mod push;
 pub(crate) mod tool;
 
@@ -298,6 +299,8 @@ pub(crate) struct State {
     wake: Arc<tokio::sync::Notify>,
     /// Devices registered for pushes, and pushes waiting.
     pub(crate) push: push::State,
+    /// Alerts waiting in Needs you until the person reads them.
+    pub(crate) alerts: alerts::Alerts,
     /// The settings, once read from factory.db.
     settings: Mutex<Option<NotificationsConfig>>,
     /// Held while the settings are read, changed and saved, so two changes
@@ -527,10 +530,12 @@ pub(crate) struct Note {
     /// A website another Claktory started sharing over `pipe_id` (W2),
     /// whose share a tap opens.
     pub share_id: String,
+    /// An alert kept in Needs you (`alerts`), which a tap opens.
+    pub alert_id: String,
 }
 
 impl Note {
-    fn new(kind: Kind, source: String, who: String) -> Note {
+    pub(crate) fn new(kind: Kind, source: String, who: String) -> Note {
         Note {
             kind,
             source,
@@ -547,6 +552,7 @@ impl Note {
             device_id: String::new(),
             waits: String::new(),
             share_id: String::new(),
+            alert_id: String::new(),
         }
     }
 }
@@ -712,6 +718,7 @@ pub(crate) fn observe(factory: &Factory, inner: &Inner, workspace: &v1::Workspac
             + workspace.chats.iter().map(|chat| chat.waiting_seqs.len()).sum::<usize>()
             + workspace.dm_sends.len()
             + workspace.provider_waits.len()
+            + usize::try_from(workspace.alerts_unread).unwrap_or(usize::MAX)
             + usize::from(lid_stuck(workspace))
             + workspace.remote.as_ref().map_or(0, |remote| remote.pending_devices.len());
         data.badge = u32::try_from(waiting).unwrap_or(u32::MAX);
@@ -738,6 +745,7 @@ fn waiting_keys(workspace: &v1::Workspace) -> BTreeSet<String> {
     }
     keys.extend(workspace.dm_sends.iter().map(|waiting| format!("dm:{}", waiting.proposal_id)));
     keys.extend(workspace.provider_waits.iter().map(|wait| format!("provider:{}", wait.provider_id)));
+    keys.extend(workspace.alerts.iter().map(|alert| format!("alert:{}", alert.id)));
     if lid_stuck(workspace) {
         keys.insert("keep_awake:lid".to_owned());
     }
@@ -1099,13 +1107,56 @@ pub(crate) enum Delivered {
     Skipped(Skipped),
 }
 
+/// An alert (`note`, of kind Alert, saying `title` and `text`): kept in
+/// Needs you until the person reads it, whatever becomes of its
+/// notification, then delivered. Its id, and what became of the
+/// notification.
+pub(crate) fn alert(
+    factory: &Factory,
+    config: &Config,
+    settings: &NotificationsConfig,
+    mut note: Note,
+    title: &str,
+    text: &str,
+) -> (String, Delivered) {
+    let id = alerts::keep(
+        factory,
+        v1::Alert {
+            agent_id: note.agent_id.clone(),
+            from_name: note.who.clone(),
+            title: title.to_owned(),
+            text: text.to_owned(),
+            urgent: note.urgent,
+            withheld: note.tainted,
+            seq: note.seq,
+            ..Default::default()
+        },
+    );
+    note.alert_id = id.clone();
+    note.waits = format!("alert:{id}");
+    note.what = if text.is_empty() { title.to_owned() } else { format!("{title}\n{text}") };
+    (id.clone(), deliver(factory, config, settings, note))
+}
+
+/// Claktory's own alert, in its own words (`what`, its first sentence the
+/// title), when no admin agent can take it: the machine running short, a
+/// newer model. Kept in Needs you like an agent's.
+pub(crate) fn host_alert(factory: &Factory, config: &Config, what: &str) -> Delivered {
+    let settings = settings(factory);
+    let note = Note::new(Kind::Alert, "host".to_owned(), config.claktory_name());
+    let (title, text) = what.trim().split_once(". ").map_or((what.trim(), ""), |(title, text)| (title, text.trim()));
+    let title = if text.is_empty() { title.to_owned() } else { format!("{title}.") };
+    alert(factory, config, &settings, note, &title, text).1
+}
+
 /// Tells the person `note`, if their settings, their presence and its
 /// source's hourly share let it.
 pub(crate) fn deliver(factory: &Factory, config: &Config, settings: &NotificationsConfig, note: Note) -> Delivered {
     if let Err(skipped) = allowed(settings, &note, local_minute()) {
-        // A Needs-you item that came during quiet hours waits for their end
-        // (O3), counted in one notification then if it still waits.
-        if skipped == Skipped::Quiet && note.kind == Kind::NeedsYou && !note.waits.is_empty() {
+        // A Needs-you item (an alert kept there too) that came during quiet
+        // hours waits for their end (O3), counted in one notification then
+        // if it still waits.
+        if skipped == Skipped::Quiet && matches!(note.kind, Kind::NeedsYou | Kind::Alert) && !note.waits.is_empty() {
             let mut data = factory.notify.data();
             let held = data.quiet.get_or_insert_with(|| read_row(factory, "quiet"));
             if held.insert(note.waits.clone()) {
@@ -1161,6 +1212,7 @@ fn send(factory: &Factory, config: &Config, settings: &NotificationsConfig, note
         seq: note.seq,
         device_id: note.device_id.clone(),
         share_id: note.share_id.clone(),
+        alert_id: note.alert_id.clone(),
         urgent: note.urgent && settings.urgent_breaks_quiet,
         collapse,
         thread: note.source.clone(),

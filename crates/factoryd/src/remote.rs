@@ -217,10 +217,43 @@ pub struct Device {
     /// device. Empty if neither.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub confirmed_as: String,
-    /// When its grace to confirm ends, in ms since 1970: set at its first
-    /// Hello from an app that can confirm while this Claktory is signed in.
+    /// When its grace to confirm was to end, in ms since 1970, from
+    /// versions before #527 S3 (no deadlines): read, never set or used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_by: Option<i64>,
+    /// How it was let in (#527 S3), for Settings → Devices: when, in ms
+    /// since 1970, and by what (`ALLOWED_BY_*`): another device (or this
+    /// computer's own app) by its id and its name then, the terminal, a
+    /// program, the first-device window, or "before" for a device let in
+    /// before this was kept. Empty for one let in otherwise (its code and
+    /// the owner's account). Never the digits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub allowed_by: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub allowed_by_device: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub allowed_by_name: String,
+    /// It's the owner's by its Allow: a person compared its digits, on
+    /// this computer's own app, on a confirmed device or at a terminal
+    /// (#527 S3). Such a device needs no assertion; one let in by a
+    /// program or an unconfirmed device does, while this Claktory is
+    /// signed in.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_confirmed: bool,
+    /// Its Allow's notice waits in Needs you on the person's devices
+    /// (RemoteAccess.allow_notices) until one dismisses it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_notice: bool,
+    /// When it was last turned away, and why ("other_account": signed in
+    /// to another account than this Claktory's, #527 S4), so the person's
+    /// other devices see it (a stolen phone, say). Cleared when it next
+    /// gets in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turned_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub turned_why: String,
     /// The device waiting with it showed a valid assertion for this
     /// Claktory's account.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -260,7 +293,46 @@ fn is_zero(value: &i32) -> bool {
     *value == 0
 }
 
+/// Why a device was last turned away (Device.turned_why).
+pub const TURNED_OTHER_ACCOUNT: &str = "other_account";
+/// How often that's noted while it keeps trying.
+const TURNED_EVERY: i64 = 60_000;
+
+/// What let a device in (Device.allowed_by, PairedDevice.allowed_by).
+pub const ALLOWED_BY_DEVICE: &str = "device";
+pub const ALLOWED_BY_TERMINAL: &str = "terminal";
+pub const ALLOWED_BY_PROGRAM: &str = "program";
+pub const ALLOWED_BY_FIRST_DEVICE: &str = "first_device";
+pub const ALLOWED_BY_BEFORE: &str = "before";
+
+/// Who allows a waiting device, with its digits compared by the backend
+/// (#527 S3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Allower {
+    /// A device: its id ("local" for this computer's own app), its name,
+    /// and whether it's confirmed as the owner's itself.
+    Device { id: String, name: String, confirmed: bool },
+    /// A person at a terminal: `factoryd pair`, or `factoryd allow` on one.
+    Terminal,
+    /// `factoryd allow` from a program, with no terminal.
+    Program,
+}
+
+impl Allower {
+    /// A person compared the digits on a device of the owner's: the
+    /// device it lets in is the owner's too.
+    fn confirms(&self) -> bool {
+        matches!(self, Allower::Device { confirmed: true, .. } | Allower::Terminal)
+    }
+}
+
 impl Device {
+    /// It's the owner's: by an Allow a person made (`allow_confirmed`), or
+    /// for `owner`, the account this Claktory is signed in to.
+    pub(crate) fn confirmed_for(&self, owner: Option<&str>) -> bool {
+        self.local || self.allow_confirmed || owner.is_some_and(|owner| !owner.is_empty() && self.confirmed_as == owner)
+    }
+
     /// Its code is waiting for its device: not used yet and not expired.
     /// It may have a device waiting to be allowed.
     pub(crate) fn awaiting(&self, now: i64) -> bool {
@@ -293,11 +365,57 @@ fn devices_path(home: &Home) -> PathBuf {
 }
 
 pub fn devices(home: &Home) -> Result<Vec<Device>, RemoteError> {
+    let mut devices = devices_as_saved(home)?;
+    let now = now_ms();
+    for device in &mut devices {
+        allowed_before(device, now);
+    }
+    Ok(devices)
+}
+
+/// devices.json as it is on disk, without `allowed_before`.
+fn devices_as_saved(home: &Home) -> Result<Vec<Device>, RemoteError> {
     let path = devices_path(home);
     match std::fs::read(&path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| RemoteError::Devices(path, error)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(error) => Err(error.into()),
+    }
+}
+
+/// At start: writes `allowed_before`'s marks to devices.json, so a device
+/// still within its grace when this version started stays allowed after
+/// that grace would have ended, even if it doesn't connect meanwhile.
+pub(crate) fn record_allowed_before(home: &Home) -> Result<(), RemoteError> {
+    let _changing = devices_lock();
+    let saved = devices_as_saved(home)?;
+    let marked = devices(home)?;
+    if marked != saved {
+        save_devices(home, &marked)?;
+        tracing::info!("devices allowed before Allows were recorded count as allowed");
+    }
+    Ok(())
+}
+
+/// A device let in with its code before Allows were recorded (#527 S3),
+/// and not confirmed by an assertion: every Allow since #352 P4 compared
+/// its digits, so it's the owner's by its Allow, and no deadline turns it
+/// away. Not one whose grace had already run out, which versions before
+/// were turning away (Fugo 40892): it still confirms. Every way a device
+/// is let in now records how (`allowed_by` or `confirmed_as`), so this
+/// only ever finds devices from before (`every_way_in_is_recorded`).
+/// Written at start (`record_allowed_before`), and with any change.
+fn allowed_before(device: &mut Device, now: i64) {
+    if !device.local
+        && !device.discovered
+        && !device.endpoint_id.is_empty()
+        && device.allowed_by.is_empty()
+        && device.confirmed_as.is_empty()
+        && !device.allow_confirmed
+        && device.confirm_by.is_none_or(|by| by > now)
+    {
+        device.allowed_by = ALLOWED_BY_BEFORE.to_owned();
+        device.allow_confirmed = true;
     }
 }
 
@@ -560,23 +678,34 @@ pub enum Ended {
 /// (only one not allowed yet), None allows the device waiting with its code.
 /// Err(NotWaiting) when there's none so (for Denied and allowing, one that
 /// isn't waiting). With the devices an allowed one replaced (`replace_same_key`).
-fn settle(home: &Home, device: &str, ended: Option<Ended>) -> Result<(Device, Vec<Device>), RemoteError> {
+fn settle(home: &Home, device: &str, ended: Result<&Allower, Ended>) -> Result<(Device, Vec<Device>), RemoteError> {
     let _changing = devices_lock();
     let mut devices = devices(home)?;
     let now = now_ms();
     let waiting = |known: &Device| match ended {
-        None | Some(Ended::Denied) => known.is_pending(now),
-        Some(_) => known.endpoint_id.is_empty() && !known.local,
+        Ok(_) | Err(Ended::Denied) => known.is_pending(now),
+        Err(_) => known.endpoint_id.is_empty() && !known.local,
     };
     let Some(index) = devices.iter().position(|known| (known.id == device || known.name == device) && waiting(known)) else {
         return Err(RemoteError::NotWaiting(device.to_owned()));
     };
-    if ended.is_some() {
-        let removed = devices.remove(index);
-        save_devices(home, &devices)?;
-        return Ok((removed, Vec::new()));
-    }
+    let allower = match ended {
+        Ok(allower) => allower,
+        Err(_) => {
+            let removed = devices.remove(index);
+            save_devices(home, &devices)?;
+            return Ok((removed, Vec::new()));
+        }
+    };
     let allowed = &mut devices[index];
+    allowed.allowed_ms = Some(now);
+    (allowed.allowed_by, allowed.allowed_by_device, allowed.allowed_by_name) = match allower {
+        Allower::Device { id, name, .. } => (ALLOWED_BY_DEVICE.to_owned(), id.clone(), name.clone()),
+        Allower::Terminal => (ALLOWED_BY_TERMINAL.to_owned(), String::new(), String::new()),
+        Allower::Program => (ALLOWED_BY_PROGRAM.to_owned(), String::new(), String::new()),
+    };
+    allowed.allow_confirmed = allower.confirms();
+    allowed.allow_notice = true;
     allowed.endpoint_id = std::mem::take(&mut allowed.pending_endpoint_id);
     allowed.pending_kind = 0;
     allowed.pending_since = None;
@@ -588,20 +717,27 @@ fn settle(home: &Home, device: &str, ended: Option<Ended>) -> Result<(Device, Ve
     Ok((allowed, replaced))
 }
 
-/// Lets in the device waiting with this device's code (by id or name).
-/// A device paired before with the same key is gone: it was this one.
+/// Lets in the device waiting with this device's code (by id or name),
+/// allowed by a person at a terminal who compared its digits (`factoryd
+/// pair`). A device paired before with the same key is gone: it was this
+/// one.
 pub fn approve(home: &Home, device: &str) -> Result<Device, RemoteError> {
-    settle(home, device, None).map(|(allowed, _)| allowed)
+    approve_by(home, device, &Allower::Terminal)
+}
+
+/// `approve`, by `allower`: tests stand in for the app or a program with it.
+pub fn approve_by(home: &Home, device: &str, allower: &Allower) -> Result<Device, RemoteError> {
+    settle(home, device, Ok(allower)).map(|(allowed, _)| allowed)
 }
 
 /// Turns away the device waiting with this device's code, and forgets it.
 pub fn deny(home: &Home, device: &str) -> Result<Device, RemoteError> {
-    settle(home, device, Some(Ended::Denied)).map(|(denied, _)| denied)
+    settle(home, device, Err(Ended::Denied)).map(|(denied, _)| denied)
 }
 
 /// Ends a code that hasn't let a device in, and forgets its device.
 pub fn cancel(home: &Home, device: &str) -> Result<Device, RemoteError> {
-    settle(home, device, Some(Ended::Cancelled)).map(|(ended, _)| ended)
+    settle(home, device, Err(Ended::Cancelled)).map(|(ended, _)| ended)
 }
 
 /// Drops every other device that connects with the key `devices[keep]` was
@@ -962,6 +1098,16 @@ impl Drop for Waiting {
     }
 }
 
+/// Who asks to allow a device (ApproveDevice): its device id
+/// (`LOCAL_DEVICE` for this computer), whether it's `factoryd`'s own
+/// commands rather than an app (`factoryd allow`), and, for those, whether
+/// they ran on a terminal (ApproveDevice.from_terminal).
+pub struct Asker {
+    pub device: String,
+    pub tool: bool,
+    pub from_terminal: bool,
+}
+
 /// What became of a device's Hello with its token.
 pub(crate) enum Authorized {
     Connected(Connected),
@@ -969,9 +1115,9 @@ pub(crate) enum Authorized {
     /// for the person to allow it.
     Pending(Device),
     Refused,
-    /// Turned away for a reason it can act on: the code to answer with and
-    /// what to tell it.
-    Turned(v1::ErrorCode, String),
+    /// Turned away for a reason it can act on: the Error to answer with
+    /// (its code and what to tell it).
+    Turned(v1::Error),
 }
 
 /// What a device's Hello says of who it is (`Factory::authorize`).
@@ -982,8 +1128,6 @@ pub(crate) struct Knock<'a> {
     /// A device assertion from the account service (Hello.assertion): it's
     /// signed in to the person's account. Empty without one.
     pub assertion: &'a str,
-    /// Its app can sign in to the account and confirm (Hello.can_confirm).
-    pub can_confirm: bool,
     pub kind: v1::DeviceKind,
     /// Its own name (Hello.device_name), for a device that names itself.
     pub name: &'a str,
@@ -993,9 +1137,6 @@ pub(crate) struct Knock<'a> {
     pub app_version: &'a str,
 }
 
-/// How long a device has to confirm it's the owner's, from its first Hello
-/// from an app that can while this Claktory is signed in.
-pub const CONFIRM_GRACE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// How long after this Claktory signs in its first device may join through
 /// the account alone, without Allow: the fresh server's case.
 pub const FIRST_DEVICE_WINDOW: Duration = Duration::from_secs(30 * 60);
@@ -1005,19 +1146,23 @@ pub(crate) struct Owner {
     pub account_id: String,
     /// When it signed in, in ms since 1970; 0 if before that was kept.
     pub signed_in_ms: i64,
+    /// This Claktory's name, for what a device is told.
+    pub name: String,
 }
 
 /// What `admit` decided, by the device's place in the list.
+#[derive(Debug)]
 enum Admission {
-    Connected {
-        index: usize,
-        confirm_by: i64,
-    },
+    Connected(usize),
     Pending(usize),
     /// The same, taken out of the list once it's saved.
-    Found(Device, i64),
+    Found(Device),
     Waits(Device),
     Turned(v1::ErrorCode, String),
+    /// Turned away as signed in to another account, having been let in
+    /// here before: ERROR_CODE_OTHER_ACCOUNT, with
+    /// Error.other_account_before.
+    OtherAccountNow(String),
     Unknown,
 }
 
@@ -1026,7 +1171,7 @@ fn refusal(refused: crate::account::AssertionRefusal) -> (v1::ErrorCode, String)
     use crate::account::AssertionRefusal as Refused;
     match refused {
         Refused::Expired => (v1::ErrorCode::SignInRequired, "This device's sign-in ran out. Connect again to sign in afresh.".to_owned()),
-        Refused::OtherAccount => (v1::ErrorCode::Unauthorized, "This Claktory belongs to another account.".to_owned()),
+        Refused::OtherAccount => (v1::ErrorCode::OtherAccount, other_account(false, "", "This Claktory")),
         Refused::NotSignedIn => (
             v1::ErrorCode::Unauthorized,
             "This Claktory isn't signed in to an account, so it can't be found this way. Add this device with a code from its Settings → Devices.".to_owned(),
@@ -1037,10 +1182,56 @@ fn refusal(refused: crate::account::AssertionRefusal) -> (v1::ErrorCode, String)
     }
 }
 
+/// The characters the app shows to check against (Trish 41556: "Check
+/// that it matches what … showed") for this Claktory's pairing codes
+/// (MC7): the first 16 hex digits of its tunnel key, in fours, as the app's
+/// pairingFingerprint writes them, so the two match by eye.
+pub fn code_fingerprint(home: &Home) -> String {
+    let key = secret_key(home).map(|key| key.public().to_string()).unwrap_or_default();
+    fingerprint_of(&key)
+}
+
+fn fingerprint_of(key: &str) -> String {
+    let short: Vec<char> = key.chars().take(16).collect();
+    short.chunks(4).map(|chunk| chunk.iter().collect::<String>()).collect::<Vec<_>>().join(" ")
+}
+
+/// Why a device signed in to another account than this Claktory's is
+/// turned away (#527 S4): `known`, one let in here before; `platform`, its
+/// Hello's, to name it; `name`, this Claktory's.
+fn other_account(known: bool, platform: &str, name: &str) -> String {
+    let device = match platform {
+        "macos" => "Mac",
+        "ios" => "iPhone",
+        "ipados" => "iPad",
+        "android" => "phone",
+        _ => "device",
+    };
+    if known {
+        format!("This {device} is now signed in to a different Claktory account. Sign in with the account {name} uses to connect again.")
+    } else {
+        format!("So it can't let this {device} in. To work with someone else's agents, open a pipe with them.")
+    }
+}
+
 /// A device's own name, as it gives it: whitespace squeezed, at most
 /// `NAME_CHARS`.
 fn own_name(name: &str) -> String {
     name.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(NAME_CHARS).collect()
+}
+
+/// A device whose code is `knock`'s, bound to `peer`'s key, let in and
+/// confirmed by an Allow a person made, or this computer's own app.
+fn bound_and_allowed(devices: &[Device], knock: &Knock<'_>, peer: &Peer) -> bool {
+    let digest = token_hash(knock.token);
+    !knock.token.is_empty()
+        && !peer.endpoint_id.is_empty()
+        && devices.iter().any(|device| {
+            device.token_sha256 == digest
+                && device.endpoint_id == peer.endpoint_id
+                && device.pending_endpoint_id.is_empty()
+                && (device.allow_confirmed || device.local)
+        })
 }
 
 /// Who may come in, changing `devices` as that says (a key bound, a device
@@ -1071,7 +1262,46 @@ fn admit(
     shown: Option<Result<String, (v1::ErrorCode, String)>>,
     now: i64,
 ) -> Admission {
+    // An assertion that ran out, from a device let in here before by its
+    // key and confirmed by an Allow a person made (or this computer's own
+    // app): it needs none, so it's as if it sent none (Fugo 40892), and a
+    // Claktory whose clock is off doesn't lock it out. Only Expired
+    // (`refusal` gives SignInRequired for that alone): another account,
+    // another key or a bad signature still refuse.
+    let expired = matches!(&shown, Some(Err((v1::ErrorCode::SignInRequired, _))));
+    let shown = if expired && bound_and_allowed(devices, knock, peer) { None } else { shown };
     let signed_in = matches!(&shown, Some(Ok(_)));
+    // While this Claktory is signed in (#527 S4): an assertion for another
+    // account is turned away, before and after Allow (a friend's device:
+    // pipes are for that); one that doesn't verify is refused as it is,
+    // never taken for none.
+    if owner.is_some()
+        && !peer.endpoint_id.is_empty()
+        && let Some(Err((code, reason))) = &shown
+    {
+        if *code == v1::ErrorCode::OtherAccount
+            && let Some(owner) = owner
+        {
+            let mut known = false;
+            for device in devices
+                .iter_mut()
+                .filter(|device| !device.local && !device.endpoint_id.is_empty() && device.endpoint_id == peer.endpoint_id)
+            {
+                known = true;
+                // Noted once a minute at most, however often it retries.
+                if device.turned_why != TURNED_OTHER_ACCOUNT || device.turned_ms.is_none_or(|at| now - at >= TURNED_EVERY) {
+                    device.turned_ms = Some(now);
+                    device.turned_why = TURNED_OTHER_ACCOUNT.to_owned();
+                }
+            }
+            let reason = other_account(known, knock.platform, &owner.name);
+            return if known { Admission::OtherAccountNow(reason) } else { Admission::Turned(*code, reason) };
+        }
+        // With a code, never Unauthorized: that says it was removed, and
+        // the app would wipe what it hasn't sent (#446).
+        let code = if knock.token.is_empty() || *code != v1::ErrorCode::Unauthorized { *code } else { v1::ErrorCode::SignInRequired };
+        return Admission::Turned(code, reason.clone());
+    }
     let digest = token_hash(knock.token);
     let mut found = None;
     let mut pending = None;
@@ -1169,6 +1399,8 @@ fn admit(
                     if first {
                         device.endpoint_id.clone_from(&peer.endpoint_id);
                         device.confirmed_as.clone_from(account);
+                        device.allowed_ms = Some(now);
+                        device.allowed_by = ALLOWED_BY_FIRST_DEVICE.to_owned();
                         found = Some(devices.len());
                     } else {
                         device.code_expires = Some(now + CODE_LIFETIME.as_millis() as i64);
@@ -1196,35 +1428,32 @@ fn admit(
     }
     let Some(index) = found else { return Admission::Unknown };
     let device = &mut devices[index];
-    // Is it the owner's?
-    let mut confirm_by = 0;
+    // Is it the owner's? Its assertion says so, or an Allow a person made
+    // (#527 S3: no deadline); one let in otherwise (by a program, or a
+    // device not confirmed itself) shows the owner's assertion first.
     if let Some(owner) = owner
         && !device.local
     {
         if signed_in {
             device.confirmed_as.clone_from(&owner.account_id);
-            device.confirm_by = None;
-        } else if device.confirmed_as != owner.account_id {
-            match device.confirm_by {
-                Some(by) if by <= now => {
-                    return Admission::Turned(
-                        v1::ErrorCode::SignInRequired,
-                        "Sign in to your Claktory account on this device to keep using it here.".to_owned(),
-                    );
-                }
-                Some(by) => confirm_by = by,
-                None if knock.can_confirm => {
-                    confirm_by = now + CONFIRM_GRACE.as_millis() as i64;
-                    device.confirm_by = Some(confirm_by);
-                }
-                None => {}
-            }
+        } else if !device.confirmed_for(Some(&owner.account_id)) {
+            return Admission::Turned(
+                v1::ErrorCode::SignInRequired,
+                "Sign in to your Claktory account on this device to connect.".to_owned(),
+            );
         }
+    }
+    // Versions before kept a deadline: gone once it's confirmed. One past
+    // it stays so, and keeps confirming (`allowed_before`).
+    if device.confirmed_for(owner.map(|owner| owner.account_id.as_str())) {
+        device.confirm_by = None;
     }
     if !peer.endpoint_id.is_empty() {
         device.endpoint_id.clone_from(&peer.endpoint_id);
     }
     device.last_seen = Some(now);
+    device.turned_ms = None;
+    device.turned_why.clear();
     // Only an app says its system: a tool on the loopback port (factoryd's
     // own commands, QA) leaves this computer's app's as they were.
     if !knock.platform.is_empty() {
@@ -1233,7 +1462,7 @@ fn admit(
         device.app_version = knock.app_version.chars().take(40).collect();
     }
     device.last_address = peer.address.map(|address| address.ip().to_canonical().to_string()).unwrap_or_default();
-    Admission::Connected { index, confirm_by }
+    Admission::Connected(index)
 }
 
 /// Where a device waiting to be allowed stands.
@@ -1249,6 +1478,9 @@ impl State {
     /// the first Workspace rather than in a change just after.
     pub(crate) fn new(home: &Home) -> State {
         let state = State::default();
+        if let Err(error) = record_allowed_before(home) {
+            tracing::warn!(%error, "could not record which devices were allowed before Allows were recorded");
+        }
         match secret_key(home) {
             Ok(key) => lock(&state.shown).endpoint_id = key.public().to_string(),
             Err(error) => tracing::error!(%error, "could not read the tunnel's key"),
@@ -1330,9 +1562,6 @@ struct Network {
 /// One of a device's sessions; it counts as connected while this lives.
 pub(crate) struct Connected {
     pub device: Device,
-    /// When it has to confirm it's the owner's by (Welcome.confirm_by_ms);
-    /// 0 when it needn't.
-    pub confirm_by: i64,
     /// Notified when the device is unpaired: the session closes.
     pub closed: Arc<tokio::sync::Notify>,
     factory: Weak<Factory>,
@@ -1364,8 +1593,11 @@ impl Factory {
     pub(crate) async fn authorize(self: &Arc<Self>, knock: &Knock<'_>, peer: &Peer) -> Authorized {
         let now = now_ms();
         let account = self.lock().config.account.clone();
-        let owner =
-            crate::account::owner(self, &account).map(|owner| Owner { account_id: owner.account_id, signed_in_ms: owner.signed_in_ms });
+        let owner = crate::account::owner(self, &account).map(|owner| Owner {
+            account_id: owner.account_id,
+            signed_in_ms: owner.signed_in_ms,
+            name: self.identity().name,
+        });
         // What its assertion shows, if it brought one through the tunnel.
         let shown = (!knock.assertion.is_empty() && !peer.endpoint_id.is_empty()).then(|| {
             crate::account::check_assertion(self, &account, knock.assertion, &peer.endpoint_id)
@@ -1373,6 +1605,7 @@ impl Factory {
                 .map_err(refusal)
         });
         let mut replaced = Vec::new();
+        let mut noted = false;
         let changing = devices_lock();
         let admission = match devices(&self.home) {
             Ok(mut devices) => {
@@ -1384,17 +1617,26 @@ impl Factory {
                         .is_some_and(|device| device.local || (!peer.endpoint_id.is_empty() && device.endpoint_id == peer.endpoint_id))
                 };
                 let before: Vec<bool> = (0..devices.len()).map(|index| bound(&devices, index)).collect();
+                let unchanged = devices.clone();
                 let mut admission = admit(&mut devices, knock, peer, owner.as_ref(), shown, now);
+                // A device of the person's turned away as another account's:
+                // noted, for their other devices to see (#527 S4).
+                if matches!(admission, Admission::OtherAccountNow(_)) && devices != unchanged {
+                    match save_devices(&self.home, &devices) {
+                        Ok(()) => noted = true,
+                        Err(error) => tracing::warn!(%error, "could not note that a device was turned away"),
+                    }
+                }
                 // A device just bound to its key by its code and account
                 // replaces any other with that key: the same device.
-                if let Admission::Connected { index, confirm_by } = admission
+                if let Admission::Connected(index) = admission
                     && !before.get(index).copied().unwrap_or(false)
                 {
                     let (index, dropped) = replace_same_key(&mut devices, index);
                     replaced = dropped;
-                    admission = Admission::Connected { index, confirm_by };
+                    admission = Admission::Connected(index);
                 }
-                if matches!(admission, Admission::Connected { .. } | Admission::Pending(_))
+                if matches!(admission, Admission::Connected(_) | Admission::Pending(_))
                     && let Err(error) = save_devices(&self.home, &devices)
                 {
                     // A disk that can't be written (read-only, failing:
@@ -1404,7 +1646,7 @@ impl Factory {
                     // isn't paired.
                     replaced.clear();
                     admission = match admission {
-                        Admission::Connected { index, .. } if before.get(index).copied().unwrap_or(false) => {
+                        Admission::Connected(index) if before.get(index).copied().unwrap_or(false) => {
                             tracing::warn!(%error, "could not note when a device connected; it's let in all the same");
                             admission
                         }
@@ -1415,7 +1657,7 @@ impl Factory {
                     };
                 }
                 match admission {
-                    Admission::Connected { index, confirm_by } => Admission::Found(devices.swap_remove(index), confirm_by),
+                    Admission::Connected(index) => Admission::Found(devices.swap_remove(index)),
                     Admission::Pending(index) => Admission::Waits(devices.swap_remove(index)),
                     other => other,
                 }
@@ -1439,8 +1681,8 @@ impl Factory {
             // Their key is the one coming in: its tunnel stays.
             self.forget_devices(&replaced, false).await;
         }
-        let (device, confirm_by) = match admission {
-            Admission::Found(device, confirm_by) => (device, confirm_by),
+        let device = match admission {
+            Admission::Found(device) => device,
             Admission::Waits(device) => {
                 tracing::info!(device = %device.id, endpoint = %peer.endpoint_id, discovered = device.discovered, "a device waits to be allowed");
                 // An earlier code's device by the same id ended some way: not this one.
@@ -1448,12 +1690,15 @@ impl Factory {
                 self.refresh_remote();
                 return Authorized::Pending(device);
             }
-            Admission::Turned(code, reason) => {
-                tracing::warn!(endpoint = %peer.endpoint_id, ?code, "turned a device away");
-                self.pause_after_refusal(peer).await;
-                return Authorized::Turned(code, reason);
+            Admission::Turned(code, message) => {
+                return self.turn_away(peer, noted, v1::Error { code: code.into(), message, ..Default::default() }).await;
             }
-            Admission::Unknown | Admission::Connected { .. } | Admission::Pending(_) => {
+            Admission::OtherAccountNow(message) => {
+                let refusal =
+                    v1::Error { code: v1::ErrorCode::OtherAccount.into(), message, other_account_before: true, ..Default::default() };
+                return self.turn_away(peer, noted, refusal).await;
+            }
+            Admission::Unknown | Admission::Connected(_) | Admission::Pending(_) => {
                 // The loopback port's refusals are logged where they're known.
                 if !peer.endpoint_id.is_empty() {
                     tracing::warn!(endpoint = %peer.endpoint_id, "refused a device that isn't paired");
@@ -1466,7 +1711,7 @@ impl Factory {
         let session = Session { closed: closed.clone(), endpoint_id: peer.endpoint_id.clone() };
         lock(&self.remote.connected).entry(device.id.clone()).or_default().push(session);
         self.refresh_remote();
-        Authorized::Connected(Connected { device, confirm_by, closed, factory: Arc::downgrade(self) })
+        Authorized::Connected(Connected { device, closed, factory: Arc::downgrade(self) })
     }
 
     /// ConfirmDevice, from `asker` (its device id; `LOCAL_DEVICE` for this
@@ -1486,7 +1731,7 @@ impl Factory {
                 || devices(&self.home)
                     .map_err(|error| RequestError::Remote(error.to_string()))?
                     .iter()
-                    .any(|device| device.id == asker && device.confirmed_as == owner.account_id);
+                    .any(|device| device.id == asker && device.confirmed_for(Some(&owner.account_id)));
             if !trusted {
                 return Err(RequestError::Account(
                     v1::ErrorCode::Unauthorized,
@@ -1555,6 +1800,17 @@ impl Factory {
         }
     }
 
+    /// Turns `peer` away with `refusal`, once a second after its last
+    /// refusal; `noted`, its devices.json changed, for the app to see.
+    async fn turn_away(&self, peer: &Peer, noted: bool, refusal: v1::Error) -> Authorized {
+        tracing::warn!(endpoint = %peer.endpoint_id, code = ?refusal.code(), "turned a device away");
+        if noted {
+            self.refresh_remote();
+        }
+        self.pause_after_refusal(peer).await;
+        Authorized::Turned(refusal)
+    }
+
     /// Waits until a second after `peer`'s last refusal.
     async fn pause_after_refusal(&self, peer: &Peer) {
         let wait = {
@@ -1621,11 +1877,12 @@ impl Factory {
     /// Allows the device waiting with this device's code, from the app,
     /// with the four digits the person read off it (#352 P4, Fugo): a wrong
     /// number is refused, and the third wrong one turns the device away.
-    pub async fn approve_device(&self, id: &str, number: &str) -> Result<(), RequestError> {
+    pub async fn approve_device(&self, asker: &Asker, id: &str, number: &str) -> Result<(), RequestError> {
         // As the devices file has it now, not as last shown: a code that
         // just ran out isn't waiting any more.
         let now = now_ms();
         let known = devices(&self.home).map_err(|error| RequestError::Remote(error.to_string()))?;
+        let allower = self.allower(asker, &known);
         let Some(device) = known.into_iter().find(|device| device.id == id && device.is_pending(now)) else {
             return Err(RequestError::UnknownDevice(id.to_owned()));
         };
@@ -1655,9 +1912,9 @@ impl Factory {
             return Err(RequestError::Remote(format!("That's not the number {name} shows. {tries}.")));
         }
         lock(&self.remote.wrong_numbers).remove(id);
-        let replaced = match settle(&self.home, id, None) {
+        let replaced = match settle(&self.home, id, Ok(&allower)) {
             Ok((device, replaced)) => {
-                tracing::info!(device = %device.id, replaced = replaced.len(), "the person allowed a device");
+                tracing::info!(device = %device.id, by = %device.allowed_by, confirmed = device.allow_confirmed, replaced = replaced.len(), "a device was allowed");
                 replaced
             }
             Err(RemoteError::NotWaiting(id)) => return Err(RequestError::UnknownDevice(id)),
@@ -1668,6 +1925,27 @@ impl Factory {
         self.forget_devices(&replaced, false).await;
         self.refresh_remote();
         Ok(())
+    }
+
+    /// Who allows a device, from what asked (#527 S3): this computer's
+    /// own app, or another device as `devices` has it, is a device;
+    /// `factoryd allow` is the terminal when it ran on one, else a program.
+    fn allower(&self, asker: &Asker, devices: &[Device]) -> Allower {
+        if asker.device == LOCAL_DEVICE {
+            return match (asker.tool, asker.from_terminal) {
+                (false, _) => Allower::Device { id: LOCAL_DEVICE.to_owned(), name: machine_name().to_owned(), confirmed: true },
+                (true, true) => Allower::Terminal,
+                (true, false) => Allower::Program,
+            };
+        }
+        let config = self.lock().config.account.clone();
+        let owner = crate::account::owner(self, &config).map(|owner| owner.account_id);
+        let known = devices.iter().find(|device| device.id == asker.device);
+        Allower::Device {
+            id: asker.device.clone(),
+            name: known.map(|device| shown_name(&device.name)).unwrap_or_default(),
+            confirmed: known.is_some_and(|device| device.confirmed_for(owner.as_deref())),
+        }
     }
 
     /// Turns away the device waiting with this device's code, from the app,
@@ -1835,6 +2113,21 @@ impl Factory {
             })
             .collect();
         pending.sort_by_key(|device| device.requested_ms);
+        // Each Allow until a device dismisses it (#527 S3), oldest first.
+        let mut allow_notices: Vec<v1::AllowNotice> = shown
+            .devices
+            .iter()
+            .filter(|device| device.allow_notice && !device.local && !device.endpoint_id.is_empty())
+            .map(|device| v1::AllowNotice {
+                device_id: device.id.clone(),
+                device_name: shown_name(&device.name),
+                allowed_by: device.allowed_by.clone(),
+                allowed_by_device_id: device.allowed_by_device.clone(),
+                allowed_by_name: device.allowed_by_name.clone(),
+                allowed_ms: device.allowed_ms.unwrap_or_default(),
+            })
+            .collect();
+        allow_notices.sort_by_key(|notice| notice.allowed_ms);
         // The backend an update would bring, if it would bring one.
         let offered = Some(inner.latest_release.backend.as_str())
             .filter(|offered| !offered.is_empty() && *offered != crate::update::VERSION)
@@ -1852,12 +2145,9 @@ impl Factory {
                 .filter(|device| !device.local)
                 .map(|device| {
                     let connected = connected.contains_key(&device.id);
-                    // Whether it's the owner's: only asked while signed in.
-                    let confirmed = owner.as_ref().is_some_and(|owner| device.confirmed_as == owner.account_id);
-                    let confirm_by_ms = match &owner {
-                        Some(_) if !confirmed => device.confirm_by.unwrap_or_default(),
-                        _ => 0,
-                    };
+                    // Whether it's the owner's: by an Allow a person made, or
+                    // the account this Claktory is signed in to.
+                    let confirmed = device.confirmed_for(owner.as_ref().map(|owner| owner.account_id.as_str()));
                     let path =
                         if connected { shown.paths.get(&device.id).copied().unwrap_or(v1::DevicePath::None) } else { v1::DevicePath::None };
                     v1::PairedDevice {
@@ -1876,7 +2166,13 @@ impl Factory {
                         last_seen_ms: device.last_seen.unwrap_or_default(),
                         last_address: device.last_address,
                         confirmed,
-                        confirm_by_ms,
+                        allowed_ms: device.allowed_ms.unwrap_or_default(),
+                        allowed_by: device.allowed_by,
+                        allowed_by_device_id: device.allowed_by_device,
+                        allowed_by_name: device.allowed_by_name,
+                        turned_ms: device.turned_ms.unwrap_or_default(),
+                        turned_why: device.turned_why,
+                        ..v1::PairedDevice::default()
                     }
                 })
                 .collect(),
@@ -1887,7 +2183,22 @@ impl Factory {
             custom_relays: shown.custom_relays,
             home_relay: shown.home_relay,
             relay_connected: shown.relay_connected,
+            allow_notices,
         }
+    }
+
+    /// DismissAllowNotice: the notice of a device's Allow leaves Needs you
+    /// on every device (#527 S3). One already gone is no error.
+    pub async fn dismiss_allow_notice(&self, id: &str) -> Result<(), RequestError> {
+        {
+            let _changing = devices_lock();
+            let mut devices = devices(&self.home).map_err(|error| RequestError::Remote(error.to_string()))?;
+            let Some(device) = devices.iter_mut().find(|device| device.id == id && device.allow_notice) else { return Ok(()) };
+            device.allow_notice = false;
+            save_devices(&self.home, &devices).map_err(|error| RequestError::Remote(error.to_string()))?;
+        }
+        self.refresh_remote();
+        Ok(())
     }
 
     /// How long making a pairing code waits for the tunnel to reach its
@@ -2140,6 +2451,8 @@ impl Factory {
             }
         }
         self.refresh_remote();
+        // And focus mode (#514).
+        crate::focus_mode::forget(self, &removed.iter().map(|removed| removed.id.clone()).collect::<Vec<_>>());
         // Their zoom and file cache go with them.
         let kept = {
             let display = &self.lock().config.display;
@@ -2883,8 +3196,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    fn knock<'a>(token: &'a str, assertion: &'a str, can_confirm: bool) -> Knock<'a> {
-        Knock { token, assertion, can_confirm, kind: v1::DeviceKind::Phone, name: "Matt's  iPhone", platform: "", app_version: "" }
+    fn knock<'a>(token: &'a str, assertion: &'a str) -> Knock<'a> {
+        Knock { token, assertion, kind: v1::DeviceKind::Phone, name: "Matt's  iPhone", platform: "", app_version: "" }
     }
 
     fn tunnel(key: &str) -> Peer {
@@ -2892,7 +3205,7 @@ mod tests {
     }
 
     fn owner(signed_in_ms: i64) -> Owner {
-        Owner { account_id: "acct".to_owned(), signed_in_ms }
+        Owner { account_id: "acct".to_owned(), signed_in_ms, name: "Mac Studio".to_owned() }
     }
 
     fn ours() -> Option<Result<String, (v1::ErrorCode, String)>> {
@@ -2906,33 +3219,33 @@ mod tests {
         let now = 100 * MINUTE;
         // Fresh: in at once, named after itself, connecting by its key from then on.
         let mut devices = Vec::new();
-        let Admission::Connected { index, confirm_by } =
-            admit(&mut devices, &knock("", "A1", true), &tunnel("k1"), Some(&owner(now - 29 * MINUTE)), ours(), now)
+        let Admission::Connected(index) =
+            admit(&mut devices, &knock("", "A1"), &tunnel("k1"), Some(&owner(now - 29 * MINUTE)), ours(), now)
         else {
             panic!("in at once")
         };
         let first = &devices[index];
         assert_eq!(
-            (first.name.as_str(), first.endpoint_id.as_str(), first.confirmed_as.as_str(), confirm_by),
-            ("Matt's iPhone", "k1", "acct", 0)
+            (first.name.as_str(), first.endpoint_id.as_str(), first.confirmed_as.as_str(), first.allowed_by.as_str(), first.allowed_ms),
+            ("Matt's iPhone", "k1", "acct", ALLOWED_BY_FIRST_DEVICE, Some(now))
         );
+        assert!(!first.allow_notice, "the account let it in: no Allow to tell of");
         assert!(first.discovered && first.code_expires.is_none());
-        let again = admit(&mut devices, &knock("", "A1", true), &tunnel("k1"), Some(&owner(now - 29 * MINUTE)), ours(), now + 1);
-        assert!(matches!(again, Admission::Connected { index: 0, .. }), "back with a fresh assertion");
+        let again = admit(&mut devices, &knock("", "A1"), &tunnel("k1"), Some(&owner(now - 29 * MINUTE)), ours(), now + 1);
+        assert!(matches!(again, Admission::Connected(0)), "back with a fresh assertion");
         // Its key alone is never enough: anything that borrows the device's
         // tunnel shares its key.
-        let alone = admit(&mut devices, &knock("", "", true), &tunnel("k1"), Some(&owner(now - 29 * MINUTE)), None, now + 1);
+        let alone = admit(&mut devices, &knock("", ""), &tunnel("k1"), Some(&owner(now - 29 * MINUTE)), None, now + 1);
         assert!(matches!(alone, Admission::Turned(v1::ErrorCode::SignInRequired, _)), "not by its key alone");
         let expired = Some(Err(refusal(crate::account::AssertionRefusal::Expired)));
-        let stale = admit(&mut devices, &knock("", "A1", true), &tunnel("k1"), Some(&owner(now - 29 * MINUTE)), expired, now + 1);
+        let stale = admit(&mut devices, &knock("", "A1"), &tunnel("k1"), Some(&owner(now - 29 * MINUTE)), expired, now + 1);
         assert!(
             matches!(stale, Admission::Turned(v1::ErrorCode::SignInRequired, reason) if reason.contains("ran out")),
             "an assertion that ran out asks for a fresh sign-in"
         );
 
         // Not the first: it waits to be allowed, its digits from the assertion.
-        let Admission::Pending(index) =
-            admit(&mut devices, &knock("", "A2", true), &tunnel("k2"), Some(&owner(now - 29 * MINUTE)), ours(), now)
+        let Admission::Pending(index) = admit(&mut devices, &knock("", "A2"), &tunnel("k2"), Some(&owner(now - 29 * MINUTE)), ours(), now)
         else {
             panic!("waits")
         };
@@ -2940,28 +3253,28 @@ mod tests {
         assert!(second.discovered && second.pending_signed_in && second.endpoint_id.is_empty());
         assert_eq!((second.pending_endpoint_id.as_str(), second.token_sha256.clone()), ("k2", token_hash("A2")));
         assert!(
-            matches!(admit(&mut devices, &knock("", "A2", true), &tunnel("k2"), None, ours(), now), Admission::Pending(i) if i == index),
+            matches!(admit(&mut devices, &knock("", "A2"), &tunnel("k2"), None, ours(), now), Admission::Pending(i) if i == index),
             "still waiting"
         );
         assert!(
             matches!(
-                admit(&mut devices, &knock("", "", true), &tunnel("k2"), None, None, now),
+                admit(&mut devices, &knock("", ""), &tunnel("k2"), None, None, now),
                 Admission::Turned(v1::ErrorCode::SignInRequired, _)
             ),
             "waiting, but never by its key alone"
         );
         // Its assertion is no token: nobody gets in with it.
-        assert!(matches!(admit(&mut devices, &knock("A2", "", true), &tunnel("k3"), None, None, now), Admission::Unknown));
+        assert!(matches!(admit(&mut devices, &knock("A2", ""), &tunnel("k3"), None, None, now), Admission::Unknown));
 
         // An old sign-in: even the first device waits.
         let mut devices = Vec::new();
         assert!(matches!(
-            admit(&mut devices, &knock("", "A", true), &tunnel("k1"), Some(&owner(now - 31 * MINUTE)), ours(), now),
+            admit(&mut devices, &knock("", "A"), &tunnel("k1"), Some(&owner(now - 31 * MINUTE)), ours(), now),
             Admission::Pending(0)
         ));
         let mut devices = Vec::new();
         assert!(
-            matches!(admit(&mut devices, &knock("", "A", true), &tunnel("k1"), Some(&owner(0)), ours(), now), Admission::Pending(0)),
+            matches!(admit(&mut devices, &knock("", "A"), &tunnel("k1"), Some(&owner(0)), ours(), now), Admission::Pending(0)),
             "signed in before it was kept"
         );
     }
@@ -2970,14 +3283,14 @@ mod tests {
     fn a_device_without_a_good_assertion_is_told_what_to_do() {
         let mut devices = Vec::new();
         let now = 1_000;
-        let turned = admit(&mut devices, &knock("", "", true), &tunnel("k"), Some(&owner(now)), None, now);
+        let turned = admit(&mut devices, &knock("", ""), &tunnel("k"), Some(&owner(now)), None, now);
         assert!(matches!(turned, Admission::Turned(v1::ErrorCode::SignInRequired, _)));
         let refused = Some(Err(refusal(crate::account::AssertionRefusal::OtherAccount)));
         assert!(
-            matches!(admit(&mut devices, &knock("", "A", true), &tunnel("k"), Some(&owner(now)), refused, now), Admission::Turned(v1::ErrorCode::Unauthorized, reason) if reason.contains("another account"))
+            matches!(admit(&mut devices, &knock("", "A"), &tunnel("k"), Some(&owner(now)), refused, now), Admission::Turned(v1::ErrorCode::OtherAccount, reason) if reason.contains("open a pipe"))
         );
         assert!(
-            matches!(admit(&mut devices, &knock("", "", true), &tunnel("k"), None, None, now), Admission::Unknown),
+            matches!(admit(&mut devices, &knock("", ""), &tunnel("k"), None, None, now), Admission::Unknown),
             "not signed in: as before"
         );
         assert!(devices.is_empty());
@@ -2996,17 +3309,17 @@ mod tests {
         // Signed out (after a disk failure, friend bug #38): a new code
         // would pair it twice.
         let signed_out = Some(Err(refusal(crate::account::AssertionRefusal::NotSignedIn)));
-        let turned = admit(&mut devices, &knock("", "A1", true), &tunnel("k"), None, signed_out.clone(), now);
+        let turned = admit(&mut devices, &knock("", "A1"), &tunnel("k"), None, signed_out.clone(), now);
         // Not Unauthorized: that says it was removed, and the app wipes
         // what it hadn't sent (#446).
         assert!(matches!(turned, Admission::Turned(v1::ErrorCode::SignInRequired, reason) if reason == SIGNED_OUT));
         // A device it doesn't know still hears how to be added, as one
         // not paired (Unauthorized).
-        let turned = admit(&mut devices, &knock("", "A1", true), &tunnel("other"), None, signed_out, now);
+        let turned = admit(&mut devices, &knock("", "A1"), &tunnel("other"), None, signed_out, now);
         assert!(matches!(turned, Admission::Turned(v1::ErrorCode::Unauthorized, reason) if reason.contains("with a code")));
         // Signed in, an assertion that ran out is still the device's to renew.
         let expired = Some(Err(refusal(crate::account::AssertionRefusal::Expired)));
-        let turned = admit(&mut devices, &knock("", "A1", true), &tunnel("k"), Some(&owner(1)), expired, now);
+        let turned = admit(&mut devices, &knock("", "A1"), &tunnel("k"), Some(&owner(1)), expired, now);
         assert!(matches!(turned, Admission::Turned(v1::ErrorCode::SignInRequired, _)));
     }
 
@@ -3036,7 +3349,7 @@ mod tests {
         assert_eq!(ids(&home), [first.clone(), other.clone()]);
         // Allowed, it's the one pairing of that key.
         let again = bound("MacBook", "k");
-        let (allowed, replaced) = settle(&home, &again, None).expect("allowed");
+        let (allowed, replaced) = settle(&home, &again, Ok(&Allower::Terminal)).expect("allowed");
         assert_eq!(replaced.iter().map(|device| device.id.as_str()).collect::<Vec<_>>(), [first.as_str()]);
         assert_eq!((allowed.id.as_str(), allowed.endpoint_id.as_str()), (again.as_str(), "k"));
         assert_eq!(ids(&home), [other, again]);
@@ -3044,7 +3357,7 @@ mod tests {
     }
 
     #[test]
-    fn a_code_and_the_account_need_no_allow_and_paired_devices_confirm_once() {
+    fn a_code_and_the_account_need_no_allow_and_an_allow_a_person_made_confirms() {
         let now = 1_000_000;
         let mut devices = vec![Device {
             id: "phone".into(),
@@ -3053,46 +3366,229 @@ mod tests {
             code_expires: Some(now + MINUTE),
             ..Device::default()
         }];
-        let Admission::Connected { confirm_by, .. } =
-            admit(&mut devices, &knock("T", "A", true), &tunnel("k"), Some(&owner(1)), ours(), now)
-        else {
-            panic!("in without Allow")
-        };
-        assert_eq!(
-            (devices[0].endpoint_id.as_str(), devices[0].confirmed_as.as_str(), devices[0].code_expires, confirm_by),
-            ("k", "acct", None, 0)
-        );
+        assert!(matches!(admit(&mut devices, &knock("T", "A"), &tunnel("k"), Some(&owner(1)), ours(), now), Admission::Connected(0)));
+        assert_eq!((devices[0].endpoint_id.as_str(), devices[0].confirmed_as.as_str(), devices[0].code_expires), ("k", "acct", None));
 
-        // A device from before: an old app keeps working as it did…
-        let mut devices = vec![Device { id: "mac".into(), token_sha256: token_hash("M"), endpoint_id: "m".into(), ..Device::default() }];
-        assert!(matches!(
-            admit(&mut devices, &knock("M", "", false), &tunnel("m"), Some(&owner(1)), None, now),
-            Admission::Connected { confirm_by: 0, .. }
-        ));
-        assert_eq!(devices[0].confirm_by, None);
-        // …and one that can confirm gets a week, once…
-        let grace = now + CONFIRM_GRACE.as_millis() as i64;
-        assert!(
-            matches!(admit(&mut devices, &knock("M", "", true), &tunnel("m"), Some(&owner(1)), None, now), Admission::Connected { confirm_by, .. } if confirm_by == grace)
-        );
-        assert!(
-            matches!(admit(&mut devices, &knock("M", "", true), &tunnel("m"), Some(&owner(1)), None, now + MINUTE), Admission::Connected { confirm_by, .. } if confirm_by == grace)
-        );
-        // …then has to.
-        let after = admit(&mut devices, &knock("M", "", false), &tunnel("m"), Some(&owner(1)), None, grace + 1);
-        assert!(matches!(after, Admission::Turned(v1::ErrorCode::SignInRequired, _)));
-        assert!(matches!(
-            admit(&mut devices, &knock("M", "A", true), &tunnel("m"), Some(&owner(1)), ours(), grace + 1),
-            Admission::Connected { confirm_by: 0, .. }
-        ));
-        assert_eq!((devices[0].confirmed_as.as_str(), devices[0].confirm_by), ("acct", None));
+        // Allowed by a person who compared its digits: the owner's, with
+        // no deadline, signed in or not.
+        let paired = |allow_confirmed: bool| Device {
+            id: "mac".into(),
+            token_sha256: token_hash("M"),
+            endpoint_id: "m".into(),
+            allowed_by: if allow_confirmed { ALLOWED_BY_TERMINAL } else { ALLOWED_BY_PROGRAM }.into(),
+            allow_confirmed,
+            confirm_by: Some(now - 1),
+            ..Device::default()
+        };
+        let mut devices = vec![paired(true)];
+        assert!(matches!(admit(&mut devices, &knock("M", ""), &tunnel("m"), Some(&owner(1)), None, now), Admission::Connected(0)));
+        assert_eq!(devices[0].confirm_by, None, "an old deadline is dropped");
+        // Let in by a program: the owner's assertion first, at once.
+        let mut devices = vec![paired(false)];
+        let turned = admit(&mut devices, &knock("M", ""), &tunnel("m"), Some(&owner(1)), None, now);
+        assert!(matches!(turned, Admission::Turned(v1::ErrorCode::SignInRequired, _)));
+        assert!(matches!(admit(&mut devices, &knock("M", "A"), &tunnel("m"), Some(&owner(1)), ours(), now), Admission::Connected(0)));
+        assert_eq!(devices[0].confirmed_as, "acct");
         // Not signed in, nothing is asked.
-        let mut devices = vec![Device { id: "mac".into(), token_sha256: token_hash("M"), endpoint_id: "m".into(), ..Device::default() }];
+        let mut devices = vec![paired(false)];
+        assert!(matches!(admit(&mut devices, &knock("M", ""), &tunnel("m"), None, None, now), Admission::Connected(0)));
+    }
+
+    #[test]
+    fn its_code_reads_as_the_apps() {
+        assert_eq!(fingerprint_of("abcdef1234567890ffff"), "abcd ef12 3456 7890");
+        assert_eq!(fingerprint_of("abc"), "abc");
+    }
+
+    #[test]
+    fn a_device_let_in_before_allows_were_recorded_is_the_owners_by_its_allow() {
+        let now = 1_000;
+        let mut before = Device { id: "mac".into(), endpoint_id: "m".into(), confirm_by: Some(now + 5), ..Device::default() };
+        allowed_before(&mut before, now);
+        assert!(before.allow_confirmed && before.allowed_by == ALLOWED_BY_BEFORE && !before.allow_notice);
+        // Not one confirmed by its account, found through it, waiting, or
+        // let in since with a record.
+        for mut other in [
+            Device { endpoint_id: "m".into(), confirmed_as: "acct".into(), ..Device::default() },
+            Device { endpoint_id: "m".into(), discovered: true, ..Device::default() },
+            Device { pending_endpoint_id: "m".into(), code_expires: Some(5), ..Device::default() },
+            Device { endpoint_id: "m".into(), allowed_by: ALLOWED_BY_PROGRAM.into(), ..Device::default() },
+        ] {
+            let was = other.clone();
+            allowed_before(&mut other, now);
+            assert_eq!(other, was);
+        }
+        // Past its grace, it was being turned away: it still is, signed in,
+        // until it confirms; signed out, it comes in and keeps its deadline.
+        let mut devices = vec![Device {
+            id: "mac".into(),
+            token_sha256: token_hash("M"),
+            endpoint_id: "m".into(),
+            confirm_by: Some(now - 1),
+            ..Device::default()
+        }];
+        allowed_before(&mut devices[0], now);
+        assert!(!devices[0].allow_confirmed && devices[0].allowed_by.is_empty());
+        let turned = admit(&mut devices, &knock("M", ""), &tunnel("m"), Some(&owner(1)), None, now);
+        assert!(matches!(turned, Admission::Turned(v1::ErrorCode::SignInRequired, _)));
+        assert!(matches!(admit(&mut devices, &knock("M", ""), &tunnel("m"), None, None, now), Admission::Connected(0)));
+        assert_eq!(devices[0].confirm_by, Some(now - 1), "kept until it confirms");
+        allowed_before(&mut devices[0], now);
+        assert!(!devices[0].allow_confirmed);
+        assert!(matches!(admit(&mut devices, &knock("M", "A"), &tunnel("m"), Some(&owner(1)), ours(), now), Admission::Connected(0)));
+        assert_eq!((devices[0].confirmed_as.as_str(), devices[0].confirm_by), ("acct", None));
+    }
+
+    /// What `allowed_before` relies on (Fugo 40892): every way a device is
+    /// let in now records how, by `allowed_by` or `confirmed_as`, so a
+    /// device with neither is one from before.
+    #[test]
+    fn every_way_in_is_recorded() {
+        let now = 100 * MINUTE;
+        let recorded = |device: &Device| !device.allowed_by.is_empty() || !device.confirmed_as.is_empty();
+        let waiting = |token: &str, key: &str| Device {
+            id: format!("d-{token}"),
+            token_sha256: token_hash(token),
+            code_expires: Some(now + MINUTE),
+            pending_endpoint_id: key.into(),
+            ..Device::default()
+        };
+        // The first device through the account.
+        let mut devices = Vec::new();
         assert!(matches!(
-            admit(&mut devices, &knock("M", "", true), &tunnel("m"), None, None, now),
-            Admission::Connected { confirm_by: 0, .. }
+            admit(&mut devices, &knock("", "A1"), &tunnel("k1"), Some(&owner(now - MINUTE)), ours(), now),
+            Admission::Connected(0)
         ));
-        assert_eq!(devices[0].confirm_by, None);
+        assert!(recorded(&devices[0]));
+        // A code and the owner's assertion.
+        let mut devices = vec![Device { pending_endpoint_id: String::new(), ..waiting("T", "") }];
+        assert!(matches!(admit(&mut devices, &knock("T", "A"), &tunnel("k"), Some(&owner(1)), ours(), now), Admission::Connected(0)));
+        assert!(recorded(&devices[0]));
+        // An Allow, by anyone.
+        let root = std::env::temp_dir().join(format!("factoryd-every-way-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = Home::new(root.clone());
+        for (index, allower) in [
+            Allower::Terminal,
+            Allower::Program,
+            Allower::Device { id: "local".into(), name: "Mac".into(), confirmed: true },
+            Allower::Device { id: "x".into(), name: "X".into(), confirmed: false },
+        ]
+        .iter()
+        .enumerate()
+        {
+            let (_, made) = pair(&home, "Device").expect("paired");
+            let mut saved = devices_as_saved(&home).expect("devices");
+            let at = saved.iter().position(|known| known.id == made.id).expect("there");
+            saved[at].pending_endpoint_id = format!("key-{index}");
+            save_devices(&home, &saved).expect("save");
+            let (allowed, _) = settle(&home, &made.id, Ok(allower)).expect("allowed");
+            assert!(recorded(&allowed) && !allowed.endpoint_id.is_empty(), "{allower:?}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_assertion_that_ran_out_is_ignored_only_for_a_device_a_person_allowed() {
+        let now = 1_000_000;
+        let expired = || Some(Err(refusal(crate::account::AssertionRefusal::Expired)));
+        let device = |allow_confirmed: bool| Device {
+            id: "mac".into(),
+            token_sha256: token_hash("M"),
+            endpoint_id: "m".into(),
+            allowed_by: ALLOWED_BY_TERMINAL.into(),
+            allow_confirmed,
+            ..Device::default()
+        };
+        // Allowed by a person: as if it sent none.
+        let mut devices = vec![device(true)];
+        assert!(matches!(admit(&mut devices, &knock("M", "A"), &tunnel("m"), Some(&owner(1)), expired(), now), Admission::Connected(0)));
+        // Not by its key on another device, nor without its code.
+        assert!(matches!(
+            admit(&mut devices, &knock("M", "A"), &tunnel("other"), Some(&owner(1)), expired(), now),
+            Admission::Turned(v1::ErrorCode::SignInRequired, _)
+        ));
+        // Let in by a program: it still has to sign in.
+        let mut devices = vec![device(false)];
+        assert!(matches!(
+            admit(&mut devices, &knock("M", "A"), &tunnel("m"), Some(&owner(1)), expired(), now),
+            Admission::Turned(v1::ErrorCode::SignInRequired, _)
+        ));
+        // Anything but Expired still refuses a device a person allowed.
+        let mut devices = vec![device(true)];
+        for refused in [
+            crate::account::AssertionRefusal::OtherAccount,
+            crate::account::AssertionRefusal::OtherKey,
+            crate::account::AssertionRefusal::Invalid,
+        ] {
+            let turned = admit(&mut devices, &knock("M", "A"), &tunnel("m"), Some(&owner(1)), Some(Err(refusal(refused))), now);
+            assert!(matches!(turned, Admission::Turned(..) | Admission::OtherAccountNow(_)), "{turned:?}");
+        }
+        // Only Expired reads as SignInRequired.
+        for refused in [
+            crate::account::AssertionRefusal::OtherAccount,
+            crate::account::AssertionRefusal::OtherKey,
+            crate::account::AssertionRefusal::Invalid,
+            crate::account::AssertionRefusal::NotSignedIn,
+        ] {
+            assert_ne!(refusal(refused).0, v1::ErrorCode::SignInRequired);
+        }
+    }
+
+    #[test]
+    fn another_accounts_device_is_turned_away_before_and_after_allow_and_a_bad_assertion_is_never_ignored() {
+        let now = 1_000_000;
+        let other = || Some(Err(refusal(crate::account::AssertionRefusal::OtherAccount)));
+        let waiting = Device { id: "new".into(), token_sha256: token_hash("T"), code_expires: Some(now + MINUTE), ..Device::default() };
+        let mut devices = vec![waiting.clone()];
+        let turned = admit(&mut devices, &knock("T", "A"), &tunnel("k"), Some(&owner(1)), other(), now);
+        assert!(matches!(turned, Admission::Turned(v1::ErrorCode::OtherAccount, reason) if reason.contains("open a pipe")));
+        assert_eq!(devices, std::slice::from_ref(&waiting), "nothing to allow");
+        // Allowed and confirmed, then signed in to another account.
+        let mut devices = vec![Device {
+            id: "mac".into(),
+            token_sha256: token_hash("M"),
+            endpoint_id: "m".into(),
+            allow_confirmed: true,
+            ..Device::default()
+        }];
+        let turned = admit(&mut devices, &knock("M", "A"), &tunnel("m"), Some(&owner(1)), other(), now);
+        assert!(
+            matches!(turned, Admission::OtherAccountNow(reason) if reason.contains("now signed in to a different") && reason.contains("Mac Studio"))
+        );
+        // Noted on it, once a minute however often it tries, and cleared
+        // when it next gets in.
+        assert_eq!((devices[0].turned_ms, devices[0].turned_why.as_str()), (Some(now), TURNED_OTHER_ACCOUNT));
+        admit(&mut devices, &knock("M", "A"), &tunnel("m"), Some(&owner(1)), other(), now + 1);
+        assert_eq!(devices[0].turned_ms, Some(now));
+        admit(&mut devices, &knock("M", "A"), &tunnel("m"), Some(&owner(1)), other(), now + TURNED_EVERY);
+        assert_eq!(devices[0].turned_ms, Some(now + TURNED_EVERY));
+        assert!(matches!(
+            admit(&mut devices, &knock("M", "A"), &tunnel("m"), Some(&owner(1)), ours(), now + TURNED_EVERY + 1),
+            Admission::Connected(0)
+        ));
+        assert_eq!((devices[0].turned_ms, devices[0].turned_why.as_str()), (None, ""));
+        // An assertion that doesn't verify is refused, not taken for none;
+        // with a code, never as Unauthorized (#446). (One that only ran out,
+        // from a device a person allowed, is the exception: next test.)
+        let turned = admit(
+            &mut devices,
+            &knock("M", "A"),
+            &tunnel("m"),
+            Some(&owner(1)),
+            Some(Err(refusal(crate::account::AssertionRefusal::OtherKey))),
+            now,
+        );
+        assert!(matches!(turned, Admission::Turned(v1::ErrorCode::SignInRequired, _)), "{turned:?}");
+        for refused in [crate::account::AssertionRefusal::Expired, crate::account::AssertionRefusal::OtherKey] {
+            let mut fresh = vec![waiting.clone()];
+            let turned = admit(&mut fresh, &knock("T", "A"), &tunnel("k"), Some(&owner(1)), Some(Err(refusal(refused))), now);
+            assert!(matches!(turned, Admission::Turned(v1::ErrorCode::SignInRequired, _)));
+        }
+        // Signed out, there's no owner to compare with: as before.
+        let mut devices = vec![waiting];
+        let not_signed_in = Some(Err(refusal(crate::account::AssertionRefusal::NotSignedIn)));
+        assert!(matches!(admit(&mut devices, &knock("T", "A"), &tunnel("k"), None, not_signed_in, now), Admission::Pending(0)));
     }
 
     /// The example the app checks its side against.

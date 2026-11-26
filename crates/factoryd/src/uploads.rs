@@ -390,6 +390,12 @@ impl Factory {
         std::fs::rename(&upload.partial, &path)?;
         let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
         tracing::info!(agent = %upload.agent, path = %path.display(), size = upload.size, "file uploaded");
+        // A picture's previews made now, for the screens that asked lately,
+        // so another device's first look finds them (Polpo's
+        // efficiency/photo-attach.md item 3).
+        if upload.mime.starts_with("image/") {
+            crate::previews::ahead(self.home.root(), &path);
+        }
         let attachment = v1::Attachment { path: path.display().to_string(), name, size: upload.size, mime: upload.mime };
         Ok(v1::UploadedFile { upload_id: request.upload_id.clone(), attachment: Some(attachment), blob_sha256: String::new() })
     }

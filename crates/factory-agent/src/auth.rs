@@ -161,6 +161,11 @@ pub trait OAuthFlow: Send + Sync {
     fn login<'a>(&'a self, interaction: &'a dyn AuthInteraction) -> AuthFuture<'a, Result<Credential, Error>>;
     fn refresh<'a>(&'a self, credential: Credential, cancel: CancellationToken) -> AuthFuture<'a, Result<Credential, Error>>;
     fn to_auth(&self, credential: &Credential) -> Result<RequestAuth, Error>;
+    /// Ends the sign-in at the provider as it's signed out of, where the
+    /// provider has a way (Grok's revoke); nothing elsewhere.
+    fn revoke<'a>(&'a self, _credential: &'a Credential) -> AuthFuture<'a, Result<(), Error>> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 const OAUTH_MINIMUM_VALIDITY_MS: u64 = 5 * 60 * 1000;

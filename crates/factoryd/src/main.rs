@@ -226,18 +226,20 @@ async fn run() -> Result<(), MainError> {
             let qr = if std::io::stdout().is_terminal() { factoryd::terminal_qr::lines(scanned) } else { None };
             match qr {
                 Some(lines) => {
-                    println!("Scan this with Claktory on your iPhone:\n");
+                    println!("Scan this with Claktory on your phone or iPad:\n");
                     for line in lines {
                         println!("  {line}");
                     }
                     println!(
-                        "\nOr, on your Mac, click Add a Claktory (+) at the far left of Claktory's window and paste this code:\n\n{code}\n"
+                        "\nOr, on a Mac, click Add a Claktory (+) at the far left of Claktory's window and paste this code:\n\n{code}\n"
                     );
                 }
                 None => println!(
                     "Paste this code into Claktory on your other device (on a Mac: Add a Claktory, the + at the far left of the window):\n\n{code}\n"
                 ),
             }
+            // What the device shows before it connects, to compare (MC7).
+            println!("The device you connect shows this too: {}\n", factoryd::remote::code_fingerprint(&instance.home));
             println!("It works once, for {minutes} minutes. You'll be asked to allow the device that uses it.");
             allow_in_terminal(&instance.home, &device).await
         }
@@ -397,7 +399,7 @@ async fn receive(instance: &Instance, args: &[String]) -> Result<(), MainError> 
             code: Arc::new(move |code| {
                 let text = code.text();
                 if let Some(lines) = terminal.then(|| factoryd::terminal_qr::lines(&text)).flatten() {
-                    println!("\nScan this with Claktory on your iPhone, or paste the code below:\n");
+                    println!("\nScan this with Claktory on your phone or iPad, or paste the code below:\n");
                     for line in lines {
                         println!("  {line}");
                     }
@@ -717,7 +719,7 @@ fn registry(home: &Home, port: u16) -> Result<Registry, MainError> {
         let url = std::env::var_os(qa::URL_VAR).map(|url| url.to_string_lossy().into_owned());
         if let Some((base, anthropic)) = qa::provider_for(url.as_deref(), home.root(), port).map_err(MainError::QaProvider)? {
             tracing::warn!("QA provider override: {base}");
-            let mut providers = factory_agent::providers::models::default_providers();
+            let mut providers = providers(home);
             if let Some(slot) = providers.iter_mut().find(|provider| provider.id == anthropic.id) {
                 *slot = anthropic;
             }
@@ -729,7 +731,25 @@ fn registry(home: &Home, port: u16) -> Result<Registry, MainError> {
     }
     #[cfg(not(feature = "qa-provider"))]
     let _ = port;
-    Ok(Registry::new(home.auth_path()))
+    let store = factory_agent::credentials::FileCredentialStore::new(home.auth_path());
+    let files = home.auth_path().with_file_name(factory_agent::providers::models::IMAGE_FILES);
+    Ok(Registry::with_providers(store, factory_agent::auth::process_env(), providers(home)).keeping_image_files(Some(files)))
+}
+
+/// The providers Claktory offers. Grok waits for a real sign-in and an
+/// agent's reply on it before a release shows it (Bruno 46121): until then
+/// only a debug build or the dev Claktory has it.
+fn providers(home: &Home) -> Vec<factory_agent::providers::Provider> {
+    providers_for(home, !cfg!(debug_assertions))
+}
+
+fn providers_for(home: &Home, release: bool) -> Vec<factory_agent::providers::Provider> {
+    let mut providers = factory_agent::providers::models::default_providers();
+    let dev = home.root().file_name().is_some_and(|name| name == ".factory-dev");
+    if release && !dev {
+        providers.retain(|provider| provider.id != factory_agent::providers::grok::ID);
+    }
+    providers
 }
 
 async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Handed>) -> Result<(), MainError> {
@@ -788,4 +808,20 @@ async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Hand
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grok_shows_only_in_a_debug_build_or_the_dev_claktory() {
+        let ids = |root: &str, release: bool| -> Vec<String> {
+            providers_for(&Home::new(std::path::PathBuf::from(root)), release).into_iter().map(|provider| provider.id.to_owned()).collect()
+        };
+        assert!(!ids("/tmp/someone/.factory", true).contains(&"grok".to_owned()));
+        assert!(ids("/tmp/someone/.factory-dev", true).contains(&"grok".to_owned()));
+        assert!(ids("/tmp/someone/.factory", false).contains(&"grok".to_owned()));
+        assert_eq!(ids("/tmp/someone/.factory", true), ["anthropic", "openai", "openai-codex", "openrouter"]);
+    }
 }

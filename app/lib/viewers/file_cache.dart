@@ -98,6 +98,18 @@ Future<String?> _findFolder() async {
         ? 'dev.factory.app.dev'
         : 'dev.factory.app';
     path = '$home/Library/Caches/$app/files';
+  } else if (Platform.isWindows) {
+    // Cache in the app's own folder in %LOCALAPPDATA%, this account's only
+    // (app/windows/runner/device_channel.cpp); Windows has no HOME.
+    try {
+      final cache = await const MethodChannel('factory/device')
+          .invokeMethod<String>('cacheFolder');
+      if (cache == null || cache.isEmpty) return null;
+      path = '$cache\\files';
+    } on Object catch (error) {
+      developer.log('no folder for kept files: $error', name: 'files');
+      return null;
+    }
   } else if (home.isNotEmpty) {
     const app = bool.fromEnvironment('FACTORY_DEV')
         ? 'claktory-dev'

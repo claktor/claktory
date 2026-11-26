@@ -7,7 +7,9 @@ import 'account.dart' show signInPutOff;
 import 'apps.dart' show appOfGrantee;
 import 'avatar.dart';
 import 'backend.dart';
+import 'card_answer.dart';
 import 'characters/character.dart';
+import 'claktory_identity.dart' show claktoryNameInText;
 import 'connectors.dart';
 import 'controls.dart';
 import 'decision.dart';
@@ -173,8 +175,8 @@ class _Locked extends StatelessWidget {
             ? "Secrets are locked. Agents can't use them until you unlock them."
             : removed
             ? 'Secrets are locked because this Claktory was removed from your '
-                  'account. Sign in again to unlock them, or use your recovery '
-                  'key.'
+                  'account. Sign in again to unlock them, or use this '
+                  'Claktory\'s recovery key.'
             // Signed in: the backend's own words; none while it's asking.
             : 'Secrets are locked. '
                   '${account.problem.isEmpty ? 'Opening them…' : account.problem}');
@@ -267,6 +269,10 @@ class _UnlockSecretsFormState extends State<UnlockSecretsForm> {
   @override
   Widget build(BuildContext context) => FormFrame(
     title: 'Unlock with recovery key',
+    body:
+        'Enter the recovery key saved for '
+        '${claktoryNameInText(AppScope.of(context))}. Each Claktory has its '
+        'own.',
     fields: [
       Field(
         label: 'Recovery key',
@@ -2241,7 +2247,7 @@ class SecretRequestCard extends StatefulWidget {
 }
 
 class _SecretRequestCardState extends State<SecretRequestCard>
-    with AutomaticKeepAliveClientMixin {
+    with AutomaticKeepAliveClientMixin, PublishesAnswer {
   /// While it waits, what the person chose or typed here (a length, a
   /// name, a value) stays when the card scrolls out of view and back
   /// (Zucchero's row 189); it goes with the conversation, as before.
@@ -2373,14 +2379,17 @@ class _SecretRequestCardState extends State<SecretRequestCard>
     final chosen = secrets.any((secret) => secret.id == _chosen);
     if (!_names && !adding && !chosen) {
       setState(() => _error = 'Choose a secret, or add a new one.');
+      _notSent();
       return;
     }
     if (adding && _name.text.trim().isEmpty) {
       setState(() => _error = 'Enter a name for the secret.');
+      _notSent();
       return;
     }
     if (adding && _values.any((v) => v.value.text.isEmpty)) {
       setState(() => _error = 'Enter a value for each variable.');
+      _notSent();
       return;
     }
     final secret = secrets.where((secret) => secret.id == _chosen).firstOrNull;
@@ -2426,6 +2435,7 @@ class _SecretRequestCardState extends State<SecretRequestCard>
             ? 'Enter a name for the password.'
             : 'Enter a name for the key.',
       );
+      _notSent();
       return;
     }
     await _decide(
@@ -2448,6 +2458,7 @@ class _SecretRequestCardState extends State<SecretRequestCard>
     final name = _name.text.trim();
     if (name.isEmpty) {
       setState(() => _error = 'Enter a name for the secret.');
+      _notSent();
       return;
     }
     await _decide(
@@ -2493,19 +2504,41 @@ class _SecretRequestCardState extends State<SecretRequestCard>
 
   /// [reply]: Submit (#370), the comment going to the agent as the
   /// person's reply, and nothing given; it can ask again. A backend that
-  /// doesn't know replies dismisses it with the comment.
-  Future<void> _dismiss({bool reply = false}) => _decide(
+  /// doesn't know replies dismisses it with the comment. [reason]: the
+  /// no's, from focus mode's dock, with the comment.
+  Future<void> _dismiss({bool reply = false, String? reason}) => _decide(
     () => AppScope.of(context).decideSecretRequest(
       request.agentId,
       request.id,
       approve: false,
-      comment: _comment.text.trim(),
+      comment: noComment(reason, _comment.text),
       reply: reply,
     ),
   );
 
+  /// A decision from focus mode's keys (#514) on its way: refused, it
+  /// throws, and one the card stopped (a name missing) throws
+  /// [AnswerNotSent], its error on the card.
+  var _fromDock = false;
+
+  Future<void> _docked(Future<void> Function() run) async {
+    _fromDock = true;
+    try {
+      await run();
+    } finally {
+      _fromDock = false;
+    }
+  }
+
+  void _notSent() {
+    if (_fromDock) throw const AnswerNotSent();
+  }
+
   Future<void> _decide(Future<void> Function() send) async {
-    if (_deciding) return;
+    if (_deciding) {
+      _notSent();
+      return;
+    }
     setState(() {
       _deciding = true;
       _error = null;
@@ -2515,6 +2548,7 @@ class _SecretRequestCardState extends State<SecretRequestCard>
       widget.onDecided?.call();
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
+      if (_fromDock) rethrow;
     } finally {
       if (mounted) setState(() => _deciding = false);
     }
@@ -2525,13 +2559,98 @@ class _SecretRequestCardState extends State<SecretRequestCard>
     super.build(context);
     final store = AppScope.of(context).workspace;
     return ListenableBuilder(
-      listenable: store,
-      builder: (context, _) => _card(
-        context,
-        store.agent(request.agentId),
-        request.adminAgentId.isEmpty ? null : store.agent(request.adminAgentId),
-        store.workspace.vault.secrets,
-      ),
+      // What's typed turns Submit on in the dock.
+      listenable: Listenable.merge([store, _comment]),
+      builder: (context, _) {
+        final secrets = _secrets = store.workspace.vault.secrets;
+        final card = _card(
+          context,
+          store.agent(request.agentId),
+          request.adminAgentId.isEmpty
+              ? null
+              : store.agent(request.adminAgentId),
+          secrets,
+        );
+        publishAnswer();
+        return card;
+      },
+    );
+  }
+
+  /// The person's secrets, as last shown.
+  var _secrets = const <SecretInfo>[];
+
+  /// For focus mode's keys (#514): the card's main action (Give, Add and
+  /// give, Approve, Generate, Import…), Submit once a comment's typed, and
+  /// Dismiss; the secrets to choose from as its choices.
+  @override
+  CardAnswer? answerNow() {
+    if (!_waiting || widget.direct) return null;
+    final secrets = _secrets;
+    final typed = _comment.text.trim().isNotEmpty;
+    String yes = '';
+    Future<void> Function()? onYes;
+    var choices = const <CardChoice>[];
+    CardChoice choice(SecretInfo secret) => CardChoice(
+      secret.name,
+      chosen: _adding == false && _chosen == secret.id,
+      choose: () => setState(() {
+        _adding = false;
+        _chosen = secret.id;
+        _error = null;
+        _aliases.clear();
+      }),
+    );
+    if (_imports) {
+      final blocked = request.imports.any((file) => file.problem.isNotEmpty);
+      final give = !request.grantToNobody;
+      yes = give ? 'Import and give' : 'Import only';
+      onYes = blocked ? null : () => _import(give: give);
+    } else if (_generates) {
+      yes = 'Generate';
+      onYes = _generate;
+    } else if (_answers) {
+      final approved =
+          request.state == SecretRequestState.SECRET_REQUEST_STATE_APPROVED;
+      if (!approved || _here) {
+        final chosen = secrets.where((s) => s.id == _chosen).firstOrNull;
+        final adding = _adding != false || chosen == null;
+        final derives =
+            !adding &&
+            chosen.hasConnection() &&
+            request.adminAgentId.isNotEmpty;
+        yes = derives ? 'Approve' : (adding ? 'Add and give' : 'Give');
+        onYes = derives ? _approve : () => _give(secrets);
+        choices = [
+          for (final secret in secrets)
+            if (!secret.hasConnection()) choice(secret),
+        ];
+      }
+    } else {
+      final adding = !_names && _adding == true;
+      yes = adding ? 'Add and give' : 'Give';
+      onYes = !_names && !adding && secrets.isEmpty
+          ? null
+          : () => _give(secrets);
+      if (!_names && !_collect) {
+        choices = [for (final secret in secrets) choice(secret)];
+      }
+    }
+    final yesNow = onYes;
+    return CardAnswer(
+      key: 'agent:${request.agentId}/secret/${request.id}',
+      docked: false,
+      yes: yes,
+      no: 'Dismiss',
+      typed: typed,
+      busy: _deciding,
+      error: _error,
+      choices: choices.take(9).toList(),
+      onYes: _deciding || yesNow == null ? null : () => _docked(yesNow),
+      onSubmit: _deciding ? null : () => _docked(() => _dismiss(reply: true)),
+      onNo: _deciding
+          ? null
+          : (reason) => _docked(() => _dismiss(reason: reason)),
     );
   }
 
@@ -3189,7 +3308,28 @@ class _SecretRequestCardState extends State<SecretRequestCard>
           ),
         ),
       ),
-      if (others.isNotEmpty || !adding) ...[
+      // In focus mode, the secrets to give instead are a list in place,
+      // numbered for its keys (FS5, #514).
+      if (inDock && secrets.any((secret) => !secret.hasConnection())) ...[
+        const SizedBox(height: Space.m),
+        _untilTyped(
+          _SecretChoices(
+            choices: answerNow()?.choices ?? const [],
+            adding: adding,
+            onAdd: _deciding
+                ? null
+                : () => setState(() {
+                    _adding = true;
+                    _error = null;
+                    _aliases.clear();
+                  }),
+            adminName: request.adminAgentId.isNotEmpty && !derives
+                ? adminName
+                : null,
+            onAdmin: _deciding ? null : () => unawaited(_approve()),
+          ),
+        ),
+      ] else if (others.isNotEmpty || !adding) ...[
         const SizedBox(height: Space.s),
         _untilTyped(
           Align(
@@ -3797,6 +3937,95 @@ class _PublicKeyState extends State<_PublicKey> {
 
 /// One of the request card's two ways to give: Choose one or Add new. The
 /// selected one is underlined in signal, as the Marketplace's tabs are.
+/// A secret request's choices in focus mode (FS5, #514): the person's
+/// secrets in place, numbered for 1 to 9, the one chosen marked; then a
+/// new one, and the admin agent's choice.
+class _SecretChoices extends StatelessWidget {
+  const _SecretChoices({
+    required this.choices,
+    required this.adding,
+    required this.onAdd,
+    required this.adminName,
+    required this.onAdmin,
+  });
+
+  final List<CardChoice> choices;
+  final bool adding;
+  final VoidCallback? onAdd;
+  final String? adminName;
+  final VoidCallback? onAdmin;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    Widget row(String? number, String label, bool chosen, VoidCallback? tap) =>
+        Semantics(
+          button: true,
+          selected: chosen,
+          child: Pressable(
+            onTap: tap,
+            builder: (context, hovered) => Container(
+              constraints: const BoxConstraints(minHeight: 28),
+              padding: const EdgeInsets.symmetric(
+                horizontal: Space.s,
+                vertical: Space.xs,
+              ),
+              decoration: BoxDecoration(
+                border: Border(
+                  left: BorderSide(
+                    width: 2,
+                    color: chosen ? palette.signal : const Color(0x00000000),
+                  ),
+                ),
+              ),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 20,
+                    child: Text(
+                      number ?? '',
+                      style: type.caption.copyWith(color: palette.textFaint),
+                    ),
+                  ),
+                  Expanded(
+                    child: Text(
+                      label,
+                      style: type.body.copyWith(
+                        color: chosen || hovered
+                            ? palette.text
+                            : palette.textMuted,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'Or give one of yours',
+          style: type.caption.copyWith(color: palette.textFaint),
+        ),
+        const SizedBox(height: Space.xs),
+        for (final (index, choice) in choices.indexed)
+          row(
+            '${index + 1}',
+            choice.label,
+            choice.chosen,
+            onAdd == null ? null : choice.choose,
+          ),
+        row(null, 'Add a new one', adding, onAdd),
+        if (adminName case final admin?)
+          row(null, 'Let $admin choose', false, onAdmin),
+      ],
+    );
+  }
+}
+
 class _ModeTab extends StatelessWidget {
   const _ModeTab({
     required this.title,

@@ -102,10 +102,7 @@ void main() {
       [for (final l in loaded) ((l as Map)['page_1based'], l['ink_layer_id'])],
       [(3, 'theirs-3')],
     );
-    expect(
-      find.text('Your drawing on 1 page goes with your answer.'),
-      findsOneWidget,
-    );
+    expect(find.text('Your drawing goes with it.'), findsOneWidget);
     expect(
       _status(tester),
       'This PDF changed. Your drawing on page 5 is from the earlier version.',

@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -10,7 +11,9 @@ import '../identity.dart';
 import '../layout.dart';
 import '../mobile/device.dart' show WindowControls, windowControls;
 import '../mobile/metrics.dart';
+import '../mobile/permission.dart' show registerPermissionHost;
 import '../mobile/popover.dart' show presentPopover;
+import '../needs_you_focus.dart' show focusModeKey, focusModeOf, setFocusMode;
 import '../panes.dart' show PaneProjection, paneTitle, paneGlyph;
 import '../protocol/factory/v1/factory.pb.dart';
 import '../scope.dart' show AppScope;
@@ -61,6 +64,23 @@ class WorkbenchFocus extends ChangeNotifier {
   /// Whether the sidebar is open over the window (paired and focused).
   bool get overlayOpen => _overlayOpen;
   var _overlayOpen = false;
+
+  /// Settings while it's shown (settings_keys.dart's WorkbenchSettings):
+  /// what the menu's Search Settings invokes its intent on.
+  BuildContext? get settings => _settings.lastOrNull;
+  final _settings = <BuildContext>[];
+
+  /// [settings] came into the window, while it builds: the menu hears
+  /// after the frame.
+  void showSettings(BuildContext settings) {
+    _settings.add(settings);
+    _notifyAfterFrame();
+  }
+
+  /// [settings] went.
+  void hideSettings(BuildContext settings) {
+    if (_settings.remove(settings) && !_disposed) _notifyAfterFrame();
+  }
 
   /// The leaf [agentId]'s layout [root] is read at ([focusIn]).
   String focusedIn(String agentId, ViewNode root) =>
@@ -232,8 +252,8 @@ WorkbenchTier windowTier(BuildContext context, [Size? window]) {
 /// covers the rail and the sidebar, as it does a UIKit sidebar; the
 /// content and the panel rise above it ([_aboveKeyboard]). What's inside
 /// sees no keyboard left to avoid, and only the home indicator's padding.
-class _SafeWindow extends StatelessWidget {
-  const _SafeWindow({required this.controls, required this.child});
+class SafeWindow extends StatelessWidget {
+  const SafeWindow({super.key, required this.controls, required this.child});
 
   final WindowControls controls;
   final Widget child;
@@ -290,7 +310,7 @@ double keyboardOverWindow(BuildContext context) =>
 /// room: they end above it, so the message box being written in stays in
 /// sight, while the rail and the sidebar beside them stay put under it (a
 /// short window's columns would overflow if they rose too). [context] is
-/// outside [_SafeWindow], where the keyboard is still known.
+/// outside [SafeWindow], where the keyboard is still known.
 Widget _aboveKeyboard(BuildContext context, Widget child) {
   final lift = MediaQuery.viewInsetsOf(context).bottom;
   return Padding(
@@ -355,21 +375,29 @@ class _WorkbenchState extends State<Workbench> {
   /// the toolbar's leading items clear them, and so does the rail's column.
   WindowControls get _controls => windowControls.value;
 
+  /// Asks from outside a screen (notifications after pairing) explain
+  /// themselves over the workbench (area 5a P3, Zucchero 44139).
+  late final VoidCallback _unhostPermissions;
+
   @override
   void initState() {
     super.initState();
     windowControls.addListener(_controlsChanged);
+    _unhostPermissions = registerPermissionHost(context);
   }
 
   @override
   void dispose() {
     windowControls.removeListener(_controlsChanged);
+    _focusMode?.removeListener(_focusModeChanged);
     _highlights?.removeListener(_glowed);
     _highlights?.pointedAt.removeListener(_pointedAt);
+    _unhostPermissions();
     super.dispose();
   }
 
   void _controlsChanged() => setState(() {});
+  void _focusModeChanged() => setState(() {});
 
   /// What glows, and what the backend points at: a pane of the agent's
   /// shown again (an agent's show of a file already open, its show card
@@ -377,9 +405,18 @@ class _WorkbenchState extends State<Workbench> {
   HighlightStore? _highlights;
   var _lastGlow = 0;
 
+  /// Whether Needs you's focus mode is over the window (#514): leaving it,
+  /// the workbench's commands are the menu's again.
+  ValueListenable<bool>? _focusMode;
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final focusMode = focusModeOf(AppScope.of(context));
+    if (!identical(focusMode, _focusMode)) {
+      _focusMode?.removeListener(_focusModeChanged);
+      _focusMode = focusMode..addListener(_focusModeChanged);
+    }
     final highlights = context
         .getInheritedWidgetOfExactType<AppScope>()
         ?.backend
@@ -505,15 +542,29 @@ class _WorkbenchState extends State<Workbench> {
         WorkbenchTier.focused => _focused(context, focus, content),
         _ => _wide(context, focus, constraints, content, pinned: pinned),
       };
-      // The system's menu lists them as they are now.
-      WidgetsBinding.instance.addPostFrameCallback(
-        (_) => focus.menu.publish(commands),
-      );
+      // The system's menu lists them as they are now, with Needs you's
+      // focus mode to enter (#514). While it's on, the workbench waits
+      // under it, out of sight, and focus mode's commands are the menu's
+      // (ipad/focus.dart): this one publishes nothing.
+      final backend = AppScope.of(context);
+      final focusMode = focusModeOf(backend);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || focusMode.value) return;
+        focus.menu.publish([
+          ...commands,
+          WorkbenchCommand(
+            id: 'focus.toggle',
+            title: 'Focus on Needs You',
+            keys: focusModeKey,
+            run: () => setFocusMode(backend, true),
+          ),
+        ]);
+      });
       return WorkbenchShortcuts(
         commands: commands,
         native: focus.menu.native,
         escape: focus.overlayOpen && !pinned ? focus.closeOverlay : null,
-        child: _SafeWindow(
+        child: SafeWindow(
           controls: _controls,
           child: Stack(
             children: [

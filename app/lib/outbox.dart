@@ -162,6 +162,16 @@ class Outbox extends ChangeNotifier {
   final _messages = <Outgoing>[];
   final _random = Random.secure();
 
+  /// The files sent from this device this session, by where the backend
+  /// put them: a picture sent shows from here, at once, rather than coming
+  /// back over the link it just went up (Polpo's photo-attach.md). Only
+  /// for as long as the app runs, as the picker's copies last.
+  final _localCopies = <String, String>{};
+
+  /// Where the file the backend keeps at [path] is on this device, when
+  /// it was sent from here this session; null otherwise.
+  String? localCopyOf(String path) => _localCopies[path];
+
   /// The most sent in one chunk.
   static const chunk = 1024 * 1024;
 
@@ -399,7 +409,8 @@ class Outbox extends ChangeNotifier {
     } finally {
       await source.close();
     }
-    file.done = await _backend.finishUpload(file.uploadId);
+    final done = file.done = await _backend.finishUpload(file.uploadId);
+    _localCopies[done.path] = file.file.path;
     notifyListeners();
   }
 

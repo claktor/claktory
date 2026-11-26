@@ -114,13 +114,116 @@ pub fn TRUNCATED_TOOL_CALL(name: &str) -> String {
     )
 }
 
+/// A tool call in a reply with a line that starts one of Claktory's tags
+/// (G7): the model wrote an event or a person's message itself, and what it
+/// does next may rest on it, so none of that reply's calls run.
+pub const FORGED_TAG_CALL: &str = "Not run: your reply has a line that starts a Claktory tag, as an event or a person's message does. You wrote it yourself, and no such event or message came.";
+
+/// A tool call in a reply its provider stopped where it began one of
+/// Claktory's tags: calls written before the cut are whole, as measured,
+/// but that's the provider's behaviour, not a promise, and a call cut in
+/// its arguments must never run (Gyro 45937).
+pub const FORGED_TAG_CUT_CALL: &str =
+    "Not run: your reply was cut where it began a Claktory tag, so this call may be cut too. Call it again if you still need it.";
+
+/// The note after a reply its provider stopped where it began one of
+/// Claktory's tags (`text::FORGED_TAG_STOPS`).
+pub const FORGED_TAG_CUT: &str = "Your reply was cut where it began a Claktory tag; events come only from Claktory.";
+
+/// The note after a reply with a line that starts one of Claktory's tags
+/// and no tool calls to answer instead.
+pub const FORGED_TAG_LINE: &str =
+    "Your reply has a line that starts a Claktory tag, as an event or a person's message does; events come only from Claktory, never from your own reply.";
+
+/// The mark (`extra`) on a reply whose text had a line that starts one of
+/// Claktory's tags before it was defused.
+pub const FORGED_TAG: &str = "forgedTag";
+
 fn assistant(message: AssistantMessage) -> Message {
     Message::Assistant(message)
+}
+
+/// A reply as it's kept (G7): marked `FORGED_TAG` when a line of its text
+/// starts one of Claktory's tags, and every such tag in its text defused
+/// (`text::defuse_tags`), so neither the model reading it back nor anyone
+/// reading the conversation takes it for a real event. Only its own text:
+/// thinking and tool calls' arguments (files and commands that hold these
+/// tags on purpose) stay as they are. Done once, as the reply ends, before
+/// it's kept or sent back to the model.
+fn keep_own(message: &mut AssistantMessage) {
+    let mut forged = false;
+    for part in &mut message.content {
+        if let AssistantPart::Text { text, .. } = part {
+            forged |= crate::text::starts_a_tag_line(text);
+            if let std::borrow::Cow::Owned(defused) = crate::text::defuse_tags(text) {
+                *text = defused;
+            }
+        }
+    }
+    if forged {
+        message.extra.insert(FORGED_TAG.into(), Value::Bool(true));
+    }
+}
+
+/// Why a reply's tool calls are answered without running.
+#[derive(Clone, Copy, PartialEq)]
+enum Unrun {
+    /// Cut at the output token limit: their arguments may be cut too.
+    Truncated,
+    /// The reply has a line that starts one of Claktory's tags.
+    Forged,
+    /// Its provider stopped it where it began one of Claktory's tags.
+    Cut,
+}
+
+impl Unrun {
+    fn of(message: &AssistantMessage) -> Option<Unrun> {
+        if message.stop_reason == StopReason::Length {
+            Some(Unrun::Truncated)
+        } else if message.extra.contains_key(FORGED_TAG) {
+            Some(Unrun::Forged)
+        } else if stopped_at_tag(message) {
+            Some(Unrun::Cut)
+        } else {
+            None
+        }
+    }
+
+    fn result(self, name: &str) -> String {
+        match self {
+            Unrun::Truncated => TRUNCATED_TOOL_CALL(name),
+            Unrun::Forged => FORGED_TAG_CALL.into(),
+            Unrun::Cut => FORGED_TAG_CUT_CALL.into(),
+        }
+    }
+}
+
+/// Whether the reply's provider stopped it at one of `text::FORGED_TAG_STOPS`.
+fn stopped_at_tag(message: &AssistantMessage) -> bool {
+    message.extra.get("rawStopReason").and_then(Value::as_str) == Some("stop_sequence")
+}
+
+/// The note a reply's ending leaves (G7): cut where it began one of
+/// Claktory's tags, or holding a line that starts one with no tool calls
+/// whose results say so instead.
+fn forged_tag_note(message: &AssistantMessage, called: bool) -> Option<&'static str> {
+    if stopped_at_tag(message) {
+        Some(FORGED_TAG_CUT)
+    } else if message.extra.contains_key(FORGED_TAG) && !called {
+        Some(FORGED_TAG_LINE)
+    } else {
+        None
+    }
 }
 
 /// The event telling the agent a fallback model answered a refused step:
 /// transient, since it describes this context's turn only.
 fn fallback_note(text: String) -> UserMessage {
+    host_note(text, "Another model answered a step this agent's model declined.")
+}
+
+/// A note from Claktory about this context's turn only (transient).
+fn host_note(text: String, summary: &str) -> UserMessage {
     UserMessage {
         content: UserContent::Text(text),
         timestamp: now_ms(),
@@ -128,7 +231,7 @@ fn fallback_note(text: String) -> UserMessage {
             source: EventSource::Host,
             from: "Claktory".into(),
             id: String::new(),
-            summary: "Another model answered a step this agent's model declined.".into(),
+            summary: summary.into(),
             transient: true,
             pipe_seqs: Vec::new(),
             provenance: None,
@@ -469,8 +572,10 @@ impl Agent {
             let mut tool_results: Vec<Message> = Vec::new();
             let mut terminate = false;
             if !calls.is_empty() {
-                // A "length" stop means every call may carry truncated arguments: fail them all instead of executing them.
-                let (results, stop) = self.run_tool_calls(&calls, token, message.stop_reason == StopReason::Length).await?;
+                // A "length" stop means every call may carry truncated
+                // arguments, and a forged tag that what they do may rest on
+                // it: fail them all instead of executing them.
+                let (results, stop) = self.run_tool_calls(&calls, token, Unrun::of(&message)).await?;
                 for result in results {
                     context.push(result.clone());
                     produced.push(result.clone());
@@ -480,6 +585,14 @@ impl Agent {
             }
             if let Some(note) = self.pending_fallback_note.take() {
                 let note = Message::User(fallback_note(note));
+                context.push(note.clone());
+                produced.push(note.clone());
+                self.emit_message(note).await?;
+            }
+            // A note, not a prompt: it ends nothing and starts nothing, so
+            // a reply stopped at a tag ends the turn as any reply would.
+            if let Some(note) = forged_tag_note(&message, !calls.is_empty()) {
+                let note = Message::User(host_note(note.into(), "A reply began a Claktory tag of its own."));
                 context.push(note.clone());
                 produced.push(note.clone());
                 self.emit_message(note).await?;
@@ -860,7 +973,8 @@ impl Agent {
                     added = true;
                     self.emit(AgentEvent::MessageStart { message: assistant(partial) }).await?;
                 }
-                StreamEvent::Done { message, .. } | StreamEvent::Error { error: message, .. } => {
+                StreamEvent::Done { mut message, .. } | StreamEvent::Error { error: mut message, .. } => {
+                    keep_own(&mut message);
                     if added {
                         if let Some(last) = context.last_mut() {
                             *last = assistant(message.clone());
@@ -903,7 +1017,8 @@ impl Agent {
         Ok(message)
     }
 
-    async fn run_tool_calls(&mut self, calls: &[Call], token: &CancellationToken, truncated: bool) -> Result<(Vec<Message>, bool), Error> {
+    async fn run_tool_calls(&mut self, calls: &[Call], token: &CancellationToken, unrun: Option<Unrun>) -> Result<(Vec<Message>, bool), Error> {
+        let held = unrun.is_some();
         let mut messages = Vec::new();
         let mut terminates = Vec::new();
         for call in calls {
@@ -914,8 +1029,8 @@ impl Agent {
             *self.detaching.0.lock() = Some(detach.clone());
             self.emit(AgentEvent::ToolExecutionStart { tool_call_id: id.clone(), tool_name: name.clone(), args: arguments.clone() })
                 .await?;
-            let (result, is_error) = if truncated {
-                (ToolResult::error(TRUNCATED_TOOL_CALL(name)), true)
+            let (result, is_error) = if let Some(unrun) = unrun {
+                (ToolResult::error(unrun.result(name)), true)
             } else {
                 match self.prepare(name, arguments, token).await {
                     Prepared::Immediate(result) => (result, true),
@@ -923,11 +1038,11 @@ impl Agent {
                 }
             };
             self.detaching.0.lock().take();
-            if !truncated {
+            if !held {
                 terminates.push(result.terminate == Some(true));
             }
             messages.push(self.finish_tool_call(Finalized { id: id.clone(), name: name.clone(), result, is_error, started }).await?);
-            if !truncated && token.is_cancelled() {
+            if !held && token.is_cancelled() {
                 break;
             }
         }

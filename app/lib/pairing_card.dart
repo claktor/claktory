@@ -5,6 +5,7 @@ import 'package:flutter/widgets.dart';
 
 import 'avatar.dart';
 import 'backend.dart';
+import 'card_answer.dart' show CardAnswer, PublishesAnswer;
 import 'characters/character.dart';
 import 'controls.dart';
 import 'devices.dart' show PairingInstructions, PairingWay, pairingWayOf;
@@ -28,7 +29,8 @@ class DevicePairingCard extends StatefulWidget {
   State<DevicePairingCard> createState() => _DevicePairingCardState();
 }
 
-class _DevicePairingCardState extends State<DevicePairingCard> {
+class _DevicePairingCardState extends State<DevicePairingCard>
+    with PublishesAnswer {
   Backend? _backend;
 
   /// The code, while it waits and has arrived.
@@ -132,7 +134,11 @@ class _DevicePairingCardState extends State<DevicePairingCard> {
     if (mounted) setState(() => _copied = true);
   }
 
-  Future<void> _decide(Future<void> Function(Backend backend) send) async {
+  /// [rethrowing] for focus mode's keys (#514): refused, it throws too.
+  Future<void> _decide(
+    Future<void> Function(Backend backend) send, {
+    bool rethrowing = false,
+  }) async {
     final backend = _backend;
     if (_deciding || backend == null) return;
     setState(() {
@@ -149,9 +155,62 @@ class _DevicePairingCardState extends State<DevicePairingCard> {
           _number.clear();
         });
       }
+      if (rethrowing) rethrow;
     } finally {
       if (mounted) setState(() => _deciding = false);
     }
+  }
+
+  /// The device asking, once it used the code.
+  PendingDevice? _asking;
+
+  /// For focus mode's keys (#514): while it waits, Cancel; once the device
+  /// asks, Allow only with its number typed (never a quick yes, FS14), and
+  /// Don't allow.
+  @override
+  CardAnswer? answerNow() {
+    final key = 'agent:${pairing.agentId}/pairing/${pairing.id}';
+    if (_waiting) {
+      return CardAnswer(
+        key: key,
+        docked: false,
+        yes: '',
+        no: 'Cancel',
+        busy: _deciding,
+        error: _error,
+        onNo: _deciding
+            ? null
+            : (_) => _decide(
+                (backend) => backend.cancelPairing(pairing.deviceId),
+                rethrowing: true,
+              ),
+      );
+    }
+    if (pairing.state != DevicePairingState.DEVICE_PAIRING_STATE_ASKING) {
+      return null;
+    }
+    final asking = _asking;
+    final ready = !_deciding && asking != null && isDeviceNumber(_number.text);
+    return CardAnswer(
+      key: key,
+      docked: false,
+      yes: 'Allow',
+      no: "Don't allow",
+      busy: _deciding,
+      error: _error,
+      onYes: ready
+          ? () => _decide(
+              (backend) => backend.approveDevice(asking.deviceId, _number.text),
+              rethrowing: true,
+            )
+          : null,
+      onNo: _deciding || asking == null
+          ? null
+          : (_) => _decide(
+              (backend) => backend.denyDevice(asking.deviceId),
+              rethrowing: true,
+            ),
+    );
   }
 
   @override
@@ -159,13 +218,13 @@ class _DevicePairingCardState extends State<DevicePairingCard> {
     final store = AppScope.of(context).workspace;
     return ListenableBuilder(
       listenable: Listenable.merge([store, _number]),
-      builder: (context, _) => _card(
-        context,
-        store.agent(pairing.agentId),
-        store.workspace.remote.pendingDevices
+      builder: (context, _) {
+        _asking = store.workspace.remote.pendingDevices
             .where((device) => device.deviceId == pairing.deviceId)
-            .firstOrNull,
-      ),
+            .firstOrNull;
+        publishAnswer();
+        return _card(context, store.agent(pairing.agentId), _asking);
+      },
     );
   }
 

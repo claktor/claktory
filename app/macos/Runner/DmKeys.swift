@@ -244,8 +244,13 @@ enum DmKeys {
   private static let queue = DispatchQueue(label: "com.claktory.dm-keys")
 
   #if canImport(Flutter) || canImport(FlutterMacOS)
-    static func register(with messenger: FlutterBinaryMessenger, store: DmKeyStore = .forThisApp()) {
-      let channel = FlutterMethodChannel(name: channelName, binaryMessenger: messenger)
+    /// [name]: another channel over another [store], such as the Mac's
+    /// account key's (#529, `factory/account-key`).
+    static func register(
+      with messenger: FlutterBinaryMessenger, store: DmKeyStore = .forThisApp(),
+      channel name: String = channelName
+    ) {
+      let channel = FlutterMethodChannel(name: name, binaryMessenger: messenger)
       channel.setMethodCallHandler { call, result in
         let args = call.arguments as? [String: Any] ?? [:]
         let name = args["name"] as? String ?? ""

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:ui' as ui;
 
 import 'package:factory_app/controls.dart';
+import 'package:factory_app/primary_key.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/viewers/registry.dart';
 import 'package:fixnum/fixnum.dart';
@@ -251,7 +252,9 @@ void main() {
       expect(await zoomShown(tester), fitted);
     });
 
-    testWidgets('⌘+, ⌘− and ⌘0 zoom once it has been clicked', (tester) async {
+    testWidgets('⌘+, ⌘− and ⌘0 (Ctrl off Apple\'s) zoom once clicked', (
+      tester,
+    ) async {
       await showImage(
         tester,
         image('/w/big.png', await png(tester, 4000, 2000)),
@@ -259,10 +262,13 @@ void main() {
       final fitted = await zoomShown(tester);
       await tester.tapAt(tester.getCenter(picture));
       await settle(tester);
+      final modifier = primaryIsMeta
+          ? LogicalKeyboardKey.metaLeft
+          : LogicalKeyboardKey.controlLeft;
       Future<void> command(LogicalKeyboardKey key) async {
-        await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+        await tester.sendKeyDownEvent(modifier);
         await tester.sendKeyEvent(key);
-        await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+        await tester.sendKeyUpEvent(modifier);
         await settle(tester);
       }
 

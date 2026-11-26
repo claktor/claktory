@@ -19,6 +19,7 @@ import 'mobile/input.dart' show InputKind;
 import 'mobile/metrics.dart';
 import 'mobile/page_find.dart' show phonePageSearch;
 import 'mobile/presentation.dart' show SheetAction, showActions;
+import 'mobile/typing_above.dart';
 import 'model_select.dart' show ModelChooser;
 import 'model_step.dart' show showConnectModel;
 import 'protocol/factory/v1/factory.pb.dart';
@@ -384,54 +385,63 @@ class _ChatViewState extends State<ChatView> {
                 ? WorkingLine(onStop: _stop, wait: wait, waiting: chat.id)
                 : const SizedBox.shrink(),
           ),
-          MessageBox(
-            target: ChatMessageTarget(chat, backend),
-            onSent: () => _follow.value++,
-            maxFieldHeight: constraints.maxHeight.isFinite
-                ? constraints.maxHeight * 0.3
-                : null,
+          TypingAboveBox(
+            child: MessageBox(
+              target: ChatMessageTarget(chat, backend),
+              onSent: () => _follow.value++,
+              maxFieldHeight: constraints.maxHeight.isFinite
+                  ? constraints.maxHeight * 0.3
+                  : null,
+            ),
           ),
         ];
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(
-              child: Stack(
-                children: [
-                  Positioned.fill(child: conversation),
-                  if (!_phone)
-                    const Positioned(
-                      top: Space.s,
-                      left: Space.m,
-                      right: Space.m,
-                      bottom: Space.m,
-                      child: Align(
-                        alignment: Alignment.topRight,
-                        // Aside while the chat's find bar is open there.
-                        child: ClearOfFindBar(child: NeedsYouChip()),
-                      ),
+        // On a phone the box steps aside while a field in the conversation
+        // (a card's) has the keyboard (TypingAbove).
+        return TypingAbove(
+          enabled: _phone,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                child: Stack(
+                  children: [
+                    Positioned.fill(
+                      child: TypingAboveArea(child: conversation),
                     ),
-                ],
+                    if (!_phone)
+                      const Positioned(
+                        top: Space.s,
+                        left: Space.m,
+                        right: Space.m,
+                        bottom: Space.m,
+                        child: Align(
+                          alignment: Alignment.topRight,
+                          // Aside while the chat's find bar is open there.
+                          child: ClearOfFindBar(child: NeedsYouChip()),
+                        ),
+                      ),
+                  ],
+                ),
               ),
-            ),
-            // On a phone, what's under the conversation takes at most 60%
-            // of the room, scrolling within it, as in an agent's.
-            if (_phone && constraints.maxHeight.isFinite)
-              ConstrainedBox(
-                constraints: BoxConstraints(
-                  maxHeight: constraints.maxHeight * 0.6,
-                ),
-                child: SingleChildScrollView(
-                  reverse: true,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: bottom,
+              // On a phone, what's under the conversation takes at most 60%
+              // of the room, scrolling within it, as in an agent's.
+              if (_phone && constraints.maxHeight.isFinite)
+                ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: constraints.maxHeight * 0.6,
                   ),
-                ),
-              )
-            else
-              ...bottom,
-          ],
+                  child: SingleChildScrollView(
+                    reverse: true,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: bottom,
+                    ),
+                  ),
+                )
+              else
+                ...bottom,
+            ],
+          ),
         );
       },
     );

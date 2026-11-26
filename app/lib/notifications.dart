@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'backend.dart';
+import 'inbox.dart' show NeedsYouItem;
+import 'needs_you_entries.dart' show NeedsYouEntries;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'rail.dart' show Claktories, Claktory;
 import 'scope.dart' show AppPage;
@@ -67,6 +69,7 @@ class NotificationTarget {
     this.seq = 0,
     this.deviceId = '',
     this.kind = '',
+    this.alertId = '',
   });
 
   /// [Claktory] by [claktoryId].
@@ -85,6 +88,10 @@ class NotificationTarget {
   /// opens Needs you.
   final String kind;
 
+  /// An alert kept in Needs you (Notify.alert_id): Needs you, at it, which
+  /// reads it; its agent at [seq] once it's read already.
+  final String alertId;
+
   Map<String, Object> toMap() => {
     'claktory': claktory,
     'agentId': agentId,
@@ -93,6 +100,7 @@ class NotificationTarget {
     'seq': seq,
     'deviceId': deviceId,
     'kind': kind,
+    'alertId': alertId,
   };
 
   static NotificationTarget? fromMap(Object? map) {
@@ -107,6 +115,7 @@ class NotificationTarget {
       seq: seq is int ? seq : 0,
       deviceId: text('deviceId'),
       kind: text('kind'),
+      alertId: text('alertId'),
     );
   }
 }
@@ -144,7 +153,11 @@ String claktoryId(Claktory claktory) {
 /// Shows each Claktory's notifications while the person isn't using it,
 /// and tells each backend whether they are.
 class ClaktoryNotifications {
-  ClaktoryNotifications({required this.claktories, required this.system}) {
+  ClaktoryNotifications({
+    required this.claktories,
+    required this.system,
+    this.phone,
+  }) {
     claktories.addListener(_sync);
     system.using.addListener(_sayActive);
     _clicks = system.clicked.listen(open);
@@ -154,6 +167,10 @@ class ClaktoryNotifications {
 
   final Claktories claktories;
   final SystemNotifications system;
+
+  /// Whether the app is laid out as on a phone now: there a card's
+  /// notification opens Needs you at it (#514 §7.2). Null: never.
+  final bool Function()? phone;
 
   late final StreamSubscription<NotificationTarget> _clicks;
   final _listening = <Claktory, StreamSubscription<Notify>>{};
@@ -214,6 +231,7 @@ class ClaktoryNotifications {
             kind: notify.kind == NotifyKind.NOTIFY_KIND_NEEDS_YOU
                 ? 'needs_you'
                 : '',
+            alertId: notify.alertId,
           ),
         ),
       ),
@@ -233,11 +251,36 @@ class ClaktoryNotifications {
       claktory.page.value = AppPage.inbox;
       return;
     }
+    // An alert waiting in Needs you: there, at it (§3.9). Read already
+    // (on another device, say), its agent at it instead.
+    if (target.alertId.isNotEmpty &&
+        backend.workspace.workspace.alerts.any(
+          (alert) => alert.id == target.alertId,
+        )) {
+      claktory.page.value = AppPage.inbox;
+      NeedsYouEntries.of(backend).revealAlert.value = target.alertId;
+      return;
+    }
     if (target.agentId.isEmpty &&
         target.pipeId.isEmpty &&
         target.chatId.isEmpty) {
       // About no one thing (what waited out quiet hours): Needs you.
       if (target.kind == 'needs_you') claktory.page.value = AppPage.inbox;
+      return;
+    }
+    // A card that needs you, on a phone: Needs you at that card, over what
+    // showed, so Back goes back there (#514 §7.2). A Mac opens the
+    // conversation at it: focus mode is a sitting the person chooses.
+    final card = target.kind != 'needs_you' || target.seq <= 0
+        ? null
+        : target.chatId.isNotEmpty
+        ? NeedsYouItem.chat(target.chatId, target.seq)
+        : target.agentId.isNotEmpty
+        ? NeedsYouItem.entry(target.agentId, target.seq)
+        : null;
+    if (card != null && (phone?.call() ?? false)) {
+      backend.needsYouCard.value = card.key;
+      claktory.page.value = AppPage.inbox;
       return;
     }
     claktory.page.value = AppPage.agent;

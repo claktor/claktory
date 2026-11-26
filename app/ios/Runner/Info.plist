@@ -45,25 +45,20 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>ClaktoryPushKeychainGroup</key>
 	<string>$(AppIdentifierPrefix)$(CLAKTORY_PUSH_GROUP)</string>
-	<!-- Export compliance: Claktory uses only standard encryption (TLS and
-	     the platform's own), no proprietary algorithms, so it's exempt from
-	     export documentation, and the App Store leaves France out until the
-	     ANSSI filing. NO answers that for every build as it arrives. YES
-	     would need a compliance code Apple issues only for uploaded
-	     documents, which this case has none of (ITMS-90592, see S4 in the
-	     store-launch plan). -->
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
-	<key>NSCameraUsageDescription</key>
-	<string>Scan the code from your Claktory to connect this iPhone to it.</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Connects directly to your Claktory when it's on the same network, which is faster.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_claktory-check._tcp</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Claktory uses the camera to scan the code that connects this iPhone to your Claktory, and to take photos you send to your agents.</string>
+	<key>NSCameraUsageDescription~ipad</key>
+	<string>Claktory uses the camera to scan the code that connects this iPad to your Claktory, and to take photos you send to your agents.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Connects directly to your Claktory when it's on the same network, which is faster.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Speak your messages and answers to your agents. Claktory turns them into text.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>

@@ -3,10 +3,15 @@ import 'dart:convert';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import '../conversation_find.dart' show ConversationFind;
+import '../find.dart' show FindSessions;
 import '../layout.dart';
+import '../panes.dart' show pageKinds;
+import '../scope.dart' show AppPage;
 import '../protocol/factory/v1/factory.pb.dart';
 import 'columns.dart';
 import 'document_host.dart' show DocumentPanel, documentKind;
+import 'settings_keys.dart' show FocusSettingsSearchIntent;
 import 'workbench.dart';
 
 /// The workbench's keyboard commands: the sidebar, moving between panes and
@@ -74,6 +79,16 @@ List<WorkbenchCommand> workbenchCommands({
   final document = focused != null && focused.leaf.kind == documentKind
       ? focused
       : null;
+  // The conversation, when it's the pane being read: ⌘F finds in it (Lucy's
+  // agent view §4), its find bar the one ⌘F opens on a Mac.
+  final conversation = agent != null && focused?.leaf.kind == chatKind;
+  // Settings, when it's the page shown or the pane being read: ⌘F searches
+  // it (settings_keys.dart).
+  final settings = focus.settings;
+  final searchSettings =
+      settings != null &&
+      settings.mounted &&
+      (agent == null || focused?.leaf.kind == pageKinds[AppPage.settings]);
 
   return [
     WorkbenchCommand(
@@ -116,9 +131,15 @@ List<WorkbenchCommand> workbenchCommands({
     ),
     WorkbenchCommand(
       id: 'find',
-      title: 'Find…',
+      // One word, whatever's read: the list names keys (Trish 43450).
+      title: searchSettings ? 'Search Settings' : 'Find',
       keys: const SingleActivator(LogicalKeyboardKey.keyF, meta: true),
-      run: agent == null || document == null
+      run: searchSettings
+          ? () =>
+                Actions.maybeInvoke(settings, const FocusSettingsSearchIntent())
+          : conversation
+          ? _findInConversation
+          : agent == null || document == null
           ? null
           : () => focus.documents
                 .of(agent.id, document)
@@ -126,6 +147,12 @@ List<WorkbenchCommand> workbenchCommands({
     ),
   ];
 }
+
+/// Opens the find bar of the conversation on show.
+void _findInConversation() => FindSessions.instance.sessions.value
+    .where((session) => session.target is ConversationFind)
+    .lastOrNull
+    ?.open();
 
 /// The panes ⌃Tab moves through, in the layout's order: in the focused
 /// tier all of them (each shows in turn), wider only those shown.
@@ -212,9 +239,7 @@ Map<String, Object?> encodeCommands(List<WorkbenchCommand> commands) => {
       {
         'id': command.id,
         'title': command.title,
-        'input': command.keys.trigger == LogicalKeyboardKey.tab
-            ? '\t'
-            : command.keys.trigger.keyLabel.toLowerCase(),
+        'input': keyCommandInput(command.keys.trigger),
         'modifiers': [
           if (command.keys.meta) 'command',
           if (command.keys.control) 'control',
@@ -224,6 +249,23 @@ Map<String, Object?> encodeCommands(List<WorkbenchCommand> commands) => {
         'enabled': command.enabled,
       },
   ],
+};
+
+/// [key] as UIKeyCommand's input: a lowercase letter or digit, a control
+/// character for Tab, Return and Delete (backspace, U+0008: that's
+/// `UIKeyCommand.inputDelete`'s value, not a name), or UIKit's names for the
+/// arrows (`UIKeyCommand.inputDownArrow`'s, and so on). RunnerTests checks
+/// them against UIKit's constants.
+@visibleForTesting
+String keyCommandInput(LogicalKeyboardKey key) => switch (key) {
+  LogicalKeyboardKey.tab => '\t',
+  LogicalKeyboardKey.enter => '\r',
+  LogicalKeyboardKey.backspace => '\b',
+  LogicalKeyboardKey.arrowUp => 'UIKeyInputUpArrow',
+  LogicalKeyboardKey.arrowDown => 'UIKeyInputDownArrow',
+  LogicalKeyboardKey.arrowLeft => 'UIKeyInputLeftArrow',
+  LogicalKeyboardKey.arrowRight => 'UIKeyInputRightArrow',
+  _ => key.keyLabel.toLowerCase(),
 };
 
 /// Binds [commands]' keys over [child], unless the system's menu runs them

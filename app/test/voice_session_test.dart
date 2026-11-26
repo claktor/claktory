@@ -589,5 +589,57 @@ void main() {
       );
       expect(kept.listSync().whereType<Directory>(), isEmpty);
     });
+
+    // Focus mode's hold-to-say (#514): a held key records into the card's
+    // field and letting go puts the words in, to read before sending.
+    for (final early in [false, true]) {
+      testWidgets(
+        early
+            ? 'held and let go before it started: it ends once it has'
+            : 'held, it records; let go, the words go in the field',
+        (tester) async {
+          final harness = Harness(withAsk());
+          harness.backend.transcript.load(
+            Transcript(
+              agentId: 'june',
+              entries: [
+                Entry(
+                  seq: Int64(7),
+                  timestampMs: Int64(1000),
+                  askPerson: AskPerson(
+                    id: 'ask7',
+                    title: 'Ship it?',
+                    wantsText: true,
+                    state: AskPersonState.ASK_PERSON_STATE_PENDING,
+                  ),
+                ),
+              ],
+            ),
+          );
+          await harness.show(tester);
+          await settle(tester);
+          Finder inCard(Finder finder) =>
+              find.descendant(of: find.byType(AskPersonCard), matching: finder);
+          final hold =
+              tester.state(inCard(find.byType(Dictation))) as DictationHold;
+          unawaited(hold.holdStart());
+          if (early) hold.holdEnd();
+          await io(tester);
+          if (!early) {
+            expect(recorder.recordingInto, isNotNull);
+            recorder.hear(0.5, const Duration(seconds: 3));
+            await tester.pump();
+            hold.holdEnd();
+          }
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 100)),
+          );
+          await io(tester);
+          await pumpFrames(tester);
+          expect(asked, 1);
+          expect(inCard(find.text('after the release')), findsOneWidget);
+        },
+      );
+    }
   });
 }

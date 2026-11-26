@@ -7,7 +7,7 @@
 // chat's and pipe's waiting_seqs), and each card is fetched as it is now,
 // with LoadEntries for an agent's, LoadChatEntries for a chat's and
 // LoadPipeMessages for a pipe's.
-import 'dart:async';
+import 'dart:async' show Timer;
 
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -28,6 +28,7 @@ import 'browser/session.dart' show browserHost;
 import 'characters/character.dart';
 import 'checklist_reply.dart' show showChecklistItem;
 import 'chats.dart' show ChatGlyph, chatTitle, openChat;
+import 'claktory_identity.dart' show claktoryNameInText;
 import 'connectors.dart' show ConnectProposalCard, serviceName;
 import 'controls.dart';
 import 'find.dart';
@@ -39,6 +40,9 @@ import 'mobile/drawer.dart' show largeText;
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
 import 'move.dart' show BackendMove, MoveConfirmCard, MoveStatus, moveStatusOf;
+import 'name_role_line.dart';
+import 'needs_you_alerts.dart';
+import 'needs_you_entries.dart';
 import 'needs_you_history.dart' show NeedsYouHistoryList, NeedsYouTabs;
 import 'pairing.dart' show AllowDeviceCard, deviceCallingItself;
 import 'pairing_card.dart' show DevicePairingCard;
@@ -54,7 +58,6 @@ import 'scope.dart';
 import 'selection.dart' show CopyShape, SelectableArea, SelectionPane;
 import 'secrets.dart'
     show SecretRequestCard, UnlockSecretsForm, secretRequestSummary;
-import 'state.dart' show TranscriptStore;
 import 'transcript.dart' show ProposalCard, deviceGlyph;
 import 'usage.dart' show UsageRing, formatAge;
 import 'visible_codes.dart' show proseCodes;
@@ -138,6 +141,15 @@ enum NeedsYouKind {
   /// The Mac can't sleep with its lid closed although Claktory isn't
   /// keeping it awake (KeepAwake.lid_closed STUCK, #371): what fixes it.
   lidStuck,
+
+  /// An alert an agent (or Claktory) sent, kept until the person reads it
+  /// (Workspace.alerts; Lucy's needs-you-cards.md §3.9): nothing to
+  /// decide, so a light row of its own (needs_you_alerts.dart).
+  alert,
+
+  /// Three or more alerts from one agent (or Claktory), none urgent,
+  /// folded into one row ([alertFoldAt]).
+  alertGroup,
 }
 
 /// One thing that waits for the person's answer.
@@ -271,6 +283,28 @@ class NeedsYouItem {
       seq = 0,
       sessionId = '';
 
+  /// An alert ([NeedsYouKind.alert]), from [agentId] ('' for Claktory's
+  /// own); its id is its [sessionId].
+  const NeedsYouItem.alert(this.agentId, this.sessionId)
+    : kind = NeedsYouKind.alert,
+      chatId = '',
+      pipeId = '',
+      providerId = '',
+      accountId = '',
+      seq = 0,
+      conversationId = '';
+
+  /// [agentId]'s alerts, folded ('' for Claktory's own).
+  const NeedsYouItem.alertGroup(this.agentId)
+    : kind = NeedsYouKind.alertGroup,
+      chatId = '',
+      pipeId = '',
+      providerId = '',
+      accountId = '',
+      seq = 0,
+      sessionId = '',
+      conversationId = '';
+
   /// The waiting device's id is its [sessionId].
   const NeedsYouItem.device(this.sessionId)
     : kind = NeedsYouKind.device,
@@ -291,7 +325,7 @@ class NeedsYouItem {
   final String providerId;
   final String accountId;
 
-  /// The browser session waiting, or the device.
+  /// The browser session waiting, the device, or the alert.
   final String sessionId;
 
   /// The direct-message conversation an agent's messages wait to go to.
@@ -324,7 +358,14 @@ class NeedsYouItem {
     NeedsYouKind.keepAwake => 'keepAwake',
     NeedsYouKind.backendService => 'backendService',
     NeedsYouKind.lidStuck => 'lidStuck',
+    NeedsYouKind.alert => 'alert:$sessionId',
+    NeedsYouKind.alertGroup => 'alerts:$agentId',
   };
+
+  /// An alert, or a fold of them: a row of its own, read rather than
+  /// answered.
+  bool get isAlert =>
+      kind == NeedsYouKind.alert || kind == NeedsYouKind.alertGroup;
 
   /// Done in a click, with no card to open: signing in again, unlocking
   /// the secrets, saving the recovery key.
@@ -415,6 +456,10 @@ List<NeedsYouItem> needsYouItems(Workspace workspace) {
     // Devices waiting to be allowed, one item each.
     for (final device in workspace.remote.pendingDevices)
       NeedsYouItem.device(device.deviceId),
+    // Alerts, urgent ones first: urgent ones alone, the rest folded by who
+    // sent them from three on (§3.9). Where each goes in a list is the
+    // list's (urgent above the cards, the rest under them).
+    ...alertItems(workspace),
   ];
 }
 
@@ -546,7 +591,9 @@ bool waitedADay(int ms, DateTime now) =>
     now.difference(DateTime.fromMillisecondsSinceEpoch(ms)).inDays >= 1;
 
 /// How many things wait for the person, everywhere.
-int needsYouCount(Workspace workspace) => needsYouItems(workspace).length;
+int needsYouCount(Workspace workspace) =>
+    needsYouItems(workspace).where((item) => !item.isAlert).length +
+    unreadAlerts(workspace);
 
 /// What the count says to a screen reader.
 String needsYouLabel(int count) => count == 1
@@ -683,24 +730,22 @@ class NeedsYouList extends StatefulWidget {
 class _NeedsYouListState extends State<NeedsYouList> {
   late final Backend _backend = AppScope.of(context);
 
-  /// The cards as fetched, by key.
-  final _entries = <String, Entry>{};
-  final _messages = <String, PipeMessage>{};
-
-  /// Fetches under way, and those that failed (why).
-  final _fetching = <String>{};
-  final _failed = <String, String>{};
-
-  /// Asked for again while their fetch was under way.
-  final _again = <String, NeedsYouItem>{};
+  /// The cards as fetched, shared with focus mode (#514).
+  late final NeedsYouEntries _store = NeedsYouEntries.of(_backend);
 
   /// Open bubbles, and what the person opened here: kept in the list once
-  /// answered, until they leave, showing how it ended.
+  /// answered, until they leave, showing how it ended ([NeedsYouEntries.hold]).
   final _open = <String>{};
   final _kept = <String, NeedsYouItem>{};
 
-  /// What waited the last time the list was built.
-  var _waiting = <String>{};
+  /// Alerts read here, by id: they stay, marked Read, until the person
+  /// leaves (§3.9), as answered cards do.
+  final _readHere = <String, Alert>{};
+
+  /// The alert row just opened from its notification, standing out a
+  /// moment ([NeedsYouEntries.revealAlert]).
+  String? _highlighted;
+  Timer? _unhighlight;
 
   /// Find in the list (⌘F): who asks and what, as the bubbles say them.
   late final _find = LocalFind(
@@ -714,6 +759,7 @@ class _NeedsYouListState extends State<NeedsYouList> {
             return '$who\n$what';
           }(),
         ),
+      for (final (item, words) in _shownAlerts) (item.key, words),
     ],
     go: (key, _) {
       final context = _places[key]?.currentContext;
@@ -732,6 +778,9 @@ class _NeedsYouListState extends State<NeedsYouList> {
 
   /// The bubbles as the last build showed them, and each one's place.
   var _shown = const <_Bubble>[];
+
+  /// The alert rows as the last build showed them, with their words.
+  var _shownAlerts = const <(NeedsYouItem, String)>[];
   final _places = <String, GlobalKey>{};
 
   @override
@@ -739,21 +788,22 @@ class _NeedsYouListState extends State<NeedsYouList> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      _backend.workspace.addListener(_changed);
-      _backend.transcript.addListener(_rebuild);
-      _backend.chatTranscript.addListener(_rebuild);
-      _backend.pipeChat.addListener(_rebuild);
-      _changed();
+      _store.addListener(_rebuild);
+      _store.revealAlert.addListener(_reveal);
+      setState(() {});
+      _reveal();
     });
   }
 
   @override
   void dispose() {
+    _unhighlight?.cancel();
     _find.dispose();
-    _backend.workspace.removeListener(_changed);
-    _backend.transcript.removeListener(_rebuild);
-    _backend.chatTranscript.removeListener(_rebuild);
-    _backend.pipeChat.removeListener(_rebuild);
+    _store.revealAlert.removeListener(_reveal);
+    _store.removeListener(_rebuild);
+    for (final key in _kept.keys) {
+      _store.release(key);
+    }
     super.dispose();
   }
 
@@ -761,187 +811,57 @@ class _NeedsYouListState extends State<NeedsYouList> {
     if (mounted) setState(() {});
   }
 
-  /// What waits changed, perhaps: fetch what's new, and once more what the
-  /// person answered here, to show how it ended.
-  void _changed() {
-    if (!mounted) return;
-    final workspace = _backend.workspace.workspace;
-    final items = needsYouItems(workspace);
-    final now = {for (final item in items) item.key};
-    final agents = {for (final agent in workspace.agents) agent.id: agent};
-    final chats = {for (final chat in workspace.chats) chat.id: chat};
-    for (final item in items) {
-      if (!_has(item) || _stepping(item, agents, chats)) _fetch(item);
-    }
-    for (final MapEntry(key: key, value: item) in _kept.entries) {
-      if (_waiting.contains(key) && !now.contains(key)) _fetch(item);
-    }
-    _waiting = now;
-    setState(() {});
-  }
-
-  bool _has(NeedsYouItem item) => switch (item.kind) {
-    NeedsYouKind.entry || NeedsYouKind.chat => _entries.containsKey(item.key),
-    NeedsYouKind.pipeHeld ||
-    NeedsYouKind.pipeUnanswered => _messages.containsKey(item.key),
-    _ => true,
-  };
-
-  /// A procedure (ask_person's steps) that waits moves on a step at a time
-  /// with no change to what waits: once its agent (or chat) changes in the
-  /// Workspace (told of the step, done here or on another device), what was
-  /// fetched of it may be a step behind, so it's fetched again (friend bug
-  /// #11). Only then: a busy Claktory sends the Workspace a few times a
-  /// second, and fetching every waiting procedure each time was most of what
-  /// the app asked of it (Polpo's needs-you-refetch.md). Not when the open
-  /// conversation holds it: that copy is live.
-  bool _stepping(
-    NeedsYouItem item,
-    Map<String, Agent> agents,
-    Map<String, Chat> chats,
-  ) {
-    final entry = _entries[item.key];
-    if (entry == null ||
-        !entry.hasAskPerson() ||
-        entry.askPerson.steps.isEmpty ||
-        entry.askPerson.state != AskPersonState.ASK_PERSON_STATE_PENDING) {
-      return false;
-    }
-    if (!identical(_entryOf(item), entry)) return false;
-    final was = _fetchedUnder[item.key];
-    final now = item.kind == NeedsYouKind.chat
-        ? chats[item.chatId]
-        : agents[item.agentId];
-    // A patch keeps an unchanged agent's own object; a whole Workspace
-    // brings a new one, the same or not.
-    return !(identical(was, now) || was == now);
-  }
-
-  /// The agent (or chat) each fetched card's fetch started under, as the
-  /// Workspace had it: [_stepping] fetches it again once that changes.
-  final _fetchedUnder = <String, Object?>{};
-
-  /// [item]'s agent, or chat, in the Workspace now.
-  Object? _ownerOf(NeedsYouItem item) {
-    final workspace = _backend.workspace.workspace;
-    if (item.kind == NeedsYouKind.chat) {
-      return workspace.chats
-          .where((chat) => chat.id == item.chatId)
-          .firstOrNull;
-    }
-    return workspace.agents
-        .where((agent) => agent.id == item.agentId)
-        .firstOrNull;
-  }
-
-  void _fetch(NeedsYouItem item) {
-    final key = item.key;
-    if (item.kind == NeedsYouKind.pipeApproval ||
-        item.kind == NeedsYouKind.pipeLoop ||
-        item.kind == NeedsYouKind.pipeIdentity ||
-        item.kind == NeedsYouKind.browser ||
-        item.kind == NeedsYouKind.dmSend ||
-        item.kind == NeedsYouKind.device) {
-      return;
-    }
-    // Already under way: once more after it, since what it brings may be
-    // older than what changed meanwhile.
-    if (!_fetching.add(key)) {
-      _again[key] = item;
-      return;
-    }
-    Future<void> run() async {
-      // Before the request: a step answered meanwhile changes its agent
-      // after this, and so fetches it again.
-      if (item.kind == NeedsYouKind.entry || item.kind == NeedsYouKind.chat) {
-        _fetchedUnder[key] = _ownerOf(item);
-      }
-      try {
-        if (item.kind == NeedsYouKind.entry) {
-          final entry = await _backend.fetchEntry(item.agentId, item.seq);
-          if (entry != null) _entries[key] = entry;
-        } else if (item.kind == NeedsYouKind.chat) {
-          final entry = await _backend.fetchChatEntry(item.chatId, item.seq);
-          if (entry != null) _entries[key] = entry;
-        } else {
-          final message = await _backend.fetchPipeMessage(
-            item.pipeId,
-            item.seq,
-          );
-          if (message != null) _messages[key] = message;
-        }
-        _failed.remove(key);
-      } on RequestFailure catch (failure) {
-        _failed[key] = failure.message;
-      } finally {
-        _fetching.remove(key);
-        final again = _again.remove(key);
-        if (mounted) {
-          setState(() {});
-          if (again != null) _fetch(again);
-        }
-      }
-    }
-
-    unawaited(run());
-  }
-
-  /// [item]'s card as it is now: the open conversation's own copy when it
-  /// holds it (it's live), else what was fetched.
-  Entry? _entryOf(NeedsYouItem item) {
-    Entry? live(TranscriptStore transcript) {
-      for (var i = transcript.length - 1; i >= 0; i--) {
-        final entry = transcript[i].entry;
-        if (entry.seq.toInt() == item.seq) return entry;
-        if (entry.seq.toInt() < item.seq) break;
-      }
-      return null;
-    }
-
-    final chat = _backend.chatTranscript;
-    final held = item.kind == NeedsYouKind.chat
-        ? (chat.chatId == item.chatId ? live(chat) : null)
-        : (_backend.transcript.agentId == item.agentId
-              ? live(_backend.transcript)
-              : null);
-    return held ?? _entries[item.key];
-  }
-
-  PipeMessage? _messageOf(NeedsYouItem item) {
-    final chat = _backend.pipeChat;
-    if (chat.pipeId == item.pipeId) {
-      for (final message in chat.messages) {
-        if (message.seq.toInt() == item.seq) return message;
-      }
-    }
-    return _messages[item.key];
-  }
-
-  /// When it began waiting, to put the newest first; 0 while unknown.
-  int _timeOf(NeedsYouItem item, Workspace workspace) => switch (item.kind) {
-    // A card its agent replied on rises by its thread's last message.
-    NeedsYouKind.entry || NeedsYouKind.chat => waitingSince(_entryOf(item)),
-    NeedsYouKind.pipeHeld ||
-    NeedsYouKind.pipeUnanswered => _messageOf(item)?.timestampMs.toInt() ?? 0,
-    NeedsYouKind.browser =>
-      browserSessionOf(workspace, item)?.createdMs.toInt() ?? 0,
-    NeedsYouKind.dmSend =>
-      dmSendsOf(workspace, item).firstOrNull?.createdMs.toInt() ?? 0,
-    NeedsYouKind.device =>
-      pendingDeviceOf(workspace, item)?.requestedMs.toInt() ?? 0,
-    _ => 0,
-  };
-
   void _toggle(NeedsYouItem item) {
     final key = item.key;
     setState(() {
       if (!_open.remove(key)) {
         _open.add(key);
+        if (_kept[key] == null) _store.hold(item);
         _kept[key] = item;
       }
     });
     // Opened: as it is now.
-    if (_open.contains(key)) _fetch(item);
+    if (_open.contains(key)) _store.fetch(item);
+  }
+
+  /// Reads [alerts], [item]'s: they stay here, marked Read.
+  void _readAlerts(NeedsYouItem item, List<Alert> alerts) {
+    if (alerts.isEmpty) return;
+    setState(() {
+      for (final alert in alerts) {
+        _readHere[alert.id] = alert;
+      }
+      _kept[item.key] = item;
+    });
+    fireAndLog(_backend.readAlerts([for (final alert in alerts) alert.id]));
+  }
+
+  /// An alert's notification was tapped: its row, in view, standing out a
+  /// moment, and read (a fold opened, all of it: "June sent 3 more").
+  void _reveal() {
+    final id = _store.revealAlert.value;
+    if (id == null || !mounted) return;
+    _store.revealAlert.value = null;
+    final workspace = _backend.workspace.workspace;
+    final alert = workspace.alerts.where((alert) => alert.id == id).firstOrNull;
+    if (alert == null) return;
+    final item = alertItems(workspace).firstWhere(
+      (item) => alertsOf([alert], item).isNotEmpty,
+      orElse: () => NeedsYouItem.alert(alert.agentId, alert.id),
+    );
+    if (item.kind == NeedsYouKind.alertGroup) _open.add(item.key);
+    _readAlerts(item, alertsOf(workspace.alerts, item));
+    _unhighlight?.cancel();
+    setState(() => _highlighted = item.key);
+    _unhighlight = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _highlighted = null);
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final context = _places[item.key]?.currentContext;
+      if (context != null && context.mounted) {
+        Scrollable.ensureVisible(context, alignment: 0.2);
+      }
+    });
   }
 
   /// Signs in again, or unlocks the secrets: no card to open first.
@@ -976,16 +896,50 @@ class _NeedsYouListState extends State<NeedsYouList> {
     final workspace = _backend.workspace.workspace;
     final waiting = needsYouItems(workspace);
     final keys = {for (final item in waiting) item.key};
-    final items = [
-      ...waiting,
+    // A fold read here (all or some of it) stays whole: its agent's alerts
+    // left unread show in it, not apart.
+    final keptFolds = {
+      for (final item in _kept.values)
+        if (item.kind == NeedsYouKind.alertGroup && !keys.contains(item.key))
+          item.agentId,
+    };
+    final alerts = [
+      ...workspace.alerts,
+      for (final alert in _readHere.values)
+        if (!workspace.alerts.any((each) => each.id == alert.id)) alert,
+    ];
+    final unread = {for (final alert in workspace.alerts) alert.id};
+    final all = [
+      for (final item in waiting)
+        if (!(item.kind == NeedsYouKind.alert &&
+            keptFolds.contains(item.agentId) &&
+            !isUrgentAlert(alerts, item)))
+          item,
       // Answered here meanwhile: stays, showing how it ended.
       for (final item in _kept.values)
         if (!keys.contains(item.key) && _stillThere(item, workspace)) item,
     ];
+    int latest(NeedsYouItem item) =>
+        alertsOf(alerts, item).firstOrNull?.sentMs.toInt() ?? 0;
+    // Urgent alerts above the cards, the rest under them (§3.9); each
+    // newest first.
+    final urgent = [
+      for (final item in all)
+        if (isUrgentAlert(alerts, item)) item,
+    ]..sort((a, b) => latest(b).compareTo(latest(a)));
+    final lateAlerts = [
+      for (final item in all)
+        if (item.isAlert && !isUrgentAlert(alerts, item)) item,
+    ]..sort((a, b) => latest(b).compareTo(latest(a)));
+    final items = [
+      for (final item in all)
+        if (!item.isAlert) item,
+    ];
     // Newest first; unknown times (a pipe's approval, its pause) on top.
     final order = {for (var i = 0; i < items.length; i++) items[i].key: i};
     items.sort((a, b) {
-      final ta = _timeOf(a, workspace), tb = _timeOf(b, workspace);
+      final ta = _store.timeOf(a, workspace);
+      final tb = _store.timeOf(b, workspace);
       final ka = ta == 0 ? 1 << 62 : ta, kb = tb == 0 ? 1 << 62 : tb;
       if (ka != kb) return kb.compareTo(ka);
       return order[a.key]!.compareTo(order[b.key]!);
@@ -1000,14 +954,35 @@ class _NeedsYouListState extends State<NeedsYouList> {
           waiting: keys.contains(item.key),
           open: _open.contains(item.key),
           onToggle: () => item.isAction ? _act(item) : _toggle(item),
-          entry: item.isEntry ? _entryOf(item) : null,
+          entry: item.isEntry ? _store.entryOf(item) : null,
           message:
               item.kind == NeedsYouKind.pipeHeld ||
                   item.kind == NeedsYouKind.pipeUnanswered
-              ? _messageOf(item)
+              ? _store.messageOf(item)
               : null,
-          failed: _failed[item.key],
+          failed: _store.failedOf(item),
           workspace: workspace,
+        ),
+    ];
+    Widget alertRow(NeedsYouItem item) => NeedsYouAlert(
+      item: item,
+      alerts: alertsOf(alerts, item),
+      unread: unread,
+      open: _open.contains(item.key),
+      onToggle: () => setState(() {
+        if (!_open.remove(item.key)) _open.add(item.key);
+      }),
+      onRead: (read) => _readAlerts(item, read),
+      highlighted: _highlighted == item.key,
+    );
+    _shownAlerts = [
+      for (final item in [...urgent, ...lateAlerts])
+        (
+          item,
+          [
+            for (final alert in alertsOf(alerts, item))
+              '${alertFrom(alert)}\n${alertSummary(alert)}\n${alert.text}',
+          ].join('\n'),
         ),
     ];
     // What's found follows what waits.
@@ -1016,9 +991,30 @@ class _NeedsYouListState extends State<NeedsYouList> {
     });
     // An item answered here keeps its place, and with it its card's state
     // (how it ended), until it's no longer shown.
-    final shownKeys = {for (final item in items) item.key};
+    final shownKeys = {
+      for (final item in [...items, ...urgent, ...lateAlerts]) item.key,
+    };
     _places.removeWhere((key, _) => !shownKeys.contains(key));
-    if (items.isEmpty) {
+    Widget placed(NeedsYouItem item, Widget child) => Align(
+      key: ValueKey(item.key),
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 640),
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: Space.s),
+          child: CopyShape(
+            lines: true,
+            child: LocalFindMarks(
+              key: _places[item.key] ??= GlobalKey(),
+              find: _find,
+              itemKey: item.key,
+              child: child,
+            ),
+          ),
+        ),
+      ),
+    );
+    if (items.isEmpty && urgent.isEmpty && lateAlerts.isEmpty) {
       return FindScope(
         target: _find,
         child: Center(
@@ -1054,30 +1050,45 @@ class _NeedsYouListState extends State<NeedsYouList> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // Urgent alerts first: they can't wait (§3.9).
+                    for (final item in urgent) placed(item, alertRow(item)),
                     // Keyed here, on the column's own children: matched by place
                     // instead, a question coming in above would take this one's
                     // card, and with it what the person was typing and their
                     // focus.
-                    for (final bubble in _shown)
+                    for (final bubble in _shown) placed(bubble.item, bubble),
+                    if (lateAlerts.isNotEmpty) ...[
                       Align(
-                        key: ValueKey(bubble.item.key),
+                        key: const ValueKey('alerts-heading'),
                         alignment: Alignment.topCenter,
                         child: ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 640),
+                          constraints: const BoxConstraints(
+                            maxWidth: 640,
+                            minWidth: 640,
+                          ),
                           child: Padding(
-                            padding: const EdgeInsets.only(bottom: Space.s),
-                            child: CopyShape(
-                              lines: true,
-                              child: LocalFindMarks(
-                                key: _places[bubble.item.key] ??= GlobalKey(),
-                                find: _find,
-                                itemKey: bubble.item.key,
-                                child: bubble,
+                            padding: EdgeInsets.fromLTRB(
+                              Space.m,
+                              _shown.isEmpty && urgent.isEmpty ? 0 : Space.l,
+                              Space.m,
+                              Space.xs,
+                            ),
+                            child: Semantics(
+                              header: true,
+                              child: Text(
+                                'Alerts',
+                                style: TextStyles.label.copyWith(
+                                  color: palette.textMuted,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                             ),
                           ),
                         ),
                       ),
+                      for (final item in lateAlerts)
+                        placed(item, alertRow(item)),
+                    ],
                   ],
                 ),
               ),
@@ -1113,13 +1124,15 @@ class _NeedsYouListState extends State<NeedsYouList> {
         // Opened here, it stays once the Mac can sleep, saying so
         // (Abbacchio's row 1159).
         NeedsYouKind.lidStuck => true,
+        // Read here: it stays, marked Read.
+        NeedsYouKind.alert || NeedsYouKind.alertGroup => true,
         _ => workspace.pipes.any((pipe) => pipe.id == item.pipeId),
       };
 }
 
 /// One thing that waits, as a bubble: who asks and what, folded; opened,
 /// the card itself, and a way to its conversation or pipe.
-class _Bubble extends StatelessWidget {
+class _Bubble extends StatelessWidget with _ItemParts {
   const _Bubble({
     required this.item,
     required this.waiting,
@@ -1131,91 +1144,20 @@ class _Bubble extends StatelessWidget {
     required this.workspace,
   });
 
+  @override
   final NeedsYouItem item;
 
   /// Still waiting; else answered here, showing how it ended.
   final bool waiting;
   final bool open;
   final VoidCallback onToggle;
+  @override
   final Entry? entry;
+  @override
   final PipeMessage? message;
   final String? failed;
+  @override
   final Workspace workspace;
-
-  /// Whose it is: a move's is the agent that started it.
-  Agent? get _agent {
-    final id = item.kind == NeedsYouKind.move
-        ? _move.startedByAgentId
-        : item.agentId;
-    return [
-      for (final agent in workspace.agents)
-        if (agent.id == id) agent,
-    ].firstOrNull;
-  }
-
-  ProviderWait? get _providerWait => providerWaitOf(workspace, item.providerId);
-
-  MoveStatus get _move =>
-      moveStatusOf(workspace.hasMove() ? workspace.move : null);
-
-  Chat? get _chat => [
-    for (final chat in workspace.chats)
-      if (chat.id == item.chatId) chat,
-  ].firstOrNull;
-
-  Pipe? get _pipe => [
-    for (final pipe in workspace.pipes)
-      if (pipe.id == item.pipeId) pipe,
-  ].firstOrNull;
-
-  /// The checklist items an agent's card asks about ([cardItemsOf]).
-  List<({String checklistAgentId, WaitingItem item})> get _cardItems =>
-      item.kind == NeedsYouKind.entry
-      ? cardItemsOf(workspace, item.agentId, item.seq)
-      : const [];
-
-  /// A pipe's liaison asks as the pipe's ("Kai · Acme launch").
-  Pipe? get _liaisonOf {
-    final agent = _agent;
-    return agent == null || agent.pipeId.isEmpty
-        ? null
-        : [
-            for (final pipe in workspace.pipes)
-              if (pipe.id == agent.pipeId) pipe,
-          ].firstOrNull;
-  }
-
-  /// Who asks, and what, as its header says them (and find searches).
-  ({String who, String what}) words(Backend backend) {
-    final agent = _agent;
-    final chat = _chat;
-    final pipe = _pipe;
-    final liaisonOf = _liaisonOf;
-    final signIn = signInOf(workspace, item);
-    final who = item.kind == NeedsYouKind.providerWait
-        ? providerWaitOf(workspace, item.providerId)?.title ?? ''
-        : item.kind == NeedsYouKind.signIn
-        ? 'Sign in to ${signIn?.provider.name ?? 'your provider'} again'
-        : item.kind == NeedsYouKind.vault
-        ? 'Unlock your secrets with your recovery key'
-        : item.kind == NeedsYouKind.recoveryKey
-        ? 'Save your recovery key'
-        : item.kind == NeedsYouKind.device
-        ? 'Allow a new device?'
-        : item.kind == NeedsYouKind.keepAwake
-        ? keepAwakeTitle
-        : item.kind == NeedsYouKind.backendService
-        ? backendServiceTitle
-        : item.kind == NeedsYouKind.lidStuck
-        ? lidClosedStuck(backend)
-        : liaisonOf != null
-        ? '${agent!.name} · ${liaisonOf.name}'
-        : agent?.name ??
-              (chat == null ? null : chatTitle(chat)) ??
-              pipe?.name ??
-              '';
-    return (who: who, what: _summary(backend));
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -1224,6 +1166,7 @@ class _Bubble extends StatelessWidget {
     final agent = _agent;
     final liaisonOf = _liaisonOf;
     final (:who, :what) = words(backend);
+    final named = needsYouWho(workspace, item, who);
     final large = largeText(context);
     // How it ended: its agent may have taken it back meanwhile (#407).
     final ask = entry?.whichKind() == Entry_Kind.askPerson
@@ -1345,46 +1288,49 @@ class _Bubble extends StatelessWidget {
                     // it still waits, in signal.
                     Ticking(
                       active: time > 0,
-                      builder: (context, now) => Text.rich(
+                      builder: (context, now) => NameRoleLine(
+                        name: named.name,
+                        // Quietly beside its name (§3.10), cut first.
+                        role: named.role,
                         // Its name's matches marked when found (⌘F).
-                        FindHighlight.mark(
-                          context,
-                          TextSpan(
-                            children: [
-                              TextSpan(text: who),
-                              if (time > 0) ...[
-                                // Changed by its agent last (#473): said
-                                // so, in signal, timed from then.
-                                if (updated)
-                                  TextSpan(
-                                    text: ' · $updatedMark',
-                                    style: TextStyles.caption.copyWith(
-                                      color: palette.signal,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                  ),
-                                TextSpan(
-                                  text:
-                                      '${updated ? ' ' : ' · '}'
-                                      '${formatAge(time, now)}',
-                                  style: TextStyles.caption.copyWith(
-                                    color: waiting && waitedADay(time, now)
-                                        ? palette.signal
-                                        : palette.textFaint,
-                                    fontWeight: FontWeight.w400,
-                                  ),
+                        mark: (span) => FindHighlight.mark(context, span),
+                        after: [
+                          if (named.after.isNotEmpty)
+                            TextSpan(text: named.after),
+                          if (time > 0) ...[
+                            // Changed by its agent last (#473): said so, in
+                            // signal, timed from then.
+                            if (updated)
+                              TextSpan(
+                                text: ' · $updatedMark',
+                                style: TextStyles.caption.copyWith(
+                                  color: palette.signal,
+                                  fontWeight: FontWeight.w500,
                                 ),
-                              ],
-                            ],
-                          ),
-                        ),
+                              ),
+                            TextSpan(
+                              text:
+                                  '${updated ? ' ' : ' · '}'
+                                  '${formatAge(time, now)}',
+                              style: TextStyles.caption.copyWith(
+                                color: waiting && waitedADay(time, now)
+                                    ? palette.signal
+                                    : palette.textFaint,
+                                fontWeight: FontWeight.w400,
+                              ),
+                            ),
+                          ],
+                        ],
                         // At large text it wraps rather than cutting the
                         // name ("Ri…" beside Answered).
-                        maxLines: large ? null : 1,
-                        overflow: large ? null : TextOverflow.ellipsis,
+                        wrap: large,
                         style: TextStyles.label.copyWith(
                           color: waiting ? palette.text : palette.textMuted,
                           fontWeight: FontWeight.w600,
+                        ),
+                        roleStyle: TextStyles.label.copyWith(
+                          color: palette.textMuted,
+                          fontWeight: FontWeight.w400,
                         ),
                       ),
                     ),
@@ -1475,7 +1421,13 @@ class _Bubble extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    _card(context, palette),
+                    NeedsYouCard(
+                      item: item,
+                      entry: entry,
+                      message: message,
+                      failed: failed,
+                      workspace: workspace,
+                    ),
                     // A move's card is all there is to it, and a device's
                     // and keeping the Mac awake's, and a message to a
                     // friend's has Open chat on it.
@@ -1503,7 +1455,7 @@ class _Bubble extends StatelessWidget {
                               NeedsYouKind.providerWait => 'Open conversation',
                               _ => 'Open pipe',
                             },
-                            onTap: () => _openWhere(context),
+                            onTap: () => openNeedsYouItem(context, item),
                           ),
                           // The checklist item the card asks about, glowing
                           // in its checklist beside the conversation.
@@ -1533,15 +1485,299 @@ class _Bubble extends StatelessWidget {
       ),
     );
   }
+}
 
-  /// The card, with its real controls; until it's here, where it is.
-  Widget _card(BuildContext context, Palette palette) {
+/// What a Needs you item is about, from the Workspace and its card: whose
+/// it is, its chat or pipe, and the words that say it.
+mixin _ItemParts {
+  NeedsYouItem get item;
+  Workspace get workspace;
+  Entry? get entry;
+  PipeMessage? get message;
+
+  /// Whose it is: a move's is the agent that started it.
+  Agent? get _agent {
+    final id = item.kind == NeedsYouKind.move
+        ? _move.startedByAgentId
+        : item.agentId;
+    return [
+      for (final agent in workspace.agents)
+        if (agent.id == id) agent,
+    ].firstOrNull;
+  }
+
+  ProviderWait? get _providerWait => providerWaitOf(workspace, item.providerId);
+
+  MoveStatus get _move =>
+      moveStatusOf(workspace.hasMove() ? workspace.move : null);
+
+  Chat? get _chat => [
+    for (final chat in workspace.chats)
+      if (chat.id == item.chatId) chat,
+  ].firstOrNull;
+
+  Pipe? get _pipe => [
+    for (final pipe in workspace.pipes)
+      if (pipe.id == item.pipeId) pipe,
+  ].firstOrNull;
+
+  /// The checklist items an agent's card asks about ([cardItemsOf]).
+  List<({String checklistAgentId, WaitingItem item})> get _cardItems =>
+      item.kind == NeedsYouKind.entry
+      ? cardItemsOf(workspace, item.agentId, item.seq)
+      : const [];
+
+  /// The role beside the name of the agent that asks (§3.10, Matt via
+  /// Bruno 46581): empty for no role, and where no agent's name is who
+  /// asks: Claktory's own items, chats, pipes and their peers, and a
+  /// liaison, which asks as its pipe's.
+  String get _role {
+    final agent = _agent;
+    if (agent == null || _liaisonOf != null) return '';
+    return switch (item.kind) {
+      NeedsYouKind.entry ||
+      NeedsYouKind.move ||
+      NeedsYouKind.alert ||
+      NeedsYouKind.alertGroup => agent.role.trim(),
+      _ => '',
+    };
+  }
+
+  /// A pipe's liaison asks as the pipe's ("Kai · Acme launch").
+  Pipe? get _liaisonOf {
+    final agent = _agent;
+    return agent == null || agent.pipeId.isEmpty
+        ? null
+        : [
+            for (final pipe in workspace.pipes)
+              if (pipe.id == agent.pipeId) pipe,
+          ].firstOrNull;
+  }
+
+  /// Who asks, and what, as its header says them (and find searches).
+  ({String who, String what}) words(Backend backend) {
+    final agent = _agent;
+    final chat = _chat;
+    final pipe = _pipe;
+    final liaisonOf = _liaisonOf;
+    final signIn = signInOf(workspace, item);
+    final who = item.kind == NeedsYouKind.providerWait
+        ? providerWaitOf(workspace, item.providerId)?.title ?? ''
+        : item.kind == NeedsYouKind.signIn
+        ? 'Sign in to ${signIn?.provider.name ?? 'your provider'} again'
+        : item.kind == NeedsYouKind.vault
+        // Named, since each Claktory has its own key, even on one account
+        // (Matt's two Claktories, Bruno 45499).
+        ? 'Unlock the secrets on ${claktoryNameInText(backend)} with its '
+              'recovery key'
+        : item.kind == NeedsYouKind.recoveryKey
+        ? 'Save the recovery key for ${claktoryNameInText(backend)}'
+        : item.kind == NeedsYouKind.device
+        ? 'Allow a new device?'
+        : item.kind == NeedsYouKind.keepAwake
+        ? keepAwakeTitle
+        : item.kind == NeedsYouKind.backendService
+        ? backendServiceTitle
+        : item.kind == NeedsYouKind.lidStuck
+        ? lidClosedStuck(backend)
+        : item.isAlert
+        ? switch (alertsOf(workspace.alerts, item)) {
+            [final latest, ...] when item.kind == NeedsYouKind.alertGroup =>
+              '${alertFrom(latest)} · '
+                  '${alertsOf(workspace.alerts, item).length} alerts',
+            [final latest, ...] => alertFrom(latest),
+            _ => agent?.name ?? 'Claktory',
+          }
+        : liaisonOf != null
+        ? '${agent!.name} · ${liaisonOf.name}'
+        : agent?.name ??
+              (chat == null ? null : chatTitle(chat)) ??
+              pipe?.name ??
+              '';
+    return (who: who, what: _summary(backend));
+  }
+
+  /// What it asks, in a line.
+  String _summary(Backend backend) {
+    final pipe = _pipe;
+    switch (item.kind) {
+      case NeedsYouKind.alert || NeedsYouKind.alertGroup:
+        final alerts = alertsOf(workspace.alerts, item);
+        if (alerts.isEmpty) return 'Read';
+        return alertSummary(alerts.first);
+      case NeedsYouKind.pipeApproval:
+        return pipe == null
+            ? 'Waiting for your approval'
+            : '${pipePeerName(pipe, start: true)} wants to connect';
+      case NeedsYouKind.pipeLoop:
+        return 'Paused: agents kept talking on their own';
+      case NeedsYouKind.pipeIdentity:
+        return pipe == null
+            ? 'Another account now'
+            : '${pipePeerClaktory(pipe)} is on another account '
+                  'now';
+      case NeedsYouKind.pipeHeld:
+        final message = this.message;
+        if (message == null) return 'A message waits for you';
+        final held =
+            message.state == PipeMessageState.PIPE_MESSAGE_STATE_HELD_INCOMING;
+        return held
+            ? 'Let in a message from '
+                  '${pipe == null ? 'the other side' : pipePeerClaktory(pipe)}?'
+                  '\n${message.text}'
+            : 'Waiting for you to send it: ${message.text}';
+      case NeedsYouKind.pipeUnanswered:
+        final message = this.message;
+        if (message == null) return pipeUnanswered;
+        return '$pipeUnanswered\n${message.text}';
+      case NeedsYouKind.signIn:
+        final signIn = signInOf(workspace, item);
+        return signIn == null
+            ? 'Signed in again'
+            : signInAgainText(signIn.provider, signIn.account);
+      case NeedsYouKind.move:
+        return 'Move this Claktory to ${_move.target}?';
+      case NeedsYouKind.vault:
+        final why = workspace.vault.lockedWhy;
+        return why.isEmpty ? 'Agents are waiting for your secrets.' : why;
+      case NeedsYouKind.recoveryKey:
+        return 'Your way back into your secrets if you ever lose access. '
+            'Save it in a password manager, then confirm you have it.';
+      case NeedsYouKind.dmSend:
+        return dmSendSummary(workspace, item);
+      case NeedsYouKind.providerWait:
+        return providerWaitOf(workspace, item.providerId)?.text ??
+            'They carry on.';
+      case NeedsYouKind.device:
+        final device = pendingDeviceOf(workspace, item);
+        return device == null
+            ? 'No longer waiting'
+            : '${deviceCallingItself(device)} wants to connect';
+      case NeedsYouKind.keepAwake:
+        final keep = workspace.keepAwake;
+        return keep.ask
+            ? keepAwakeSummary(backend)
+            : keepAwakeAnswered(backend, keep);
+      case NeedsYouKind.backendService:
+        return backendByHand(workspace)
+            ? backendServiceSummary(workspace.backendService)
+            : 'Claktory runs in the background again.';
+      case NeedsYouKind.lidStuck:
+        final keep = workspace.keepAwake;
+        final fix = keep.lidClosedFix.replaceAll('`', '');
+        return keep.lidClosed != LidClosedState.LID_CLOSED_STUCK || fix.isEmpty
+            ? 'It can sleep again.'
+            : fix;
+      case NeedsYouKind.browser:
+        final session = browserSessionOf(workspace, item);
+        if (session == null) return 'No longer needs you';
+        final host = browserHost(session.origin);
+        return browserAssists(session)
+            ? 'Allow reading and using $host in Chrome?'
+            : 'Allow reading $host in Chrome?';
+      case NeedsYouKind.entry || NeedsYouKind.chat:
+        final entry = this.entry;
+        if (entry == null) return 'Waiting for your answer';
+        return waitingSummary(entry, backend, agentId: item.agentId);
+    }
+  }
+}
+
+/// An item's parts without a widget ([needsYouWords]).
+class _Words with _ItemParts {
+  _Words(this.item, this.workspace, {this.entry, this.message});
+
+  @override
+  final NeedsYouItem item;
+  @override
+  final Workspace workspace;
+  @override
+  final Entry? entry;
+  @override
+  final PipeMessage? message;
+}
+
+/// The role of the agent that asks for [item], to show quietly beside its
+/// name (§3.10); empty where there's none to show.
+String needsYouRole(Workspace workspace, NeedsYouItem item) =>
+    _Words(item, workspace)._role;
+
+/// [who] ([needsYouWords]) cut where its agent's role goes beside its
+/// name (§3.10): "June" + "Project Manager" + " · 3 alerts". With no role
+/// to show, [who] whole and nothing beside it.
+({String name, String role, String after}) needsYouWho(
+  Workspace workspace,
+  NeedsYouItem item,
+  String who,
+) {
+  final role = needsYouRole(workspace, item);
+  final name = workspace.agents
+      .where((agent) => agent.id == item.agentId)
+      .firstOrNull
+      ?.name;
+  if (role.isEmpty || name == null || !who.startsWith(name)) {
+    return (name: who, role: '', after: '');
+  }
+  return (name: name, role: role, after: who.substring(name.length));
+}
+
+/// Who asks, and what, as Needs you's bubble says them (and find searches):
+/// for focus mode's queue (#514). [entry] and [message], its card as
+/// fetched ([NeedsYouEntries]), when there is one.
+({String who, String what}) needsYouWords(
+  Backend backend,
+  Workspace workspace,
+  NeedsYouItem item, {
+  Entry? entry,
+  PipeMessage? message,
+}) => _Words(item, workspace, entry: entry, message: message).words(backend);
+
+/// [item]'s card with its real controls, as Needs you's bubble shows it
+/// opened, for every kind; until its card is here, where it is ([failed]
+/// when it couldn't be fetched). Focus mode's stage shows the same (#514).
+class NeedsYouCard extends StatelessWidget with _ItemParts {
+  const NeedsYouCard({
+    super.key,
+    required this.item,
+    required this.entry,
+    required this.message,
+    required this.failed,
+    required this.workspace,
+  });
+
+  @override
+  final NeedsYouItem item;
+  @override
+  final Entry? entry;
+  @override
+  final PipeMessage? message;
+  final String? failed;
+  @override
+  final Workspace workspace;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
     final pipe = _pipe;
     Widget line(String text, {Color? color}) => Text(
       text,
       style: TextStyles.caption.copyWith(color: color ?? palette.textFaint),
     );
     switch (item.kind) {
+      case NeedsYouKind.alert || NeedsYouKind.alertGroup:
+        final alerts = alertsOf(workspace.alerts, item);
+        if (alerts.isEmpty) return line('Read');
+        final backend = AppScope.of(context);
+        return NeedsYouAlert(
+          item: item,
+          alerts: alerts,
+          unread: {for (final alert in alerts) alert.id},
+          open: true,
+          onToggle: () {},
+          onRead: (read) => fireAndLog(
+            backend.readAlerts([for (final alert in read) alert.id]),
+          ),
+        );
       case NeedsYouKind.pipeApproval:
         if (pipe == null || pipe.state != PipeState.PIPE_STATE_APPROVAL) {
           return line(
@@ -1664,7 +1900,7 @@ class _Bubble extends StatelessWidget {
             Button(
               label: 'Open chat',
               primary: true,
-              onPressed: () => _openWhere(context),
+              onPressed: () => openNeedsYouItem(context, item),
             ),
           ],
         );
@@ -1728,148 +1964,74 @@ class _Bubble extends StatelessWidget {
         );
     }
   }
+}
 
-  /// What it asks, in a line.
-  String _summary(Backend backend) {
-    final pipe = _pipe;
-    switch (item.kind) {
-      case NeedsYouKind.pipeApproval:
-        return pipe == null
-            ? 'Waiting for your approval'
-            : '${pipePeerName(pipe, start: true)} wants to connect';
-      case NeedsYouKind.pipeLoop:
-        return 'Paused: agents kept talking on their own';
-      case NeedsYouKind.pipeIdentity:
-        return pipe == null
-            ? 'Another account now'
-            : '${pipePeerClaktory(pipe)} is on another account '
-                  'now';
-      case NeedsYouKind.pipeHeld:
-        final message = this.message;
-        if (message == null) return 'A message waits for you';
-        final held =
-            message.state == PipeMessageState.PIPE_MESSAGE_STATE_HELD_INCOMING;
-        return held
-            ? 'Let in a message from '
-                  '${pipe == null ? 'the other side' : pipePeerClaktory(pipe)}?'
-                  '\n${message.text}'
-            : 'Waiting for you to send it: ${message.text}';
-      case NeedsYouKind.pipeUnanswered:
-        final message = this.message;
-        if (message == null) return pipeUnanswered;
-        return '$pipeUnanswered\n${message.text}';
-      case NeedsYouKind.signIn:
-        final signIn = signInOf(workspace, item);
-        return signIn == null
-            ? 'Signed in again'
-            : signInAgainText(signIn.provider, signIn.account);
-      case NeedsYouKind.move:
-        return 'Move this Claktory to ${_move.target}?';
-      case NeedsYouKind.vault:
-        final why = workspace.vault.lockedWhy;
-        return why.isEmpty ? 'Agents are waiting for your secrets.' : why;
-      case NeedsYouKind.recoveryKey:
-        return 'Your way back into your secrets if you ever lose access. '
-            'Save it in a password manager, then confirm you have it.';
-      case NeedsYouKind.dmSend:
-        return dmSendSummary(workspace, item);
-      case NeedsYouKind.providerWait:
-        return providerWaitOf(workspace, item.providerId)?.text ??
-            'They carry on.';
-      case NeedsYouKind.device:
-        final device = pendingDeviceOf(workspace, item);
-        return device == null
-            ? 'No longer waiting'
-            : '${deviceCallingItself(device)} wants to connect';
-      case NeedsYouKind.keepAwake:
-        final keep = workspace.keepAwake;
-        return keep.ask
-            ? keepAwakeSummary(backend)
-            : keepAwakeAnswered(backend, keep);
-      case NeedsYouKind.backendService:
-        return backendByHand(workspace)
-            ? backendServiceSummary(workspace.backendService)
-            : 'Claktory runs in the background again.';
-      case NeedsYouKind.lidStuck:
-        final keep = workspace.keepAwake;
-        final fix = keep.lidClosedFix.replaceAll('`', '');
-        return keep.lidClosed != LidClosedState.LID_CLOSED_STUCK || fix.isEmpty
-            ? 'It can sleep again.'
-            : fix;
-      case NeedsYouKind.browser:
-        final session = browserSessionOf(workspace, item);
-        if (session == null) return 'No longer needs you';
-        final host = browserHost(session.origin);
-        return browserAssists(session)
-            ? 'Allow reading and using $host in Chrome?'
-            : 'Allow reading $host in Chrome?';
-      case NeedsYouKind.entry || NeedsYouKind.chat:
-        final entry = this.entry;
-        if (entry == null) return 'Waiting for your answer';
-        return waitingSummary(entry, backend, agentId: item.agentId);
-    }
+/// Opens where [item] is answered: the conversation at its card, the chat,
+/// or the pipe; leaving the page it's opened from unless [closePage] is
+/// false (focus mode leaves itself first, #514).
+void openNeedsYouItem(
+  BuildContext context,
+  NeedsYouItem item, {
+  bool closePage = true,
+}) {
+  if (item.kind == NeedsYouKind.dmSend) {
+    // The chat over Needs you, from the person's own conversations; its
+    // review card sends it.
+    fireAndLog(openDmChat(context, item.conversationId));
+    return;
   }
-
-  /// Opens the conversation at the card, the chat, or the pipe.
-  void _openWhere(BuildContext context) {
-    if (item.kind == NeedsYouKind.dmSend) {
-      // The chat over Needs you, from the person's own conversations; its
-      // review card sends it.
-      fireAndLog(openDmChat(context, item.conversationId));
-      return;
-    }
-    final backend = AppScope.of(context);
-    final chat = _chat;
-    AppScope.closePage(context);
-    final agent = _agent;
-    final pipe = _pipe;
-    if (item.kind == NeedsYouKind.providerWait) {
-      // The first that waits: its wait line has the same ways forward.
-      final wait = providerWaitOf(backend.workspace.workspace, item.providerId);
-      final waiting = wait == null ? null : firstWaiter(wait);
-      if (wait != null && wait.agentIds.isNotEmpty) {
-        fireAndLog(backend.selectAgent(waiting!));
-      } else if (waiting != null && waiting.isNotEmpty) {
-        final chat = [
-          for (final chat in backend.workspace.workspace.chats)
-            if (chat.id == waiting) chat,
-        ].firstOrNull;
-        if (chat != null) openChat(context, chat);
-      }
-    } else if (item.kind == NeedsYouKind.browser) {
-      // Its card shows in the agent's conversation the whole time.
-      fireAndLog(backend.selectAgent(item.agentId));
-    } else if (item.kind == NeedsYouKind.entry) {
-      fireAndLog(() async {
-        // A pipe's liaison's conversation shows in its pipe.
-        if (agent != null && agent.pipeId.isNotEmpty) {
-          await backend.selectPipe(agent.pipeId);
-        } else {
-          await backend.selectAgent(item.agentId);
-        }
-        backend.reveal.reachSeq(item.agentId, item.seq);
-      }());
-    } else if (item.kind == NeedsYouKind.chat) {
+  final backend = AppScope.of(context);
+  final parts = _Words(item, backend.workspace.workspace);
+  final chat = parts._chat;
+  if (closePage) AppScope.closePage(context);
+  final agent = parts._agent;
+  final pipe = parts._pipe;
+  if (item.kind == NeedsYouKind.providerWait) {
+    // The first that waits: its wait line has the same ways forward.
+    final wait = providerWaitOf(backend.workspace.workspace, item.providerId);
+    final waiting = wait == null ? null : firstWaiter(wait);
+    if (wait != null && wait.agentIds.isNotEmpty) {
+      fireAndLog(backend.selectAgent(waiting!));
+    } else if (waiting != null && waiting.isNotEmpty) {
+      final chat = [
+        for (final chat in backend.workspace.workspace.chats)
+          if (chat.id == waiting) chat,
+      ].firstOrNull;
       if (chat != null) openChat(context, chat);
-    } else {
-      final liaison = pipe == null
-          ? null
-          : pipeLiaison(backend.workspace.workspace, pipe);
-      fireAndLog(() async {
-        await backend.selectPipe(item.pipeId);
-        // Among its liaison's conversation, at the message's card.
-        if (item.kind == NeedsYouKind.pipeHeld ||
-            item.kind == NeedsYouKind.pipeUnanswered) {
-          backend.reveal.reachExtra(
-            liaison?.id ?? pipeChatRevealId(item.pipeId),
-            pipeItemKey(item.seq),
-          );
-        }
-      }());
     }
-    // On a phone, the conversation is pushed over the list.
-    PhoneNavigation.of(context)?.value = true;
+  } else if (item.kind == NeedsYouKind.browser) {
+    // Its card shows in the agent's conversation the whole time.
+    fireAndLog(backend.selectAgent(item.agentId));
+  } else if (item.kind == NeedsYouKind.entry) {
+    fireAndLog(() async {
+      // A pipe's liaison's conversation shows in its pipe.
+      if (agent != null && agent.pipeId.isNotEmpty) {
+        await backend.selectPipe(agent.pipeId);
+      } else {
+        await backend.selectAgent(item.agentId);
+      }
+      backend.reveal.reachSeq(item.agentId, item.seq);
+    }());
+  } else if (item.kind == NeedsYouKind.chat) {
+    if (chat != null) openChat(context, chat);
+  } else {
+    final liaison = pipe == null
+        ? null
+        : pipeLiaison(backend.workspace.workspace, pipe);
+    fireAndLog(() async {
+      await backend.selectPipe(item.pipeId);
+      // Among its liaison's conversation, at the message's card.
+      if (item.kind == NeedsYouKind.pipeHeld ||
+          item.kind == NeedsYouKind.pipeUnanswered) {
+        backend.reveal.reachExtra(
+          liaison?.id ?? pipeChatRevealId(item.pipeId),
+          pipeItemKey(item.seq),
+        );
+      }
+    }());
   }
+  // On a phone, the conversation is pushed over the list.
+  PhoneNavigation.of(context)?.value = true;
 }
 
 /// A quiet link under an open bubble's card.

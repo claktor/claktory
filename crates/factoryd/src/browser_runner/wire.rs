@@ -26,7 +26,9 @@ use serde::{Deserialize, Serialize};
 
 /// This wire's version, in [`Report::Ready`]: a runner of another (an
 /// older Mac image, say) is stopped rather than half understood.
-pub const VERSION: u32 = 1;
+/// 2: input leases ([`Control::LeaseInput`], R11): a runner that gates
+/// `Input.*` on them, so a host never drives one that doesn't.
+pub const VERSION: u32 = 2;
 
 /// The bytes before each payload: the channel, then its length.
 pub const HEADER: usize = 5;
@@ -222,6 +224,13 @@ pub enum Control {
     DownloadRead { guid: String },
     /// Delete the download `guid`, read or not.
     DownloadDrop { guid: String },
+    /// Let the host's `Input.*` calls through to the driven Chrome for at
+    /// most `for_ms` (capped at ten minutes) or until [`Control::EndLease`]:
+    /// one agent action's (R11.3 #5). It replaces a lease still live.
+    /// Answered with [`Report::Lease`].
+    LeaseInput { id: u64, for_ms: u32 },
+    /// The lease `id` is over: `Input.*` is refused again.
+    EndLease { id: u64 },
 }
 
 /// Control, the runner to factoryd. Hostile input once read (a page that
@@ -262,6 +271,17 @@ pub enum Report {
     /// A download the runner cancelled and deleted: past the size cap,
     /// too many at once, the disk too full, or not driven.
     DownloadCancelled { guid: String, why: String },
+    /// The lease `id` asked for: granted, or refused and why (no driven
+    /// Chrome).
+    Lease {
+        id: u64,
+        granted: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        why: String,
+    },
+    /// A lease ended before its [`Control::EndLease`]: it ran out, another
+    /// replaced it, or Chrome stopped, changed mode or started again.
+    LeaseEnded { id: u64, why: String },
 }
 
 /// A frame's header (channel 2 out), 12 bytes, big-endian: its seq, the
@@ -550,7 +570,15 @@ mod tests {
                 download_dir: None
             }))
             .unwrap(),
-            r#"{"op":"ready","wire":1,"chrome":"158.0.8127.88","landlock_abi":4,"mode":"undriven"}"#
+            r#"{"op":"ready","wire":2,"chrome":"158.0.8127.88","landlock_abi":4,"mode":"undriven"}"#
+        );
+        // Input leases (R11, wire 2).
+        assert_eq!(decode::<Control>(br#"{"op":"lease_input","id":7,"for_ms":4000}"#), Some(Control::LeaseInput { id: 7, for_ms: 4000 }));
+        assert_eq!(decode::<Control>(br#"{"op":"end_lease","id":7}"#), Some(Control::EndLease { id: 7 }));
+        assert_eq!(String::from_utf8(encode(&Report::Lease { id: 7, granted: true, why: String::new() })).unwrap(), r#"{"op":"lease","id":7,"granted":true}"#);
+        assert_eq!(
+            String::from_utf8(encode(&Report::LeaseEnded { id: 7, why: "it ran out".into() })).unwrap(),
+            r#"{"op":"lease_ended","id":7,"why":"it ran out"}"#
         );
 
         let frame = FrameHeader { seq: 0x0102_0304, width: 780, height: 487, screen_width: 1280, screen_height: 800 };

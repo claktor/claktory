@@ -10,9 +10,12 @@ import 'dart:typed_data';
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/diagnostics_record.dart' show PushStep;
 import 'package:factory_app/drafts.dart';
+import 'package:factory_app/mobile/permission.dart' show registerPermissionHost;
 import 'package:factory_app/mobile/push.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/rail.dart';
+import 'package:flutter/foundation.dart'
+    show TargetPlatform, debugDefaultTargetPlatformOverride;
 import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -177,6 +180,36 @@ void main() {
     // Asked once only.
     await registrar.askInContext();
     expect(device.asked, 1);
+  });
+
+  testWidgets('on a screen, why first: the permission sheet, then the '
+      "system's prompt; a yes registers (area 5a, P3)", (tester) async {
+    final registrar = await start(tester);
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    late BuildContext screen;
+    await Harness(Workspace()).show(
+      tester,
+      size: const Size(390, 844),
+      home: Builder(
+        builder: (context) {
+          screen = context;
+          return const SizedBox.expand();
+        },
+      ),
+    );
+    addTearDown(registerPermissionHost(screen));
+    await connect(tester, studio());
+
+    unawaited(registrar.askInContext());
+    await pumpFrames(tester, const Duration(seconds: 1));
+    expect(find.text('Know when an agent needs you'), findsOneWidget);
+    expect(device.asked, 0, reason: 'not before Continue');
+    await tester.tap(find.text('Continue'));
+    await pumpFrames(tester, const Duration(seconds: 1));
+    expect(device.asked, 1);
+    expect(find.text('Know when an agent needs you'), findsNothing);
+    expect(studio().registered, hasLength(1));
   });
 
   testWidgets('a Claktory paired since the app started asks once, as it '

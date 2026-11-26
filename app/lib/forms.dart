@@ -2237,11 +2237,12 @@ class _ExtensionSettings extends StatelessWidget {
                   ),
                   child: switch (option.kind) {
                     ExtensionOptionKind.EXTENSION_OPTION_KIND_AGENTS =>
-                      _AgentListOption(
-                        option: option,
+                      AgentListField(
+                        label: option.label,
+                        description: option.description,
                         workspace: workspace,
-                        agentId: agentId,
-                        projectId: projectId,
+                        hidden: agentId,
+                        alwaysIn: option.includesProject ? projectId : null,
                         chosen: value(option.id).agentIds,
                         onChanged: (ids) =>
                             onOption(option.id, OptionValue(agentIds: ids)),
@@ -2470,32 +2471,37 @@ class _SwitchRow extends StatelessWidget {
   }
 }
 
-/// An option that's a list of agents: the chosen ones as chips, and a menu
-/// of every other agent, grouped by where they live, to choose from. With
-/// `includes_project`, the agents in its own project are always in, so
-/// they show checked and greyed.
-class _AgentListOption extends StatefulWidget {
-  const _AgentListOption({
-    required this.option,
+/// A list of agents to choose: the chosen ones as chips, and a menu of
+/// every other agent, grouped by where they live, to choose from (an
+/// extension's agent-list option, who hears Resources alerts). The agents
+/// in project [alwaysIn] are always in (an option's `includes_project`), so
+/// they show checked and greyed; [hidden] (the agent whose option it is)
+/// isn't offered.
+class AgentListField extends StatefulWidget {
+  const AgentListField({
+    super.key,
+    required this.label,
+    this.description = '',
     required this.workspace,
-    required this.agentId,
-    required this.projectId,
+    this.hidden = '',
+    this.alwaysIn,
     required this.chosen,
     required this.onChanged,
   });
 
-  final ExtensionOption option;
+  final String label;
+  final String description;
   final Workspace workspace;
-  final String agentId;
-  final String projectId;
+  final String hidden;
+  final String? alwaysIn;
   final List<String> chosen;
   final ValueChanged<List<String>> onChanged;
 
   @override
-  State<_AgentListOption> createState() => _AgentListOptionState();
+  State<AgentListField> createState() => _AgentListFieldState();
 }
 
-class _AgentListOptionState extends State<_AgentListOption> {
+class _AgentListFieldState extends State<AgentListField> {
   final _menu = OverlayPortalController();
   final _link = LayerLink();
   final _tapRegion = Object();
@@ -2503,7 +2509,7 @@ class _AgentListOptionState extends State<_AgentListOption> {
 
   /// Agents in the agent's own project, which count without being chosen.
   bool _inProject(Agent agent) =>
-      widget.option.includesProject && agent.projectId == widget.projectId;
+      widget.alwaysIn != null && agent.projectId == widget.alwaysIn;
 
   void _toggle(Agent agent) {
     final chosen = widget.chosen.toSet();
@@ -2520,19 +2526,19 @@ class _AgentListOptionState extends State<_AgentListOption> {
     final palette = Palette.of(context);
     final chosen = [
       for (final agent in widget.workspace.agents)
-        if (widget.chosen.contains(agent.id) && agent.id != widget.agentId)
+        if (widget.chosen.contains(agent.id) && agent.id != widget.hidden)
           agent,
     ];
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Text(
-          widget.option.label,
+          widget.label,
           style: TypeScale.of(context).body.copyWith(color: palette.text),
         ),
-        if (widget.option.description.isNotEmpty)
+        if (widget.description.isNotEmpty)
           Text(
-            widget.option.description,
+            widget.description,
             style: TypeScale.of(context).caption
                 .copyWith(color: palette.textMuted),
           ),
@@ -2575,7 +2581,7 @@ class _AgentListOptionState extends State<_AgentListOption> {
                           Expanded(
                             child: chosen.isEmpty
                                 ? Text(
-                                    widget.option.includesProject
+                                    widget.alwaysIn != null
                                         ? 'No one outside its project'
                                         : 'No one',
                                     style: TypeScale.of(context).body
@@ -2623,10 +2629,10 @@ class _AgentListOptionState extends State<_AgentListOption> {
     for (final (id, name, inPlace) in places) {
       final agents = [
         for (final agent in workspace.agents)
-          if (inPlace(agent) && agent.id != widget.agentId) agent,
+          if (inPlace(agent) && agent.id != widget.hidden) agent,
       ];
       if (agents.isEmpty) continue;
-      final own = widget.option.includesProject && id == widget.projectId;
+      final own = widget.alwaysIn != null && id == widget.alwaysIn;
       rows.add(
         Padding(
           padding: EdgeInsets.fromLTRB(

@@ -156,6 +156,20 @@ void main() {
     }, variant: TargetPlatformVariant.only(platform));
   }
 
+  macWidgets("while a card's field has the keys, the overlay says they go "
+      'to it (#511)', (tester) async {
+    await showWindow(tester, two());
+    final owner = Object();
+    FileDrop.divert(owner, (_) {}, label: 'your answer to Builder');
+    addTearDown(() => FileDrop.undivert(owner));
+    await fromWindow(tester, 'filesOver', 2);
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text('Drop to add to your answer to Builder'), findsOneWidget);
+    expect(find.text('2 files'), findsOneWidget);
+    await fromWindow(tester, 'filesOver', 0);
+    await tester.pump(const Duration(milliseconds: 200));
+  });
+
   macWidgets('files dragged over the window dim it all and say where they '
       'go', (tester) async {
     await showWindow(tester, two());

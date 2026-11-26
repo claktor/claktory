@@ -8,6 +8,8 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 
+import 'backend.dart' show RequestFailure;
+import 'card_answer.dart' show AnswerNotSent, CardAnswer, PublishesAnswer;
 import 'controls.dart';
 import 'identity.dart';
 import 'mobile/lines.dart' show ControlsLine;
@@ -45,12 +47,20 @@ class ProviderWaitCard extends StatefulWidget {
   State<ProviderWaitCard> createState() => _ProviderWaitCardState();
 }
 
-class _ProviderWaitCardState extends State<ProviderWaitCard> {
+class _ProviderWaitCardState extends State<ProviderWaitCard>
+    with PublishesAnswer {
   var _busy = false;
   String? _error;
 
-  Future<void> _continue(String waiting, UsageWaitOptions options) async {
+  /// [rethrowing] for focus mode's keys (#514): refused, it throws, and
+  /// cancelled it throws [AnswerNotSent].
+  Future<void> _continue(
+    String waiting,
+    UsageWaitOptions options, {
+    bool rethrowing = false,
+  }) async {
     setState(() => _error = null);
+    var sent = false;
     final refused = await continueOnAlternative(
       context,
       waiting: waiting,
@@ -58,14 +68,38 @@ class _ProviderWaitCardState extends State<ProviderWaitCard> {
       allOnly: true,
       // Busy once it's asked for, not while the person chooses.
       onSending: () {
+        sent = true;
         if (mounted) setState(() => _busy = true);
       },
     );
-    if (!mounted) return;
-    setState(() {
-      _busy = false;
-      _error = refused;
-    });
+    if (mounted) {
+      setState(() {
+        _busy = false;
+        _error = refused;
+      });
+    }
+    if (!rethrowing) return;
+    if (refused != null) throw RequestFailure(refused);
+    if (!sent) throw const AnswerNotSent();
+  }
+
+  @override
+  CardAnswer? answerNow() {
+    final waiting = firstWaiter(widget.wait);
+    final options = usageWaitOptions(context, waiting);
+    final alternative = options?.alternative;
+    if (alternative == null) return null;
+    return CardAnswer(
+      key: 'usage:${widget.wait.providerId}',
+      docked: false,
+      yes: 'Continue on ${alternative.providerName}',
+      no: '',
+      busy: _busy,
+      error: _error,
+      onYes: _busy
+          ? null
+          : () => _continue(waiting, options!, rethrowing: true),
+    );
   }
 
   @override
@@ -85,6 +119,7 @@ class _ProviderWaitCardState extends State<ProviderWaitCard> {
         : alternative != null && count > 1
         ? null
         : usageWaitDetail(options);
+    publishAnswer();
     final resets = [
       for (final meter in providerWaitMeters(workspace, wait))
         for (final reset in resetsLeft(meter))

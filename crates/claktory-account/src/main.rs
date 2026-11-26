@@ -57,11 +57,16 @@ serve options:
   --user-apps-uid UID     the worker's user: whatever listens on the socket
                           must run as it, or it's sent nothing (needed with
                           --user-apps)
-  --review-account FILE   the store reviewers' account: FILE's one line,
+  --review-account FILE   a store reviewers' account: FILE's one line,
                           `<email> <salt> <sha256 of salt and code, hex>`, lets
                           that email sign in with that 6-digit code instead of
                           an emailed one (nothing is sent to it); off while
-                          FILE isn't there
+                          FILE isn't there; repeat for a second store (2 at
+                          most, each its own email)
+  --review-claktory-key FILE
+                          the review box's backend key (base64url, one line):
+                          the only Claktory a review email signs in; while
+                          FILE isn't there, none does
 
 init-secrets writes new keys to FILE (never over one): back up its k_share and
 signing_key offline.
@@ -189,6 +194,7 @@ fn serve(args: &[String]) -> Result<(), String> {
             "--user-apps",
             "--user-apps-uid",
             "--review-account",
+            "--review-claktory-key",
         ],
         &["--trust-proxy"],
     )?;
@@ -218,17 +224,28 @@ fn serve(args: &[String]) -> Result<(), String> {
         }),
         _ => return Err("--user-apps and --user-apps-uid go together".to_owned()),
     };
-    if let Some(path) = options.value("--review-account")? {
-        config.review_account = server::review::ReviewAccount::read(&PathBuf::from(&path))?;
-        match &config.review_account {
-            // Never vouched for: pipes would show it as Claktory's staff.
-            Some(review)
-                if config.vouched_claktory_emails.iter().any(|email| normalize_email(email).is_some_and(|email| review.is(&email))) =>
-            {
-                return Err("the review account's email can't also be a --vouch-claktory-email".to_owned());
-            }
-            Some(_) => tracing::info!("review account: on"),
+    for path in options.values("--review-account") {
+        match server::review::ReviewAccount::read(&PathBuf::from(&path))? {
+            Some(review) => config.review_accounts.push(review),
             None => tracing::info!("review account: off ({path} isn't there)"),
+        }
+    }
+    server::review::ReviewAccount::check_all(&config.review_accounts)?;
+    // Never vouched for: pipes would show it as Claktory's staff.
+    if config
+        .vouched_claktory_emails
+        .iter()
+        .any(|email| normalize_email(email).is_some_and(|email| config.review_accounts.iter().any(|review| review.is(&email))))
+    {
+        return Err("a review account's email can't also be a --vouch-claktory-email".to_owned());
+    }
+    if !config.review_accounts.is_empty() {
+        tracing::info!("review accounts: {} on", config.review_accounts.len());
+    }
+    if let Some(path) = options.value("--review-claktory-key")? {
+        config.review_claktory_key = server::review::read_claktory_key(&PathBuf::from(&path))?;
+        if config.review_claktory_key.is_none() {
+            tracing::info!("review box: none ({path} isn't there), so no Claktory signs in with a review email");
         }
     }
     let service_key = claktory_account::protocol::b64(secrets.signing_key.verifying_key().to_bytes());

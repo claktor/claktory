@@ -5,7 +5,10 @@
 // answered, the pane closes and the person is back where they pressed
 // Review. On media nothing else is offered meanwhile; on text, line
 // comments go with the answer.
+import 'dart:io';
+
 import 'package:factory_app/backend.dart' show RequestFailure;
+import 'package:factory_app/card_files.dart' show cardFilesKey;
 import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/dictation.dart' show transcribeRecording;
 import 'package:factory_app/layout.dart' show leaves;
@@ -895,5 +898,42 @@ void main() {
       expect(_held, findsOneWidget);
       expect(_button('Approve').onPressed, isNull);
     });
+  });
+
+  testWidgets("files added to the card (#511) go with the review's answer, "
+      'under the field meanwhile', (tester) async {
+    final folder = Directory.systemTemp.createTempSync('review-files');
+    addTearDown(() => folder.deleteSync(recursive: true));
+    final shot = '${folder.path}/shot.png';
+    File(shot).writeAsBytesSync(List.filled(100, 1));
+    final harness = await _showing(tester, _text, 'text');
+    await tester.runAsync(
+      () =>
+          harness.backend.attachments.add(cardFilesKey('fugo', 'ask7'), [shot]),
+    );
+    await tester.pump();
+    expect(
+      find.descendant(
+        of: find.byType(ReviewBar),
+        matching: find.text('shot.png'),
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Approve'));
+    for (var i = 0; i < 12; i++) {
+      await tester.pump();
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+    }
+    await settle(tester);
+    final answer = harness.backend.sent
+        .lastWhere((m) => m.hasAnswerAsk())
+        .answerAsk;
+    expect([for (final a in answer.attachments) a.name], ['shot.png']);
+    expect(
+      harness.backend.attachments.of(cardFilesKey('fugo', 'ask7')),
+      isEmpty,
+    );
   });
 }

@@ -437,6 +437,10 @@ pub(crate) fn tools(factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
             tools.push(app_tool(factory, agent, &manifest, tool));
         }
     }
+    // Giving an app up (#236), for an agent that has any.
+    if !tools.is_empty() {
+        tools.push(crate::given_up::apps_tool(factory, agent));
+    }
     tools
 }
 

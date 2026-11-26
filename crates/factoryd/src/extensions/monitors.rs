@@ -586,8 +586,12 @@ fn db_error(error: rusqlite::Error) -> String {
 }
 
 /// Whose monitors `asker` means: its own, or (with `agent`) another agent
-/// it can message. The person (`asker` "") may name anyone.
-fn whose(config: &Config, asker: &str, agent: Option<&str>) -> Result<String, String> {
+/// it can message. The person (`asker` "") may name anyone. With
+/// `archived`, to list or change them (never to add one), an admin agent
+/// may also name an agent in an archived project, which no one can
+/// message (friend bug #55): its monitors are paused there, and only
+/// cancelling or listing them needn't bring the project back.
+fn whose(config: &Config, asker: &str, agent: Option<&str>, archived: bool) -> Result<String, String> {
     let agent = agent.map(str::trim).filter(|agent| !agent.is_empty());
     if asker.is_empty() {
         let id = agent.ok_or("Say whose monitors.")?;
@@ -597,7 +601,10 @@ fn whose(config: &Config, asker: &str, agent: Option<&str>) -> Result<String, St
     let Some(wanted) = agent.filter(|wanted| *wanted != asker && !me.name.eq_ignore_ascii_case(wanted)) else {
         return Ok(asker.to_owned());
     };
-    let reachable: Vec<&AgentConfig> = config.agents.iter().filter(|to| super::agents::can_message(config, me, to)).collect();
+    let mut reachable: Vec<&AgentConfig> = config.agents.iter().filter(|to| super::agents::can_message(config, me, to)).collect();
+    if archived && crate::proposals::is_admin(me) {
+        reachable.extend(config.agents.iter().filter(|to| to.id != me.id && config.archived(to)));
+    }
     match super::agents::find(config, me, &reachable, wanted)? {
         Some(found) if super::enabled(found, ID) => Ok(found.id.clone()),
         Some(found) => Err(format!("{} has monitors turned off.", found.id)),
@@ -658,7 +665,7 @@ fn add_monitors(factory: &Arc<Factory>, asker: &str, wanted: Vec<AddOne>) -> Res
         for (index, one) in wanted.into_iter().enumerate() {
             let which = if index == 0 { String::new() } else { format!("monitor {}: ", index + 1) };
             let fail = |error: String| format!("{which}{error} Nothing was added.");
-            let agent = whose(&inner.config, asker, one.agent.as_deref()).map_err(fail)?;
+            let agent = whose(&inner.config, asker, one.agent.as_deref(), false).map_err(fail)?;
             let Some(config) = inner.config.agent(&agent) else { return Err(fail(format!("No agent has the id \"{agent}\"."))) };
             let name = clean_name(&one.name);
             if name.is_empty() || name.chars().count() > MAX_NAME {
@@ -805,7 +812,7 @@ struct ListArgs {
 
 fn run_list(factory: &Arc<Factory>, asker: &str, args: Value) -> Result<ToolResult, String> {
     let args: ListArgs = serde_json::from_value(args).map_err(|error| error.to_string())?;
-    let agent = whose(&factory.lock().config, asker, args.agent.as_deref())?;
+    let agent = whose(&factory.lock().config, asker, args.agent.as_deref(), true)?;
     let (text, count) = list(factory, &agent, args.all.unwrap_or(false))?;
     Ok(ToolResult::text(text, json!({"agent": agent, "count": count})))
 }
@@ -897,7 +904,7 @@ pub(crate) struct ChangeOne {
 
 fn run_change(factory: &Arc<Factory>, asker: &str, args: Value) -> Result<ToolResult, String> {
     let args: ChangeArgs = serde_json::from_value(args).map_err(|error| format!("{error}; changes is a list of {{id, action}}."))?;
-    let agent = whose(&factory.lock().config, asker, args.agent.as_deref())?;
+    let agent = whose(&factory.lock().config, asker, args.agent.as_deref(), true)?;
     change(factory, &agent, asker, &args.changes)
 }
 
@@ -917,6 +924,11 @@ pub(crate) fn change(factory: &Arc<Factory>, agent: &str, actor: &str, changes: 
         return Err("changes is empty; give at least one {id, action}.".to_owned());
     }
     let by = if actor.is_empty() { format!("by {}", factory.lock().config.person()) } else { format!("by {actor}") };
+    // In an archived project nothing runs or wakes it (friend bug #55).
+    let archived = {
+        let inner = factory.lock();
+        inner.config.agent(agent).is_some_and(|agent| inner.config.archived(agent))
+    };
     let mut planned = Vec::new();
     for change in changes {
         let wanted = change.id.trim();
@@ -929,6 +941,9 @@ pub(crate) fn change(factory: &Arc<Factory>, agent: &str, actor: &str, changes: 
             "fire" => Action::Fire,
             other => return Err(format!("m{id}: action must be pause, resume, cancel or fire; got \"{other}\". Nothing changed.")),
         };
+        if archived && action == Action::Fire {
+            return Err(format!("m{id} can't fire while its agent's project is archived: nothing runs there. Nothing changed."));
+        }
         let found = query(&factory.store, &Query { agent: Some(agent), id: Some(id), ended_since: Some(0), ..Query::default() })
             .map_err(db_error)?;
         let Some(monitor) = found.into_iter().next() else {

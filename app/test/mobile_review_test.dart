@@ -24,6 +24,8 @@ import 'package:factory_app/dictation.dart';
 import 'package:factory_app/recorder.dart';
 import 'package:factory_app/voice.dart' show voiceMessagesOn;
 
+import 'package:factory_app/mobile/needs_you_phone.dart' show PhoneNeedsYou;
+
 import 'harness.dart';
 import 'voice_test.dart' show FakeRecorder, io;
 import 'panes_test.dart' show beside, snapshot;
@@ -203,7 +205,7 @@ void main() {
     await tester.tap(find.bySemanticsLabel('Back').last);
     await pumpFrames(tester);
     expect(find.text('Builder asks you to review this'), findsNothing);
-    expect(find.text('Needs you'), findsWidgets);
+    expect(find.byType(PhoneNeedsYou), findsOneWidget);
     expect(harness.page.value, AppPage.inbox);
   });
 
@@ -229,8 +231,7 @@ void main() {
     final harness = await phone(tester);
     harness.page.value = AppPage.inbox;
     await pumpFrames(tester);
-    await tester.tap(find.text('Builder').first);
-    await pumpFrames(tester);
+    // One card a screen, already open (#514).
     await tester.tap(find.text('Review').last);
     await pumpFrames(tester);
     expect(find.text('Builder asks you to review this'), findsOneWidget);
@@ -247,8 +248,7 @@ void main() {
     await tester.tap(find.byType(PhoneNeedsYouButton));
     await pumpFrames(tester);
     expect(harness.page.value, AppPage.inbox);
-    await tester.tap(find.text('Builder').last);
-    await pumpFrames(tester);
+    // One card a screen, already open (#514).
     await tester.tap(find.text('Review').last);
     await pumpFrames(tester);
     // On top: its bar takes a tap, with nothing over it.
@@ -337,8 +337,7 @@ void main() {
       ]);
     harness.page.value = AppPage.inbox;
     await pumpFrames(tester);
-    await tester.tap(find.text('Builder').first);
-    await pumpFrames(tester);
+    // One card a screen, already open (#514).
     await tester.tap(find.text('Review').last);
     await pumpFrames(tester);
     expect(find.text('Builder asks you to review this'), findsOneWidget);
@@ -618,7 +617,7 @@ void main() {
     await pumpFrames(tester);
     expect(find.text('Builder asks you to review this'), findsNothing);
     expect(harness.page.value, AppPage.inbox);
-    expect(find.text('Needs you'), findsWidgets);
+    expect(find.byType(PhoneNeedsYou), findsOneWidget);
   });
 
   testWidgets('the field and the bar sit above the keyboard', (tester) async {

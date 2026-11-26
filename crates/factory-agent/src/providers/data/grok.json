@@ -1,0 +1,100 @@
+{
+  "openai-responses": {
+    "grok-4.7": {
+      "id": "grok-4.7",
+      "name": "Grok 4.7",
+      "api": "openai-responses",
+      "provider": "grok",
+      "baseUrl": "https://cli-chat-proxy.grok.com/v1",
+      "reasoning": true,
+      "input": [
+        "text"
+      ],
+      "cost": {
+        "input": 2,
+        "output": 6,
+        "cacheRead": 0.5,
+        "cacheWrite": 0
+      },
+      "contextWindow": 256000,
+      "maxTokens": 64000,
+      "thinkingLevelMap": {
+        "off": null,
+        "minimal": "low",
+        "xhigh": "xhigh"
+      }
+    },
+    "grok-4.7-build-fast": {
+      "id": "grok-4.7-build-fast",
+      "name": "Grok 4.7 Fast",
+      "api": "openai-responses",
+      "provider": "grok",
+      "baseUrl": "https://cli-chat-proxy.grok.com/v1",
+      "reasoning": true,
+      "input": [
+        "text"
+      ],
+      "cost": {
+        "input": 4,
+        "output": 12,
+        "cacheRead": 1,
+        "cacheWrite": 0
+      },
+      "contextWindow": 256000,
+      "maxTokens": 64000,
+      "thinkingLevelMap": {
+        "off": null,
+        "minimal": "low",
+        "xhigh": "xhigh"
+      }
+    },
+    "grok-4.6": {
+      "id": "grok-4.6",
+      "name": "Grok 4.6",
+      "api": "openai-responses",
+      "provider": "grok",
+      "baseUrl": "https://cli-chat-proxy.grok.com/v1",
+      "reasoning": true,
+      "input": [
+        "text"
+      ],
+      "cost": {
+        "input": 2,
+        "output": 6,
+        "cacheRead": 0.5,
+        "cacheWrite": 0
+      },
+      "contextWindow": 256000,
+      "maxTokens": 64000,
+      "thinkingLevelMap": {
+        "off": null,
+        "minimal": "low",
+        "xhigh": "xhigh"
+      }
+    },
+    "grok-4.5": {
+      "id": "grok-4.5",
+      "name": "Grok 4.5",
+      "api": "openai-responses",
+      "provider": "grok",
+      "baseUrl": "https://cli-chat-proxy.grok.com/v1",
+      "reasoning": true,
+      "input": [
+        "text"
+      ],
+      "cost": {
+        "input": 2,
+        "output": 6,
+        "cacheRead": 0.5,
+        "cacheWrite": 0
+      },
+      "contextWindow": 256000,
+      "maxTokens": 64000,
+      "thinkingLevelMap": {
+        "off": null,
+        "minimal": "low",
+        "xhigh": "xhigh"
+      }
+    }
+  }
+}

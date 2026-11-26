@@ -386,6 +386,55 @@ async fn each_model_change_shows_in_history_and_the_person_undoes_it() {
     view.follow(&mut client, |view| (view.agent("lea").model.clone(), view.agent("lea").effort.clone()) == before).await;
 }
 
+/// `agent`, selected, answers "go on": what Claktory told it first, if
+/// anything.
+async fn told(client: &mut Client, view: &mut View, agent: &str) -> Option<String> {
+    apply_request(client, view, Request::SelectAgent(v1::SelectAgent { agent_id: agent.into() })).await;
+    let before = view.entries.len();
+    apply_request(client, view, send_message(agent, "go on")).await;
+    view.follow(client, |view| view.entries.len() >= before + 2 && idle(view, agent)).await;
+    let said = view.entries[before..].iter().find_map(|entry| match &entry.kind {
+        Some(Kind::Event(event)) if event.from == "Claktory" => Some(event.text.clone()),
+        _ => None,
+    });
+    apply_request(client, view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
+    said
+}
+
+/// Friend bug #43: "Your model is now …" says who changed it: an agent
+/// with models_set and its reason, or the person undoing that.
+#[tokio::test]
+async fn an_agent_hears_who_changed_its_model_and_why() {
+    let dir = temp_dir();
+    let (_factory, mut client, mut view) = setup(&dir).await;
+    told(&mut client, &mut view, "lea").await;
+    let first = view.agent("lea").model.clone();
+    let set = serde_json::json!({"agent": "lea", "model": crate::common::OTHER_MODEL, "reason": "Lea reads pictures now."});
+    call(&mut client, &mut view, "models_set", set).await;
+    let said = told(&mut client, &mut view, "lea").await.expect("a note");
+    assert!(
+        said.contains("your model is now scripted/parrot (Rivet changed it with models_set: Lea reads pictures now.)"),
+        "{said}"
+    );
+
+    let change = changes(&mut client, &mut view).await[0].model_change_id.clone();
+    assert!(matches!(undo(&mut client, &mut view, &change).await, Body::Ack(_)));
+    let said = told(&mut client, &mut view, "lea").await.expect("a note");
+    // On the device it says: this machine's name here.
+    assert!(said.contains(&format!("your model is now {first} (the person put it back, undoing Rivet's models_set on ")), "{said}");
+
+    // Written into the settings file.
+    let path = home(&dir).config_path();
+    let mut config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("config")).expect("json");
+    let agents = config["agents"].as_array_mut().expect("agents");
+    let lea = agents.iter_mut().find(|agent| agent["id"] == "lea").expect("lea");
+    lea["model"] = crate::common::OTHER_MODEL.into();
+    std::fs::write(&path, serde_json::to_string_pretty(&config).expect("json")).expect("written");
+    view.follow(&mut client, |view| view.agent("lea").model == crate::common::OTHER_MODEL).await;
+    let said = told(&mut client, &mut view, "lea").await.expect("a note");
+    assert!(said.contains("your model is now scripted/parrot (it was changed in Claktory's settings file)"), "{said}");
+}
+
 fn models_option(agent: &str, change: v1::ExtensionChange) -> Request {
     Request::UpdateAgent(v1::UpdateAgent { agent_id: agent.into(), extension: Some(change), ..Default::default() })
 }

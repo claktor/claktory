@@ -68,6 +68,11 @@ const _keep = Duration(hours: 24);
 /// where one without it was cut short (closed, cancelled, the app quit).
 const _sentMark = '.sent';
 
+/// In the folder of a video made here and not saved anywhere yet: kept
+/// [_keepUnsaved] from then, for the person to save ([keepMadeFile]).
+const _keptMark = '.keep';
+const _keepUnsaved = Duration(days: 7);
+
 /// Characters that would make a name read as another in the share sheet:
 /// controls, and invisible or reordering formatting (Fugo: an agent's file
 /// named from web text, `invoice\u202Efdp.exe`).
@@ -107,7 +112,9 @@ bool get canShareFiles =>
 /// Download beside Share… (Matt, Bruno 41308): the Mac. A phone or iPad
 /// saves with Share… → Save to Files.
 bool get canDownloadFiles =>
-    !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
+    !kIsWeb &&
+    (defaultTargetPlatform == TargetPlatform.macOS ||
+        defaultTargetPlatform == TargetPlatform.windows);
 
 /// The label of the action that saves a file to Downloads.
 const downloadLabel = 'Download';
@@ -129,6 +136,11 @@ Future<void> _sweep({required Duration cutShort}) async {
     if (!await shares.exists()) return;
     final now = DateTime.now();
     await for (final share in shares.list(followLinks: false)) {
+      final kept = File('${share.path}/$_keptMark');
+      if (share is Directory && await kept.exists()) {
+        final since = (await kept.stat()).modified;
+        if (now.difference(since) < _keepUnsaved) continue;
+      }
       final mark = File('${share.path}/$_sentMark');
       final sent = share is Directory && await mark.exists();
       final since = (await (sent ? mark : share).stat()).modified;
@@ -245,10 +257,24 @@ Future<List<File>?> downloadFiles(
   }
 }
 
-/// This device's Downloads folder.
-Directory get _downloads =>
-    debugDownloadsFolder ??
-    Directory('${Platform.environment['HOME'] ?? ''}/Downloads');
+/// This device's Downloads folder: on Windows wherever the person moved it,
+/// as the runner says (Windows has no HOME).
+Future<Directory> _downloads() async {
+  if (debugDownloadsFolder case final folder?) return folder;
+  if (defaultTargetPlatform == TargetPlatform.windows) {
+    String? folder;
+    try {
+      folder = await _device.invokeMethod<String>('downloadsFolder');
+    } on Object {
+      folder = null;
+    }
+    if (folder == null || folder.isEmpty) {
+      throw const FileSystemException("Windows didn't say where Downloads is");
+    }
+    return Directory(folder);
+  }
+  return Directory('${Platform.environment['HOME'] ?? ''}/Downloads');
+}
 
 /// A test's own Downloads folder in place of the device's.
 @visibleForTesting
@@ -268,7 +294,7 @@ File _freeName(Directory folder, String name) {
 
 /// Moves [fetched] into Downloads, each under a free name.
 Future<List<File>> _intoDownloads(List<_Fetched> fetched) async {
-  final downloads = _downloads;
+  final downloads = await _downloads();
   await downloads.create(recursive: true);
   final saved = <File>[];
   for (final item in fetched) {
@@ -283,11 +309,21 @@ Future<List<File>> _intoDownloads(List<_Fetched> fetched) async {
   return saved;
 }
 
-/// Shows [files] in the Finder, selected; a test's own in its place.
-@visibleForTesting
+/// Shows [files] in the Finder, selected; a test may put its own in its
+/// place.
 Future<void> Function(List<File> files) showInFinder = _showInFinder;
 
 Future<void> _showInFinder(List<File> files) async {
+  if (defaultTargetPlatform == TargetPlatform.windows) {
+    try {
+      await _device.invokeMethod<bool>('showFiles', [
+        for (final file in files) file.path,
+      ]);
+    } on Object {
+      // No Explorer to show them in: they're in Downloads all the same.
+    }
+    return;
+  }
   try {
     await Process.run('open', ['-R', for (final file in files) file.path]);
   } on ProcessException {
@@ -334,7 +370,9 @@ class _DownloadingState extends State<_Downloading> {
       if (!mounted) return;
       setState(() {
         // macOS asks once whether Claktory may use Downloads: told no.
-        _error = error.osError?.errorCode == 1
+        _error =
+            defaultTargetPlatform == TargetPlatform.macOS &&
+                error.osError?.errorCode == 1
             ? "Claktory isn't allowed to save to your Downloads folder. "
                   'Allow it in System Settings → Privacy & Security → Files '
                   'and Folders, then try again.'
@@ -378,7 +416,9 @@ class _DownloadingState extends State<_Downloading> {
           : '${saved.length} files are in your Downloads folder.',
       fields: const [],
       error: null,
-      submitLabel: 'Show in Finder',
+      submitLabel: defaultTargetPlatform == TargetPlatform.windows
+          ? 'Show in Explorer'
+          : 'Show in Finder',
       onSubmit: () {
         unawaited(showInFinder(saved));
         widget.onClose();
@@ -389,50 +429,90 @@ class _DownloadingState extends State<_Downloading> {
   }
 }
 
-/// Shares [file], made on this device in a folder of its own in the
-/// shares folder (History's video, which the Runner's writer makes there:
-/// app/macos/Runner/ReplayWriter.swift), with the share sheet pointing at
-/// [from]. As a fetched share: kept [_keep] once sent somewhere, else its
-/// folder goes at once. A file anywhere else is shared but never deleted
-/// here. True once it was sent somewhere.
-Future<bool> shareMadeFile(
-  File file, {
-  required String mime,
-  Rect? from,
-}) async {
-  final folder = file.parent;
-  bool ours;
-  try {
-    ours =
-        folder.parent.resolveSymbolicLinksSync() ==
-        _shares.resolveSymbolicLinksSync();
-  } on FileSystemException {
-    ours = false;
+/// Why the share sheet couldn't open: in the system's words, or ours.
+class ShareUnavailable implements Exception {
+  const ShareUnavailable(this.message, {this.sentence = false});
+
+  /// Why, to follow "Couldn't open the share menu:"; or, a [sentence],
+  /// in its place.
+  final String message;
+  final bool sentence;
+
+  @override
+  String toString() => message;
+}
+
+/// Opens the share sheet for [file], a file the person keeps (History's
+/// video, saved), pointing at [from]; it's never deleted here. True once it
+/// was sent somewhere, false when the person closed the sheet. Throws
+/// [ShareUnavailable] when the sheet can't open at all, so the person is
+/// told why rather than seeing nothing (Matt's export, Bruno 44170).
+Future<bool> shareFile(File file, {required String mime, Rect? from}) async {
+  if (!canShareFiles) {
+    throw const ShareUnavailable("this device can't share files.");
   }
-  var sent = false;
+  if (!await file.exists()) {
+    throw ShareUnavailable('${file.uri.pathSegments.last} is no longer there.');
+  }
   try {
-    if (!canShareFiles) return false;
-    sent =
-        await _device.invokeMethod<bool>('shareFiles', {
+    return await _device.invokeMethod<bool>('shareFiles', {
           'paths': [file.path],
           'mimes': [mime],
           if (from != null)
             'rect': [from.left, from.top, from.width, from.height],
         }) ??
         false;
-    return sent;
   } on MissingPluginException {
-    return false;
-  } on PlatformException {
-    return false;
-  } finally {
-    if (ours) {
-      if (sent) {
-        await _markSent(folder);
-      } else {
-        unawaited(_delete(folder));
-      }
-    }
+    throw const ShareUnavailable(
+      'Update Claktory to share files.',
+      sentence: true,
+    );
+  } on PlatformException catch (failure) {
+    throw ShareUnavailable(failure.message ?? failure.code);
+  }
+}
+
+/// Keeps [file], made on this device in a folder of its own in the shares
+/// folder and not saved anywhere yet (History's video, while it's made
+/// and where Photos said no), from the sweep for [_keepUnsaved]: it's
+/// deleted only once it's saved, or when the person says so.
+Future<void> keepMadeFile(File file) async {
+  try {
+    // Written afresh, so its week starts now.
+    await File('${file.parent.path}/$_keptMark').writeAsBytes(const []);
+  } on FileSystemException {
+    // Unmarked, the next launch sweeps it.
+  }
+}
+
+/// A copy of [file] named [name], in a share folder of its own, to share in
+/// its place (History's video, without the date in its name); swept as
+/// any share is, kept a day once [markShared].
+Future<File> shareableCopy(File file, String name) async {
+  final folder = Directory(
+    '${_shares.path}/copy-${DateTime.now().microsecondsSinceEpoch}',
+  );
+  await folder.create(recursive: true);
+  return file.copy('${folder.path}/$name');
+}
+
+/// [file], a [shareableCopy], went somewhere: kept a day for the app it
+/// went to.
+Future<void> markShared(File file) async {
+  try {
+    await File('${file.parent.path}/$_sentMark').writeAsBytes(const []);
+  } on FileSystemException {
+    // Swept at the next launch, then.
+  }
+}
+
+/// Lets the sweep take [file] again once it's saved elsewhere (History's
+/// video in Photos or Files): the copy here was only for Share….
+Future<void> releaseMadeFile(File file) async {
+  try {
+    await File('${file.parent.path}/$_keptMark').delete();
+  } on FileSystemException {
+    // Not marked.
   }
 }
 

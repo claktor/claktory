@@ -67,7 +67,9 @@ fn signed(method: &Method, path: &str) -> bool {
                 | "/v1/devices/sign-out"
                 | "/v1/devices/remove"
                 | "/v1/devices/assertion"
+                | "/v1/devices/vouch"
                 | "/v1/pipe-identity"
+                | "/v1/claktories/sign-out"
         ) | (&Method::PUT, "/v1/endpoints")
             | (&Method::GET, "/v1/devices/me" | "/v1/claktories")
     ) || path.starts_with("/v1/apps/")
@@ -106,9 +108,14 @@ pub struct Config {
     /// (`--vouch-claktory-email`); none by default, since "Verified" with
     /// one reads as Claktory's staff and a shared inbox (QA's) can sign in.
     pub vouched_claktory_emails: Vec<String>,
-    /// The store reviewers' account (`--review-account`): its email signs
-    /// in with a fixed code, and is sent nothing. Off by default.
-    pub review_account: Option<review::ReviewAccount>,
+    /// The store reviewers' accounts (`--review-account`, up to two, one
+    /// per store): each email signs in with its fixed code, and is sent
+    /// nothing. None by default.
+    pub review_accounts: Vec<review::ReviewAccount>,
+    /// The review box's backend key (`--review-claktory-key`, base64): the
+    /// only Claktory a review email signs in (#319), so the reviewers'
+    /// details are no relay credential. Without it, none does.
+    pub review_claktory_key: Option<String>,
 }
 
 impl Default for Config {
@@ -125,7 +132,8 @@ impl Default for Config {
             service_key_statement: None,
             user_apps: None,
             vouched_claktory_emails: Vec::new(),
-            review_account: None,
+            review_accounts: Vec::new(),
+            review_claktory_key: None,
         }
     }
 }
@@ -252,7 +260,7 @@ impl Service {
 
     /// Asks the user-apps worker every minute to purge the deleted accounts
     /// it hasn't yet (it was down when they were deleted, say), and tells it
-    /// of the devices' sign-outs it hasn't heard of.
+    /// of the devices' sign-outs and Claktories' removals it hasn't heard of.
     pub fn spawn_app_purges(self: &Arc<Self>) {
         if self.config.user_apps.is_none() {
             return;
@@ -265,6 +273,7 @@ impl Service {
                 let Some(service) = service.upgrade() else { return };
                 apps::retry_purges(&service).await;
                 apps::retry_sign_outs(&service).await;
+                apps::retry_claktory_removals(&service).await;
             }
         });
     }
@@ -283,9 +292,16 @@ impl Service {
         apps::retry_sign_outs(self).await
     }
 
-    /// The review account, when `email` (normalized) is its.
+    /// Tells the user-apps worker, now, of the Claktories' removals due to
+    /// be told again: how many it heard. For tests; `spawn_app_purges` does
+    /// it every minute.
+    pub async fn retry_app_claktory_removals(&self) -> usize {
+        apps::retry_claktory_removals(self).await
+    }
+
+    /// The review account `email` (normalized) is, if it's one.
     fn review(&self, email: &str) -> Option<&review::ReviewAccount> {
-        self.config.review_account.as_ref().filter(|review| review.is(email))
+        self.config.review_accounts.iter().find(|review| review.is(email))
     }
 
     /// Where a request came from, when the service has a GeoIP file and
@@ -393,6 +409,7 @@ impl Service {
             (&Method::POST, "/v1/relay/token") => relay_token::token(self, call),
             (&Method::PUT, "/v1/endpoints") => api::endpoints(self, call),
             (&Method::POST, "/v1/move") => api::move_claktory(self, call).await,
+            (&Method::POST, "/v1/claktories/sign-out") => api::sign_out(self, call).await,
             (&Method::POST, "/v1/devices/sign-in/start") => devices::sign_in_start(self, call).await,
             (&Method::POST, "/v1/devices/sign-in/verify") => devices::sign_in_verify(self, call),
             (&Method::GET, "/v1/devices/me") => devices::me(self, call),
@@ -400,6 +417,7 @@ impl Service {
             (&Method::POST, "/v1/devices/remove") => devices::remove(self, call).await,
             (&Method::GET, "/v1/claktories") => devices::claktories(self, call),
             (&Method::POST, "/v1/devices/assertion") => devices::assertion(self, call),
+            (&Method::POST, "/v1/devices/vouch") => devices::vouch(self, call),
             (&Method::POST, "/v1/pipe-identity") => pipes::identity(self, call),
             (&Method::POST, protocol::AI_REPORT_PATH) => reports::report(self, call),
             (&Method::GET, "/v1/relay/allowlist") => api::allowlist(self, call),

@@ -396,6 +396,13 @@ async fn rivet_asks_to_share_a_website_only_on_a_card_that_shows_what_it_exposes
     let nothing = std::net::TcpListener::bind("127.0.0.1:0").expect("a port").local_addr().expect("its port").port();
     let refused = call(&mut client, &mut view, "rivet", "pipes_share", &ask(nothing)).await;
     assert!(refused.starts_with(&format!("Nothing answers on port {nothing} on this computer")), "{refused}");
+    // How long: 1 to 168 hours, never until it's stopped, which is the
+    // person's (#46, Fugo 46375).
+    for hours in [json!(0), json!(169), json!("never"), json!(-24)] {
+        let args = json!({"pipe": "Website", "port": port, "name": "Dashboard", "hours": hours, "reason": "Matt wants Ana to see it."});
+        let refused = call(&mut client, &mut view, "rivet", "pipes_share", &args.to_string()).await;
+        assert!(!refused.starts_with("Asked "), "{hours}: {refused}");
+    }
     assert!(cards(&view).is_empty(), "a refusal made a card");
 
     // The card: what it exposes, in Claktory's words; nothing shared yet.
@@ -412,7 +419,7 @@ async fn rivet_asks_to_share_a_website_only_on_a_card_that_shows_what_it_exposes
     assert!(card.action_description.contains(&format!("(process {}).", std::process::id())), "{}", card.action_description);
     assert!(
         card.action_description.ends_with(
-            "While it's shared, the other side can use every page and action of that site, as a browser on this computer could. It stays shared until you choose Stop under Shared websites in the pipe's settings."
+            "While it's shared, the other side can use every page and action of that site, as a browser on this computer could. It stays shared for 24 hours, then stops by itself. You can change that or stop it sooner under Shared websites in the pipe's settings."
         ),
         "{}",
         card.action_description

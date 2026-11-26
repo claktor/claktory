@@ -964,7 +964,7 @@ fn a_month_maps_users_by_country_each_once_and_every_country_exact() {
     // isn't a country's name.
     user("f1", &[("f1a", "Germany", mid - 86_400), ("f1b", "France", mid)]);
     user("o1", &[("o1a", "Paris, 75001", mid)]);
-    // A deleted account's day, under its stand-in.
+    // A deleted account's day, under its stand-in: Deleted, not Unknown.
     seen_on(&conn, "deleted-x", "deleted-x", mid);
     stats::publish(&mut conn, "2026-10", end + 10).unwrap();
     let out: serde_json::Value = serde_json::from_str(&stats::export(&conn, end + 20).unwrap()).unwrap();
@@ -976,8 +976,8 @@ fn a_month_maps_users_by_country_each_once_and_every_country_exact() {
             ("none".into(), "All".into(), Some(12)),
             ("country".into(), "Netherlands".into(), Some(5)),
             ("country".into(), "Germany".into(), Some(4)),
+            ("country".into(), "Deleted".into(), Some(1)),
             ("country".into(), "France".into(), Some(1)),
-            ("country".into(), "Unknown".into(), Some(1)),
             ("country".into(), "Other".into(), Some(1)),
         ]
     );
@@ -989,5 +989,84 @@ fn a_month_maps_users_by_country_each_once_and_every_country_exact() {
     assert!(
         out["rows"].as_array().unwrap().iter().all(|row| row["dimension"] != "country" || row["window"] == "month" || row["window"] == "rolling30")
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A deleted account counts once, as one user, however many Claktories it
+/// had, and its Claktories once each, all under stand-ins no one can link
+/// back to it; on the map they're Deleted, and Unknown is only a live
+/// Claktory never placed (Bruno 42242). A Claktory that moved to another
+/// account since keeps a stand-in of its own, as a user of its own.
+#[test]
+fn a_deleted_account_counts_once_and_shows_as_deleted_on_the_map() {
+    let (dir, mut conn) = scratch("deleted-once");
+    let today = 1_795_000_000 / 86_400 * 86_400;
+    let now = today + 12 * 3600;
+    let yesterday = today - 86_400;
+    add_account(&conn, "gone", today - 20 * 86_400);
+    add_account(&conn, "live", today - 20 * 86_400);
+    add_account(&conn, "left", today - 20 * 86_400);
+    for claktory in ["gone-a", "gone-b", "gone-c"] {
+        add_claktory(&conn, claktory, "gone", today - 20 * 86_400, yesterday, "Netherlands", None);
+        seen_on(&conn, claktory, "gone", yesterday);
+    }
+    add_claktory(&conn, "live-a", "live", today - 20 * 86_400, yesterday, "", None);
+    seen_on(&conn, "live-a", "live", yesterday);
+    add_claktory(&conn, "moved-a", "left", today - 20 * 86_400, yesterday, "France", None);
+    seen_on(&conn, "moved-a", "left", yesterday);
+    let gone = db::account_by_email(&conn, "gone@example.com").unwrap().unwrap();
+    db::delete_account(&mut conn, &gone, false, now).unwrap();
+
+    // Its Claktories' days: a stand-in each, one stand-in for the account,
+    // none of them its ids.
+    let stood: Vec<(String, String)> = {
+        let mut statement = conn.prepare("SELECT claktory_id, account_id FROM seen_days WHERE claktory_id LIKE 'deleted-%'").unwrap();
+        statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().map(Result::unwrap).collect()
+    };
+    let claktories: std::collections::BTreeSet<&str> = stood.iter().map(|(claktory, _)| claktory.as_str()).collect();
+    let accounts: std::collections::BTreeSet<&str> = stood.iter().map(|(_, account)| account.as_str()).collect();
+    assert_eq!((stood.len(), claktories.len(), accounts.len()), (3, 3, 1), "{stood:?}");
+    let user = accounts.first().unwrap().to_string();
+    assert!(user.starts_with("deleted-") && !claktories.contains(user.as_str()));
+    assert!(!format!("{stood:?}").contains("gone"));
+
+    // The other Claktory moves to another account: a stand-in of its own,
+    // as its own user, not the deleted account's.
+    let request = db::Request {
+        id: "r1".into(),
+        kind: "claktory".into(),
+        email: "new@example.com".into(),
+        claktory_id: Some("moved-a".into()),
+        name: Some("Mac".into()),
+        backend_key: Some("key".into()),
+        version: Some("v0.1.21".into()),
+        platform: Some("macos-arm64".into()),
+        code_hash: String::new(),
+        attempts: 0,
+        expires: now + 600,
+    };
+    db::register(&mut conn, &request, "token", now, true, false).unwrap();
+    let (claktory, account): (String, String) = conn
+        .query_row(
+            "SELECT claktory_id, account_id FROM seen_days WHERE claktory_id LIKE 'deleted-%' AND account_id != ?1",
+            [&user],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(claktory, account, "a moved Claktory is a user of its own");
+
+    let out: serde_json::Value = serde_json::from_str(&stats::export(&conn, now).unwrap()).unwrap();
+    let on = |metric: &str| series(&out, "day", metric).into_iter().find(|(day, _)| *day == yesterday).unwrap().1;
+    // The deleted account, the live one, and the moved Claktory's old days.
+    assert_eq!((on("contact_users"), on("contact_claktories")), (3, 5));
+    let map = |metric: &str| -> Vec<(String, Option<i64>)> {
+        rows_of(&out, "rolling30", metric)
+            .into_iter()
+            .filter(|(_, dimension, ..)| dimension == "country")
+            .map(|(_, _, label, value, _)| (label, value))
+            .collect()
+    };
+    assert_eq!(map("contact_users"), [("Deleted".to_owned(), Some(2)), ("Unknown".to_owned(), Some(1))]);
+    assert_eq!(map("contact_claktories"), [("Deleted".to_owned(), Some(4)), ("Unknown".to_owned(), Some(1))]);
     let _ = std::fs::remove_dir_all(&dir);
 }

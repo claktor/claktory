@@ -226,9 +226,7 @@ void main() {
     harness.page.value = AppPage.inbox;
     await pumpFrames(tester);
     await settle(tester);
-    await tester.tap(find.text('Allow the helper · Step 6 of 7').first);
-    await pumpFrames(tester);
-    await settle(tester);
+    // An iPhone's Needs you shows the card itself, one a screen (#514).
     expect(find.text('Step 6 of 7'), findsOneWidget);
 
     await _done(tester, harness, 6);

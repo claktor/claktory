@@ -1,7 +1,9 @@
 //! What API keys have to spend, as their provider says (#343 U8 and U14,
 //! Account.credit): OpenRouter's GET /key, read at sign-in, then every few
 //! minutes while agents work on the provider and every half hour while
-//! they don't. Only numbers are kept, never what the provider wrote.
+//! they don't, and when the person looks at the accounts (ProvidersShown)
+//! if it's more than a minute old. Only numbers are kept, never what the
+//! provider wrote.
 
 use std::collections::HashSet;
 use std::sync::Weak;
@@ -24,6 +26,9 @@ const WHILE_WORKING: i64 = 5 * MINUTE;
 const WHILE_IDLE: i64 = 30 * MINUTE;
 /// Between attempts after a read failed.
 const AFTER_ERROR: i64 = 5 * MINUTE;
+/// How old a read may be when the person looks at the accounts
+/// (ProvidersShown) before it's read again.
+const SHOWN: i64 = MINUTE;
 
 /// Keeps every key's credit current while the Factory lives.
 pub(crate) async fn monitor(factory: Weak<Factory>) {
@@ -68,19 +73,36 @@ impl Factory {
                     working.insert(provider.to_owned());
                 }
             }
-            let accounts: Vec<AccountKey> = inner
-                .providers
-                .iter()
-                .filter(|provider| !provider.signed_in_with.is_empty() && self.models.reads_credit(&provider.id))
-                .flat_map(|provider| account_ids(provider).into_iter().map(|account| (provider.id.clone(), account)))
-                .collect();
-            (accounts, working)
+            (self.credit_accounts(&inner), working)
         };
         self.forget_credit(&accounts);
         for key in accounts {
             let tried = self.credit_tried.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key).copied();
             let failed = self.lock().credit.get(&key).is_some_and(|last| !last.error.is_empty());
             if due(tried, failed, working.contains(&key.0), now) {
+                self.read_credit(&key).await;
+            }
+        }
+    }
+
+    /// The signed-in accounts whose credit their provider tells.
+    fn credit_accounts(&self, inner: &crate::factory::Inner) -> Vec<AccountKey> {
+        inner
+            .providers
+            .iter()
+            .filter(|provider| !provider.signed_in_with.is_empty() && self.models.reads_credit(&provider.id))
+            .flat_map(|provider| account_ids(provider).into_iter().map(|account| (provider.id.clone(), account)))
+            .collect()
+    }
+
+    /// ProvidersShown (friend bug #41): the person looks at the accounts, so
+    /// each one's credit read more than `SHOWN` ago is read again now.
+    pub(crate) async fn read_shown_credit(&self) {
+        let now = now_ms();
+        let accounts = self.credit_accounts(&self.lock());
+        for key in accounts {
+            let tried = self.credit_tried.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key).copied();
+            if tried.is_none_or(|tried| now - tried >= SHOWN) {
                 self.read_credit(&key).await;
             }
         }

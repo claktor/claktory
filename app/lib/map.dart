@@ -11,7 +11,6 @@ import 'characters/character.dart' show AgentCharacter, identityOf;
 import 'controls.dart';
 import 'history/export.dart' show canExportReplay;
 import 'history/view.dart' show HistoryView, MapModeSwitch, shareReplay;
-import 'mobile/share.dart' show globalRectOf;
 import 'identity.dart';
 import 'map_card.dart';
 import 'map_layout.dart';
@@ -395,11 +394,7 @@ class _MapViewState extends State<_Map> {
                       key: _shareReplay,
                       label: 'Share replay…',
                       glyph: (color) => glyph('share', color),
-                      onTap: () => shareReplay(
-                        context,
-                        _historyView,
-                        from: globalRectOf(_shareReplay.currentContext!),
-                      ),
+                      onTap: () => shareReplay(context, _historyView),
                     ),
                 ],
               ),
@@ -1049,13 +1044,18 @@ class _BoardPainter extends CustomPainter {
       final color = pad.closed ? palette.textFaint : pipeColor;
       final paint = _stroke(
         focus == null ? color : color.withValues(alpha: 0.3),
-        1.5,
+        2,
       );
-      final x = pad.rect.center.dx;
+      // Over its portal, as History's (Lucy): the border, padding and half
+      // the glyph in; a pad of only its portal, its middle.
+      final x = pad.rect.width <= _padHeight + 0.5
+          ? pad.rect.center.dx
+          : pad.rect.left + 1.5 + Space.s + 6;
       final end = Offset(x, pad.rect.top - portalReach);
       canvas
         ..drawLine(Offset(x, pad.rect.top), end, paint)
-        ..drawCircle(end, 2.5, paint);
+        ..drawCircle(end, 3.5, Paint()..color = palette.canvas)
+        ..drawCircle(end, 3.5, paint);
     }
 
     // A pipe's reports going to the agent that reads them: a line from its
@@ -1362,9 +1362,16 @@ class _PortalPadView extends StatelessWidget {
               curve: Curves.easeOut,
               padding: const EdgeInsets.symmetric(horizontal: Space.s),
               decoration: BoxDecoration(
-                color: hovered ? palette.hover : palette.canvas,
+                // The pipe's color washed in, so it reads as a way out of
+                // the board even small, as History's pad does (Bruno 44370).
+                color: hovered
+                    ? palette.hover
+                    : Color.alphaBlend(
+                        color.withValues(alpha: 0.12),
+                        palette.canvas,
+                      ),
                 borderRadius: BorderRadius.circular(_padHeight / 2),
-                border: Border.all(color: color),
+                border: Border.all(color: color, width: 1.5),
               ),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,

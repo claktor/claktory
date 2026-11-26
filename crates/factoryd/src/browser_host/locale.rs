@@ -105,11 +105,57 @@ pub(crate) fn offer(factory: &Arc<Factory>, zone: &str, languages: &[String]) ->
 
 /// What the next start gets: the setting's zone, or this computer's when
 /// unset (left out when neither is one the runner takes: UTC); its
-/// languages (none: en-US).
+/// languages, or this computer's when unset (none either: en-US). Nobody
+/// opens the browser from a device to fill them any more (#435, Matt's
+/// card 222), so on a Mac it's the person's own; on a server, the
+/// server's until Settings says otherwise (R11 Q9).
 pub(crate) fn for_start(browser: &BrowserConfig) -> (Option<String>, Vec<String>) {
     let system = || jiff::tz::TimeZone::system().iana_name().map(str::to_owned);
     let zone = Some(browser.time_zone.clone()).filter(|zone| zone_known(zone)).or_else(system).filter(|zone| zone_known(zone));
-    (zone, kept(&browser.languages))
+    let languages = kept(&browser.languages);
+    let languages = if languages.is_empty() { kept(&system_languages()) } else { languages };
+    (zone, languages)
+}
+
+/// This computer's languages, most preferred first: on a Mac the person's
+/// (AppleLanguages), else the POSIX locale's (LANGUAGE, then LC_ALL,
+/// LC_MESSAGES, LANG). Empty when none says.
+fn system_languages() -> Vec<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let asked = std::process::Command::new("/usr/bin/defaults").args(["read", "-g", "AppleLanguages"]).output();
+        if let Ok(output) = asked
+            && output.status.success()
+        {
+            let languages = apple_languages(&String::from_utf8_lossy(&output.stdout));
+            if !languages.is_empty() {
+                return languages;
+            }
+        }
+    }
+    let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    posix_languages(var("LANGUAGE").as_deref(), ["LC_ALL", "LC_MESSAGES", "LANG"].iter().find_map(|name| var(name)).as_deref())
+}
+
+/// `defaults read -g AppleLanguages`: a property list array, one quoted
+/// or bare tag a line ("(\n    \"en-GB\",\n    it\n)").
+fn apple_languages(said: &str) -> Vec<String> {
+    said.lines()
+        .map(|line| line.trim().trim_end_matches(',').trim_matches('"'))
+        .filter(|tag| !tag.is_empty() && *tag != "(" && *tag != ")")
+        .map(str::to_owned)
+        .collect()
+}
+
+/// LANGUAGE ("en_GB:en"), else the locale ("en_GB.UTF-8"), as BCP 47 tags;
+/// C and POSIX say nothing.
+fn posix_languages(language: Option<&str>, locale: Option<&str>) -> Vec<String> {
+    let tag = |value: &str| {
+        let bare = value.split(['.', '@']).next().unwrap_or_default().trim();
+        (!bare.is_empty() && bare != "C" && bare != "POSIX").then(|| bare.replace('_', "-"))
+    };
+    let listed: Vec<String> = language.unwrap_or_default().split(':').filter_map(tag).collect();
+    if listed.is_empty() { locale.and_then(tag).into_iter().collect() } else { listed }
 }
 
 /// What the Workspace shows of the setting: only what passes the checks
@@ -139,6 +185,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn this_computers_languages_read_as_tags() {
+        assert_eq!(apple_languages("(\n    \"en-GB\",\n    it,\n    \"zh-Hans-CN\"\n)\n"), ["en-GB", "it", "zh-Hans-CN"]);
+        assert_eq!(posix_languages(Some("en_GB:en"), Some("de_DE.UTF-8")), ["en-GB", "en"]);
+        assert_eq!(posix_languages(None, Some("de_DE.UTF-8@euro")), ["de-DE"]);
+        assert!(posix_languages(Some(""), Some("C.UTF-8")).is_empty());
+        assert!(posix_languages(None, Some("POSIX")).is_empty());
+        // Unset, a start gets them; set, the setting wins.
+        let set = BrowserConfig { languages: vec!["fr-FR".into()], ..Default::default() };
+        assert_eq!(for_start(&set).1, ["fr-FR"]);
+    }
+
+    #[test]
     fn only_known_zones_and_well_formed_languages_are_kept() {
         assert!(zone_known("Europe/London"));
         assert!(zone_known("UTC"));
@@ -155,12 +213,12 @@ mod tests {
     }
 
     #[test]
-    fn a_start_gets_the_setting_or_this_computers_zone() {
+    fn a_start_gets_the_setting_or_this_computers_zone_and_languages() {
         let set = BrowserConfig { time_zone: "Asia/Tokyo".into(), languages: vec!["ja".into(), "en".into()], ..Default::default() };
         assert_eq!(for_start(&set), (Some("Asia/Tokyo".to_owned()), vec!["ja".to_owned(), "en".to_owned()]));
         let unset = for_start(&BrowserConfig::default());
         assert_eq!(unset.0, jiff::tz::TimeZone::system().iana_name().map(str::to_owned).filter(|zone| zone_known(zone)));
-        assert!(unset.1.is_empty());
+        assert_eq!(unset.1, kept(&system_languages()), "this computer's languages");
     }
 
     #[test]

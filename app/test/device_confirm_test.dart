@@ -247,6 +247,35 @@ void main() {
     await server.close(force: true);
   });
 
+  test('a Hello refused as another account\'s stops trying, says what it '
+      'said, and forgets nothing (#529, S4)', () async {
+    const said =
+        "So it can't let this iPhone in. To work with someone else's "
+        'agents, open a pipe with them.';
+    final (server, _) = await answering(
+      (_) => ServerMessage(
+        error: Error(code: ErrorCode.ERROR_CODE_OTHER_ACCOUNT, message: said),
+      ),
+    );
+    final backend = backendWith(FakeTunnels(FakeTunnel(server.port)))
+      ..deviceKey = ((_) => 'k' * 64)
+      ..account = DeviceAccount();
+    backend.connectTo(
+      parsePairingCode('factory://?t=${'c' * 64}&e=${'a' * 64}&name=fred'),
+    );
+    unawaited(backend.run());
+    await until(() => backend.otherAccount.value != null);
+    expect(backend.otherAccount.value, said);
+    // Nothing tried until Try again, as when refused.
+    expect(backend.refused.value, said);
+    expect(backend.signInRequired.value, isNull);
+    backend.retry();
+    expect(backend.otherAccount.value, isNull);
+    expect(backend.refused.value, isNull);
+    await backend.close();
+    await server.close(force: true);
+  });
+
   test("a Welcome says by when this device has to confirm it's the "
       "owner's", () async {
     final by = DateTime.now().add(const Duration(days: 7));

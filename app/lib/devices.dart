@@ -24,7 +24,7 @@ import 'mobile/lines.dart' show ActionLine, ControlsLine;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'phone.dart' show pairingProblem;
 import 'pipes.dart' show backendOnMac;
-import 'rail.dart' show ClaktoriesScope;
+import 'rail.dart' show ClaktoriesScope, confirmRemoveClaktory;
 import 'scan_code.dart';
 import 'scope.dart';
 import 'tunnel_client.dart';
@@ -1099,13 +1099,20 @@ class _FactoryChooserState extends State<FactoryChooser> {
             for (final saved in connections.saved)
               _FactoryRow(
                 label: saved.label,
-                detail: 'On another device',
+                // Where it runs, beside "Running here" (MC13: a device is
+                // what shows a Claktory, not where one runs).
+                detail: 'Running elsewhere',
                 showing: saved == current,
                 onTap: () => _show(saved),
-                onForget: () {
-                  final wasShowing = saved == current;
-                  connections.forget(saved);
-                  if (wasShowing) AppScope.switchFactory(context, null);
+                // The rail's own Remove…, its question and all (#529, MC8):
+                // one act, one word.
+                onRemove: switch (claktories?.all.where(
+                  (claktory) => claktory.target == saved,
+                )) {
+                  final found? when found.isNotEmpty => () => unawaited(
+                    confirmRemoveClaktory(context, found.first),
+                  ),
+                  _ => null,
                 },
               ),
             const SizedBox(height: Space.l),
@@ -1163,14 +1170,16 @@ class _FactoryRow extends StatelessWidget {
     required this.detail,
     required this.showing,
     required this.onTap,
-    this.onForget,
+    this.onRemove,
   });
 
   final String label;
   final String detail;
   final bool showing;
   final VoidCallback onTap;
-  final VoidCallback? onForget;
+
+  /// Removes it from this device, after the rail's question.
+  final VoidCallback? onRemove;
 
   @override
   Widget build(BuildContext context) {
@@ -1218,8 +1227,10 @@ class _FactoryRow extends StatelessWidget {
                   ],
                 ),
               ),
-              if (onForget != null && hovered)
-                Button(label: 'Forget', onPressed: onForget),
+              // On hover with a pointer; always with a finger, which has
+              // none (Zucchero's row 642).
+              if (onRemove != null && (hovered || touchFirst(context)))
+                Button(label: 'Remove…', onPressed: onRemove),
             ],
           ),
         ),
@@ -1236,6 +1247,7 @@ String get thisDeviceKind => switch (defaultTargetPlatform) {
   TargetPlatform.android => AndroidDeviceIdentity.forDisplayShortestSide(
     androidDisplayShortestSide(),
   ).noun,
+  TargetPlatform.windows => 'PC',
   _ => 'Mac',
 };
 

@@ -14,6 +14,7 @@ class NetworkPath {
     this.expensive = false,
     this.constrained = false,
     this.network = '',
+    this.blocked = false,
   });
 
   /// From the channel's event: `satisfied`, `interfaces` ('wifi',
@@ -33,6 +34,7 @@ class NetworkPath {
       expensive: map['expensive'] == true,
       constrained: map['constrained'] == true,
       network: network is String || network is int ? '$network' : '',
+      blocked: map['blocked'] == true,
     );
   }
 
@@ -45,6 +47,12 @@ class NetworkPath {
   /// doesn't. The same network keeps its connections whatever its
   /// interfaces say meanwhile.
   final String network;
+
+  /// Whether the system blocks this app's network for now, where it says
+  /// (Android 10 and later: an app in the background while the screen is
+  /// off, say); false elsewhere. Unblocked, a Claktory told to keep trying
+  /// in the background tries again at once (W6).
+  final bool blocked;
 
   /// The interface the system uses first; empty with none.
   String get primary => interfaces.isEmpty ? '' : interfaces.first;
@@ -69,7 +77,8 @@ class NetworkPath {
   String toString() =>
       '${satisfied ? 'up' : 'down'} ${interfaces.join(',')}'
       '${expensive ? ' expensive' : ''}${constrained ? ' constrained' : ''}'
-      '${network.isEmpty ? '' : ' #$network'}';
+      '${network.isEmpty ? '' : ' #$network'}'
+      '${blocked ? ' blocked' : ''}';
 }
 
 /// The moments [paths] moved to a network where open connections may be

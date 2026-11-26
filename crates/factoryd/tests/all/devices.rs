@@ -111,7 +111,7 @@ async fn an_admin_agent_adds_a_device_the_person_allows_and_the_code_never_reach
 
     // Allowed, exactly as before: it's added, and Rivet is told.
     let number = crate::remote::number(&code, &device.id().to_string());
-    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: "laptop".into(), number });
+    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: "laptop".into(), number, ..Default::default() });
     assert!(matches!(apply_request(&mut client, &mut view, allow).await, Body::Ack(_)));
     assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
     let added = follow_card(&mut client, &mut view, "Laptop", DevicePairingState::Added).await;

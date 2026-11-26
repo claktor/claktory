@@ -158,6 +158,11 @@ pub struct Config {
     /// Claktory's browser (`crate::browser_host`). Only written once set.
     #[serde(default, skip_serializing_if = "BrowserConfig::is_default")]
     pub browser: BrowserConfig,
+    /// Agents pinned under Rivet in the sidebar, in the person's order
+    /// (`crate::pins`): each in a project that isn't archived. Only written
+    /// once there's one, so Rivet can pin when asked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned_agents: Vec<String>,
     /// Settings this version doesn't know, kept and written back as they
     /// were (`Unknown`).
     #[serde(flatten)]
@@ -196,7 +201,8 @@ impl AccountConfig {
 }
 
 /// Claktory's browser (#435): the time zone and languages its pages see,
-/// the person's own (`crate::browser_host::locale`). Empty: not set.
+/// the person's own (`crate::browser_host::locale`; empty: not set), and
+/// whether its live view is on (QA and debugging).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BrowserConfig {
@@ -206,6 +212,11 @@ pub struct BrowserConfig {
     /// BCP 47 tags, the one preferred first.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub languages: Vec<String>,
+    /// The live view and the person's turn in it, for QA and debugging
+    /// only (Matt's card 222: he never drives the browser): off, a device
+    /// can't watch, open, type in, take over or hand back the browser.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub live_view: bool,
     /// Settings this version doesn't know, kept and written back as they
     /// were (`Unknown`).
     #[serde(flatten)]
@@ -417,6 +428,13 @@ pub struct ResourcesConfig {
     /// written when changed, so a backend from before it reads the rest.
     #[serde(skip_serializing_if = "is_default_build_cache")]
     pub build_cache_gb: f64,
+    /// Admin agents hear the alerts (friend bug #54): true unless changed,
+    /// and only written then, as the next one.
+    #[serde(skip_serializing_if = "is_true")]
+    pub alerts_to_admins: bool,
+    /// Agents chosen to hear them as well, or instead, by id.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub alert_agents: Vec<String>,
     /// Settings this version doesn't know, kept and written back as they
     /// were (`Unknown`).
     #[serde(flatten)]
@@ -437,6 +455,8 @@ impl Default for ResourcesConfig {
             disk_free_percent: 10,
             cpu_percent: 0,
             build_cache_gb: DEFAULT_BUILD_CACHE_GB,
+            alerts_to_admins: true,
+            alert_agents: Vec::new(),
             other: Default::default(),
         }
     }
@@ -734,6 +754,7 @@ impl Default for Config {
             apps: Vec::new(),
             browser: BrowserConfig::default(),
             default_fallback_model: String::new(),
+            pinned_agents: Vec::new(),
             other: Default::default(),
         }
     }
@@ -1225,6 +1246,20 @@ impl Config {
     /// Rivet's, as this version ships it. None for any other agent.
     pub fn default_prompt(agent: &AgentConfig) -> Option<&'static str> {
         (agent.id == RIVET).then(|| RIVET_PROMPT.trim_end())
+    }
+
+    /// Leaves out pins that can't be (`crate::pins`): agents gone, outside
+    /// projects (already at the top), in an archived project, or pinned
+    /// twice. Says whether any went, so the file is written back.
+    pub fn prune_pins(&mut self) -> bool {
+        let before = self.pinned_agents.len();
+        let mut seen = std::collections::BTreeSet::new();
+        let pinned = std::mem::take(&mut self.pinned_agents);
+        self.pinned_agents = pinned
+            .into_iter()
+            .filter(|id| self.agent(id).is_some_and(|agent| agent.project.is_some() && !self.archived(agent)) && seen.insert(id.clone()))
+            .collect();
+        self.pinned_agents.len() != before
     }
 
     /// Gives an agent whose prompt is still a default Claktory shipped (any

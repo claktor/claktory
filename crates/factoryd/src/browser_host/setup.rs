@@ -2,8 +2,9 @@
 //! before it starts, and shown on the setup card with what fixes it. On
 //! Linux: a supported system, Landlock ABI 4 or later, Chrome and Xvfb,
 //! the browser's own user and folders, the sudo line for exactly the
-//! runner, Chrome's local network policy and the firewall's unit
-//! (`scripts/browser-setup-linux.md`, Pericolo's table). Without them
+//! runner, Chrome's policy (no local network, no sign-in to Chrome itself)
+//! and the firewall's unit (`scripts/browser-setup-linux.md`, Pericolo's
+//! table). Without them
 //! Claktory refuses to run it, rather than run Chrome less contained. On a
 //! Mac: Apple silicon, macOS 26 or later and Apple's container tool,
 //! running (`mac`); or, asked for, the dev stand-in over this Mac's Chrome.
@@ -150,7 +151,7 @@ fn missing() -> Vec<String> {
         missing.push("its sudo line".to_owned());
     }
     if !policy_ok() {
-        missing.push("Chrome's local network policy".to_owned());
+        missing.push("Chrome's policy".to_owned());
     }
     // A site sees the fonts a person's computer has (change 3); fontconfig
     // finds them as Chrome does, on NixOS too (Pericolo 37396).
@@ -194,10 +195,22 @@ fn emoji_font() -> bool {
 }
 
 fn policy_ok() -> bool {
-    let Ok(text) = std::fs::read_to_string(POLICY) else { return false };
-    let Ok(policy) = serde_json::from_str::<serde_json::Value>(&text) else { return false };
-    policy["LocalNetworkAccessRestrictionsEnabled"] == true
-        && policy["LocalNetworkAccessBlockedForUrls"].as_array().is_some_and(|urls| urls.iter().any(|url| url == "*"))
+    std::fs::read_to_string(POLICY).is_ok_and(|text| policy_says_enough(&text))
+}
+
+/// Whether the policy keeps pages off the local network, and Chrome from
+/// signing in or syncing itself, so a site's sign-in (Google's, say) stays
+/// that site's cookies, which Sign out can clear (Fugo 41236, Giorno 41237).
+/// LocalNetworkAccessRestrictionsEnabled isn't required: Chrome 158 calls
+/// it an unknown policy (Fugo 41628), so setup writes it for older Chromes
+/// only.
+fn policy_says_enough(text: &str) -> bool {
+    let Ok(policy) = serde_json::from_str::<serde_json::Value>(text) else { return false };
+    policy["LocalNetworkAccessBlockedForUrls"].as_array().is_some_and(|urls| urls.iter().any(|url| url == "*"))
+        && policy["BrowserSignin"] == 0
+        && policy["SyncDisabled"] == true
+        // The runner's fixed flags show no warning bar (R11, Fugo 41700).
+        && policy["CommandLineFlagSecurityWarningsEnabled"] == false
 }
 
 /// The kernel's Landlock ABI, 0 with none.
@@ -247,7 +260,7 @@ let
   person = "NAME";  # who runs Claktory
   # Google's Chrome where nixpkgs has it for this machine, Chromium elsewhere.
   chrome = if lib.meta.availableOn pkgs.stdenv.hostPlatform pkgs.google-chrome then pkgs.google-chrome else pkgs.chromium;
-  policy = builtins.toJSON { LocalNetworkAccessRestrictionsEnabled = true; LocalNetworkAccessBlockedForUrls = [ "*" ]; };
+  policy = builtins.toJSON { LocalNetworkAccessRestrictionsEnabled = true; LocalNetworkAccessBlockedForUrls = [ "*" ]; BrowserSignin = 0; SyncDisabled = true; CommandLineFlagSecurityWarningsEnabled = false; };
 in {
   nixpkgs.config.allowUnfree = true;
   environment.systemPackages = with pkgs; [ chrome xvfb xorg.xauth ];
@@ -287,5 +300,28 @@ mod tests {
         assert!(!x11_folder_ok(&link));
         assert!(!x11_folder_ok(&dir.join("missing")));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_policy_keeps_chrome_off_the_local_network_and_out_of_its_own_sign_in() {
+        let all = r#"{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"], "BrowserSignin": 0, "SyncDisabled": true, "CommandLineFlagSecurityWarningsEnabled": false}"#;
+        assert!(policy_says_enough(all));
+        // The NixOS lines say the same.
+        assert!(NIXOS.contains("BrowserSignin = 0; SyncDisabled = true; CommandLineFlagSecurityWarningsEnabled = false;"));
+        // An older setup's policy, without the sign-in keys, is missing.
+        assert!(!policy_says_enough(r#"{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"]}"#));
+        // The key Chrome 158 ignores isn't needed.
+        assert!(policy_says_enough(r#"{"LocalNetworkAccessBlockedForUrls": ["*"], "BrowserSignin": 0, "SyncDisabled": true, "CommandLineFlagSecurityWarningsEnabled": false}"#));
+        for (right, wrong) in [
+            (r#""BrowserSignin": 0"#, r#""BrowserSignin": 1"#),
+            (r#""BrowserSignin": 0"#, r#""BrowserSignin": "0""#),
+            (r#""SyncDisabled": true"#, r#""SyncDisabled": false"#),
+            (r#""CommandLineFlagSecurityWarningsEnabled": false"#, r#""CommandLineFlagSecurityWarningsEnabled": true"#),
+        ] {
+            let text = all.replace(right, wrong);
+            assert_ne!(text, all);
+            assert!(!policy_says_enough(&text), "{text}");
+        }
+        assert!(!policy_says_enough("not json"));
     }
 }

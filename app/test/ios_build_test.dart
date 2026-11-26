@@ -3,7 +3,8 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import '../hook/build.dart' show iosTriples, macTriples, rustFlags;
+import '../hook/build.dart'
+    show buildHome, iosTriples, macTriples, rustFlags, windowsTriples;
 import '../hook/macho.dart';
 
 /// The tunnel's Rust library is built so an iPhone will load it: for the
@@ -56,6 +57,28 @@ void main() {
       expect(rustFlags(triple, home: '/h'), contains('-C strip=none'));
     }
     expect(rustFlags('aarch64-apple-darwin', home: ''), '-C strip=none');
+  });
+
+  test("Windows' libraries don't name it either: its home is USERPROFILE, "
+      'and one with a space stops the build rather than ship it', () {
+    for (final triple in windowsTriples) {
+      expect(
+        rustFlags(triple, home: r'C:\Users\me'),
+        r'--remap-path-prefix=C:\Users\me=~',
+        reason: triple,
+      );
+    }
+    expect(buildHome({'HOME': '/Users/me'}), '/Users/me');
+    expect(buildHome({'USERPROFILE': r'C:\Users\me'}), r'C:\Users\me');
+    expect(
+      buildHome({'HOME': '/Users/me', 'USERPROFILE': r'C:\Users\x'}),
+      '/Users/me',
+    );
+    expect(buildHome({}), '');
+    expect(
+      () => buildHome({'USERPROFILE': r'C:\Users\John Smith'}),
+      throwsStateError,
+    );
   });
 
   group('the hook refuses an Apple library dyld would refuse', () {

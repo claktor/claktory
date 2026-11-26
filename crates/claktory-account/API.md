@@ -118,7 +118,10 @@ not the account exists: `200 {"request_id": "…", "expires_in": 900, "code_from
 absence as unknown).
 Errors: `400 invalid_email` (not an address, or one with an invisible
 character that changes how it reads, such as U+202E or a zero-width space),
-`400 invalid_request`, `429 rate_limited`
+`400 invalid_request`, `409 backend_key_retired` (a key its Claktory signed
+out with: no code is sent; make a new backend key and start again),
+`403 review_account` (a review email, from a Claktory other than the
+review box: see the review accounts below), `429 rate_limited`
 (per email 5 an hour and 20 a day, per IP 30 sign-ins a day),
 `503 email_unavailable` (the day's email cap is reached, or the mail
 provider didn't send it: it failed or refused, or the address is on its
@@ -139,9 +142,14 @@ seen before `401 replayed`, each leaving the code to use again.
 `200 {"account_id", "email", "claktory_id", "machine_token", "epoch", "sealed_share", "service_key"}`.
 Errors: `400 wrong_code` (`attempts_left`), `410 code_expired` (expired, or
 out of tries: start again), `409 claktory_taken` (that id belongs to another
-account), `403 too_many_claktories` (10 per account), `400 invalid_request`.
+account), `403 too_many_claktories` (10 per account), `409
+backend_key_retired` (its Claktory signed out with that key after the
+sign-in started; the code is spent), `403 review_account` (a review email,
+and the verify isn't signed by the review box's key, or that key changed
+since the start; the code is spent),
+`400 invalid_request`.
 
-### The review account (`--review-account`)
+### The review accounts (`--review-account`)
 For the stores' reviewers, who need sign-in details that work at any time,
 from anywhere, without a one-time code. Off unless the service is started
 with `--review-account FILE` and FILE is there (the operator's
@@ -171,6 +179,28 @@ answers, except:
 - each sign-in with it logs one line, `review sign-in: <route>, from
   <region, country>` (`claktory`, `device` or `web`; the place from the
   GeoIP file, never the IP).
+
+There may be two (#319), one per store (App Store and Google Play), each
+rotated on its own: `--review-account` given twice, each FILE its own email
+(the service won't start with more than two, or two with one email).
+
+Neither is a relay credential (Fugo 34608):
+- a Claktory signs in with a review email (`POST /v1/sign-in/start` and
+  its verify) only with the review box's backend key,
+  `--review-claktory-key FILE` (one line, base64url, as `backend_key` is
+  sent; others may read it). Any other key is `403 review_account`, and so
+  is every one while FILE isn't there. Since the key is public, the verify
+  must also be signed by it (`Claktory-Time` and `Claktory-Signature`, no
+  token, as factoryd signs every verify): unsigned or signed by another key
+  it's `403 review_account` and the code is spent. A review account's
+  Claktory moves (`POST /v1/move`) to no other key, and one under another
+  key (signed in before the pin) gets no relay token (`POST
+  /v1/relay/token`: `403 review_account`);
+- the web pages don't remove a review account's Claktories: `/account`
+  shows no Remove, and `/account/remove` answers `403` with a page saying
+  so. Delete account works as for any account (Apple's review needs it):
+  the account comes back at the next sign-in, and only the review box
+  signs a Claktory in to it.
 
 It's an ordinary account otherwise. Every other email is unchanged, and the
 fixed code opens no other email's sign-in.
@@ -313,8 +343,31 @@ computer's name (tidied as at sign-in), `from` the old one's, for the email.
 `200 {"epoch"}`. The account is emailed ("Mac mini moved to cloud-box").
 A Claktory whose answer was lost tries again with the old pair, gets `401
 unauthorized`, and checks whether its new pair works with a check-in.
+The devices it vouched for (`/v1/devices/vouch`), apps on the computer it
+left, are signed out.
 Errors: `400 invalid_request` (a key or token that isn't 32 bytes, or a
-token already in use), `401`, `403 revoked`, `429 rate_limited` (10 a day).
+token already in use), `401`, `403 revoked`, `403 review_account` (a review
+account's Claktory, to a key other than the review box's), `429
+rate_limited` (10 a day).
+
+### `POST /v1/claktories/sign-out` (signed)
+`{}` → `200 {}` (#524): the Claktory signs itself out, before it forgets its
+sign-in. Its registration ends as a removal at claktory.com/account does: its
+app grants end (a grant holds only under its registration's epoch, and the
+user-apps worker drops them), it gets
+no more pipe-identity statements or relay tokens (those given run out: a
+week for either), its endpoints leave the relay allowlist, and the
+account's devices no longer list it. Unlike a removal, its token no longer
+matches anything, so every call with it is `401 unauthorized` (never `403
+revoked`), and its backend key is retired for good: a sign-in with it is
+`409 backend_key_retired`, and it proves nothing at verify. The devices it
+vouched for (`/v1/devices/vouch`) are signed out as `/v1/devices/sign-out`
+does, and its vouches not used yet stop working (#529). Signing in again
+with a new backend key, the same Claktory id is registered again, at the
+next epoch, as after a removal. Also for a Claktory removed already. A
+sign-out that's answered `401 unauthorized` happened already (its answer was
+lost), or the Claktory signed in again since: nothing's left to do.
+Errors: `401`.
 
 ### `POST /v1/pipe-identity` (signed)
 Verified pipes: the service's word, for the Claktories this one has pipes
@@ -414,7 +467,8 @@ that only at verify, so that a public key alone never tells which account
 it's in.
 
 #### `POST /v1/devices/sign-in/verify` (device signed, by the key that started it)
-`{"request_id", "code"}` → `200 {"account_id", "email", "name"}`. Makes the
+`{"request_id", "code"}` → `200 {"account_id", "email", "name"}`, with
+the emailed code, or a Claktory's vouch's (`/v1/devices/vouch`). Makes the
 account if it's new and binds the account key to it. The service keeps the
 account each key last signed in to, past its sign-out, until the account is
 deleted (in Download My Data as `device_keys`). Errors: `400 wrong_code`,
@@ -424,6 +478,33 @@ device_removed` (the key was removed after the code was sent; the code is
 spent), `403 key_of_another_account` (the key last signed in to another
 account; the code is spent; the app makes a new key and asks for a new
 code).
+
+#### `POST /v1/devices/vouch` (signed)
+```json
+{"account_key": b64, "name": "Matt's MacBook Pro", "platform": "macos-arm64", "version": "v0.1.20"}
+```
+A signed-in Claktory vouches for the app on its own computer (#529), which
+then signs in as a device with no email: `200 {"request_id", "code",
+"expires_in": 300}`, for `sign-in/verify`, device signed by `account_key`
+(another key is `401 unauthorized`), within 300 s, once. The code is bound
+to that key and the Claktory's account; it's kept only as its hash and
+never logged, and is 16 random bytes (base64url), never typed. A new vouch
+spends the Claktory's earlier code not yet used. The device is then signed
+in as any other, shown as "signed in through <the Claktory>" on
+claktory.com/account (`vouched_by`, the Claktory's id, in Download My
+Data), and removable there or by another device like any. Each Claktory
+has one device vouched for at a time: verifying a new one signs out the
+one before. Its devices are signed out when it signs out (`/v1/claktories/sign-out`),
+signs in again (to this account or another), moves (`/v1/move`) or is
+removed; a code it gave is spent then too. A device vouched for that signs
+in by email itself is no longer the Claktory's. `name`, `platform` and
+`version` are checked as at `sign-in/start`; no email is sent. Errors:
+`400 invalid_request`, `401`, `403 revoked`, `403 device_removed` (the key
+was removed from this account: never vouched for again), `403
+key_of_another_account` (the key last signed in to another account),
+`429 rate_limited` (10 an hour per Claktory). `sign-in/verify` answers
+as ever, and `410 code_expired` also when the Claktory is no longer the
+account's.
 
 #### `GET /v1/devices/me` (device signed)
 `200 {"account_id", "email", "name"}`, `401 unauthorized` when the key isn't
@@ -512,7 +593,9 @@ It works 7 days; a Claktory asks again when under 3 days are left.
   today gets another without counting.
 
 Errors: `400 invalid_request` (not 64 hex), `401`, `403 revoked` (removed
-from its account, or the account is gone), `429 rate_limited`.
+from its account, or the account is gone), `403 review_account` (a review
+account's Claktory with a key other than the review box's), `429
+rate_limited`.
 
 ### User-level apps: `/v1/apps/…` (signed, or device signed)
 Apps a person keeps at the account rather than in a Claktory (DMs first) run
@@ -557,7 +640,11 @@ app's data:
   signed) or the Claktory's own (signed).
 
 A grant holds only under the epoch it was made in: signing in again,
-signing out or being removed ends it. Refusals: `400 invalid_request`,
+signing out or being removed ends it. The worker is told then too, and
+drops the grants made under that registration (E11-4: at once for a
+removal or a sign-out, within a minute for a sign-in again; asked again
+until it hears, `claktory_removed` in its README), with a `groups` event
+for the account's devices. Refusals: `400 invalid_request`,
 `403 not_granted`, `404 not_found`, `429 rate_limited`. `GET
 /v1/apps/whoami` answers with the caller as the worker got it.
 
@@ -652,8 +739,8 @@ its agents a new message from the other person should wake (ids only).
 Sign in with an emailed code; lists the account's Claktories (name, version,
 platform, last contact, its last 5 unlocks with their IP, each emailed one marked "emailed you", and what their
 check-ins sent: place, counts, agent hours in the last 7 days, tokens per
-model in the last 30); **Remove** a Claktory (what `revoked` means above); the devices signed in
-(name, platform, last seen), each with **Remove** (its key is unbound, and never signs in to the account again: `403 device_removed`; the DMs' worker drops its KeyPackages);
+model in the last 30); **Remove** a Claktory (what `revoked` means above, the devices it vouched for are signed out, and the user-apps worker drops its agents' grants); the devices signed in
+(name, platform, "signed in through <Claktory>" for one its Claktory vouched for, last seen), each with **Remove** (its key is unbound, and never signs in to the account again: `403 device_removed`; the DMs' worker drops its KeyPackages);
 **Agents' access**, the grants agents on its Claktories hold in the user-level
 apps (agent, Claktory, app, what it may do, how many conversations, since
 when), each with **Remove**, asked of the user-apps worker, so it works with
@@ -699,7 +786,7 @@ row a flat object with exactly these eleven columns (schema version 1):
 | `window` | `hour`, `day`, `today`, `rolling30`, `snapshot` or `month`. `hour`, `day` and `today` are global only. |
 | `metric` | One of the metrics below. |
 | `dimension` | `none`; `claktory_count` (`snapshot`'s users by their Claktories); `country` (the latest `rolling30`'s, and a month's); or a month's breakdown: `provider`, `model`, `backend_version`, `backend_platform`, `device_platform`, `device_kind`, `app_version`. |
-| `label` | `All` with `none`; `1`, `2`, `3-5` and `6+` with `claktory_count`; else a label of the dimension's, `Other` or `Unknown`. |
+| `label` | `All` with `none`; `1`, `2`, `3-5` and `6+` with `claktory_count`; else a label of the dimension's, `Other` or `Unknown` (and `Deleted` with `country`). |
 | `value` | A count, never negative; null when suppressed (only in months published before the exact counts, below). |
 | `status` | `ok`, `partial` (`today`'s, and the two latest hours') or `suppressed` (as `value`). |
 
@@ -721,8 +808,10 @@ The metrics:
   once. Never add up days for it.
 - `contact_users`, `day` and `rolling30`: the same for users, each account
   once however many of its Claktories were in touch. A deleted account's
-  past days count once per Claktory it had (they're kept under a stand-in
-  each, unlinked from the account).
+  past days still count it once: its Claktories' days are kept under a
+  random stand-in each, with one random stand-in as their user, unlinked
+  from the account. A Claktory that signed in to another account since
+  keeps its days before under a stand-in of its own, as a user of its own.
 - `registered_users`, `day`: accounts at the day's end; `new_users`, `day`:
   accounts made that day. A deleted account is gone from both, on every
   day, so past days undercount the users there were then.
@@ -746,7 +835,9 @@ The metrics:
   the latest completed day only (bucket yesterday): those in touch in the
   30 days ending yesterday, a Claktory in its country, a user once, in the
   country of their Claktory last in touch (a registered one first), as at
-  the export.
+  the export. Those no longer there (a deleted account's, a Claktory that
+  signed in to another account since) are `Deleted`, and `Unknown` is only
+  a Claktory there never placed.
 
 Each UTC hour of the last 28 days, the current one last, as `hour`: when
 Claktories run, for day and night and weekday patterns. Global only, and
@@ -788,7 +879,7 @@ and these breakdowns, one dimension at a time, never crossed:
   removed) by `backend_version`, `backend_platform` and `country`;
 - `contact_users` by `country`: each user in touch in the month once, in
   the country of their Claktory last in touch (a registered one first), as
-  at publication;
+  at publication, `Deleted` for those no longer there;
 - `reported_devices` (devices as the Claktories last reported them) by
   `device_platform`, `device_kind` and `app_version`.
 
@@ -799,7 +890,8 @@ anything is counted: one of a fixed, reviewed list per dimension (providers,
 models, backend platforms, device systems and kinds), for versions `v` and
 three numbers, for countries the GeoIP file's English name when it's a
 name in form (letters, spaces and `.,'()-`, 60 characters at most),
-`Unknown` when there's none, else `Other`; no other text is ever published.
+`Deleted` for a user or Claktory no longer there, `Unknown` when there's
+none, else `Other`; no other text is ever published.
 
 Every label has its exact count, one included, the largest first: every
 country its own, and any other breakdown at most 12 labels, the smallest
@@ -829,6 +921,7 @@ breakdown with fewer than 5 in all one `Other` row per metric,
 | 403 | `unsupported_email` | an email a pipe statement can't carry (not printable ASCII, or claktory.com's own) |
 | 404 | `not_found` | |
 | 409 | `claktory_taken` | |
+| 409 | `backend_key_retired` | a backend key its Claktory signed out with; make a new one |
 | 410 | `code_expired` | |
 | 429 | `rate_limited` | `retry_after` |
 | 500 | `internal` | the service's fault; try again later |

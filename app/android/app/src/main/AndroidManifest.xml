@@ -95,6 +95,24 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/share_paths" />
         </provider>
+        <!-- Where the phone's camera app writes the photo Take photo asks
+             for (PhotoCapture): not exported, so only the one address
+             takePhoto grants, for writing, in cache/claktory-camera. -->
+        <provider
+            android:name=".CameraFiles"
+            android:authorities="${applicationId}.camera"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/camera_paths" />
+        </provider>
+        <!-- Bound by the browser while a shared website Claktory opened in
+             a Custom Tab is on screen (ShareBrowser, KEEP_ALIVE), so the
+             share's forward keeps its network. It does nothing else. -->
+        <service
+            android:name=".ShareKeepAlive"
+            android:exported="true"/>
         <!-- What other apps share to Claktory (factory/shared): text, links,
              images and any file. It shows nothing and hands the app's one
              screen only the text, the subject and the files, with a read
@@ -125,6 +143,14 @@
     </application>
     <!-- Flutter's ProcessTextPlugin asks which apps can act on selected text. -->
     <queries>
+        <!-- The browsers that take Custom Tabs, for shared websites (ShareBrowser). -->
+        <intent>
+            <action android:name="android.support.customtabs.action.CustomTabsService"/>
+        </intent>
+        <!-- The camera apps, for Take photo (PhotoCapture). -->
+        <intent>
+            <action android:name="android.media.action.IMAGE_CAPTURE"/>
+        </intent>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>

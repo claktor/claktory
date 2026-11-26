@@ -422,7 +422,90 @@ message ClientMessage {
     // Claktory's browser's time zone and languages (#435, change 3).
     SetAgentBrowserLocale set_agent_browser_locale = 241;
     ListTimeZones list_time_zones = 242;
+    // The person is looking at the models or the accounts (friend bug #41).
+    ProvidersShown providers_shown = 251;
+    SetSecretSites set_secret_sites = 247;
+    SignOutAgentBrowserAccount sign_out_agent_browser_account = 248;
+    // A recovery-codes card's codes (#435 W8b): shown only to the person's
+    // device that asks, answered with RecoveryCodes; kept in Secrets.
+    // Person's requests only, never an agent's tool or a pipe.
+    ShowRecoveryCodes show_recovery_codes = 252;
+    KeepRecoveryCodes keep_recovery_codes = 253;
+    // Needs you's focus mode (#514), for this connection's device.
+    SetFocusMode set_focus_mode = 243;
+    // Follow one conversation without selecting it (#514): answered with
+    // its snapshot (ServerMessage.watched), then an Ack.
+    WatchTranscript watch_transcript = 244;
+    // This computer's own app signs in to the account as a device through
+    // this Claktory's sign-in (#529).
+    VouchDevice vouch_device = 245;
+    DismissAllowNotice dismiss_allow_notice = 246;
+    // The person read alerts kept in Needs you (Workspace.alerts): the
+    // person's devices only, never an agent's.
+    ReadAlerts read_alerts = 257;
+    // Changes how long a website this side shares lasts (#46): the
+    // person's devices only, never an agent's.
+    SetPipeShareExpiry set_pipe_share_expiry = 260;
+    // Pins an agent under Rivet in the sidebar, or moves its pin; unpins
+    // one (Settings.pinned_agents; Lucy's ux/pinned-agents.md). The
+    // person's own: refused to agents. Answered with Ack.
+    PinAgent pin_agent = 262;
+    UnpinAgent unpin_agent = 263;
   }
+}
+
+// The person read these alerts (Alert.id): they opened one, or tapped Got
+// it. Each leaves Workspace.alerts for History (NEEDS_YOU_RECORD_KIND_ALERT,
+// outcome READ, decided_ms when, answered_on this connection's device).
+// Ids already read or unknown are skipped. Ack.
+// Pins `agent_id` before the pin `before_id` (empty, or one not pinned:
+// last); an agent pinned already moves there. Refused for an agent outside
+// projects (it's at the top already) and for one in an archived project.
+message PinAgent {
+  string agent_id = 1;
+  string before_id = 2;
+}
+
+// Unpins `agent_id`; one not pinned is no change.
+message UnpinAgent {
+  string agent_id = 1;
+}
+
+message ReadAlerts {
+  repeated string ids = 1;
+}
+
+// An alert kept in Needs you until the person reads it (ReadAlerts): an
+// agent's notify_person, or Claktory's own (its disk can't be written, the
+// machine runs short with no admin agent to take it, a newer model with no
+// admin agent to switch to it). Kept whatever became of its notification:
+// sent, held by quiet hours or the hourly cap, or not sent at all (alerts
+// turned off, the agent's Notify me set to Never, no device that shows
+// them). Not a question: it never counts toward an agent's waiting cards.
+message Alert {
+  string id = 1;
+  // The agent that sent it; empty for Claktory's own.
+  string agent_id = 2;
+  // Who it's from as it was sent: the agent's name then (kept after the
+  // agent is renamed or deleted), or this Claktory's name for its own.
+  string from_name = 3;
+  // What it says, in its agent's words (Claktory's for its own): title a
+  // short line (at most 120 characters), text a sentence or two more (at
+  // most 300; may be empty). Both empty when `withheld`.
+  string title = 4;
+  string text = 5;
+  // Its agent marked it urgent.
+  bool urgent = 6;
+  // When it was sent, in ms since 1970.
+  int64 sent_ms = 7;
+  // Its agent had read a web page or another Claktory's words when it sent
+  // it, so what it says may be a stranger's: its words aren't kept here, as
+  // its notification said only who. Show "<from_name> sent you an alert",
+  // and that it's in their conversation.
+  bool withheld = 8;
+  // The notify_person call's entry in its agent's conversation, to open it
+  // there; 0 for Claktory's own, or when it isn't found.
+  uint64 seq = 9;
 }
 
 // A new group at the end of the project's (Workspace.pipe_groups).
@@ -522,6 +605,19 @@ message PipeShare {
   // Theirs: not opened yet from this Claktory, on any device: the app
   // makes it stand out until it is (W2).
   bool unopened = 14;
+  // When it stops being shared (#46), ms since 1970; 0: not until it's
+  // stopped. Mine: this Claktory stops it then, as Stop does. Theirs: when
+  // its sharer said it ends, to show ("Ends in 3 hours"); the sharer ends
+  // it.
+  int64 expires_ms = 15;
+  // Theirs: when this computer last couldn't reach the website for its
+  // browser (Claktory's own "couldn't be reached" page), ms since 1970; 0
+  // when nothing failed since the last request that went through. Kept
+  // while Claktory runs.
+  int64 last_failure_ms = 16;
+  // Theirs: what that page said, for the person ("Nothing is listening on
+  // port 3000 on Ana's Mac."); empty with last_failure_ms 0.
+  string last_failure = 17;
 }
 
 // Shares a website on this computer (Share a website… in a pipe's or a
@@ -537,6 +633,19 @@ message SharePipeWebsite {
   repeated string pipe_ids = 3;
   // a group: it reaches the group's pipes and follows the group.
   string group_id = 4;
+  // How long it lasts from now, in seconds, at most a year (#46); 0: until
+  // it's stopped, as from an app before this. The app offers 1 hour, 24
+  // hours (its default), 7 days and Never.
+  int64 lasts_s = 5;
+}
+
+// Changes how long a share of this side's lasts, counted from now (#46,
+// Change end…): lasts_s as in SharePipeWebsite, 0 for until it's stopped.
+// The other side is told the new end. Answered with the Workspace, or an
+// Error saying why ("That website isn't shared any more.").
+message SetPipeShareExpiry {
+  string share_id = 1;
+  int64 lasts_s = 2;
 }
 
 // Stops a share of this side's on every pipe at once: its connections end
@@ -756,6 +865,11 @@ message ServerMessage {
     ErrandLog errand_log = 88;
     // The answer to ListTimeZones, to the asker only.
     TimeZones time_zones = 89;
+    // The answer to ShowRecoveryCodes, to the asker only: never in the
+    // Workspace, a conversation or a patch.
+    RecoveryCodes recovery_codes = 92;
+    // The answer to VouchDevice, to the asker only.
+    DeviceVouched device_vouched = 91;
   }
   // Resuming the Workspace on reconnect (#378), only to an app whose Hello
   // has workspace_patches. On a message carrying a Workspace or a
@@ -775,6 +889,15 @@ message ServerMessage {
   // with its agent, and send both back in Hello.transcript_agent_id and
   // transcript_revision. Empty on others (a chat's, a pipe's).
   string transcript_revision = 77;
+  // For the conversation this connection watches (WatchTranscript, #514),
+  // not the one selected: its snapshot (Transcript, ChatTranscript or
+  // PipeTranscript) and its agent's or chat's EntryUpdate, EntryDelta,
+  // ChatEntryUpdate and ChatEntryDelta, to this connection only. Keep them
+  // apart from the selected conversation's, which comes as before (both,
+  // when it's the same one). No transcript_revision: after a reconnect,
+  // send WatchTranscript again. A watched pipe's PipeMessageUpdate is the
+  // one every connection gets (untagged), routed by its pipe_id.
+  bool watched = 90;
 }
 
 // ---- Handshake ----
@@ -809,9 +932,9 @@ message Hello {
   // confirms the device as the owner's. Empty when the device has none.
   string assertion = 7;
   // This app can sign in to the account and confirm (`assertion`,
-  // ConfirmDevice). A paired device is asked to confirm only once it has
-  // connected with an app that can: false from apps before it, which keep
-  // working as they did.
+  // ConfirmDevice). Versions before #527 S3 started a device's deadline to
+  // confirm only once it connected with an app that can; there are no
+  // deadlines now, and it's no longer read.
   bool can_confirm = 8;
   // The device's system: "ios", "ipados", "android", "macos", "linux" or
   // "windows". Kept with the paired device and counted, never named, in
@@ -865,9 +988,8 @@ message Welcome {
   // Workspace.
   string name = 4;
   string color = 5;
-  // This device has to confirm it's the owner's by then, in ms since 1970:
-  // a Hello with an assertion, or ConfirmDevice with one. Past it, its Hello
-  // is refused with ERROR_CODE_SIGN_IN_REQUIRED. 0 when it needn't.
+  // Versions before #527 S3 gave a device a deadline to confirm it's the
+  // owner's; there are none now, so this is always 0.
   int64 confirm_by_ms = 6;
 }
 
@@ -925,6 +1047,19 @@ message ApproveDevice {
   // away, as DenyDevice does. Empty is refused as a wrong number isn't:
   // it asks for the digits.
   string number = 2;
+  // From `factoryd allow` (a tool on this computer): it ran on a terminal,
+  // so a person compared the digits and the device is confirmed by its
+  // Allow (#527 S3); false from a program, whose device then shows the
+  // owner's assertion before it connects. Apps leave it false: who asks
+  // decides for them (this computer's own app, or a confirmed device,
+  // confirms; an unconfirmed device doesn't).
+  bool from_terminal = 3;
+}
+
+// Takes a device's Allow off Needs you (RemoteAccess.allow_notices) on every
+// device (#527 S3). Answered with Ack, also when it's gone already.
+message DismissAllowNotice {
+  string device_id = 1;
 }
 
 // Turns away a device that's waiting: its code stops working, the device is
@@ -1030,6 +1165,9 @@ message RemoteAccess {
   // Devices that used a pairing code and wait for the person to allow them,
   // oldest first. Each is also in `devices`, with its code_expires_ms.
   repeated PendingDevice pending_devices = 14;
+  // Allows not yet dismissed, oldest first (#527 S3). A removed device's
+  // goes with it.
+  repeated AllowNotice allow_notices = 15;
 }
 
 // A device that connected with a pairing code and waits to be allowed: a
@@ -1097,13 +1235,17 @@ message PairedDevice {
   int64 code_expires_ms = 8;
   // It's the owner's: it showed a valid device assertion for this
   // Claktory's account, or the person confirmed it from a confirmed device
-  // (ConfirmDevice.device_id). Always true for this computer's own app.
+  // (ConfirmDevice.device_id), or it was allowed with its digits by a
+  // person (#527 S3: on this computer's own app, on a confirmed device, or
+  // at a terminal), or before Allows were recorded (allowed_by "before").
+  // Always true for this computer's own app. One that isn't (let in by a
+  // program, or by a device not confirmed itself) is turned away with
+  // ERROR_CODE_SIGN_IN_REQUIRED while this Claktory is signed in, until it
+  // shows the owner's assertion; the person can confirm or remove it from
+  // another device.
   bool confirmed = 9;
-  // While it isn't confirmed and has connected with an app that can
-  // confirm (Hello.can_confirm), the end of its 7-day grace, in ms since
-  // 1970; 0 otherwise. Past it and not confirmed, it's "Not confirmed": its
-  // Hello is refused until it confirms, and the person can confirm or remove
-  // it from another device.
+  // Versions before #527 S3 gave a 7-day grace to confirm; there are no
+  // deadlines now, so this is always 0.
   int64 confirm_by_ms = 10;
   // It gets notifications pushed to it while it isn't connected: it
   // registered with the push relay (RegisterNotifications).
@@ -1122,6 +1264,44 @@ message PairedDevice {
   // it's updated too. False when no new backend is on offer, or either
   // version isn't numbered.
   bool update_leaves_behind = 14;
+  // How it was let in (#527 S3), for Settings → Devices: when, in ms since
+  // 1970 (0 when no time was kept), and by what:
+  // "device": a device allowed it with its digits; allowed_by_device_id is
+  //   its id ("local" for this computer's own app) and allowed_by_name its
+  //   name then.
+  // "terminal": `factoryd pair`, or `factoryd allow` on a terminal.
+  // "program": `factoryd allow` from a program, with no terminal.
+  // "first_device": the first device through the account, within 30
+  //   minutes of this Claktory signing in.
+  // "before": allowed before Allows were recorded.
+  // Empty when it got in otherwise (a code and the owner's account).
+  int64 allowed_ms = 15;
+  string allowed_by = 16;
+  string allowed_by_device_id = 17;
+  string allowed_by_name = 18;
+  // When it was last turned away, in ms since 1970, and why; 0 and empty
+  // once it gets in again. "other_account": it showed it's signed in to
+  // another account than this Claktory's (#527 S4), a stolen phone, say.
+  // Settings → Devices shows "Turned away: now signed in to another
+  // account · <time>".
+  int64 turned_ms = 19;
+  string turned_why = 20;
+}
+
+// An Allow the person should know of (#527 S3): "<device> can now use
+// <Claktory>", in Needs you on their devices until one dismisses it
+// (DismissAllowNotice). Apps hide it on the device that allowed it
+// (allowed_by_device_id equal to Welcome.device_id). Never the digits.
+message AllowNotice {
+  // The allowed device (PairedDevice.id), which is also this notice's id,
+  // and its name.
+  string device_id = 1;
+  string device_name = 2;
+  // As PairedDevice's: "device", "terminal" or "program".
+  string allowed_by = 3;
+  string allowed_by_device_id = 4;
+  string allowed_by_name = 5;
+  int64 allowed_ms = 6;
 }
 
 // ---- Requests (client → server). Each is answered with `ack` or `error`. ----
@@ -1482,6 +1662,13 @@ message UpdateSettings {
   // Settings.when_app_quits (friend bug #27); UNSPECIFIED is refused. Also
   // answers Onboarding.when_app_quits.
   optional QuitMode when_app_quits = 37;
+  // Settings.resource_alerts_to_admins (friend bug #54).
+  optional bool resource_alerts_to_admins = 38;
+  // The agents chosen to hear the Resources alerts, in place of those
+  // chosen before; empty clears them. Each must be an agent (NOT_FOUND
+  // otherwise, naming the id), and Resources is turned on for those that
+  // have it off, in the same change.
+  optional AgentIds resource_alert_agents = 39;
 }
 
 // Replaces a settings file that has an error (`Workspace.config_error`) with
@@ -2401,6 +2588,11 @@ message Error {
   // With ERROR_CODE_MOVED: where this Claktory went, for the screen the old
   // computer's app shows instead of the Claktory.
   MovedAway moved = 3;
+  // With ERROR_CODE_OTHER_ACCOUNT: this device was let in here before, and
+  // is now signed in to a different account than this Claktory's (signing
+  // in with that one again lets it back in); false for a device this
+  // Claktory never let in, which only a pipe can work with.
+  bool other_account_before = 4;
 }
 
 // A Claktory that moved to another computer, as the copy left behind
@@ -2466,14 +2658,21 @@ enum ErrorCode {
   // can't trust); the message says which. Claktory keeps working.
   ERROR_CODE_UNREACHABLE = 14;
   // Hello refused: this device has to show a (fresh) device assertion. A
-  // paired device whose grace to confirm is over, or a device that found
-  // this Claktory through its account with an assertion missing or expired.
+  // paired device not confirmed as the owner's (let in by a program, say:
+  // PairedDevice.confirmed), a device that found this Claktory through its
+  // account with an assertion missing, or one whose assertion doesn't
+  // verify (expired, for another key).
   // The app signs in to the account (or gets a new assertion) and connects
   // again. Connection closes.
   ERROR_CODE_SIGN_IN_REQUIRED = 15;
   // This Claktory moved to another computer (Error.moved says where); the
   // copy left here runs nothing.
   ERROR_CODE_MOVED = 16;
+  // Hello refused (#527 S4): this Claktory is signed in to an account, and
+  // the device's assertion is for another one. A Claktory is one person's:
+  // to work with someone else's agents, open a pipe. The message says
+  // whether the device was let in here before. Connection closes.
+  ERROR_CODE_OTHER_ACCOUNT = 17;
 }
 
 // Everything the sidebar and headers need. Sent in full after `welcome` and
@@ -2636,6 +2835,12 @@ message Workspace {
   AgentBrowser agent_browser = 49;
   // Errands, running and lately ended (the last 7 days), oldest first.
   repeated Errand errands = 50;
+  // Alerts waiting for the person to read them (Alert): one Needs you item
+  // each, until they open it or tap Got it (ReadAlerts). The newest 100,
+  // oldest first; alerts_unread counts them all, and each counts in the
+  // badge. Read ones are in History.
+  repeated Alert alerts = 51;
+  uint32 alerts_unread = 52;
 }
 
 // Claktory's background service on a Mac (friend bug #24): the LaunchAgent
@@ -2994,6 +3199,15 @@ message RefreshModels {
   // (Provider.models_fetchable).
   string provider_id = 1;
 }
+
+// The person opened a list of models (an agent's model picker, say) or
+// Settings → Providers (friend bug #41): Claktory reads again what's stale,
+// each model list read more than 15 minutes ago (Provider.models_fetched_ms)
+// and each key's credit read more than a minute ago (Account.credit), and
+// Workspace shows what it finds as it comes (Provider.models_fetching while
+// a list is read). Answered with Ack at once, before anything is read. Send
+// it each time one of them opens; asking often costs nothing.
+message ProvidersShown {}
 
 // Adds a model its provider's list doesn't have, by its id, once the
 // provider says this sign-in has it and an agent can run on it (friend bug
@@ -3868,6 +4082,55 @@ message Settings {
   // keeps 1 GB (1,000,000,000); a listed one 100 MB to 100 GB. Each
   // device's own; set with SetFileCache.
   map<string, uint64> file_cache = 35;
+  // The devices in Needs you's focus mode (#514), by id as
+  // Welcome.device_id gives it ("local" for this computer's app): the app
+  // opens in focus mode when its own is here. Each device's own; set with
+  // SetFocusMode. Kept in factory.db; a removed device leaves it.
+  repeated string focus_mode = 36;
+  // Who hears the Resources extension's alerts (friend bug #54; config.json's
+  // `resources.alerts_to_admins` and `resources.alert_agents`): the admin
+  // agents, while this is on (true unless changed), and the agents chosen.
+  // With none told, Claktory notifies the person itself.
+  bool resource_alerts_to_admins = 37;
+  // Everyone who hears them, as in effect: the admin agents first (while
+  // resource_alerts_to_admins is on), then the agents chosen, each once,
+  // and whether it's told now. Show it; don't work it out.
+  repeated ResourceAlertAgent resource_alert_agents = 38;
+  // Agents pinned under Rivet in the sidebar, by id, in the person's
+  // order: each in a project that isn't archived (deleting one, moving it
+  // out of projects or archiving its project unpins it; moving it to
+  // another project keeps its pin). The same on every device; set with
+  // PinAgent and UnpinAgent, or by Rivet in config.json (pinned_agents).
+  repeated string pinned_agents = 40;
+}
+
+// One agent that hears the Resources extension's alerts (Settings).
+message ResourceAlertAgent {
+  // Its id; an agent chosen that's gone keeps its id (held NO_AGENT).
+  string agent_id = 1;
+  // It's told of the next alert.
+  bool told = 2;
+  // Why it isn't told: UNSPECIFIED when it is.
+  ResourceAlertHeld held = 3;
+  // Listed as an admin agent (resource_alerts_to_admins), not chosen.
+  bool admin = 4;
+}
+
+enum ResourceAlertHeld {
+  RESOURCE_ALERT_HELD_UNSPECIFIED = 0;
+  // Its Resources extension is off.
+  RESOURCE_ALERT_HELD_RESOURCES_OFF = 1;
+  // Its project is archived.
+  RESOURCE_ALERT_HELD_ARCHIVED = 2;
+  // Its model can't run.
+  RESOURCE_ALERT_HELD_NO_MODEL = 3;
+  // No agent has this id any more.
+  RESOURCE_ALERT_HELD_NO_AGENT = 4;
+}
+
+// Agents, by id: a whole list, set as one.
+message AgentIds {
+  repeated string agent_ids = 1;
 }
 
 // What happens to Claktory on its Mac when the Mac app quits (friend bug
@@ -4434,6 +4697,13 @@ message Agent {
   // can have the errands extension (Claktory's browser). Only the person
   // sets or lifts it (SetAgentContained), never its settings or an agent.
   bool contained = 52;
+  // For its header (settings.md area 4 §8.9): its checklist's items not
+  // done or dropped (open, in progress, blocked or parked); 0 when the
+  // Checklist extension is off for it.
+  uint32 checklist_open = 53;
+  // Its background tasks running now; 0 when the Tasks extension is off
+  // for it. Both change in Workspace as items and tasks do.
+  uint32 tasks_running = 54;
 }
 
 // What an agent (or a chat) waiting on its provider's usage could continue
@@ -4837,6 +5107,12 @@ message Entry {
   // compaction divider or an unloaded page. Replies to events and monitors
   // carry nothing.
   optional uint64 replied_to = 17;
+  // A card (anything in Agent.waiting_seqs, or a chat's) the person
+  // answered, approved, dismissed, declined or replied to from a device:
+  // which one (#514), to say "Answered on Matt's iPhone" on another.
+  // Unset while it waits, for one decided before this version, and for one
+  // closed without the person (withdrawn, expired, resolved by its agent).
+  AnsweredOn answered_on = 21;
 }
 
 // Something other than the person prompting the agent: Factory itself,
@@ -5721,6 +5997,10 @@ message SecretInfo {
   // app can use it. Changed with SetSecretAskEachTime; never on a connected
   // service itself (only Claktory uses that), only on secrets made from it.
   bool ask_each_time = 15;
+  // Where Claktory's browser may fill it (#435, browser_fill_secret): exact
+  // https origins ("https://shop.example"), spelled as Chrome spells an
+  // origin. Empty: it's filled nowhere. Changed with SetSecretSites.
+  repeated string sites = 16;
 }
 
 message SecretVariable {
@@ -5744,6 +6024,9 @@ message SecretGrant {
   // the request it answered asked (`CLOUDFLARE_API_TOKEN` → the secret's
   // `CF_CLAKTORY_DNS`); besides the secret's own names. Empty for most.
   map<string, string> aliases = 4;
+  // The agent may only fill it into its sites (SecretInfo.sites) in
+  // Claktory's browser: its commands and apps never get it.
+  bool fill_only = 5;
 }
 
 // A variable with its value, in requests from the app and in SecretValue.
@@ -5786,6 +6069,17 @@ message CreateSecret {
   repeated SecretEntry entries = 3;
   // Made with Ask each time on (SecretInfo.ask_each_time).
   bool ask_each_time = 4;
+  // See SecretInfo.sites.
+  repeated string sites = 5;
+}
+
+// Replaces where Claktory's browser may fill a secret (SecretInfo.sites);
+// empty unbinds it. Answered with Ack; refused (INVALID_REQUEST, with the
+// reason in words) for a site that isn't an exact https origin on the
+// internet, more than 20, or a connected service itself.
+message SetSecretSites {
+  string id = 1;
+  repeated string sites = 2;
 }
 
 // Turns Ask each time (SecretInfo.ask_each_time) on or off for a secret.
@@ -5818,6 +6112,9 @@ message GrantSecret {
   string id = 1;
   string agent_id = 2;
   VaultProof proof = 3;
+  // Only to fill into its sites in Claktory's browser (SecretGrant.fill_only),
+  // replacing a full grant the agent held.
+  bool fill_only = 4;
 }
 
 // No proof needed: it only takes access away. The agent is told.
@@ -5976,7 +6273,10 @@ message SecretUse {
   // "use" (an agent's command got it), "reveal" (the person saw it in the
   // app), "grant", "revoke", "import" (the vault read it from files on this
   // computer: detail says which, their sizes and fingerprints, whom it was
-  // given to and whether the originals were deleted; agent is who asked).
+  // given to and whether the originals were deleted; agent is who asked),
+  // "keep" (recovery codes from an errand kept as this secret: detail says
+  // why, from the person's Keep in Secrets or because their card closed
+  // before they chose).
   string kind = 4;
   // The agent; for reveal, grant and revoke, the one concerned, if any.
   string agent_id = 5;
@@ -6294,6 +6594,57 @@ message ConfirmDevice {
 // skippable.
 message SkipAccountSignIn {}
 
+// This computer's own app signs in to this Claktory's account as a device
+// without an emailed code (#529): the Claktory, signed in, asks its account
+// service for a one-time code for the app's account key
+// (claktory-account API.md, POST /v1/devices/vouch), and the app signs in
+// with it through the service's own POST /v1/devices/sign-in/verify, signed
+// by that key. From then on the app is a device signed in to the account,
+// as a phone that signed in itself is: other Claktories of the account take
+// its device assertions. Only this computer's own app may ask: from any
+// other device ERROR_CODE_UNAUTHORIZED; ERROR_CODE_SIGN_IN_REQUIRED while
+// this Claktory isn't signed in; ERROR_CODE_UNREACHABLE or
+// ERROR_CODE_RATE_LIMITED when the service can't answer. Answered with
+// DeviceVouched, to the asker only. Apps ask only on a computer whose own
+// Claktory is signed in, and never again by themselves after the service
+// said device_removed.
+message VouchDevice {
+  // The app's account key: Ed25519, its public half in base64url, as
+  // POST /v1/devices/sign-in/start takes it.
+  string account_key = 1;
+  // The app's name, system and version, as sign-in/start takes them
+  // ("Matt's MacBook", "macos", "v0.1.20").
+  string name = 2;
+  string platform = 3;
+  string version = 4;
+}
+
+// The answer to VouchDevice. Either `request_id` and `code`, or `refused`.
+message DeviceVouched {
+  // For POST /v1/devices/sign-in/verify at `service`, signed by the account
+  // key: single use, until `expires_ms`. Never shown or kept.
+  string request_id = 1;
+  string code = 2;
+  // When the code stops working, in ms since 1970.
+  int64 expires_ms = 3;
+  // This Claktory's account service ("https://account.claktory.com"): the
+  // app signs in there, not at claktory.com unless it's that one.
+  string service = 4;
+  // The account's email, as this Claktory is signed in with it.
+  string email = 5;
+  // The service said no, and why, for the app to act on:
+  // "device_removed": the key was removed from the account; don't ask
+  //   again unless the person asks.
+  // "key_of_another_account": the key last signed in to another account;
+  //   make a new key and ask once more.
+  // "unavailable": the service can't vouch (one from before it): carry on
+  //   as before, without asking again until the app restarts.
+  // Empty when it vouched.
+  string refused = 6;
+  // With `refused`: what the service said, in words for the person.
+  string message = 7;
+}
+
 // The account service to use; empty for claktory.com's. Only while signed
 // out. Answered with Ack.
 message SetAccountService {
@@ -6469,7 +6820,16 @@ enum MapEdgeKind {
 // Answered with HistoryOverview: everything that ever existed, when, and
 // how busy each hour was. Asked when History opens and again after
 // HistoryChanged.
-message GetHistoryOverview {}
+message GetHistoryOverview {
+  // Empty: the whole Claktory. A project's id: histogram, message_count,
+  // cursors and the busiest hour's chapter count only its events, those
+  // whose sender or a recipient was in it at the time (a node's project
+  // over time is its labels' project_id; the person counts through the
+  // recipients, a pipe in its project, apps in none). Everything else
+  // stays whole, so the timeline and node indexes are the same in every
+  // view.
+  string project_id = 1;
+}
 
 // When something existed. Before HistoryOverview.recording_since_ms what
 // History knows is reconstructed (inferred): drawn dotted.
@@ -6570,6 +6930,12 @@ message GetHistoryEvents {
   uint32 limit = 3;
   // Also when agents worked (HistoryEvents.run_*).
   bool include_runs = 4;
+  // Empty: every event. A project's id: only its events (as
+  // GetHistoryOverview.project_id counts them, each whole, every recipient
+  // kept) and the runs of agents in it when the run began; start from that
+  // project's cursors. A page can then hold fewer than limit, even none,
+  // with next_cursor set: ask on until it's empty.
+  string project_id = 5;
 }
 
 enum HistoryEventKind {
@@ -6627,6 +6993,9 @@ message HistoryEvents {
 // them.
 message WatchHistory {
   bool on = 1;
+  // Empty: every event. A project's id: only its events, as
+  // GetHistoryEvents.project_id; another project's watches again from now.
+  string project_id = 2;
 }
 
 message HistoryChanged {
@@ -6966,6 +7335,40 @@ message SetZoom {
 // 100,000,000,000, or it's refused. Answered with Ack.
 message SetFileCache {
   uint64 bytes = 1;
+}
+
+// Turns Needs you's focus mode on or off (#514) for the device this
+// connection is, never another (Settings.focus_mode). Answered with Ack.
+message SetFocusMode {
+  bool on = 1;
+}
+
+// Follows one conversation for this connection without selecting it
+// (#514: focus mode's Context), beside the selected one: nothing else
+// changes (the selection, `unseen`, what's read). One at a time: a new one
+// replaces the last; no target stops watching. Its snapshot comes first,
+// as selecting it sends it, with ServerMessage.watched, then its changes
+// (see ServerMessage.watched); then the Ack. Earlier entries: LoadEntries,
+// LoadChatEntries or LoadPipeMessages, as for any. NOT_FOUND for an
+// unknown agent, chat or pipe.
+message WatchTranscript {
+  oneof target {
+    string agent_id = 1;
+    string chat_id = 2;
+    string pipe_id = 3;
+  }
+}
+
+// The device a card was decided from (Entry.answered_on,
+// NeedsYouRecord.answered_on; #514).
+message AnsweredOn {
+  // As Welcome.device_id gives it: "local" for this computer's app.
+  string device_id = 1;
+  // Its name then ("Matt's iPhone"; this computer's name for "local"),
+  // kept after the device is removed.
+  string device_name = 2;
+  // When, in ms since 1970.
+  int64 at_ms = 3;
 }
 
 // Removes a connection and the secrets made from it.
@@ -8236,7 +8639,11 @@ message AskPerson {
   // decision. state is ANSWERED; `answer` is the person's optional comment.
   // Show "Resolved", never as approved. Its agent can end it the same way
   // (ask_reply's resolve, #496) when the talk settled it: then the thread
-  // ends with the agent's words and `answer` is empty.
+  // ends with the agent's words and `answer` is empty. On a procedure
+  // stopped at a step the person couldn't do (state DISMISSED, a CANT
+  // step, #533), resolved means its agent gave up on it there: show
+  // "Stopped at step N of M"; without it, "Couldn't do step N · waiting
+  // for <agent>". state and steps stay as they were.
   bool resolved = 21;
   // Approved, but the change it asked for couldn't be made (#423's action
   // cards, or a card asking to clear a conversation): why, in Claktory's
@@ -8292,6 +8699,31 @@ message AskPerson {
   // as it is) and Can't do this (AnswerAsk dismiss, with their reason as
   // the comment: the errand ends, CANCELLED).
   ErrandHandoff handoff = 27;
+  // A code card (#435 W8; set with handoff.kind CODE): the site asks for a
+  // code sent to the person. Its heading is Claktory's, "<handoff.origin's
+  // host> asks for a code", never the agent's. Show one field for the code
+  // only (one-time-code autofill; suggestions, autocorrect and keyboard
+  // learning off; spaces and dashes stripped from a paste), no comment
+  // field, no mic, no attachments, never kept as a draft. Fill in sends
+  // AnswerAsk with the code as `text`: Claktory fills it into the page's
+  // field and the agent never sees it. A code that isn't one (letters,
+  // digits, spaces and hyphens, at most 16) is refused with an error and
+  // the card stays. Can't do this is AnswerAsk dismiss with the reason as
+  // the comment. The code is never in the Workspace, the transcript,
+  // History, a notification or the card's thread: the answered card's
+  // answer is empty.
+  bool code = 28;
+  // Why it changed last, in Claktory's own words, when Claktory changed it
+  // rather than its agent: its review file (review_path) changed while it
+  // waited ("This file changed since June asked. Approving means it as it
+  // reads now."). Claktory marks it once the file has been quiet for about
+  // 30 seconds, as an ask_update would: revision goes up, updated_ms is
+  // set, and an answer to the version before is refused, so Approve means
+  // the file as it reads now. Show it on the updated line as Claktory's,
+  // never as the agent's; update_reason is then empty. '' when its agent
+  // made the last change, or none was made. An open review pane shows the
+  // file as it reads now.
+  string update_note = 29;
 }
 
 // What an Execute card runs, where, and how it went.
@@ -8422,6 +8854,13 @@ message AskThreadMessage {
   // In the agent's words or the person's: Markdown, shown as theirs.
   string text = 2;
   int64 at_ms = 3;
+  // The person's files on that turn of the talk (#511), as they sent them
+  // with it (AnswerAsk.attachments); empty for the agent's turns.
+  repeated Attachment attachments = 4;
+  // On a procedure, the step that turn is about (#533), 1 for the first:
+  // the app shows it above that step. 0 on an ordinary card, and for turns
+  // kept before it was recorded.
+  uint32 step = 5;
 }
 
 // Where the person answered a card from (AnswerAsk.from, #430): the agent
@@ -8444,6 +8883,8 @@ message AskStep {
   string comment = 3;
   // When it was done or marked CANT, ms since 1970; 0 while pending.
   int64 decided_ms = 4;
+  // The person's files with that comment (#511); empty for none.
+  repeated Attachment comment_attachments = 5;
 }
 
 enum AskStepState {
@@ -8477,10 +8918,16 @@ message AnswerAsk {
   string text = 4;
   // What the person answers (or dismisses) it with besides words: their
   // drawings on a review ask's PDF, one PNG per page named
-  // "<pdf stem>-p<page>.png" (paper.pdf, page 3: paper-p3.png). Files
-  // uploaded for this agent first, checked as SendMessage.attachments are:
-  // each must be in the agent's uploads folder and still there, or the
-  // answer is refused. The agent's event names each by path, with its page.
+  // "<pdf stem>-p<page>.png" (paper.pdf, page 3: paper-p3.png), and any
+  // files they attach (#511), with every kind of answer: an answer,
+  // Approve or Dismiss with its comment, a reply (threaded or not),
+  // Resolve, and a step's Done or Can't do this. Files uploaded for this
+  // agent first, checked as SendMessage.attachments are: each must be in
+  // the agent's uploads folder and still there, or the answer is refused.
+  // A reply needs text or at least one file. The card keeps them where
+  // they were given (AskPerson.answer_attachments, a turn's
+  // AskThreadMessage.attachments, a step's AskStep.comment_attachments),
+  // and the agent's event names each by path, a drawing with its page.
   repeated Attachment attachments = 5;
   // A procedure (AskPerson.steps): the step answered, 0-based; it must be
   // the current one, so a second tap can't answer the next. dismiss false
@@ -8858,6 +9305,10 @@ message Notify {
   // A website another Claktory started sharing over pipe_id (W2): a tap
   // opens the pipe at that share (PipeShare.id).
   string share_id = 14;
+  // ALERT: the alert kept in Needs you (Alert.id); a tap opens it there
+  // (and opening it reads it). For an hour's "<agent> sent 3 more", its
+  // latest alert. Empty for none (an alert from a backend before them).
+  string alert_id = 15;
 }
 
 enum NotifyKind {
@@ -9089,6 +9540,37 @@ message NeedsYouRecord {
   // there; 0 when it's no longer in the conversation as loaded (after
   // /clear, say): open the conversation at its end then.
   uint64 proposal_seq = 28;
+  // The device it was decided from, as on its card (Entry.answered_on);
+  // unset when not known.
+  AnsweredOn answered_on = 29;
+  // ALERT: the alert as it was kept (its words empty when withheld).
+  Alert alert = 36;
+  // QUESTION and REVIEW with steps (a procedure, #533): the step its
+  // outcome is about, 1 for the first: the one they couldn't do (Can't do
+  // this), the one their words were on when they replied, or the one
+  // waiting when it was dismissed, withdrawn or resolved; the last when
+  // they did them all. 0 for a card without steps.
+  uint32 step = 37;
+  // The procedure's number of steps; 0 for a card without steps.
+  uint32 steps = 30;
+  // Its agent stopped it for good at `step` after Can't do this
+  // (ask_reply's resolve, #533 N3): outcome RESOLVED, agent_reason its
+  // words. Say "Stopped at step 2 of 4", not "settled in the talk".
+  bool step_stopped = 31;
+  // SECRET_REQUEST approved: how the agent got the secret. Unset for a
+  // dismissal or a reply (outcome and reply say those) and for every other
+  // kind.
+  NeedsYouSecretOutcome secret_outcome = 32;
+  // SECRET_REQUEST given (GAVE, ADDED, GENERATED, IMPORTED): the name of
+  // the secret it got, which may differ from `title`, the name the agent
+  // asked for. Empty otherwise.
+  string secret_given_name = 33;
+  // SECRET_REQUEST, GENERATED or IMPORTED: the vault gave the secret to no
+  // one (the agent asked so, or the person chose to only import it):
+  // "Imported, given to no one". False: given to the agent that asked
+  // (agent_id): "Imported, given to Risotto". False for every other
+  // outcome and kind.
+  bool secret_to_no_one = 34;
 }
 
 enum NeedsYouRecordKind {
@@ -9182,6 +9664,24 @@ enum NeedsYouRecordKind {
   // its why. seq is the secrets_give_up call's entry in its conversation.
   // Getting it back takes a request, like any other secret.
   NEEDS_YOU_RECORD_KIND_SECRET_GIVEN_UP = 18;
+  // An agent gave up access it had, on its own (#236): no card, no
+  // approval. Outcome CHANGED, agent_id the agent, title Claktory's
+  // sentence ("Mista left the pipe "Launch"", "Mista stopped reading the
+  // pipe "Launch"", "Mista stopped leading the pipe "Launch"", "Mista gave
+  // up Charts", "Mista gave up messaging Ana"), agent_reason its why. What
+  // it gave up: pipe_id (pipe_leave), app_id (apps_give_up) or
+  // subject_agent_id, the agent it no longer messages
+  // (agents_give_up_reach). seq is the call's entry in its conversation.
+  // Getting it back is the person's: in the pipe's settings, the app's, or
+  // the agent's.
+  NEEDS_YOU_RECORD_KIND_GIVEN_UP = 20;
+  // An alert the person read (Alert; ReadAlerts): outcome READ, agent_id
+  // the agent that sent it (empty for Claktory's own), title its title
+  // (empty when withheld), alert the whole of it, asked_ms when it was
+  // sent, decided_ms when it was read, answered_on the device it was read
+  // on. seq is the notify_person call's entry in its agent's conversation
+  // (0 for Claktory's own, or once it's no longer there).
+  NEEDS_YOU_RECORD_KIND_ALERT = 21;
 }
 
 enum NeedsYouOutcome {
@@ -9206,6 +9706,26 @@ enum NeedsYouOutcome {
   // (#430), without a decision: by the person, or by its agent closing it as
   // settled in the talk (#496; agent_reason holds its words).
   NEEDS_YOU_OUTCOME_RESOLVED = 9;
+  // An alert the person read: opened, or Got it (ALERT only).
+  NEEDS_YOU_OUTCOME_READ = 10;
+}
+
+// How an agent's secret request was approved (NeedsYouRecord.secret_outcome).
+enum NeedsYouSecretOutcome {
+  NEEDS_YOU_SECRET_OUTCOME_UNSPECIFIED = 0;
+  // The person gave it a secret they had (secret_given_name). Also every
+  // grant recorded before Claktory told the cases apart.
+  NEEDS_YOU_SECRET_OUTCOME_GAVE = 1;
+  // The person added a new secret on the card, with its value, and gave it.
+  NEEDS_YOU_SECRET_OUTCOME_ADDED = 2;
+  // The vault generated it (a key or a password no one sees): given to the
+  // agent, or to no one when the request said so.
+  NEEDS_YOU_SECRET_OUTCOME_GENERATED = 3;
+  // Claktory read it from files on this computer into the vault.
+  NEEDS_YOU_SECRET_OUTCOME_IMPORTED = 4;
+  // The person approved the need and left it to the admin agent
+  // (subject_agent_id) to find a matching secret or collect a new one.
+  NEEDS_YOU_SECRET_OUTCOME_ADMIN = 5;
 }
 
 // ---- Browser control ----
@@ -10292,6 +10812,28 @@ message AgentBrowser {
   // The languages its pages see, BCP 47 tags in order ("en-GB", "en");
   // empty until set, when they see en-US. Applies from its next start.
   repeated string languages = 9;
+  // The identity providers it's signed in to (#435), each with Sign out
+  // (SignOutAgentBrowserAccount); empty when none.
+  repeated AgentBrowserAccount accounts = 10;
+}
+
+// An identity provider Claktory's browser is signed in to (#435 W6), from
+// the vault's record of its first sign-in there.
+message AgentBrowserAccount {
+  // "google", "apple" or "microsoft".
+  string provider = 1;
+  // As shown: "Google".
+  string name = 2;
+  // The secret it signed in with (SecretInfo.id), and its name now; empty
+  // when the secret is gone.
+  string secret_id = 3;
+  string secret_name = 4;
+  // When it first signed in there, in ms since 1970.
+  int64 signed_in_ms = 5;
+  // A sign-out is waiting for the errand using the browser to end (or for
+  // its next start); the account's fills and sign-in clicks are refused
+  // meanwhile.
+  bool signing_out = 6;
 }
 
 enum AgentBrowserState {
@@ -10390,6 +10932,17 @@ message ErrandHandoff {
   // The card it waits on: the entry's seq in the agent's conversation
   // (its AskPerson).
   uint64 seq = 6;
+  // A code card's field takes digits only (#435 W8, Prosciutto 42531): the
+  // page's input is type number or tel, inputmode numeric, or its pattern
+  // allows only digits. A phone shows the number pad then, the ordinary
+  // keyboard otherwise. False on every other handoff.
+  bool numeric = 7;
+  // An agreement card's words (#435 W8b, R12.2): what the box the person
+  // accepts says on the page, its labels as the page has them (at most
+  // 1,000 characters, control and invisible characters taken out). They're
+  // the site's words: show them fenced as "The site's words", apart from
+  // Claktory's. Empty on every other handoff.
+  string agreement = 8;
 }
 
 enum ErrandHandoffKind {
@@ -10406,6 +10959,17 @@ enum ErrandHandoffKind {
   ERRAND_HANDOFF_KIND_SIGN_IN = 6;
   // Anything else, such as a site outside the errand's.
   ERRAND_HANDOFF_KIND_OTHER = 7;
+  // Recovery codes a site showed once (#435 W8b): Claktory read them off
+  // the page, and the agent never saw them. The card shows them only on
+  // ShowRecoveryCodes, and has two answers: I saved them (AnswerAsk,
+  // approved, no text) and Keep in Secrets (KeepRecoveryCodes). No
+  // dismissing, replying or words: its codes go only when the person says.
+  ERRAND_HANDOFF_KIND_RECOVERY_CODES = 8;
+  // Turning on two-step sign-in at a site: the person's call. Approved,
+  // the agent may turn it on there with codes sent by text message or
+  // email only, never an authenticator app or a security key. Can't do
+  // this ends the errand.
+  ERRAND_HANDOFF_KIND_TWO_STEP = 9;
 }
 
 // Starts or stops this connection's live view. One connection watches at a
@@ -10541,6 +11105,46 @@ message TimeZones {
 // Deletes everything the browser keeps (sign-ins, history, its profile),
 // stopping it and any errand first. Confirm in the app first.
 message DeleteAgentBrowserData {}
+
+// Signs Claktory's browser out of one identity provider
+// (AgentBrowserAccount.provider): its cookies and stored data cleared, now
+// or before its next page loads, and the vault's record of the account
+// forgotten once that's done. Answered with Ack, or Error with a sentence
+// to show. A person's request only.
+message SignOutAgentBrowserAccount {
+  string provider = 1;
+}
+
+// The codes of the recovery-codes card at `seq` in `agent_id`'s
+// conversation (an AskPerson whose handoff kind is RECOVERY_CODES), while
+// it waits: answered with RecoveryCodes to this connection only, or Error
+// with a sentence to show ("These codes are gone: …"). Ask each time the
+// card opens or Show is pressed; keep them only while they're on screen.
+// A person's request only.
+message ShowRecoveryCodes {
+  string agent_id = 1;
+  uint64 seq = 2;
+}
+
+// The site's recovery codes, one per item, in the site's order. Secret:
+// show them on the card, copy them only to the clipboard that clears
+// itself, and never keep or log them.
+message RecoveryCodes {
+  string agent_id = 1;
+  uint64 seq = 2;
+  repeated string codes = 3;
+}
+
+// Keep in Secrets on a recovery-codes card: Claktory saves the codes as a
+// new secret, "<host> recovery codes" (variable RECOVERY_CODES, one code
+// per line), given to no agent, deletes its own copy and closes the card.
+// Answered with Ack, or Error with a sentence to show (the vault is
+// locked, say), the card still waiting. I saved them is AnswerAsk, approved
+// with no text. A person's request only.
+message KeepRecoveryCodes {
+  string agent_id = 1;
+  uint64 seq = 2;
+}
 
 // An errand's log (empty: every errand's), the last 7 days.
 message ListErrandLog {

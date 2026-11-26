@@ -12,6 +12,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'harness.dart';
 
 Workspace _workspace({bool unconfirmed = true}) => Workspace(
+  // Named: each Claktory has its own key, so Needs you says whose.
+  settings: Settings(name: 'nixos'),
   vault: VaultState(
     exists: true,
     unlocked: true,
@@ -46,8 +48,8 @@ void main() {
       'it is typed back, and it goes from every device', (tester) async {
     final harness = await _open(tester);
     final backend = harness.backend;
-    expect(find.text('Save your recovery key'), findsOneWidget);
-    await tester.tap(find.text('Save your recovery key'));
+    expect(find.text('Save the recovery key for nixos'), findsOneWidget);
+    await tester.tap(find.text('Save the recovery key for nixos'));
     await settle(tester);
     expect(find.byType(SaveRecoveryKeyForm), findsOneWidget);
     // Not asked for until the person does.
@@ -79,14 +81,14 @@ void main() {
 
     // The backend says so everywhere: the item goes.
     await harness.apply(tester, _workspace(unconfirmed: false));
-    expect(find.text('Save your recovery key'), findsNothing);
+    expect(find.text('Save the recovery key for nixos'), findsNothing);
   });
 
   testWidgets('a wrong group says why, as the backend does, and can be '
       'typed again; Back starts over', (tester) async {
     final harness = await _open(tester);
     final backend = harness.backend;
-    await tester.tap(find.text('Save your recovery key'));
+    await tester.tap(find.text('Save the recovery key for nixos'));
     await settle(tester);
     await tester.tap(find.text("I've saved it"));
     await settle(tester);
@@ -114,7 +116,8 @@ void main() {
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
     try {
       await _open(tester, size: const Size(375, 667));
-      await tester.tap(find.text('Save your recovery key'));
+      // Needs you on an iPhone is one card a screen; its button saves it.
+      await tester.tap(find.text('Save recovery key…'));
       await settle(tester);
       await tester.ensureVisible(find.text('Show recovery key'));
       await settle(tester);

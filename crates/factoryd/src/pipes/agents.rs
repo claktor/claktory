@@ -131,7 +131,7 @@ pub(crate) fn label(record: &Record) -> String {
 
 /// How `agent` is told of the pipe ("the pipe \"Launch\"", "pipe 3f2a…"): by
 /// its name, or by `label` when it only sends.
-fn called(record: &Record, agent: &str) -> String {
+pub(super) fn called(record: &Record, agent: &str) -> String {
     let label = if record.sends_only(agent) { label(record) } else { format!("\"{}\"", record.name) };
     if label.starts_with('"') { format!("the pipe {label}") } else { label }
 }
@@ -380,6 +380,8 @@ pub(crate) fn tools(factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
     } else {
         tools.retain(|tool| tool.spec.name != "pipe_read");
     }
+    // Giving a pipe up, or only reading or leading it (#236).
+    tools.push(super::leave::tool(factory, agent));
     tools
 }
 
@@ -428,7 +430,7 @@ fn withdraw(factory: &Arc<Factory>, agent: &str, args: WithdrawArgs) -> Result<T
 }
 
 /// The agent's pipe `wanted` names (by id or name), or its only one.
-fn resolve(factory: &Factory, agent: &str, wanted: Option<&str>) -> Result<Record, String> {
+pub(super) fn resolve(factory: &Factory, agent: &str, wanted: Option<&str>) -> Result<Record, String> {
     let mine: Vec<Record> =
         factory.pipes.all().into_iter().filter(|record| record.granted() && record.members.iter().any(|member| member == agent)).collect();
     if mine.is_empty() {

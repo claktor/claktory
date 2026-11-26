@@ -61,7 +61,7 @@ void main() {
     // The code's fingerprint first; its name only quoted, its own words.
     expect(
       find.text(
-        'Its code: cccc cccc cccc cccc Check it matches the one shown there.',
+        'Check that it matches what it showed there: cccc cccc cccc cccc',
         findRichText: true,
       ),
       findsOneWidget,

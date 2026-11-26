@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- The attach menu, from the message box's + (Trish's words). -->
+    <string name="attach_take_photo">Take photo</string>
     <string name="attach_photos">Choose photos or videos</string>
     <string name="attach_files">Choose files</string>
     <string name="attach_paste">Paste image</string>

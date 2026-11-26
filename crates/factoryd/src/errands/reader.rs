@@ -56,6 +56,7 @@ fn source() -> String {
         "(() => {{\n\
          if (globalThis.__claktoryAsk) return;\n\
          globalThis.__claktoryDownloads = true;\n\
+         globalThis.__claktoryFills = true;\n\
          HTMLElement.prototype.click = function () {{\n\
            const r = this.getBoundingClientRect();\n\
            globalThis.__claktoryClick = {{x: r.left + r.width / 2, y: r.top + r.height / 2}};\n\
@@ -119,6 +120,10 @@ pub(crate) struct Frame {
     /// Whose its document is (securityOrigin): for about:blank, the page
     /// that made it, if any.
     pub origin: String,
+    /// The frame it's in, when it's a frame of another page: a session of
+    /// a frame in another process (site isolation) has it as its root.
+    /// Empty for a tab's own page.
+    pub parent: String,
 }
 
 /// The reader's world in the page's current document.
@@ -136,11 +141,19 @@ pub(crate) struct Page {
     session: String,
     world: Mutex<Option<World>>,
     documents: AtomicU64,
+    /// Where the errand may turn on two-step sign-in, as the person
+    /// approved (`super::code::two_step_refusal`).
+    two_step: std::sync::Mutex<Vec<String>>,
 }
 
 impl Page {
     pub(crate) fn new(cdp: Arc<Cdp>, session: String) -> Page {
-        Page { cdp, session, world: Mutex::new(None), documents: AtomicU64::new(0) }
+        Page { cdp, session, world: Mutex::new(None), documents: AtomicU64::new(0), two_step: std::sync::Mutex::new(Vec::new()) }
+    }
+
+    /// Where the errand may turn on two-step sign-in now.
+    pub(crate) fn set_two_step(&self, origins: Vec<String>) {
+        *crate::locking::lock(&self.two_step) = origins;
     }
 
     /// The errand's tab, attached and brought to the front: the one the
@@ -276,7 +289,13 @@ impl Page {
         let frame = &tree["frameTree"]["frame"];
         let text = |key: &str, max: usize| frame[key].as_str().filter(|s| s.len() <= max).map(str::to_owned);
         match (text("id", 128), text("loaderId", 128), text("url", 8192)) {
-            (Some(id), Some(loader), Some(url)) => Ok(Frame { id, loader, url, origin: text("securityOrigin", 512).unwrap_or_default() }),
+            (Some(id), Some(loader), Some(url)) => Ok(Frame {
+                id,
+                loader,
+                url,
+                origin: text("securityOrigin", 512).unwrap_or_default(),
+                parent: text("parentId", 128).unwrap_or_default(),
+            }),
             _ => Err(Error::Refused("Page.getFrameTree".into(), "no top frame".into())),
         }
     }
@@ -365,10 +384,16 @@ impl Page {
         let op = Op::Read { limit };
         let mut answer = schema::answer(&op, &value.to_string()).map_err(|_| unreadable())?;
         if let Answer::Page(page) = &mut answer {
+            let origin = self.frame().await.map(|frame| frame.origin).unwrap_or_default();
+            let approved = crate::locking::lock(&self.two_step).clone();
             for element in &mut page.elements {
                 let words = format!("{} {}", element.name, element.shows.as_deref().unwrap_or(""));
                 if element.sensitive.is_none() && tickable(&element.role) && agreement(&words) {
                     element.sensitive = Some(AGREEMENT.to_owned());
+                }
+                // Two-step sign-in (#435 W8b): the person's call.
+                if let Some(why) = element.sensitive.is_none().then(|| super::code::two_step_refusal(&words, &origin, &approved)).flatten() {
+                    element.sensitive = Some(why.to_owned());
                 }
             }
         }
@@ -381,6 +406,41 @@ impl Page {
         let op = Op::Scroll { direction, pages: pages.clamp(1, 3) };
         let json = self.ask(context, serde_json::to_value(&op).unwrap_or_default()).await?;
         schema::answer(&op, &json).map_err(|_| unreadable())
+    }
+
+    /// The element `target` of `document`, as the agent read it, for a fill
+    /// from the vault (#435 W6, `super::fill`): the reader checks it's still
+    /// the element read, visible, enabled, on screen and not covered, then
+    /// hands it over by node, never its value. Its Chrome object id, in the
+    /// reader's world, and the frame that world lives in (id, loader and
+    /// security origin as Chrome says them).
+    pub(crate) async fn element(&self, document: &str, target: &str) -> Result<(String, Frame), (String, String)> {
+        let (context, now, new) = self.world().await.map_err(gone)?;
+        if new || document != now {
+            return Err(stale_document());
+        }
+        let frame = self.frame().await.map_err(gone)?;
+        let checked = self.ask(context, json!({"op": "element", "target": target})).await?;
+        let checked: Value = serde_json::from_str(&checked).map_err(|_| unreadable())?;
+        if let Some(error) = checked["error"].as_str() {
+            return Err(failed(error, checked["why"].as_str().unwrap_or_default()));
+        }
+        let held = self
+            .call(
+                "Runtime.evaluate",
+                json!({"expression": "(() => { const el = globalThis.__claktoryElement; globalThis.__claktoryElement = null; return el; })()", "contextId": context, "returnByValue": false}),
+            )
+            .await
+            .map_err(gone)?;
+        let Some(object) = held["result"]["objectId"].as_str().filter(|id| !id.is_empty() && id.len() <= 256) else {
+            return Err(("stale_target".to_owned(), "the field went: read the page again".to_owned()));
+        };
+        // The world is the one made in this document: same loader.
+        let world = crate::locking::lock(&self.world).as_ref().map(|world| world.loader.clone());
+        if world.as_deref() != Some(frame.loader.as_str()) {
+            return Err(stale_document());
+        }
+        Ok((object.to_owned(), frame))
     }
 
     /// Clicks or fills `target` of `document`, as the agent read it: the
@@ -406,6 +466,19 @@ impl Page {
         let words = format!("{} {}", action["name"].as_str().unwrap_or(""), action["shows"].as_str().unwrap_or(""));
         if tickable(action["role"].as_str().unwrap_or("")) && agreement(&words) {
             return Err(("sensitive_action".to_owned(), AGREEMENT.to_owned()));
+        }
+        // On an identity provider's sign-in, only Next and the like (#435 W6).
+        // The reader's world is the main frame's: a target in a child frame
+        // (W3) passes its own frame's origin, and false.
+        let origin = self.frame().await.map_err(gone)?.origin;
+        // Two-step sign-in (#435 W8b): only where the person approved it,
+        // and never an authenticator, security key or passkey.
+        let approved = crate::locking::lock(&self.two_step).clone();
+        if let Some(why) = super::code::two_step_refusal(&words, &origin, &approved) {
+            return Err(("sensitive_action".to_owned(), why.to_owned()));
+        }
+        if let Some(refused) = super::fill::on_identity_provider(&origin, true, kind, action) {
+            return Err(refused);
         }
         if kind == "click" {
             let cleared = json!({"expression": "globalThis.__claktoryClick = null", "contextId": context});
@@ -728,6 +801,95 @@ pub(crate) mod tests {
             <div role="dialog"><p>We use cookies</p><button>Accept all</button></div>"#;
         page.call("Page.setDocumentContent", json!({"frameId": frame.id, "html": passed})).await.unwrap();
         assert_eq!(page.check().await, None);
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    /// #435 W8b (Fugo 40691): recovery codes are withheld whole, text and
+    /// all, offered only as a ref; what's inside them isn't offered; and
+    /// once withheld they stay withheld, even if the page changes their
+    /// words.
+    #[tokio::test]
+    async fn recovery_codes_are_withheld_from_every_read() {
+        let codes = r#"<!doctype html><title>Two-step sign-in</title>
+            <h1>Save your backup codes</h1><p>Each works once.</p>
+            <div id=codes><ul><li>a8f2-91kd</li><li>c3m9-2wle</li><li>k1vv-o3ds</li></ul>
+            <ul><li>7bq1-x0pe</li><li>p0za-77rt</li><li>u8yn-41bc</li></ul><button>Copy u8yn-41bc</button></div>
+            <p>Order 1234 shipped on 2026-11-02.</p><button>Continue</button>"#;
+        let Some((_local, page, profile)) = page_with(codes).await else { return };
+        let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
+        let block = element(&read, "recovery codes (withheld)");
+        assert_eq!(block.sensitive.as_deref(), Some("recovery codes: the person's (errand_handoff, kind recovery_codes)"));
+        let everything = format!("{read:?}");
+        for code in ["a8f2-91kd", "7bq1-x0pe", "u8yn-41bc"] {
+            assert!(!everything.contains(code), "{code} in {everything}");
+        }
+        assert!(read.text.contains("Save your backup codes") && read.text.contains("Order 1234"), "{}", read.text);
+        assert!(element(&read, "Continue").sensitive.is_none());
+        assert!(!read.elements.iter().any(|element| element.name.contains("Copy")), "{:?}", read.elements);
+        // Claktory reads them by the ref, as errand_handoff does.
+        let (object, _) = page.element(&read.document, &block.reference).await.expect("the block");
+        let text = page
+            .call("Runtime.callFunctionOn", json!({"objectId": object, "functionDeclaration": "function () { return this.innerText; }", "returnByValue": true}))
+            .await
+            .unwrap();
+        assert!(text["result"]["value"].as_str().unwrap().contains("p0za-77rt"));
+        // The page renames its heading: still withheld.
+        page.call("Runtime.evaluate", json!({"expression": "document.querySelector('h1').textContent = 'Done'; document.title = 'Done'"})).await.unwrap();
+        let Ok(Answer::Page(again)) = page.read(4096).await else { panic!("a page") };
+        assert!(!format!("{again:?}").contains("a8f2-91kd"), "{again:?}");
+        // An authenticator's setup key (Fugo 42966): an otpauth:// address
+        // anywhere, or a typed key on a page about it, is never read nor
+        // offered, even as a ref.
+        let frame = page.frame().await.unwrap();
+        let qr = r#"<title>Authenticator</title><h1>Scan this with your authenticator app</h1>
+            <a href="otpauth://totp/Shop:matt?secret=JBSWY3DPEHPK3PXP&issuer=Shop"><img alt="otpauth://totp/Shop:matt?secret=JBSWY3DPEHPK3PXP" src="data:image/png;base64,AAAA"></a>
+            <p>otpauth://totp/Shop:matt?secret=JBSWY3DPEHPK3PXP</p><button>Next</button>"#;
+        let typed = r#"<title>Authenticator</title><p>Can't scan it? Enter this key instead:</p>
+            <p><code>jbsw y3dp ehpk 3pxp</code></p><p>Then type the 6-digit code it shows.</p><button>Verify</button>"#;
+        for html in [qr, typed] {
+            page.call("Page.setDocumentContent", json!({"frameId": frame.id, "html": html})).await.unwrap();
+            let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
+            let everything = format!("{read:?}").to_lowercase();
+            assert!(!everything.contains("jbswy3dp") && !everything.contains("jbsw y3dp") && !everything.contains("otpauth"), "{read:?}");
+            assert!(!read.elements.iter().any(|element| element.name.contains("withheld")), "{:?}", read.elements);
+            assert!(read.elements.iter().any(|element| element.name == "Next" || element.name == "Verify"), "{:?}", read.elements);
+        }
+        // Secco 43242: a key drawn a group per element, a key with no
+        // digits, a key in a read-only field's value, and a field named by
+        // a withheld block: none read nor offered; a sentence of
+        // four-letter words on the same page is read.
+        let spans = r#"<title>Set up your authenticator</title>
+            <p id=k>Your key: <span>JBSW</span><span>Y3DP</span><span>EHPK</span><span>3PXP</span></p>
+            <p>Or this one: <b>QWRT XKPL MNBV ZCSD</b></p>
+            <input readonly aria-label="Setup key" value="KRSX G5CT MVRX AAAA">
+            <input aria-labelledby=k placeholder="Code"><p>Then type this code from your app.</p><button>Verify</button>"#;
+        page.call("Page.setDocumentContent", json!({"frameId": frame.id, "html": spans})).await.unwrap();
+        let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
+        let everything = format!("{read:?}").to_lowercase();
+        for part in ["jbsw", "ehpk", "3pxp", "qwrt", "zcsd", "krsx", "setup key"] {
+            assert!(!everything.contains(part), "{part} in {read:?}");
+        }
+        assert!(read.text.contains("this code from your app"), "{}", read.text);
+        assert!(read.elements.iter().any(|element| element.name == "Code"), "{:?}", read.elements);
+        assert!(read.elements.iter().any(|element| element.name == "Verify"), "{:?}", read.elements);
+        // A page about codes too long to scan whole: nothing past the scan
+        // is read, and the reader says so.
+        let long = "<title>Backup codes</title><h1>Your backup codes</h1><div id=filler></div><ul id=late><li>z9q1-4kfp</li><li>m2xc-81bd</li><li>r5tt-0lqa</li><li>h7wn-3ys2</li></ul>";
+        page.call("Page.setDocumentContent", json!({"frameId": frame.id, "html": long})).await.unwrap();
+        page.call(
+            "Runtime.evaluate",
+            json!({"expression": "const f = document.getElementById('filler'); for (let i = 0; i < 6000; i++) { const s = document.createElement('span'); s.textContent = 'word '; f.appendChild(s); }"}),
+        )
+        .await
+        .unwrap();
+        let Ok(Answer::Page(long)) = page.read(65536).await else { panic!("a page") };
+        assert!(!format!("{long:?}").contains("z9q1"), "{long:?}");
+        assert!(long.unsupported.iter().any(|why| why.contains("too long to check")), "{:?}", long.unsupported);
+        // An ordinary page with numbers isn't touched.
+        let orders = "<title>Orders</title><p>Orders 1001 1002 1003 1004 1005 shipped.</p>";
+        page.call("Page.setDocumentContent", json!({"frameId": frame.id, "html": orders})).await.unwrap();
+        let Ok(Answer::Page(plain)) = page.read(4096).await else { panic!("a page") };
+        assert!(plain.text.contains("1004") && plain.elements.is_empty(), "{plain:?}");
         let _ = std::fs::remove_dir_all(&profile);
     }
 

@@ -11,3 +11,5 @@ analyzer:
     - ios/**
     # The Android host: Kotlin and Gradle, no Dart.
     - android/**
+    # The Windows host: C++ and CMake, no Dart.
+    - windows/**

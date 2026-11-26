@@ -7,6 +7,7 @@ import 'package:flutter/widgets.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'backend.dart';
+import 'claktory_identity.dart' show claktoryNameInText;
 import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
@@ -483,6 +484,21 @@ class _SignInStepState extends State<SignInStep> {
             'Sign in to Claktory',
             "Enter your email address. You'll get a code to sign in.",
           ),
+          // What the backend says of the sign-out it just made (one
+          // claktory.com hasn't heard yet, say): this sheet covers Settings,
+          // where it's said too.
+          if (_account.state ==
+                  ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SIGNED_OUT &&
+              _account.problem.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: Space.l),
+              child: Text(
+                _account.problem,
+                key: const ValueKey('sign-in-notice'),
+                style: TypeScale.of(context).caption
+                    .copyWith(color: Palette.of(context).textMuted),
+              ),
+            ),
           TextField(
             key: const ValueKey('email'),
             controller: _email,
@@ -1050,7 +1066,7 @@ class _SignOutFormState extends State<_SignOutForm> {
     title: 'Sign out of Claktory?',
     body:
         'Your agents keep working. If Claktory restarts before you sign in '
-        'again, unlock your secrets with your recovery key.',
+        'again, unlock your secrets with this Claktory\'s recovery key.',
     fields: const [],
     error: _error,
     submitLabel: 'Sign out',
@@ -1173,6 +1189,7 @@ class _RecoveryKeyState extends State<_RecoveryKey> {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     final key = _key;
+    final name = claktoryNameInText(AppScope.of(context));
     final copy = key == null
         ? null
         : Button(
@@ -1188,18 +1205,20 @@ class _RecoveryKeyState extends State<_RecoveryKey> {
     final stacked = isPhoneLayout(context) && largeText(context);
     final words = [
       Text(
-        'Your recovery key',
+        'Recovery key for $name',
         style: type.emphasis.copyWith(color: palette.text),
       ),
       const SizedBox(height: Space.s),
       Text(
-        'Your secrets open with two halves together: one on the computer '
-        'Claktory runs on and one at claktory.com. Neither can open them '
-        'alone. This key opens them by itself, if claktory.com can\'t be '
-        'reached, your account is gone or that computer\'s half is lost.\n\n'
+        'Each Claktory has its own recovery key, even on the same account: '
+        'this one opens the secrets on $name, and no other key does.\n\n'
+        'Those secrets open with two halves together: one on $name and one '
+        'at claktory.com. This key opens them by itself, if claktory.com '
+        'can\'t be reached, your account is gone or the half on $name is '
+        'lost.\n\n'
         'Keep it in a password manager, such as Passwords or 1Password, or '
         'on paper kept somewhere safe. Never share it: anyone with it can '
-        'open your secrets.',
+        'open these secrets.',
         style: type.body.copyWith(color: palette.textMuted),
       ),
       const SizedBox(height: Space.xl),

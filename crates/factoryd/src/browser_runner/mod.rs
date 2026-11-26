@@ -30,6 +30,7 @@ mod downloads;
 mod fence;
 mod input;
 mod keysym;
+pub(crate) mod lease;
 mod live;
 #[cfg(target_os = "linux")]
 mod namespace;
@@ -201,6 +202,8 @@ struct Runner {
     session: Option<Session>,
     /// Each Chrome's number, so what an earlier one says is told apart.
     generation: u64,
+    /// The agent's input lease, while one is held (R11.3 #5).
+    lease: Option<lease::Lease>,
 }
 
 impl Runner {
@@ -221,7 +224,7 @@ impl Runner {
         // SAFETY: getuid can't fail.
         let own = unsafe { libc::getuid() };
         let uid = std::env::var("SUDO_UID").ok().and_then(|uid| uid.parse().ok()).unwrap_or(own);
-        Runner { out, events, tell, uid, session: None, generation: 0 }
+        Runner { out, events, tell, uid, session: None, generation: 0, lease: None }
     }
 
     fn run(mut self) -> ExitCode {
@@ -231,6 +234,7 @@ impl Runner {
                 return ExitCode::SUCCESS;
             }
             self.downloads_tick();
+            self.lease_tick();
             let event = match self.events.recv_timeout(Duration::from_secs(1)) {
                 Ok(event) => event,
                 Err(RecvTimeoutError::Timeout) => {
@@ -249,15 +253,7 @@ impl Runner {
                     }
                 }
                 Event::BadControl => self.error("a control message that doesn't read was dropped"),
-                Event::Cdp(message) => {
-                    // Undriven, Chrome has no pipe: there's nowhere for it to go.
-                    if let Some(chrome) = self.session.as_mut().and_then(|session| session.chrome.as_mut())
-                        && chrome.mode == Mode::Driven
-                        && let Err(why) = chrome.send(&message)
-                    {
-                        self.error(&why);
-                    }
-                }
+                Event::Cdp(message) => self.cdp(&message),
                 Event::Screen(channel, payload) => {
                     if let Some(live) = self.session.as_ref().and_then(|session| session.live.as_ref()) {
                         live.screen(channel, payload);
@@ -286,6 +282,7 @@ impl Runner {
                         && session.chrome.as_mut().is_some_and(|chrome| chrome.ended())
                     {
                         session.chrome = None;
+                        self.end_lease("Chrome ended");
                         self.out.report(&Report::ChromeExited { code });
                         reap_orphans(self.session.as_ref());
                     }
@@ -313,6 +310,7 @@ impl Runner {
                 }
             }
             Control::Mode { mode, url } => {
+                self.end_lease("Chrome changed mode");
                 let Some(session) = &mut self.session else {
                     self.error("start the browser first");
                     return false;
@@ -418,8 +416,64 @@ impl Runner {
                     downloads.delete(&guid);
                 }
             }
+            Control::LeaseInput { id, for_ms } => {
+                self.end_lease("another lease replaced it");
+                if self.driven() {
+                    self.lease = Some(lease::Lease::new(id, self.generation, for_ms, Instant::now()));
+                    self.out.report(&Report::Lease { id, granted: true, why: String::new() });
+                } else {
+                    self.out.report(&Report::Lease { id, granted: false, why: "the browser isn't driven".to_owned() });
+                }
+            }
+            Control::EndLease { id } => {
+                if self.lease.as_ref().is_some_and(|lease| lease.id == id) {
+                    self.lease = None;
+                }
+            }
         }
         false
+    }
+
+    /// Whether a driven Chrome of this generation runs.
+    fn driven(&self) -> bool {
+        self.session.as_ref().and_then(|session| session.chrome.as_ref()).is_some_and(|chrome| chrome.mode == Mode::Driven)
+    }
+
+    /// One of the host's DevTools messages: on to a driven Chrome, unless
+    /// it's input outside a lease (answered at once) or can't be judged.
+    /// Undriven, Chrome has no pipe: there's nowhere for it to go.
+    fn cdp(&mut self, message: &[u8]) {
+        if !self.driven() {
+            return;
+        }
+        let generation = self.generation;
+        let leased = self.lease.as_ref().is_some_and(|lease| lease.live(generation, Instant::now()));
+        match lease::judge(message, leased) {
+            lease::Verdict::Forward => {
+                let sent = self.session.as_mut().and_then(|session| session.chrome.as_mut()).map(|chrome| chrome.send(message));
+                if let Some(Err(why)) = sent {
+                    self.error(&why);
+                }
+            }
+            lease::Verdict::Refuse(reply) => self.out.send(Channel::Cdp, reply),
+            lease::Verdict::Drop(why) => self.error(why),
+        }
+    }
+
+    /// Ends the lease, if any, saying why.
+    fn end_lease(&mut self, why: &str) {
+        if let Some(lease) = self.lease.take() {
+            self.out.report(&Report::LeaseEnded { id: lease.id, why: why.to_owned() });
+        }
+    }
+
+    /// A lease past its time, or for a Chrome that's gone, ends.
+    fn lease_tick(&mut self) {
+        let generation = self.generation;
+        if self.lease.as_ref().is_some_and(|lease| !lease.live(generation, Instant::now())) {
+            let why = if self.lease.as_ref().is_some_and(|lease| lease.generation != generation) { "Chrome started again" } else { "it ran out" };
+            self.end_lease(why);
+        }
     }
 
     fn root(&self, profile: &str) -> PathBuf {
@@ -480,6 +534,7 @@ impl Runner {
 
     /// Quits Chrome as a person would, then the screen.
     fn stop_session(&mut self) -> u64 {
+        self.end_lease("the browser stopped");
         let started = Instant::now();
         if let Some(session) = self.session.take() {
             finish(session);

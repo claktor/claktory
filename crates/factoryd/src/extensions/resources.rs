@@ -534,9 +534,9 @@ fn stray(about: &str) -> Option<(u32, u64)> {
 }
 
 /// Takes a sample in: history, alerts and the panel. An alert goes to the
-/// admin agents with the extension on that can run (friend bug #13: Rivet
-/// looks after the machine, not every agent); with none, Claktory tells
-/// the person itself.
+/// agents that look after the machine (`keepers`: the admin agents unless
+/// the person chose otherwise, and those they chose, friend bugs #13 and
+/// #54); with none, Claktory tells the person itself.
 fn record(factory: &Arc<Factory>, sampled: sample::Sample) {
     let time = now_ms();
     let (lines, config) = {
@@ -646,46 +646,53 @@ fn kept(factory: &Factory) {
     }
 }
 
-/// The agents that look after the machine: admin agents (such as Rivet)
-/// with the extension on, in no archived project, whose model can run.
+/// The agents that look after the machine (`hearers`) and are told now.
 fn keepers(factory: &Factory) -> Vec<String> {
     let inner = factory.lock();
-    let config = &inner.config;
-    config
+    hearers(&inner.config, &inner.models).into_iter().filter(|hears| hears.told).map(|hears| hears.agent_id).collect()
+}
+
+/// Whether `agent` is one that hears the alerts (`hearers`), told or not:
+/// its prompt says so.
+fn hears(config: &Config, agent: &AgentConfig) -> bool {
+    (config.resources.alerts_to_admins && super::switch(agent, super::agents::ID, "admin"))
+        || config.resources.alert_agents.contains(&agent.id)
+}
+
+/// Everyone who hears the alerts (friend bug #54), as Settings shows them:
+/// the admin agents (such as Rivet) while `resources.alerts_to_admins` is
+/// on, then the agents chosen in `resources.alert_agents`, each once; told
+/// when it has the extension on, is in no archived project, and its model
+/// can run.
+pub(crate) fn hearers(config: &Config, models: &[v1::Model]) -> Vec<v1::ResourceAlertAgent> {
+    use v1::ResourceAlertHeld as Held;
+    let admins = config
         .agents
         .iter()
-        .filter(|agent| {
-            enabled(agent, ID)
-                && super::switch(agent, super::agents::ID, "admin")
-                && !config.archived(agent)
-                && inner.models.iter().any(|model| model.id == agent.model)
-        })
-        .map(|agent| agent.id.clone())
-        .collect()
+        .filter(|agent| config.resources.alerts_to_admins && super::switch(agent, super::agents::ID, "admin"))
+        .map(|agent| (agent.id.clone(), true));
+    let chosen = config.resources.alert_agents.iter().map(|id| (id.clone(), false));
+    let mut listed: Vec<v1::ResourceAlertAgent> = Vec::new();
+    for (id, admin) in admins.chain(chosen) {
+        if listed.iter().any(|hears| hears.agent_id == id) {
+            continue;
+        }
+        let held = match config.agent(&id) {
+            None => Held::NoAgent,
+            Some(agent) if !enabled(agent, ID) => Held::ResourcesOff,
+            Some(agent) if config.archived(agent) => Held::Archived,
+            Some(agent) if !models.iter().any(|model| model.id == agent.model) => Held::NoModel,
+            Some(_) => Held::Unspecified,
+        };
+        listed.push(v1::ResourceAlertAgent { agent_id: id, told: held == Held::Unspecified, held: held.into(), admin });
+    }
+    listed
 }
 
 /// No agent can take an alert: Claktory notifies the person itself, as an
 /// alert, in its own words.
 fn tell_person(factory: &Factory, config: &Config, what: String) {
-    let settings = crate::notify::settings(factory);
-    let note = crate::notify::Note {
-        kind: v1::NotifyKind::Alert,
-        source: "host".to_owned(),
-        who: config.claktory_name(),
-        what,
-        tainted: false,
-        urgent: false,
-        mode: crate::notify::Mode::Default,
-        from_phone: false,
-        agent_id: String::new(),
-        pipe_id: String::new(),
-        chat_id: String::new(),
-        seq: 0,
-        device_id: String::new(),
-        waits: String::new(),
-        share_id: String::new(),
-    };
-    let delivered = crate::notify::deliver(factory, config, &settings, note);
+    let delivered = crate::notify::host_alert(factory, config, &what);
     tracing::info!(?delivered, "told the person about the machine itself: no admin agent can take it");
 }
 
@@ -946,8 +953,8 @@ impl Extension for Resources {
         true
     }
 
-    fn prompt(&self, _factory: &Factory, _inner: &Inner, agent: &AgentConfig) -> Vec<PromptSection> {
-        let text = if super::switch(agent, super::agents::ID, "admin") { PROMPT } else { PROMPT_LOOK };
+    fn prompt(&self, _factory: &Factory, inner: &Inner, agent: &AgentConfig) -> Vec<PromptSection> {
+        let text = if hears(&inner.config, agent) { PROMPT } else { PROMPT_LOOK };
         vec![PromptSection::static_text(text)]
     }
 

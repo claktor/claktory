@@ -95,6 +95,14 @@ class RecordingBackend extends Backend {
       _record(ClientMessage(selectAgent: SelectAgent(agentId: agentId)));
 
   @override
+  Future<void> setFocusMode(bool on) =>
+      _record(ClientMessage(setFocusMode: SetFocusMode(on: on)));
+
+  @override
+  Future<void> watchTranscript(WatchTranscript? target) =>
+      _record(ClientMessage(watchTranscript: target ?? WatchTranscript()));
+
+  @override
   Future<void> paneOpened(String agentId, String paneId) => _record(
     ClientMessage(
       paneOpened: PaneOpened(agentId: agentId, paneId: paneId),
@@ -1926,6 +1934,16 @@ class RecordingBackend extends Backend {
   Future<void> stopPipeShare(String shareId) =>
       _record(ClientMessage(stopPipeShare: StopPipeShare(shareId: shareId)));
 
+  @override
+  Future<void> setPipeShareExpiry(String shareId, int lastsS) => _record(
+    ClientMessage(
+      setPipeShareExpiry: SetPipeShareExpiry(
+        shareId: shareId,
+        lastsS: Int64(lastsS),
+      ),
+    ),
+  );
+
   /// What [openPipeShare] answers: a share's one-time addresses.
   PipeShareOpened Function(String shareId) pipeShareOpened = (id) =>
       PipeShareOpened(
@@ -2082,6 +2100,10 @@ class RecordingBackend extends Backend {
     );
     return pipeMessagesById['$pipeId/$seq'];
   }
+
+  @override
+  Future<void> readAlerts(List<String> ids) =>
+      _record(ClientMessage(readAlerts: ReadAlerts(ids: ids)));
 
   @override
   Future<void> answerAsk(
@@ -2260,14 +2282,19 @@ class FakeUpdater extends AppUpdater {
   final replaced = <String>[];
   final discarded = <String>[];
 
+  /// Whether the download was told the connection is relayed, as it began.
+  bool? relayedAtStart;
+
   @override
   Future<StagedApp> stage({
     required FetchAppPiece fetch,
     required String version,
     required String bundlePath,
     ValueListenable<bool>? connected,
+    ValueListenable<bool>? relayed,
     void Function(UpdateProgress progress)? onProgress,
   }) async {
+    relayedAtStart = relayed?.value;
     await fetch(version, 0);
     for (final step in steps) {
       onProgress?.call(step);

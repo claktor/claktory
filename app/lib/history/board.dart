@@ -332,7 +332,15 @@ extension on _HistoryBoardState {
         for (var i = 0; i < scene.pads.length; i++)
           if (still.padOpacity[i] > 0)
             Positioned.fromRect(
-              rect: scene.pads[i].rect,
+              // Unnamed, only its portal, under its line (Lucy).
+              rect: words.pad(i).isEmpty
+                  ? Rect.fromLTWH(
+                      pipeTop(scene.pads[i].rect).dx - padHeight / 2,
+                      scene.pads[i].rect.top,
+                      padHeight,
+                      padHeight,
+                    )
+                  : scene.pads[i].rect,
               child: Opacity(
                 opacity:
                     still.padOpacity[i] * (frame.pads[i] == dotted ? 0.7 : 1),
@@ -496,11 +504,19 @@ class _PadView extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: Space.xs),
+      // Unnamed, only its portal, in a pill its own height.
+      padding: label.isEmpty
+          ? EdgeInsets.zero
+          : const EdgeInsets.symmetric(horizontal: Space.xs),
       decoration: BoxDecoration(
-        color: palette.canvas,
+        // The pipe's color washed in, so it reads as a way out of the board
+        // even small (Bruno 44370), as the Map's pad does.
+        color: Color.alphaBlend(
+          pipeColor.withValues(alpha: 0.12),
+          palette.canvas,
+        ),
         borderRadius: BorderRadius.circular(padHeight / 2),
-        border: Border.all(color: pipeColor),
+        border: Border.all(color: pipeColor, width: 1.5),
       ),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -625,15 +641,15 @@ class _LinesPainter extends CustomPainter {
     for (var i = 0; i < scene.pads.length; i++) {
       if (frame.pads[i] == hidden) continue;
       final rect = scene.pads[i].rect;
-      final paint = _stroke(
-        focus == null ? pipeColor : pipeColor.withValues(alpha: 0.3),
-        1.5,
-      );
-      final x = rect.center.dx;
-      final end = Offset(x, rect.top - mapCell * 2);
+      final color = focus == null
+          ? pipeColor
+          : pipeColor.withValues(alpha: 0.3);
+      final top = pipeTop(rect);
+      final end = top - const Offset(0, pipeReach);
       canvas
-        ..drawLine(Offset(x, rect.top), end, paint)
-        ..drawCircle(end, 2.5, paint);
+        ..drawLine(top, end, _stroke(color, 2))
+        ..drawCircle(end, 3.5, Paint()..color = palette.canvas)
+        ..drawCircle(end, 3.5, _stroke(color, 2));
     }
 
     for (final pass in [false, true]) {
@@ -709,10 +725,13 @@ class _GlowPainter extends CustomPainter {
     if (scene == null || timeline == null) return;
     final t = controller.time.value;
     final now = controller.playAt(t);
+    final project = controller.project;
+    bool out(int chip) =>
+        project != null && !scene.chipInProject(chip, t, project);
     for (final node in controller.log.runStarts.keys) {
       if (!controller.log.running(node, t)) continue;
       final chip = scene.chipAt(node, t);
-      if (chip < 0) continue;
+      if (chip < 0 || out(chip)) continue;
       // A node newer than the overview isn't drawn until it's read again.
       if (node > timeline.nodes.length ||
           spanAt(timeline.nodeSpans[node - 1], t) == null) {
@@ -727,7 +746,7 @@ class _GlowPainter extends CustomPainter {
       final age = now - controller.playAt(renamed);
       if (age < 0 || age > 1.4) continue;
       final chip = scene.chipAt(node, t);
-      if (chip < 0) continue;
+      if (chip < 0 || out(chip)) continue;
       // In over 0.3 s, held 0.3 s, out over 0.8 s, as a highlight is.
       final strength = reduced
           ? 0.7
@@ -789,6 +808,7 @@ class _PulsePainter extends CustomPainter {
       historyAt: controller.historyAt,
       t: controller.time.value,
       budget: budget,
+      project: controller.project,
     );
     for (final tick in ticks) {
       final rect = scene.chips[tick.chip].rect;
@@ -800,6 +820,40 @@ class _PulsePainter extends CustomPainter {
       );
     }
     for (final pulse in pulses) {
+      // Through a pipe: never drawn over its pad, which brightens as the
+      // message crosses it (Lucy).
+      final padRect = pulse.pad >= 0 && pulse.pad < scene.pads.length
+          ? scene.pads[pulse.pad].rect
+          : null;
+      if (padRect != null) {
+        final seconds = pulseSeconds(pulse.route.length);
+        final ring = pipeTop(padRect) - const Offset(0, pipeReach);
+        final inward = (pulse.route.start - ring).distance < 1;
+        final crossing = pulse.route.length <= 0
+            ? 0.0
+            : pipeReach / pulse.route.length;
+        final at = inward ? crossing : 1 - crossing;
+        final away = (pulse.at - at).abs() * seconds;
+        if (away < 0.15) {
+          // Its portal: the pad as a video without names draws it too.
+          final top = pipeTop(padRect);
+          canvas.drawRRect(
+            RRect.fromRectAndRadius(
+              Rect.fromLTWH(
+                top.dx - padHeight / 2,
+                padRect.top,
+                padHeight,
+                padHeight,
+              ),
+              const Radius.circular(padHeight / 2),
+            ),
+            Paint()
+              ..color = pipeColor.withValues(alpha: 0.12 * (1 - away / 0.15)),
+          );
+        }
+      }
+      bool over(Offset point) =>
+          padRect != null && padRect.deflate(0.5).contains(point);
       final color = switch (pulse.kind) {
         PulseKind.agent => mapLayerColor(MapLayer.messages, palette),
         PulseKind.person => palette.text,
@@ -807,14 +861,28 @@ class _PulsePainter extends CustomPainter {
         PulseKind.pipe => pipeColor,
         PulseKind.app => mapLayerColor(MapLayer.apps, palette),
       };
-      final strength = pulse.quiet ? 0.55 : 1.0;
+      final pipe = pulse.kind == PulseKind.pipe;
+      final strength = pulse.quiet && !pipe ? 0.55 : 1.0;
       final radius =
-          (pulse.quiet ? 2.0 : 3.0) +
+          (pipe
+              ? 3.5
+              : pulse.quiet
+              ? 2.0
+              : 3.0) +
           (pulse.count > 1 ? 1.2 * math.log(pulse.count) / math.ln2 : 0);
+      // Through a pipe: a halo, so a message to or from another Claktory
+      // is noticed (Bruno 44370).
+      if (pipe && !over(pulse.point)) {
+        canvas.drawCircle(
+          pulse.point,
+          math.min(radius, 8) * 2.4,
+          Paint()..color = pipeColor.withValues(alpha: 0.22),
+        );
+      }
       // A short tail behind it.
       for (var k = 3; k >= 1; k--) {
         final behind = pulse.at - 0.025 * k;
-        if (behind < 0) continue;
+        if (behind < 0 || over(pulse.route.at(behind))) continue;
         canvas.drawCircle(
           pulse.route.at(behind),
           radius * (1 - 0.18 * k),
@@ -822,6 +890,7 @@ class _PulsePainter extends CustomPainter {
         );
       }
       final point = pulse.point;
+      if (over(point)) continue;
       canvas.drawCircle(
         point,
         math.min(radius, 8),

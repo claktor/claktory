@@ -22,6 +22,23 @@ pub fn has_cache_lifetime(model: &Model) -> bool {
 }
 const ERROR_PREFIX: &str = "OpenAI API error";
 
+/// How a provider speaking OpenAI's Responses API differs from OpenAI.
+pub(crate) struct Dialect {
+    /// Begins its errors.
+    pub prefix: &'static str,
+    /// It takes OpenAI's session headers (`session_id`, `x-client-request-id`).
+    pub session_headers: bool,
+    /// What a failed answer (status, body) means when the provider says it
+    /// its own way: its message, with the response marked as it needs (a
+    /// usage limit, say), instead of OpenAI's form of the error and marks.
+    pub failed: Option<Failed>,
+}
+
+/// `Dialect::failed`: (status, body, the response so far) to what to say.
+pub(crate) type Failed = fn(u16, &str, &mut AssistantMessage) -> Option<String>;
+
+const OPENAI: Dialect = Dialect { prefix: ERROR_PREFIX, session_headers: true, failed: None };
+
 pub fn provider() -> Provider {
     let mut provider = Provider::new(
         "openai",
@@ -46,14 +63,14 @@ fn compat_str<'a>(model: &'a Model, key: &str) -> Option<&'a str> {
     model.compat.as_ref().and_then(|compat| compat.get(key)).and_then(Value::as_str)
 }
 
-fn request_headers(model: &Model, options: &StreamOptions) -> Vec<(String, String)> {
+fn request_headers(model: &Model, options: &StreamOptions, dialect: &Dialect) -> Vec<(String, String)> {
     let mut headers = vec![user_agent_header()];
     for (name, value) in model.headers.iter().flatten() {
         if let Some(value) = value.as_str() {
             assign(&mut headers, name, value);
         }
     }
-    if let Some(session) = &options.session_id {
+    if let Some(session) = options.session_id.as_ref().filter(|_| dialect.session_headers) {
         let detected = if model.provider == "openrouter" || model.base_url.contains("openrouter.ai") { "openrouter" } else { "openai" };
         let format = compat_str(model, "sessionAffinityFormat").unwrap_or(detected);
         if format == "openrouter" {
@@ -109,25 +126,37 @@ fn build_params(
 }
 
 pub fn stream_simple(model: &Model, context: LlmContext, options: StreamOptions) -> Result<EventStream, Error> {
+    stream_dialect(model, context, options, &OPENAI)
+}
+
+/// `stream_simple` for a provider speaking OpenAI's Responses API its own way.
+pub(crate) fn stream_dialect(
+    model: &Model,
+    context: LlmContext,
+    options: StreamOptions,
+    dialect: &'static Dialect,
+) -> Result<EventStream, Error> {
     client_api_key(model, &options, &[])?;
     let max_tokens = clamp_max_tokens(model, &context, model.max_tokens);
     let effort = stream_effort(model, &options);
-    spawn_stream!(model, options, output = pending_message(&model), output, request(&context, &options, max_tokens, effort))
+    spawn_stream!(model, options, output = pending_message(&model), output, request(&context, &options, max_tokens, effort, dialect))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn request(
     model: &Model,
     context: &LlmContext,
     options: &StreamOptions,
     max_tokens: u64,
     effort: Option<ThinkingLevel>,
+    dialect: &Dialect,
     output: &mut AssistantMessage,
     sink: &EventSink,
 ) -> Result<(), String> {
     let api_key = client_api_key(model, options, &[]).map_err(|error| error.to_string())?;
     let params = build_params(model, context, options, max_tokens, effort)?;
     let mut builder = client().post(format!("{}/responses", model.base_url.trim_end_matches('/')));
-    for (name, value) in request_headers(model, options) {
+    for (name, value) in request_headers(model, options, dialect) {
         builder = builder.header(name, value);
     }
     builder = builder
@@ -140,19 +169,22 @@ async fn request(
     if !(200..300).contains(&status) {
         crate::accounts::mark_retry_after(output, response.headers());
         let body = response_text(response).await;
+        if let Some(said) = dialect.failed.and_then(|failed| failed(status, &body, output)) {
+            return Err(said);
+        }
         if crate::accounts::credit_error(status, &body) {
             crate::accounts::mark_out_of_credit(output);
         } else if crate::accounts::refused_error(status, &body) {
             crate::accounts::mark_refused(output, &crate::accounts::Refused::default());
         }
-        return Err(status_error(status, &body).format(Some(ERROR_PREFIX)));
+        return Err(status_error(status, &body).format(Some(dialect.prefix)));
     }
     sink.push(StreamEvent::Start { partial: output.clone() });
     let mut parser = Parser::new(output.clone());
     let outcome = read_sdk_stream(response, &options.cancel, |event| parser.handle(&event, sink, model)).await;
     let outcome = match outcome {
         Ok(()) => parser.finish(),
-        Err(StreamFailure::Api(error)) => Err(error.format(Some(ERROR_PREFIX))),
+        Err(StreamFailure::Api(error)) => Err(error.format(Some(dialect.prefix))),
         Err(StreamFailure::Other(message)) => Err(message),
     };
     *output = parser.output;

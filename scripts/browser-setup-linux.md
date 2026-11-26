@@ -15,7 +15,7 @@ when one is missing. Nothing here is used by anything but the browser.
 | The runner's folder | `/opt/claktory-browser` | the person, 0755 | factoryd copies itself here before each start |
 | The runner | `/opt/claktory-browser/runner` | the person, 0755 | `factoryd browser-runner`, run through sudo |
 | Sudo, exactly the runner | `/etc/sudoers.d/claktory-browser`, one line: `<person> ALL=(claktory-browser) NOPASSWD: /opt/claktory-browser/runner browser-runner *` | root, 0440, checked with `visudo -cf` | |
-| Chrome's policy | `/etc/opt/chrome/policies/managed/claktory.json`: `{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"]}` | root, 0644 | pages can't reach the local network (Fugo) |
+| Chrome's policy | `/etc/opt/chrome/policies/managed/claktory.json`: `{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"], "BrowserSignin": 0, "SyncDisabled": true, "CommandLineFlagSecurityWarningsEnabled": false}` | root, 0644 | pages can't reach the local network (Fugo); Chrome never signs in or syncs itself, so a sign-in on a site stays that site's cookies (Fugo 41236); no warning bar for the runner's fixed flags, which hide `navigator.webdriver` while an agent drives (R11, Fugo 41700) |
 | The firewall | nft table `inet claktory_browser`, from `/etc/claktory-browser.nft` (a copy of `scripts/claktory-browser.nft`), loaded by `/usr/local/sbin/claktory-browser-nft` (a copy of `scripts/claktory-browser-nft.sh`, which the Mac image uses too), which replaces only that table in one transaction and then adds the resolvers in `/etc/resolv.conf` to its sets `dns4` and `dns6` (port 53 only), run by `claktory-browser-nft.service` (`/etc/systemd/system`, enabled, wanted by sysinit.target, before network-pre.target, restarted with nftables.service). `/etc/nftables.conf` and nftables.service are left alone (Fugo) | root; 0644, the loader 0755 | the browser's user reaches neither this machine nor the local network, by any protocol |
 | User namespaces for the runner (Ubuntu 23.10 and later: only where `kernel.apparmor_restrict_unprivileged_userns` exists) | `/etc/apparmor.d/claktory-browser-runner`: profile `claktory-browser-runner` for `/opt/claktory-browser/runner`, `flags=(unconfined)`, `userns,` only; loaded with `apparmor_parser -r`, checked with `aa-status` | root, 0644 | the runner's private /proc and PID 1 (Ghiaccio). It lets the runner, and anything the person puts at its path, make user namespaces (Fugo accepted) |
 | X's socket folder | `/tmp/.X11-unix`, made at every boot by `/etc/tmpfiles.d/claktory-browser.conf` (`D! /tmp/.X11-unix 1777 root root -`, as systemd's own x11.conf); each runner mounts its own tmpfs over it and refuses to start unless it's a real folder of root's | root, 1777 | two browsers can't take each other's display (Ghiaccio, Fugo 38527) |
@@ -61,7 +61,7 @@ let
   person = "NAME";  # who runs Claktory
   # Google's Chrome where nixpkgs has it for this machine, Chromium elsewhere.
   chrome = if lib.meta.availableOn pkgs.stdenv.hostPlatform pkgs.google-chrome then pkgs.google-chrome else pkgs.chromium;
-  policy = builtins.toJSON { LocalNetworkAccessRestrictionsEnabled = true; LocalNetworkAccessBlockedForUrls = [ "*" ]; };
+  policy = builtins.toJSON { LocalNetworkAccessRestrictionsEnabled = true; LocalNetworkAccessBlockedForUrls = [ "*" ]; BrowserSignin = 0; SyncDisabled = true; CommandLineFlagSecurityWarningsEnabled = false; };
 in {
   nixpkgs.config.allowUnfree = true;
   environment.systemPackages = with pkgs; [ chrome xvfb xorg.xauth ];
@@ -94,7 +94,7 @@ resolver.
 ## The Mac image
 
 On a Mac the browser runs in a Linux VM (Apple's `container`), from the image
-`ghcr.io/claktor/claktory-browser`, pinned by digest in each release's factoryd
+`ghcr.io/claktory/claktory-browser`, pinned by digest in each release's factoryd
 (`CLAKTORY_BROWSER_IMAGE` at build time). `scripts/browser-image.sh` builds it:
 a base (`browser-image/Containerfile.base`: Ubuntu 24.04 arm64, Chrome from
 Google's repository with the key pinned as above, Xvfb, xauth, the fonts, the

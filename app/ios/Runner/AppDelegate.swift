@@ -49,6 +49,9 @@ import UniformTypeIdentifiers
     // A short grace after leaving the app, so a quick trip to another app
     // keeps the connections (BackgroundGrace.swift).
     BackgroundGrace.register(with: messenger)
+    // A website a friend shares over a pipe, opened in Safari's view over
+    // the app, which keeps its forward up (ShareBrowser.swift, W6).
+    ShareBrowser.register(with: messenger)
     // Copying a secret, such as a device's add code, marked sensitive and
     // expiring (app/macos/Runner/SecretClipboard.swift).
     SecretClipboard.register(with: messenger)
@@ -68,6 +71,10 @@ import UniformTypeIdentifiers
     let links = engineBridge.pluginRegistry.registrar(forPlugin: "Links")!
     links.addSceneDelegate(Links.shared)
     Links.shared.register(with: links.messenger())
+    // The Home Screen's quick action, Needs you (QuickActions, below).
+    let quick = engineBridge.pluginRegistry.registrar(forPlugin: "QuickActions")!
+    quick.addSceneDelegate(QuickActions.shared)
+    QuickActions.shared.register(with: quick.messenger())
     // Notifications: those the app shows, its pushes' taps, and this
     // iPhone's registration for pushes (Notifications.swift, Push.swift).
     Notifications.shared.register(with: messenger)
@@ -133,7 +140,12 @@ import UniformTypeIdentifiers
         Camera.openSettings()
         result(nil)
       case "pickAttachments":
-        Attach.shared.pick(result)
+        Attach.shared.pick(call.arguments as? [String: Any] ?? [:], result)
+      case "takePhoto":
+        Attach.shared.takePhoto(result)
+      case "pickedAttachments":
+        // A staged pick's copies, once they're done (Attach.picked).
+        Attach.shared.picked(call.arguments as? [String: Any] ?? [:], result)
       case "webAuth":
         WebAuth.shared.start(call.arguments, result)
       case "cancelWebAuth":
@@ -291,15 +303,50 @@ import UniformTypeIdentifiers
 /// system's menu (Choose from Photos, Choose from Files, and Paste image when the
 /// clipboard holds a picture), then its picker. What's chosen is copied
 /// into this app's temporary folder, and the copies' paths answered.
-final class Attach: NSObject, PHPickerViewControllerDelegate, UIDocumentPickerDelegate {
+///
+/// Staged (`staged`: the message box's and a card's paperclip), a photo
+/// pick answers as soon as the picker closes with what's on its way,
+/// `{"pending": ["photo", "video", …], "ticket": n}`, for the app to show
+/// at once: copying a big photo, or one still in iCloud, takes seconds.
+/// `pickedAttachments` with that ticket answers the paths once every copy
+/// is done. Anything else answers the paths themselves, as before.
+final class Attach: NSObject, PHPickerViewControllerDelegate, UIDocumentPickerDelegate,
+  UIImagePickerControllerDelegate, UINavigationControllerDelegate
+{
   static let shared = Attach()
 
   private var result: FlutterResult?
 
-  func pick(_ result: @escaping FlutterResult) {
+  /// The pick under way answers what's on its way first.
+  private var staged = false
+
+  /// Staged picks' copies, by ticket: their paths once done, or the
+  /// answer waiting for them.
+  private var copying = [Int: (paths: [String]?, waiting: FlutterResult?)]()
+  private var nextTicket = 0
+
+  /// `rect`, the paperclip's [left, top, width, height] in the window, is
+  /// what an iPad's menu points at; without it the menu shows in the middle,
+  /// with no arrow. An iPad's action sheet is a popover, and UIKit ends the
+  /// app if one has nothing to come from (Zucchero row 630).
+  func pick(_ args: [String: Any], _ result: @escaping FlutterResult) {
     guard self.result == nil, let presenter = Self.presenter() else { return result([]) }
     self.result = result
+    staged = args["staged"] as? Bool ?? false
     let menu = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
+    // The rect is in the Flutter view's points, so the window's root view
+    // is what it's measured in, whatever is presented over it (Sorbet 45406).
+    let flutterView = presenter.view.window?.rootViewController?.view ?? presenter.view!
+    Self.anchor(menu, in: flutterView, rect: args["rect"] as? [Double])
+    // First, as Apple's own apps have it; only where the caller takes a
+    // photo (`camera`) and this device has a camera. Chosen, the menu
+    // closes and the app explains the camera before it opens (takePhoto).
+    if args["camera"] as? Bool == true, Self.hasCamera {
+      menu.addAction(
+        UIAlertAction(title: "Take Photo", style: .default) { _ in
+          self.fail("take_photo", "Take Photo was chosen.")
+        })
+    }
     menu.addAction(
       UIAlertAction(title: "Choose from Photos", style: .default) { _ in self.photos(presenter) })
     menu.addAction(
@@ -311,9 +358,125 @@ final class Attach: NSObject, PHPickerViewControllerDelegate, UIDocumentPickerDe
     presenter.present(menu, animated: true)
   }
 
+  /// Points [menu]'s popover (an iPad's) at [rect] in [view], or at the
+  /// middle of [view] with no arrow when there's no rect.
+  static func anchor(_ menu: UIAlertController, in view: UIView, rect: [Double]?) {
+    guard let popover = menu.popoverPresentationController else { return }
+    popover.sourceView = view
+    if let r = rect, r.count == 4 {
+      popover.sourceRect = CGRect(x: r[0], y: r[1], width: r[2], height: r[3])
+    } else {
+      popover.sourceRect = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 0, height: 0)
+      popover.permittedArrowDirections = []
+    }
+  }
+
   private func finish(_ paths: [String]) {
     result?(paths)
     result = nil
+  }
+
+  private func fail(_ code: String, _ message: String) {
+    result?(FlutterError(code: code, message: message, details: nil))
+    result = nil
+  }
+
+  /// A camera to take a photo with; in a build other than the App Store's,
+  /// the camera's pretend switch (Camera.Pretend) stands in for one, so QA
+  /// reaches Take Photo in the Simulator.
+  static var hasCamera: Bool {
+    UIImagePickerController.isSourceTypeAvailable(.camera) || Camera.Pretend.current() != nil
+  }
+
+  /// Takes a photo with the camera, full screen, once the app has
+  /// explained it and the person allowed it: its path, a JPEG named for
+  /// when it was taken ("Photo 2026-11-26 at 21.04.33.jpg"), or [] when
+  /// cancelled. camera_denied without the camera's permission (the app asks
+  /// first), camera_unavailable without a camera.
+  func takePhoto(_ result: @escaping FlutterResult) {
+    guard self.result == nil, let presenter = Self.presenter() else { return result([]) }
+    guard Self.hasCamera else {
+      return result(
+        FlutterError(code: "camera_unavailable", message: "This device has no camera.", details: nil))
+    }
+    guard Camera.access() == "granted" else {
+      return result(
+        FlutterError(code: "camera_denied", message: "Claktory may not use the camera.", details: nil))
+    }
+    self.result = result
+    guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+      // The pretend camera (QA, in the Simulator): a picture made here.
+      return save(Self.pretendPhoto())
+    }
+    let camera = UIImagePickerController()
+    camera.sourceType = .camera
+    camera.cameraCaptureMode = .photo
+    camera.delegate = self
+    camera.modalPresentationStyle = .fullScreen
+    presenter.present(camera, animated: true)
+  }
+
+  func imagePickerController(
+    _ picker: UIImagePickerController,
+    didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
+  ) {
+    picker.dismiss(animated: true)
+    guard let image = info[.originalImage] as? UIImage else { return finish([]) }
+    save(image)
+  }
+
+  func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+    picker.dismiss(animated: true)
+    finish([])
+  }
+
+  /// [image] as a JPEG in a folder of its own, off the main thread: written
+  /// from the picture itself, so it carries no location.
+  private func save(_ image: UIImage) {
+    let name = "Photo \(Self.photoTime.string(from: Date())).jpg"
+    DispatchQueue.global(qos: .userInitiated).async {
+      var failure: (String, String)?
+      var path: String?
+      if let data = image.jpegData(compressionQuality: 0.9), let folder = Self.folder() {
+        let file = folder.appendingPathComponent(name)
+        do {
+          try data.write(to: file)
+          path = file.path
+        } catch let error as NSError
+          where error.domain == NSCocoaErrorDomain && error.code == NSFileWriteOutOfSpaceError
+        {
+          failure = ("no_space", "This device hasn't room for the photo.")
+        } catch {
+          failure = ("copy_failed", "The photo couldn't be kept (\(error)).")
+        }
+      } else {
+        failure = ("copy_failed", "The photo couldn't be made into a JPEG.")
+      }
+      DispatchQueue.main.async {
+        if let path { self.finish([path]) } else if let failure { self.fail(failure.0, failure.1) }
+      }
+    }
+  }
+
+  /// "2026-11-26 at 21.04.33", local time, as a Mac names a screenshot.
+  static let photoTime: DateFormatter = {
+    let format = DateFormatter()
+    format.locale = Locale(identifier: "en_US_POSIX")
+    format.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+    return format
+  }()
+
+  /// What the pretend camera "takes": a plain picture saying so.
+  private static func pretendPhoto() -> UIImage {
+    let size = CGSize(width: 1200, height: 900)
+    return UIGraphicsImageRenderer(size: size).image { context in
+      UIColor.systemTeal.setFill()
+      context.fill(CGRect(origin: .zero, size: size))
+      let words = "Pretend photo" as NSString
+      words.draw(
+        at: CGPoint(x: 80, y: 400),
+        withAttributes: [.font: UIFont.boldSystemFont(ofSize: 96), .foregroundColor: UIColor.white])
+    }
   }
 
   private func photos(_ presenter: UIViewController) {
@@ -324,11 +487,33 @@ final class Attach: NSObject, PHPickerViewControllerDelegate, UIDocumentPickerDe
     presenter.present(picker, animated: true)
   }
 
+  /// What a staged pick's copies came to: their paths, as soon as every
+  /// copy is done; none for a ticket that isn't one.
+  func picked(_ args: [String: Any], _ result: @escaping FlutterResult) {
+    guard let ticket = args["ticket"] as? Int, let entry = copying[ticket] else {
+      return result([String]())
+    }
+    if let paths = entry.paths {
+      copying[ticket] = nil
+      result(paths)
+    } else {
+      copying[ticket] = (nil, result)
+    }
+  }
+
+  /// What a chosen item is, for the app to say what's on its way.
+  static func kind(of provider: NSItemProvider) -> String {
+    if provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) { return "video" }
+    if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) { return "photo" }
+    return "file"
+  }
+
   func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
     picker.dismiss(animated: true)
     let group = DispatchGroup()
     let lock = NSLock()
     var paths = [Int: String]()
+    var kinds = [String]()
     for (index, item) in results.enumerated() {
       let provider = item.itemProvider
       // JPEG when the photo offers it: agents read it more readily than HEIC.
@@ -337,6 +522,7 @@ final class Attach: NSObject, PHPickerViewControllerDelegate, UIDocumentPickerDe
         let type = types.first(where: { $0 == UTType.jpeg.identifier })
           ?? types.first(where: { $0 == UTType.png.identifier }) ?? types.first
       else { continue }
+      kinds.append(Self.kind(of: provider))
       let ext = UTType(type)?.preferredFilenameExtension
       let name = (provider.suggestedName ?? "Photo") + (ext.map { ".\($0)" } ?? "")
       group.enter()
@@ -350,7 +536,25 @@ final class Attach: NSObject, PHPickerViewControllerDelegate, UIDocumentPickerDe
         group.leave()
       }
     }
-    group.notify(queue: .main) { self.finish(paths.keys.sorted().compactMap { paths[$0] }) }
+    func copied() -> [String] { paths.keys.sorted().compactMap { paths[$0] } }
+    guard staged, !kinds.isEmpty else {
+      return group.notify(queue: .main) { self.finish(copied()) }
+    }
+    // What's on its way shows now; the paths follow (picked).
+    let ticket = nextTicket
+    nextTicket += 1
+    copying[ticket] = (nil, nil)
+    result?(["pending": kinds, "ticket": ticket] as [String: Any])
+    result = nil
+    group.notify(queue: .main) {
+      let done = copied()
+      if let waiting = self.copying[ticket]?.waiting {
+        self.copying[ticket] = nil
+        waiting(done)
+      } else {
+        self.copying[ticket] = (done, nil)
+      }
+    }
   }
 
   private func files(_ presenter: UIViewController) {
@@ -528,6 +732,83 @@ final class Links: NSObject, FlutterSceneLifeCycleDelegate {
   // A link while the app runs (or wakes from the background).
   func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) -> Bool {
     open(URLContexts.map(\.url))
+  }
+}
+
+/// The Home Screen's quick action (touch and hold the app's icon): Needs
+/// you, with how many wait as its subtitle (#514 §7.2). Its words come
+/// from the app ("set"), which keeps them current while it runs; a tap
+/// opens Needs you ("open"), or waits for the app to listen when it
+/// launched the app.
+final class QuickActions: NSObject, FlutterSceneLifeCycleDelegate {
+  static let shared = QuickActions()
+
+  /// The one quick action's type.
+  static let needsYou = "needs-you"
+
+  private var channel: FlutterMethodChannel?
+  private var listening = false
+  private var waiting = false
+
+  func register(with messenger: FlutterBinaryMessenger) {
+    let channel = FlutterMethodChannel(name: "factory/quick_actions", binaryMessenger: messenger)
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard let self else { return result(nil) }
+      switch call.method {
+      case "listen":
+        // Whether a tap opened the app before it listened.
+        self.listening = true
+        result(self.waiting)
+        self.waiting = false
+      case "set":
+        let words = call.arguments as? [String: Any] ?? [:]
+        let title = words["title"] as? String ?? ""
+        let subtitle = words["subtitle"] as? String ?? ""
+        UIApplication.shared.shortcutItems =
+          title.isEmpty
+          ? []
+          : [
+            UIApplicationShortcutItem(
+              type: Self.needsYou, localizedTitle: title,
+              localizedSubtitle: subtitle.isEmpty ? nil : subtitle,
+              icon: UIApplicationShortcutIcon(systemImageName: "tray"), userInfo: nil)
+          ]
+        result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+    self.channel = channel
+  }
+
+  @discardableResult
+  func take(_ item: UIApplicationShortcutItem) -> Bool {
+    guard item.type == Self.needsYou else { return false }
+    if listening, let channel {
+      channel.invokeMethod("open", arguments: item.type)
+    } else {
+      waiting = true
+    }
+    return true
+  }
+
+  // The app launched by the quick action.
+  func scene(
+    _ scene: UIScene, willConnectTo session: UISceneSession,
+    options connectionOptions: UIScene.ConnectionOptions?
+  ) -> Bool {
+    guard let item = connectionOptions?.shortcutItem else { return false }
+    return take(item)
+  }
+
+  // The quick action while the app runs, or wakes from the background.
+  func windowScene(
+    _ windowScene: UIWindowScene, performActionFor shortcutItem: UIApplicationShortcutItem,
+    completionHandler: @escaping (Bool) -> Void
+  ) -> Bool {
+    let took = take(shortcutItem)
+    completionHandler(took)
+    return took
   }
 }
 

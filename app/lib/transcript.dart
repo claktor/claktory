@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show File, FileSystemException;
 import 'dart:math' as math;
 
 import 'package:clock/clock.dart';
@@ -18,6 +19,7 @@ import 'device_kind.dart' show thisDeviceKindForHello, thisDeviceNameForHello;
 import 'characters/character.dart';
 import 'checklist_reply.dart' show ChecklistRef;
 import 'avatar.dart';
+import 'card_files.dart' show CardUploads;
 import 'chats.dart' show ChatScope, chatTitle;
 import 'report_reply.dart' show ReportedReply, reportReply;
 import 'connectors.dart' show ConnectProposalCard;
@@ -39,6 +41,7 @@ import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'message_time.dart';
 import 'markdown.dart';
 import 'outbox.dart';
+import 'paced.dart' show FilePreviews, PreviewBox;
 import 'ask_card.dart';
 import 'pairing_card.dart';
 import 'pipe_start.dart' show PipeStartCard;
@@ -54,6 +57,9 @@ import 'tell_rivet.dart';
 import 'selection.dart';
 import 'tool_views.dart';
 import 'visible_codes.dart';
+import 'viewers/file_cache.dart'
+    show FileCache, originalVariant, previewVariant;
+import 'viewers/previews.dart' show previewScreen, touchDevice;
 import 'voice.dart';
 import 'waiting.dart' show EntryReveal, EntryTarget;
 
@@ -1650,14 +1656,7 @@ class _TranscriptViewState extends State<TranscriptView>
                 alignment: WrapAlignment.end,
                 spacing: Space.xs,
                 runSpacing: Space.xs,
-                children: [
-                  for (final file in files.skip(1))
-                    AttachmentChip(
-                      name: file.file.name,
-                      size: file.file.size,
-                      progress: file.done == null ? file.progress : null,
-                    ),
-                ],
+                children: [for (final file in files.skip(1)) _Uploading(file)],
               ),
             ],
           ],
@@ -1682,14 +1681,7 @@ class _TranscriptViewState extends State<TranscriptView>
               alignment: WrapAlignment.end,
               spacing: Space.xs,
               runSpacing: Space.xs,
-              children: [
-                for (final file in files)
-                  AttachmentChip(
-                    name: file.file.name,
-                    size: file.file.size,
-                    progress: file.done == null ? file.progress : null,
-                  ),
-              ],
+              children: [for (final file in files) _Uploading(file)],
             ),
           ],
         ),
@@ -2722,7 +2714,11 @@ class _EntryViewState extends State<EntryView> {
         Space.l,
       ),
       Entry_Kind.proposal => (
-        ProposalCard(key: ValueKey(entry.proposal.id), entry.proposal),
+        ProposalCard(
+          key: ValueKey(entry.proposal.id),
+          entry.proposal,
+          agentId: _shownAgentId(context),
+        ),
         Space.l,
       ),
       Entry_Kind.event =>
@@ -2790,7 +2786,7 @@ class _EntryViewState extends State<EntryView> {
           key: ValueKey(entry.secretRequest.id),
           entry.secretRequest,
           // An admin agent's conversation shows the secret it collects.
-          shownIn: AppScope.of(context).transcript.agentId,
+          shownIn: _shownAgentId(context),
         ),
         Space.l,
       ),
@@ -2821,7 +2817,7 @@ class _EntryViewState extends State<EntryView> {
         AskPersonCard(
           key: ValueKey(seq),
           entry.askPerson,
-          agentId: AppScope.of(context).transcript.agentId,
+          agentId: _shownAgentId(context),
           seq: seq,
           from: AskAnsweredFrom.ASK_ANSWERED_FROM_CONVERSATION,
         ),
@@ -2831,7 +2827,7 @@ class _EntryViewState extends State<EntryView> {
         AppGrantCard(
           key: ValueKey(entry.appGrant.id),
           entry.appGrant,
-          agentId: AppScope.of(context).transcript.agentId,
+          agentId: _shownAgentId(context),
           seq: seq,
         ),
         Space.l,
@@ -2840,7 +2836,7 @@ class _EntryViewState extends State<EntryView> {
         AppAccessCard(
           key: ValueKey(entry.appAccess.id),
           entry.appAccess,
-          agentId: AppScope.of(context).transcript.agentId,
+          agentId: _shownAgentId(context),
           seq: seq,
         ),
         Space.l,
@@ -3151,15 +3147,107 @@ class SentFiles extends StatelessWidget {
   );
 }
 
+/// A file going with one of the person's messages, as it uploads: a
+/// picture shows from this device at once, in the frame it will keep once
+/// sent, with how far it got along its foot (Matt: a photo sent took
+/// seconds to show); any other file, or a picture that can't be shown, is
+/// a chip with its progress.
+class _Uploading extends StatelessWidget {
+  const _Uploading(this.file);
+
+  final OutgoingFile file;
+
+  @override
+  Widget build(BuildContext context) {
+    final local = file.file;
+    final progress = file.done == null ? file.progress : null;
+    final chip = AttachmentChip(
+      name: local.name,
+      size: local.size,
+      progress: progress,
+    );
+    if (!local.isImage) return chip;
+    final palette = Palette.of(context);
+    return Semantics(
+      image: true,
+      label: shownName(local.name),
+      child: _PictureFrame(
+        child: Stack(
+          children: [
+            _LocalPicture(local.path, failed: chip),
+            if (progress != null)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: FractionallySizedBox(
+                    widthFactor: progress.clamp(0, 1),
+                    child: Container(height: 3, color: palette.signal),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A sent picture's frame: 240×180 at most, 10px radius and a hairline.
+class _PictureFrame extends StatelessWidget {
+  const _PictureFrame({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 240, maxHeight: 180),
+      decoration: BoxDecoration(
+        color: palette.sidebar,
+        borderRadius: BorderRadius.circular(Radii.panel),
+        border: Border.all(color: palette.hairline),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: child,
+    );
+  }
+}
+
+/// The picture at [path] on this device, decoded no bigger than its frame
+/// needs; [failed] where it can't be shown.
+class _LocalPicture extends StatelessWidget {
+  const _LocalPicture(this.path, {required this.failed});
+
+  final String path;
+  final Widget failed;
+
+  @override
+  Widget build(BuildContext context) => Image.file(
+    File(path),
+    cacheWidth: (240 * MediaQuery.devicePixelRatioOf(context)).round(),
+    fit: BoxFit.contain,
+    gaplessPlayback: true,
+    errorBuilder: (context, error, stack) => failed,
+  );
+}
+
 /// A picture sent with a message, fitted in 240×180 at most, 10px radius
-/// and a hairline; it opens in the image viewer. One too big to fetch here,
-/// or that can't be shown, is a chip instead.
+/// and a hairline; it opens in the image viewer. One sent from this device
+/// this session shows from its file here, nothing coming back over the
+/// link; any other comes as a preview made for this screen (#379), never
+/// the whole original, kept on the device for next time (#446). One that
+/// can't be shown is a chip instead.
 class _Thumbnail extends StatefulWidget {
   const _Thumbnail(this.file);
 
   final Attachment file;
 
-  /// The biggest picture fetched for a thumbnail.
+  /// The biggest picture fetched for a thumbnail, where its Claktory
+  /// sends the original rather than a preview.
   static const maxBytes = 8 * 1024 * 1024;
 
   /// Pictures fetched, by path, the latest last: a conversation scrolled
@@ -3173,44 +3261,89 @@ class _Thumbnail extends StatefulWidget {
 
 class _ThumbnailState extends State<_Thumbnail> {
   Uint8List? _bytes;
+  String? _local;
   var _failed = false;
+  var _asked = false;
 
   @override
-  void initState() {
-    super.initState();
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_asked) return;
+    _asked = true;
     final file = widget.file;
+    final backend = AppScope.of(context);
+    // Sent from here this session: its file is still on this device.
+    final local =
+        backend.outbox.localCopyOf(file.path) ??
+        backend.chatOutbox.localCopyOf(file.path) ??
+        CardUploads.of(backend).localCopyOf(file.path);
+    if (local != null && File(local).existsSync()) {
+      _local = local;
+      return;
+    }
     final cached = _Thumbnail._cache.remove(file.path);
     if (cached != null) {
       _Thumbnail._cache[file.path] = cached;
       _bytes = cached;
-    } else if (file.size.toInt() > _Thumbnail.maxBytes) {
-      _failed = true;
-    } else {
-      unawaited(_fetch());
+      return;
     }
+    unawaited(_fetch(backend, MediaQuery.devicePixelRatioOf(context)));
   }
 
-  Future<void> _fetch() async {
+  /// The preview asked for: on a phone or tablet the one made for its
+  /// screen, the image viewer's own, so tapping it opens at once from the
+  /// same copy; elsewhere one the size of the frame.
+  PreviewBox _box(double ratio) => touchDevice
+      ? previewScreen()
+      : (width: (240 * ratio).round(), height: (180 * ratio).round());
+
+  Future<void> _fetch(Backend backend, double ratio) async {
+    final path = widget.file.path;
+    final box = _box(ratio);
+    final variants = [previewVariant(box), originalVariant];
     try {
-      final content = await AppScope.of(context)
-          .readFile(widget.file.path, maxBytes: _Thumbnail.maxBytes);
+      // Kept on this device and still that version.
+      final cache = FileCache.of(backend);
+      final found = await cache?.lookup(backend, path, variants);
+      if (found != null) {
+        try {
+          return _show((await found.kept.read()).data);
+        } on FileSystemException {
+          await cache?.drop(path);
+        }
+      }
+      final content = await backend.readFile(
+        path,
+        preview: box,
+        maxBytes: _Thumbnail.maxBytes,
+      );
       if (content.error.isNotEmpty || content.truncated) {
         throw const RequestFailure('');
       }
-      final bytes = Uint8List.fromList(content.data);
-      _Thumbnail._cache[widget.file.path] = bytes;
-      while (_Thumbnail._cache.length > _Thumbnail._kept) {
-        _Thumbnail._cache.remove(_Thumbnail._cache.keys.first);
-      }
-      if (mounted) setState(() => _bytes = bytes);
+      _show(content.data);
+      unawaited(
+        cache?.keepRead(
+          path,
+          content.isPreview ? variants.first : originalVariant,
+          content,
+        ),
+      );
     } on RequestFailure {
       if (mounted) setState(() => _failed = true);
     }
   }
 
+  void _show(List<int> data) {
+    final bytes = data is Uint8List ? data : Uint8List.fromList(data);
+    _Thumbnail._cache[widget.file.path] = bytes;
+    while (_Thumbnail._cache.length > _Thumbnail._kept) {
+      _Thumbnail._cache.remove(_Thumbnail._cache.keys.first);
+    }
+    if (mounted) setState(() => _bytes = bytes);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final palette = Palette.of(context);
     final file = widget.file;
     void open() => openFile(context, file.path);
     final chip = AttachmentChip(
@@ -3220,21 +3353,17 @@ class _ThumbnailState extends State<_Thumbnail> {
     );
     if (_failed) return chip;
     final bytes = _bytes;
+    final local = _local;
     final ratio = MediaQuery.devicePixelRatioOf(context);
     return Semantics(
       image: true,
       label: shownName(file.name),
       child: Pressable(
         onTap: open,
-        builder: (context, hovered) => Container(
-          constraints: const BoxConstraints(maxWidth: 240, maxHeight: 180),
-          decoration: BoxDecoration(
-            color: palette.sidebar,
-            borderRadius: BorderRadius.circular(Radii.panel),
-            border: Border.all(color: palette.hairline),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: bytes == null
+        builder: (context, hovered) => _PictureFrame(
+          child: local != null
+              ? _LocalPicture(local, failed: chip)
+              : bytes == null
               // On its way: the room it will most likely take.
               ? const SizedBox(width: 160, height: 120)
               : Image.memory(
@@ -3966,12 +4095,23 @@ class _AgentMessageState extends State<_AgentMessage> {
   }
 }
 
+/// The agent whose conversation [context] is in: the view's own (focus
+/// mode's Context shows one that isn't selected, #514), or the selected
+/// one's. In a chat, as before, the selected agent's (its cards go by the
+/// chat).
+String _shownAgentId(BuildContext context) {
+  final selected = AppScope.of(context).transcript.agentId;
+  if (ChatScope.chatIdOf(context) != null) return selected;
+  final shown = ToolViewScope.of(context)?.agentId ?? '';
+  return shown.isEmpty ? selected : shown;
+}
+
 /// Reply [seq] of the conversation around [context]: a chat's, or its
 /// agent's.
 ReportedReply _reportedIn(BuildContext context, int seq) {
   final chatId = ChatScope.chatIdOf(context) ?? '';
   return (
-    agentId: chatId.isEmpty ? AppScope.of(context).transcript.agentId : '',
+    agentId: chatId.isEmpty ? _shownAgentId(context) : '',
     chatId: chatId,
     seq: seq,
   );

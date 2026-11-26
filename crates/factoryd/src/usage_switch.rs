@@ -137,6 +137,8 @@ fn maker_and_name(model: &str) -> Option<(&str, &str)> {
     match provider {
         "openrouter" => id.split_once('/'),
         "openai-codex" => Some(("openai", id)),
+        // The Grok subscription's models are xAI's, as OpenRouter names them.
+        "grok" => Some(("x-ai", id)),
         _ => Some((provider, id)),
     }
 }
@@ -463,14 +465,29 @@ pub(crate) fn view(factory: &Factory, inner: &Inner) -> View {
 // ---- switching ----
 
 /// Gives an agent or chat a model and effort, as the person changing them
-/// would, without forgetting a switch.
-async fn run_on(factory: &Arc<Factory>, id: &str, model: &str, effort: &str) -> Result<(), RequestError> {
+/// would, without forgetting a switch; `why` is what the agent hears of it.
+async fn run_on(factory: &Arc<Factory>, id: &str, model: &str, effort: &str, why: &str) -> Result<(), RequestError> {
     if crate::chats::is_chat(id) {
         crate::chats::set_model(factory, id, model, effort)
     } else {
-        let change = AgentChange { model: Some(model), effort: Some(effort), ..AgentChange::default() };
+        let change = AgentChange { model: Some(model), effort: Some(effort), why: Some(why), ..AgentChange::default() };
         factory.update_agent_keeping_switch(id, change).await
     }
+}
+
+/// What the person did from the device `from`, as an agent hears it (friend
+/// bug #43): "Matt changed it on Matt's Mac". `person`: `Config::person`.
+pub(crate) fn by_person(person: &str, from: &factory_agent::SentFrom, did: &str) -> String {
+    match from.device.trim() {
+        "" => format!("{person} {did} in the app"),
+        device => format!("{person} {did} on {device}"),
+    }
+}
+
+/// "Anthropic" for an agent's account there: whose usage reached its limit.
+fn noun_of(inner: &Inner, provider_id: &str) -> String {
+    let name = inner.providers.iter().find(|known| known.id == provider_id).map_or(provider_id, |known| known.name.as_str());
+    factory_agent::accounts::account_noun(provider_id, name)
 }
 
 fn name_of(factory: &Factory, inner: &Inner, id: &str) -> Option<String> {
@@ -490,8 +507,16 @@ fn as_seen(expected: u32, now: usize, what: &str) -> Result<(), RequestError> {
 }
 
 /// ContinueOnAlternative.
-pub(crate) async fn continue_on(factory: &Arc<Factory>, id: &str, all_waiting: bool, expected: u32) -> Result<(), RequestError> {
-    let moves: Vec<(String, String, String, Before, i64)> = {
+/// `by`: the device the person chose it on; None when it's Claktory's own
+/// choice (`continue_by_itself`).
+pub(crate) async fn continue_on(
+    factory: &Arc<Factory>,
+    id: &str,
+    all_waiting: bool,
+    expected: u32,
+    by: Option<&factory_agent::SentFrom>,
+) -> Result<(), RequestError> {
+    let moves: Vec<(String, String, String, Before, i64, String)> = {
         let inner = factory.lock();
         let Some(name) = name_of(factory, &inner, id) else { return Err(RequestError::UnknownAgent(id.to_owned())) };
         let view = view(factory, &inner);
@@ -523,11 +548,21 @@ pub(crate) async fn continue_on(factory: &Arc<Factory>, id: &str, all_waiting: b
                 let alternative = view.alternatives.get(&id)?;
                 let (model, effort) = model_and_effort(factory, &inner, &id)?;
                 let reset = inner.agents.get(&id).and_then(|runtime| runtime.usage_wait.as_ref()).map_or(0, |wait| wait.until_ms);
-                Some((id, alternative.model.clone(), alternative.effort.clone(), Before { model, effort }, reset))
+                let noun = noun_of(&inner, provider_of(&model));
+                let to = &alternative.provider_name;
+                let why = match by {
+                    Some(from) => {
+                        format!("{}, while your {noun} usage is at its limit", by_person(inner.config.person(), from, &format!("chose {to}")))
+                    }
+                    None => format!(
+                        "Claktory continued on {to} by itself, since your {noun} usage reached its limit and Continue automatically is on"
+                    ),
+                };
+                Some((id, alternative.model.clone(), alternative.effort.clone(), Before { model, effort }, reset, why))
             })
             .collect()
     };
-    for (id, model, effort, before, reset) in moves {
+    for (id, model, effort, before, reset, why) in moves {
         // The first switch is what it goes back to.
         let kept = factory.usage_switches.kept().get(&id).cloned();
         let before = kept.as_ref().map_or(before, |kept| kept.before.clone());
@@ -537,7 +572,7 @@ pub(crate) async fn continue_on(factory: &Arc<Factory>, id: &str, all_waiting: b
         let bounced = factory.usage_switches.came_back().get(&id).is_some_and(|at| now - at < BOUNCE_MS);
         let hold_until = if bounced { if reset > now { reset } else { i64::MAX } } else { 0 };
         let hold_until = kept.map_or(hold_until, |kept| kept.hold_until.max(hold_until));
-        run_on(factory, &id, &model, &effort).await?;
+        run_on(factory, &id, &model, &effort, &why).await?;
         factory.usage_switches.set(&factory.store, &id, before, hold_until);
     }
     factory.broadcast_workspace(&factory.lock());
@@ -546,7 +581,14 @@ pub(crate) async fn continue_on(factory: &Arc<Factory>, id: &str, all_waiting: b
 }
 
 /// SwitchBack.
-pub(crate) async fn switch_back(factory: &Arc<Factory>, id: &str, all: bool, expected: u32) -> Result<(), RequestError> {
+pub(crate) async fn switch_back(
+    factory: &Arc<Factory>,
+    id: &str,
+    all: bool,
+    expected: u32,
+    by: &factory_agent::SentFrom,
+) -> Result<(), RequestError> {
+    let why = by_person(factory.lock().config.person(), by, "switched you back");
     let backs: Vec<(String, Before)> = {
         let inner = factory.lock();
         let Some(name) = name_of(factory, &inner, id) else { return Err(RequestError::UnknownAgent(id.to_owned())) };
@@ -569,7 +611,7 @@ pub(crate) async fn switch_back(factory: &Arc<Factory>, id: &str, all: bool, exp
         backs
     };
     for (id, before) in backs {
-        run_on(factory, &id, &before.model, &before.effort).await?;
+        run_on(factory, &id, &before.model, &before.effort, &why).await?;
         factory.usage_switches.forget(&factory.store, &id);
     }
     factory.broadcast_workspace(&factory.lock());
@@ -637,7 +679,7 @@ pub(crate) async fn continue_by_itself(factory: &Arc<Factory>, id: &str) -> bool
         let noun = factory_agent::accounts::account_noun(provider_id, name);
         format!("Continued on {} automatically: your {noun} usage reached its limit.", alternative.provider_name)
     };
-    if let Err(error) = continue_on(factory, id, false, 0).await {
+    if let Err(error) = continue_on(factory, id, false, 0, None).await {
         tracing::warn!(agent = %id, ?error, "could not continue on another provider by itself");
         return false;
     }
@@ -659,7 +701,7 @@ pub(crate) async fn come_back(factory: &Arc<Factory>) {
         return;
     }
     let now = crate::transcript::now_ms();
-    let backs: Vec<(String, Before, String)> = {
+    let backs: Vec<(String, Before, String, String)> = {
         let inner = factory.lock();
         let kept: Vec<(String, Kept)> = factory.usage_switches.kept().iter().map(|(id, kept)| (id.clone(), kept.clone())).collect();
         kept.into_iter()
@@ -673,16 +715,17 @@ pub(crate) async fn come_back(factory: &Arc<Factory>) {
                 }
                 let noun = factory_agent::accounts::account_noun(provider_id, &provider.name);
                 let notice = format!("Back on {}: your {noun} usage has room again.", shown_name(&listed.name));
-                Some((id, before, notice))
+                let why = format!("Claktory switched you back by itself, since your {noun} usage has room again");
+                Some((id, before, notice, why))
             })
             .collect()
     };
     if backs.is_empty() {
         return;
     }
-    for (id, before, notice) in backs {
+    for (id, before, notice, why) in backs {
         tracing::info!(agent = %id, to = %before.model, "going back by itself: its provider has room again");
-        if let Err(error) = run_on(factory, &id, &before.model, &before.effort).await {
+        if let Err(error) = run_on(factory, &id, &before.model, &before.effort, &why).await {
             tracing::warn!(agent = %id, ?error, "could not go back to the provider it switched from");
             continue;
         }
@@ -737,6 +780,7 @@ mod tests {
         assert_eq!(kind("anthropic/claude-opus-4-5-20251101"), kind("openrouter/anthropic/claude-opus-4.5"));
         assert_eq!(kind("openai-codex/gpt-5.6-sol"), kind("openrouter/openai/gpt-5.6-sol"));
         assert_eq!(kind("openai-codex/gpt-5.6-sol"), kind("openai/gpt-5.6-sol"));
+        assert_eq!(kind("grok/grok-4.7"), kind("openrouter/x-ai/grok-4.7"));
         assert_ne!(kind("anthropic/claude-opus-4-7"), kind("openrouter/anthropic/claude-opus-4.7-fast"));
         assert_eq!(kind("openrouter/anthropic/claude-opus-4.7:batch"), None);
     }

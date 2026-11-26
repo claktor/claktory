@@ -645,3 +645,48 @@ async fn a_moment_of_a_video_is_told_in_words() {
     let anchors: Vec<AnchorState> = back.threads.iter().map(v1::Thread::anchor).collect();
     assert_eq!(anchors, [AnchorState::Anchored, AnchorState::Outdated], "the one made on an earlier version stays so");
 }
+
+/// #540: a Markdown file shown in a pane is watched with the pictures it
+/// shows in place, so a picture that changes while the file doesn't is read
+/// again (FileChanged for the picture's own path).
+#[tokio::test]
+async fn a_picture_a_shown_markdown_file_shows_is_watched_with_it() {
+    let dir = temp_dir();
+    let (addr, _factory) = start_with(&dir, Scripted::signed_in()).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Writer", "")).await;
+    let png = |tail: &[u8]| [&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A][..], tail].concat();
+    std::fs::create_dir_all(dir.join("site/img")).expect("folder");
+    std::fs::write(dir.join("site/img/shot.png"), png(b"one")).expect("write");
+    std::fs::write(dir.join("site/notes.md"), "# Notes\n\nSee ![shot](img/shot.png) here.\n").expect("write");
+    let site = std::fs::canonicalize(dir.join("site")).expect("path").display().to_string();
+    let notes = format!("{site}/notes.md");
+    let picture = format!("{site}/img/shot.png");
+    let leaf = |id: &str, kind: &str, path: &str| v1::ViewNode {
+        id: id.into(),
+        node: Some(v1::view_node::Node::Leaf(v1::ViewLeaf { kind: kind.into(), path: path.into(), ..Default::default() })),
+    };
+    let split = v1::ViewSplit {
+        axis: v1::ViewAxis::Row.into(),
+        children: vec![leaf("chat", "chat", ""), leaf("pane-1", "text", &notes)],
+        weights: Vec::new(),
+    };
+    let root = v1::ViewNode { id: "split".into(), node: Some(v1::view_node::Node::Split(split)) };
+    apply_request(
+        &mut client,
+        &mut view,
+        client_message::Body::SetLayout(v1::SetLayout { agent_id: "writer".into(), root: Some(root), ..Default::default() }),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    std::fs::write(dir.join("site/img/shot.png"), png(b"two, bigger")).expect("write");
+    let changed = until(&mut client, &mut view, |body| match body {
+        Body::FileChanged(changed) if changed.path == picture => Some(changed.clone()),
+        Body::FileChanged(changed) if changed.path == notes => panic!("the file itself didn't change: {changed:?}"),
+        _ => None,
+    })
+    .await;
+    assert!(!changed.sha256.is_empty() && changed.by_agent_id.is_empty(), "{changed:?}");
+}

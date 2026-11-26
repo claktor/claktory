@@ -141,7 +141,6 @@ pub(crate) async fn serve_stream<S: Stream>(
         let knock = crate::remote::Knock {
             token: &hello.token,
             assertion: &hello.assertion,
-            can_confirm: hello.can_confirm,
             kind,
             name: &hello.device_name,
             platform: &hello.platform,
@@ -156,6 +155,9 @@ pub(crate) async fn serve_stream<S: Stream>(
                     match wait_to_be_allowed(&mut socket, &factory, message.id, &waiting, peer).await? {
                         Pairing::Allowed => match factory.authorize(&knock, peer).await {
                             Authorized::Connected(connected) => connected,
+                            // Allowed, and asked for the owner's assertion
+                            // first (let in by a program: #527 S3).
+                            Authorized::Turned(refusal) => return refuse(socket, message.id, refusal).await,
                             _ => {
                                 let reason = "This device was allowed, then removed.";
                                 return reject(socket, message.id, ErrorCode::Unauthorized, reason).await;
@@ -171,10 +173,10 @@ pub(crate) async fn serve_stream<S: Stream>(
                     let reason = "This device is no longer allowed to connect. Add it again in Settings → Devices on the computer that runs Claktory.";
                     return reject(socket, message.id, ErrorCode::Unauthorized, reason).await;
                 }
-                Authorized::Turned(code, reason) => {
-                    let why = code.as_str_name().trim_start_matches("ERROR_CODE_").to_lowercase();
+                Authorized::Turned(refusal) => {
+                    let why = refusal.code().as_str_name().trim_start_matches("ERROR_CODE_").to_lowercase();
                     crate::diagnostics::turned_away(&factory, via, &why);
-                    return reject(socket, message.id, code, reason).await;
+                    return refuse(socket, message.id, refusal).await;
                 }
             };
             tracing::info!(client_version = %hello.client_version, kind = ?kind, device = %connected.device.id, endpoint = %peer.endpoint_id, "device connected");
@@ -211,7 +213,8 @@ pub(crate) async fn serve_stream<S: Stream>(
         device_id: device.device.id.clone(),
         name: claktory.name,
         color: claktory.color,
-        confirm_by_ms: device.confirm_by,
+        // No deadlines to confirm any more (#527 S3).
+        confirm_by_ms: 0,
     };
     send(&mut socket, hello_id, Body::Welcome(welcome)).await?;
     // This machine's own app may do what the loopback port's may.
@@ -229,6 +232,7 @@ pub(crate) async fn serve_stream<S: Stream>(
         binding: device.device.id.clone(),
         zoom_device: device.device.id.clone(),
         endpoint_id: peer.as_ref().map(|peer| peer.endpoint_id.clone()).unwrap_or_default(),
+        tool: !remote && app_version.starts_with(crate::cli::CLIENT_NAME),
         workspace_patches,
         workspace_revision,
         held_transcript,
@@ -241,6 +245,7 @@ pub(crate) async fn serve_stream<S: Stream>(
         dictations: crate::speech::dictation::Port::new(),
         dms: crate::dm_device::Port::new(),
         history: crate::history::Watch::new(&factory),
+        watch: crate::watch::Port::new(&factory),
         diagnostics: crate::diagnostics::Source::device(&device.device.id, from, kind as i32, platform, app_version),
     };
     let (id, since) = (device.device.id.clone(), std::time::Instant::now());
@@ -291,6 +296,9 @@ struct Connection {
     zoom_device: String,
     /// The tunnel key it connected with; empty on the loopback port.
     endpoint_id: String,
+    /// `factoryd`'s own commands on this computer (`factoryd allow`), not
+    /// an app: its Hello's client_version says so.
+    tool: bool,
     /// The app applies WorkspacePatch.
     workspace_patches: bool,
     /// The Workspace it holds (Hello.workspace_revision), to resume from.
@@ -321,6 +329,9 @@ struct Connection {
     dms: crate::dm_device::Port,
     /// What's new in History while it watches (WatchHistory, #458).
     history: crate::history::Watch,
+    /// The conversation it watches without selecting it (WatchTranscript,
+    /// #514).
+    watch: crate::watch::Port,
 }
 
 /// Requests in, events out, until the client leaves. `unpaired` is the
@@ -370,9 +381,26 @@ async fn session<S: Stream>(
                         }
                         continue;
                     }
+                    // Its snapshot goes before its answer (#514).
+                    Some(client_message::Body::WatchTranscript(request)) => {
+                        let reply = match connection.watch.watch(factory, &request).await {
+                            Ok(frames) => {
+                                for frame in frames {
+                                    forward(socket, sent, frame).await?;
+                                }
+                                Body::Ack(v1::Ack {})
+                            }
+                            Err(problem) => error(problem.code(), problem.to_string()),
+                        };
+                        out(socket, sent, message.id, reply).await?;
+                        continue;
+                    }
                     body => body,
                 };
+                // What it decides is noted as decided from this device (#514).
+                let deciding = crate::answered_on::before(factory, body.as_ref());
                 let reply = handle(factory, body, &connection, &mut vault_session).await;
+                crate::answered_on::after(factory, deciding, &connection.zoom_device, &connection.sent_from.device);
                 // Deliver what the request changed before answering it, so a
                 // client that sees the ack also sees the new state.
                 flush(socket, sent, &mut events, factory).await?;
@@ -386,6 +414,11 @@ async fn session<S: Stream>(
             body = connection.dictations.next() => out(socket, sent, 0, body).await?,
             body = connection.dms.next() => out(socket, sent, 0, body).await?,
             body = connection.history.next() => out(socket, sent, 0, body).await?,
+            frames = connection.watch.next(factory) => {
+                for frame in frames {
+                    forward(socket, sent, frame).await?;
+                }
+            }
             event = events.recv() => match event {
                 Ok(event) => forward(socket, sent, event).await?,
                 Err(RecvError::Lagged(missed)) => {
@@ -519,6 +552,8 @@ async fn handle(
             {
                 return error(ErrorCode::InvalidRequest, &why);
             }
+            let person = factory.lock().config.person().to_owned();
+            let why = crate::usage_switch::by_person(&person, &connection.sent_from, "changed it");
             let change = AgentChange {
                 name: name.as_deref(),
                 prompt: prompt.as_deref(),
@@ -534,6 +569,7 @@ async fn handle(
                 lead: lead_id.as_deref(),
                 fallback_model: fallback_model.as_deref(),
                 notify: notify.map(|mode| v1::NotifyMode::try_from(mode).unwrap_or_default()),
+                why: Some(&why),
             };
             factory.update_agent(&agent_id, change).await
         }
@@ -786,6 +822,7 @@ async fn handle(
         }
         Some(Request::CreateSecret(request)) => vault::create_secret(factory, &request),
         Some(Request::UpdateSecret(request)) => vault::update_secret(factory, &request),
+        Some(Request::SetSecretSites(request)) => vault::set_secret_sites(factory, &request),
         Some(Request::RevokeSecret(request)) => vault::revoke_secret(factory, &request),
         Some(Request::ImportEnv(request)) => vault::import_env(factory, &request),
         Some(Request::PreviewEnv(request)) => return Body::EnvPreview(vault::preview_env(&request.text)),
@@ -852,7 +889,7 @@ async fn handle(
                 Err(problem) => error(problem.code(), problem.to_string()),
             };
         }
-        Some(Request::UndoModelChange(request)) => crate::extensions::models::undo(factory, &request).await,
+        Some(Request::UndoModelChange(request)) => crate::extensions::models::undo(factory, &request, &connection.sent_from).await,
         Some(Request::ListAppFiles(request)) => return answer(crate::apps::data::list_files(factory, &request).await, Body::AppFiles),
         // Browser control: each binds to this connection itself, never to
         // anything the message says about who sent it.
@@ -905,6 +942,7 @@ async fn handle(
         // Website sharing over pipes (pipes/shares.rs): the person's only.
         Some(Request::SharePipeWebsite(request)) => crate::pipes::shares::share_request(factory, &request).await,
         Some(Request::StopPipeShare(request)) => crate::pipes::shares::stop(factory, &request),
+        Some(Request::SetPipeShareExpiry(request)) => crate::pipes::shares::set_expiry(factory, &request),
         Some(Request::CheckPipeSharePort(request)) => {
             return Body::PipeSharePort(crate::pipes::shares::check_port(factory, &request).await);
         }
@@ -922,8 +960,20 @@ async fn handle(
         // never by where it comes from (friend bug #27).
         Some(Request::StopEngine(request)) => crate::service::stop(factory, !connection.remote, request.quitting).await,
         Some(Request::SetFileCache(request)) => factory.set_file_cache(&connection.zoom_device, request.bytes).await,
+        // This connection's own device, never one a request names (Fugo).
+        Some(Request::SetFocusMode(request)) => crate::focus_mode::set(factory, &connection.zoom_device, request.on),
+        // The person read alerts kept in Needs you, on this connection's own
+        // device (Bruno 44235; rivet_reach: Person).
+        Some(Request::ReadAlerts(request)) => {
+            crate::notify::alerts::read(factory, &request.ids, &connection.zoom_device, &connection.sent_from.device)
+        }
+        // Pinned agents (rivet_reach: the settings file's pinned_agents).
+        Some(Request::PinAgent(request)) => crate::pins::pin(factory, &request).await,
+        Some(Request::UnpinAgent(request)) => crate::pins::unpin(factory, &request).await,
+        // Answered in `session`, its snapshot first.
+        Some(Request::WatchTranscript(_)) => return error(ErrorCode::InvalidRequest, "watched in the session"),
         // History (#458): the person's devices only (rivet_reach: Person).
-        Some(Request::GetHistoryOverview(_)) => match crate::history::overview(factory).await {
+        Some(Request::GetHistoryOverview(request)) => match crate::history::overview(factory, request).await {
             Ok(overview) => return Body::HistoryOverview(overview),
             Err(problem) => Err(problem),
         },
@@ -931,7 +981,7 @@ async fn handle(
             Ok(page) => return Body::HistoryEvents(page),
             Err(problem) => Err(problem),
         },
-        Some(Request::WatchHistory(request)) => connection.history.set(request.on).await,
+        Some(Request::WatchHistory(request)) => connection.history.set(request).await,
         // Claktory's browser (#435, `crate::browser_host`): the person's
         // devices only (rivet_reach: Person), never a tool or a pipe.
         Some(Request::WatchAgentBrowser(request)) => connection.agent_browser.watch(&request),
@@ -941,9 +991,21 @@ async fn handle(
         Some(Request::HandBackAgentBrowser(_)) => connection.agent_browser.hand_back(),
         Some(Request::StopAgentBrowser(_)) => connection.agent_browser.stop(),
         Some(Request::OpenAgentBrowser(request)) => connection.agent_browser.open(&request),
-        Some(Request::DeleteAgentBrowserData(_)) => connection.agent_browser.delete_data(),
+        Some(Request::DeleteAgentBrowserData(_)) => connection.agent_browser.delete_data().inspect(|()| {
+            // Signed out everywhere: no identity provider's account is the
+            // browser's any more (#435 W6).
+            if let Err(error) = factory.vault.forget_browser_accounts(None) {
+                tracing::error!(%error, "the browser's identity provider accounts weren't forgotten");
+            }
+        }),
         Some(Request::SetAgentBrowserLocale(request)) => crate::browser_host::locale::set(factory, &request).await,
+        Some(Request::SignOutAgentBrowserAccount(request)) => crate::errands::code::sign_out_request(factory, &request).await,
         Some(Request::ListTimeZones(_)) => return Body::TimeZones(crate::browser_host::locale::time_zones()),
+        // A recovery-codes card's codes (#435 W8b): to this connection only.
+        Some(Request::ShowRecoveryCodes(request)) => {
+            return answer(crate::extensions::ask::show_recovery_codes(factory, &request).await, Body::RecoveryCodes);
+        }
+        Some(Request::KeepRecoveryCodes(request)) => crate::extensions::ask::keep_recovery_codes(factory, &request).await,
         // Errands (#435 P3, `crate::errands`): the person's (rivet_reach),
         // refused while Claktory has no browser.
         Some(Request::OpenErrand(request)) => crate::errands::open_request(factory, &request),
@@ -961,6 +1023,14 @@ async fn handle(
         Some(Request::RefreshModels(request)) => crate::catalog::refresh(factory, request.provider_id.trim())
             .await
             .map_err(|why| RequestError::Account(ErrorCode::InvalidRequest, why)),
+        // Answered at once; what's stale is read meanwhile (friend bug #41).
+        Some(Request::ProvidersShown(_)) => {
+            let factory = factory.clone();
+            tokio::spawn(async move {
+                tokio::join!(factory.read_shown_credit(), crate::catalog::shown(&factory));
+            });
+            Ok(())
+        }
         Some(Request::AddModel(request)) => crate::catalog::ensure(factory, &request.model, crate::catalog::Check::Always)
             .await
             .map_err(|why| RequestError::Account(ErrorCode::InvalidRequest, why)),
@@ -979,14 +1049,23 @@ async fn handle(
         Some(Request::SetSpendCap(request)) => crate::pipes::spend::set_caps(factory, &request),
         Some(Request::TryAgainNow(request)) => factory.try_again_now(&request.agent_id).await,
         Some(Request::ContinueOnAlternative(request)) => {
-            crate::usage_switch::continue_on(factory, &request.agent_id, request.all_waiting, request.expected_others).await
+            crate::usage_switch::continue_on(factory, &request.agent_id, request.all_waiting, request.expected_others, Some(&connection.sent_from))
+                .await
         }
         Some(Request::SwitchBack(request)) => {
-            crate::usage_switch::switch_back(factory, &request.agent_id, request.all, request.expected_others).await
+            crate::usage_switch::switch_back(factory, &request.agent_id, request.all, request.expected_others, &connection.sent_from).await
         }
         Some(Request::SetUsageAutoContinue(request)) => crate::usage_switch::set_auto_continue(factory, request.on),
         Some(Request::ReportReply(request)) => return answer(crate::account::reports::report(factory, request).await, Body::ReplyReport),
         Some(Request::SetAccountService(request)) => crate::account::set_service(factory, &request.url).await,
+        // Only this computer's own app signs in to the account through
+        // this Claktory (#529): never a paired device.
+        Some(Request::VouchDevice(request)) => {
+            if connection.remote || connection.zoom_device != crate::remote::LOCAL_DEVICE {
+                return error(ErrorCode::Unauthorized, "Only this computer's own Claktory app can sign in through this Claktory.");
+            }
+            return answer(crate::account::vouch::vouch(factory, &request).await, Body::DeviceVouched);
+        }
         Some(Request::ShowRecoveryKey(_)) => return answer(vault::show_recovery_key(factory, vault_session), Body::RecoveryKey),
         Some(Request::CheckRecoveryKey(_)) => return answer(vault::check_recovery_key(factory, vault_session), Body::RecoveryKeyCheck),
         Some(Request::ConfirmRecoveryKey(request)) => vault::confirm_recovery_key(factory, vault_session, &request),
@@ -1018,7 +1097,15 @@ async fn handle(
         // Only a Claktory that moved away answers this (move_import::moved).
         Some(Request::DeleteMovedCopy(_)) => return error(ErrorCode::InvalidRequest, "This Claktory hasn't moved to another computer."),
         Some(Request::UnpairDevice(request)) => factory.unpair_device(&request.device_id).await,
-        Some(Request::ApproveDevice(request)) => factory.approve_device(&request.device_id, &request.number).await,
+        Some(Request::ApproveDevice(request)) => {
+            let asker = crate::remote::Asker {
+                device: connection.zoom_device.clone(),
+                tool: connection.tool,
+                from_terminal: connection.tool && request.from_terminal,
+            };
+            factory.approve_device(&asker, &request.device_id, &request.number).await
+        }
+        Some(Request::DismissAllowNotice(request)) => factory.dismiss_allow_notice(&request.device_id).await,
         Some(Request::DenyDevice(request)) => factory.deny_device(&request.device_id).await,
         Some(Request::CancelPairing(request)) => factory.cancel_pairing(&request.device_id).await,
         // Remote access is on while devices are paired: only the relays are set here.
@@ -1248,12 +1335,17 @@ async fn wait_to_be_allowed<S: Stream>(
 
 /// Sends a final error and closes the connection.
 async fn reject<S: Stream>(
-    mut socket: Socket<S>,
+    socket: Socket<S>,
     reply_to: u64,
     code: ErrorCode,
     reason: impl Into<String>,
 ) -> Result<(), ConnectionError> {
-    send(&mut socket, reply_to, error(code, reason)).await?;
+    refuse(socket, reply_to, v1::Error { code: code.into(), message: reason.into(), ..Default::default() }).await
+}
+
+/// Answers with `refusal` and closes the connection.
+async fn refuse<S: Stream>(mut socket: Socket<S>, reply_to: u64, refusal: v1::Error) -> Result<(), ConnectionError> {
+    send(&mut socket, reply_to, Body::Error(refusal)).await?;
     socket.close(None).await?;
     Ok(())
 }

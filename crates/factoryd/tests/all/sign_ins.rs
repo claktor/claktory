@@ -22,7 +22,7 @@ use tokio::net::TcpListener;
 const SECRETS: [&[u8]; 4] = [b"sk-ant-oat01", b"sk-ant-ort01", b"sk-or-v1", b"acct-mark"];
 
 /// Waits for `done`, a few seconds at most.
-async fn until(what: &str, done: impl Fn() -> bool) {
+pub(crate) async fn until(what: &str, done: impl Fn() -> bool) {
     for _ in 0..200 {
         if done() {
             return;
@@ -32,11 +32,11 @@ async fn until(what: &str, done: impl Fn() -> bool) {
     panic!("timed out waiting until {what}");
 }
 
-fn plain(dir: &Path) -> Value {
+pub(crate) fn plain(dir: &Path) -> Value {
     serde_json::from_str(&std::fs::read_to_string(dir.join("auth.json")).unwrap_or_default()).unwrap_or(Value::Null)
 }
 
-fn moved(dir: &Path) -> bool {
+pub(crate) fn moved(dir: &Path) -> bool {
     home(dir).root().join("vault/sign-ins.json").exists()
 }
 
@@ -72,8 +72,8 @@ async fn anthropic() -> (String, Arc<std::sync::Mutex<Vec<(String, String)>>>) {
 }
 
 /// A Claktory over the sign-ins in `dir`'s `auth.json`, serving.
-struct Open {
-    factory: Arc<Factory>,
+pub(crate) struct Open {
+    pub(crate) factory: Arc<Factory>,
     registry: Arc<factory_agent::Registry>,
     server: tokio::task::JoinHandle<()>,
 }
@@ -89,7 +89,7 @@ impl Open {
     }
 }
 
-async fn open(dir: &Path, base_url: &str) -> (Open, Client, View) {
+pub(crate) async fn open(dir: &Path, base_url: &str) -> (Open, Client, View) {
     let registry = Arc::new(registry_over(dir.join("auth.json"), base_url));
     let factory = Factory::open(home(dir), registry.clone()).await.expect("open");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -104,7 +104,7 @@ async fn open(dir: &Path, base_url: &str) -> (Open, Client, View) {
 /// Opens `dir`'s Claktory, lets its sign-ins move into the vault and
 /// returns the vault's recovery key; then its key on disk is lost, and it
 /// opens again: locked, until the recovery key opens it.
-async fn locked_after_restart(dir: &Path, base_url: &str) -> (Arc<Factory>, Client, View, String) {
+pub(crate) async fn locked_after_restart(dir: &Path, base_url: &str) -> (Arc<Factory>, Client, View, String) {
     std::fs::write(dir.join("auth.json"), json!({"anthropic": account("a")}).to_string()).expect("credentials");
     let (running, mut client, _) = open(dir, base_url).await;
     until("the sign-ins move into the vault", || moved(dir) && plain(dir) == json!({})).await;

@@ -19,6 +19,7 @@ import 'mobile/platform_policy.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'tell_rivet.dart';
+import 'tunnel_client.dart' show TunnelPath;
 import 'usage_wait.dart';
 
 /// What this app knows about its own build, for offering and installing
@@ -113,12 +114,33 @@ int compareVersions(String a, String b) {
   );
 }
 
-/// Whether to offer [Workspace.latestRelease]: the backend or this app is
-/// older than it. Never in the Android app ([updatesHere]).
+/// Whether to offer [Workspace.latestRelease]: the backend is older than
+/// it, or this app is where Update replaces it ([replacesItself]). Never in
+/// the Android app ([updatesHere]). An iPhone's or iPad's app behind it,
+/// with nothing for the Claktory to install, isn't an update to offer: its
+/// app comes from its store ([appBehind]).
 bool updateOffered(Workspace workspace, String appVersion) =>
     updatesHere &&
     (restartsBackend(workspace) ||
-        isNewer(workspace.latestRelease, appVersion));
+        (replacesItself && isNewer(workspace.latestRelease, appVersion)));
+
+/// The release this device's app is behind, where Update can't replace
+/// the app (an iPhone, an iPad: [replacesItself] false) and the Claktory
+/// has nothing to install: there's nothing to update here, only to say so
+/// ([AppBehindNote]). Null otherwise, and in the Android app, which has its
+/// own notice ([AndroidUpdateNotice]).
+String? appBehind(Workspace workspace, String appVersion) =>
+    updatesHere &&
+        !replacesItself &&
+        !restartsBackend(workspace) &&
+        isNewer(workspace.latestRelease, appVersion)
+    ? workspace.latestRelease
+    : null;
+
+/// What [AppBehindNote] says.
+String appBehindText(String release) =>
+    'A newer Claktory app ($release) is in the App Store or TestFlight. '
+    'Your Claktory is already up to date.';
 
 /// Whether this app replaces itself when it updates: a desktop's does (as
 /// the banner's Update), a phone's or tablet's comes from its store, so
@@ -279,15 +301,28 @@ Future<bool> _install(
   final appFirst =
       fetches && mismatch(build.version, offeredBackend(workspace)) != null;
   Future<StagedApp> fetch() async {
-    final staged = await build.updater.stage(
-      fetch: scope.backend.fetchApp,
-      version: latest,
-      bundlePath: build.bundlePath,
-      connected: scope.backend.connected,
-      onProgress: onProgress,
-    );
-    onProgress(null);
-    return staged;
+    // Through the tunnel by a relay, not directly: the download goes gently
+    // until the path is direct (friend bug #51).
+    final tunnel = scope.backend.tunnel;
+    bool byRelay() => tunnel.value?.path == TunnelPath.relayed;
+    final relayed = ValueNotifier(byRelay());
+    void follow() => relayed.value = byRelay();
+    tunnel.addListener(follow);
+    try {
+      final staged = await build.updater.stage(
+        fetch: scope.backend.fetchApp,
+        version: latest,
+        bundlePath: build.bundlePath,
+        connected: scope.backend.connected,
+        relayed: relayed,
+        onProgress: onProgress,
+      );
+      onProgress(null);
+      return staged;
+    } finally {
+      tunnel.removeListener(follow);
+      relayed.dispose();
+    }
   }
 
   StagedApp? staged;
@@ -390,6 +425,9 @@ class _UpdateBannerState extends State<UpdateBanner> {
       appReplaced = await installLatest(
         scope,
         workspace,
+        // An iPhone's or iPad's app comes from its store: Update updates
+        // only the Claktory there.
+        app: replacesItself,
         onProgress: (progress) {
           if (mounted) setState(() => _progress = progress);
         },
@@ -621,6 +659,67 @@ class _Strip extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// The release an [AppBehindNote] was closed for, while the app runs: not
+/// kept, so a relaunch, or a newer release, shows it again.
+final _appBehindClosed = ValueNotifier<String?>(null);
+
+/// Forgets a closed [AppBehindNote] between tests.
+@visibleForTesting
+void resetAppBehindNote() => _appBehindClosed.value = null;
+
+/// Where the update banner goes, on an iPhone or iPad whose app is behind
+/// the latest release while its Claktory is up to date ([appBehind]): says
+/// so quietly, with no Update, since the app comes from its store. Close
+/// puts it away until the app is opened again or a newer release comes.
+class AppBehindNote extends StatelessWidget {
+  const AppBehindNote({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final scope = AppScope.scope(context);
+    final store = scope.backend.workspace;
+    return ListenableBuilder(
+      listenable: Listenable.merge([store, _appBehindClosed]),
+      builder: (context, _) {
+        final release = appBehind(store.workspace, scope.appBuild.version);
+        if (release == null || _appBehindClosed.value == release) {
+          return const SizedBox.shrink();
+        }
+        final palette = Palette.of(context);
+        return Container(
+          padding: const EdgeInsets.fromLTRB(
+            Space.xl,
+            Space.xs,
+            Space.s,
+            Space.xs,
+          ),
+          decoration: BoxDecoration(
+            color: palette.sidebar,
+            border: Border(bottom: BorderSide(color: palette.hairline)),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  appBehindText(release),
+                  style: TextStyles.body.copyWith(color: palette.textMuted),
+                ),
+              ),
+              const SizedBox(width: Space.s),
+              GlyphButton(
+                label: 'Close',
+                active: false,
+                onTap: () => _appBehindClosed.value = release,
+                glyph: (color) => CloseGlyph(color: color),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

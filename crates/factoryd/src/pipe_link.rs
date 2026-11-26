@@ -592,7 +592,9 @@ struct Payload {
     #[serde(skip_serializing_if = "Option::is_none")]
     identity: Option<String>,
     /// waiting: until when, in ms since 1970; absent when there's no known
-    /// end. Whatever the peer put here is checked (`heard_liaison`).
+    /// end. Whatever the peer put here is checked (`heard_liaison`). share:
+    /// when the website stops being shared (#46), shown only, checked too
+    /// (`shares::heard_end`); absent for none.
     #[serde(skip_serializing_if = "Option::is_none")]
     until_ms: Option<serde_json::Value>,
     /// share: the port it serves on the sharer's computer, which the
@@ -1271,12 +1273,15 @@ fn resume_saying(factory: &Arc<Factory>, pipe: &str, looped: bool) -> Result<(),
 
 /// Offers a website this side shares (`pipes::shares`) to the peer, or
 /// takes it back: in order with the pipe's other controls.
-pub(crate) fn share(factory: &Arc<Factory>, pipe: &str, id: &str, offer: Option<(&str, u16)>) -> Result<(), PipeError> {
+pub(crate) fn share(factory: &Arc<Factory>, pipe: &str, id: &str, offer: Option<(&str, u16, i64)>) -> Result<(), PipeError> {
     match offer {
-        Some((name, port)) => control_saying(factory, pipe, KIND_SHARE, |_| {}, &format!("share:{id}"), |payload| {
+        Some((name, port, until)) => control_saying(factory, pipe, KIND_SHARE, |_| {}, &format!("share:{id}"), |payload| {
             payload.msg_id = id.to_owned();
             payload.text = name.to_owned();
             payload.port = Some(port);
+            // When it ends (#46), for the other side to show; absent for
+            // none. Only this side ends it.
+            payload.until_ms = (until > 0).then(|| serde_json::json!(until));
         }),
         None => control_saying(factory, pipe, KIND_UNSHARE, |_| {}, &format!("unshare:{id}"), |payload| {
             payload.msg_id = id.to_owned();
@@ -1869,7 +1874,8 @@ async fn received(factory: &Arc<Factory>, peer: &str, payload: Payload, files: V
                 }
                 if payload.kind == KIND_SHARE {
                     let port = payload.port.unwrap_or(0);
-                    crate::pipes::shares::offered(factory, &pipe, &link.peer, &payload.msg_id, &payload.text, port);
+                    let until = crate::pipes::shares::heard_end(payload.until_ms.as_ref());
+                    crate::pipes::shares::offered(factory, &pipe, &link.peer, &payload.msg_id, &payload.text, port, until);
                 } else {
                     crate::pipes::shares::withdrawn(factory, &pipe, &payload.msg_id);
                 }

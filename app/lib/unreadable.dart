@@ -15,6 +15,7 @@ String get _thisDevice => switch (defaultTargetPlatform) {
   TargetPlatform.iOS => 'this iPhone',
   TargetPlatform.android => 'this phone',
   TargetPlatform.macOS => 'this Mac',
+  TargetPlatform.windows => 'this PC',
   _ => 'this device',
 };
 

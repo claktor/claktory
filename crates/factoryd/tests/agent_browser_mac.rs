@@ -56,6 +56,8 @@ async fn the_browser_runs_in_a_vm_on_a_mac() {
     let frames = std::env::temp_dir().join("claktory-browser-mac");
     std::fs::create_dir_all(&frames).expect("frames");
     let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("home")).expect("home");
+    std::fs::write(dir.join("home/config.json"), r#"{"browser": {"live_view": true}}"#).expect("config");
     let (addr, _factory) = start(&dir).await;
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };

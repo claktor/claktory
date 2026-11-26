@@ -28,7 +28,11 @@ import java.util.concurrent.Executors
  * factory/device's pickAttachments, as on the iPhone (ios/Runner/
  * AppDelegate.swift, Attach): a menu of where to attach from (photos or
  * videos, files, and a pasted image when the clipboard holds one), then the
- * system's own picker: the photo picker, the document picker. No storage
+ * system's own picker: the photo picker, the document picker. Asked with
+ * {"camera": true} (the message box's paperclip) on a phone that can take
+ * one, Take photo comes first: choosing it closes the menu and fails the
+ * pick with take_photo, so the app can explain the camera before asking
+ * for it, then call takePhoto ([PhotoCapture]). No storage
  * permission is ever asked for: both hand over only what the person chose.
  * What was chosen is copied into the app's cache ([AttachmentCopies]) and
  * the copies' paths answered, in the order chosen; nothing chosen (or
@@ -40,15 +44,18 @@ class AttachmentPicker(
     private val activity: Activity,
     private val copies: AttachmentCopies = AttachmentCopies(File(activity.cacheDir, AttachmentCopies.FOLDER)),
     private val worker: ExecutorService = Executors.newSingleThreadExecutor { Thread(it, "Claktory attachments") },
+    private val camera: PhotoCapture? = null,
 ) : HostLifecycle, AutoCloseable {
     private val main = Handler(Looper.getMainLooper())
     private var result: MethodChannel.Result? = null
     private var menu: AlertDialog? = null
 
-    fun pick(result: MethodChannel.Result) {
+    fun pick(result: MethodChannel.Result, arguments: Any? = null) {
         if (this.result != null || activity.isFinishing) return result.success(emptyList<String>())
         this.result = result
+        val photo = (arguments as? Map<*, *>)?.get("camera") == true && camera?.usable() == true
         val choices = buildList {
+            if (photo) add(activity.getString(R.string.attach_take_photo) to ::takePhoto)
             add(activity.getString(R.string.attach_photos) to ::photos)
             add(activity.getString(R.string.attach_files) to ::files)
             if (clipboardHasImage()) add(activity.getString(R.string.attach_paste) to ::paste)
@@ -79,6 +86,9 @@ class AttachmentPicker(
         }
         start(intent)
     }
+
+    /** Take photo: the app explains the camera, then calls takePhoto. */
+    private fun takePhoto() = fail("take_photo", "Take photo was chosen.")
 
     private fun files() = start(
         Intent(Intent.ACTION_OPEN_DOCUMENT)
@@ -158,6 +168,16 @@ class AttachmentPicker(
     /** The menu taken away as choosing from it does, without cancelling (tests only). */
     internal fun dismissMenuForTest() {
         menu?.dismiss()
+    }
+
+    /** The menu's items as it shows them (tests only). */
+    internal fun menuItemsForTest(): List<String> =
+        menu?.listView?.adapter?.let { adapter -> (0 until adapter.count).map { adapter.getItem(it).toString() } }.orEmpty()
+
+    /** Chooses the menu's item at [index], as a tap on it does (tests only). */
+    internal fun chooseForTest(index: Int) {
+        val list = menu?.listView ?: return
+        list.performItemClick(list, index, list.adapter.getItemId(index))
     }
 
     override fun close() {
@@ -250,6 +270,27 @@ class AttachmentCopies(
             folder.deleteRecursively()
             throw if (error is Refused) error else Refused("copy_failed", "A chosen file couldn't be read (${error.javaClass.simpleName}).")
         }
+    }
+
+    /**
+     * Moves [file] (one the app made, such as the camera's photo) into a
+     * new folder as [name], kept as a pick's copies are; its path. Over
+     * [maxSize] refuses it as too large, and the file stays where it was.
+     */
+    fun adopt(file: File, name: String): String {
+        prune()
+        if (file.length() > maxSize) throw tooLarge()
+        val folder = File(root, UUID.randomUUID().toString())
+        if (!folder.mkdirs()) throw Refused("copy_failed", "The cache folder couldn't be made.")
+        val target = File(folder, name)
+        try {
+            // Both in the app's cache, so a rename; a copy when they aren't on one disk.
+            if (!file.renameTo(target)) file.copyTo(target)
+        } catch (error: Exception) {
+            folder.deleteRecursively()
+            throw Refused("copy_failed", "The photo couldn't be kept (${error.javaClass.simpleName}).")
+        }
+        return target.path
     }
 
     /** Folders from picks over a day old. */

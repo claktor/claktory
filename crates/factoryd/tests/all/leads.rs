@@ -164,7 +164,7 @@ async fn a_lead_sees_how_its_team_is_set_up_and_no_one_else_does() {
     };
     apply_request(&mut client, &mut view, client_message::Body::CreateSecret(secret)).await;
     let id = view.workspace.vault.clone().expect("vault").secrets[0].id.clone();
-    let grant = v1::GrantSecret { id, agent_id: "lena".into(), proof: None };
+    let grant = v1::GrantSecret { id, agent_id: "lena".into(), proof: None, fill_only: false };
     apply_request(&mut client, &mut view, client_message::Body::GrantSecret(grant)).await;
     let added = call(
         &mut client,

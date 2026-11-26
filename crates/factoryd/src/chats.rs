@@ -244,13 +244,23 @@ pub(crate) fn broadcast_queue(factory: &Factory, inner: &Inner) {
     }
 }
 
-fn queue_of(inner: &Inner, id: &str) -> v1::ChatQueuedMessages {
+pub(crate) fn queue_of(inner: &Inner, id: &str) -> v1::ChatQueuedMessages {
     let queue = inner.agents.get(id).map_or(&[][..], |runtime| &runtime.queue[..]);
     v1::ChatQueuedMessages { chat_id: id.to_owned(), messages: queue.iter().map(crate::factory::queued_message).collect() }
 }
 
 /// A change to a chat's conversation, to clients while it's shown.
 pub(crate) fn send_change(factory: &Factory, id: &str, change: Change) {
+    // To connections watching it without selecting it (#514).
+    let key = crate::watch::chat_key(id);
+    if factory.watches.watched(&key) {
+        let chat_id = id.to_owned();
+        let body = match &change {
+            Change::Entry(entry) => Body::ChatEntry(v1::ChatEntryUpdate { chat_id, entry: Some(entry.clone()) }),
+            Change::Delta { seq, text } => Body::ChatDelta(v1::ChatEntryDelta { chat_id, seq: *seq, text: text.clone() }),
+        };
+        factory.watches.send(&key, body);
+    }
     if factory.chats.selected().as_deref() != Some(id) {
         return;
     }
@@ -625,6 +635,10 @@ fn forget(factory: &Factory, inner: &mut Inner, id: &str) {
     if let Err(error) = crate::proposals::forget(&factory.store, id) {
         tracing::error!(chat = %id, %error, "could not delete a chat's proposals");
     }
+    if let Err(error) = crate::answered_on::forget(&factory.store, id) {
+        tracing::error!(chat = %id, %error, "could not delete where a chat's cards were decided");
+    }
+    factory.watches.gone(&crate::watch::chat_key(id));
     let folder = dir(&factory.home, id);
     if let Err(error) = std::fs::remove_dir_all(&folder)
         && error.kind() != std::io::ErrorKind::NotFound

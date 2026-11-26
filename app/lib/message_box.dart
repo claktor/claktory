@@ -187,9 +187,14 @@ class MessageBox extends StatefulWidget {
     required this.target,
     required this.onSent,
     this.maxFieldHeight,
+    this.autofocus = true,
   });
 
   final MessageTarget target;
+
+  /// Takes the keys as it comes (not on a touch screen). Focus mode's
+  /// Context box doesn't: the keys stay with the card (#514).
+  final bool autofocus;
 
   /// Just before a message goes: the conversation follows it.
   final VoidCallback onSent;
@@ -292,8 +297,12 @@ class _MessageBoxState extends State<MessageBox> {
       (widget.target.takesFiles &&
           AppScope.of(context).attachments.of(widget.target.key).isNotEmpty);
 
-  /// Anything to send: what's written, files, or a voice note.
-  bool get _canSend => _hasDraft || _note != null;
+  /// Anything to send: what's written, files, or a voice note; not while
+  /// files chosen are still on their way into the box ("Adding photo…"),
+  /// so a message never goes without them.
+  bool get _canSend =>
+      (_hasDraft || _note != null) &&
+      AppScope.of(context).attachments.adding(widget.target.key).isEmpty;
 
   /// The phone's mic, the same one wherever it sits (Send's place, or
   /// beside Send while there's text), so a finger holding it carries on
@@ -429,6 +438,9 @@ class _MessageBoxState extends State<MessageBox> {
     _focus.requestFocus();
   }
 
+  /// The paperclip, where an iPad's picker menu points.
+  final _attachButton = GlobalKey(debugLabel: 'Attach files');
+
   /// The paperclip, or a phone's +: the system's picker for files (and
   /// photos, on a phone). Every phone asks its own through the same
   /// contract (`factory/device`'s pickAttachments), never a desktop's; a
@@ -436,19 +448,45 @@ class _MessageBoxState extends State<MessageBox> {
   Future<void> _pick() async {
     // A Mac's window.
     if (!PhonePlatformPolicy.current.touch) return _attach(await pickFiles());
-    // An iPhone, an iPad or Android.
+    // An iPhone, an iPad or Android. What was chosen shows in the box as
+    // soon as the picker closes, "Adding photo…" while it's copied for the
+    // app (Matt: a photo took seconds to show).
+    final drafts = AppScope.of(context).attachments;
+    final key = widget.target.key;
+    var chosen = const <String>[];
     final List<String> paths;
     try {
-      paths = await _pickOnPhone();
+      // Take Photo first in its menu, where there's a camera.
+      paths = await pickOnDevice(
+        context,
+        from: pickerAnchor(_attachButton.currentContext),
+        camera: true,
+        onChosen: widget.target.takesFiles
+            ? (kinds) => drafts.startAdding(key, chosen = kinds)
+            : null,
+      );
     } on MissingPluginException {
+      drafts.doneAdding(key, chosen);
       // This app has no picker of its own yet (Android, for now).
       if (mounted) setState(() => _error = pickerMissing);
       return;
     } on Exception {
+      drafts.doneAdding(key, chosen);
       if (mounted) setState(() => _error = pickerFailed);
       return;
     }
-    await _attach(paths);
+    try {
+      if (mounted) {
+        await _attach(paths);
+      } else {
+        // The box went meanwhile: they wait in its agent's box all the same.
+        await drafts.add(key, paths);
+      }
+    } finally {
+      drafts.doneAdding(key, chosen);
+    }
+    final missing = notAdded(chosen, chosen.length - paths.length);
+    if (missing != null && mounted) setState(() => _error = missing);
   }
 
   /// What the box says when a phone's picker failed to open.
@@ -456,17 +494,6 @@ class _MessageBoxState extends State<MessageBox> {
 
   /// What the box says when this phone's app has no picker at all.
   static const pickerMissing = "You can't attach files from this phone yet.";
-
-  /// The phone's picker (attachments.dart's [pickAttachments], with its
-  /// failures kept): the chosen files' paths, empty when cancelled.
-  static Future<List<String>> _pickOnPhone() async {
-    final paths = await const MethodChannel('factory/device')
-        .invokeListMethod<Object?>('pickAttachments');
-    return [
-      for (final path in paths ?? const <Object?>[])
-        if (path is String) path,
-    ];
-  }
 
   /// The draft changed from outside the box: a message started for this
   /// target elsewhere.
@@ -755,8 +782,9 @@ class _MessageBoxState extends State<MessageBox> {
   }
 
   Future<void> _send() async {
-    // A recording going on is sent from its own Send.
-    if (_voice.recording || _voice.starting) return;
+    // A recording going on is sent from its own Send; files still on
+    // their way into the box hold it until they're in.
+    if (_voice.recording || _voice.starting || !_canSend) return;
     final text = _text.text.trim();
     final key = widget.target.key;
     final backend = AppScope.of(context);
@@ -1117,7 +1145,9 @@ class _MessageBoxState extends State<MessageBox> {
                                             // On a touch screen (a phone, an
                                             // iPad) the keyboard would cover
                                             // the conversation at once.
-                                            autofocus: !touchFirst(context),
+                                            autofocus:
+                                                widget.autofocus &&
+                                                !touchFirst(context),
                                             minLines: 1,
                                             maxLines: 12,
                                             bordered: false,
@@ -1156,6 +1186,7 @@ class _MessageBoxState extends State<MessageBox> {
                                           !recording) ...[
                                         const SizedBox(width: Space.xs),
                                         GlyphButton(
+                                          key: _attachButton,
                                           label: 'Attach files',
                                           active: false,
                                           onTap: _pick,
@@ -1585,8 +1616,11 @@ class _Attachments extends StatelessWidget {
       listenable: Listenable.merge([attachments, notes]),
       builder: (context, _) {
         final files = attachments.of(boxKey);
+        final adding = attachments.adding(boxKey);
         final note = notes.note(boxKey);
-        if (files.isEmpty && note == null) return const SizedBox.shrink();
+        if (files.isEmpty && adding.isEmpty && note == null) {
+          return const SizedBox.shrink();
+        }
         return Padding(
           padding: const EdgeInsets.only(top: 2, right: Space.xs, bottom: 2),
           child: Wrap(
@@ -1605,6 +1639,7 @@ class _Attachments extends StatelessWidget {
                   size: file.size,
                   onRemove: () => attachments.remove(boxKey, file),
                 ),
+              for (final kind in adding) AddingChip(kind: kind),
             ],
           ),
         );

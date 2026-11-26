@@ -392,7 +392,7 @@ async fn agents_with_the_same_name_in_different_projects_are_told_apart() {
     let Some(Kind::Event(event)) = &view.entries[0].kind else { panic!("an event") };
     assert_eq!((event.from.as_str(), event.from_id.as_str()), ("Lead (App)", "lead"));
     let Some(Kind::Assistant(read)) = &view.entries[1].kind else { panic!("a reply") };
-    let tag = format!("<event source=\"agent\" from=\"Lead (App)\" id=\"lead\" msg=\"{}\">", event.message_id);
+    let tag = format!("&lt;event source=\"agent\" from=\"Lead (App)\" id=\"lead\" msg=\"{}\">", event.message_id);
     assert!(event.message_id > 0 && read.text.contains(&tag), "{}", read.text);
 
     // The admin agent, in neither project, must say which.
@@ -609,7 +609,9 @@ async fn an_agents_system_prompt_and_tools_hold_still_and_changes_are_appended()
     let renamed = v1::UpdateAgent { agent_id: "lead".into(), name: Some("Captain".into()), ..Default::default() };
     ack(apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(renamed)).await);
     let said = talk(&mut client, &mut view, "new model").await;
-    assert!(said[0].contains(&format!("your model is now {OTHER_MODEL}; your name is now Captain")), "{said:?}");
+    // Who changed it, on the device it says (this machine's name here).
+    assert!(said[0].contains(&format!("your model is now {OTHER_MODEL} (the person changed it on ")), "{said:?}");
+    assert!(said[0].contains("); your name is now Captain"), "{said:?}");
     assert!(sent().0.contains("You are Captain") && sent() != after);
 }
 
@@ -650,9 +652,11 @@ async fn a_working_agents_settings_apply_from_its_next_model_call() {
     assert_eq!((after.model.as_str(), after.effort.as_str()), ("parrot", "high"), "the next call, mid-run");
     assert!(!before.system_prompt.contains("Be brief.") && after.system_prompt.contains("## Your instructions\n\nBe brief."));
     let note = said.iter().find(|line| line.starts_with("event from Claktory")).expect("a note");
+    let (start, rest) = note.split_once(" (the person changed it on ").expect("who changed it");
+    assert_eq!(start, "event from Claktory: Your settings changed: your model is now scripted/parrot");
     assert_eq!(
-        note,
-        "event from Claktory: Your settings changed: your model is now scripted/parrot; your effort is now high. Your instructions changed; the new ones are in your system prompt from now on."
+        rest.split_once(')').expect("the device").1,
+        "; your effort is now high. Your instructions changed; the new ones are in your system prompt from now on."
     );
 
     // An extension turned on mid-run: the same system prompt and tools, and

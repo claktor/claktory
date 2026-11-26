@@ -1,28 +1,27 @@
 // History's video export (#458 E1, history-replay.md "Video export"):
-// "Share replay…" makes an MP4 of the replay and hands it to the share
-// sheet. Nothing is uploaded by Claktory.
+// "Share replay…" makes an MP4 of the replay. Nothing is uploaded by
+// Claktory.
 //
-// The frames are drawn from the same board as the replay, offscreen in
-// effect: each is stepped to a fixed time (never in real time, so nothing
-// drops), rendered at 1080 pixels, and given to the Runner's encoder
-// (app/macos/Runner/ReplayWriter.swift, the Mac's and the iPhone's), which
-// makes the file itself in a fresh share folder; share_files.dart shares it
-// and deletes it as it does any share. Android has no encoder yet: the
+// The frames are drawn from the same board as the replay, each stepped to a
+// fixed time (never in real time, so nothing drops), rendered at 1080
+// pixels, and given to the Runner's encoder (app/macos/Runner/
+// ReplayWriter.swift, the Mac's and the iPhone's). Making it runs in the
+// background (export_job.dart): the person can do anything meanwhile, and
+// once it's made it's saved where everyone knows to look, ~/Movies/Claktory
+// on a Mac, Photos on an iPhone or iPad. Android has no encoder yet: the
 // export isn't offered there.
 //
 // A share shows only the shape unless the person turns more on (Fugo,
 // msg 33087): names, roles, project names and dates are off by default;
 // secrets, apps and databases aren't in it at all, other Claktories are
-// never named, and paths never shown. The file carries no metadata, its name no name
-// (claktory-replay.mp4), and its header's dates are zeroed unless dates
-// are shown.
+// never named, and paths never shown. The file carries no metadata, and its
+// header's dates are zeroed unless dates are shown.
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -34,45 +33,15 @@ import '../map.dart' show MapGridPainter;
 import '../map_layout.dart';
 import '../mobile/drawer.dart' show largeText;
 import '../mobile/metrics.dart' show TypeScale;
-import '../mobile/share.dart' show globalRectOf;
 import '../protocol/factory/v1/factory.pb.dart';
 import '../scope.dart';
-import '../share_files.dart' show shareMadeFile;
 import 'board.dart';
 import 'controller.dart';
+import 'export_job.dart';
 import 'scene.dart';
 import 'scrubber.dart' show chapterAt, historyWhen;
 import 'timeline.dart';
 import 'warp.dart';
-
-const _writer = MethodChannel('claktory/replay-writer');
-
-/// A test's: makes only this many frames.
-@visibleForTesting
-int? debugReplayFrames;
-
-/// A test's frame grab in place of rendering one ([RenderRepaintBoundary]
-/// to the frame's RGBA bytes).
-@visibleForTesting
-Future<Uint8List> Function(RenderRepaintBoundary stage, ReplayShape shape)?
-debugReplayCapture;
-
-/// Frame [stage] at [shape]'s pixels, as RGBA bytes.
-Future<Uint8List> _capture(
-  RenderRepaintBoundary stage,
-  ReplayShape shape,
-) async {
-  if (debugReplayCapture case final capture?) return capture(stage, shape);
-  final image = await stage.toImage(
-    pixelRatio: shape.width / shape.logical.width,
-  );
-  try {
-    final bytes = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
-    return bytes!.buffer.asUint8List();
-  } finally {
-    image.dispose();
-  }
-}
 
 /// Frames a second.
 const replayFps = 30;
@@ -204,9 +173,9 @@ class ShareWords implements BoardWords {
     }
   }
 
-  // Another Claktory's: never named.
+  // A pipe's name names the other side: only with names (Bruno 44370).
   @override
-  String pad(int pad) => '';
+  String pad(int pad) => privacy.names ? scene.pads[pad].label : '';
 
   // Their initials and colours would say who it is: the plain avatar
   // unless names show (Fugo).
@@ -268,6 +237,7 @@ class ReplayVideo {
       ..scene = scene
       ..routes = replay.routes
       ..log = replay.log
+      ..project = replay.project
       ..loaded = true;
     final end = math.max(timeline.end, replay.log.last);
     TimeWarp warp(double seconds) => TimeWarp.build(
@@ -297,10 +267,25 @@ class ReplayVideo {
     frames = ((video.warp!.duration + tail) * replayFps).ceil();
     // Messages sent by each event, so far: no task, monitor or Claktory
     // ticks.
+    // With one project, only those to or from it.
     final log = replay.log;
+    final project = replay.project;
+    bool ours(int node, double t) => scene.nodeInProject(node, t, project!);
+
+    bool counts(int i) {
+      if (log.kind(i).tick) return false;
+      if (project == null) return true;
+      final t = log.time(i);
+      if (ours(log.from(i), t)) return true;
+      for (var k = 0; k < log.toCount(i); k++) {
+        if (ours(log.to(i, k), t)) return true;
+      }
+      return false;
+    }
+
     _sent = Int32List(log.length + 1);
     for (var i = 0; i < log.length; i++) {
-      _sent[i + 1] = _sent[i] + (log.kind(i).tick ? 0 : 1);
+      _sent[i + 1] = _sent[i] + (counts(i) ? 1 : 0);
     }
   }
 
@@ -332,7 +317,7 @@ class ReplayVideo {
     index = i;
     final t = video.historyAt(math.min(p, video.warp!.duration));
     video.time.value = t;
-    final frame = _team(scene.at(t));
+    final frame = _team(scene.at(t, project: video.project));
     this.frame = frame;
 
     // One chip a node: a moved agent's shown one, or where it was last.
@@ -452,20 +437,13 @@ class ReplayVideo {
   /// How many messages had been sent by now.
   int get messages => _sent[video.log.upperBound(time)];
 
+  /// How many agents there are now, and how many of them are working.
+  ({int working, int total}) get working => frame == null
+      ? (working: 0, total: 0)
+      : scene.agentsAt(video.log, time, project: video.project);
+
   /// How many agents there are now.
-  int get agents {
-    final frame = this.frame;
-    if (frame == null) return 0;
-    final seen = <String>{};
-    for (var c = 0; c < scene.chips.length; c++) {
-      if (frame.chips[c] == hidden) continue;
-      if (scene.chips[c].chip.node.kind != MapNodeKind.MAP_NODE_KIND_AGENT) {
-        continue;
-      }
-      seen.add(scene.originOf(scene.chips[c].id));
-    }
-    return seen.length;
-  }
+  int get agents => working.total;
 
   void dispose() => video.time.dispose();
 }
@@ -480,6 +458,15 @@ int replayDay(double start, double t) {
 
   // By whole days, whatever a clock change did to one.
   return (date(t).difference(date(start)).inHours + 12) ~/ 24 + 1;
+}
+
+/// How many agents there are, and how many work: "4 of 23 agents
+/// working", the same in History's bar and its video.
+String agentsWorking(({int working, int total}) agents) {
+  final (:working, :total) = agents;
+  if (working == 0) return total == 1 ? '1 agent' : '${_grouped(total)} agents';
+  if (total == 1) return '1 agent working';
+  return '${_grouped(working)} of ${_grouped(total)} agents working';
 }
 
 /// "1,204".
@@ -511,7 +498,7 @@ class ReplayStage extends StatelessWidget {
 
   /// Room kept for the words at the top and the watermark at the foot.
   static const _top = 64.0;
-  static const _foot = 36.0;
+  static const _foot = 48.0;
   static const _side = 20.0;
 
   Matrix4 _fit(Rect camera, Size size) {
@@ -554,11 +541,18 @@ class ReplayStage extends StatelessWidget {
     final transform = _fit(camera, size);
     final t = video.time;
     final day = replayDay(video.timeline.start, t);
+    // One project's: only its own chapters (Abbacchio's row 1584).
     final chapter = privacy.names && privacy.projects
-        ? chapterAt(video.timeline.chapters, t)
+        ? chapterAt(video.video.chapters, t)
         : null;
-    final agents = video.agents;
+    final agents = video.working;
     final messages = video.messages;
+    // One project's video names it only when projects are named.
+    final project = video.video.project;
+    final box = project == null || !privacy.projects
+        ? -1
+        : video.scene.projectBox(project);
+    final projectName = box < 0 ? null : video.scene.boxes[box].box.label;
     return MediaQuery(
       data: MediaQuery.of(context)
           .copyWith(textScaler: TextScaler.noScaling, disableAnimations: true),
@@ -573,24 +567,28 @@ class ReplayStage extends StatelessWidget {
                   painter: MapGridPainter(transform, palette.hairline),
                 ),
               ),
+              // Above the watermark's own strip: the board never runs
+              // under it (Lucy).
               Positioned(
                 left: 0,
                 top: 0,
                 width: size.width,
-                height: size.height,
-                child: Transform(
-                  transform: transform,
-                  child: OverflowBox(
-                    alignment: Alignment.topLeft,
-                    minWidth: video.scene.layout.size.width,
-                    maxWidth: video.scene.layout.size.width,
-                    minHeight: video.scene.layout.size.height,
-                    maxHeight: video.scene.layout.size.height,
-                    child: HistoryBoard(
-                      controller: video.video,
-                      frame: frame,
-                      person: person,
-                      still: still,
+                height: size.height - _foot + Space.s,
+                child: ClipRect(
+                  child: Transform(
+                    transform: transform,
+                    child: OverflowBox(
+                      alignment: Alignment.topLeft,
+                      minWidth: video.scene.layout.size.width,
+                      maxWidth: video.scene.layout.size.width,
+                      minHeight: video.scene.layout.size.height,
+                      maxHeight: video.scene.layout.size.height,
+                      child: HistoryBoard(
+                        controller: video.video,
+                        frame: frame,
+                        person: person,
+                        still: still,
+                      ),
                     ),
                   ),
                 ),
@@ -614,7 +612,8 @@ class ReplayStage extends StatelessWidget {
                     ),
                     Text(
                       [
-                        agents == 1 ? '1 agent' : '${_grouped(agents)} agents',
+                        ?projectName,
+                        agentsWorking(agents),
                         messages == 1
                             ? '1 message'
                             : '${_grouped(messages)} messages',
@@ -632,14 +631,8 @@ class ReplayStage extends StatelessWidget {
               ),
               Positioned(
                 right: _side,
-                bottom: Space.s + 2,
-                child: Text(
-                  'Made with Claktory',
-                  style: TextStyles.caption.copyWith(
-                    color: palette.textFaint,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
+                bottom: Space.s,
+                child: const ReplayWatermark(),
               ),
             ],
           ),
@@ -649,28 +642,83 @@ class ReplayStage extends StatelessWidget {
   }
 }
 
-/// Opens the export sheet for [replay] (its events all in), the share
-/// sheet pointing at [from].
-Future<void> showReplayExport(
-  BuildContext context,
-  HistoryController replay, {
-  Rect? from,
-}) => showModal(
-  context,
-  (context, close) => ReplayExport(replay: replay, onClose: close, from: from),
-);
+/// Whose video it is, at its foot: Claktory's mark, then "Made with
+/// Claktory · claktory.com", legible but quiet (Matt, through Bruno 44277;
+/// Trish's words, Bruno 46771: whoever watches it isn't its owner).
+class ReplayWatermark extends StatelessWidget {
+  const ReplayWatermark({super.key});
+
+  /// The app icon's colors: a white cog with a blue shadow on graphite.
+  static const _graphite = Color(0xFF2A2D33);
+  static const _blue = Color(0xFF2F6FEB);
+  static const _white = Color(0xFFFFFFFF);
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final style = TextStyles.caption.copyWith(
+      color: palette.textMuted,
+      fontWeight: FontWeight.w500,
+    );
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 20,
+          height: 20,
+          decoration: BoxDecoration(
+            color: _graphite,
+            borderRadius: BorderRadius.circular(5),
+          ),
+          child: const Stack(
+            children: [
+              Positioned(
+                left: 3.5,
+                top: 3.5,
+                width: 14,
+                height: 14,
+                child: FittedBox(child: CogGlyph(color: _blue)),
+              ),
+              Positioned(
+                left: 3,
+                top: 3,
+                width: 14,
+                height: 14,
+                child: FittedBox(child: CogGlyph(color: _white)),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: Space.s),
+        Text.rich(
+          TextSpan(
+            children: [
+              TextSpan(
+                text: 'Made with Claktory',
+                style: style.copyWith(color: palette.text),
+              ),
+              TextSpan(text: ' · claktory.com', style: style),
+            ],
+          ),
+          maxLines: 1,
+        ),
+      ],
+    );
+  }
+}
+
+/// Opens the export sheet for [replay] (its events all in).
+Future<void> showReplayExport(BuildContext context, HistoryController replay) =>
+    showModal(
+      context,
+      (context, close) => ReplayExport(replay: replay, onClose: close),
+    );
 
 class ReplayExport extends StatefulWidget {
-  const ReplayExport({
-    super.key,
-    required this.replay,
-    required this.onClose,
-    this.from,
-  });
+  const ReplayExport({super.key, required this.replay, required this.onClose});
 
   final HistoryController replay;
   final VoidCallback onClose;
-  final Rect? from;
 
   @override
   State<ReplayExport> createState() => _ReplayExportState();
@@ -688,16 +736,12 @@ class _ReplayExportState extends State<ReplayExport>
   ReplayShape? _chosenShape;
   final _stage = GlobalKey();
 
-  /// How far making the video is, 0…1; null while not making it.
-  double? _making;
-  var _cancelled = false;
-  String? _error;
-
   @override
   void initState() {
     super.initState();
     _ticker = createTicker(_tick);
     widget.replay.addListener(_loaded);
+    replayJobs.addListener(_jobs);
     _loaded();
   }
 
@@ -715,11 +759,16 @@ class _ReplayExportState extends State<ReplayExport>
       _chosenShape ??
       (isPhoneLayout(context) ? ReplayShape.portrait : ReplayShape.square);
 
+  /// A video being made finished, or went: this one can be made now.
+  void _jobs() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
+    replayJobs.removeListener(_jobs);
     widget.replay.removeListener(_loaded);
     _ticker.dispose();
-    _cancelled = true;
     _made?.dispose();
     super.dispose();
   }
@@ -728,7 +777,6 @@ class _ReplayExportState extends State<ReplayExport>
 
   /// The preview plays the video as it will be, round and round.
   void _tick(Duration elapsed) {
-    if (_making != null) return;
     final i = (elapsed.inMicroseconds * replayFps ~/ 1000000) % _video.frames;
     if (i == _video.index) return;
     setState(() => _video.step(i, _words));
@@ -742,75 +790,21 @@ class _ReplayExportState extends State<ReplayExport>
       ..start();
   }
 
-  Future<void> _make() async {
-    final shape = _shape;
-    final privacy = _privacy;
-    final from = widget.from ?? globalRectOf(context);
-    setState(() {
-      _making = 0;
-      _error = null;
-      _cancelled = false;
-    });
-    // Its own, from the first frame.
-    final video = ReplayVideo(widget.replay, length: _length);
-    final words = ShareWords(video.scene, privacy);
-    _made?.dispose();
-    _made = video;
-    final frames = math.min(debugReplayFrames ?? video.frames, video.frames);
-    String? path;
-    try {
-      path = await _writer.invokeMethod<String>('start', {
-        'width': shape.width,
-        'height': shape.height,
-        'fps': replayFps,
-      });
-      for (var i = 0; i < frames; i++) {
-        // Away from the app, an iPhone's encoder stops: wait to be back.
-        await _foreground();
-        if (_cancelled || !mounted) throw const _Cancelled();
-        setState(() {
-          video.step(i, words);
-          _making = i / frames;
-        });
-        await SchedulerBinding.instance.endOfFrame;
-        if (_cancelled || !mounted) throw const _Cancelled();
-        final boundary =
-            _stage.currentContext!.findRenderObject()! as RenderRepaintBoundary;
-        final rgba = await _capture(boundary, shape);
-        if (_cancelled || !mounted) throw const _Cancelled();
-        await _writer.invokeMethod<void>('frame', {'rgba': rgba});
-      }
-      path = await _writer.invokeMethod<String>('finish');
-      if (path == null) throw PlatformException(code: 'failed');
-      if (!privacy.dates) await clearMp4Dates(File(path));
-      if (!mounted) return;
-      setState(() => _making = 1);
-      await shareMadeFile(File(path), mime: 'video/mp4', from: from);
-      widget.onClose();
-    } on _Cancelled {
-      unawaited(_writer.invokeMethod<void>('cancel').catchError((_) {}));
-      if (mounted) setState(() => _making = null);
-    } on Object catch (error) {
-      unawaited(_writer.invokeMethod<void>('cancel').catchError((_) {}));
-      if (!mounted) return;
-      setState(() {
-        _making = null;
-        _error = error is PlatformException && error.code == 'limit'
-            ? "Couldn't make the video: it's too long."
-            : "Couldn't make the video.";
-      });
-    }
-  }
-
-  /// Until the app is in front again, if it isn't.
-  Future<void> _foreground() async {
-    final binding = WidgetsBinding.instance;
-    while (mounted &&
-        !_cancelled &&
-        binding.lifecycleState != null &&
-        binding.lifecycleState != AppLifecycleState.resumed) {
-      await Future<void>.delayed(const Duration(milliseconds: 200));
-    }
+  /// Starts making the video in the background, from its first frame,
+  /// and puts the sheet away: its progress, then where it's saved, show
+  /// along the top of the window (export_job.dart).
+  void _make() {
+    replayJobs.start(
+      ReplayJob(
+        video: ReplayVideo(widget.replay, length: _length),
+        shape: _shape,
+        privacy: _privacy,
+        person: AppScope.of(context).workspace.workspace.person,
+        media: MediaQuery.of(context),
+        style: DefaultTextStyle.of(context).style,
+      ),
+    );
+    widget.onClose();
   }
 
   @override
@@ -818,7 +812,9 @@ class _ReplayExportState extends State<ReplayExport>
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     final phone = isPhoneLayout(context);
-    final making = _making;
+    // One video at a time: while one is made, its progress shows along the
+    // top of the window, and another waits for it.
+    final busy = replayJobs.busy;
     if (_made == null) {
       return FormFrame(
         title: 'Share replay',
@@ -873,11 +869,7 @@ class _ReplayExportState extends State<ReplayExport>
               ),
             ),
             const SizedBox(width: Space.m),
-            Toggle(
-              value: value,
-              onChanged: making == null ? onChanged : null,
-              label: label,
-            ),
+            Toggle(value: value, onChanged: onChanged, label: label),
           ],
         );
     Widget choice<T>(
@@ -917,106 +909,69 @@ class _ReplayExportState extends State<ReplayExport>
 
     final fields = <Widget>[
       preview,
-      if (making != null) ...[
-        _Progress(value: making),
+      choice<ReplayShape>('Shape', _shape, [
+        for (final shape in ReplayShape.values) (shape, shape.title),
+      ], (shape) => setState(() => _chosenShape = shape)),
+      choice<ReplayLength>(
+        'Length',
+        _length,
+        [for (final length in ReplayLength.values) (length, length.title)],
+        (length) => setState(() {
+          _length = length;
+          _restart(length: length);
+        }),
+      ),
+      Text(
+        'Only the shape of your team shows unless you turn more on. '
+        'Secrets and the names of other Claktories never show.',
+        style: type.caption.copyWith(color: palette.textMuted),
+      ),
+      Column(
+        spacing: phone ? 0 : Space.s,
+        children: [
+          toggle(
+            'Names',
+            _privacy.names,
+            (on) => setState(() => _privacy = _privacy.copyWith(names: on)),
+          ),
+          toggle(
+            'Roles',
+            _privacy.roles,
+            (on) => setState(() => _privacy = _privacy.copyWith(roles: on)),
+          ),
+          toggle(
+            'Project names',
+            _privacy.projects,
+            (on) => setState(() => _privacy = _privacy.copyWith(projects: on)),
+          ),
+          toggle(
+            'Dates',
+            _privacy.dates,
+            (on) => setState(() => _privacy = _privacy.copyWith(dates: on)),
+          ),
+        ],
+      ),
+      if (!busy)
         Text(
-          making >= 1
-              ? 'Sharing…'
-              : 'Making the video… ${(making * 100).floor()}%',
+          defaultTargetPlatform == TargetPlatform.macOS
+              ? "It's made in the background and saved in $replayFolderName."
+              : "It's made in the background and saved in Photos.",
           style: type.caption.copyWith(color: palette.textMuted),
         ),
-      ] else ...[
-        choice<ReplayShape>('Shape', _shape, [
-          for (final shape in ReplayShape.values) (shape, shape.title),
-        ], (shape) => setState(() => _chosenShape = shape)),
-        choice<ReplayLength>(
-          'Length',
-          _length,
-          [for (final length in ReplayLength.values) (length, length.title)],
-          (length) => setState(() {
-            _length = length;
-            _restart(length: length);
-          }),
-        ),
-        Text(
-          'Only the shape of your team shows unless you turn more on. '
-          'Secrets and the names of other Claktories never show.',
-          style: type.caption.copyWith(color: palette.textMuted),
-        ),
-        Column(
-          spacing: phone ? 0 : Space.s,
-          children: [
-            toggle(
-              'Names',
-              _privacy.names,
-              (on) => setState(() => _privacy = _privacy.copyWith(names: on)),
-            ),
-            toggle(
-              'Roles',
-              _privacy.roles,
-              (on) => setState(() => _privacy = _privacy.copyWith(roles: on)),
-            ),
-            toggle(
-              'Project names',
-              _privacy.projects,
-              (on) =>
-                  setState(() => _privacy = _privacy.copyWith(projects: on)),
-            ),
-            toggle(
-              'Dates',
-              _privacy.dates,
-              (on) => setState(() => _privacy = _privacy.copyWith(dates: on)),
-            ),
-          ],
-        ),
-      ],
     ];
     return FormFrame(
       title: 'Share replay',
+      // Why Make video is greyed, at the top, where it shows without
+      // scrolling on the smallest phone (Zucchero's row 662).
+      body: busy
+          ? "Another video is being made. You can make this one once it's "
+                'done.'
+          : null,
       fields: fields,
-      error: _error,
+      error: null,
       submitLabel: 'Make video',
-      onSubmit: making == null ? _make : null,
-      onCancel: () {
-        if (making != null && making < 1) {
-          // Stops the video being made; the sheet stays.
-          setState(() => _cancelled = true);
-          return;
-        }
-        widget.onClose();
-      },
-      cancelLabel: making != null && making < 1 ? 'Stop' : 'Cancel',
-    );
-  }
-}
-
-class _Cancelled implements Exception {
-  const _Cancelled();
-}
-
-/// A thin bar, filled as far as [value] (0…1).
-class _Progress extends StatelessWidget {
-  const _Progress({required this.value});
-
-  final double value;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    return SizedBox(
-      height: 4,
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(2),
-        child: Stack(
-          children: [
-            Positioned.fill(child: ColoredBox(color: palette.hover)),
-            FractionallySizedBox(
-              widthFactor: value.clamp(0.0, 1.0),
-              child: ColoredBox(color: palette.signal),
-            ),
-          ],
-        ),
-      ),
+      onSubmit: busy ? null : _make,
+      onCancel: widget.onClose,
     );
   }
 }

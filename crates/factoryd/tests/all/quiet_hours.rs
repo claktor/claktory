@@ -95,6 +95,48 @@ async fn needs_you_during_quiet_hours_notifies_once_they_end() {
     assert!(more.is_err(), "{more:?}");
 }
 
+/// An alert during quiet hours isn't pushed, but waits in Needs you and
+/// counts in the one notification when they end (Bruno 44235).
+#[tokio::test]
+async fn an_alert_during_quiet_hours_waits_in_needs_you() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, mut view) = connect_on(addr, "macos").await;
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Builder", "")).await;
+    let now = jiff::ZonedDateTime::now().time();
+    let minute = u32::try_from(now.hour()).expect("hour") * 60 + u32::try_from(now.minute()).expect("minute");
+    let (start, end) = ((minute + 1439) % 1440, (minute + 720) % 1440);
+    assert!(matches!(apply_request(&mut client, &mut view, quiet(true, start, end)).await, Body::Ack(_)));
+
+    let mut notes = Vec::new();
+    let alert = serde_json::json!({"title": "The build is done", "text": "All green."});
+    let said = call(&mut client, &mut view, &mut notes, "builder", "notify_person", alert).await;
+    assert_eq!(
+        said,
+        "Not sent as a notification: it's the person's quiet hours. It waits in their Needs you until they read it. When quiet hours end, they're told what came meanwhile."
+    );
+    assert!(notes.is_empty(), "quiet: {notes:?}");
+    assert_eq!(view.workspace.alerts.iter().map(|alert| alert.title.as_str()).collect::<Vec<_>>(), ["The build is done"]);
+
+    let reply = client.request(quiet(false, start, end)).await;
+    notes.extend(reply.events.iter().filter_map(|event| match &event.body {
+        Some(Body::Notify(notify)) => Some(notify.clone()),
+        _ => None,
+    }));
+    let waited = tokio::time::timeout(Duration::from_secs(20), async {
+        while notes.is_empty() {
+            if let Some(Body::Notify(notify)) = client.receive().await.body {
+                notes.push(notify);
+            }
+        }
+    })
+    .await;
+    assert!(waited.is_ok(), "no notification when quiet hours ended");
+    let [morning] = notes.as_slice() else { panic!("{notes:?}") };
+    assert_eq!((morning.title.as_str(), morning.body.as_str()), ("1 thing needs you", "It came during your quiet hours."));
+}
+
 #[tokio::test]
 async fn an_alert_with_only_an_android_app_connected_isnt_delivered() {
     let dir = temp_dir();
@@ -105,10 +147,10 @@ async fn an_alert_with_only_an_android_app_connected_isnt_delivered() {
     let mut notes = Vec::new();
     let alert = serde_json::json!({"title": "The build is done", "text": "All green."});
     let said = call(&mut client, &mut view, &mut notes, "builder", "notify_person", alert.clone()).await;
-    assert!(said.starts_with("Not delivered:"), "{said}");
+    assert!(said.starts_with("Not delivered as a notification:"), "{said}");
 
     // With the Mac's app connected too, it is.
     let (_mac, _) = connect_on(addr, "macos").await;
     let said = call(&mut client, &mut view, &mut notes, "builder", "notify_person", alert).await;
-    assert_eq!(said, "Sent: the person gets it as a notification.");
+    assert_eq!(said, "Sent: the person gets it as a notification, and it waits in their Needs you until they read it.");
 }

@@ -34,6 +34,7 @@ import '../ink_preview.dart' show DrawBar;
 import '../layout.dart' show chatOnly, leaves;
 import '../mobile/device.dart' show Idiom, deviceCapabilities;
 import '../mobile/metrics.dart' show TypeScale;
+import '../needs_you_focus.dart' show FocusSession;
 import '../pane_chrome.dart' show PaneAction, PaneChrome, PaneScaffold;
 // The bridge's InkComposite (what the native view exported) is this file's,
 // not the protocol's review-item composite.
@@ -132,13 +133,21 @@ class DocumentSurfaces {
         return surface;
       });
 
-  /// The project file's page at [path] went.
-  void release(String path) {
-    final surface = _surfaces.remove('$_files$path');
+  /// The project file's page at [path] went; or, given [agentId] and
+  /// [leaf], focus mode's stage for that card.
+  void release(String path, {String? agentId, ViewNode? leaf}) {
+    final surface = _surfaces.remove(
+      agentId != null && leaf != null ? _key(agentId, leaf) : '$_files$path',
+    );
     if (surface == null) return;
     surface._dispose();
     _restroke();
   }
+
+  /// The start of a leaf id focus mode's stage gives a card's file
+  /// (ipad/focus.dart): it's no pane of the agent's layout, so pruning
+  /// the layout leaves it be.
+  static const focusLeaf = 'focus:';
 
   /// Keys of project files' surfaces: no agent id has a space.
   static const _files = 'file /';
@@ -163,13 +172,17 @@ class DocumentSurfaces {
   }
 
   /// Drops [agentId]'s surfaces whose leaf has left its layout [root]
-  /// (closed, or another file in it).
+  /// (closed, or another file in it). Focus mode's ([focusLeaf]) aren't
+  /// in any layout: they go with their stage ([release]).
   void prune(String agentId, ViewNode root) {
     final kept = {for (final leaf in leaves(root)) _key(agentId, leaf)};
     final prefix = '$agentId/';
     final gone = [
       for (final key in _surfaces.keys)
-        if (key.startsWith(prefix) && !kept.contains(key)) key,
+        if (key.startsWith(prefix) &&
+            !key.startsWith('$prefix$focusLeaf') &&
+            !kept.contains(key))
+          key,
     ];
     for (final key in gone) {
       _surfaces.remove(key)!._dispose();
@@ -1060,11 +1073,15 @@ class DocumentHost extends StatelessWidget {
 
   /// The surface for [leaf] of the agent shown, under its own key so the
   /// pane keeps its state wherever it moves.
+  /// On focus mode's stage ([session]), [leaf]'s id starts with
+  /// [DocumentSurfaces.focusLeaf]: its surface goes with the stage, and the
+  /// review bar answers the stage's card ([DocumentReviewBar.session]).
   static Widget forLeaf(
     BuildContext context,
     ViewNode leaf, {
     String? agentId,
     VoidCallback? onDone,
+    FocusSession? session,
   }) {
     final focus = WorkbenchScope.maybeOf(context);
     final agent = agentId ?? AppScope.of(context).workspace.selectedAgent?.id;
@@ -1078,10 +1095,16 @@ class DocumentHost extends StatelessWidget {
       agentId: agent,
       surface: surface,
       onDone: onDone,
+      session: session,
       // The pane went: if it left the agent's layout (closed, even the last
       // one, which leaves no panes to lay out and so nothing else to drop
       // it), its surface goes, and its last save finishes or gives up.
+      // Focus mode's goes with its card.
       onGone: () {
+        if (session != null) {
+          focus.documents.release(leaf.leaf.path, agentId: agent, leaf: leaf);
+          return;
+        }
         final now = store.agent(agent);
         focus.documents.prune(
           agent,
@@ -1116,7 +1139,11 @@ class _Host extends StatefulWidget {
     required this.surface,
     this.onGone,
     this.onDone,
+    this.session,
   });
+
+  /// Focus mode's, whose stage it's on.
+  final FocusSession? session;
 
   /// Whose pane it is; null for a project's file, which no agent asks
   /// about.
@@ -1307,8 +1334,15 @@ class _HostState extends State<_Host> {
         if (status != null)
           _StatusLine(text: status.text, keepBoth: status.keepBoth),
         // Answerable even when the file can't show.
-        if (_review case final review? when review.ask != null)
-          DocumentReviewBar(watch: review, surface: surface),
+        // In focus mode, also once the card ended elsewhere: the bar says
+        // how, with Next.
+        if (_review case final review?
+            when review.ask != null || widget.session != null)
+          DocumentReviewBar(
+            watch: review,
+            surface: surface,
+            session: widget.session,
+          ),
       ];
       return PaneScaffold(
         details: page == null ? '' : 'Page ${page.page} of ${page.count}',

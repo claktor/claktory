@@ -5,8 +5,12 @@
 // the agent, named in the answer, with what's typed. Answered, the pane
 // closes.
 import 'dart:async';
+import 'dart:io';
 
 import 'package:factory_app/backend.dart' show RequestFailure;
+import 'package:factory_app/attachments.dart' show LocalFile;
+import 'package:factory_app/card_answer.dart' show drawingGoesLine, insteadLine;
+import 'package:factory_app/card_files.dart' show cardFilesKey;
 import 'package:factory_app/controls.dart' show Pressable;
 import 'package:factory_app/dictation.dart';
 import 'package:factory_app/ipad/document_review.dart';
@@ -49,25 +53,27 @@ void main() {
     expect(find.text('Check the figures on page 3'), findsOneWidget);
     expect(find.text('The totals look off.'), findsOneWidget);
     // Nothing drawn: nothing said about drawings.
-    expect(find.textContaining('go with your answer'), findsNothing);
+    expect(find.textContaining('go with it'), findsNothing);
+    expect(find.text('Reply to Builder'), findsOneWidget);
 
     await native.drew(3, 2);
     await native.drew(1, 1);
     await native.drew(5, 0); // drawn, then all erased
     await settle(tester);
-    expect(
-      find.text('Your drawings on 2 pages go with your answer.'),
-      findsOneWidget,
-    );
-
-    expect(find.text('Builder gets it with your answer.'), findsOneWidget);
+    // The line beside the buttons: the drawings go with either.
+    expect(find.text('Your drawings on 2 pages go with it.'), findsOneWidget);
+    expect(find.text('Approve'), findsOneWidget);
+    expect(find.text('Dismiss'), findsOneWidget);
     await tester.enterText(_field, 'Looks right');
     await tester.pump();
     // A comment is a reply (#370): Submit alone, saying so.
     expect(find.text('Approve'), findsNothing);
     expect(find.text('Dismiss'), findsNothing);
     expect(
-      find.text('Builder gets your comment and carries on from it.'),
+      find.text(
+        'Submit sends your words instead of approving. '
+        'Your drawings on 2 pages go with it.',
+      ),
       findsOneWidget,
     );
     await tester.tap(find.text('Submit'));
@@ -117,10 +123,7 @@ void main() {
     final harness = await showDocument(tester);
     await native.drew(2, 4);
     await settle(tester);
-    expect(
-      find.text('Your drawing on 1 page goes with your answer.'),
-      findsOneWidget,
-    );
+    expect(find.text(drawingGoesLine), findsOneWidget);
     // Typed and cleared: Approve and Dismiss are back.
     await tester.enterText(_field, 'Not this week');
     await tester.pump();
@@ -353,10 +356,7 @@ void main() {
         {'page_1based': 3, 'scope': 'all'},
       ]);
       expect(comment(tester), 'why page 1?\nwhy page 3?');
-      expect(
-        find.text('Builder gets your comment and carries on from it.'),
-        findsOneWidget,
-      );
+      expect(find.textContaining(insteadLine('approving')), findsOneWidget);
       expect(sentOf(harness, (m) => m.hasAnswerAsk()), isEmpty);
       // Offered again, for more.
       expect(offer(all), findsOneWidget);
@@ -390,10 +390,7 @@ void main() {
       // is the offer's, not the field's.
       await tester.tapAt(Offset(read.left + 24, read.top + 1));
       await settle(tester);
-      expect(
-        find.text('Builder gets your comment and carries on from it.'),
-        findsOneWidget,
-      );
+      expect(find.textContaining(insteadLine('approving')), findsOneWidget);
       expect(comment(tester), 'why page 1?');
     });
 
@@ -585,7 +582,7 @@ void main() {
       harness.backend.appliesLayouts = true;
       // Always open, named for VoiceOver, with how to send it.
       expect(_field, findsOneWidget);
-      expect(find.text('Your answer to Builder'), findsOneWidget);
+      expect(find.text('Reply to Builder'), findsOneWidget);
       expect(
         find.byWidgetPredicate(
           (w) =>
@@ -645,7 +642,7 @@ void main() {
       expect(answer.talkSeen, 0);
     });
 
-    testWidgets('an agent that wants words: Send waits for them', (
+    testWidgets('an agent that wants words: Answer waits for them', (
       tester,
     ) async {
       asIPad();
@@ -655,12 +652,15 @@ void main() {
         ask: (ask) => ask.wantsText = true,
       );
       expect(find.text('Approve'), findsNothing);
-      await tester.tap(find.text('Send'));
+      expect(find.text('Your answer'), findsOneWidget);
+      await tester.tap(find.text('Answer'));
       await settle(tester);
       expect(sentOf(harness, (m) => m.hasAnswerAsk()), isEmpty);
       await tester.enterText(_field, 'The second');
       await tester.pump();
-      await tester.tap(find.text('Send'));
+      // Words are this card's answer: no "instead of" line.
+      expect(find.textContaining('instead of'), findsNothing);
+      await tester.tap(find.text('Answer'));
       await settle(tester);
       final answer = sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk;
       expect(answer.text, 'The second');
@@ -866,6 +866,106 @@ void main() {
       findsOneWidget,
     );
     expect(tester.widget<EditableText>(_field).controller.text, isEmpty);
+  });
+
+  group('files with the answer (#511)', () {
+    late Directory folder;
+    late String shot;
+    setUp(() {
+      folder = Directory.systemTemp.createTempSync('ipad-review-files');
+      shot = '${folder.path}/logo.png';
+      File(shot).writeAsBytesSync(List.filled(500, 3));
+    });
+    tearDown(() => folder.deleteSync(recursive: true));
+
+    Future<void> io(WidgetTester tester) async {
+      for (var i = 0; i < 12; i++) {
+        await tester.pump();
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+      }
+      await settle(tester);
+    }
+
+    Future<void> attach(WidgetTester tester, Harness harness) async {
+      await tester.runAsync(
+        () => harness.backend.attachments.add(cardFilesKey('a1', 'q1'), [shot]),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('a file and a drawn page go in one answer; the drawings '
+        'line stays beside the chips', (tester) async {
+      asIPad();
+      final native = DocumentNative();
+      final harness = await showDocument(tester);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('document-review')),
+          matching: find.bySemanticsLabel('Attach files'),
+        ),
+        findsOneWidget,
+      );
+      await attach(tester, harness);
+      await native.drew(2, 4);
+      await settle(tester);
+      expect(find.text('logo.png'), findsOneWidget);
+      expect(find.text(drawingGoesLine), findsOneWidget);
+      await tester.tap(find.text('Approve'));
+      await io(tester);
+      final answer = sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk;
+      expect(
+        [for (final a in answer.attachments) a.name],
+        ['paper-p2.png', 'logo.png'],
+      );
+      expect(harness.backend.attachments.of(cardFilesKey('a1', 'q1')), isEmpty);
+    });
+
+    testWidgets("drawings that can't go up: nothing is sent, and the file "
+        'stays for the retry', (tester) async {
+      asIPad();
+      final native = DocumentNative();
+      readComposite = (file) async => throw StateError('gone');
+      final harness = await showDocument(tester);
+      await attach(tester, harness);
+      await native.drew(1, 1);
+      await settle(tester);
+      await tester.tap(find.text('Dismiss'));
+      await io(tester);
+      expect(sentOf(harness, (m) => m.hasAnswerAsk()), isEmpty);
+      expect(find.text('logo.png'), findsOneWidget);
+      expect(harness.backend.attachments.of(cardFilesKey('a1', 'q1')), [
+        isA<LocalFile>(),
+      ]);
+    });
+
+    for (final width in [320.0, 375.0, 516.0]) {
+      testWidgets('at ${width.toInt()} points wide (Slide Over, a third, '
+          'a half) the paperclip is a 44 pt target beside the mic and the '
+          'field', (tester) async {
+        asIPad();
+        DocumentNative();
+        await showDocument(tester, size: Size(width, 1024));
+        if (find.text('paper.pdf').evaluate().isNotEmpty) {
+          await tester.tap(find.text('paper.pdf').first);
+          await settle(tester);
+        }
+        expect(tester.takeException(), isNull);
+        final clip = find.descendant(
+          of: find.byKey(const ValueKey('document-review')),
+          matching: find.bySemanticsLabel('Attach files'),
+        );
+        final field = tester.getRect(
+          find.byKey(const ValueKey('review-answer')),
+        );
+        final rect = tester.getRect(clip);
+        expect(rect.height, greaterThanOrEqualTo(44));
+        expect(rect.width, greaterThanOrEqualTo(44));
+        expect(rect.left, greaterThanOrEqualTo(field.right));
+        expect(rect.right, lessThanOrEqualTo(width));
+      });
+    }
   });
 
   group('answering by voice', () {

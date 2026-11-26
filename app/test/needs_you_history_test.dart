@@ -87,6 +87,50 @@ Future<Harness> _openHistory(
 }
 
 void main() {
+  testWidgets("a read alert: who sent it, its title, and where it was read "
+      "(§3.9)", (tester) async {
+    NeedsYouRecord alert(
+      String agent,
+      Alert what, {
+      String device = '',
+      Duration ago = const Duration(hours: 1),
+    }) =>
+        _record(
+            agent,
+            what.title,
+            kind: NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_ALERT,
+            outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_READ,
+            ago: ago,
+          )
+          ..alert = what
+          ..answeredOn = AnsweredOn(deviceName: device);
+    await _openHistory(tester, [
+      alert(
+        'june',
+        Alert(agentId: 'june', fromName: 'June', title: 'Backup done'),
+        device: "Matt's iPhone",
+      ),
+      alert(
+        'omar',
+        Alert(agentId: 'omar', fromName: 'Omar', withheld: true),
+        ago: const Duration(hours: 2),
+      ),
+      alert(
+        '',
+        Alert(fromName: 'Studio', title: "The disk can't be written"),
+        ago: const Duration(hours: 3),
+      )..agentName = '',
+    ]);
+    expect(find.text('Backup done'), findsOneWidget);
+    expect(
+      find.textContaining("Read on Matt's iPhone", findRichText: true),
+      findsOneWidget,
+    );
+    expect(find.text('Omar sent you an alert'), findsOneWidget);
+    expect(find.textContaining('Studio', findRichText: true), findsWidgets);
+    expect(find.text("The disk can't be written"), findsOneWidget);
+  });
+
   testWidgets('what was decided, newest first: who, what it asked, how '
       'it ended and when', (tester) async {
     final harness = await _openHistory(tester, [

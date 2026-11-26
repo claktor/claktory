@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/drafts.dart';
+import 'package:factory_app/needs_you_entries.dart';
 import 'package:factory_app/notifications.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/rail.dart';
@@ -59,7 +60,7 @@ void main() {
   late ClaktoryNotifications notifications;
   final backends = <String, _Backend>{};
 
-  Future<void> start(WidgetTester tester) async {
+  Future<void> start(WidgetTester tester, {bool phone = false}) async {
     // Claktories follow the app's lifecycle, which needs the binding.
     await tester.pumpWidget(const SizedBox());
     connections = Connections(MemoryConnectionStorage());
@@ -86,6 +87,7 @@ void main() {
     notifications = ClaktoryNotifications(
       claktories: claktories,
       system: system,
+      phone: () => phone,
     );
     addTearDown(() {
       notifications.dispose();
@@ -252,6 +254,103 @@ void main() {
     expect(local().sent, hasLength(sent));
   });
 
+  testWidgets("on a phone, a card's click opens Needs you at that card, "
+      'over what showed (#514 §7.2)', (tester) async {
+    await start(tester, phone: true);
+    final page = claktories.all.last.page..value = AppPage.settings;
+    final sent = nixos().sent.length;
+    system.clicks.add(
+      NotificationTarget(
+        claktory: 'c' * 64,
+        agentId: 'rivet',
+        seq: 7,
+        kind: 'needs_you',
+      ),
+    );
+    await tester.pump();
+    expect(claktories.selected.backend, same(nixos()));
+    expect(page.value, AppPage.inbox);
+    expect(nixos().needsYouCard.value, 'agent:rivet/7');
+    expect(nixos().sent, hasLength(sent), reason: 'no agent selected');
+
+    system.clicks.add(
+      NotificationTarget(
+        claktory: 'c' * 64,
+        chatId: '3',
+        seq: 2,
+        kind: 'needs_you',
+      ),
+    );
+    await tester.pump();
+    expect(nixos().needsYouCard.value, 'chat:3/2');
+
+    // A reply's notification still opens the conversation.
+    system.clicks.add(
+      NotificationTarget(claktory: 'c' * 64, agentId: 'rivet', seq: 9),
+    );
+    await tester.pump();
+    expect(page.value, AppPage.agent);
+    expect(nixos().sent.last.selectAgent.agentId, 'rivet');
+  });
+
+  testWidgets("an alert's click opens Needs you at it while it waits, "
+      "else its agent at it (§3.9)", (tester) async {
+    await start(tester);
+    final page =
+        claktories.all.firstWhere((each) => claktoryId(each) == 'local').page
+          ..value = AppPage.settings;
+    local().notifies.add(
+      Notify(
+        id: 'n9',
+        kind: NotifyKind.NOTIFY_KIND_ALERT,
+        title: 'Rivet',
+        body: 'account.claktory.com is down',
+        agentId: 'rivet',
+        seq: Int64(40),
+        alertId: 'al1',
+      ),
+    );
+    expect(system.posted.last.target.alertId, 'al1');
+    expect(
+      NotificationTarget.fromMap(system.posted.last.target.toMap())!.alertId,
+      'al1',
+    );
+
+    local().workspace.apply(
+      local().workspace.workspace.deepCopy()
+        ..alerts.add(Alert(id: 'al1', agentId: 'rivet', title: 'Down')),
+    );
+    system.clicks.add(
+      NotificationTarget(
+        claktory: 'local',
+        agentId: 'rivet',
+        seq: 40,
+        alertId: 'al1',
+      ),
+    );
+    await tester.pump();
+    expect(page.value, AppPage.inbox);
+    expect(NeedsYouEntries.of(local()).revealAlert.value, 'al1');
+
+    // Read since: its agent, at it.
+    NeedsYouEntries.of(local()).revealAlert.value = null;
+    local().workspace.apply(
+      local().workspace.workspace.deepCopy()..alerts.clear(),
+    );
+    system.clicks.add(
+      NotificationTarget(
+        claktory: 'local',
+        agentId: 'rivet',
+        seq: 40,
+        alertId: 'al1',
+      ),
+    );
+    await tester.pump();
+    expect(page.value, AppPage.agent);
+    expect(local().sent.last.selectAgent.agentId, 'rivet');
+    expect(NeedsYouEntries.of(local()).revealAlert.value, isNull);
+  });
+
   testWidgets("a Mac's: whether in use, posting, and clicks, through "
       'factory/notifications', (tester) async {
     const channel = MethodChannel('factory/notifications');
@@ -300,6 +399,7 @@ void main() {
         'seq': 0,
         'deviceId': '',
         'kind': '',
+        'alertId': '',
       },
     });
 

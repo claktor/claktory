@@ -351,3 +351,68 @@ async fn a_stray_process_on_a_full_core_is_told_once_and_an_agents_task_never() 
     view.follow(&mut client, |view| samples(view) >= 20).await;
     assert_eq!(of(&view, &pid).len(), 1, "told again after a restart");
 }
+
+/// Friend bug #54: the person chooses who hears the alerts: the admin
+/// agents unless they turn that off, and agents they choose, which get
+/// Resources turned on in the same change. Settings says who's told.
+#[tokio::test]
+async fn the_person_chooses_who_hears_the_alerts_and_settings_says_whos_told() {
+    let (dir, _factory, mut client, mut view) = setup().await;
+    let hearers = |view: &View| {
+        let settings = view.workspace.settings.clone().expect("settings");
+        let listed: Vec<(String, bool, bool)> =
+            settings.resource_alert_agents.iter().map(|hears| (hears.agent_id.clone(), hears.told, hears.admin)).collect();
+        (settings.resource_alerts_to_admins, listed)
+    };
+    assert_eq!(hearers(&view), (true, vec![("rivet".to_owned(), true, true)]));
+
+    // An agent that isn't one is refused, and nothing changes.
+    let wrong = v1::UpdateSettings { resource_alert_agents: Some(v1::AgentIds { agent_ids: vec!["nobody".into()] }), ..Default::default() };
+    assert!(matches!(apply_request(&mut client, &mut view, settings(wrong)).await, Body::Error(_)));
+
+    // Scout instead of the admin agents: Resources goes on for it.
+    let scout = v1::UpdateSettings {
+        resource_alerts_to_admins: Some(false),
+        resource_alert_agents: Some(v1::AgentIds { agent_ids: vec!["scout".into(), "scout".into()] }),
+        ..Default::default()
+    };
+    assert!(matches!(apply_request(&mut client, &mut view, settings(scout)).await, Body::Ack(_)));
+    view.follow(&mut client, |view| hearers(view) == (false, vec![("scout".to_owned(), true, false)])).await;
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("home/config.json")).expect("config")).expect("json");
+    assert_eq!(config["resources"]["alerts_to_admins"], false);
+    assert_eq!(config["resources"]["alert_agents"], serde_json::json!(["scout"]));
+    let scout_resources =
+        config["agents"].as_array().expect("agents").iter().find(|agent| agent["id"] == "scout").expect("scout")["extensions"]["resources"]
+            ["enabled"]
+            .clone();
+    assert_eq!(scout_resources, true);
+
+    // Scout hears the alert; Rivet doesn't.
+    let low_memory = "This machine is running low on memory";
+    apply_request(&mut client, &mut view, select("scout")).await;
+    apply_request(&mut client, &mut view, settings(v1::UpdateSettings { ram_percent: Some(1), ..Default::default() })).await;
+    view.follow(&mut client, |view| told(view, low_memory) == 1).await;
+    apply_request(&mut client, &mut view, select("rivet")).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    view.follow(&mut client, |view| idle(view, "rivet")).await;
+    assert_eq!(told(&view, low_memory), 0);
+
+    // Resources off for Scout: still chosen, shown untold, and why.
+    let off = v1::ExtensionChange { id: "resources".into(), enabled: Some(false), ..Default::default() };
+    apply_request(
+        &mut client,
+        &mut view,
+        client_message::Body::UpdateAgent(v1::UpdateAgent { agent_id: "scout".into(), extension: Some(off), ..Default::default() }),
+    )
+    .await;
+    view.follow(&mut client, |view| hearers(view) == (false, vec![("scout".to_owned(), false, false)])).await;
+    let held = view.workspace.settings.clone().expect("settings").resource_alert_agents[0].held();
+    assert_eq!(held, v1::ResourceAlertHeld::ResourcesOff);
+
+    // Both again: Rivet first, then Scout.
+    let both = v1::UpdateSettings { resource_alerts_to_admins: Some(true), ..Default::default() };
+    apply_request(&mut client, &mut view, settings(both)).await;
+    view.follow(&mut client, |view| hearers(view).1.len() == 2).await;
+    assert_eq!(hearers(&view), (true, vec![("rivet".to_owned(), true, true), ("scout".to_owned(), false, false)]));
+}

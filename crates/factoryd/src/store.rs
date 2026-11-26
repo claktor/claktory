@@ -88,7 +88,7 @@ CREATE TABLE show_all (project TEXT PRIMARY KEY);
 /// Changes to the schema since `SCHEMA`, in order: database version n+1 has
 /// the first n+1 of them. Older backends (after a rollback) ignore tables they
 /// don't know.
-const MIGRATIONS: [&str; 118] = [
+const MIGRATIONS: [&str; 125] = [
     "
 -- Agents with a run that finished or failed since the person last opened them.
 CREATE TABLE unseen (agent TEXT PRIMARY KEY);
@@ -285,6 +285,38 @@ CREATE INDEX checklist_items_by_status ON checklist_items (status);
 -- that ended it, its agent is told where it ran); null for tasks before it.
 ALTER TABLE tasks ADD COLUMN folder TEXT;
 ",
+    crate::focus_mode::SCHEMA,
+    crate::answered_on::SCHEMA,
+    crate::notify::alerts::SCHEMA,
+    "
+-- History's messages_history index was built here, before Claktory
+-- listened; it's one of LATE_INDEXES now.
+",
+    crate::pipes::shares::EXPIRY,
+    crate::extensions::ask::FOLLOWS_FILE,
+    crate::given_up::SCHEMA,
+];
+
+/// Migrations from this one on add no index to a table that grows with
+/// every message or run (`no_migration_indexes_a_growing_table`).
+#[cfg(test)]
+const FIRST_WITHOUT_BIG_INDEXES: usize = 121;
+
+/// Indexes on tables that grow with every message or run, built a while
+/// after Claktory listens (`Store::build_late_indexes`, from History's
+/// warm-up), never in a migration: building one reads the whole table,
+/// which with years of history can take long enough that a new version
+/// misses the update's trial (update.rs `TRIAL`) and is rolled back, on
+/// every try (Polpo's efficiency/startup-db.md). What reads with them is
+/// as right without them, only slower.
+pub(crate) const LATE_INDEXES: [(&str, &str); 3] = [
+    // History reads every message from it, never their texts (Polpo's
+    // history-scale.md item 5).
+    ("messages_history", "CREATE INDEX IF NOT EXISTS messages_history ON messages (id, created, agent, source, sender_id, send_id, quiet, reply_to, intent)"),
+    // The few messages not delivered yet, read at every start (`waiting`).
+    ("messages_waiting", "CREATE INDEX IF NOT EXISTS messages_waiting ON messages (id) WHERE delivered IS NULL AND dropped IS NULL"),
+    // Runs not ended, read at every start (`interrupted_runs`).
+    ("runs_open", "CREATE INDEX IF NOT EXISTS runs_open ON runs (id) WHERE ended IS NULL"),
 ];
 
 /// A background task as recorded.
@@ -406,6 +438,25 @@ impl Store {
 
     pub(crate) fn db(&self) -> MutexGuard<'_, Connection> {
         self.db.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Builds the LATE_INDEXES not there yet, one at a time, on the store's
+    /// own connection, held meanwhile: a write waits for it rather than
+    /// meeting a locked database. How many it built.
+    pub(crate) fn build_late_indexes(&self) -> Result<usize, rusqlite::Error> {
+        let mut built = 0;
+        for (name, sql) in LATE_INDEXES {
+            let db = self.db();
+            let there: i64 = db.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = ?1", [name], |row| row.get(0))?;
+            if there > 0 {
+                continue;
+            }
+            let started = std::time::Instant::now();
+            db.execute_batch(sql)?;
+            tracing::info!(index = name, took = ?started.elapsed(), "built an index");
+            built += 1;
+        }
+        Ok(built)
     }
 
     /// Writes the model calls counted so far (`crate::calls`): before
@@ -636,6 +687,11 @@ impl Store {
         Ok(query(&self.db(), "SELECT agent, task FROM tasks WHERE ended IS NULL", [], row2)?.into_iter().collect())
     }
 
+    /// How many background tasks each agent has running (Agent.tasks_running).
+    pub(crate) fn running_counts(&self) -> Result<std::collections::HashMap<String, u32>, rusqlite::Error> {
+        Ok(query(&self.db(), "SELECT agent, COUNT(*) FROM tasks WHERE ended IS NULL GROUP BY agent", [], row2)?.into_iter().collect())
+    }
+
     pub(crate) fn running_tasks(&self) -> Result<Vec<(String, Task)>, rusqlite::Error> {
         let db = self.db();
         let mut statement =
@@ -840,6 +896,37 @@ fn source_named(name: &str) -> Option<EventSource> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A big table's index in a migration would be built before Claktory
+    /// listens: one goes in LATE_INDEXES instead.
+    #[test]
+    fn no_migration_indexes_a_growing_table() {
+        for (at, migration) in MIGRATIONS.iter().enumerate().skip(FIRST_WITHOUT_BIG_INDEXES) {
+            let sql = migration.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase().replace(" (", "(");
+            for table in ["messages", "runs", "pipe_messages", "map_history", "asks", "proposals", "quiet_copies"] {
+                assert!(
+                    !(sql.contains("create index") || sql.contains("create unique index")) || !sql.contains(&format!(" on {table}(")),
+                    "migration {at} indexes {table}: put it in LATE_INDEXES"
+                );
+            }
+        }
+    }
+
+    /// Built late, once; and what reads at every start uses them.
+    #[test]
+    fn late_indexes_are_built_once_and_used() {
+        let store = Store::open(&path()).expect("store");
+        assert_eq!(store.build_late_indexes().expect("built"), LATE_INDEXES.len());
+        assert_eq!(store.build_late_indexes().expect("again"), 0);
+        let db = store.db();
+        let plan = |sql: &str| -> String {
+            crate::store::query(&db, &format!("EXPLAIN QUERY PLAN {sql}"), [], |row| row.get::<_, String>(3)).expect("plan").join("; ")
+        };
+        let waiting = plan("SELECT id FROM messages WHERE delivered IS NULL AND dropped IS NULL ORDER BY id");
+        assert!(waiting.contains("messages_waiting"), "{waiting}");
+        let open = plan("SELECT agent, version, started FROM runs WHERE ended IS NULL ORDER BY id");
+        assert!(open.contains("runs_open"), "{open}");
+    }
 
     fn path() -> std::path::PathBuf {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

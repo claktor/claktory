@@ -9,12 +9,15 @@
 // as a PNG with the ink on it, uploaded to the agent and named in the
 // answer (AnswerAsk.attachments), so they reach the agent only when the
 // person answers. Answered, the pane closes and the person is back where
-// they were. Nothing here is a comment of its own.
+// they were. Nothing here is a comment of its own. In Needs you's focus
+// mode (#514) the bar is the stage's answer for a PDF or a picture: its
+// answer goes in the stage's dock, ⌘↩, ⌘⌫ and its buttons go through the
+// focus session, and answered, nothing closes; the next card comes in.
 //
 // Only a backend that takes the drawings accepts a PDF for review, so a
 // question waiting on a PDF says the answer can carry them.
 import 'dart:async';
-import 'dart:io' show File;
+import 'dart:io' show File, FileSystemException;
 import 'dart:math' show Random, min;
 
 import 'package:flutter/foundation.dart';
@@ -22,14 +25,24 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../backend.dart';
+import '../card_files.dart';
+import '../card_answer.dart'
+    show AnswerDock, CardAnswer, drawingGoesLine, insteadLine, replyPlaceholder;
 import '../characters/character.dart';
 import '../controls.dart';
 import '../decision.dart' show SubmitButton, commentTyped, decisionCommentLimit;
 import '../identity.dart';
 import '../markdown.dart' show Markdown;
+import '../mobile/lines.dart' show ActionLine, ControlsLine;
 import '../mobile/metrics.dart' show Metrics, TypeScale;
 import '../protocol/factory/v1/factory.pb.dart';
-import '../dictation.dart' show Dictation;
+import '../dictation.dart' show Dictation, DictationHold;
+import '../needs_you_focus.dart'
+    show
+        FocusOutcomeState,
+        FocusSession,
+        focusDismissReasons,
+        focusDismissWithoutReason;
 import '../outbox.dart' show decisionWaiting;
 import '../review_answer.dart'
     show
@@ -210,10 +223,17 @@ class DocumentReviewBar extends StatefulWidget {
     super.key,
     required this.watch,
     required this.surface,
+    this.session,
   });
 
   final ReviewWatch watch;
   final DocumentSurface surface;
+
+  /// Focus mode's, when the bar is its stage's answer (#514, spec §6.4):
+  /// it puts the card's answer in the stage's dock, so ⌘↩, ⌘⌫ and its own
+  /// buttons go through the session, which moves on once the answer is
+  /// accepted; answered, nothing closes (the next card comes in).
+  final FocusSession? session;
 
   @override
   State<DocumentReviewBar> createState() => _DocumentReviewBarState();
@@ -230,6 +250,14 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
   /// the agent wants words.
   final _comment = TextEditingController();
   final _field = FocusNode(debugLabel: 'review answer');
+
+  /// The field's dictation: what holding ⌘↩ or ⌘⌫ records into, in focus
+  /// mode.
+  final _dictation = GlobalKey();
+
+  /// What the bar put in focus mode's dock, and the dock.
+  CardAnswer? _published;
+  ValueNotifier<CardAnswer?>? _dock;
 
   @override
   void initState() {
@@ -278,11 +306,88 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
 
   @override
   void dispose() {
+    if (widget.session case final session?) {
+      if (identical(session.say, _dictation.currentState)) session.say = null;
+      if (session.intoField == _field.requestFocus) session.intoField = null;
+      // After the frame: the dock's listeners rebuild. Focus mode may have
+      // ended meanwhile (its session goes after the frame that stopped
+      // showing it): then there's nothing to tell.
+      final dock = _dock;
+      final published = _published;
+      if (dock != null && published != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!session.disposed && identical(dock.value, published)) {
+            dock.value = null;
+          }
+        });
+      }
+    }
     _comment
       ..removeListener(_typed)
       ..dispose();
     _field.dispose();
     super.dispose();
+  }
+
+  /// In focus mode, the card's answer in the stage's [dock] (what ⌘↩ and
+  /// ⌘⌫ do), again whenever it changes: what's typed, sending, an error.
+  /// And the field for R and for holding ⌘↩ or ⌘⌫ to say the answer.
+  void _publish(
+    FocusSession session,
+    ValueNotifier<CardAnswer?> dock,
+    String itemKey,
+    PendingReview ask, {
+    required String placeholder,
+    required String? error,
+  }) {
+    final wantsText = ask.ask.wantsText;
+    final next = CardAnswer(
+      key: itemKey,
+      // The bar is the stage's: it draws the field and the buttons, and the
+      // quick reasons of a no (FocusReviewBody answers).
+      docked: true,
+      field: _comment,
+      placeholder: placeholder,
+      wantsText: wantsText,
+      yes: wantsText ? 'Answer' : 'Approve',
+      no: 'Dismiss',
+      typed: _comment.text.trim().isNotEmpty,
+      busy: _busy,
+      error: error,
+      // Words are the answer when the agent wants them: nothing to
+      // approve without.
+      onYes: wantsText ? null : _sendOrThrow,
+      onSubmit: _sendOrThrow,
+      onNo: (reason) => _sendOrThrow(dismiss: true, reason: reason),
+      filesKey: cardFilesKey(widget.watch.agentId, ask.ask.id),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || session.disposed) return;
+      final state = _dictation.currentState;
+      session.say = state is DictationHold ? state as DictationHold : null;
+      session.intoField = _field.requestFocus;
+      final now = dock.value;
+      if (identical(dock, _dock) &&
+          now != null &&
+          identical(now, _published) &&
+          now.same(next)) {
+        return;
+      }
+      _dock = dock;
+      dock.value = _published = next;
+    });
+  }
+
+  /// The answer, for focus mode's session: thrown back as a refusal when
+  /// it wasn't accepted, so the card stays, with what the bar says.
+  Future<void> _sendOrThrow({bool dismiss = false, String? reason}) async {
+    final ask = widget.watch.ask;
+    if (!mounted || ask == null) {
+      throw const RequestFailure("Your answer wasn't sent. Try again.");
+    }
+    if (!await _answer(ask, dismiss: dismiss, reason: reason)) {
+      throw RequestFailure(_error ?? "Your answer wasn't sent. Try again.");
+    }
   }
 
   /// Handwriting being read, and what came of the last reading when it
@@ -383,16 +488,29 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
     return attachments;
   }
 
-  Future<bool> _answer(PendingReview ask, {bool dismiss = false}) async {
+  Future<bool> _answer(
+    PendingReview ask, {
+    bool dismiss = false,
+    String? reason,
+  }) async {
     final backend = widget.watch.backend;
     if (_busy || backend == null || !widget.watch.waits(ask)) return false;
     setState(() {
       _busy = true;
       _error = null;
     });
+    // The drawings went up: what fails after is the answer's own.
+    var drawn = false;
     try {
       final attachments = await _drawings(backend, ask.seq);
-      final text = _comment.text.trim();
+      drawn = true;
+      final typed = _comment.text.trim();
+      // A quick reason for a no (focus mode's), before anything typed.
+      final text = reason == null
+          ? typed
+          : typed.isEmpty
+          ? reason
+          : '$reason\n\n$typed';
       final watch = widget.watch;
       // The card as the bar shows it (#428), and its talk (#492).
       await sendReview(
@@ -414,8 +532,10 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
       _comment.clear();
       if (mounted) setState(() => _error = null);
       // Answered: the file's pane closes and the person is back where
-      // they pressed Review.
-      if (mounted) {
+      // they pressed Review. In focus mode nothing closes: the next card
+      // comes in once this one stops waiting.
+      // (Illuso's forgetReview goes here then, once it lands.)
+      if (mounted && widget.session == null) {
         unawaited(
           finishReview(
             context,
@@ -430,6 +550,18 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
         // Its agent changed it meanwhile: the words and the ink stay, for
         // the person to look again and send.
         setState(() => _error = reviewFailure(failure));
+      }
+      return false;
+    } on FileSystemException catch (error) {
+      // A drawn page couldn't be read, or a file added to the answer
+      // (#511), after the drawings went up.
+      if (mounted) {
+        setState(
+          () => _error = drawn
+              ? cardFilesFailure(error)
+              : "Couldn't send your drawings, so your answer wasn't sent. "
+                    'Try again.',
+        );
       }
       return false;
     } on Object {
@@ -457,16 +589,31 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
   /// Return never approves.
   void _submit(PendingReview ask) {
     if (_busy || _comment.text.trim().isEmpty) return;
-    unawaited(_answer(ask));
+    final session = widget.session;
+    unawaited(session != null ? session.yes() : _answer(ask));
   }
 
   @override
   Widget build(BuildContext context) => ListenableBuilder(
-    listenable: Listenable.merge([widget.watch, widget.surface]),
+    listenable: Listenable.merge([
+      widget.watch,
+      widget.surface,
+      ?widget.session,
+    ]),
     builder: (context, _) => _build(context),
   );
 
   Widget _build(BuildContext context) {
+    // Focus mode's card answered on another device or taken back while
+    // it was read: how it ended, and Next; the document stays, its ink
+    // saving as ever (§6.6).
+    if (widget.session case final session?) {
+      final key = session.current?.key;
+      final outcome = key == null ? null : session.outcomeOf(key);
+      if (outcome != null && outcome.state == FocusOutcomeState.ended) {
+        return _ended(context, session, outcome.words);
+      }
+    }
     final ask = widget.watch.ask;
     final agent = widget.watch.backend?.workspace.agent(widget.watch.agentId);
     if (ask == null || agent == null) return const SizedBox.shrink();
@@ -477,21 +624,57 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
     final typed = commentTyped(_comment);
     // A comment on a question that doesn't want words: Submit alone.
     final replying = typed && !ask.ask.wantsText;
+    // Where the words go, before anything's typed (rule 4).
+    final placeholder = ask.ask.wantsText
+        ? 'Your answer'
+        : replyPlaceholder(agent.name);
     // Held while a reply has it wait on its agent (Abbacchio's row 1325).
     final held = !widget.watch.waits(ask);
-    final off = _busy || held;
+    final session = widget.session;
+    if (session != null) {
+      final dock = AnswerDock.of(context);
+      _publish(
+        session,
+        dock?.answer ?? session.answer,
+        dock?.itemKey ?? session.current?.key ?? '',
+        ask,
+        placeholder: placeholder,
+        error: _error,
+      );
+    }
+    // In focus mode, a card changed a moment ago takes no answer yet (§8):
+    // the main button says so.
+    final guarded = session?.guarded ?? false;
+    final off = _busy || held || (session != null && !session.answerable);
+    // Through focus mode's session when there's one: it marks the card
+    // sent, and moves on once it's accepted.
+    void yes() => unawaited(session != null ? session.yes() : _answer(ask));
+    void no() =>
+        unawaited(session != null ? session.no() : _answer(ask, dismiss: true));
     final sending = _sending;
+    final error = _error ?? (held ? reviewHeld(ask.ask, agent.name) : null);
+    // The line at the row's start says what pressing does (the Needs you
+    // cards' rule 2): sending, then what went wrong, then what Submit
+    // does instead and the drawings that go with any answer (§3.1: a
+    // drawing leaves the buttons as they are). Nothing when the buttons
+    // say it all.
     final String? line = sending != null
         ? (sending.of == 1
               ? 'Sending your drawing…'
               : 'Sending your drawings… ${sending.sent + 1} of ${sending.of}')
-        : switch (drawn) {
-            0 => null,
-            1 when widget.surface.image =>
-              'Your drawing goes with your answer.',
-            1 => 'Your drawing on 1 page goes with your answer.',
-            _ => 'Your drawings on $drawn pages go with your answer.',
-          };
+        : error ??
+              [
+                if (replying) insteadLine('approving'),
+                if (drawn == 1) drawingGoesLine,
+                if (drawn > 1) 'Your drawings on $drawn pages go with it.',
+              ].join(' ').emptyAsNull;
+    final lineColor =
+        sending == null &&
+            error != null &&
+            error != decisionWaiting &&
+            _error != null
+        ? palette.danger
+        : palette.textMuted;
     return Semantics(
       container: true,
       explicitChildNodes: true,
@@ -509,20 +692,24 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Row(
-              children: [
-                ExcludeSemantics(child: AgentCharacter(agent: agent, size: 20)),
-                const SizedBox(width: Space.s),
-                Expanded(
-                  child: Text(
-                    '${agent.name} asks you to review this',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: type.secondary.copyWith(color: palette.textMuted),
+            // Focus mode's header already says who asks.
+            if (session == null)
+              Row(
+                children: [
+                  ExcludeSemantics(
+                    child: AgentCharacter(agent: agent, size: 20),
                   ),
-                ),
-              ],
-            ),
+                  const SizedBox(width: Space.s),
+                  Expanded(
+                    child: Text(
+                      '${agent.name} asks you to review this',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: type.secondary.copyWith(color: palette.textMuted),
+                    ),
+                  ),
+                ],
+              ),
             if (_moves.movedTo(widget.watch.agentId, ask.seq)) ...[
               const SizedBox(height: Space.xs),
               ReviewMovedOn(name: agent.name),
@@ -564,24 +751,24 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
               agent: agent,
               name: agent.name,
             ),
-            if (line != null) ...[
-              const SizedBox(height: Space.xs),
-              Semantics(
-                liveRegion: sending != null,
-                child: Text(
-                  line,
-                  style: type.secondary.copyWith(color: palette.textMuted),
-                ),
-              ),
-            ],
             const SizedBox(height: Space.s),
             // The answer, always open: Return sends what's typed, Shift
             // and Return starts a new line on a hardware keyboard. Or said:
             // the mic at its end puts what's said in, to check first.
             Dictation(
+              key: _dictation,
               controller: _comment,
               focusNode: _field,
               enabled: !_busy,
+              // Files with the answer (#511), the card's: what was added
+              // on it comes here too. The drawings go with them.
+              trailing: CardAttachButton(
+                card: cardFilesKey(widget.watch.agentId, ask.ask.id),
+                enabled: !_busy,
+                onNote: (note) {
+                  if (mounted) setState(() => _error = note);
+                },
+              ),
               child: CallbackShortcuts(
                 bindings: {
                   const SingleActivator(LogicalKeyboardKey.enter): () =>
@@ -593,8 +780,8 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
                     key: const ValueKey('review-answer'),
                     controller: _comment,
                     focusNode: _field,
-                    placeholder: 'Your answer to ${agent.name}',
-                    semanticsLabel: 'Your answer to ${agent.name}',
+                    placeholder: placeholder,
+                    semanticsLabel: placeholder,
                     minLines: 1,
                     maxLines: 6,
                     textInputAction: TextInputAction.send,
@@ -606,58 +793,69 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
                 ),
               ),
             ),
-            const SizedBox(height: Space.xs),
-            Text(
-              replying
-                  ? '${agent.name} gets your comment and carries on from it.'
-                  : '${agent.name} gets it with your answer.',
-              style: type.caption.copyWith(color: palette.textFaint),
+            CardFileChips(
+              card: cardFilesKey(widget.watch.agentId, ask.ask.id),
+              busy: _busy,
             ),
-            if (_error ?? (held ? reviewHeld(ask.ask, agent.name) : null)
-                case final error?) ...[
-              const SizedBox(height: Space.xs),
-              Text(
-                error,
-                style: type.secondary.copyWith(
-                  color: error == decisionWaiting || _error == null
-                      ? palette.textMuted
-                      : palette.danger,
+            const SizedBox(height: Space.s),
+            // The row (the Needs you cards' rule 2): the line, then Dismiss
+            // quiet, then the answer at the end, gone to one Submit while a
+            // reply is typed. The buttons go under the line when the pane
+            // is narrow or the text large, and stack as on a phone.
+            ActionLine(
+              lead: Semantics(
+                liveRegion: sending != null || error != null,
+                child: Text(
+                  line ?? '',
+                  style: type.caption.copyWith(color: lineColor),
                 ),
               ),
-            ],
-            const SizedBox(height: Space.s),
-            // The answer at the end, as a pane's other actions; Dismiss
-            // quiet before it, gone while a reply is typed. Under each
-            // other when the pane is narrow or the text large.
-            Align(
-              alignment: AlignmentDirectional.centerEnd,
-              child: Wrap(
-                spacing: Space.s,
-                runSpacing: Space.s,
-                children: [
-                  if (replying)
+              action: _rowOf(
+                reasons: session != null && session.reasonsShowing,
+                [
+                  // Focus mode's no, asked why first (§5.4): the quick
+                  // reasons, or none.
+                  if (session != null && session.reasonsShowing) ...[
+                    for (final (index, reason) in focusDismissReasons.indexed)
+                      Button(
+                        key: ValueKey('review-reason-$index'),
+                        label: reason,
+                        onPressed: off
+                            ? null
+                            : () => unawaited(session.no(reason: reason)),
+                      ),
+                    Button(
+                      key: const ValueKey('review-no-reason'),
+                      label: focusDismissWithoutReason,
+                      onPressed: off
+                          ? null
+                          : () => unawaited(session.no(askWhy: false)),
+                    ),
+                  ] else if (replying)
                     SubmitButton(
                       key: const ValueKey('review-send'),
-                      onPressed: off ? null : () => unawaited(_answer(ask)),
+                      onPressed: off ? null : yes,
                     )
                   else ...[
                     Button(
                       key: const ValueKey('review-dismiss'),
                       label: 'Dismiss',
-                      onPressed: off
-                          ? null
-                          : () => unawaited(_answer(ask, dismiss: true)),
+                      onPressed: off ? null : no,
                     ),
                     Button(
                       key: const ValueKey('review-send'),
                       // No Approve when the agent wants words: they're
                       // the answer.
-                      label: ask.ask.wantsText ? 'Send' : 'Approve',
+                      label: guarded
+                          ? 'Updated'
+                          : ask.ask.wantsText
+                          ? 'Answer'
+                          : 'Approve',
                       primary: true,
                       // Words are the answer when the agent wants them.
                       onPressed: off || (ask.ask.wantsText && !typed)
                           ? null
-                          : () => unawaited(_answer(ask)),
+                          : yes,
                     ),
                   ],
                 ],
@@ -671,7 +869,60 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
   }
 }
 
+extension on String {
+  String? get emptyAsNull => isEmpty ? null : this;
+}
+
+/// The row's buttons: in a line while they fit, stacked as on a phone when
+/// they don't; focus mode's quick [reasons] wrap instead.
+Widget _rowOf(List<Widget> buttons, {required bool reasons}) => reasons
+    ? Wrap(
+        alignment: WrapAlignment.end,
+        spacing: Space.s,
+        runSpacing: Space.s,
+        children: buttons,
+      )
+    : ControlsLine(children: buttons);
+
 extension on _DocumentReviewBarState {
+  /// Focus mode's card that ended elsewhere: [words], and Next.
+  Widget _ended(BuildContext context, FocusSession session, String words) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    return Container(
+      key: const ValueKey('document-review-ended'),
+      decoration: BoxDecoration(
+        color: palette.canvas,
+        border: Border(top: BorderSide(color: palette.hairline)),
+      ),
+      padding: const EdgeInsets.symmetric(
+        horizontal: Space.l,
+        vertical: Space.s,
+      ),
+      child: Wrap(
+        alignment: WrapAlignment.spaceBetween,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: Space.m,
+        runSpacing: Space.s,
+        children: [
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              words,
+              style: type.secondary.copyWith(color: palette.textMuted),
+            ),
+          ),
+          Button(
+            key: const ValueKey('review-next'),
+            label: 'Next',
+            primary: true,
+            onPressed: session.waiting.isEmpty ? null : session.next,
+          ),
+        ],
+      ),
+    );
+  }
+
   /// The offer to turn what's handwritten into the answer, on an iPad
   /// that reads handwriting (iPadOS 27 and later) with something drawn or
   /// chosen with the lasso; nothing at all on one that doesn't.

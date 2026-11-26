@@ -70,7 +70,12 @@ enum ConnectionKind implements DiagnosticKind {
   /// Usable after a welcome: the Workspace and the conversation shown are
   /// in, how long after the try began, and how many bytes the tunnel's
   /// connection had received by then.
-  ready;
+  ready,
+
+  /// Advanced diagnostics were turned on while connected: how the
+  /// connection goes now, so the Claktory hears from this device at once,
+  /// not at its next reconnect (friend bug #53).
+  recording;
 
   @override
   DiagnosticArea get area => DiagnosticArea.connection;

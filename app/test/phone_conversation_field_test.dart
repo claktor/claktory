@@ -1,6 +1,7 @@
 // A field inside a phone's conversation (a card's Add a comment) while the
-// person types in it: "Latest" steps aside, and the field shows whole above
-// the message box and the keyboard (Zucchero's #321, sa-23).
+// person types in it: "Latest" and the message box step aside, and the
+// field shows whole above the keyboard (Zucchero's #321, sa-23; the box,
+// Lucy's needs-you-cards.md §5.2).
 import 'package:factory_app/controls.dart' show TextField;
 import 'package:factory_app/identity.dart' show Space;
 import 'package:factory_app/message_box.dart' show MessageBox;
@@ -127,8 +128,10 @@ Future<void> _comment(WidgetTester tester) async {
 
 void main() {
   for (final scale in [1.0, 2.0]) {
-    testWidgets('typing a comment at ${scale}x: Latest steps aside, and the '
-        'field shows whole above the message box', (tester) async {
+    testWidgets('typing a comment at ${scale}x: Latest and the message '
+        'box step aside, and the field shows whole above the keyboard', (
+      tester,
+    ) async {
       await _show(tester, scale: scale);
       await _toCard(tester);
       // Away from the end, Latest offers the way back.
@@ -140,31 +143,31 @@ void main() {
       expect(focused, isNotNull);
       // Out of the way while the field has focus.
       expect(_latest.hitTestable(), findsNothing);
-      // Whole, between the header and the message box.
+      // The message box too, kept as it was (TypingAbove).
+      expect(find.byType(MessageBox), findsNothing);
+      expect(find.byType(MessageBox, skipOffstage: false), findsOneWidget);
+      // Whole, between the header and the keyboard.
       final field = tester.getRect(_field);
-      final box = tester.getRect(find.byType(MessageBox));
-      // With room under it for the line beneath, not flush with the box.
-      expect(field.bottom + Space.l, lessThanOrEqualTo(box.top));
-      expect(box.bottom, lessThanOrEqualTo(_se.height - _keyboard));
+      final keyboardTop = _se.height - _keyboard;
+      // With room under it for the line beneath, not flush with the keyboard.
+      expect(field.bottom + Space.l, lessThanOrEqualTo(keyboardTop));
       final header = tester.getRect(find.byType(PhoneHeader)).bottom;
       expect(field.top, greaterThanOrEqualTo(header));
 
       // A comment that runs to more lines grows the field; it stays whole.
-      await tester.enterText(
-        _field,
-        'Serial 1234567 shows.',
-      );
+      await tester.enterText(_field, 'Serial 1234567 shows.');
       await pumpFrames(tester);
       final grown = tester.getRect(_field);
       expect(grown.height, greaterThan(field.height));
       expect(grown.top, greaterThanOrEqualTo(header));
-      expect(grown.bottom, lessThanOrEqualTo(box.top));
+      expect(grown.bottom, lessThanOrEqualTo(keyboardTop));
 
       // Done typing: back again.
       FocusManager.instance.primaryFocus?.unfocus();
       tester.view.resetViewInsets();
       await pumpFrames(tester);
       expect(_latest.hitTestable(), findsOneWidget);
+      expect(find.byType(MessageBox), findsOneWidget);
     });
   }
 }

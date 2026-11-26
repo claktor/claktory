@@ -679,6 +679,120 @@ void main() {
       noSend(app);
     });
 
+    for (final wide in [false, true]) {
+      for (final back in [false, true]) {
+        testWidgets(
+          'repeated unreadable shares need one dismissal (wide=$wide, back=$back)',
+          (tester) async {
+            final app = _App();
+            await app.show(tester, incoming: incoming, wide: wide);
+            await share(tester, text: null, error: 'refused');
+            await share(tester, text: null, error: 'refused', id: 2);
+            expect(find.text('Nothing to add'), findsOneWidget);
+            expect(find.text("Some files couldn't be opened."), findsOneWidget);
+            expect(incoming.pending.map((share) => share.id), [1, 2]);
+            if (back) {
+              await _button();
+            } else {
+              await tester.tap(find.widgetWithText(Button, 'Close'));
+            }
+            await pumpFrames(tester);
+            expect(find.byType(AndroidSharePicker), findsNothing);
+            expect(incoming.pending, isEmpty);
+            expect(discarded, [1, 2]);
+            expect(systemPops, 0);
+            expect(app.claktories.selected.drafts.of('agent'), isEmpty);
+            noSend(app);
+          },
+        );
+      }
+    }
+
+    testWidgets(
+      'new unreadable share replaces the warning in the open notice',
+      (tester) async {
+        final app = _App();
+        await app.show(tester, incoming: incoming);
+        await share(tester, text: null, error: 'refused');
+        await share(tester, text: null, error: 'too_large', id: 2);
+        expect(find.text('Nothing to add'), findsOneWidget);
+        expect(find.text("Some files couldn't be opened."), findsNothing);
+        expect(find.text("Files over 2 GB can't be added."), findsOneWidget);
+        await tester.tap(find.widgetWithText(Button, 'Close'));
+        await pumpFrames(tester);
+        expect(find.byType(AndroidSharePicker), findsNothing);
+        expect(incoming.pending, isEmpty);
+        expect(discarded, [1, 2]);
+        noSend(app);
+      },
+    );
+
+    testWidgets('unreadable burst before the first frame has one notice', (
+      tester,
+    ) async {
+      final app = _App();
+      await app.show(tester, incoming: incoming);
+      for (final id in [1, 2, 3]) {
+        await sendNativeMethod(
+          channel,
+          MethodCall('received', {
+            'id': id,
+            'text': null,
+            'subject': null,
+            'files': <String>[],
+            'text_cut': false,
+            'error': 'refused',
+          }),
+        );
+      }
+      await pumpFrames(tester);
+      expect(find.byType(AndroidSharePicker), findsOneWidget);
+      expect(find.text('Nothing to add'), findsOneWidget);
+      await tester.tap(find.widgetWithText(Button, 'Close'));
+      await pumpFrames(tester);
+      expect(find.byType(AndroidSharePicker), findsNothing);
+      expect(incoming.pending, isEmpty);
+      expect(discarded, [1, 2, 3]);
+      noSend(app);
+    });
+
+    testWidgets('coalescing never skips real content or its partial warning', (
+      tester,
+    ) async {
+      final app = _App();
+      await app.show(tester, incoming: incoming);
+      await share(tester, text: null, error: 'refused');
+      await share(
+        tester,
+        text: 'Keep this shared text',
+        error: 'too_large',
+        id: 2,
+      );
+      await share(tester, text: null, error: 'no_space', id: 3);
+      expect(find.text("Some files couldn't be opened."), findsOneWidget);
+      expect(find.text("Files over 2 GB can't be added."), findsNothing);
+      await tester.tap(find.widgetWithText(Button, 'Close'));
+      await pumpFrames(tester);
+      expect(discarded, [1]);
+      expect(incoming.pending.map((share) => share.id), [2, 3]);
+      expect(find.text('Keep this shared text'), findsOneWidget);
+      expect(find.text("Files over 2 GB can't be added."), findsOneWidget);
+      await choose(tester, 'Origin agent');
+      expect(
+        app.claktories.selected.drafts.of('agent'),
+        'Keep this shared text',
+      );
+      expect(discarded, [1], reason: 'the accepted text is not discarded');
+      expect(find.text('Nothing to add'), findsOneWidget);
+      expect(find.textContaining('Not enough space on this'), findsOneWidget);
+      await tester.tap(find.widgetWithText(Button, 'Close'));
+      await pumpFrames(tester);
+      expect(find.byType(AndroidSharePicker), findsNothing);
+      expect(discarded, [1, 3]);
+      expect(incoming.pending, isEmpty);
+      noSend(app);
+    });
+
     testWidgets(
       'failed selection is truthful/retryable and keeps the payload',
       (tester) async {

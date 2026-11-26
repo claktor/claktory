@@ -130,11 +130,18 @@ pub fn tell(factory: &Factory, fault: Fault) -> usize {
         }
         Fault::Failing => "Its disk keeps failing, so what your agents do may not be kept. Check the disk on the computer it runs on.",
     };
+    let title = format!("{name} can't save anything");
+    // Kept in Needs you too, in memory while factory.db can't take it.
+    let alert = crate::notify::alerts::keep(
+        factory,
+        v1::Alert { from_name: name.clone(), title: title.clone(), text: body.to_owned(), urgent: true, ..Default::default() },
+    );
     let now = crate::transcript::now_ms();
     let notify = v1::Notify {
         id: format!("{now}-disk"),
+        alert_id: alert,
         kind: v1::NotifyKind::Alert.into(),
-        title: format!("{name} can't save anything"),
+        title,
         body: body.to_owned(),
         urgent: true,
         collapse: "disk".to_owned(),

@@ -1,17 +1,18 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
-import 'backend.dart' show fireAndLog;
 import 'controls.dart';
 import 'devices.dart' show thisDeviceKind;
 import 'identity.dart';
+import 'mobile/device_permissions.dart' show CameraPermission;
 import 'mobile/haptics.dart';
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
 import 'mobile/navigation.dart';
+import 'mobile/permission.dart'
+    show PermissionAccess, PermissionContent, PermissionFlow, PermissionWayOut;
 import 'mobile/presentation.dart' show PhoneSheet, presentSheet;
 import 'scanner.dart';
 import 'scope.dart';
@@ -28,22 +29,49 @@ Future<bool> canOfferScan(BuildContext context) async {
       access != CameraAccess.restricted;
 }
 
+/// A scanner's Paste code instead for a field with no Paste of its own:
+/// what's on the clipboard goes in [field], then [then] (reading it as a
+/// scanned code is read). Nothing on the clipboard: the field has the keys,
+/// for the person to paste or type.
+VoidCallback pasteCodeInto(TextEditingController field, {VoidCallback? then}) =>
+    () => unawaited(() async {
+      final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text
+          ?.trim();
+      if (text == null || text.isEmpty) return;
+      field.text = text;
+      then?.call();
+    }());
+
 /// Scans a code's QR code with the camera: on a phone a page that rises
 /// from the bottom, titled [title], with Close; elsewhere (an iPad) a
 /// dialog. Each code the camera reads goes to [check], which says why it
 /// can't be used (shown under the picture, the camera reading on) or null
 /// when it can: then it closes with that code, trimmed. Null when closed
-/// without one. A camera not asked for yet is asked for as it opens (the
-/// person just tapped Scan); a refused one says how to allow it, with Open
-/// Settings, and the camera starts once it's allowed and the person comes
-/// back.
+/// without one. A camera not asked for yet says why first, with Continue,
+/// which brings the system's prompt (area 5a, P7); a refused one says how
+/// to allow it, with Open Settings, and the camera starts once it's
+/// allowed and the person comes back.
+///
+/// [onPasteInstead]: the field's own Paste. Given, the scanner's way out
+/// (camera refused, or not available in this window) is Paste code
+/// instead: it closes, puts the keys back in the field it was opened from,
+/// and pastes.
 Future<String?> scanCode(
   BuildContext context, {
   required String title,
   required String? Function(String text) check,
+  VoidCallback? onPasteInstead,
 }) async {
-  // The keyboard goes down: the camera's picture needs the room.
-  FocusManager.instance.primaryFocus?.unfocus();
+  // The keyboard goes down: the camera's picture needs the room. The field
+  // it was opened from gets the keys back to paste instead.
+  final field = FocusManager.instance.primaryFocus;
+  field?.unfocus();
+  final pasteInstead = onPasteInstead == null
+      ? null
+      : () => WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (field?.context?.mounted ?? false) field!.requestFocus();
+          onPasteInstead();
+        });
   final routes = PhoneRoutes.of(context);
   if (isPhoneLayout(context)) {
     // Asked from a sheet (Your Claktories, Move…), a page would open under
@@ -58,6 +86,7 @@ Future<String?> scanCode(
           title: title,
           check: check,
           frame: _Frame.sheet,
+          pasteInstead: pasteInstead,
           done: ([code]) => close(code),
         ),
       );
@@ -70,6 +99,7 @@ Future<String?> scanCode(
           title: title,
           check: check,
           frame: _Frame.page,
+          pasteInstead: pasteInstead,
           done: ([code]) => routes.pop<String>(code),
         ),
       ),
@@ -82,6 +112,7 @@ Future<String?> scanCode(
       title: title,
       check: check,
       frame: _Frame.dialog,
+      pasteInstead: pasteInstead,
       done: ([code]) {
         scanned = code;
         close();
@@ -109,11 +140,15 @@ class _Scanner extends StatefulWidget {
     required this.check,
     required this.frame,
     required this.done,
+    this.pasteInstead,
   });
 
   final String title;
   final String? Function(String text) check;
   final _Frame frame;
+
+  /// Pastes in the field it was opened from, once it's closed; null: none.
+  final VoidCallback? pasteInstead;
 
   /// Closes it, with the code when there's one.
   final void Function([String? code]) done;
@@ -129,6 +164,9 @@ class _ScannerState extends State<_Scanner> with WidgetsBindingObserver {
   /// Why the last code read can't be used.
   String? _problem;
 
+  /// The camera is kept from the app now ([CameraAvailability]).
+  var _unavailable = false;
+
   /// A code was taken: what the camera reads next is ignored.
   var _taken = false;
 
@@ -136,7 +174,7 @@ class _ScannerState extends State<_Scanner> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _check(ask: true));
+    WidgetsBinding.instance.addPostFrameCallback((_) => _check());
   }
 
   @override
@@ -151,21 +189,62 @@ class _ScannerState extends State<_Scanner> with WidgetsBindingObserver {
     if (state == AppLifecycleState.resumed) unawaited(_check());
   }
 
-  /// Finds out whether the camera may be used, asking the person ([ask])
-  /// when they haven't answered yet. Refused, it's asked again rather than
-  /// assumed for good: Android can still ask after a first no.
-  Future<void> _check({bool ask = false}) async {
+  /// Finds out whether the camera may be used, asking nothing: the
+  /// permission's own screen asks, after saying why ([_permission]).
+  Future<void> _check() async {
     if (!mounted) return;
-    final camera = AppScope.scope(context).camera;
-    var access = await camera.access();
-    if (!mounted) return;
-    if (ask && access == CameraAccess.undetermined) {
-      access = await camera.request()
-          ? CameraAccess.granted
-          : await camera.access();
-    }
-    if (mounted && access != _access) setState(() => _access = access);
+    final access = await AppScope.scope(context).camera.access();
+    if (!mounted || access == _access) return;
+    setState(() {
+      _access = access;
+      if (access != CameraAccess.undetermined &&
+          access != CameraAccess.denied) {
+        _flow = null;
+      }
+    });
   }
+
+  /// The camera's permission, while the scanner says why or that it's off.
+  PermissionFlow? _flow;
+
+  /// Before the camera's first use, why, with Continue; refused, how to
+  /// turn it on, with Open Settings and the way out: Paste code instead
+  /// where the field can, else Not now. Closes itself once allowed.
+  Widget _permission(BuildContext context, CameraAccess access) {
+    final flow = _flow ??= PermissionFlow(
+      CameraPermission(
+        AppScope.scope(context).camera,
+        pairing: false,
+        paste: widget.pasteInstead != null,
+      ),
+      from: access == CameraAccess.denied
+          ? PermissionAccess.denied
+          : PermissionAccess.undetermined,
+    );
+    final pasteInstead = widget.pasteInstead;
+    return PermissionContent(
+      key: ObjectKey(flow),
+      flow: flow,
+      fill: widget.frame == _Frame.page,
+      wayOut: pasteInstead == null
+          ? null
+          : PermissionWayOut('Paste code instead', pasteInstead),
+      onDone: () {
+        final allowed = flow.result == PermissionAccess.granted;
+        _flow = null;
+        if (allowed) {
+          unawaited(_check());
+        } else {
+          _close();
+        }
+      },
+    );
+  }
+
+  /// The camera's permission is on screen: its own words, no title over
+  /// them.
+  bool get _asking =>
+      _access == CameraAccess.undetermined || _access == CameraAccess.denied;
 
   void _scanned(String code) {
     if (_taken) return;
@@ -189,7 +268,7 @@ class _ScannerState extends State<_Scanner> with WidgetsBindingObserver {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (widget.frame == _Frame.dialog) ...[
+        if (widget.frame == _Frame.dialog && !_asking) ...[
           Text(
             widget.title,
             style: TypeScale.of(context).emphasis.copyWith(color: palette.text),
@@ -214,10 +293,17 @@ class _ScannerState extends State<_Scanner> with WidgetsBindingObserver {
             search: false,
           ),
           Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(Touch.gutter),
-              child: body,
-            ),
+            // The camera's permission fills the page, the way on at its
+            // foot; the scanner scrolls.
+            child: _asking
+                ? Padding(
+                    padding: const EdgeInsets.all(Touch.gutter),
+                    child: _content(context, palette),
+                  )
+                : SingleChildScrollView(
+                    padding: const EdgeInsets.all(Touch.gutter),
+                    child: body,
+                  ),
           ),
         ],
       ),
@@ -239,6 +325,7 @@ class _ScannerState extends State<_Scanner> with WidgetsBindingObserver {
         return const SizedBox(height: 120);
       case CameraAccess.granted:
         final problem = _problem;
+        final pasteInstead = widget.pasteInstead;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -258,7 +345,19 @@ class _ScannerState extends State<_Scanner> with WidgetsBindingObserver {
                       borderRadius: BorderRadius.circular(Radii.panel),
                       border: Border.all(color: palette.hairline),
                     ),
-                    child: AppScope.scope(context).camera.preview(_scanned),
+                    // The camera kept from the app (an iPad sharing its
+                    // screen, another app using it): its words over the
+                    // picture, and Paste code instead below (Sorbet's).
+                    child: NotificationListener<CameraAvailability>(
+                      onNotification: (notice) {
+                        final unavailable = notice.unavailable != null;
+                        if (unavailable != _unavailable) {
+                          setState(() => _unavailable = unavailable);
+                        }
+                        return true;
+                      },
+                      child: AppScope.scope(context).camera.preview(_scanned),
+                    ),
                   ),
                 ),
               ),
@@ -270,41 +369,41 @@ class _ScannerState extends State<_Scanner> with WidgetsBindingObserver {
                 style: type.caption.copyWith(color: palette.danger),
               ),
             ],
-            if (widget.frame == _Frame.dialog) ...[
+            if (_unavailable && pasteInstead != null) ...[
+              const SizedBox(height: Space.l),
+              Wrap(
+                alignment: WrapAlignment.end,
+                spacing: Space.s,
+                runSpacing: Space.s,
+                children: [
+                  if (widget.frame == _Frame.dialog)
+                    Button(label: 'Cancel', onPressed: _close),
+                  Button(
+                    label: 'Paste code instead',
+                    primary: true,
+                    onPressed: () {
+                      _close();
+                      pasteInstead();
+                    },
+                  ),
+                ],
+              ),
+            ] else if (widget.frame == _Frame.dialog) ...[
               const SizedBox(height: Space.l),
               back('Cancel'),
             ],
           ],
         );
-      case CameraAccess.undetermined:
-        // Asked, and the question put away without an answer (Android):
-        // the person asks again.
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Button(
-              label: 'Scan code',
-              primary: true,
-              onPressed: () => _check(ask: true),
-            ),
-            const SizedBox(height: Space.m),
-            back(widget.frame == _Frame.dialog ? 'Cancel' : 'Back'),
-          ],
-        );
-      case CameraAccess.denied ||
-          CameraAccess.restricted ||
-          CameraAccess.unavailable:
-        final refused = access == CameraAccess.denied;
+      case CameraAccess.undetermined || CameraAccess.denied:
+        return _permission(context, access);
+      case CameraAccess.restricted || CameraAccess.unavailable:
+        final pasteInstead = widget.pasteInstead;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              !refused
-                  ? "The camera isn't available on this $thisDeviceKind. "
-                        'Paste the code instead.'
-                  : defaultTargetPlatform == TargetPlatform.android
-                  ? 'To scan, allow Claktory to use the camera in Settings.'
-                  : 'To scan, allow camera access in Settings → Claktory.',
+              "The camera isn't available on this $thisDeviceKind. "
+              'Paste the code instead.',
               style: type.body.copyWith(color: palette.text),
             ),
             const SizedBox(height: Space.l),
@@ -314,13 +413,14 @@ class _ScannerState extends State<_Scanner> with WidgetsBindingObserver {
               runSpacing: Space.s,
               children: [
                 Button(label: 'Back', onPressed: _close),
-                if (refused)
+                if (pasteInstead != null)
                   Button(
-                    label: 'Open Settings',
+                    label: 'Paste code instead',
                     primary: true,
-                    onPressed: () => fireAndLog(
-                      AppScope.scope(context).camera.openSettings(),
-                    ),
+                    onPressed: () {
+                      _close();
+                      pasteInstead();
+                    },
                   ),
               ],
             ),

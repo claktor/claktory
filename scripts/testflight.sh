@@ -147,7 +147,7 @@ auth=(
   -authenticationKeyIssuerID "$ASC_ISSUER_ID"
 )
 
-echo "Building Claktory $version ($build) from ${commit:0:10} in $src…"
+echo "Building Claktory $version ($build) from ${commit:0:10} in ${src}…"
 cd "$src/app"
 # Flutter's half (the Dart code, its assets and the tunnel's Rust library),
 # then Xcode's archive of it. The bundle id, com.claktory.app, comes from

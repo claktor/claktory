@@ -85,10 +85,11 @@ struct Read {
     item: Item,
 }
 
-/// Up to `limit` items after `cursor` in time order, none after `until`
-/// (0: no end), runs only when `runs`; with the cursor after them, and
-/// whether more may follow. `requests` reads the vault's requests for
-/// secrets after a rowid.
+/// Up to `limit` items after `cursor` in time order that `keep` keeps, none
+/// after `until` (0: no end), runs only when `runs`; with the cursor after
+/// what was looked at, and whether more may follow (fewer than `limit`,
+/// even none, can come with more to follow). `requests` reads the vault's
+/// requests for secrets after a rowid.
 pub(super) fn read(
     db: &Connection,
     requests: &dyn Fn(i64, usize) -> Vec<(i64, String, i64)>,
@@ -96,7 +97,34 @@ pub(super) fn read(
     until: i64,
     limit: usize,
     runs: bool,
+    keep: &dyn Fn(&Item) -> bool,
 ) -> rusqlite::Result<(Vec<Item>, Cursor, bool)> {
+    let mut taken = Vec::new();
+    let (next, more) = walk(db, requests, cursor, until, limit, runs, &mut |item, _| {
+        let kept = keep(item);
+        if kept {
+            taken.push(item.clone());
+        }
+        kept
+    })?;
+    Ok((taken, next, more))
+}
+
+/// Walks the items after `cursor` in time order, none after `until` (0: no
+/// end), runs only when `runs`: `each` is given each item and the cursor
+/// before it, and says whether it counts towards `limit`. Stops after
+/// `limit` counted, or where a source's batch ran out with more to read,
+/// since what comes next in it may come before any other's. The cursor
+/// after the last item walked, and whether more may follow.
+pub(super) fn walk(
+    db: &Connection,
+    requests: &dyn Fn(i64, usize) -> Vec<(i64, String, i64)>,
+    cursor: Cursor,
+    until: i64,
+    limit: usize,
+    runs: bool,
+    each: &mut dyn FnMut(&Item, Cursor) -> bool,
+) -> rusqlite::Result<(Cursor, bool)> {
     // Enough of each that a list send isn't cut short.
     let batch = limit + 64;
     let mut reads = Vec::new();
@@ -111,11 +139,17 @@ pub(super) fn read(
         reads.push(items);
         full.push(was_full);
     }
-    let mut taken = Vec::new();
+    let mut counted = 0;
     let mut next = cursor;
     let mut heads = [0usize; 6];
     let after_until = |at: i64| until > 0 && at > until;
-    while taken.len() < limit {
+    while counted < limit {
+        // A source all walked whose batch was full: its next rows aren't
+        // read yet, and may come before the others' (a batch of list sends
+        // makes fewer items than the others').
+        if SOURCES.iter().any(|source| full[*source as usize] && heads[*source as usize] == reads[*source as usize].len()) {
+            break;
+        }
         let first = SOURCES
             .iter()
             .filter_map(|source| reads[*source as usize].get(heads[*source as usize]).map(|read| (read.item.at(), *source)))
@@ -125,12 +159,14 @@ pub(super) fn read(
             break;
         }
         let read = &reads[source as usize][heads[source as usize]];
+        if each(&read.item, next) {
+            counted += 1;
+        }
         next.0[source as usize] = read.last;
-        taken.push(read.item.clone());
         heads[source as usize] += 1;
     }
-    // More: something read but not taken (and not past until), or a source
-    // whose batch was full and is all taken.
+    // More: something read but not walked (and not past until), or a
+    // source whose batch was full and is all walked.
     let more = SOURCES.iter().any(|source| {
         let (read, head) = (&reads[*source as usize], heads[*source as usize]);
         match read.get(head) {
@@ -138,7 +174,7 @@ pub(super) fn read(
             None => full[*source as usize],
         }
     });
-    Ok((taken, next, more))
+    Ok((next, more))
 }
 
 /// The cursor after everything there is now.
@@ -257,17 +293,22 @@ struct Message {
     same: String,
 }
 
+/// What History reads of messages, from after an id, so many.
+fn messages_after() -> String {
+    format!(
+        "SELECT id, agent, source, sender_id, created, coalesce(send_id, ''), coalesce(quiet, 0), coalesce(reply_to, ''), coalesce(intent, '')
+         FROM messages WHERE id > ?1 AND {NOT_A_CHAT} ORDER BY id LIMIT ?2"
+    )
+}
+
 /// Messages to agents, a list send's copies as one event.
 fn messages(db: &Connection, after: i64, batch: usize) -> rusqlite::Result<(Vec<Read>, bool)> {
     let limit = i64::try_from(batch).unwrap_or(i64::MAX);
-    let rows: Vec<Message> = crate::store::query(
+    // From the index alone (messages_history, one of the store's
+    // LATE_INDEXES; the table until it's built), never the rows' texts.
+    let mut rows: Vec<Message> = crate::store::query(
         db,
-        &format!(
-            "SELECT id, agent, source, sender_id, created, coalesce(send_id, ''), coalesce(quiet, 0), coalesce(reply_to, ''),
-                coalesce(intent, ''),
-                CASE WHEN source = 'agent' AND coalesce(send_id, '') = '' THEN length(text) || ':' || substr(text, 1, 200) ELSE '' END
-         FROM messages WHERE id > ?1 AND {NOT_A_CHAT} ORDER BY id LIMIT ?2"
-        ),
+        &messages_after(),
         [after, limit],
         |row| {
             Ok(Message {
@@ -280,10 +321,18 @@ fn messages(db: &Connection, after: i64, batch: usize) -> rusqlite::Result<(Vec<
                 quiet: row.get::<_, i64>(6)? != 0,
                 reply: !row.get::<_, String>(7)?.is_empty(),
                 intent: row.get(8)?,
-                same: row.get(9)?,
+                same: String::new(),
             })
         },
     )?;
+    // An agent's from before send_id: its words, to tell a list send's
+    // copies apart, read one by one (only messages from before it).
+    if rows.iter().any(|row| row.source == "agent" && row.send_id.is_empty()) {
+        let mut same = db.prepare_cached("SELECT length(text) || ':' || substr(text, 1, 200) FROM messages WHERE id = ?1")?;
+        for row in rows.iter_mut().filter(|row| row.source == "agent" && row.send_id.is_empty()) {
+            row.same = same.query_row([row.id], |found| found.get(0))?;
+        }
+    }
     let full = rows.len() == batch;
     let mut reads: Vec<Read> = Vec::new();
     let mut group: Option<&Message> = None;
@@ -360,4 +409,27 @@ pub(super) fn columns(items: &[Item], index: &mut dyn FnMut(&str) -> u32, next: 
     }
     events.next_cursor = next.map(Cursor::encode).unwrap_or_default();
     events
+}
+
+#[cfg(test)]
+mod tests {
+    /// Messages are read from their index, never the table, once it's
+    /// built; and rightly before.
+    #[test]
+    fn messages_are_read_from_their_index() {
+        let dir = std::env::temp_dir().join(format!("factoryd-history-{}-{}", std::process::id(), crate::transcript::now_ms()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let store = crate::store::Store::open(&dir.join("factory.db")).expect("store");
+        let plan = |store: &crate::store::Store| -> String {
+            let db = store.db();
+            crate::store::query(&db, &format!("EXPLAIN QUERY PLAN {}", super::messages_after()), [0, 10], |row| row.get::<_, String>(3))
+                .expect("plan")
+                .join("; ")
+        };
+        let before = plan(&store);
+        assert!(!before.contains("messages_history"), "{before}");
+        store.build_late_indexes().expect("built");
+        let after = plan(&store);
+        assert!(after.contains("COVERING INDEX messages_history"), "{after}");
+    }
 }

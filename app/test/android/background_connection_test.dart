@@ -1,16 +1,19 @@
 import 'dart:async';
 
 import 'package:factory_app/android/background_connection.dart';
+import 'package:factory_app/android/share_browser_lifecycle.dart';
 import 'package:factory_app/backend.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../harness.dart';
+import 'support/channel_fakes.dart';
 
 class _Backend extends RecordingBackend {
   var stops = 0;
   var hiddenEdges = 0;
+  var resumeEdges = 0;
   late final agentAck = Completer<void>();
   late final chatAck = Completer<void>();
 
@@ -21,6 +24,12 @@ class _Backend extends RecordingBackend {
   void hidden() {
     hiddenEdges++;
     super.hidden();
+  }
+
+  @override
+  void resumed({DateTime? now}) {
+    resumeEdges++;
+    super.resumed(now: now);
   }
 
   @override
@@ -159,6 +168,152 @@ void main() {
     await backend.holding(() async {});
     await tester.pump(const Duration(minutes: 10));
     expect(backend.stops, 0);
+  });
+
+  testWidgets('native tab holds only its origin and close starts fresh grace', (
+    tester,
+  ) async {
+    final events = ChannelEvents('factory/share-browser/events');
+    final browser = AndroidShareBrowserLifecycle();
+    final other = _Backend();
+    final otherPolicy = AndroidBackgroundConnection(other, browser: browser)
+      ..hidden();
+    addTearDown(() async {
+      otherPolicy.dispose();
+      policy.dispose();
+      browser.dispose();
+      await other.close();
+      events.dispose();
+    });
+    policy = AndroidBackgroundConnection(backend, browser: browser)..hidden();
+    await tester.pump(Duration.zero);
+    browser.opening(backend);
+    expect(backend.keepTryingWhileHidden, isFalse);
+    await events.emit({'visible': true});
+    await tester.pump(const Duration(minutes: 5));
+    expect(backend.keepTryingWhileHidden, isTrue);
+    expect(backend.stops, 0);
+    expect(other.keepTryingWhileHidden, isFalse);
+    expect(other.stops, 1);
+    await events.emit({'visible': false});
+    expect(backend.keepTryingWhileHidden, isFalse);
+    await tester.pump(const Duration(milliseconds: 24999));
+    expect(backend.stops, 0);
+    await tester.pump(const Duration(milliseconds: 1));
+    expect(backend.stops, 1);
+  });
+
+  testWidgets('screen off then on rearms the tab without resuming Flutter', (
+    tester,
+  ) async {
+    final events = ChannelEvents('factory/share-browser/events');
+    final browser = AndroidShareBrowserLifecycle();
+    addTearDown(() {
+      policy.dispose();
+      browser.dispose();
+      events.dispose();
+    });
+    policy = AndroidBackgroundConnection(backend, browser: browser)..hidden();
+    await tester.pump(Duration.zero);
+    browser.opening(backend);
+    await events.emit({'visible': true});
+    await tester.pump(const Duration(minutes: 5));
+    expect(backend.stops, 0);
+    // Chrome unbinds on screen-off. Flutter's activity stays stopped.
+    await events.emit({'visible': false});
+    await tester.pump(const Duration(seconds: 25));
+    expect(backend.stops, 1);
+    expect(backend.keepTryingWhileHidden, isFalse);
+    // On screen-on Chrome binds again, with no MainActivity resume.
+    await events.emit({'visible': true});
+    expect(backend.keepTryingWhileHidden, isTrue);
+    expect(backend.resumeEdges, 0);
+    await tester.pump(const Duration(minutes: 5));
+    expect(backend.stops, 1);
+    await events.emit({'visible': false});
+    await tester.pump(const Duration(seconds: 25));
+    expect(backend.stops, 2, reason: 'the second trip away has its own grace');
+    expect(backend.resumeEdges, 0);
+  });
+
+  testWidgets('replacement tab transfers retry permission to its own origin', (
+    tester,
+  ) async {
+    final events = ChannelEvents('factory/share-browser/events');
+    final browser = AndroidShareBrowserLifecycle();
+    final other = _Backend();
+    final otherPolicy = AndroidBackgroundConnection(other, browser: browser)
+      ..hidden();
+    addTearDown(() async {
+      otherPolicy.dispose();
+      policy.dispose();
+      browser.dispose();
+      await other.close();
+      events.dispose();
+    });
+    policy = AndroidBackgroundConnection(backend, browser: browser)..hidden();
+    await tester.pump(Duration.zero);
+    final first = browser.opening(backend);
+    await events.emit({'visible': true});
+    expect(backend.keepTryingWhileHidden, isTrue);
+    browser.opening(other);
+    browser.openFailed(first);
+    expect(backend.keepTryingWhileHidden, isFalse);
+    expect(other.keepTryingWhileHidden, isTrue);
+    await tester.pump(const Duration(seconds: 25));
+    expect(backend.stops, 1);
+    expect(other.stops, 0);
+  });
+
+  testWidgets(
+    'disposing the origin clears permission and ignores late events',
+    (tester) async {
+      final events = ChannelEvents('factory/share-browser/events');
+      final browser = AndroidShareBrowserLifecycle();
+      // Another watcher keeps the native stream alive after this Backend goes.
+      final unwatch = browser.watch(() {});
+      addTearDown(() {
+        policy.dispose();
+        unwatch();
+        browser.dispose();
+        events.dispose();
+      });
+      policy = AndroidBackgroundConnection(backend, browser: browser)..hidden();
+      await tester.pump(Duration.zero);
+      browser.opening(backend);
+      await events.emit({'visible': true});
+      expect(backend.keepTryingWhileHidden, isTrue);
+      policy.dispose();
+      expect(backend.keepTryingWhileHidden, isFalse);
+      await events.emit({'visible': false});
+      await events.emit({'visible': true});
+      expect(backend.keepTryingWhileHidden, isFalse);
+      expect(browser.visibleFor(backend), isFalse);
+      await tester.pump(const Duration(minutes: 5));
+      expect(backend.stops, 0);
+    },
+  );
+
+  testWidgets('channel failure releases retry permission with ordinary grace', (
+    tester,
+  ) async {
+    final events = ChannelEvents('factory/share-browser/events');
+    final browser = AndroidShareBrowserLifecycle();
+    addTearDown(() {
+      policy.dispose();
+      browser.dispose();
+      events.dispose();
+    });
+    policy = AndroidBackgroundConnection(backend, browser: browser)..hidden();
+    await tester.pump(Duration.zero);
+    browser.opening(backend);
+    await events.emit({'visible': true});
+    await tester.pump(const Duration(minutes: 5));
+    expect(backend.stops, 0);
+    await events.error('failed', 'Fixture native failure');
+    expect(backend.keepTryingWhileHidden, isFalse);
+    await tester.pump(const Duration(seconds: 25));
+    expect(backend.stops, 1);
   });
 
   testWidgets('inactive alone does not start a background timer', (

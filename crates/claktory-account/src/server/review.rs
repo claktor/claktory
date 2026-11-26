@@ -9,6 +9,16 @@
 //! `review-account off` removes it). The file, a systemd credential, is one
 //! line: `<email> <salt> <sha256(salt || code), hex>`, the salt taken as the
 //! text it is (`printf '%s%s' "$salt" "$code" | sha256sum`).
+//!
+//! Up to two such accounts (#319), one per store (App Store and Google
+//! Play), each its own file and email, rotated on its own: the option may
+//! be given twice. Play may re-review at any time, so its pair mustn't
+//! change when Apple's is rotated for a submission. A review email signs in
+//! no Claktory but the review box (`--review-claktory-key`), and its
+//! Claktories can't be removed on the web pages, so the details the stores
+//! hold are no relay credential, and a reviewer trying Remove doesn't break
+//! the next review. Delete account works, as Apple's review needs: the
+//! account comes back at the next sign-in.
 
 use std::path::Path;
 
@@ -19,6 +29,9 @@ use crate::protocol::{hex, normalize_email};
 /// Wrong codes the review account may get an hour, counted by its email
 /// and by the address they come from, across sign-ins.
 pub const WRONG_PER_HOUR: u32 = 5;
+
+/// The most review accounts the service takes: one per store.
+pub const MOST: usize = 2;
 
 pub struct ReviewAccount {
     email: String,
@@ -74,7 +87,21 @@ impl ReviewAccount {
         ReviewAccount::parse(text.trim()).map(Some)
     }
 
-    /// Whether `email` (normalized) is the review account's.
+    /// Checks a set of accounts the service would take: at most `MOST`,
+    /// each its own email.
+    pub fn check_all(accounts: &[ReviewAccount]) -> Result<(), String> {
+        if accounts.len() > MOST {
+            return Err(format!("at most {MOST} review accounts, one per store"));
+        }
+        for (index, account) in accounts.iter().enumerate() {
+            if accounts[..index].iter().any(|other| other.email == account.email) {
+                return Err("two review accounts have the same email".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `email` (normalized) is this review account's.
     pub fn is(&self, email: &str) -> bool {
         self.email == email
     }
@@ -89,6 +116,21 @@ impl ReviewAccount {
     pub fn digest_of(&self, code: &str) -> String {
         digest(&self.salt, code)
     }
+}
+
+/// The review box's backend key in the file at `path`, its one line, as
+/// a sign-in sends it (base64url of its 32 bytes): None when it isn't
+/// there, so no Claktory signs in with a review email. A public key, so
+/// others may read the file; one that isn't a key stops the service.
+pub fn read_claktory_key(path: &Path) -> Result<Option<String>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("can't read the review box's key file {}: {error}", path.display())),
+    };
+    crate::protocol::verifying_key(text.trim())
+        .map(|key| Some(crate::protocol::b64(key.to_bytes())))
+        .ok_or_else(|| format!("the review box's key file {} isn't one backend key in base64url", path.display()))
 }
 
 fn digest(salt: &str, code: &str) -> String {

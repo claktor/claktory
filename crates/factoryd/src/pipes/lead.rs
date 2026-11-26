@@ -29,9 +29,10 @@ pub(crate) fn effective(config: &Config, record: &Record) -> Option<String> {
 }
 
 /// Who leads it: its lead, else its bound liaison, else its first agent
-/// limited to the pipe; None when it has neither (the person chooses).
+/// limited to the pipe, but never one that gave up leading it (#236);
+/// None when it has neither (the person chooses).
 fn chosen(config: &Config, record: &Record) -> Option<String> {
-    let limited = |id: &&String| record.quarantined.contains(id);
+    let limited = |id: &&String| record.quarantined.contains(id) && !record.declined_lead.contains(id);
     effective(config, record)
         .or_else(|| present(config, record).filter(limited).find(|id| **id == record.bound).cloned())
         .or_else(|| present(config, record).find(limited).cloned())

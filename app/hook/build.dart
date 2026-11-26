@@ -47,12 +47,32 @@ const unstrippedTriples = [...iosTriples, ...macTriples];
 /// `--target-platform android-arm64,android-x64` (app/android/DESIGN.md).
 const androidTriples = ['aarch64-linux-android', 'x86_64-linux-android'];
 
+/// Windows' targets (app/windows, windows.md): x64 first, Arm64 later.
+const windowsTriples = ['x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc'];
+
 /// Android loads a library only if its segments are aligned for the
 /// phone's page size, and phones with 16 KiB pages ship now (Play requires
 /// it of apps targeting Android 15+). native_toolchain_rust adds this flag
 /// itself only when it finds no rustflags for the target anywhere, and the
 /// home-folder remap below sets them, so it's said here, explicitly.
 const androidPageSizeFlag = '-C link-arg=-Wl,-z,max-page-size=16384';
+
+/// The home folder of whoever builds: HOME on a Mac or Linux, USERPROFILE on
+/// Windows, where HOME is normally unset (`C:\Users\name`); empty when
+/// neither is set. One with a space stops the build, saying why: cargo
+/// splits a target's RUSTFLAGS on spaces, so its remap can't be passed, and
+/// leaving it out would ship the folder's path in the app.
+String buildHome(Map<String, String> environment) {
+  final home = environment['HOME'] ?? environment['USERPROFILE'] ?? '';
+  if (home.contains(RegExp(r'\s'))) {
+    throw StateError(
+      'The home folder "$home" has a space, so the tunnel can\'t be built '
+      'without its path in the app (cargo splits RUSTFLAGS on spaces). '
+      'Build from an account whose home folder has none.',
+    );
+  }
+  return home;
+}
 
 /// The flags rustc gets for [triple]. Every target's say "~" for the home
 /// folder of whoever built it: a panic's location and the paths of the
@@ -78,9 +98,14 @@ void main(List<String> args) async {
         // Read by rustc only when it builds for iOS or the Simulator.
         'IPHONEOS_DEPLOYMENT_TARGET': iosDeploymentTarget,
         // After the release profile's own strip, so iOS's wins.
-        for (final triple in [...iosTriples, ...macTriples, ...androidTriples])
+        for (final triple in [
+          ...iosTriples,
+          ...macTriples,
+          ...androidTriples,
+          ...windowsTriples,
+        ])
           'CARGO_TARGET_${triple.replaceAll('-', '_').toUpperCase()}_RUSTFLAGS':
-              rustFlags(triple, home: Platform.environment['HOME'] ?? ''),
+              rustFlags(triple, home: buildHome(Platform.environment)),
         // Dependencies built once for every checkout (shared_build.dart).
         if (shared.isNotEmpty) 'CARGO_BUILD_BUILD_DIR': shared,
       },

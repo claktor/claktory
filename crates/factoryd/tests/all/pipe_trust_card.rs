@@ -143,6 +143,13 @@ async fn a_trust_card_is_void_once_the_change_moves_on_and_its_comment_goes_to_t
         ..Default::default()
     });
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
+    // Files can't follow the comment to the lead, so none go (#511, Fugo 37176).
+    let Request::AnswerAsk(with) = &dismiss else { unreachable!() };
+    let filed = v1::AnswerAsk { attachments: vec![v1::Attachment { path: "/x/a.png".into(), name: "a.png".into(), ..Default::default() }], ..with.clone() };
+    match apply_request(&mut client, &mut view, Request::AnswerAsk(filed)).await {
+        Body::Error(error) => assert_eq!(error.message, "Files can't go with this answer: its comment goes to the pipe's lead, not the asker."),
+        other => panic!("not refused: {other:?}"),
+    }
     apply_request(&mut client, &mut view, dismiss).await;
     let event = told(&mut client, &mut view, "dismissed").await;
     assert!(!event.contains("SENTINEL-COMMENT"), "{event}");

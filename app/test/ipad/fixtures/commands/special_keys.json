@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "channel": "factory/commands",
+  "note": "setCommands' input for keys that aren't a letter or a digit: control characters for Return, Tab and Delete (backspace: U+0008, UIKeyCommand.inputDelete's value), and UIKit's names for the arrows (UIKeyCommand.inputUpArrow's and so on). Keyed by Flutter's LogicalKeyboardKey name.",
+  "inputs": {
+    "enter": "\r",
+    "backspace": "\b",
+    "tab": "\t",
+    "arrowUp": "UIKeyInputUpArrow",
+    "arrowDown": "UIKeyInputDownArrow",
+    "arrowLeft": "UIKeyInputLeftArrow",
+    "arrowRight": "UIKeyInputRightArrow"
+  }
+}

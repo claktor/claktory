@@ -228,7 +228,7 @@ async fn an_agent_that_read_a_web_page_needs_the_person_for_each_secret_but_a_pi
     };
     apply_request(&mut client, &mut view, client_message::Body::CreateSecret(secret)).await;
     let id = view.workspace.vault.clone().expect("vault").secrets[0].id.clone();
-    let grant = v1::GrantSecret { id, agent_id: "bo".into(), proof: None };
+    let grant = v1::GrantSecret { id, agent_id: "bo".into(), proof: None, fill_only: false };
     apply_request(&mut client, &mut view, client_message::Body::GrantSecret(grant)).await;
     let command = r#"{"command": "echo ran", "secrets": ["AWS"]}"#;
     // Before it reads the pipe, nothing asks.
@@ -346,7 +346,7 @@ async fn hostile_an_allowance_is_not_bound_to_the_command_shown() {
     let (_dir, factory, mut client, mut view, pipe) = setup(true).await;
     aws(&mut client, &mut view).await;
     let id = view.workspace.vault.clone().expect("vault").secrets[0].id.clone();
-    let grant = v1::GrantSecret { id, agent_id: "bo".into(), proof: None };
+    let grant = v1::GrantSecret { id, agent_id: "bo".into(), proof: None, fill_only: false };
     apply_request(&mut client, &mut view, client_message::Body::GrantSecret(grant)).await;
     let _ = pipe;
     pipes::taint_for_test(&factory, "bo", "browser:https://example.com");

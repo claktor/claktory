@@ -6,6 +6,8 @@ import 'package:flutter/widgets.dart';
 import 'agent_name.dart';
 import 'avatar.dart';
 import 'backend.dart';
+import 'card_answer.dart'
+    show AnswerNotSent, CardAnswer, PublishesAnswer, noComment;
 import 'characters/character.dart';
 import 'controls.dart';
 import 'decision.dart';
@@ -1034,11 +1036,13 @@ class PipeIdentityNotice extends StatefulWidget {
   State<PipeIdentityNotice> createState() => _PipeIdentityNoticeState();
 }
 
-class _PipeIdentityNoticeState extends State<PipeIdentityNotice> {
+class _PipeIdentityNoticeState extends State<PipeIdentityNotice>
+    with PublishesAnswer {
   var _busy = false;
   String? _error;
 
-  Future<void> _accept() async {
+  /// [rethrowing] for focus mode's keys (#514): refused, it throws too.
+  Future<void> _accept({bool rethrowing = false}) async {
     setState(() {
       _busy = true;
       _error = null;
@@ -1047,28 +1051,42 @@ class _PipeIdentityNoticeState extends State<PipeIdentityNotice> {
       await AppScope.of(context).acceptPipeIdentity(widget.pipe.id);
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
+      if (rethrowing) rethrow;
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
+  /// For focus mode's keys (#514): OK, or Trust this Claktory…, which asks
+  /// first, as its button does (never one key, FS14).
   @override
-  Widget build(BuildContext context) {
+  CardAnswer? answerNow() {
+    final (title, _, danger) = pipeIdentityNoticeText(widget.pipe);
+    if (title.isEmpty) return null;
+    return CardAnswer(
+      key: 'pipe:${widget.pipe.id}/identity',
+      docked: false,
+      yes: danger ? 'Trust this Claktory…' : 'OK',
+      no: '',
+      busy: _busy,
+      error: _error,
+      onYes: _busy
+          ? null
+          : danger
+          ? () => _trust(rethrowing: true)
+          : () => _accept(rethrowing: true),
+    );
+  }
+
+  /// Asks before trusting the Claktory that changed; cancelled, nothing
+  /// went ([AnswerNotSent] when [rethrowing]).
+  Future<void> _trust({bool rethrowing = false}) async {
     final pipe = widget.pipe;
-    final peer = pipe.peer;
-    final palette = Palette.of(context);
-    final type = TypeScale.of(context);
-    final now = peer.verifiedEmail;
-    final (title, body, danger) = pipeIdentityNoticeText(pipe);
-    if (title.isEmpty) return const SizedBox.shrink();
-    final Widget action = danger
-        ? Button(
-            label: 'Trust this Claktory…',
-            onPressed: _busy
-                ? null
-                : () => showModal(
-                    context,
-                    (context, close) => FormFrame(
+    final now = pipe.peer.verifiedEmail;
+    Future<void>? accepting;
+    await showModal(
+      context,
+      (context, close) => FormFrame(
                       title: now.isEmpty
                           ? 'Trust this Claktory?'
                           : "Trust this Claktory as $now's?",
@@ -1087,11 +1105,31 @@ class _PipeIdentityNoticeState extends State<PipeIdentityNotice> {
                       submitLabel: 'Trust',
                       onSubmit: () {
                         close();
-                        unawaited(_accept());
+                        accepting = _accept(rethrowing: rethrowing);
                       },
                       onCancel: close,
                     ),
-                  ),
+    );
+    final accepted = accepting;
+    if (accepted == null) {
+      if (rethrowing) throw const AnswerNotSent();
+      return;
+    }
+    await accepted;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    publishAnswer();
+    final pipe = widget.pipe;
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final (title, body, danger) = pipeIdentityNoticeText(pipe);
+    if (title.isEmpty) return const SizedBox.shrink();
+    final Widget action = danger
+        ? Button(
+            label: 'Trust this Claktory…',
+            onPressed: _busy ? null : () => unawaited(_trust()),
           )
         : Button(label: 'OK', onPressed: _busy ? null : _accept);
     return Container(
@@ -1397,6 +1435,7 @@ class _StateButton extends StatefulWidget {
     required this.action,
     required this.label,
     this.primary = false,
+    this.answers,
   });
 
   final Pipe pipe;
@@ -1404,15 +1443,20 @@ class _StateButton extends StatefulWidget {
   final String label;
   final bool primary;
 
+  /// The Needs you item it answers, as its yes for focus mode's keys
+  /// (#514): a paused pipe's Continue.
+  final String? answers;
+
   @override
   State<_StateButton> createState() => _StateButtonState();
 }
 
-class _StateButtonState extends State<_StateButton> {
+class _StateButtonState extends State<_StateButton> with PublishesAnswer {
   var _busy = false;
   String? _error;
 
-  Future<void> _run() async {
+  /// [rethrowing] for focus mode's keys (#514): refused, it throws too.
+  Future<void> _run({bool rethrowing = false}) async {
     setState(() {
       _busy = true;
       _error = null;
@@ -1421,13 +1465,30 @@ class _StateButtonState extends State<_StateButton> {
       await AppScope.of(context).setPipeState(widget.pipe.id, widget.action);
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
+      if (rethrowing) rethrow;
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
   @override
+  CardAnswer? answerNow() {
+    final key = widget.answers;
+    if (key == null) return null;
+    return CardAnswer(
+      key: key,
+      docked: false,
+      yes: widget.label,
+      no: '',
+      busy: _busy,
+      error: _error,
+      onYes: _busy ? null : () => _run(rethrowing: true),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
+    publishAnswer();
     final palette = Palette.of(context);
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -1833,7 +1894,8 @@ class _PipeTrustAskViewState extends State<PipeTrustAskView> {
 /// The lead choice that makes a new liaison agent.
 const _liaison = '\u0000liaison';
 
-class _PipeApprovalCardState extends State<PipeApprovalCard> {
+class _PipeApprovalCardState extends State<PipeApprovalCard>
+    with PublishesAnswer {
   final _members = <String>{};
 
   /// Each member's "Can run commands on this computer", once the person
@@ -1883,6 +1945,48 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
     } else {
       _read(widget.pipe);
     }
+    _comment.addListener(_typing);
+  }
+
+  /// A comment typed or cleared turns the dock's Submit on or off.
+  var _typed = false;
+  void _typing() {
+    final typed = _comment.text.trim().isNotEmpty;
+    if (typed != _typed && mounted) setState(() => _typed = typed);
+  }
+
+  /// For focus mode's keys (#514), the pipe's own approval (an agent's card
+  /// asking for it answers as that card): Decline, Submit once a comment's
+  /// typed, and Approve, never from a key while there are digits to
+  /// compare (FS14, Fugo's rule C): then only the card's own button.
+  @override
+  CardAnswer? answerNow() {
+    final pipe = widget.pipe;
+    if (widget.ask != null || pipe.state != PipeState.PIPE_STATE_APPROVAL) {
+      return null;
+    }
+    final replyTo = pipe.replyAgentId.isEmpty
+        ? null
+        : AppScope.of(context).workspace.agent(pipe.replyAgentId)?.name ??
+              'Your agent';
+    return CardAnswer(
+      key: 'pipe:${pipe.id}/approval',
+      docked: false,
+      yes: 'Approve',
+      no: 'Decline',
+      typed: _typed && replyTo != null,
+      busy: _busy,
+      error: _error,
+      onYes: _busy || pipe.digits.isNotEmpty
+          ? null
+          : () => _decide(true, rethrowing: true),
+      onSubmit: _busy || replyTo == null
+          ? null
+          : () => _reply(replyTo, rethrowing: true),
+      onNo: _busy
+          ? null
+          : (reason) => _decide(false, reason: reason, rethrowing: true),
+    );
   }
 
   @override
@@ -2024,11 +2128,19 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
     super.dispose();
   }
 
-  Future<void> _decide(bool approve) async {
+  /// [reason]: the no's, from focus mode's dock, with the comment;
+  /// [rethrowing] for its keys: refused, it throws too, and stopped here
+  /// (no liaison's name), [AnswerNotSent].
+  Future<void> _decide(
+    bool approve, {
+    String? reason,
+    bool rethrowing = false,
+  }) async {
     final lead = _shownLead;
     final liaison = lead == _liaison;
     if (approve && liaison && _liaisonName.text.trim().isEmpty) {
       setState(() => _error = 'Name the liaison agent.');
+      if (rethrowing) throw const AnswerNotSent();
       return;
     }
     setState(() {
@@ -2067,13 +2179,14 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
               : null,
           reviewIncoming: approve ? _reviewIncoming : null,
           reviewOutgoing: approve ? _reviewOutgoing : null,
-          comment: _commentField.text.trim(),
+          comment: noComment(reason, _commentField.text),
           // From an agent's card (#471 G1): approved through it.
           cardId: widget.ask?.cardId,
         ),
       );
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
+      if (rethrowing) rethrow;
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -2081,7 +2194,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
 
   /// The comment to [agent] (Pipe.reply_agent_id), as a reply: nothing
   /// approved or declined, the pipe still waiting (#370).
-  Future<void> _reply(String agent) async {
+  Future<void> _reply(String agent, {bool rethrowing = false}) async {
     setState(() {
       _busy = true;
       _error = null;
@@ -2102,6 +2215,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
       }
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
+      if (rethrowing) rethrow;
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -2116,6 +2230,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard> {
 
   @override
   Widget build(BuildContext context) {
+    publishAnswer();
     final palette = Palette.of(context);
     final pipe = widget.pipe;
     final peer = pipe.peer;
@@ -2818,12 +2933,56 @@ class PipeMessageView extends StatefulWidget {
   State<PipeMessageView> createState() => _PipeMessageViewState();
 }
 
-class _PipeMessageViewState extends State<PipeMessageView> {
+class _PipeMessageViewState extends State<PipeMessageView>
+    with PublishesAnswer {
   var _busy = false;
   String? _error;
 
   /// The person's comment with their decision, for this side's agent only.
-  final _comment = TextEditingController();
+  late final _comment = TextEditingController()..addListener(_typing);
+
+  /// A comment typed or cleared turns the dock's Submit on or off.
+  var _typed = false;
+  void _typing() {
+    final typed = _comment.text.trim().isNotEmpty;
+    if (typed != _typed && mounted) setState(() => _typed = typed);
+  }
+
+  /// For focus mode's keys (#514), a held message: Send (Let in), Discard,
+  /// and Submit once a comment's typed on an agent's, as its buttons.
+  @override
+  CardAnswer? answerNow() {
+    final message = widget.message;
+    final held = message.state == PipeMessageState.PIPE_MESSAGE_STATE_HELD;
+    if (!held &&
+        message.state != PipeMessageState.PIPE_MESSAGE_STATE_HELD_INCOMING) {
+      return null;
+    }
+    final replies =
+        held &&
+        pipeDecisionHearer(
+              AppScope.of(context).workspace.workspace,
+              widget.pipe,
+              message,
+            ) !=
+            null;
+    return CardAnswer(
+      key: 'pipe:${widget.pipe.id}/${message.seq}',
+      docked: false,
+      yes: held ? 'Send' : 'Let in',
+      no: 'Discard',
+      typed: replies && _typed,
+      busy: _busy,
+      error: _error,
+      onYes: _busy ? null : () => _decide(true, rethrowing: true),
+      onSubmit: _busy || !replies
+          ? null
+          : () => _decide(false, reply: true, rethrowing: true),
+      onNo: _busy
+          ? null
+          : (reason) => _decide(false, reason: reason, rethrowing: true),
+    );
+  }
 
   @override
   void dispose() {
@@ -2833,8 +2992,14 @@ class _PipeMessageViewState extends State<PipeMessageView> {
 
   /// Sends it (lets it in), or discards it; [reply], on one of this
   /// side's agents' (#370), sends it back unsent to its writer with the
-  /// comment, to write again.
-  Future<void> _decide(bool allow, {bool reply = false}) async {
+  /// comment, to write again. [reason]: the no's, from focus mode's dock,
+  /// with the comment; [rethrowing] for its keys: refused, it throws too.
+  Future<void> _decide(
+    bool allow, {
+    bool reply = false,
+    String? reason,
+    bool rethrowing = false,
+  }) async {
     setState(() {
       _busy = true;
       _error = null;
@@ -2844,11 +3009,12 @@ class _PipeMessageViewState extends State<PipeMessageView> {
         widget.pipe.id,
         widget.message.seq.toInt(),
         allow,
-        comment: _comment.text.trim(),
+        comment: noComment(reason, _comment.text),
         reply: reply,
       );
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
+      if (rethrowing) rethrow;
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -2856,6 +3022,7 @@ class _PipeMessageViewState extends State<PipeMessageView> {
 
   @override
   Widget build(BuildContext context) {
+    publishAnswer();
     final palette = Palette.of(context);
     final message = widget.message;
     final author = message.author;
@@ -3360,6 +3527,7 @@ class PipeLoopCard extends StatelessWidget {
             action: PipeAction.PIPE_ACTION_RESUME,
             label: 'Continue',
             primary: true,
+            answers: 'pipe:${pipe.id}/loop',
           ),
         ),
       ],
@@ -4577,6 +4745,7 @@ class _ConnectPipeFormState extends State<ConnectPipeForm> {
       context,
       title: 'Scan a pipe invite',
       check: pipeInviteCheck,
+      onPasteInstead: pasteCodeInto(_code, then: _readCode),
     );
     if (code == null || !mounted) return;
     _code.text = code;
@@ -4849,17 +5018,51 @@ class SecretApprovalCard extends StatefulWidget {
   State<SecretApprovalCard> createState() => _SecretApprovalCardState();
 }
 
-class _SecretApprovalCardState extends State<SecretApprovalCard> {
+class _SecretApprovalCardState extends State<SecretApprovalCard>
+    with PublishesAnswer {
   var _busy = false;
   String? _error;
 
   /// The person's comment, sent with Allow once or Don't allow.
-  final _comment = TextEditingController();
+  late final _comment = TextEditingController()..addListener(_typing);
+  var _typed = false;
+
+  /// A comment typed or cleared turns the dock's Submit on or off.
+  void _typing() {
+    final typed = _comment.text.trim().isNotEmpty;
+    if (typed != _typed && mounted) setState(() => _typed = typed);
+  }
 
   @override
   void dispose() {
     _comment.dispose();
     super.dispose();
+  }
+
+  /// Allow once and Don't allow for focus mode's keys (#514), and Submit
+  /// once a comment's typed, as the card's buttons.
+  @override
+  CardAnswer? answerNow() {
+    final approval = widget.approval;
+    if (approval.state != SecretApprovalState.SECRET_APPROVAL_STATE_PENDING) {
+      return null;
+    }
+    return CardAnswer(
+      key: 'agent:${approval.agentId}/${widget.seq}',
+      docked: false,
+      yes: 'Allow once',
+      no: "Don't allow",
+      typed: _typed,
+      busy: _busy,
+      error: _error,
+      onYes: _busy ? null : () => _decide(true, rethrowing: true),
+      onSubmit: _busy
+          ? null
+          : () => _decide(false, reply: true, rethrowing: true),
+      onNo: _busy
+          ? null
+          : (reason) => _decide(false, reason: reason, rethrowing: true),
+    );
   }
 
   /// "AWS", "AWS and Stripe", "AWS, Stripe and GitHub".
@@ -4897,8 +5100,14 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
   }
 
   /// Allows it once or doesn't; [reply] (#370) doesn't, sending the
-  /// comment as the answer.
-  Future<void> _decide(bool allow, {bool reply = false}) async {
+  /// comment as the answer. [reason]: the no's, from focus mode's dock,
+  /// with the comment; [rethrowing] for its keys: refused, it throws too.
+  Future<void> _decide(
+    bool allow, {
+    bool reply = false,
+    String? reason,
+    bool rethrowing = false,
+  }) async {
     setState(() {
       _busy = true;
       _error = null;
@@ -4908,11 +5117,12 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
         widget.approval.agentId,
         widget.seq,
         allow,
-        comment: _comment.text.trim(),
+        comment: noComment(reason, _comment.text),
         reply: reply,
       );
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
+      if (rethrowing) rethrow;
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -4920,6 +5130,7 @@ class _SecretApprovalCardState extends State<SecretApprovalCard> {
 
   @override
   Widget build(BuildContext context) {
+    publishAnswer();
     final palette = Palette.of(context);
     final approval = widget.approval;
     final agent = AppScope.of(context).workspace.agent(approval.agentId);

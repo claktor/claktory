@@ -1,6 +1,7 @@
 import 'package:factory_app/compatibility.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart' show AppPage;
+import 'package:flutter/foundation.dart' show TargetPlatform;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
@@ -118,7 +119,7 @@ void main() {
     await tester.tap(find.text('Update').hitTestable());
     await settle(tester);
     expect(harness.last.installUpdate.appPath, isNotEmpty);
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
   testWidgets('versions that work together show nothing', (tester) async {
     await show(

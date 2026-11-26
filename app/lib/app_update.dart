@@ -252,6 +252,8 @@ class AppUpdater {
     this.firstPiece = 64 * 1024,
     this.leastPiece = 32 * 1024,
     this.mostPiece = _mostPerPiece,
+    this.relayedPiece = 64 * 1024,
+    this.relayedRate = 256 * 1024,
   });
 
   final AppSystem system;
@@ -280,6 +282,14 @@ class AppUpdater {
   final int leastPiece;
   final int mostPiece;
 
+  /// While the connection goes by a relay rather than directly (friend bug
+  /// #51): pieces of at most [relayedPiece], at most [relayedRate] bytes a
+  /// second, so the download doesn't crowd the relay (which may throttle
+  /// it) and the connection's own messages and pings. 50 MB takes about 3
+  /// minutes so; once the path is direct it goes at the link's pace again.
+  final int relayedPiece;
+  final int relayedRate;
+
   /// Replaces the bundle [app] with [staged] once this process has quit,
   /// then opens it.
   Future<void> replace(StagedApp staged, {required String app}) =>
@@ -303,12 +313,14 @@ class AppUpdater {
   /// The download carries on from what an earlier one kept there, and keeps
   /// what it got when it stops: the next try goes on from there. While
   /// [connected] is false it waits for it, up to [reconnectWithin], and
-  /// carries on. Anything else that goes wrong leaves nothing behind.
+  /// carries on. While [relayed] is true it goes gently ([relayedRate]).
+  /// Anything else that goes wrong leaves nothing behind.
   Future<StagedApp> stage({
     required FetchAppPiece fetch,
     required String version,
     required String bundlePath,
     ValueListenable<bool>? connected,
+    ValueListenable<bool>? relayed,
     void Function(UpdateProgress progress)? onProgress,
   }) async {
     if (bundlePath.isEmpty) {
@@ -346,6 +358,7 @@ class AppUpdater {
         version,
         staging.path,
         connected,
+        relayed,
         onProgress,
       );
     } on _StartOver catch (failure) {
@@ -393,6 +406,7 @@ class AppUpdater {
     String version,
     String staging,
     ValueListenable<bool>? connected,
+    ValueListenable<bool>? relayed,
     void Function(UpdateProgress)? onProgress,
   ) async {
     try {
@@ -401,11 +415,19 @@ class AppUpdater {
         version,
         staging,
         connected,
+        relayed,
         onProgress,
       );
     } on _StartOver {
       _forget(staging);
-      return _downloadOnce(fetch, version, staging, connected, onProgress);
+      return _downloadOnce(
+        fetch,
+        version,
+        staging,
+        connected,
+        relayed,
+        onProgress,
+      );
     }
   }
 
@@ -424,6 +446,7 @@ class AppUpdater {
     String version,
     String staging,
     ValueListenable<bool>? connected,
+    ValueListenable<bool>? relayed,
     void Function(UpdateProgress)? onProgress,
   ) async {
     final part = File('$staging/$_partName');
@@ -438,21 +461,44 @@ class AppUpdater {
     var received = have;
     var size = kept?.size ?? 0;
 
+    // Relayed, when the link is free for the next piece at [relayedRate]
+    // (shared by the pieces asked at once).
+    var free = DateTime.now();
+
+    /// Relayed, [maxBytes] cut to [relayedPiece], once the link is free for
+    /// it at [relayedRate]: sooner if the path turns direct meanwhile.
+    Future<int> gently(int maxBytes) async {
+      if (!(relayed?.value ?? false)) return maxBytes;
+      final bytes = math.min(maxBytes, relayedPiece);
+      final now = DateTime.now();
+      final start = free.isAfter(now) ? free : now;
+      free = start.add(
+        Duration(
+          microseconds: bytes * Duration.microsecondsPerSecond ~/ relayedRate,
+        ),
+      );
+      if (start.isAfter(now)) {
+        await _whileRelayed(relayed!, start.difference(now));
+      }
+      return bytes;
+    }
+
     /// One piece, asked again while the connection is down or the backend
     /// can't answer for a moment.
     Future<AppPiece> ask(int offset, int maxBytes) async {
       var failures = 0;
       while (true) {
+        final asking = await gently(maxBytes);
         final started = DateTime.now();
         try {
-          final piece = await fetch(version, offset, maxBytes: maxBytes);
+          final piece = await fetch(version, offset, maxBytes: asking);
           if (!piece.preparing) {
             pace.took(piece.data.length, DateTime.now().difference(started));
           }
           return piece;
         } on Exception {
           if (connected == null) rethrow;
-          pace.failed(maxBytes);
+          pace.failed(asking);
           if (!connected.value) {
             onProgress?.call(
               UpdateProgress(
@@ -644,6 +690,25 @@ class AppUpdater {
       await Future<void>.delayed(pollEvery);
     }
   }
+}
+
+/// Waits [wait], or less if [relayed] turns false meanwhile.
+Future<void> _whileRelayed(ValueListenable<bool> relayed, Duration wait) {
+  final done = Completer<void>();
+  late final Timer timer;
+  void changed() {
+    if (relayed.value || done.isCompleted) return;
+    timer.cancel();
+    relayed.removeListener(changed);
+    done.complete();
+  }
+
+  timer = Timer(wait, () {
+    relayed.removeListener(changed);
+    if (!done.isCompleted) done.complete();
+  });
+  relayed.addListener(changed);
+  return done.future;
 }
 
 /// Whether [connected] is true, or becomes so within [within].

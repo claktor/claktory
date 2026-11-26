@@ -88,9 +88,11 @@ class VersionStep extends StatelessWidget {
             latest != null &&
             mismatch(appVersion, workspace.latestRelease) == null &&
             restartsBackend(workspace),
+      // Only where Update replaces this app ([replacesItself]): an
+      // iPhone's or iPad's comes from its store.
       Mismatch.appOlder =>
         banner &&
-            !phone &&
+            replacesItself &&
             latest != null &&
             latest == versionLine(workspace.version) &&
             isNewer(workspace.latestRelease, appVersion),

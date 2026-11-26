@@ -21,7 +21,7 @@ pub(super) async fn page(service: &Service, call: &Call) -> Reply {
         (&Method::GET, "/account") => Ok(account_home(service, call).await),
         (&Method::POST, "/account/sign-in") => sign_in(service, call, &form).await,
         (&Method::POST, "/account/verify") => verify(service, call, &form),
-        (&Method::POST, "/account/remove") => remove(service, call, &form),
+        (&Method::POST, "/account/remove") => remove(service, call, &form).await,
         (&Method::POST, "/account/remove-device") => remove_device(service, call, &form).await,
         (&Method::POST, "/account/remove-grant") => remove_grant(service, call, &form).await,
         (&Method::POST, "/account/delete") => delete(service, call, &form).await,
@@ -104,6 +104,8 @@ fn home(service: &Service, call: &Call, notice: Option<&str>, grants: Option<&ap
     };
     let conn = service.db();
     let account = db::account_by_email(&conn, &email).ok().flatten();
+    // The stores' reviewers' account keeps its Claktory (#319).
+    let review = service.review(&email).is_some();
     let mut body = format!("{notice}<p class=\"muted\">Signed in as {}</p>", escape(&email));
     let claktories: Vec<db::Claktory> = account
         .as_ref()
@@ -132,14 +134,21 @@ fn home(service: &Service, call: &Call, notice: Option<&str>, grants: Option<&ap
         let sent = sent(&conn, claktory, service.now());
         body.push_str(&format!(
             "<section><h2>{name}</h2><p class=\"muted\">{version} on {platform} · last contact {seen}</p>{sent}{unlocks}\
-             <form method=\"post\" action=\"/account/remove\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
-             <input type=\"hidden\" name=\"claktory\" value=\"{id}\"><button>Remove</button></form></section>",
+             {remove}</section>",
             name = escape(&claktory.name),
             version = escape(&claktory.version),
             platform = escape(&platform_name(&claktory.platform)),
             seen = escape(&format_time(claktory.last_seen)),
-            id = escape(&claktory.id),
-            csrf = escape(&csrf),
+            remove = if review {
+                String::new()
+            } else {
+                format!(
+                    "<form method=\"post\" action=\"/account/remove\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+                     <input type=\"hidden\" name=\"claktory\" value=\"{id}\"><button>Remove</button></form>",
+                    id = escape(&claktory.id),
+                    csrf = escape(&csrf),
+                )
+            },
         ));
     }
     let devices = account.as_ref().and_then(|account| db::devices(&conn, &account.id).ok()).unwrap_or_default();
@@ -149,10 +158,17 @@ fn home(service: &Service, call: &Call, notice: Option<&str>, grants: Option<&ap
             .map(|device| {
                 format!(
                     "<li><form method=\"post\" action=\"/account/remove-device\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
-                     <input type=\"hidden\" name=\"device\" value=\"{key}\">{name} <span class=\"muted\">· {platform} · last contact {seen}</span> \
+                     <input type=\"hidden\" name=\"device\" value=\"{key}\">{name} <span class=\"muted\">· {platform}{through} · last contact {seen}</span> \
                      <button class=\"plain\">Remove</button></form></li>",
                     name = escape(&device.name),
                     platform = escape(&platform_name(&device.platform)),
+                    // Signed in through the Claktory on its computer (#529).
+                    through = device
+                        .vouched_by
+                        .as_ref()
+                        .and_then(|by| claktories.iter().find(|claktory| &claktory.id == by))
+                        .map(|claktory| format!(" · signed in through {}", escape(&claktory.name)))
+                        .unwrap_or_default(),
                     seen = escape(&format_time(device.last_seen)),
                     key = escape(&device.account_key),
                     csrf = escape(&csrf),
@@ -435,18 +451,34 @@ fn verify(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError
     Ok(redirect_to(next.path(), Some(cookie)))
 }
 
-fn remove(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError> {
-    let Some(email) = checked_session(service, call, form) else { return Ok(home(service, call, None, None)) };
-    let conn = service.db();
+/// Removes a Claktory at the account page, then tells the worker
+/// (E11-4), past the database's lock.
+async fn remove(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError> {
+    let (reply, removed) = remove_now(service, call, form)?;
+    if let Some((account, claktory, epoch)) = removed {
+        super::apps::claktory_removed(service, &account, &claktory, epoch, 0).await;
+    }
+    Ok(reply)
+}
+
+/// The page, and the registration that ended (account, Claktory, epoch)
+/// when the worker is to hear of it.
+#[allow(clippy::type_complexity)]
+fn remove_now(service: &Service, call: &Call, form: &Form) -> Result<(Reply, Option<(String, String, u64)>), ApiError> {
+    let Some(email) = checked_session(service, call, form) else { return Ok((home(service, call, None, None), None)) };
+    if service.review(&email).is_some() {
+        return Ok((kept_for_review(), None));
+    }
+    let mut conn = service.db();
     let account = db::account_by_email(&conn, &email)?;
     let claktory = db::claktory(&conn, form.get("claktory"))?
         .filter(|claktory| claktory.revoked_at.is_none() && account.as_ref().is_some_and(|account| account.id == claktory.account_id));
     let (Some(account), Some(claktory)) = (account, claktory) else {
         drop(conn);
-        return Ok(home(service, call, None, None));
+        return Ok((home(service, call, None, None), None));
     };
     if form.get("confirm") != "yes" {
-        return Ok(html(
+        let page = html(
             StatusCode::OK,
             &format!("Remove {}?", claktory.name),
             &format!(
@@ -457,11 +489,13 @@ fn remove(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError
                 csrf = escape(form.get("csrf")),
                 id = escape(&claktory.id),
             ),
-        ));
+        );
+        return Ok((page, None));
     }
-    db::revoke(&conn, &account.id, &claktory.id, service.now())?;
+    let apps = service.config.user_apps.is_some();
+    let removed = db::revoke(&mut conn, &account.id, &claktory.id, apps, service.now())?;
     tracing::info!("removed: Claktory {} of account {}", claktory.id, account.id);
-    Ok(redirect(None))
+    Ok((redirect(None), (removed && apps).then_some((account.id, claktory.id, claktory.epoch))))
 }
 
 /// Removes a device at the account page, then tells the worker (row 671),
@@ -626,6 +660,20 @@ async fn delete(service: &Service, call: &Call, form: &Form) -> Result<Reply, Ap
     let mut reply = sign_in_page("<p class=\"notice\">Your account was deleted.</p>", "", Next::Account);
     reply.headers.push(clear_cookie());
     Ok(reply)
+}
+
+/// What a review account's page says instead of removing a Claktory from
+/// it (#319, Fugo 34608): a reviewer trying Remove would take away the box
+/// the next review connects to. Delete account works for it, as Apple's
+/// review needs (5.1.1(v), Bruno 46782): the account comes back at the next
+/// sign-in, and only the review box signs a Claktory in to it.
+fn kept_for_review() -> Reply {
+    html(
+        StatusCode::FORBIDDEN,
+        "This Claktory stays",
+        "<p>The app stores use this account to review Claktory, so its Claktories can't be removed. You can still delete \
+         the account.</p><p><a href=\"/account\">Go to your account</a></p>",
+    )
 }
 
 fn delete_confirm(csrf: &str) -> Reply {

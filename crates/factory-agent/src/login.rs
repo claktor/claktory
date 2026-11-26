@@ -24,7 +24,7 @@ pub async fn login_terminal(auth_path: &Path, provider: Option<&str>) -> Result<
         Some(id) => id.to_owned(),
         None => {
             let mut options = Vec::new();
-            for provider in registry.providers() {
+            for provider in registry.providers().iter().filter(|provider| !crate::credentials::VAULT_ONLY.contains(&provider.id)) {
                 options.push(SelectOption { id: provider.id.to_owned(), label: provider.name.to_owned(), description: None });
             }
             terminal.prompt(AuthPrompt::Select { message: "Sign in to:".into(), options }).await?
@@ -32,6 +32,14 @@ pub async fn login_terminal(auth_path: &Path, provider: Option<&str>) -> Result<
     };
     let provider =
         registry.provider(&provider_id).ok_or_else(|| models_error("provider", format!("Unknown provider: {provider_id}"), None))?;
+    // This writes `auth.json`, which never holds them.
+    if crate::credentials::VAULT_ONLY.contains(&provider.id) {
+        return Err(models_error(
+            "provider",
+            format!("Sign in to {} in Claktory, under Settings → Providers: its sign-in is kept only with your secrets.", provider.name),
+            None,
+        ));
+    }
     let kind = match (&provider.oauth, &provider.api_key) {
         (Some(oauth), Some(api_key)) => {
             let options = vec![

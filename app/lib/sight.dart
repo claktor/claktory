@@ -1,7 +1,10 @@
 // Whether anyone can see the window, and whether the person asked for
 // less motion, as the Mac tells it (MainFlutterWindow.swift): Flutter's
-// macOS embedder reports neither a covered window nor Reduce motion. On
-// other platforms the app's lifecycle and the platform's own Reduce motion
+// macOS embedder reports neither a covered window nor Reduce motion. The
+// Windows runner tells the same (app/windows/runner/sight_channel.h): its
+// embedder passes on no Animation effects setting, and its lifecycle misses
+// a locked session, a dark display and another virtual desktop. On other
+// platforms the app's lifecycle and the platform's own Reduce motion
 // already say so, and this changes nothing.
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -10,7 +13,8 @@ import 'package:flutter/widgets.dart';
 /// What the Mac says about the window: [shown] while any of it is on
 /// screen (not covered by other windows, minimized or hidden), and
 /// [reduceMotion] while System Settings → Accessibility → Display → Reduce
-/// motion is on.
+/// motion is on. On Windows, Settings → Accessibility → Visual effects →
+/// Animation effects off is [reduceMotion].
 class Sight {
   Sight._();
 
@@ -21,9 +25,13 @@ class Sight {
 
   static var _started = false;
 
-  /// Asks the Mac once and listens for changes after; nothing elsewhere.
+  /// Asks the Mac or Windows once and listens for changes after; nothing
+  /// elsewhere.
   static void start() {
-    if (_started || kIsWeb || defaultTargetPlatform != TargetPlatform.macOS) {
+    if (_started ||
+        kIsWeb ||
+        (defaultTargetPlatform != TargetPlatform.macOS &&
+            defaultTargetPlatform != TargetPlatform.windows)) {
       return;
     }
     _started = true;

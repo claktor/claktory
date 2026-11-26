@@ -400,6 +400,33 @@ impl CredentialBacking for FileBacking {
 
 /// The error for sign-ins that are locked away until the person opens
 /// their secrets.
+/// Providers whose sign-ins are kept only in the vault, sealed: never in
+/// `auth.json`, not as a copy for an older backend, nor while the vault is
+/// locked (Grok, #493: Fugo's condition).
+pub const VAULT_ONLY: [&str; 1] = ["grok"];
+
+/// The first provider in `all` whose sign-ins may only be kept in the vault.
+pub fn vault_only_in(all: &Map<String, Value>) -> Option<&'static str> {
+    VAULT_ONLY.into_iter().find(|provider| all.contains_key(*provider))
+}
+
+/// `all` without the sign-ins kept only in the vault: what may go into
+/// `auth.json`.
+pub fn plaintext(all: &Map<String, Value>) -> Map<String, Value> {
+    all.iter().filter(|(provider, _)| !VAULT_ONLY.contains(&provider.as_str())).map(|(key, value)| (key.clone(), value.clone())).collect()
+}
+
+/// Why a sign-in kept only in the vault can't be kept now.
+pub fn vault_only_error(provider_id: &str) -> Error {
+    let name = if provider_id == "grok" { "Grok" } else { provider_id };
+    Error::Models {
+        code: crate::errors::LOCKED,
+        message: format!(
+            "A {name} sign-in is kept only with your secrets, which can't be opened now. Unlock them, then sign in to {name} again."
+        ),
+    }
+}
+
 pub fn locked_error(provider_id: &str) -> Error {
     tracing::debug!(provider = provider_id, "sign-ins locked away");
     Error::Models { code: crate::errors::LOCKED, message: "Your sign-ins are locked with your secrets.".to_owned() }

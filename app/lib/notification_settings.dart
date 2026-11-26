@@ -430,7 +430,10 @@ abstract interface class DeviceNotifications {
         openSettings: camera.openSettings,
       );
     }
-    if (defaultTargetPlatform == TargetPlatform.macOS) {
+    // Windows' runner answers the same channel
+    // (app/windows/runner/notifications_channel.cpp).
+    if (defaultTargetPlatform == TargetPlatform.macOS ||
+        defaultTargetPlatform == TargetPlatform.windows) {
       return const MacNotificationPermission();
     }
     return null;
@@ -441,7 +444,8 @@ abstract interface class DeviceNotifications {
   static DeviceNotifications? debugOverride;
 }
 
-/// A Mac's: shown while Claktory is open on it, as macOS allows.
+/// A Mac's (and a Windows PC's): shown while Claktory is open on it, as
+/// macOS and Windows allow.
 class MacNotificationPermission implements DeviceNotifications {
   const MacNotificationPermission({
     this.channel = const MethodChannel('factory/notifications'),
@@ -450,7 +454,7 @@ class MacNotificationPermission implements DeviceNotifications {
   final MethodChannel channel;
 
   @override
-  String get name => 'This Mac';
+  String get name => 'This $thisDeviceKind';
 
   @override
   ValueListenable<Map<Backend, PushStep>>? get setupFailures => null;

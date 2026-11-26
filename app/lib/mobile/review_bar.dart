@@ -1,10 +1,12 @@
 import 'dart:async';
+import 'dart:io' show FileSystemException;
 import 'dart:math' as math;
 
 import 'package:flutter/services.dart' show TextInputAction;
 import 'package:flutter/widgets.dart';
 
 import '../backend.dart';
+import '../card_files.dart';
 import '../characters/character.dart';
 import '../controls.dart';
 import '../decision.dart' show SubmitButton, commentTyped;
@@ -176,6 +178,16 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
         });
       }
       return;
+    } on FileSystemException catch (error) {
+      // A file to go with it couldn't be read (#511).
+      unawaited(Haptics.warning());
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _error = cardFilesFailure(error);
+        });
+      }
+      return;
     }
     unawaited(dismiss ? Haptics.light() : Haptics.success());
     if (!mounted) return;
@@ -273,6 +285,18 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
     );
     final stacked = largeText(context);
     final asks = '$name asks you to review this';
+    // Files with the answer (#511), the card's: what was added on it comes
+    // here too.
+    final files = cardFilesKey(widget.agentId, ask.ask.id);
+    void filesNote(String? note) {
+      if (mounted) setState(() => _error = note);
+    }
+
+    final attach = CardAttachButton(
+      card: files,
+      enabled: !_busy,
+      onNote: filesNote,
+    );
     final keyboard = MediaQuery.viewInsetsOf(context).bottom;
     // A bar over the file, as iOS's toolbars: it grows with the text only
     // so far, so the file keeps its room at the largest sizes. A viewer's
@@ -375,8 +399,10 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
                     controller: answer,
                     focusNode: _focus,
                     enabled: !_busy,
+                    trailing: attach,
                     child: field,
                   ),
+                  CardFileChips(card: files, busy: _busy),
                   const SizedBox(height: Space.s),
                   Row(
                     children: [
@@ -393,9 +419,18 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
                     focusNode: _focus,
                     enabled: !_busy,
                     // The answer's button last, under the thumb.
-                    trailing: send,
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        attach,
+                        const SizedBox(width: Space.xs),
+                        send,
+                      ],
+                    ),
                     child: field,
                   ),
+                if (!stacked) CardFileChips(card: files, busy: _busy),
                 if (widget.kind == 'text') ...[
                   const SizedBox(height: Space.xs),
                   Text(

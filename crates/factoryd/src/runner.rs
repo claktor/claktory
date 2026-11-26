@@ -370,6 +370,10 @@ fn refused(spec: &ToolSpec, agent: &AgentConfig, app: Option<String>) -> Tool {
             format!("You no longer have {name} of the {} app, so it doesn't work any more.", app.unwrap_or_default())
         }
         _ if name.starts_with("pipe_") => format!("You no longer have a pipe, so {name} doesn't work any more."),
+        _ if name == crate::given_up::APPS_TOOL => format!("You no longer have any app, so {name} has nothing to give up."),
+        _ if name == crate::given_up::REACH_TOOL => {
+            format!("You're no longer let message any agent outside your project, so {name} has nothing to give up.")
+        }
         Some(manifest) if !crate::extensions::enabled(agent, manifest.id) => {
             format!("The {} extension is turned off for you, so {name} doesn't work any more.", manifest.name)
         }
@@ -395,13 +399,14 @@ pub(crate) fn frame_model(frame: &Frame) -> String {
 fn settings_note(
     told: &str,
     home: &Home,
-    config: &Config,
+    inner: &Inner,
     agent: &AgentConfig,
     folder: &Path,
     can_land: bool,
     tools: &[ToolSpec],
 ) -> Option<(String, Vec<&'static str>)> {
     use crate::extensions::{OptionKind, agent_list, enabled, switch};
+    let config = &inner.config;
     let then: serde_json::Value = serde_json::from_str(told).ok()?;
     let text = crate::transcript::text_fields(&then);
     // Turned on, it can use them now if its frame can call tools it doesn't list.
@@ -409,7 +414,11 @@ fn settings_note(
     let mut said = Vec::new();
     let mut turned_on = Vec::new();
     if text("model") != agent.model {
-        said.push(format!("your model is now {}", agent.model));
+        // Who or what changed it (friend bug #43), while it's still their model.
+        said.push(match inner.model_why.get(&agent.id).filter(|(model, _)| *model == agent.model) {
+            Some((_, why)) => format!("your model is now {} ({why})", agent.model),
+            None => format!("your model is now {}", agent.model),
+        });
     }
     if text("name") != agent.name {
         said.push(format!("your name is now {}", agent.name));
@@ -762,7 +771,7 @@ impl Factory {
         let pipes = crate::pipes::agents::granted(self, &inner.config, id);
         // tree_land in its tools, or reached through extension_call.
         let can_land = frame.tools.iter().any(|tool| tool.name == "tree_land" || tool.name == EXTENSION_CALL);
-        let (settings, turned_on) = match settings_note(frame.told(), &self.home, &inner.config, &agent, &folder, can_land, &frame.tools) {
+        let (settings, turned_on) = match settings_note(frame.told(), &self.home, inner, &agent, &folder, can_land, &frame.tools) {
             Some((note, turned_on)) => (Some(note), turned_on),
             None => (None, Vec::new()),
         };

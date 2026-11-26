@@ -19,7 +19,9 @@ use crate::errors::{Error, models_error};
 use crate::limits::{AccountUsage, ResetAnswer, UsageLimit, UsageReset};
 use crate::providers::anthropic::files::{Forgotten, ImageFiles, ImageFilesFor};
 use crate::providers::keys::KeyCheck;
-use crate::providers::{Provider, anthropic, merge_headers, model_headers, openai, openai_codex, openrouter, supported_thinking_levels};
+use crate::providers::{
+    Provider, anthropic, grok, merge_headers, model_headers, openai, openai_codex, openrouter, supported_thinking_levels,
+};
 use crate::stream::{EventStream, LlmContext, StreamFn, StreamOptions, ThinkingLevel, event_stream};
 use crate::types::{AssistantMessage, Model, StopReason, StreamEvent, Usage};
 
@@ -33,7 +35,7 @@ fn credential_result<T>(result: Result<T, Error>, operation: &str, id: &str) -> 
 
 /// `config.ts` registers the four providers in this order.
 pub fn default_providers() -> Vec<Provider> {
-    vec![anthropic::provider(), openai::provider(), openai_codex::provider(), openrouter::provider()]
+    vec![anthropic::provider(), openai::provider(), openai_codex::provider(), openrouter::provider(), grok::provider()]
 }
 
 /// A model an agent can use, as a client lists it.
@@ -538,6 +540,7 @@ impl Registry {
             "anthropic" => provider.base_url == "https://api.anthropic.com" && !elsewhere("ANTHROPIC_BASE_URL"),
             "openai" => provider.base_url == "https://api.openai.com/v1" && !elsewhere("OPENAI_BASE_URL"),
             "openai-codex" => provider.base_url == "https://chatgpt.com/backend-api",
+            "grok" => provider.base_url == grok::BASE_URL,
             _ => false,
         }
     }
@@ -1263,7 +1266,11 @@ impl Registry {
                 Ok(Some(accounts))
             })
             .await
-            .map_err(|error| models_error("auth", format!("Credential store modify failed for {id}"), Some(&error)))?;
+            .map_err(|error| match error {
+                // Said for the person already (kept only in the vault, which is locked).
+                Error::Models { .. } => error,
+                other => models_error("auth", format!("Credential store modify failed for {id}"), Some(&other)),
+            })?;
         Ok(credential)
     }
 
@@ -1323,7 +1330,30 @@ impl Registry {
     pub async fn logout(&self, id: &str) -> Result<(), Error> {
         self.delete_account_files(id, None).await;
         self.forget_whose(id);
-        credential_result(self.inner.store.delete(id).await, "delete", id)
+        let signed_in = self.inner.store.accounts(id).await.unwrap_or_default();
+        credential_result(self.inner.store.delete(id).await, "delete", id)?;
+        self.revoke(id, signed_in);
+        Ok(())
+    }
+
+    /// Ends `accounts`' sign-ins at the provider, signed out of here
+    /// already, where it has a way (`OAuthFlow::revoke`): in the
+    /// background, and one it can't end now is only logged.
+    fn revoke(&self, id: &str, accounts: Vec<Account>) {
+        let Some(oauth) = self.provider(id).and_then(|provider| provider.oauth.clone()) else { return };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+        for account in accounts.into_iter().filter(|account| matches!(account.credential, Credential::Oauth { .. })) {
+            let (oauth, id) = (oauth.clone(), id.to_owned());
+            runtime.spawn(async move {
+                match tokio::time::timeout(std::time::Duration::from_secs(30), oauth.revoke(&account.credential)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(provider = %id, account = %account.id, %error, "could not end a sign-in at the provider")
+                    }
+                    Err(_) => tracing::warn!(provider = %id, account = %account.id, "ending a sign-in at the provider took too long"),
+                }
+            });
+        }
     }
 
     /// Signs out of one of the provider's accounts; an empty `account`, all.
@@ -1335,6 +1365,8 @@ impl Registry {
         self.delete_account_files(id, Some(account)).await;
         self.forget_whose(id);
         let account = account.to_owned();
+        let signed_in: Vec<Account> =
+            self.inner.store.accounts(id).await.unwrap_or_default().into_iter().filter(|stored| stored.id == account).collect();
         let removed = self
             .inner
             .store
@@ -1344,7 +1376,9 @@ impl Registry {
                 Ok((accounts.len() != before).then_some(accounts))
             })
             .await;
-        credential_result(removed, "modify", id).map(|_| ())
+        credential_result(removed, "modify", id)?;
+        self.revoke(id, signed_in);
+        Ok(())
     }
 
     /// Moves one of the provider's accounts to `position` (0 is first, past

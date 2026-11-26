@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:factory_app/history/controller.dart';
+import 'package:factory_app/history/export.dart' show agentsWorking;
 import 'package:factory_app/history/pulses.dart';
 import 'package:factory_app/history/routes.dart';
 import 'package:factory_app/history/scene.dart';
@@ -262,6 +263,103 @@ void main() {
 
     int chip(String id) => scene.chips.indexWhere((chip) => chip.id == id);
 
+    test("one project's chapters name nothing else (Abbacchio's row 1584)", () {
+      HistoryChapter chapter(
+        double hours,
+        HistoryChapterKind kind,
+        String title, [
+        List<String> nodes = const [],
+      ]) => HistoryChapter(
+        atMs: Int64((day1 + hours * hour).round()),
+        kind: kind,
+        title: title,
+        nodeIds: nodes,
+      );
+      final all = [
+        chapter(
+          2,
+          HistoryChapterKind.HISTORY_CHAPTER_KIND_PROJECT,
+          'App began',
+          ['project:app'],
+        ),
+        chapter(
+          2.5,
+          HistoryChapterKind.HISTORY_CHAPTER_KIND_AGENTS,
+          'Rivet and Kai joined',
+          ['agent:rivet', 'agent:kai'],
+        ),
+        chapter(
+          6,
+          HistoryChapterKind.HISTORY_CHAPTER_KIND_AGENTS,
+          'Ana joined',
+          ['agent:ana'],
+        ),
+        chapter(
+          10,
+          HistoryChapterKind.HISTORY_CHAPTER_KIND_SECRET,
+          'The first secret: GitHub',
+          ['secret:gh'],
+        ),
+        chapter(
+          12,
+          HistoryChapterKind.HISTORY_CHAPTER_KIND_PROJECT,
+          'Shop began',
+          ['project:shop'],
+        ),
+        chapter(
+          21,
+          HistoryChapterKind.HISTORY_CHAPTER_KIND_PIPE,
+          'A pipe to another Claktory opened',
+          ['pipe:p1'],
+        ),
+        chapter(
+          30,
+          HistoryChapterKind.HISTORY_CHAPTER_KIND_RECORDING,
+          'Recording began',
+        ),
+        chapter(
+          41,
+          HistoryChapterKind.HISTORY_CHAPTER_KIND_BUSIEST,
+          'The busiest hour: 12 messages',
+        ),
+        chapter(
+          44,
+          HistoryChapterKind.HISTORY_CHAPTER_KIND_RELEASE,
+          'Claktory v0.1.24',
+        ),
+      ];
+      expect(
+        [for (final c in scene.chaptersIn(all, 'app')) c.title],
+        [
+          'App began',
+          'Ana joined',
+          'A pipe to another Claktory opened',
+          'Recording began',
+          'Claktory v0.1.24',
+        ],
+      );
+      expect(
+        [for (final c in scene.chaptersIn(all, 'shop')) c.title],
+        ['Shop began', 'Recording began', 'Claktory v0.1.24'],
+      );
+      // The board's and the video's, through the controller: all of them
+      // for all projects.
+      final controller = HistoryController(_Source())
+        ..scene = scene
+        ..timeline = HistoryTimeline.of(
+          fixtureOverview()
+            ..chapters.clear()
+            ..chapters.addAll(all),
+        );
+      expect(controller.chapters, hasLength(all.length));
+      controller.project = 'shop';
+      expect(
+        [for (final c in controller.chapters) c.title],
+        ['Shop began', 'Recording began', 'Claktory v0.1.24'],
+      );
+      controller.dispose();
+    });
+
     test('a moved agent has a chip in each place', () {
       expect(chip('agent:kai'), isNot(-1));
       expect(chip('agent:kai@1'), isNot(-1));
@@ -421,10 +519,15 @@ void main() {
       final piped = at(warp.historyAt(warp.playAt(day1 + 41.5 * hour) + 0.05))
           .pulses;
       final pipe = piped.singleWhere((pulse) => pulse.kind == PulseKind.pipe);
+      // From the ring above it, where the other Claktory is: seen coming in
+      // (Bruno 44370), down to the pad's top over its portal (Lucy).
+      final pad = scene.pads.single.rect;
       expect(
-        scene.pads.single.rect.inflate(2).contains(pipe.route.start),
-        isTrue,
+        (pipe.route.start - (pipeTop(pad) - const Offset(0, pipeReach)))
+            .distance,
+        lessThan(0.01),
       );
+      expect((pipe.route.points[1] - pipeTop(pad)).distance, lessThan(0.01));
     });
 
     test('an app\'s event leaves from its chip; a node never filled is '
@@ -542,6 +645,94 @@ void main() {
       expect(merged.length, lessThanOrEqualTo(150));
       expect(merged.fold(0, (sum, pulse) => sum + pulse.count), 1000);
       expect(merge(many.sublist(0, 10), 150), hasLength(10));
+    });
+  });
+
+  group('one project (Bruno 44372)', () {
+    late HistoryScene scene;
+    late HistoryLog log;
+    setUp(() {
+      scene = HistoryScene.build(HistoryTimeline.of(fixtureOverview()));
+      log = HistoryLog()..add(fixtureEvents());
+    });
+
+    int chip(String id) => scene.chips.indexWhere((chip) => chip.id == id);
+
+    test(
+      "shows only its box, folders, pipes and agents while they're in it",
+      () {
+        expect(scene.projects, [(id: 'app', label: 'App')]);
+        final t = (day1 + 42 * hour).toDouble();
+        final all = scene.at(t);
+        final only = scene.at(t, project: 'app');
+        expect(all.chips[chip('agent:rivet')], isNot(hidden));
+        expect(only.chips[chip('agent:rivet')], hidden);
+        expect(only.chips[chip('secret:gh')], hidden);
+        expect(only.chips[chip('agent:ana')], isNot(hidden));
+        // Kai, moved to the Web folder: still in the project, where he is.
+        final kaiChip = scene.chipAt(kai, t);
+        expect(scene.chips[kaiChip].place, greaterThanOrEqualTo(0));
+        expect(only.chips[kaiChip], isNot(hidden));
+        final project = scene.projectBox('app');
+        expect(only.boxes[project], isNot(hidden));
+        for (var b = 0; b < scene.boxes.length; b++) {
+          if (b == project || scene.boxes[b].parent == project) continue;
+          expect(only.boxes[b], hidden, reason: scene.boxes[b].box.id);
+        }
+        expect(only.pads.single, isNot(hidden));
+        // The Map's lines to what's outside go with it.
+        for (var w = 0; w < scene.wires.length; w++) {
+          final wire = scene.wires[w];
+          if (wire.a == chip('agent:rivet') || wire.b == chip('agent:rivet')) {
+            expect(only.wires[w], hidden);
+          }
+        }
+      },
+    );
+
+    test('counts its agents, and those working', () {
+      final t = (day1 + 3 * hour + 5 * 60000).toDouble();
+      expect(scene.agentsAt(log, t), (working: 1, total: 2));
+      expect(scene.agentsAt(log, t, project: 'app'), (working: 1, total: 1));
+      expect(agentsWorking((working: 1, total: 2)), '1 of 2 agents working');
+      expect(agentsWorking((working: 0, total: 1)), '1 agent');
+      expect(agentsWorking((working: 0, total: 23)), '23 agents');
+      expect(agentsWorking((working: 1, total: 1)), '1 agent working');
+      expect(
+        agentsWorking((working: 4, total: 1023)),
+        '4 of 1,023 agents working',
+      );
+    });
+
+    test('a message from outside it comes in at its edge', () {
+      final warp = TimeWarp.build(
+        start: scene.timeline.start,
+        end: scene.timeline.end,
+        speed: HistorySpeed.hour,
+        times: log.times,
+        loadedUntil: scene.timeline.end,
+      );
+      final routes = Routes(scene);
+      // Rivet, outside the project, to Kai, in it.
+      final t = warp.historyAt(warp.playAt(day1 + 3.0 * hour) + 0.1);
+      final pulse = pulsesAt(
+        scene: scene,
+        log: log,
+        routes: routes,
+        playAt: warp.playAt,
+        historyAt: warp.historyAt,
+        t: t,
+        project: 'app',
+      ).pulses.single;
+      final box = scene.boxes[scene.projectBox('app')].box.rect;
+      expect(box.inflate(1).contains(pulse.route.start), isTrue);
+      expect(box.deflate(1).contains(pulse.route.start), isFalse);
+      expect(
+        scene.chips[chip('agent:kai')].rect
+            .inflate(1)
+            .contains(pulse.route.end),
+        isTrue,
+      );
     });
   });
 

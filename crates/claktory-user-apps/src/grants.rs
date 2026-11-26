@@ -511,6 +511,34 @@ pub fn drop_resource(transaction: &Transaction<'_>, app: &str, accounts: &[&str]
     Ok(changed)
 }
 
+/// A Claktory's registration under `epoch` ended (E11-4): removed at the
+/// account page, signed out, or signed in again, here or to another
+/// account. Its grants under that epoch or an earlier one go now, not
+/// lazily, with their uses, and when any was a DM grant the account's
+/// feed says its groups changed, as a revoke does. A grant under a later
+/// epoch (it signed in again before the notice came) stays. How many went.
+pub fn claktory_removed(db: &mut Connection, account_id: &str, claktory_id: &str, epoch: u64, now_ms: i64) -> rusqlite::Result<usize> {
+    let transaction = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let ended: Vec<(String, String)> = {
+        let mut statement =
+            transaction.prepare("SELECT id, app FROM grants WHERE account_id = ?1 AND claktory_id = ?2 AND epoch <= ?3 ORDER BY id")?;
+        statement
+            .query_map(params![account_id, claktory_id, epoch as i64], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?
+    };
+    for (id, _) in &ended {
+        forget(&transaction, id)?;
+    }
+    let mut apps: Vec<&str> = ended.iter().map(|(_, app)| app.as_str()).collect();
+    apps.sort_unstable();
+    apps.dedup();
+    for app in apps {
+        regroup(&transaction, app, account_id, now_ms)?;
+    }
+    transaction.commit()?;
+    Ok(ended.len())
+}
+
 /// Forgets an account's grants (the account was deleted).
 pub fn purge_account(db: &mut Connection, account_id: &str) -> Result<(), Refused> {
     let transaction = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;

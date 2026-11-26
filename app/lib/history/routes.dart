@@ -29,6 +29,11 @@ class Route {
   final Float32List _y;
   final Float32List _run;
 
+  /// Its points, in order.
+  List<Offset> get points => [
+    for (var i = 0; i < _x.length; i++) Offset(_x[i], _y[i]),
+  ];
+
   double get length => _run.isEmpty ? 0 : _run.last;
   Offset get start => Offset(_x.first, _y.first);
   Offset get end => Offset(_x.last, _y.last);
@@ -88,10 +93,25 @@ class Routes {
             : arc(scene.chips[chip].rect, from),
       );
 
+  /// Through pipe [pad] (an index into the scene's pads), from or to chip
+  /// [chip]: down its line from the ring above it, where the other Claktory
+  /// is, to the pad, then from its edge across to the chip; or the other
+  /// way, [toChip] false. So a message through a pipe is seen leaving the
+  /// board, or coming in. The stretch inside the pad isn't drawn.
+  Route pipe(int pad, int chip, {required bool toChip}) =>
+      _cache.putIfAbsent(toChip ? 'p$pad>c$chip' : 'c$chip>p$pad', () {
+        final rect = scene.pads[pad].rect;
+        final top = pipeTop(rect);
+        final ring = top - const Offset(0, pipeReach);
+        final across = arc(rect, scene.chips[chip].rect).points;
+        final inward = [ring, top, ...across];
+        return Route(toChip ? inward : inward.reversed.toList());
+      });
+
   /// An arc from [a]'s edge to [b]'s, bowing to one side.
   static Route arc(Rect a, Rect b) {
-    final from = _edgeToward(a, b.center);
-    final to = _edgeToward(b, a.center);
+    final from = edgeToward(a, b.center);
+    final to = edgeToward(b, a.center);
     final mid = (from + to) / 2;
     final d = to - from;
     final bow = Offset(-d.dy, d.dx) * 0.18;
@@ -107,7 +127,7 @@ class Routes {
   }
 
   /// Where the line from [rect]'s middle toward [toward] leaves it.
-  static Offset _edgeToward(Rect rect, Offset toward) {
+  static Offset edgeToward(Rect rect, Offset toward) {
     final c = rect.center;
     final d = toward - c;
     if (d.dx == 0 && d.dy == 0) return c;

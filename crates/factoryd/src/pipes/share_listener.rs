@@ -96,6 +96,10 @@ const COOKIES_KEPT: usize = 200;
 #[derive(Default)]
 pub(crate) struct Listeners {
     live: Mutex<HashMap<String, Live>>,
+    /// The latest failure each share's browser was shown (Claktory's 502
+    /// page), until a request goes through again: when, and its words
+    /// (#505 row 655). Kept while Claktory runs.
+    failures: Mutex<HashMap<String, (i64, String)>>,
 }
 
 struct Live {
@@ -115,6 +119,10 @@ pub(crate) struct Status {
     /// Why it isn't, when it should be, as the person reads it.
     pub problem: String,
     pub hidden: bool,
+    /// The latest failure its browser was shown, until a request goes
+    /// through again: when (ms since 1970, 0 none) and its words.
+    pub last_failure_ms: i64,
+    pub last_failure: String,
 }
 
 /// What Open gives the app to open in the browser: the one-time address,
@@ -188,12 +196,16 @@ pub(crate) fn status(factory: &Factory, share: &str, peer: &str, port: u16) -> S
     if visit.port == 0 {
         return Status { problem: "No port is free on this computer.".to_owned(), hidden: visit.hidden, ..Status::default() };
     }
+    let (last_failure_ms, last_failure) =
+        factory.share_listeners.failures.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(share).cloned().unwrap_or_default();
     Status {
         address: format!("http://{}.localhost:{}/", visit.host, visit.port),
         fallback_address: format!("http://127.0.0.1:{}/", visit.port),
         listening,
         problem: String::new(),
         hidden: visit.hidden,
+        last_failure_ms,
+        last_failure,
     }
 }
 
@@ -263,6 +275,7 @@ pub(crate) fn open(factory: &Arc<Factory>, share: &str) -> Result<Opened, String
 /// until `resumed`. Its address and cookies stay.
 pub(crate) fn close(factory: &Factory, share: &str) {
     let live = factory.share_listeners.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(share);
+    factory.share_listeners.failures.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(share);
     if let Some(live) = live {
         live.cancel.cancel();
         tracing::info!(share, port = live.gate.port, "closed a shared website's listener");
@@ -337,6 +350,7 @@ fn start(factory: &Arc<Factory>, share: &str) -> Result<Arc<Gate>, String> {
         cookies: Mutex::new(visit.cookies),
         codes: Mutex::new(Vec::new()),
         save: Box::new(saver(Arc::downgrade(factory), share.to_owned())),
+        failed: Box::new(failure_keeper(Arc::downgrade(factory), share.to_owned())),
     });
     let cancel = CancellationToken::new();
     let weak = Arc::downgrade(factory);
@@ -366,6 +380,32 @@ fn saver(factory: Weak<Factory>, share: String) -> impl Fn(&Gate) + Send + Sync 
             factory.store.db().execute("UPDATE pipe_share_visits SET keys = ?2, cookies = ?3 WHERE share = ?1", params![share, keys, cookies]);
         if let Err(error) = saved {
             tracing::error!(%error, "couldn't keep a shared website's cookies");
+        }
+    }
+}
+
+/// Keeps the latest failure a share's browser was shown (Some: its words),
+/// or clears it once a request goes through (None); the app is told when
+/// it changes, at most once a second for the same words.
+fn failure_keeper(factory: Weak<Factory>, share: String) -> impl Fn(Option<&str>) + Send + Sync {
+    move |why: Option<&str>| {
+        let Some(factory) = factory.upgrade() else { return };
+        let changed = {
+            let mut failures = factory.share_listeners.failures.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            match why {
+                None => failures.remove(&share).is_some(),
+                Some(why) => {
+                    let now = crate::transcript::now_ms();
+                    let tell = failures.get(&share).is_none_or(|(at, said)| said != why || now - at >= 1000);
+                    if tell {
+                        failures.insert(share.clone(), (now, why.to_owned()));
+                    }
+                    tell
+                }
+            }
+        };
+        if changed {
+            factory.broadcast_workspace(&factory.lock());
         }
     }
 }
@@ -455,7 +495,12 @@ pub(crate) struct Gate {
     /// One-time codes not used yet: their SHA-256s and when they stop working.
     codes: Mutex<Vec<(String, Instant)>>,
     save: Box<dyn Fn(&Gate) + Send + Sync>,
+    /// Keeps the latest failure its browser was shown, or clears it.
+    failed: Box<Failed>,
 }
+
+/// Keeps a share's latest failure (Some: its words) or clears it (None).
+type Failed = dyn Fn(Option<&str>) + Send + Sync;
 
 /// Which of its two hosts a request named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -593,7 +638,8 @@ async fn handle(
     let Some(named) = gate.named(host) else {
         return Ok(page(StatusCode::MISDIRECTED_REQUEST, &elsewhere(host)));
     };
-    if !same_origin(request.headers()) {
+    let own = same_origin(request.headers());
+    if !own && !opened_from_an_app(request.method(), request.uri().path(), request.headers()) {
         return Ok(page(StatusCode::FORBIDDEN, FROM_ANOTHER_SITE));
     }
     if request.uri().path() == OPEN_PATH {
@@ -602,10 +648,28 @@ async fn handle(
             return Ok(page(StatusCode::FORBIDDEN, "This link has been used or is too old. Open the website again from Claktory."));
         }
         let cookie = format!("{}={}; HttpOnly; SameSite=Strict; Path=/; Max-Age={KEY_AGE}", gate.cookie_name(), gate.new_key());
-        let mut response = Response::new(Either::Right(Full::new(Bytes::new())));
-        *response.status_mut() = StatusCode::SEE_OTHER;
+        // Opened from an app the browser counts as another site (Android's
+        // Custom Tab): a redirect would stay cross-site and the Strict key
+        // wouldn't go with it, so a page of Claktory's moves on to "/"
+        // itself, a navigation of the share's own (#505).
+        let mut response = if own {
+            let mut response = Response::new(Either::Right(Full::new(Bytes::new())));
+            *response.status_mut() = StatusCode::SEE_OTHER;
+            response.headers_mut().insert(header::LOCATION, HeaderValue::from_static("/"));
+            response
+        } else {
+            let html = "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0;url=/\">\
+                <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Claktory</title>\
+                <body>\
+                <p><a href=\"/\">Open the website</a></p></body>";
+            let mut response = Response::new(Either::Right(Full::new(Bytes::from_static(html.as_bytes()))));
+            let headers = response.headers_mut();
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+            headers.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"));
+            headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+            response
+        };
         let headers = response.headers_mut();
-        headers.insert(header::LOCATION, HeaderValue::from_static("/"));
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         headers.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
         if let Ok(cookie) = HeaderValue::from_str(&cookie) {
@@ -629,12 +693,12 @@ async fn handle(
             Ok(io) => io,
             Err(why) => {
                 tracing::info!(share = %gate.share, %why, "a shared website couldn't be reached");
-                return Ok(page(StatusCode::BAD_GATEWAY, &why));
+                return Ok(unreached(&gate, &why));
             }
         };
         let (sender, connection) = match hyper::client::conn::http1::handshake(TokioIo::new(io)).await {
             Ok(made) => made,
-            Err(_) => return Ok(page(StatusCode::BAD_GATEWAY, "The shared website couldn't be reached.")),
+            Err(_) => return Ok(unreached(&gate, UNREACHED)),
         };
         let cancel = cancel.clone();
         tokio::spawn(async move {
@@ -645,20 +709,22 @@ async fn handle(
         });
         *held = Some(sender);
     }
-    let Some(sender) = held.as_mut() else { return Ok(page(StatusCode::BAD_GATEWAY, "The shared website couldn't be reached.")) };
+    let Some(sender) = held.as_mut() else { return Ok(unreached(&gate, UNREACHED)) };
     let upgrading = request.headers().contains_key(header::UPGRADE);
     let browser = upgrading.then(|| hyper::upgrade::on(&mut request));
     if sender.ready().await.is_err() {
         *held = None;
-        return Ok(page(StatusCode::BAD_GATEWAY, "The shared website couldn't be reached."));
+        return Ok(unreached(&gate, UNREACHED));
     }
     let mut response = match sender.send_request(request).await {
         Ok(response) => response,
         Err(_) => {
             *held = None;
-            return Ok(page(StatusCode::BAD_GATEWAY, "The shared website stopped answering."));
+            return Ok(unreached(&gate, "The shared website stopped answering."));
         }
     };
+    // It went through: no failure to show any more.
+    (gate.failed)(None);
     // Its cookies: never one named as Claktory's, and each for the share's
     // own host alone (no Domain, which could reach other shares' hosts
     // under .localhost); remembered for Safari's filter.
@@ -696,6 +762,25 @@ async fn handle(
         });
     }
     Ok(response.map(Either::Left))
+}
+
+/// The Open link's navigation from an app that the browser counts as
+/// another site: Chrome's Custom Tab on Android sends Sec-Fetch-Site
+/// cross-site for it (#505, rows 174–176). Taken only as a top-level GET of
+/// a document to the Open path (Sec-Fetch-Mode navigate, Sec-Fetch-Dest
+/// document, both exact), with no Origin and no upgrade, checked before
+/// its one-minute, one-time code is spent; never same-site (another local
+/// port's page), a subresource, a form's POST or any other path (Fugo
+/// 46986).
+fn opened_from_an_app(method: &hyper::Method, path: &str, headers: &hyper::HeaderMap) -> bool {
+    let said = |name: &str| headers.get(name).and_then(|value| value.to_str().ok()).map(str::to_ascii_lowercase);
+    method == hyper::Method::GET
+        && path == OPEN_PATH
+        && said("sec-fetch-site").as_deref() == Some("cross-site")
+        && said("sec-fetch-mode").as_deref() == Some("navigate")
+        && said("sec-fetch-dest").as_deref() == Some("document")
+        && !headers.contains_key(header::ORIGIN)
+        && !headers.contains_key(header::UPGRADE)
 }
 
 /// Whether a request comes from the share's own pages, or from the person
@@ -772,12 +857,21 @@ fn elsewhere(host: Option<&str>) -> String {
     )
 }
 
+const UNREACHED: &str = "The shared website couldn't be reached.";
+
+/// Claktory's 502 page for a share, its words kept as the share's latest
+/// failure for the app to show (#505 row 655).
+fn unreached(gate: &Gate, why: &str) -> Response<Body> {
+    (gate.failed)(Some(why));
+    page(StatusCode::BAD_GATEWAY, why)
+}
+
 /// A short page of Claktory's own.
 fn page(status: StatusCode, text: &str) -> Response<Body> {
     let escaped = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
     let html = format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>Claktory</title>\
-         <body style=\"font-family: -apple-system, sans-serif; margin: 4em auto; max-width: 32em\"><p>{escaped}</p></body>"
+        "<!doctype html><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Claktory</title>\
+         <body style=\"font-family: -apple-system, sans-serif; font-size: 17px; line-height: 1.4; margin: 4em auto; padding: 0 1em; max-width: 32em\"><p>{escaped}</p></body>"
     );
     let mut response = Response::new(Either::Right(Full::new(Bytes::from(html))));
     *response.status_mut() = status;

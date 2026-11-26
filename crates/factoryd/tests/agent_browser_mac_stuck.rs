@@ -72,6 +72,8 @@ async fn a_runner_that_wont_end_leaves_no_vm() {
         vec!["-c".into(), "trap '' TERM INT HUP; while :; do sleep 1; done".into()],
     );
     let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("home")).expect("home");
+    std::fs::write(dir.join("home/config.json"), r#"{"browser": {"live_view": true}}"#).expect("config");
     let (addr, _factory) = start(&dir).await;
 
     // A leftover of this kind, as a factoryd killed mid-run leaves: gone

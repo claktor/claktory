@@ -10,12 +10,13 @@ import 'avatar.dart';
 import 'backend.dart';
 import 'browser/browser_log.dart'
     show BrowserLogSettings, browserControlAvailable;
-import 'claktory_identity.dart' show ClaktoryIdentity, claktoryName;
+import 'claktory_identity.dart'
+    show ClaktoryIdentity, claktoryName, claktoryNameInText;
 import 'controls.dart';
 import 'devices.dart';
 import 'diagnostics.dart' show DiagnosticsSettings;
 import 'find.dart' show RenderedFindScope;
-import 'forms.dart' show FittedHeading;
+import 'forms.dart' show AgentListField, FittedHeading;
 import 'identity.dart';
 import 'keep_awake_card.dart'
     show keepAwakeHolding, keepAwakeLabel, keepAwakeNote, keepAwakeOnBattery;
@@ -1085,8 +1086,9 @@ class _ChecklistTimesState extends State<ChecklistTimes> with SettingRequests {
   }
 }
 
-/// When admin agents with the Resources extension are told the machine runs
-/// low: memory used, a volume's free space, the processors' load.
+/// When the agents that hear Resources alerts are told the machine runs
+/// low (memory used, a volume's free space, the processors' load), and who
+/// they are (friend bug #54).
 class _ResourceAlerts extends StatefulWidget {
   const _ResourceAlerts({required this.workspace});
 
@@ -1112,11 +1114,13 @@ class _ResourceAlertsState extends State<_ResourceAlerts> with SettingRequests {
         Padding(
           padding: const EdgeInsets.only(bottom: Space.m),
           child: Text(
-            'Rivet tells you when this computer runs low. Alert when:',
+            '${resourceAlertsWho(widget.workspace, claktoryNameInText(AppScope.of(context)))} '
+            'Alert when:',
             style: TypeScale.of(context).caption
                 .copyWith(color: palette.textMuted),
           ),
         ),
+        _AlertsHeard(workspace: widget.workspace, save: _save),
         _Threshold(
           label: 'Memory',
           parts: [(settings.ramPercent, '% used')],
@@ -1158,6 +1162,120 @@ class _ResourceAlertsState extends State<_ResourceAlerts> with SettingRequests {
         ),
         failureLine(palette),
       ],
+    );
+  }
+}
+
+/// The name of agent [id] in [workspace]; null when there's none.
+String? _agentName(Workspace workspace, String id) {
+  for (final agent in workspace.agents) {
+    if (agent.id == id) return agent.name;
+  }
+  return null;
+}
+
+/// Who tells the person when [machine] (the Claktory's name, as in text)
+/// runs low, as the backend says (Settings.resource_alert_agents: those
+/// told now), or that Claktory does itself when no agent can.
+String resourceAlertsWho(Workspace workspace, String machine) {
+  final told = [
+    for (final entry in workspace.settings.resourceAlertAgents)
+      if (entry.told) ?_agentName(workspace, entry.agentId),
+  ];
+  return switch (told) {
+    [] => 'Claktory notifies you when $machine runs low.',
+    [final one] => '$one tells you when $machine runs low.',
+    [...final rest, final last] =>
+      '${rest.join(', ')} and $last tell you when $machine runs low.',
+  };
+}
+
+/// Why a listed agent isn't told now (ResourceAlertAgent.held), in the
+/// person's words; null when it is.
+String? resourceAlertHeldText(Workspace workspace, ResourceAlertAgent entry) {
+  if (entry.told) return null;
+  final name = _agentName(workspace, entry.agentId);
+  return switch (entry.held) {
+    ResourceAlertHeld.RESOURCE_ALERT_HELD_RESOURCES_OFF =>
+      "Resources is off for ${name ?? entry.agentId}, so it isn't told.",
+    ResourceAlertHeld.RESOURCE_ALERT_HELD_ARCHIVED =>
+      "${name ?? entry.agentId} is in an archived project, so it isn't told.",
+    ResourceAlertHeld.RESOURCE_ALERT_HELD_NO_MODEL =>
+      "${name ?? entry.agentId} has no model that can run, so it isn't told.",
+    ResourceAlertHeld.RESOURCE_ALERT_HELD_NO_AGENT =>
+      "An agent on this list was deleted, so it isn't told.",
+    _ => null,
+  };
+}
+
+/// Who hears the alerts: admin agents unless turned off, and the agents
+/// the person chooses (choosing one turns Resources on for it, the
+/// backend's), with a line for each that isn't told now and why.
+class _AlertsHeard extends StatelessWidget {
+  const _AlertsHeard({required this.workspace, required this.save});
+
+  final Workspace workspace;
+  final void Function(UpdateSettings update) save;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final settings = workspace.settings;
+    final entries = settings.resourceAlertAgents;
+    final admins = [
+      for (final entry in entries)
+        if (entry.admin) ?_agentName(workspace, entry.agentId),
+    ];
+    final chosen = [
+      for (final entry in entries)
+        if (!entry.admin) entry.agentId,
+    ];
+    final held = [
+      for (final entry in entries) ?resourceAlertHeldText(workspace, entry),
+    ];
+    final caption = TypeScale.of(context).caption;
+    return SettingRow(
+      label: 'Who hears',
+      top: true,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _Switch(
+            label: 'Admin agents',
+            note: admins.isEmpty
+                ? ''
+                : admins.length == 1
+                ? admins.single
+                : '${admins.sublist(0, admins.length - 1).join(', ')} and '
+                      '${admins.last}',
+            value: settings.resourceAlertsToAdmins,
+            onChanged: (on) => save(UpdateSettings(resourceAlertsToAdmins: on)),
+          ),
+          const SizedBox(height: Space.m),
+          AgentListField(
+            label: 'Also tell',
+            description: 'Choosing an agent turns Resources on for it.',
+            workspace: workspace,
+            chosen: chosen,
+            onChanged: (ids) => save(
+              UpdateSettings(resourceAlertAgents: AgentIds(agentIds: ids)),
+            ),
+          ),
+          for (final line in held) ...[
+            const SizedBox(height: Space.xs),
+            Text(line, style: caption.copyWith(color: palette.textMuted)),
+          ],
+          if (!entries.any((entry) => entry.told)) ...[
+            const SizedBox(height: Space.xs),
+            Text(
+              "No agent can hear the alerts now, so Claktory notifies you "
+              'itself.',
+              style: caption.copyWith(color: palette.textMuted),
+            ),
+          ],
+          const SizedBox(height: Space.m),
+        ],
+      ),
     );
   }
 }

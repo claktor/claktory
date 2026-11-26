@@ -34,7 +34,8 @@ CREATE TABLE app_access_changes (
     by TEXT NOT NULL,
     -- rivet: Rivet applied it; card: the person approved Rivet's card;
     -- you: the person changed it in their apps; undo: the person undid
-    -- another.
+    -- another; agent: an agent gave up its own (given_up, #236), by the
+    -- agent.
     via TEXT NOT NULL,
     -- card: the proposal; undo: the change undone.
     ref TEXT NOT NULL DEFAULT '',
@@ -202,6 +203,8 @@ pub(crate) enum Via {
     Card,
     You,
     Undo,
+    /// The agent gave up its own access (`crate::given_up`).
+    Agent,
 }
 
 impl Via {
@@ -211,6 +214,7 @@ impl Via {
             Via::Card => "card",
             Via::You => "you",
             Via::Undo => "undo",
+            Via::Agent => "agent",
         }
     }
 
@@ -219,6 +223,7 @@ impl Via {
             "rivet" => Via::Rivet,
             "card" => Via::Card,
             "undo" => Via::Undo,
+            "agent" => Via::Agent,
             _ => Via::You,
         }
     }
@@ -264,6 +269,9 @@ impl Change {
     /// Charts", the parts joined. `names`: each agent's name now, by id.
     pub(crate) fn title(&self, names: &BTreeMap<String, String>) -> String {
         let who = if self.by.is_empty() { "You".to_owned() } else { names.get(&self.by).cloned().unwrap_or_else(|| self.by.clone()) };
+        if self.via == Via::Agent {
+            return format!("{who} gave up {}", self.labels.app);
+        }
         let parts = self.parts(names, false);
         if parts.is_empty() {
             return format!("{who} changed nothing in {}", self.labels.app);

@@ -17,8 +17,10 @@
 #![allow(dead_code)]
 
 pub(crate) mod cdp;
+pub(crate) mod code;
 pub(crate) mod downloads;
 pub(crate) mod fence;
+pub(crate) mod fill;
 pub(crate) mod handoff;
 pub(crate) mod log;
 pub(crate) mod reader;
@@ -244,11 +246,26 @@ pub(crate) struct HandoffRow {
     pub title: String,
     pub seq: u64,
     pub errand: String,
+    /// A code card's field takes digits only (W8).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub numeric: bool,
+    /// An agreement card's words, the site's (W8b).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agreement: String,
 }
 
 impl HandoffRow {
     pub(crate) fn wire(self) -> v1::ErrandHandoff {
-        v1::ErrandHandoff { errand_id: self.errand, kind: self.kind, what: self.what, origin: self.origin, title: self.title, seq: self.seq }
+        v1::ErrandHandoff {
+            errand_id: self.errand,
+            kind: self.kind,
+            what: self.what,
+            origin: self.origin,
+            title: self.title,
+            seq: self.seq,
+            numeric: self.numeric,
+            agreement: self.agreement,
+        }
     }
 }
 
@@ -381,6 +398,8 @@ impl Factory {
                 title: handoff.title.clone(),
                 seq: handoff.seq,
                 errand: handoff.errand_id.clone(),
+                numeric: handoff.numeric,
+                agreement: handoff.agreement.clone(),
             })
             .unwrap_or_default()
         });
@@ -546,6 +565,7 @@ impl Factory {
     /// The page `errand` drives, connected when it isn't.
     async fn page(&self, live: &mut Option<Live>, errand: &v1::Errand) -> Result<Arc<Page>, (String, String)> {
         if let Some(live) = live.as_ref().filter(|live| live.errand == errand.id && !live.page.cdp().closed()) {
+            live.page.set_two_step(code::two_step_origins(self, &errand.id));
             return Ok(live.page.clone());
         }
         *live = None;
@@ -583,6 +603,7 @@ impl Factory {
         cdp.call("Browser.setDownloadBehavior", behavior, None).await.map_err(gone)?;
         let tracker = Arc::new(downloads::Tracker::default());
         downloads::watch(cdp, tracker.clone(), transport.clone());
+        page.set_two_step(code::two_step_origins(self, &errand.id));
         *live = Some(Live { errand: errand.id.clone(), page: page.clone(), blocked, downloads: tracker, hops });
         Ok(page)
     }
@@ -650,7 +671,21 @@ impl Factory {
             (_, Some(refused)) => Err(refused),
             (Step::Read { limit }, None) => page.read(*limit).await.map(Some),
             (Step::Scroll { direction, pages }, None) => page.scroll(*direction, *pages).await.map(Some),
-            (Step::Act(op), None) => page.act(op).await.map(Some),
+            (Step::Act(op), None) => match self.while_signing_out(&page).await {
+                Some(refused) => Err(refused),
+                None => {
+                    // A click's mouse events reach Chrome only under an input
+                    // lease, held for this action alone (R11.3 #5).
+                    let lease = match (op, self.errands.browser()) {
+                        (Op::Click { .. }, Some(browser)) => browser.input_lease(ONE_ACTION),
+                        _ => Ok(None),
+                    };
+                    match lease {
+                        Ok(_held) => page.act(op).await.map(Some),
+                        Err(why) => Err(("interrupted".to_owned(), schema::one_line(&why, 200))),
+                    }
+                }
+            },
             (Step::Navigate { address }, None) => fence::go(&page, &errand.sites, address).await.map(Some),
             (Step::Download { address }, None) => fence::fetch(&page, &errand.sites, address).await.map(|()| None),
         };
@@ -857,6 +892,69 @@ pub(crate) trait Browser: Transport {
     fn copy_into(&self, _file: &std::path::Path, _folder: &std::path::Path, _name: &str) -> Result<std::path::PathBuf, String> {
         Err("Claktory's browser can't download files here.".to_owned())
     }
+
+    /// Signs the browser out of identity provider `provider` (#435, Fugo
+    /// 41236, Giorno 41238): its cookies on the provider's domains
+    /// (`fill::owner`) deleted now, or, while an errand drives it, kept
+    /// (in the browser's home) and deleted when that errand ends or before
+    /// Chrome next runs a page, whichever comes first; Stop doesn't undo it,
+    /// Delete browser data makes it moot. Once deleted, the host calls
+    /// `Factory::signed_out`, which has the vault forget the account. Err
+    /// says why it couldn't. Async: deleting is CDP's round trips.
+    fn sign_out(&self, _provider: &str) -> SigningOut {
+        Box::pin(std::future::ready(Err("Claktory's browser can't sign out here yet.".to_owned())))
+    }
+
+    /// Whether a sign-out of `provider` waits to be applied: nothing is
+    /// filled or pressed on its sites meanwhile (`fill::while_signing_out`).
+    fn signing_out(&self, _provider: &str) -> bool {
+        false
+    }
+
+    /// The person's sign-in turn at identity provider `provider` (#435,
+    /// Bruno 41834, Giorno 41843): a scoped grant opens the live view and
+    /// the person's input only while the top page is on the provider's
+    /// sign-in origins, and the agent's input lease is revoked. Resolves
+    /// Ok once the host's cookie check sees the provider's session cookies
+    /// (it has called `Factory::browser_signed_in` by then), or Err
+    /// ("ended: …") on Done without a sign-in, Stop, or after 15 minutes.
+    fn sign_in_turn(&self, _provider: &str) -> SignInTurn {
+        Box::pin(std::future::ready(Err("Claktory's browser can't open a sign-in here yet.".to_owned())))
+    }
+
+    /// The card's Done: ends the sign-in turn early, after the cookie check
+    /// has run once more.
+    fn sign_in_done(&self) {}
+
+    /// Lets the errand's input (Input.*) reach Chrome for one action, at
+    /// most `until`, while what's returned is held (R11.3 #5): the host
+    /// refuses input outside one. None where nothing gates input (a local
+    /// Chrome in tests); Err says why not (it isn't driven now).
+    fn input_lease(&self, _until: std::time::Duration) -> Result<Option<InputLease>, String> {
+        Ok(None)
+    }
+}
+
+/// An input lease held (`Browser::input_lease`): it ends when dropped.
+pub(crate) type InputLease = Box<dyn std::any::Any + Send>;
+
+/// The longest one action's input lease lasts: a click is three mouse
+/// events, after the reader's checks.
+const ONE_ACTION: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A sign-in turn on its way (`Browser::sign_in_turn`).
+pub(crate) type SignInTurn = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
+
+/// A sign-out on its way (`Browser::sign_out`).
+pub(crate) type SigningOut = std::pin::Pin<Box<dyn std::future::Future<Output = Result<SignedOut, String>> + Send>>;
+
+/// How a sign-out went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SignedOut {
+    /// Its cookies are deleted.
+    Applied,
+    /// An errand drives the browser: they're deleted when it ends.
+    Pending,
 }
 
 impl Browser for cdp::Local {}
@@ -905,6 +1003,18 @@ impl Browser for crate::browser_host::Handle {
 
     fn copy_into(&self, file: &std::path::Path, folder: &std::path::Path, name: &str) -> Result<std::path::PathBuf, String> {
         crate::browser_host::Handle::copy_into(self, file, folder, name)
+    }
+
+    fn sign_out(&self, provider: &str) -> SigningOut {
+        crate::browser_host::Handle::sign_out(self, provider)
+    }
+
+    fn signing_out(&self, provider: &str) -> bool {
+        crate::browser_host::Handle::signing_out(self, provider)
+    }
+
+    fn input_lease(&self, until: std::time::Duration) -> Result<Option<InputLease>, String> {
+        crate::browser_host::Handle::input_lease(self, until).map(|lease| Some(Box::new(lease) as InputLease))
     }
 }
 
@@ -1035,6 +1145,21 @@ struct Turns {
     root: std::path::PathBuf,
     /// What landed, by errand and name: the stored file and its row.
     stored: Mutex<Vec<(String, String, std::path::PathBuf, downloads::StoredRow)>>,
+    /// Sign-outs waiting for the errand to end, as the host keeps them.
+    signing_out: Mutex<Vec<String>>,
+    /// Input leases held now: as the host does, Input.* reaches Chrome
+    /// only while one is.
+    leases: Arc<std::sync::atomic::AtomicUsize>,
+    factory: std::sync::Weak<Factory>,
+}
+
+/// A lease of `Turns`': it ends when dropped.
+struct TurnsLease(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for TurnsLease {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl Turns {
@@ -1046,9 +1171,43 @@ impl Turns {
     }
 }
 
+/// Chrome's pipe with the host's input gate in front (R11.3 #5): Input.*
+/// outside a lease is answered with the runner's refusal, never sent.
 impl Transport for Turns {
     fn connect(&self) -> Result<cdp::Pipe, String> {
-        self.local.connect()
+        let chrome = self.local.connect()?;
+        let (send, mut outgoing) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        let (incoming, receive) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+        let leases = self.leases.clone();
+        // Weak, so Chrome's end still ends what the errand receives.
+        let refusals = incoming.downgrade();
+        let to_chrome = chrome.send;
+        tokio::spawn(async move {
+            while let Some(message) = outgoing.recv().await {
+                let leased = leases.load(std::sync::atomic::Ordering::SeqCst) > 0;
+                match crate::browser_runner::lease::judge(&message, leased) {
+                    crate::browser_runner::lease::Verdict::Forward => {
+                        if to_chrome.send(message).await.is_err() {
+                            return;
+                        }
+                    }
+                    crate::browser_runner::lease::Verdict::Refuse(reply) => {
+                        let Some(refusals) = refusals.upgrade() else { return };
+                        let _ = refusals.send(reply).await;
+                    }
+                    crate::browser_runner::lease::Verdict::Drop(_) => {}
+                }
+            }
+        });
+        let mut from_chrome = chrome.receive;
+        tokio::spawn(async move {
+            while let Some(message) = from_chrome.recv().await {
+                if incoming.send(message).await.is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(cdp::Pipe { send, receive })
     }
 }
 
@@ -1071,10 +1230,43 @@ impl Browser for Turns {
 
     fn end(&self, errand: &str) {
         self.call(format!("end {errand}"), Some(BrowserState::Warm));
+        let waiting = std::mem::take(&mut *crate::locking::lock(&self.signing_out));
+        for provider in waiting {
+            self.call(format!("signed out {provider}"), None);
+            if let Some(factory) = self.factory.upgrade() {
+                factory.signed_out(&provider);
+            }
+        }
+    }
+
+    /// As the host does: at once when no errand drives it, else when the
+    /// errand ends.
+    fn sign_out(&self, provider: &str) -> SigningOut {
+        let driven = matches!(*self.states.borrow(), BrowserState::Driven | BrowserState::PersonsTurn | BrowserState::TakenOver);
+        if driven {
+            self.call(format!("sign out {provider} later"), None);
+            crate::locking::lock(&self.signing_out).push(provider.to_owned());
+            return Box::pin(std::future::ready(Ok(SignedOut::Pending)));
+        }
+        self.call(format!("signed out {provider}"), None);
+        if let Some(factory) = self.factory.upgrade() {
+            factory.signed_out(provider);
+        }
+        Box::pin(std::future::ready(Ok(SignedOut::Applied)))
+    }
+
+    fn signing_out(&self, provider: &str) -> bool {
+        crate::locking::lock(&self.signing_out).iter().any(|waiting| waiting == provider)
     }
 
     fn on_release(&self, errand: &str, sessions: Vec<String>) {
         self.call(format!("release {errand} {}", sessions.len()), None);
+    }
+
+    fn input_lease(&self, _until: std::time::Duration) -> Result<Option<InputLease>, String> {
+        self.call("lease".to_owned(), None);
+        self.leases.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Some(Box::new(TurnsLease(self.leases.clone()))))
     }
 
     fn states(&self) -> Option<tokio::sync::watch::Receiver<BrowserState>> {
@@ -1149,10 +1341,39 @@ pub fn local_chrome_with_turns_for_test(factory: &Arc<Factory>, profile: &std::p
         downloads,
         root: factory.home.root().to_path_buf(),
         stored: Mutex::default(),
+        signing_out: Mutex::default(),
+        leases: Arc::default(),
+        factory: Arc::downgrade(factory),
     });
     crate::locking::lock(&TURNS).push((Arc::as_ptr(factory) as usize, turns.clone()));
     install(factory, turns);
     true
+}
+
+/// Tests: the browser just signed in to `provider` with `agent`'s secret
+/// `name` for its open errand, as a fill from the vault makes it: the card
+/// the person gets, as the fill's result carries it.
+#[doc(hidden)]
+pub fn first_sign_in_for_test(factory: &Arc<Factory>, agent: &str, provider: &str, name: &str) -> serde_json::Value {
+    let fillable = factory.vault.fillable(agent, name).expect("fillable");
+    assert!(factory.vault.set_browser_account(provider, &fillable.id).expect("kept"), "a first sign-in");
+    let errand = factory.errands.open_of(agent).expect("an open errand");
+    code::signed_in(factory, agent, &errand, provider, &fillable).expect("the card")
+}
+
+/// Tests: the person approves that card (its action, as the asks table
+/// keeps it): what Claktory says, or why it couldn't.
+#[doc(hidden)]
+pub async fn approve_card_for_test(factory: &Arc<Factory>, ask: &str) -> Result<String, String> {
+    let action: String = factory.store.db().query_row("SELECT action FROM asks WHERE id = ?1", [ask], |row| row.get(0)).expect("the card");
+    crate::card_actions::check(factory, &action)?;
+    crate::card_actions::apply(factory, &action).await
+}
+
+/// Tests: the browser's account at `provider`, as the vault keeps it.
+#[doc(hidden)]
+pub fn browser_account_for_test(factory: &Factory, provider: &str) -> Option<String> {
+    factory.vault.browser_account(provider)
 }
 
 /// Tests: what errands asked of the browser so far (`Turns`), emptied.
@@ -1178,6 +1399,33 @@ pub async fn show_for_test(factory: &Factory, html: &str) {
     drop(live);
     let frame = page.frame().await.expect("its frame");
     page.call("Page.setDocumentContent", json!({"frameId": frame.id, "html": html})).await.expect("its content");
+}
+
+/// Tests: the sweep of recovery codes whose card no longer waits.
+#[doc(hidden)]
+pub fn sweep_codes_for_test(factory: &Factory) {
+    code::sweep_codes(factory);
+}
+
+/// Tests: `errand` ends Failed, as a restart ends an open errand.
+#[doc(hidden)]
+pub async fn end_errand_for_test(factory: &Factory, errand: &str) {
+    factory.end_errand(errand, State::Failed, RESTARTED).await;
+}
+
+/// Tests: recovery-codes card `card`'s codes are lost, as a restart while
+/// Secrets was locked loses them.
+#[doc(hidden)]
+pub fn lose_codes_for_test(factory: &Factory, card: &str) {
+    code::drop_codes(factory, card.parse().unwrap_or_default());
+}
+
+/// Tests: `factory`'s code and agreement cards may be asked on pages
+/// `show_for_test` showed, which have no https origin (shown as
+/// https://shown.test).
+#[doc(hidden)]
+pub fn code_cards_anywhere_for_test(factory: &Arc<Factory>) {
+    crate::locking::lock(&code::ANY_ORIGIN_FOR_TEST).push(Arc::downgrade(factory));
 }
 
 /// The extension's id.
@@ -1210,7 +1458,9 @@ pub(crate) fn places(factory: &Factory, agent: &str) -> crate::runner::Places {
 /// The errand agents, at start.
 /// At start: reads the errands kept, and tells each agent whose errand
 /// Claktory's restart ended, so it reports to its lead rather than wait.
+/// Recovery codes whose card no longer waits go (`code::sweep_codes`).
 pub(crate) fn recover(factory: &Arc<Factory>) {
+    code::sweep_codes(factory);
     for errand in factory.errands.load(&factory.store) {
         let told = format!(
             "{RESTARTED} Your errand {} ({}) ended there. Tell your lead with errand_report what was done and what's left; it can open the errand again.",

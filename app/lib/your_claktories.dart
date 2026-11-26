@@ -17,12 +17,14 @@ import 'connections.dart';
 import 'controls.dart';
 import 'device_account.dart';
 import 'device_kind.dart' show thisDeviceName;
+import 'device_vouch.dart' show SignInThroughThisMac;
 import 'devices.dart' show thisDeviceKind;
 import 'forms.dart' show FormFrame;
 import 'identity.dart';
 import 'markdown.dart' show Markdown;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/input.dart' show InputKind;
+import 'mobile/lines.dart' show ControlsLine;
 import 'mobile/metrics.dart' show Touch, TypeScale;
 import 'name_step.dart' show StepButtons, stepFieldScrollPadding;
 import 'pairing.dart'
@@ -30,11 +32,12 @@ import 'pairing.dart'
 import 'people/e2ee.dart' show DmSignOut, E2ee, e2eeFor, e2eeOf, startedE2ee;
 import 'people/people_view.dart' show peopleAvailable;
 import 'protocol/factory/v1/factory.pb.dart';
-import 'rail.dart' show Claktories, ClaktoriesScope, claktoryInitials;
+import 'rail.dart'
+    show Claktories, ClaktoriesScope, claktoryInitials, confirmRemoveClaktory;
 import 'scope.dart';
 import 'usage.dart' show formatAge;
 
-/// Where to get Claktory for a Mac or a Linux server.
+/// Where to get Claktory for a Mac, a Linux server or Windows.
 const downloadUrl = 'https://claktory.com/download';
 
 /// Signing this device in to the person's Claktory account, and "Your
@@ -104,26 +107,62 @@ String accountProblem(Object error, String service) {
 }
 
 /// Signs this device out of the Claktory account. Where it has messages,
-/// it asks first, saying what happens to them (row 671, Fugo; Trish's
-/// words): deleted here when the person's other devices have them, kept
-/// here, locked, when it's the only one, unless the person deletes them.
+/// or Claktories it reached through the account, it asks first, saying
+/// what happens to them (row 671, Fugo; #529 MC5; Trish's words): the
+/// messages deleted here when the person's other devices have them, kept
+/// here, locked, when it's the only one, unless the person deletes them;
+/// those Claktories stop connecting until it signs in again.
 Future<void> signOutOfAccount(
   BuildContext context,
   DeviceAccount account,
 ) async {
+  final stopping = _throughAccount(context);
   final e2ee = _messagesOf(context, account);
   final plan = e2ee == null ? DmSignOut.none : await e2ee.signOutPlan();
-  if (plan == DmSignOut.none || e2ee == null) return account.signOut();
+  final messages = plan == DmSignOut.none ? null : e2ee;
+  if (messages == null && stopping.isEmpty) return account.signOut();
   if (!context.mounted) return;
   await showModal(
     context,
     (context, close) => _SignOutDevice(
       account: account,
-      e2ee: e2ee,
+      e2ee: messages,
       alone: plan == DmSignOut.alone,
+      stopping: stopping,
       close: close,
     ),
   );
+}
+
+/// The names of the Claktories this device reached through the account
+/// (no code of their own), as the rail shows them: each lets it in only
+/// while it's signed in.
+List<String> _throughAccount(BuildContext context) {
+  final connections = AppScope.scope(context).connections;
+  final claktories = ClaktoriesScope.of(context);
+  return [
+    for (final target in connections.saved)
+      if (target.fromAccount)
+        switch (claktories?.all.where((each) => each.target == target)) {
+          final found? when found.isNotEmpty => claktoryName(
+            found.first.backend,
+          ),
+          _ => target.label,
+        },
+  ];
+}
+
+/// What signing out does to [names], the Claktories reached through the
+/// account, on this [device] (Trish's words); empty for none.
+String stopConnecting(List<String> names, String device) {
+  final until = 'on this $device until you sign in again.';
+  return switch (names) {
+    [] => '',
+    [final one] => '$one stops connecting $until',
+    [final a, final b] => '$a and $b stop connecting $until',
+    [final a, final b, ...final rest] =>
+      '$a, $b and ${rest.length} more stop connecting $until',
+  };
 }
 
 /// This device's messages for [account]: its engine if it runs, or one
@@ -140,11 +179,17 @@ class _SignOutDevice extends StatefulWidget {
     required this.account,
     required this.e2ee,
     required this.alone,
+    required this.stopping,
     required this.close,
   });
 
   final DeviceAccount account;
-  final E2ee e2ee;
+
+  /// Its messages; null when it has none.
+  final E2ee? e2ee;
+
+  /// The Claktories reached through the account, by name.
+  final List<String> stopping;
 
   /// The only device with the person's messages: they stay, unless
   /// deleted.
@@ -161,17 +206,20 @@ class _SignOutDeviceState extends State<_SignOutDevice> {
 
   Future<void> _signOut() async {
     setState(() => _busy = true);
+    final e2ee = widget.e2ee;
     try {
-      if (!widget.alone) {
-        await widget.e2ee.leave();
+      if (e2ee == null) {
+        // No messages here: nothing to leave or delete.
+      } else if (!widget.alone) {
+        await e2ee.leave();
       } else if (_delete) {
-        await widget.e2ee.deleteHere();
+        await e2ee.deleteHere();
       }
     } finally {
       // Signed out in any case: what's here went, or stays locked. Gone
       // from the person's messages, its key goes too: their other devices
       // take it out of the account, so it comes back as a new device.
-      await widget.account.signOut(newKey: !widget.alone);
+      await widget.account.signOut(newKey: e2ee != null && !widget.alone);
       widget.close();
     }
   }
@@ -183,16 +231,22 @@ class _SignOutDeviceState extends State<_SignOutDevice> {
     final type = TypeScale.of(context);
     void choose(bool on) => setState(() => _delete = on);
     final label = 'Delete messages from this $kind';
+    final messages = widget.e2ee == null
+        ? null
+        : widget.alone
+        ? 'This is the only device with your messages. They stay on this '
+              '$kind, locked, until you sign in again with this account.'
+        : 'Your messages will be deleted from this $kind. Your other '
+              'devices keep them, and you can add this $kind again from '
+              'one of them.';
     return FormFrame(
       title: 'Sign out of your Claktory account?',
-      body: widget.alone
-          ? 'This is the only device with your messages. They stay on this '
-                '$kind, locked, until you sign in again with this account.'
-          : 'Your messages will be deleted from this $kind. Your other '
-                'devices keep them, and you can add this $kind again from '
-                'one of them.',
+      body: [
+        ?messages,
+        if (widget.stopping.isNotEmpty) stopConnecting(widget.stopping, kind),
+      ].join(' '),
       fields: [
-        if (widget.alone)
+        if (widget.e2ee != null && widget.alone)
           ToggleTap(
             value: _delete,
             onChanged: _busy ? null : choose,
@@ -396,6 +450,8 @@ class _DeviceSignInFormState extends State<DeviceSignInForm> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // A Mac whose own Claktory is signed in: one click (#529).
+            const SignInThroughThisMac(),
             Text(
               widget.intro,
               style: type.body.copyWith(color: palette.textMuted),
@@ -715,8 +771,8 @@ class _YourClaktoriesState extends State<YourClaktories> {
           )
         else if (listed.isEmpty)
           Markdown(
-            'No Claktories on this account yet. Claktory runs on a Mac or a '
-            'Linux server: install it there from '
+            'No Claktories on this account yet. Install Claktory on a Mac or a '
+            'Linux server (or Windows, in preview) from '
             '[claktory.com/download]($downloadUrl) and sign in with this '
             'email, and it shows up here.',
             color: palette.textMuted,
@@ -1079,6 +1135,174 @@ class ConfirmDeviceBanner extends StatelessWidget {
   }
 }
 
+/// This Claktory is signed in to another Claktory account than this device
+/// (ERROR_CODE_OTHER_ACCOUNT, #529 S4): refused at connect, it says to open
+/// a pipe instead; a device it let in before, now signed in to another
+/// account, to sign in with the account it uses. Its own words (Trish's,
+/// from the backend), Try again, and Remove… to take it off this device
+/// (the rail's own question). Never a way around it (Fugo): no allow
+/// anyway, no sign out to continue.
+class OtherAccountView extends StatefulWidget {
+  const OtherAccountView({super.key});
+
+  @override
+  State<OtherAccountView> createState() => _OtherAccountViewState();
+}
+
+class _OtherAccountViewState extends State<OtherAccountView> {
+  DeviceAccount? _account;
+  var _wasSignedIn = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final account = AppScope.scope(context).connections.account;
+    if (account == _account) return;
+    _account?.removeListener(_changed);
+    _account = account..addListener(_changed);
+    _wasSignedIn = account.signedIn;
+  }
+
+  @override
+  void dispose() {
+    _account?.removeListener(_changed);
+    super.dispose();
+  }
+
+  /// Signed in again (with the account the Claktory uses, by the sheet
+  /// below): it tries again.
+  void _changed() {
+    final signedIn = _account?.signedIn ?? false;
+    if (signedIn && !_wasSignedIn && mounted) AppScope.of(context).retry();
+    _wasSignedIn = signedIn;
+  }
+
+  /// Signing in with the account [name] uses: this device signs out of
+  /// its own first, through the sign-out sheet that says what that means
+  /// (MC5), then signs in (Squalo's V2).
+  Future<void> _signInWithTheirs(String name) async {
+    final account = _account!;
+    if (account.signedIn) {
+      await signOutOfAccount(context, account);
+      if (account.signedIn || !mounted) return;
+    }
+    await showModal(
+      context,
+      (context, close) => DeviceSignInDialog(
+        title: 'Sign in with the account $name uses',
+        intro:
+            'Use the email $name is signed in with, and $name lets this '
+            '$thisDeviceKind in again.',
+        close: close,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final backend = AppScope.of(context);
+    final account = _account!;
+    return ListenableBuilder(
+      listenable: Listenable.merge([backend.otherAccount, account]),
+      builder: (context, _) {
+        final said = backend.otherAccount.value ?? '';
+        final name = claktoryName(backend);
+        // A device it let in before says it's "now signed in to a
+        // different" account; one refused at connect, to open a pipe.
+        final before = said.contains('is now signed in to a different');
+        final masked = account.signedIn ? maskedEmail(account.email) : '';
+        final claktory = ClaktoriesScope.of(context)?.all
+            .where((claktory) => claktory.backend == backend)
+            .firstOrNull;
+        final buttons = [
+          if (claktory != null)
+            Button(
+              label: 'Remove…',
+              onPressed: () =>
+                  unawaited(confirmRemoveClaktory(context, claktory)),
+            ),
+          if (account.signedIn || before)
+            Button(
+              label: 'Sign in…',
+              onPressed: () => unawaited(_signInWithTheirs(name)),
+            ),
+          Button(label: 'Try again', primary: true, onPressed: backend.retry),
+        ];
+        final muted = type.body.copyWith(color: palette.textMuted);
+        return Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(Space.xl),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    before
+                        ? '$name no longer lets this $thisDeviceKind in'
+                        : '$name is on another Claktory account',
+                    style: type.title.copyWith(color: palette.text),
+                  ),
+                  if (said.isNotEmpty) ...[
+                    const SizedBox(height: Space.s),
+                    Text(said, style: muted),
+                  ],
+                  // Which account this device is on, so "the account it
+                  // uses" means something (Squalo's V2).
+                  if (masked.isNotEmpty) ...[
+                    const SizedBox(height: Space.s),
+                    Text(
+                      'This $thisDeviceKind is signed in as $masked.',
+                      style: muted,
+                    ),
+                  ],
+                  // Refused at connect: it may be the person's own, signed
+                  // in with their other email (Squalo's V3): moved to this
+                  // device's account in the app, never by commands, which
+                  // only the person may run (Fugo 46047, #546 A).
+                  if (!before) ...[
+                    const SizedBox(height: Space.m),
+                    Text(
+                      'If $name is yours, sign it in to this '
+                      "$thisDeviceKind's account instead, in Settings → "
+                      'Account on $name. Then try again here.',
+                      style: muted,
+                    ),
+                    const SizedBox(height: Space.s),
+                    Text(
+                      'No screen on $name? Choose Sign in… to use '
+                      "$name's account on this $thisDeviceKind for now, then "
+                      'sign $name in to yours from here, in its Settings → '
+                      'Account.',
+                      style: muted,
+                    ),
+                  ],
+                  const SizedBox(height: Space.xl),
+                  // On a phone, one a row, Try again at the bottom, nearest
+                  // the thumb; elsewhere together at the end.
+                  if (isPhoneLayout(context))
+                    for (final (i, button) in buttons.indexed) ...[
+                      if (i > 0) const SizedBox(height: Space.s),
+                      button,
+                    ]
+                  else
+                    Align(
+                      alignment: AlignmentDirectional.centerEnd,
+                      child: ControlsLine(children: buttons),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 /// This Claktory lets this device in only once it shows it's the owner's
 /// (ERROR_CODE_SIGN_IN_REQUIRED): its words, and the sign-in, after which
 /// it connects again. [onCancel], when given, gives up on it (one found
@@ -1146,7 +1370,8 @@ class _SignInRequiredViewState extends State<SignInRequiredView> {
           primary: true,
           onPressed: backend.retry,
         );
-        final cancel = Button(label: 'Cancel', onPressed: widget.onCancel);
+        // Gives up on it: the rail's own Remove question, never at once.
+        final cancel = Button(label: 'Remove…', onPressed: widget.onCancel);
         return Center(
           child: SingleChildScrollView(
             padding: const EdgeInsets.all(Space.xl),
@@ -1162,7 +1387,28 @@ class _SignInRequiredViewState extends State<SignInRequiredView> {
                         : 'Sign in to connect to $name',
                     style: type.title.copyWith(color: palette.text),
                   ),
-                  if (said.isNotEmpty) ...[
+                  if (claktorySignedOut) ...[
+                    // Its Settings → Account is on the Claktory this device
+                    // can't open now. With no screen there, factoryd pair in
+                    // its terminal (offline, the digits typed there) lets
+                    // this device in again by code, to sign it in from here
+                    // (#529 MC4; Fugo 46047, Giorno 46058: the account
+                    // commands are the person's alone, never a terminal's).
+                    const SizedBox(height: Space.s),
+                    Text(
+                      'Sign $name in to your Claktory account again, in '
+                      'Settings → Account on $name. Then try again here.',
+                      style: type.body.copyWith(color: palette.textMuted),
+                    ),
+                    const SizedBox(height: Space.s),
+                    Text(
+                      'No screen on $name? Run factoryd pair in a terminal '
+                      'there and connect this $thisDeviceKind with the code it '
+                      'shows. Then sign $name in from here, in its Settings → '
+                      'Account.',
+                      style: type.body.copyWith(color: palette.textMuted),
+                    ),
+                  ] else if (said.isNotEmpty) ...[
                     const SizedBox(height: Space.s),
                     Text(
                       said,
@@ -1188,7 +1434,10 @@ class _SignInRequiredViewState extends State<SignInRequiredView> {
                       ),
                   ] else
                     DeviceSignInForm(
-                      intro: 'Sign in with the email $name is signed in with.',
+                      intro: signInWithIntro(
+                        name,
+                        backend.workspace.workspace.account,
+                      ),
                     ),
                   if (widget.onCancel != null) ...[
                     const SizedBox(height: Space.l),
@@ -1206,6 +1455,27 @@ class _SignInRequiredViewState extends State<SignInRequiredView> {
       },
     );
   }
+}
+
+/// Which email to sign in with, for [name]: its own, masked
+/// ("m…@gmail.com"), when it said it's signed in with one; else the words
+/// without it (#529, MC13, Trish's words).
+String signInWithIntro(String name, ClaktoryAccount account) {
+  final email =
+      account.state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SIGNED_IN
+      ? maskedEmail(account.email)
+      : '';
+  return email.isEmpty
+      ? 'Sign in with the email $name is signed in with.'
+      : 'Sign in with $email, the email $name is signed in with.';
+}
+
+/// [email] with its name hidden but its first letter: "m…@gmail.com";
+/// empty when it isn't one.
+String maskedEmail(String email) {
+  final at = email.lastIndexOf('@');
+  if (at < 1 || at == email.length - 1) return '';
+  return '${email.characters.first}…${email.substring(at)}';
 }
 
 /// A device that found this Claktory through the person's account and

@@ -589,7 +589,7 @@ PUBLIC_EMAIL="releases@claktory.com"
 # What goes public of a release's source: only what people who install
 # Claktory need, these top-level folders and files. Anything else there
 # (agents' working notes and drafts, such as coordination/) stays here.
-PUBLIC_TOP=(.factoryignore .gitignore .gitleaks.toml AGENTS.md CLAUDE.md Cargo.lock Cargo.toml LICENSE.md README.md
+PUBLIC_TOP=(.factoryignore .gitignore .gitleaks.toml AGENTS.md CLAUDE.md Cargo.lock Cargo.toml LICENSE.md README.md SECURITY.md
   TENETS.md rustfmt.toml app apps browser-extension crates docs proto scripts vendor)
 #   public_tree REPO SOURCE
 # prints the tree of SOURCE's files that go public (PUBLIC_TOP), and names

@@ -8,6 +8,7 @@ import 'avatar.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
+import 'card_answer.dart' show CardAnswer, PublishesAnswer, noComment;
 import 'decision.dart' show CommentTyped, DecisionComment, SubmitButton;
 import 'extensions.dart' show logTime;
 import 'forms.dart' show rivetIn;
@@ -85,7 +86,8 @@ class AppAccessCard extends StatefulWidget {
   State<AppAccessCard> createState() => _AppAccessCardState();
 }
 
-class _AppAccessCardState extends State<AppAccessCard> {
+class _AppAccessCardState extends State<AppAccessCard>
+    with PublishesAnswer {
   final _comment = TextEditingController();
 
   /// Which decision is on its way.
@@ -101,7 +103,14 @@ class _AppAccessCardState extends State<AppAccessCard> {
   /// [reply]: Submit (#370), the comment going to Rivet as the person's
   /// reply, and nothing allowed; Rivet can suggest it again. Sent with
   /// approve off, so a backend that doesn't know replies declines it.
-  Future<void> _decide({required bool approve, bool reply = false}) async {
+  /// [reason]: the no's, from focus mode's dock, with the comment.
+  /// [rethrowing] for focus mode's keys (#514): refused, it throws too.
+  Future<void> _decide({
+    required bool approve,
+    bool reply = false,
+    String? reason,
+    bool rethrowing = false,
+  }) async {
     if (_deciding != null) return;
     final backend = AppScope.of(context);
     setState(() {
@@ -114,11 +123,12 @@ class _AppAccessCardState extends State<AppAccessCard> {
         widget.seq,
         approve: approve,
         digest: widget.access.digest,
-        comment: _comment.text.trim(),
+        comment: noComment(reason, _comment.text),
         reply: reply,
       );
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
+      if (rethrowing) rethrow;
     } finally {
       if (mounted) setState(() => _deciding = null);
     }
@@ -126,12 +136,43 @@ class _AppAccessCardState extends State<AppAccessCard> {
 
   void _submit() => unawaited(_decide(approve: false, reply: true));
 
+  /// Approve and Decline for focus mode's keys (#514), and Submit once a
+  /// comment's typed, as the card's buttons.
+  @override
+  CardAnswer? answerNow() {
+    if (widget.access.state != AppGrantState.APP_GRANT_STATE_PENDING) {
+      return null;
+    }
+    final busy = _deciding != null;
+    return CardAnswer(
+      key: 'agent:${widget.agentId}/${widget.seq}',
+      docked: false,
+      yes: 'Approve',
+      no: 'Decline',
+      typed: _comment.text.trim().isNotEmpty,
+      busy: busy,
+      error: _error,
+      onYes: busy ? null : () => _decide(approve: true, rethrowing: true),
+      onSubmit: busy
+          ? null
+          : () => _decide(approve: false, reply: true, rethrowing: true),
+      onNo: busy
+          ? null
+          : (reason) =>
+                _decide(approve: false, reason: reason, rethrowing: true),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final store = AppScope.of(context).workspace;
     return ListenableBuilder(
-      listenable: store,
-      builder: (context, _) => _card(context, store.workspace),
+      // What's typed turns Submit on in the dock.
+      listenable: Listenable.merge([store, _comment]),
+      builder: (context, _) {
+        publishAnswer();
+        return _card(context, store.workspace);
+      },
     );
   }
 

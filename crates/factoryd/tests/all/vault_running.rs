@@ -71,7 +71,7 @@ async fn the_vaults_running_task_counts_match_looking_up_each_task() {
     apply_request(&mut client, &mut view, Request::CreateSecret(secret)).await;
     let id = view.workspace.vault.clone().expect("vault").secrets[0].id.clone();
     for agent in ["builder", "writer"] {
-        let grant = v1::GrantSecret { id: id.clone(), agent_id: agent.into(), proof: None };
+        let grant = v1::GrantSecret { id: id.clone(), agent_id: agent.into(), proof: None, fill_only: false };
         apply_request(&mut client, &mut view, Request::GrantSecret(grant)).await;
     }
 

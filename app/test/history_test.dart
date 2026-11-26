@@ -134,7 +134,31 @@ void main() {
     await settle(tester);
     expect(selected(harness), 'a2');
     expect(backTo('Builder'), findsOneWidget);
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+  testWidgets('on Windows, Ctrl+[ and Alt+arrows go back and forward', (
+    tester,
+  ) async {
+    final harness = await showMessage(tester);
+    await followWriter(tester, harness);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.bracketLeft);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await settle(tester);
+    expect(selected(harness), 'a1');
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
+    await settle(tester);
+    expect(selected(harness), 'a2');
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.altLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.altLeft);
+    await settle(tester);
+    expect(selected(harness), 'a1');
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows));
 
   testWidgets("the mouse's back and forward buttons do too", (tester) async {
     final harness = await showMessage(tester);

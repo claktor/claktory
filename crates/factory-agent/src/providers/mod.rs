@@ -13,6 +13,7 @@ macro_rules! spawn_stream {
 
 pub mod anthropic;
 pub mod catalog;
+pub mod grok;
 pub mod gzip;
 pub mod keys;
 pub mod listing;

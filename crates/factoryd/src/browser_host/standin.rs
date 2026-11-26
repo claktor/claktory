@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use super::Io;
-use crate::browser_runner::wire::{self, Button, Channel, Control, FrameHeader, InputEvent, Report};
+use crate::browser_runner::wire::{self, Button, Channel, Control, FrameHeader, InputEvent, Mode, Report};
 use crate::factory::Factory;
 
 /// Ids of the stand-in's own CDP calls: above anything a client uses, and
@@ -47,6 +47,7 @@ pub(crate) fn spawn(factory: &Arc<Factory>) -> Result<Io, String> {
             casting: false,
             events: None,
             later: std::collections::VecDeque::new(),
+            mode: None,
         };
         standin.run(from_host, quitting).await;
     });
@@ -80,7 +81,13 @@ struct Standin {
     events: Option<mpsc::Receiver<Value>>,
     /// Events that came while it waited for an answer.
     later: std::collections::VecDeque<Value>,
+    /// How Chrome runs, as asked: a change takes the runner a moment (it
+    /// starts Chrome again), which the stand-in takes too.
+    mode: Option<Mode>,
 }
+
+/// About how long the runner takes to start Chrome again in another mode.
+const RELAUNCH: std::time::Duration = std::time::Duration::from_millis(300);
 
 impl Standin {
     async fn report(&self, report: Report) {
@@ -132,9 +139,13 @@ impl Standin {
                         let chrome = self.version().await;
                         let downloads = self.downloads();
                         let download_dir = std::fs::create_dir_all(&downloads).is_ok().then(|| downloads.display().to_string());
+                        self.mode = Some(mode);
                         self.report(Report::Ready { wire: wire::VERSION, chrome, landlock_abi: 0, mode, download_dir }).await;
                     }
                     Control::Mode { mode, url } => {
+                        if self.mode.replace(mode) != Some(mode) {
+                            tokio::time::sleep(RELAUNCH).await;
+                        }
                         if let Some(url) = url {
                             self.call("Page.navigate", json!({"url": url})).await;
                         }
@@ -160,6 +171,9 @@ impl Standin {
                     }
                     // No clipboard watch or downloads in the stand-in.
                     Control::Clipboard { .. } => {}
+                    // Nor an input gate: every lease is granted (dev only).
+                    Control::LeaseInput { id, .. } => self.report(Report::Lease { id, granted: true, why: String::new() }).await,
+                    Control::EndLease { .. } => {}
                     Control::DownloadRead { guid } => self.download(&guid).await,
                     Control::DownloadDrop { guid } => {
                         if wire::guid_ok(&guid) {
@@ -212,6 +226,7 @@ impl Standin {
         let (events, received) = mpsc::channel::<Value>(256);
         self.events = Some(received);
         std::fs::create_dir_all(&self.profile).map_err(|error| error.to_string())?;
+        preferences(&self.profile).map_err(|error| format!("couldn't set Chrome up: {error}"))?;
         let local = crate::errands::cdp::Local::start(std::path::Path::new(super::setup::MAC_CHROME), &self.profile)
             .map_err(|error| format!("couldn't start Chrome: {error}"))?;
         let crate::errands::cdp::Pipe { send, mut receive } = local.connect()?;
@@ -435,4 +450,38 @@ impl Standin {
             InputEvent::Text { s } => self.call("Input.insertText", json!({"text": s})).await,
         }
     }
+}
+
+/// What the runner sets in its profile before each launch, here too: Chrome
+/// never signs itself in or syncs (so a site's sign-in, Google's say, stays
+/// a site's: Fugo 41228), offers no autofill of cards or addresses (Fugo
+/// 41400), and restores no pages when it starts.
+fn preferences(profile: &std::path::Path) -> std::io::Result<()> {
+    let default = profile.join("Default");
+    std::fs::create_dir_all(&default)?;
+    let path = default.join("Preferences");
+    let mut preferences: Value =
+        std::fs::read(&path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_else(|| json!({}));
+    if !preferences.is_object() {
+        preferences = json!({});
+    }
+    for (group, key, value) in [
+        ("signin", "allowed", false),
+        ("signin", "allowed_on_next_startup", false),
+        ("sync", "requested", false),
+        ("autofill", "credit_card_enabled", false),
+        ("autofill", "profile_enabled", false),
+    ] {
+        if !preferences[group].is_object() {
+            preferences[group] = json!({});
+        }
+        preferences[group][key] = Value::Bool(value);
+    }
+    // Driven, Chrome restores no pages (W1's runner does the same): nothing
+    // runs before the host has set the browser up (Fugo 42798).
+    if !preferences["session"].is_object() {
+        preferences["session"] = json!({});
+    }
+    preferences["session"]["restore_on_startup"] = json!(5);
+    std::fs::write(path, preferences.to_string())
 }

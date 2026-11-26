@@ -334,7 +334,7 @@ async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_
     let copier = new_device().await;
     let refused = dial(&copier, &code, &code.addresses).await.expect_err("the code is taken");
     assert!(refused.contains("isn't paired"), "{refused}");
-    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: "phone".into(), number: asking.number.clone() });
+    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: "phone".into(), number: asking.number.clone(), ..Default::default() });
     assert!(matches!(apply_request(&mut client, &mut view, allow).await, Body::Ack(_)));
     match next(&mut socket).await {
         Some(Body::Welcome(welcome)) => assert_eq!(welcome.device_id, "phone"),
@@ -611,6 +611,7 @@ async fn remote_access_turning_on_and_off_keeps_this_machines_app_connected() {
     let allow = client_message::Body::ApproveDevice(v1::ApproveDevice {
         device_id: "phone".into(),
         number: number(&code, &phone.id().to_string()),
+        ..Default::default()
     });
     assert!(matches!(ask(&mut socket, 4, allow).await, Body::Ack(_)));
     assert!(matches!(next(&mut phone_socket).await, Some(Body::Welcome(_))));
@@ -818,7 +819,7 @@ async fn a_paired_device_forwards_to_this_machines_localhost() {
     assert!(answer.starts_with("no ") && answer.contains("isn't paired"), "{answer}");
 
     let allow =
-        client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone(), number: number(&code, &device.id().to_string()) });
+        client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.clone(), number: number(&code, &device.id().to_string()), ..Default::default() });
     assert!(matches!(apply_request(&mut client, &mut view, allow).await, Body::Ack(_)));
     assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
 

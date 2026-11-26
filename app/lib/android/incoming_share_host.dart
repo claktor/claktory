@@ -88,6 +88,8 @@ class _AndroidIncomingShareHostState extends State<AndroidIncomingShareHost> {
   late final _shares = widget.shares ?? AndroidIncomingShares();
   Claktories? _roots;
   bool _presenting = false;
+  ValueNotifier<AndroidIncomingShare>? _failureNotice;
+  Set<int>? _failureIds;
 
   @override
   void initState() {
@@ -111,18 +113,31 @@ class _AndroidIncomingShareHostState extends State<AndroidIncomingShareHost> {
   }
 
   void _changed() {
-    if (!mounted ||
-        _presenting ||
-        !_shares.ready ||
-        _shares.pending.isEmpty ||
-        _roots == null) {
-      return;
-    }
+    if (!mounted || !_shares.ready || _roots == null) return;
+    _mergeFailures();
+    if (_presenting || _shares.pending.isEmpty) return;
     _presenting = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) unawaited(_present());
     });
     WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  /// Repeated unreadable shares update the notice already on screen.
+  /// Stop at real content: neither it nor an error behind it may skip its
+  /// turn, and no accepted file or draft is discarded by this coalescing.
+  void _mergeFailures() {
+    final notice = _failureNotice;
+    final ids = _failureIds;
+    if (notice == null || ids == null) return;
+    var latest = notice.value;
+    for (final share in _shares.pending) {
+      if (ids.contains(share.id)) continue;
+      if (share.hasContent) break;
+      ids.add(share.id);
+      latest = share;
+    }
+    if (!identical(notice.value, latest)) notice.value = latest;
   }
 
   Future<void> _present() async {
@@ -132,29 +147,49 @@ class _AndroidIncomingShareHostState extends State<AndroidIncomingShareHost> {
       return;
     }
     final share = _shares.pending.first;
+    final failures = share.hasContent ? null : <int>{share.id};
+    final notice = share.hasContent ? null : ValueNotifier(share);
+    _failureIds = failures;
+    _failureNotice = notice;
+    _mergeFailures();
     Future<String?>? delivery;
     PhoneDrawerHost.closeAll();
+    AndroidSharePicker picker(
+      AndroidIncomingShare current,
+      VoidCallback close,
+    ) => AndroidSharePicker(
+      share: current,
+      roots: roots,
+      close: close,
+      chosen: (destination) {
+        // Do this synchronously BEFORE a Claktory switch can retire this
+        // overlay. Its eventual close/cancel cannot delete accepted files.
+        final claimed = _shares.claim(current.id);
+        if (claimed != null) {
+          delivery = _deliver(claimed, destination, roots);
+        }
+        close();
+      },
+    );
     try {
       await showModal(
         context,
-        (context, close) => AndroidSharePicker(
-          share: share,
-          roots: roots,
-          close: close,
-          chosen: (destination) {
-            // Do this synchronously BEFORE a Claktory switch can retire this
-            // overlay. Its eventual close/cancel cannot delete accepted files.
-            final claimed = _shares.claim(share.id);
-            if (claimed != null) {
-              delivery = _deliver(claimed, destination, roots);
-            }
-            close();
-          },
-        ),
+        (context, close) => notice == null
+            ? picker(share, close)
+            : ValueListenableBuilder<AndroidIncomingShare>(
+                valueListenable: notice,
+                builder: (context, current, _) => picker(current, close),
+              ),
       );
+      // A later share, received while native cleanup is still finishing,
+      // belongs to the next presentation, not the notice just dismissed.
+      _failureNotice = null;
+      _failureIds = null;
       final transferred = delivery;
       if (transferred == null) {
-        await _shares.discard(share.id);
+        for (final id in failures ?? {share.id}) {
+          await _shares.discard(id);
+        }
       } else {
         final warning = await transferred;
         if (mounted && warning != null) {
@@ -182,6 +217,9 @@ class _AndroidIncomingShareHostState extends State<AndroidIncomingShareHost> {
         }
       }
     } finally {
+      _failureNotice = null;
+      _failureIds = null;
+      notice?.dispose();
       _presenting = false;
       if (mounted) _changed();
     }

@@ -82,7 +82,9 @@ void main() {
     expect(find.text('Connect to your Claktory'), findsOneWidget);
     expect(
       find.text(
-        'Claktory runs on a Mac. Set it up there, then connect this '
+        'Claktory runs on a Mac or a Linux server (or Windows, in '
+        'preview). Set it up there, then '
+        'connect this '
         'iPhone to it.',
       ),
       findsOneWidget,
@@ -101,7 +103,9 @@ void main() {
     await tester.tap(find.text('Send me the link'));
     await pumpFrames(tester);
     expect(shared, [
-      'Set up Claktory on your Mac: https://claktory.com/download',
+      'Set up Claktory on your Mac or Linux server (or Windows, in '
+          'preview): '
+          'https://claktory.com/download',
     ]);
   });
 
@@ -118,12 +122,13 @@ void main() {
     expect(find.textContaining('On your Mac, open Claktory'), findsOneWidget);
   });
 
-  testWidgets('on Android: a Mac or a Linux server, and that this phone '
+  testWidgets('on Android: a Mac or a Linux server, or Windows in preview, and that this phone '
       "doesn't get notifications yet", (tester) async {
     await _show(tester, TargetPlatform.android, camera: CameraAccess.granted);
     expect(
       find.text(
-        'Claktory runs on a Mac or a Linux server. Set it up there, then '
+        'Claktory runs on a Mac or a Linux server (or Windows, in '
+        'preview). Set it up there, then '
         'connect this phone to it.',
       ),
       findsOneWidget,
@@ -166,20 +171,22 @@ void main() {
     expect(find.text('Send me the link'), findsOneWidget);
   });
 
-  testWidgets('on Android the link says a Mac or a Linux server', (
-    tester,
-  ) async {
-    final shared = _shared(tester);
-    PhonePlatformPolicy.debugAndroidPolicy = true;
-    addTearDown(() => PhonePlatformPolicy.debugAndroidPolicy = false);
-    await _show(tester, TargetPlatform.android, camera: CameraAccess.granted);
-    await tester.tap(find.text('Send me the link'));
-    await pumpFrames(tester);
-    expect(shared, [
-      'Set up Claktory on your Mac or Linux server: '
-          'https://claktory.com/download',
-    ]);
-  });
+  testWidgets(
+    'on Android the link says a Mac or a Linux server, or Windows in preview',
+    (tester) async {
+      final shared = _shared(tester);
+      PhonePlatformPolicy.debugAndroidPolicy = true;
+      addTearDown(() => PhonePlatformPolicy.debugAndroidPolicy = false);
+      await _show(tester, TargetPlatform.android, camera: CameraAccess.granted);
+      await tester.tap(find.text('Send me the link'));
+      await pumpFrames(tester);
+      expect(shared, [
+        'Set up Claktory on your Mac or Linux server (or Windows, in '
+            'preview): '
+            'https://claktory.com/download',
+      ]);
+    },
+  );
 
   testWidgets('with no camera, only pasting is offered', (tester) async {
     await _show(
@@ -199,7 +206,9 @@ void main() {
     await pumpFrames(tester);
     expect(
       find.text(
-        'Claktory runs on a Mac. Set it up there, then connect this '
+        'Claktory runs on a Mac or a Linux server (or Windows, in '
+        'preview). Set it up there, then '
+        'connect this '
         'iPad to it.',
       ),
       findsOneWidget,

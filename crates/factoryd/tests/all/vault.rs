@@ -119,10 +119,10 @@ async fn the_person_grants_reveals_and_deletes_with_no_passphrase() {
     client.ok(create_project("Site", &dir.join("site"))).await;
     client.ok(create_agent("site", "Builder", "")).await;
     let id = add(&mut client, "Cloudflare", "TOKEN", TOKEN).await;
-    let grant = || Request::GrantSecret(v1::GrantSecret { id: id.clone(), agent_id: "builder".into(), proof: None });
+    let grant = || Request::GrantSecret(v1::GrantSecret { id: id.clone(), agent_id: "builder".into(), proof: None, fill_only: false });
     let reveal = || Request::RevealSecret(v1::RevealSecret { id: id.clone(), proof: None });
 
-    let missing = client.request(Request::GrantSecret(v1::GrantSecret { id: id.clone(), agent_id: "nobody".into(), proof: None })).await;
+    let missing = client.request(Request::GrantSecret(v1::GrantSecret { id: id.clone(), agent_id: "nobody".into(), proof: None, fill_only: false })).await;
     assert_eq!(failure(&missing.body).0, ErrorCode::NotFound);
     let granted = client.request(grant()).await;
     let state = vault(last_workspace(&granted.events).expect("workspace"));
@@ -207,7 +207,7 @@ async fn a_deleted_agent_keeps_no_grants() {
     client.ok(create_project("Site", &dir.join("site"))).await;
     client.ok(create_agent("site", "Builder", "")).await;
     let id = add(&mut client, "AWS", "KEY", TOKEN).await;
-    client.request(Request::GrantSecret(v1::GrantSecret { id, agent_id: "builder".into(), proof: None })).await;
+    client.request(Request::GrantSecret(v1::GrantSecret { id, agent_id: "builder".into(), proof: None, fill_only: false })).await;
     let events = client.ok(Request::DeleteAgent(v1::DeleteAgent { agent_id: "builder".into() })).await;
     assert!(vault(last_workspace(&events).expect("workspace")).secrets[0].grants.is_empty());
 }
@@ -273,7 +273,7 @@ async fn agents_use_the_secrets_they_are_given_without_seeing_them() {
     assert!(!tools.lock().expect("lock").contains("\"secrets\""));
 
     // Given Cloudflare: it hears, and its bash runs with it, the value hidden.
-    let grant = v1::GrantSecret { id: id.clone(), agent_id: "builder".into(), proof: None };
+    let grant = v1::GrantSecret { id: id.clone(), agent_id: "builder".into(), proof: None, fill_only: false };
     apply_request(&mut client, &mut view, Request::GrantSecret(grant)).await;
     let command = r#"{"command":"echo \"token=$CLOUDFLARE_API_TOKEN\"","secrets":["Cloudflare"]}"#;
     let output = call(&mut client, &mut view, "builder", "bash", command).await;
@@ -416,7 +416,7 @@ async fn an_agent_gives_up_its_own_secret_and_history_says_why() {
     let cloudflare = add(&mut client, "Cloudflare", "CLOUDFLARE_API_TOKEN", TOKEN).await;
     let resend = add(&mut client, "Resend", "RESEND_API_KEY", "re_abcdefghijklmnop").await;
     for (id, agent) in [(&cloudflare, "builder"), (&cloudflare, "writer"), (&resend, "writer")] {
-        let grant = v1::GrantSecret { id: id.clone(), agent_id: agent.into(), proof: None };
+        let grant = v1::GrantSecret { id: id.clone(), agent_id: agent.into(), proof: None, fill_only: false };
         apply_request(&mut client, &mut view, Request::GrantSecret(grant)).await;
     }
 
@@ -627,9 +627,11 @@ async fn agents_describe_the_secret_they_need_and_the_person_gives_one_adds_one_
         "{:?}",
         events(&view)
     );
-    // The person's comment reaches it as theirs, on a line of its own (#253).
+    // The person's words reach it as theirs, on a line of their own (#253),
+    // to read rather than take as a no (needs-you-cards §7).
     assert!(view.entries.iter().any(|entry| matches!(&entry.kind,
-        Some(Kind::Event(event)) if event.text.contains("dismissed your request for Stripe.\n\nThe person's note: Not yet.\n\n"))));
+        Some(Kind::Event(event)) if event.text.starts_with("The person dismissed your request for Stripe and says:\n\nNot yet.\n\nRead what they say. \
+            If they ask something, say yes, or say what to ask for instead, ask again with that. Only a plain no ends it.\n\nYou asked because: Payments."))));
     let twice = client.request(Request::DecideSecretRequest(decide("builder", &id, true, Vec::new(), ""))).await;
     assert!(failure(&twice.body).1.contains("decided already"), "{:?}", twice.body);
     drop(client);
@@ -701,7 +703,7 @@ async fn a_secret_given_in_settings_answers_the_request_waiting_for_it() {
 
     // Named otherwise, but it sets what the agent asked for.
     let id = add(&mut client, "GitHub", "GITHUB_TOKEN", TOKEN).await;
-    let grant = v1::GrantSecret { id, agent_id: "builder".into(), proof: None };
+    let grant = v1::GrantSecret { id, agent_id: "builder".into(), proof: None, fill_only: false };
     apply_request(&mut client, &mut view, Request::GrantSecret(grant)).await;
     view.follow(&mut client, |view| events(view).iter().any(|line| line.contains("gave you GitHub")) && idle(view, "builder")).await;
     assert_eq!(requests(&view)[0], format!("secret request {} (Granted): To push.", asked[0].id));
@@ -709,7 +711,7 @@ async fn a_secret_given_in_settings_answers_the_request_waiting_for_it() {
 
     // Another secret: Stripe's request still waits, and the agent hears.
     let fly = add(&mut client, "Fly", "FLY_API_TOKEN", "fly-test").await;
-    let grant = v1::GrantSecret { id: fly, agent_id: "builder".into(), proof: None };
+    let grant = v1::GrantSecret { id: fly, agent_id: "builder".into(), proof: None, fill_only: false };
     apply_request(&mut client, &mut view, Request::GrantSecret(grant)).await;
     view.follow(&mut client, |view| events(view).iter().any(|line| line.contains("gave you Fly")) && idle(view, "builder")).await;
     let told = events(&view).into_iter().find(|line| line.contains("gave you Fly")).expect("told");
@@ -755,7 +757,7 @@ async fn every_way_of_giving_a_secret_shows_in_the_agents_grants() {
     };
 
     // From Settings → Secrets.
-    apply_request(&mut client, &mut view, Request::GrantSecret(v1::GrantSecret { id: store, agent_id: "devops".into(), proof: None }))
+    apply_request(&mut client, &mut view, Request::GrantSecret(v1::GrantSecret { id: store, agent_id: "devops".into(), proof: None, fill_only: false }))
         .await;
     assert_eq!(given(&view), ["App Store Connect"]);
     // By Rivet, by name.

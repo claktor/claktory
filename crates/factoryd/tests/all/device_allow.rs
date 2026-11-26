@@ -29,7 +29,7 @@ fn pending(view: &View) -> Vec<v1::PendingDevice> {
 }
 
 fn allow(id: &str, number: &str) -> client_message::Body {
-    client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.into(), number: number.into() })
+    client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: id.into(), number: number.into(), ..Default::default() })
 }
 
 /// A number that isn't `right`.

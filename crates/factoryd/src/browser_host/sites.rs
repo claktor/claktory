@@ -59,6 +59,26 @@ fn call(inner: &mut Inner, what: Call) {
     }
 }
 
+/// Sends one of the host's calls whose answer is waited for, in CDP session
+/// `session` (browser-wide when empty): the whole
+/// answer comes on what's returned (None when there's no runner, or its
+/// queue is full).
+pub(super) fn ask(inner: &mut Inner, session: &str, method: &str, params: Value) -> Option<tokio::sync::oneshot::Receiver<Value>> {
+    let runner = inner.runner.clone()?;
+    let id = next_id(inner);
+    let mut message = json!({"id": id, "method": method, "params": params});
+    if !session.is_empty() {
+        message["sessionId"] = Value::String(session.to_owned());
+    }
+    let message = serde_json::to_vec(&message).ok()?;
+    if message.len() > MAX_CDP || runner.try_send((Channel::Cdp, message)).is_err() {
+        return None;
+    }
+    let (answer, answered) = tokio::sync::oneshot::channel();
+    inner.waiting.insert(id, answer);
+    Some(answered)
+}
+
 /// Detaches the errand's sessions (Handle::on_release), with the host's
 /// own ids: Chrome's answers go nowhere.
 pub(super) fn release(inner: &mut Inner) {
@@ -111,12 +131,23 @@ pub(crate) fn answer(factory: &Arc<Factory>, payload: &[u8]) -> bool {
     }
     let Ok(message) = serde_json::from_str::<Value>(text) else { return false };
     let Some(id) = message["id"].as_u64().filter(|id| *id > HOST_IDS) else { return false };
+    let mut providers = Vec::new();
     let changed = {
         let mut inner = factory.agent_browser.inner();
+        if let Some(answer) = inner.waiting.remove(&id) {
+            drop(inner);
+            let _ = answer.send(message);
+            return true;
+        }
         let Some(what) = inner.calls.remove(&id) else { return true };
         let result = &message["result"];
         match what {
             Call::Sites => {
+                // An identity provider's session cookies: a sign-in that
+                // worked (Fugo 41632), unless it's being signed out of.
+                let leaving: Vec<String> = super::waiting(factory, &mut inner).iter().map(|one| one.provider.clone()).collect();
+                providers =
+                    super::signout::signed_in(result).into_iter().filter(|provider| !leaving.iter().any(|one| one == provider)).collect();
                 let sites = signed_in(result);
                 let changed = sites != inner.sites;
                 inner.sites = sites;
@@ -130,6 +161,9 @@ pub(crate) fn answer(factory: &Arc<Factory>, payload: &[u8]) -> bool {
             }
         }
     };
+    for provider in providers {
+        factory.browser_signed_in(provider);
+    }
     if let Some(sites) = changed {
         // What errand_open tells the agent it's signed in to (Ghiaccio 38597).
         factory.errands.set_signed_in(sites);

@@ -33,9 +33,10 @@ use prost::Message as _;
 const WORKSPACE: u32 = 5;
 /// Workspace.agents.
 const AGENTS: u32 = 2;
-/// Workspace.pipes and dm_sends: they hold what waits on the person (a pipe
-/// message to review, a direct message to approve).
-const WAITING_WORKSPACE: [u32; 2] = [26, 37];
+/// Workspace.pipes, dm_sends and alerts: they hold what waits on the person
+/// (a pipe message to review, a direct message to approve, an alert to
+/// read).
+const WAITING_WORKSPACE: [u32; 3] = [26, 37, 51];
 /// Agent.id.
 const AGENT_ID: u32 = 1;
 /// Agent.status, waiting_seqs and waiting_items: whether it's working (it
@@ -397,6 +398,10 @@ impl Deltas {
 /// Appends `next`'s text to `held`'s when it's more of the same entry, with
 /// the conversation's revision it brings.
 fn merged(held: &mut ServerMessage, next: &ServerMessage) -> bool {
+    // A watched conversation's (#514) never joins the selected one's.
+    if held.watched != next.watched {
+        return false;
+    }
     match (&mut held.body, &next.body) {
         (Some(Body::Delta(held)), Some(Body::Delta(next))) if held.agent_id == next.agent_id && held.seq == next.seq => {
             held.text.push_str(&next.text);

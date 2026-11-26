@@ -7,6 +7,8 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'avatar.dart';
 import 'backend.dart';
+import 'card_answer.dart'
+    show AnswerNotSent, CardAnswer, PublishesAnswer, noComment;
 import 'characters/character.dart';
 import 'controls.dart';
 import 'decision.dart';
@@ -903,8 +905,53 @@ class ConnectProposalCard extends StatefulWidget {
   State<ConnectProposalCard> createState() => _ConnectProposalCardState();
 }
 
-class _ConnectProposalCardState extends State<ConnectProposalCard> {
-  final _comment = TextEditingController();
+class _ConnectProposalCardState extends State<ConnectProposalCard>
+    with PublishesAnswer {
+  late final _comment = TextEditingController()..addListener(_typing);
+
+  /// A comment typed or cleared turns the dock's Submit on or off.
+  var _typed = false;
+  void _typing() {
+    final typed = _comment.text.trim().isNotEmpty;
+    if (typed != _typed && mounted) setState(() => _typed = typed);
+  }
+
+  /// For focus mode's keys (#514): Connect, which starts its flow on the
+  /// card, Dismiss, and Submit once a comment's typed.
+  @override
+  CardAnswer? answerNow() {
+    if (proposal.state !=
+        ConnectProposalState.CONNECT_PROPOSAL_STATE_PENDING) {
+      return null;
+    }
+    final run = _run;
+    final connects = run != null && _fields != null && !run.shown;
+    return CardAnswer(
+      key: 'agent:${proposal.agentId}/connect/${proposal.id}',
+      docked: false,
+      yes: 'Connect',
+      no: 'Dismiss',
+      typed: _typed,
+      busy: _dismissing || (run?.busy ?? false),
+      error: _error,
+      onYes: !connects || _dismissing
+          ? null
+          : () async {
+              _connect(run);
+              // Stopped by what's missing, said on the card.
+              if (_error != null) throw const AnswerNotSent();
+            },
+      onSubmit: _dismissing
+          ? null
+          : () => _dismiss(reply: true, rethrowing: true),
+      onNo: _dismissing
+          ? null
+          : (reason) => _dismiss(reason: reason, rethrowing: true),
+    );
+  }
+
+  /// The card's connect flow, as last built.
+  ConnectRun? _run;
   _ConnectFields? _fields;
   var _dismissing = false;
   String? _error;
@@ -947,7 +994,13 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
   /// [reply]: Submit (#370), the comment going to the agent as the
   /// person's reply, and nothing connected; it can ask again. A
   /// backend that doesn't know replies dismisses it with the comment.
-  Future<void> _dismiss({bool reply = false}) async {
+  /// [reason]: the no's, from focus mode's dock, with the comment;
+  /// [rethrowing] for its keys: refused, it throws too.
+  Future<void> _dismiss({
+    bool reply = false,
+    String? reason,
+    bool rethrowing = false,
+  }) async {
     if (_dismissing) return;
     setState(() {
       _dismissing = true;
@@ -956,11 +1009,12 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
     try {
       await AppScope.of(context).dismissConnectProposal(
         proposal.id,
-        comment: _comment.text.trim(),
+        comment: noComment(reason, _comment.text),
         reply: reply,
       );
     } on RequestFailure catch (failure) {
       if (mounted) setState(() => _error = failure.message);
+      if (rethrowing) rethrow;
     } finally {
       if (mounted) setState(() => _dismissing = false);
     }
@@ -969,10 +1023,14 @@ class _ConnectProposalCardState extends State<ConnectProposalCard> {
   @override
   Widget build(BuildContext context) {
     final backend = AppScope.of(context);
-    final run = ConnectRun.of(backend, 'proposal:${proposal.id}');
+    final run = _run = ConnectRun.of(backend, 'proposal:${proposal.id}');
     return ListenableBuilder(
       listenable: Listenable.merge([run, backend.workspace]),
-      builder: (context, _) => _card(context, backend, run),
+      builder: (context, _) {
+        final card = _card(context, backend, run);
+        publishAnswer();
+        return card;
+      },
     );
   }
 

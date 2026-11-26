@@ -414,6 +414,9 @@ fn build_params(
     let mut params = model_params(model);
     params.insert("max_tokens".into(), json!(max_tokens));
     params.insert("stream".into(), json!(true));
+    // The reply stops where it would begin an event or a person's message
+    // of its own (G7): the same on every request, so the cache keeps.
+    params.insert("stop_sequences".into(), json!(crate::text::FORGED_TAG_STOPS));
     let prompt = context.system_prompt.as_deref().filter(|prompt| !prompt.is_empty());
     let mut system = Vec::new();
     if oauth {

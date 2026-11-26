@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 
 use rusqlite::{Connection, ToSql};
 
-use super::db::day;
+use super::db::{STAND_IN, day};
 
 pub fn report(conn: &Connection, now: i64) -> rusqlite::Result<String> {
     let one = |sql: &str, args: &[&dyn ToSql]| -> rusqlite::Result<i64> { conn.query_row(sql, args, |row| row.get(0)) };
@@ -479,12 +479,15 @@ fn export_rows(conn: &Connection, now: i64) -> rusqlite::Result<Vec<Row>> {
     // Users and Claktories by country now, for the map (Bruno 29945):
     // those in touch in the 30 days ending yesterday, as rolling30's are
     // counted; a Claktory in its own country, a user in their Claktory's.
+    // A Claktory no longer there (its account deleted, or moved to another
+    // since) is Deleted, never Unknown, kept for a live one never placed.
     let since = day(today - 30 * DAY);
-    let mut statement = conn.prepare(
-        "SELECT seen.claktory_id, claktories.country, 1
+    let mut statement = conn.prepare(&format!(
+        "SELECT seen.claktory_id,
+                CASE WHEN claktories.id IS NULL AND seen.claktory_id LIKE '{STAND_IN}%' THEN '{DELETED}' ELSE claktories.country END, 1
          FROM (SELECT DISTINCT claktory_id FROM seen_days WHERE day >= ?1 AND day < ?2) AS seen
-         LEFT JOIN claktories ON claktories.id = seen.claktory_id",
-    )?;
+         LEFT JOIN claktories ON claktories.id = seen.claktory_id"
+    ))?;
     let claktories: Vec<Found> =
         statement.query_map([&since, &today_day], |row| Ok((row.get(0)?, row.get(1)?, vec![row.get(2)?])))?.collect::<rusqlite::Result<_>>()?;
     for (metric, found) in [("contact_users", users_in_touch(conn, &since, &today_day)?), ("contact_claktories", claktories)] {
@@ -656,6 +659,10 @@ fn canonical(raw: Option<&str>, list: &[&str]) -> String {
     }
 }
 
+/// The country label of a Claktory or user no longer there, in touch under
+/// a stand-in: a word no country is.
+const DELETED: &str = "Deleted";
+
 /// A country's label: its name as the GeoIP file has it in English
 /// ("Netherlands"; the only place one comes from), Unknown when there's
 /// none, else Other when it isn't a country's name in form (letters,
@@ -798,14 +805,18 @@ type Found = (String, Option<String>, Vec<i64>);
 
 /// The users in touch from day `first` to before day `after`, each once,
 /// with the country of their Claktory last in touch (one still registered
-/// first), as now: (account, country, [1]).
+/// first), as now: (account, country, [1]). A user no longer there (a
+/// deleted account, or a Claktory moved since) is Deleted.
 fn users_in_touch(conn: &Connection, first: &str, after: &str) -> rusqlite::Result<Vec<Found>> {
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare(&format!(
         "SELECT seen.account_id,
-                (SELECT country FROM claktories WHERE claktories.account_id = seen.account_id
-                 ORDER BY revoked_at IS NOT NULL, last_seen DESC LIMIT 1)
-         FROM (SELECT DISTINCT account_id FROM seen_days WHERE day >= ?1 AND day < ?2) AS seen",
-    )?;
+                coalesce((SELECT country FROM claktories WHERE claktories.account_id = seen.account_id
+                          ORDER BY revoked_at IS NOT NULL, last_seen DESC LIMIT 1),
+                         CASE WHEN seen.account_id LIKE '{STAND_IN}%'
+                              AND NOT EXISTS (SELECT 1 FROM claktories WHERE claktories.account_id = seen.account_id)
+                         THEN '{DELETED}' END)
+         FROM (SELECT DISTINCT account_id FROM seen_days WHERE day >= ?1 AND day < ?2) AS seen"
+    ))?;
     statement.query_map([first, after], |row| Ok((row.get(0)?, row.get(1)?, vec![1])))?.collect()
 }
 

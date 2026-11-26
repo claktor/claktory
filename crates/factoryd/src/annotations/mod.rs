@@ -18,6 +18,7 @@
 //! (FileChanged), and its threads are placed again and sent (ThreadList).
 
 pub(crate) mod anchor;
+mod embeds;
 pub(crate) mod ink;
 mod region;
 
@@ -108,9 +109,15 @@ pub(crate) const CHANGED: &str = "The text changed; select it again.";
 
 /// What the poller last saw of the files in panes, and a lock that keeps
 /// changes to threads one at a time.
+/// A Markdown file's stamp, and the pictures it showed in place then.
+type Pictures = (Option<(SystemTime, u64)>, Vec<String>);
+
 #[derive(Default)]
 pub(crate) struct State {
     seen: Mutex<HashMap<String, Seen>>,
+    /// The pictures each Markdown file in a pane shows in place (#540), as
+    /// of its stamp then: watched with it.
+    pictures: Mutex<HashMap<String, Pictures>>,
     work: Mutex<()>,
     /// SendComments one at a time, so a repeated client_batch_id is seen.
     sending: Mutex<()>,
@@ -496,9 +503,8 @@ fn refresh(db: &Connection, path: &str) -> rusqlite::Result<(Content, bool)> {
     if old_sha == *sha {
         return Ok((content, changed));
     }
-    let markdown = is_markdown(path);
-    let old = Doc::new(&old_text, markdown);
-    let new = Doc::new(text, markdown);
+    let old = Doc::of(&old_text, path);
+    let new = Doc::of(text, path);
     let mapping = Mapping::new(&old.source, &new.source);
     for mut thread in texts {
         let space = thread.kind.space();
@@ -599,7 +605,7 @@ fn to_proto(db: &Connection, thread: &Thread, doc: Option<&Doc>) -> rusqlite::Re
 fn list(db: &Connection, path: &str) -> rusqlite::Result<(v1::ThreadList, bool)> {
     let (content, changed) = refresh(db, path)?;
     let doc = match &content {
-        Content::Text { text, .. } => Some(Doc::new(text, is_markdown(path))),
+        Content::Text { text, .. } => Some(Doc::of(text, path)),
         _ => None,
     };
     let threads = threads_on(db, path)?.iter().map(|thread| to_proto(db, thread, doc.as_ref())).collect::<rusqlite::Result<_>>()?;
@@ -929,7 +935,7 @@ impl Factory {
         // The other threads follow the change; this one is on the new text.
         refresh(db, &thread.path)?;
         let mut placed = self::thread(db, thread.id)?.unwrap_or_else(|| thread.clone());
-        let doc = Doc::new(&new, is_markdown(&thread.path));
+        let doc = Doc::of(&new, &thread.path);
         let range = range.start..range.start + added.len();
         match doc.quote(placed.kind.space(), &range) {
             Some(quote) => {
@@ -1024,7 +1030,7 @@ impl Factory {
                 if !docs.contains_key(&thread.path) {
                     let (content, _) = refresh(&db, &thread.path)?;
                     let doc = match content {
-                        Content::Text { text, .. } => Some(Doc::new(&text, is_markdown(&thread.path))),
+                        Content::Text { text, .. } => Some(Doc::of(&text, &thread.path)),
                         _ => None,
                     };
                     docs.insert(thread.path.clone(), doc);
@@ -1323,7 +1329,7 @@ fn place(db: &Connection, path: &str, kind: Kind, version: &str, selectors: &[v1
     };
     let space = kind.space();
     let quote = if space == Space::Rendered && is_markdown(path) { quote.collapsed() } else { quote };
-    let doc = Doc::new(&text, is_markdown(path));
+    let doc = Doc::of(&text, path);
     // Made on this very text: its position, if the quote's there.
     let hint = position.filter(|_| version == sha);
     let Some((range, _)) = doc.place(space, &quote, hint.as_ref()) else { return Err(RequestError::Comments(CHANGED.to_owned())) };
@@ -1402,22 +1408,58 @@ fn shows_files(factory: &Factory) -> bool {
     FILE_PANES.iter().any(|kind| !factory.viewer.paths(kind).is_empty())
 }
 
+/// The most pictures of one Markdown file watched with it.
+const PICTURES_WATCHED: usize = 64;
+
+/// The pictures the Markdown files among `shown` show in place (#540),
+/// each as the app names it: read again only when the file changed.
+fn pictures_of(factory: &Factory, shown: &std::collections::HashSet<String>) -> Vec<String> {
+    let mut pictures = guard(&factory.annotations.pictures);
+    pictures.retain(|path, _| shown.contains(path));
+    let mut all = Vec::new();
+    for path in shown.iter().filter(|path| is_markdown(path)) {
+        let now = stamp(&on_disk(path));
+        if pictures.get(path).is_none_or(|(at, _)| *at != now) {
+            let found = match read(&on_disk(path)) {
+                Content::Text { text, .. } => embeds::pictures(path, &text, PICTURES_WATCHED),
+                _ => Vec::new(),
+            };
+            pictures.insert(path.clone(), (now, found));
+        }
+        all.extend(pictures.get(path).map(|(_, found)| found.clone()).unwrap_or_default());
+    }
+    all
+}
+
+/// Where a path as a pane or a picture names it is: "~" is the home folder.
+fn on_disk(path: &str) -> PathBuf {
+    let home = || std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    match path {
+        "~" => home(),
+        _ => path.strip_prefix("~/").map_or_else(|| PathBuf::from(path), |rest| home().join(rest)),
+    }
+}
+
 fn poll(factory: &Factory) {
     let mut paths = std::collections::HashSet::new();
     for kind in FILE_PANES {
         paths.extend(factory.viewer.paths(kind));
     }
+    // With their pictures: one that changes while its file doesn't is read
+    // again by the app's picture viewer, which follows its own path.
+    let pictures = pictures_of(factory, &paths);
+    paths.extend(pictures);
     let mut changed = Vec::new();
     {
         let mut seen = guard(&factory.annotations.seen);
         seen.retain(|path, _| paths.contains(path));
         for path in paths {
-            let stamp = stamp(Path::new(&path));
+            let stamp = stamp(&on_disk(&path));
             let before = seen.get(&path);
             if before.is_some_and(|before| before.stamp == stamp) {
                 continue;
             }
-            let sha = read(Path::new(&path)).sha().unwrap_or_default().to_owned();
+            let sha = read(&on_disk(&path)).sha().unwrap_or_default().to_owned();
             if before.is_some_and(|before| before.sha != sha) {
                 changed.push((path.clone(), sha.clone()));
             }
@@ -1460,7 +1502,7 @@ pub(crate) fn agent_list(factory: &Factory, agent: &str, path: Option<&str>, sta
     for path in paths {
         let (content, _) = refresh(&db, &path).map_err(|error| error.to_string())?;
         let doc = match content {
-            Content::Text { text, .. } => Some(Doc::new(&text, is_markdown(&path))),
+            Content::Text { text, .. } => Some(Doc::of(&text, &path)),
             _ => None,
         };
         for thread in threads_on(&db, &path).map_err(|error| error.to_string())? {
@@ -1608,7 +1650,7 @@ pub(crate) fn agent_add(
     let fail = |error: rusqlite::Error| error.to_string();
     let (content, _) = refresh(&db, &path).map_err(fail)?;
     let Content::Text { sha, text } = content else { return Err(format!("{path} isn't a text file of up to 2 MB.")) };
-    let doc = Doc::new(&text, is_markdown(&path));
+    let doc = Doc::of(&text, &path);
     let Some(found) = anchor::find(&doc.source, quote, None).filter(|found| found.similarity >= 1.0) else {
         return Err(format!("That text isn't in {path}: quote it exactly as the file has it."));
     };

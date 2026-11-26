@@ -157,9 +157,10 @@ else
 fi
 [[ -d /tmp/.X11-unix && ! -L /tmp/.X11-unix && "$(stat -c %u /tmp/.X11-unix)" == 0 ]] || die "/tmp/.X11-unix isn't a folder of root's"
 
-# Chrome's policy: pages can't reach the local network.
+# Chrome's policy: pages can't reach the local network, and Chrome never
+# signs in or syncs itself (a site's sign-in stays the site's cookies).
 install -d -m 0755 /etc/opt/chrome/policies/managed
-echo '{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"]}' >"$tmp"
+echo '{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"], "BrowserSignin": 0, "SyncDisabled": true, "CommandLineFlagSecurityWarningsEnabled": false}' >"$tmp"
 if ! cmp -s "$tmp" /etc/opt/chrome/policies/managed/claktory.json; then
   install -o root -g root -m 0644 "$tmp" /etc/opt/chrome/policies/managed/claktory.json
 fi

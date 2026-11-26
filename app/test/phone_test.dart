@@ -176,6 +176,10 @@ void main() {
     expect(harness.camera.asked, 0, reason: 'not before the person asks');
     await tester.tap(find.text('Scan code instead'));
     await pumpFrames(tester);
+    // Why first (area 5a, P7); Continue asks.
+    expect(harness.camera.asked, 0);
+    await tester.tap(find.text('Continue'));
+    await pumpFrames(tester);
     expect(harness.camera.asked, 1);
     expect(find.byKey(const ValueKey('camera')), findsOneWidget);
     expect(find.byType(EditableText), findsNothing, reason: 'no paste box');
@@ -268,6 +272,33 @@ void main() {
     expect(find.byKey(const ValueKey('camera')), findsOneWidget);
   });
 
+  testWidgets('the camera the first time: why, then Continue asks, and '
+      'allowed, it scans', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final harness = Harness(Workspace(), localBackend: false);
+    harness.camera.state = CameraAccess.undetermined;
+    await harness.show(tester, size: phone);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Scan code instead'));
+    await pumpFrames(tester);
+    expect(find.text('Scan the code'), findsOneWidget);
+    expect(
+      find.text(
+        'Claktory uses the camera to read the code your Claktory '
+        'shows. Your iPhone asks next.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Connect to your Claktory'), findsNothing);
+    expect(find.byKey(const ValueKey('camera')), findsNothing);
+    expect(harness.camera.asked, 0);
+    await tester.tap(find.text('Continue'));
+    await pumpFrames(tester);
+    expect(harness.camera.asked, 1);
+    expect(find.byKey(const ValueKey('camera')), findsOneWidget);
+  });
+
   testWidgets('a refused camera says how to allow it, and scans once allowed', (
     tester,
   ) async {
@@ -282,10 +313,13 @@ void main() {
     await pumpFrames(tester);
     await tester.tap(find.text('Scan code instead'));
     await pumpFrames(tester);
-    expect(
-      find.text('To scan, allow camera access in Settings → Claktory.'),
-      findsOneWidget,
-    );
+    // Why first (area 5a, P7): nothing asked until Continue.
+    expect(find.text('Scan the code'), findsOneWidget);
+    expect(harness.camera.asked, 0);
+    await tester.tap(find.text('Continue'));
+    await pumpFrames(tester);
+    expect(find.text('The camera is off for Claktory'), findsOneWidget);
+    expect(find.text('Paste code instead'), findsOneWidget);
     expect(find.byKey(const ValueKey('camera')), findsNothing);
     await tester.tap(find.text('Open Settings'));
     await tester.pump();

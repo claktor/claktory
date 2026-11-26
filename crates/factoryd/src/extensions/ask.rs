@@ -146,6 +146,18 @@ ALTER TABLE asks ADD COLUMN updated INTEGER;
 ALTER TABLE asks ADD COLUMN update_reason TEXT NOT NULL DEFAULT '';
 ";
 
+/// The migration that let a review card follow its file (Bruno 46189):
+/// the file's content when it was asked or its agent last changed it, or
+/// Claktory last marked it (`crate::review_watch::fingerprint`; '' for a
+/// card from before), how many of its changes were Claktory's for the file
+/// (they don't count against its agent's), and Claktory's words for the
+/// last change when it was one ('' when its agent made it).
+pub(crate) const FOLLOWS_FILE: &str = "
+ALTER TABLE asks ADD COLUMN review_seen TEXT NOT NULL DEFAULT '';
+ALTER TABLE asks ADD COLUMN file_updates INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE asks ADD COLUMN update_note TEXT NOT NULL DEFAULT '';
+";
+
 /// The migration that let an admin agent ask the person to approve a change
 /// it can't make on its own (#423): what their approval does, as JSON
 /// (`crate::card_actions::Action`); '' for an ordinary ask.
@@ -184,6 +196,13 @@ struct ThreadMessage {
     agent: bool,
     text: String,
     at: i64,
+    /// The person's files on that turn (#511), uploads of the agent's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<factory_agent::Attachment>,
+    /// On a procedure, the step that turn is about (1 for the first, #533);
+    /// None for an ordinary card, and for turns before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    step: Option<u32>,
 }
 
 /// A procedure's steps: at least, at most, and the longest one, in characters.
@@ -200,6 +219,9 @@ struct Step {
     state: String,
     #[serde(default)]
     comment: String,
+    /// The files the person answered it with (#511).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    comment_attachments: Vec<factory_agent::Attachment>,
     /// ms; 0 while pending.
     #[serde(default)]
     decided: i64,
@@ -212,7 +234,13 @@ impl Step {
             "cant" => v1::AskStepState::Cant,
             _ => v1::AskStepState::Pending,
         };
-        v1::AskStep { text: self.text.clone(), state: state.into(), comment: self.comment.clone(), decided_ms: self.decided }
+        v1::AskStep {
+            text: self.text.clone(),
+            state: state.into(),
+            comment: self.comment.clone(),
+            decided_ms: self.decided,
+            comment_attachments: self.comment_attachments.iter().map(crate::transcript::attachment).collect(),
+        }
     }
 }
 
@@ -252,13 +280,13 @@ pub(crate) fn held_today(store: &Store, agent: &str) -> u32 {
 /// The largest text file a review asks about: what comments work on.
 const REVIEW_TEXT_LIMIT: u64 = 2_000_000;
 
-const PROMPT: &str = "# Asking the person\nWhen you're genuinely blocked on something only the person can give you (a decision that's theirs, an approval, access or information you can't get any other way), ask them with ask_person: they see a card they answer or dismiss, and you're told which in an event (a dismissal without a comment quietly, with whatever next wakes you). Never use it for questions your best judgment can settle: decide, carry on, and say what you chose in your report. Don't ask in your chat text instead: the person may never see it.\nOne question or one action per card, kept short: what to do, where, and how long. Several decisions are several cards, never a list in one, and a checklist item that waits on them is one concern: if it bundles several, split it into items first, each with its own card. Something that takes them several actions goes as steps on one card: they see one step at a time, the next only once the one before is done. When it's about an item on a checklist, give item.\nWhen they ask to be sent, shown or notified of a report, a write-up, a file or anything else to read, send it as a review card (ask_person with review): it waits in their Needs you, where a notification would disappear. show only opens it beside your conversation, in addition, never instead; notify_person is for news with nothing to read, and points at the card when there is one.\nWhen a question stops applying before they answer (you found the answer, the plan changed, it was settled elsewhere), take it back at once with ask_withdraw and a short reason, rather than leaving it to waste their time. That includes a question they answer in your chat instead of on its card: take the card back then, so they don't have to dismiss it too. When what you need changes but still needs them, change the card in place with ask_update instead of withdrawing it and asking again. When they answer a card with words that need an answer from you (a question back, a doubt), answer on the card with ask_reply, where they are, not in your chat.\nApprove always means the card as it reads when they tap it. So when your answer on a card changes what you ask, give the new title or body in that same ask_reply, and the card shows what they'd be approving. Say a card asks \"OK to spend up to $20 on a paid detector?\", they reply \"no paid tools\", and you propose a free one instead: answer with the new title \"OK to use the free detector?\" and a body that says so, never only the words, or their Approve still reads as the $20. If they approve or answer a card after your reply without the card changing, you're told the talk with it: act on where the talk ended, and ask on the card if that's unclear. A card that makes a change when approved (one that changes settings, a pipe, an app, clears a conversation) does exactly what it shows: it can't be changed or answered on, so to ask for something else, ask again.\nWhen their words on a card settle it (they told you what to do, and nothing waits on them any more), answer with ask_reply and resolve: true: your words close the card as talked through, instead of sending it back to wait in their Needs you.";
+const PROMPT: &str = "# Asking the person\nWhen you're genuinely blocked on something only the person can give you (a decision that's theirs, an approval, access or information you can't get any other way), ask them with ask_person: they see a card they answer or dismiss, and you're told which in an event (a dismissal without a comment quietly, with whatever next wakes you). Never use it for questions your best judgment can settle: decide, carry on, and say what you chose in your report. Don't ask in your chat text instead: the person may never see it.\nOne question or one action per card, kept short: what to do, where, and how long. Several decisions are several cards, never a list in one, and a checklist item that waits on them is one concern: if it bundles several, split it into items first, each with its own card. Something that takes them several actions goes as steps on one card: they see one step at a time, the next only once the one before is done. When it's about an item on a checklist, give item.\nWhen they ask to be sent, shown or notified of a report, a write-up, a file or anything else to read, send it as a review card (ask_person with review): it waits in their Needs you, where a notification would disappear. show only opens it beside your conversation, in addition, never instead; notify_person is for news with nothing to read, and points at the card when there is one.\nWhen a question stops applying before they answer (you found the answer, the plan changed, it was settled elsewhere), take it back at once with ask_withdraw and a short reason, rather than leaving it to waste their time. That includes a question they answer in your chat instead of on its card: take the card back then, so they don't have to dismiss it too. When what you need changes but still needs them, change the card in place with ask_update instead of withdrawing it and asking again. When they answer a card with words that need an answer from you (a question back, a doubt), answer on the card with ask_reply, where they are, not in your chat.\nApprove always means the card as it reads when they tap it. So when your answer on a card changes what you ask, give the new title or body in that same ask_reply, and the card shows what they'd be approving. Say a card asks \"OK to spend up to $20 on a paid detector?\", they reply \"no paid tools\", and you propose a free one instead: answer with the new title \"OK to use the free detector?\" and a body that says so, never only the words, or their Approve still reads as the $20. If they approve or answer a card after your reply without the card changing, you're told the talk with it: act on where the talk ended, and ask on the card if that's unclear. A card that makes a change when approved (one that changes settings, a pipe, an app, clears a conversation) does exactly what it shows: it can't be changed or answered on, so to ask for something else, ask again.\nWhen their words on a card settle it (they told you what to do, and nothing waits on them any more), answer with ask_reply and resolve: true: your words close the card as talked through, instead of sending it back to wait in their Needs you.\nOn a procedure, their words on a step, or Can't do this, mean that step needs fixing or an answer, with nothing marked done: fix it on the same card with ask_reply and steps, or answer with text, rather than asking again. After Can't do this, find a way without them if they can't; if they won't, respect it and stop the card there with ask_reply's resolve.";
 
-const ABOUT: &str = "Ask the person something, as a card they answer or dismiss. Use it only when you're genuinely blocked on something only the person can give you: a decision that's theirs, an approval, access or information you can't get any other way. Never use it for questions your best judgment can settle: decide, carry on, and mention the choice in your report. One question or one action per card, never a list of decisions: several decisions are several cards, and at most 3 can wait at once. title: what you need, in a short line. body: what you need and why, standing alone (the person may read it hours later, away from your conversation); a command they should run on this computer goes in command instead; one for somewhere else goes in a fenced code block, which the card gives a Copy button. wants_text: true if you need a written answer; false (the default) if a yes, an approval, is enough. review: when the person asked to review or comment on a document, or to be sent, shown or notified of a report, a write-up or a file to read (text or Markdown up to 2 MB, an image, a video or a PDF up to 64 MB), ask with review: its path (absolute, or relative to your working folder), never a notification or show alone, and never having someone else show it; their card opens the file beside your conversation, their comments on it come to you, and the answer says how many they left. item: the checklist item it's about (12 for #12, or Ana#12): give it whenever the question is about an item on a checklist, since that's how it shows with the item in their Needs you; if they dismiss it, you're told what to do with the item, and Claktory can have you ask again later. steps: when they have to do several things in order (a procedure), the steps, each one short action (2 to 12 of them): the card shows one step at a time with Done and Can't do this, you're told of each in an event, and the next shows only once the one before is done; a step they can't do stops it. title says what it's all for, body introduces it; not with wants_text or review. command: a command for the person to run on this computer, as sh -c takes it (at most 4000 characters), in cwd (an absolute folder; yours unless given), stopped after timeout seconds (120 unless given, at most 600); title and body say why. Their card shows it exactly, with warnings where it's risky; Execute runs it once, as them, with no terminal (a password or host-key prompt fails), and you're told its exit code and what it printed. It goes alone, without wants_text, review, steps or item, and can't be changed: withdraw it and ask again. You're told their answer in an event, and a dismissal without a comment in a quiet one, which comes with whatever next wakes you; meanwhile carry on with whatever doesn't depend on it.";
+const ABOUT: &str = "Ask the person something, as a card they answer or dismiss. Use it only when you're genuinely blocked on something only the person can give you: a decision that's theirs, an approval, access or information you can't get any other way. Never use it for questions your best judgment can settle: decide, carry on, and mention the choice in your report. One question or one action per card, never a list of decisions: several decisions are several cards, and at most 3 can wait at once. title: what you need, in a short line. body: what you need and why, standing alone (the person may read it hours later, away from your conversation); a command they should run on this computer goes in command instead; one for somewhere else goes in a fenced code block, which the card gives a Copy button. wants_text: true if you need a written answer; false (the default) if a yes, an approval, is enough. review: when the person asked to review or comment on a document, or to be sent, shown or notified of a report, a write-up or a file to read (text or Markdown up to 2 MB, an image, a video or a PDF up to 64 MB), ask with review: its path (absolute, or relative to your working folder), never a notification or show alone, and never having someone else show it; their card opens the file beside your conversation, their comments on it come to you, and the answer says how many they left. If you change the file while it waits, Claktory marks it updated by itself, so they review the file as it reads now; no ask_update needed for that. item: the checklist item it's about (12 for #12, or Ana#12): give it whenever the question is about an item on a checklist, since that's how it shows with the item in their Needs you; if they dismiss it, you're told what to do with the item, and Claktory can have you ask again later. steps: when they have to do several things in order (a procedure), the steps, each one short action (2 to 12 of them): the card shows one step at a time with Done and Can't do this, you're told of each in an event, and the next shows only once the one before is done; a step they can't do stops it. title says what it's all for, body introduces it; not with wants_text or review. command: a command for the person to run on this computer, as sh -c takes it (at most 4000 characters), in cwd (an absolute folder; yours unless given), stopped after timeout seconds (120 unless given, at most 600); title and body say why. Their card shows it exactly, with warnings where it's risky; Execute runs it once, as them, with no terminal (a password or host-key prompt fails), and you're told its exit code and what it printed. It goes alone, without wants_text, review, steps or item, and can't be changed: withdraw it and ask again. You're told their answer in an event, and a dismissal without a comment in a quiet one, which comes with whatever next wakes you; meanwhile carry on with whatever doesn't depend on it.";
 
-const UPDATE_ABOUT: &str = "Change one of your questions still waiting for the person, in place, when what you need changes but still needs them: a detail was wrong, the plan moved, a step changed. id: the question's id, which its result gave; then only what changes: title, body, wants_text or review (\"\" for none) on a question, steps on a procedure (one with steps stays one, and one without can't get them); reason: optional, why it changed, in a short line they read on the card (at most 300 characters). Their card redraws where it is, marked updated, without counting again or notifying them again; an answer they gave to the old version is refused, so they look again. On a procedure, the steps already done stay done while their text is unchanged; from the first changed step on, they're asked again. At most 10 changes per card: change it only when it matters, and take back one that no longer applies with ask_withdraw instead. You can change only your own questions.";
+const UPDATE_ABOUT: &str = "Change one of your questions still waiting for the person, in place, when what you need changes but still needs them: a detail was wrong, the plan moved, a step changed. A change to the file a review question shows needs none: Claktory marks the question updated by itself once the file stops changing. id: the question's id, which its result gave; then only what changes: title, body, wants_text or review (\"\" for none) on a question, steps on a procedure (one with steps stays one, and one without can't get them); reason: optional, why it changed, in a short line they read on the card (at most 300 characters). Their card redraws where it is, marked updated, without counting again or notifying them again; an answer they gave to the old version is refused, so they look again. On a procedure, the steps already done stay done while their text is unchanged; from the first changed step on, they're asked again. At most 10 changes per card: change it only when it matters, and take back one that no longer applies with ask_withdraw instead. You can change only your own questions.";
 
-const REPLY_ABOUT: &str = "Answer what the person wrote on one of your cards (a reply, or their comment on approving or dismissing it), on the card, where they are: in Needs you or your conversation, rather than in your chat, which they may not be reading. id: the question's id; text: your answer, short and standing alone (Markdown, at most 4000 characters); title, body or steps: the card's new ones whenever your answer changes what you ask, since Approve always means the card as it reads: a card left unchanged still asks its old words (a procedure keeps the steps already done while unchanged, and asks again one they couldn't do). If they then approve or answer it unchanged, you're told the talk with it: act on where it ended. The card keeps the talk (their words, then yours), opens again in their Needs you as a new question does (a procedure on its way, answered on a step's comment, stays at its step and comes back to the top), and they answer it, reply again, or resolve it (talked through, with no decision); you're told which. Only after they wrote something, never on a card that makes a change when approved: it does exactly what it shows, so ask again instead. resolve: true when their words settle it, so nothing waits on them any more: your answer closes the card as talked through (Resolved, as their own Resolve does) instead of opening it again; it stays on the card, History shows you closed it, and nothing is approved or run (on a card they already approved or dismissed, the decision stands and your words are only added). Not with title, body or steps. If the talk started other work, say so in your answer (\"Started: a separate plan for X.\"). It shares a card's 10 changes with ask_update.";
+const REPLY_ABOUT: &str = "Answer what the person wrote on one of your cards (a reply, or their comment on approving or dismissing it), on the card, where they are: in Needs you or your conversation, rather than in your chat, which they may not be reading. id: the question's id; text: your answer, short and standing alone (Markdown, at most 4000 characters); title, body or steps: the card's new ones whenever your answer changes what you ask, since Approve always means the card as it reads: a card left unchanged still asks its old words (a procedure keeps the steps already done while unchanged, and asks again one they couldn't do). If they then approve or answer it unchanged, you're told the talk with it: act on where it ended. On a procedure they replied on, or couldn't do a step of, steps with that step rewritten fixes it, and the card opens again at that step; text alone answers them there. The card keeps the talk (their words, then yours), opens again in their Needs you as a new question does (a procedure on its way, answered on a step's comment, stays at its step and comes back to the top), and they answer it, reply again, or resolve it (talked through, with no decision); you're told which. Only after they wrote something, or couldn't do a step, never on a card that makes a change when approved: it does exactly what it shows, so ask again instead. resolve: true when their words settle it, so nothing waits on them any more: your answer closes the card as talked through (Resolved, as their own Resolve does) instead of opening it again; it stays on the card, History shows you closed it, and nothing is approved or run (on a card they already approved or dismissed, the decision stands and your words are only added). Not with title, body or steps. If the talk started other work, say so in your answer (\"Started: a separate plan for X.\"). It shares a card's 10 changes with ask_update.";
 
 const WITHDRAW_ABOUT: &str = "Take back one of your questions still waiting for the person (a card ask_person or another tool of yours opened), as soon as it no longer applies: you found the answer, the plan changed, or it was settled elsewhere. id: the question's id, which its result gave; reason: why, in a short line they read in Needs you's History (at most 300 characters). Without id, lists your questions waiting, with their ids. It leaves their Needs you at once and frees its place; a checklist item it was about stays as it is, so update the item yourself. You can take back only your own questions.";
 
@@ -408,6 +436,8 @@ fn ask(factory: &Arc<Factory>, agent: &str, args: AskArgs) -> Result<ToolResult,
         Some(path) => review_file(factory, agent, path)?,
         None => String::new(),
     };
+    // What the file reads as now: the card follows it (`file_changed`).
+    let seen = crate::review_watch::fingerprint(&review);
     // The checklist item it's about (#279): a dismissal can have it asked
     // again, and the person sees the item with the card in Needs you. A
     // question naming none, right after the one item it blocked on the
@@ -446,7 +476,7 @@ fn ask(factory: &Arc<Factory>, agent: &str, args: AskArgs) -> Result<ToolResult,
             }
         }
         db.execute(
-            "INSERT INTO asks (agent, title, body, wants_text, created, state, answer, taint, review, item, steps) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', '', ?6, ?7, ?8, ?9)",
+            "INSERT INTO asks (agent, title, body, wants_text, created, state, answer, taint, review, item, steps, review_seen) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', '', ?6, ?7, ?8, ?9, ?10)",
             params![
                 agent,
                 title,
@@ -456,7 +486,8 @@ fn ask(factory: &Arc<Factory>, agent: &str, args: AskArgs) -> Result<ToolResult,
                 taint.as_ref().map(serde_json::Value::to_string),
                 review,
                 item,
-                (!steps.is_empty()).then(|| serde_json::to_string(&steps).unwrap_or_default())
+                (!steps.is_empty()).then(|| serde_json::to_string(&steps).unwrap_or_default()),
+                seen
             ],
         )
         .map_err(|error| format!("Couldn't record the question: {error}"))?;
@@ -640,6 +671,7 @@ pub(crate) fn asked(tool: &str, is_error: bool, details: &serde_json::Value) -> 
         revision: 1,
         updated_ms: 0,
         update_reason: String::new(),
+        update_note: String::new(),
         action_description: text("action_description"),
         action_reason: text("action_reason"),
         thread: Vec::new(),
@@ -653,8 +685,9 @@ pub(crate) fn asked(tool: &str, is_error: bool, details: &serde_json::Value) -> 
             .map(|command| crate::command_cards::to_proto(&command, None)),
         pipe_trust: crate::pipes::trust_card::proposal_in(details),
         approve_follows_talk: false,
-        // An errand's handoff card (#435).
+        // An errand's handoff card (#435), and whether it's a code card (W8).
         handoff: crate::errands::handoff::in_details(details),
+        code: details.get("code").and_then(serde_json::Value::as_bool).unwrap_or(false),
     })
 }
 
@@ -710,11 +743,16 @@ struct Row {
     action_error: String,
     /// An Execute card's run, once read (`command_cards::run_of`).
     run: Option<crate::command_cards::Run>,
+    /// Of `revision`'s changes, those Claktory made because its review file
+    /// changed (`file_changed`): they don't count against its agent's.
+    file_updates: i64,
+    /// Claktory's words for its last change, when it was one; ''.
+    update_note: String,
 }
 
-const COLUMNS: &str = "id, title, body, wants_text, state, answer, decided, taint, review, created, answer_attachments, item, steps, replied, clears, clears_incarnation, reason, revision, updated, update_reason, action, action_description, action_reason, talk, resolved, action_error";
+const COLUMNS: &str = "id, title, body, wants_text, state, answer, decided, taint, review, created, answer_attachments, item, steps, replied, clears, clears_incarnation, reason, revision, updated, update_reason, action, action_description, action_reason, talk, resolved, action_error, file_updates, update_note";
 /// The column after COLUMNS, for a query that reads one more.
-const AFTER_COLUMNS: usize = 26;
+const AFTER_COLUMNS: usize = 28;
 
 fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
     Ok(Row {
@@ -745,6 +783,8 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Row> {
         resolved: row.get(24)?,
         action_error: row.get(25)?,
         run: None,
+        file_updates: row.get(26)?,
+        update_note: row.get(27)?,
     })
 }
 
@@ -768,10 +808,40 @@ impl Row {
         }
     }
 
+    /// The changes its agent made (ask_update, answers on it), not counting
+    /// Claktory's for its file.
+    fn agent_changes(&self) -> i64 {
+        self.revision - self.file_updates
+    }
+
     /// Approving or answering it makes no change of its own (#423's
     /// actions, clearing a conversation): what it means can be talked over.
     fn plain(&self) -> bool {
         self.action.is_empty() && self.clears.is_empty()
+    }
+
+    /// Their answer, or the step they last answered, came with words or
+    /// files (#511): something of theirs its agent can answer on the card.
+    fn person_said(&self) -> bool {
+        !self.answer.trim().is_empty() || !self.answer_attachments.is_empty()
+    }
+
+    /// On a procedure, the step the person's last words are about (1 for the
+    /// first, #533): the step they last did, when they did it with words
+    /// (`on_step`); otherwise the one waiting, or the one they couldn't do.
+    fn talk_step(&self, on_step: bool) -> Option<u32> {
+        let at = if on_step {
+            self.steps.iter().enumerate().filter(|(_, step)| step.state == "done").max_by_key(|(_, step)| step.decided).map(|(at, _)| at)
+        } else {
+            self.steps.iter().position(|step| step.state.is_empty() || step.state == "cant")
+        }?;
+        u32::try_from(at + 1).ok()
+    }
+
+    /// A procedure stopped at a step they couldn't do (#533 N3): its agent
+    /// may fix that step on the card, words or not.
+    fn stopped(&self) -> bool {
+        self.steps.iter().any(|step| step.state == "cant")
     }
 
     /// Approving or answering it now agrees with where its talk ended (#492,
@@ -815,12 +885,19 @@ impl Row {
             revision: u32::try_from(self.revision).unwrap_or(1),
             updated_ms: self.updated.unwrap_or_default(),
             update_reason: self.update_reason.clone(),
+            update_note: self.update_note.clone(),
             action_description: self.action_description.clone(),
             action_reason: self.action_reason.clone(),
             thread: self
                 .thread
                 .iter()
-                .map(|message| v1::AskThreadMessage { from_agent: message.agent, text: message.text.clone(), at_ms: message.at })
+                .map(|message| v1::AskThreadMessage {
+                    from_agent: message.agent,
+                    text: message.text.clone(),
+                    at_ms: message.at,
+                    attachments: message.attachments.iter().map(crate::transcript::attachment).collect(),
+                    step: message.step.unwrap_or_default(),
+                })
                 .collect(),
             resolved: self.resolved,
             action_error: self.action_error.clone(),
@@ -829,6 +906,7 @@ impl Row {
             approve_follows_talk: self.follows_talk(),
             command: self.execute().map(|command| crate::command_cards::to_proto(&command, self.run.as_ref())),
             handoff: self.handoff().map(|handoff| handoff.wire()),
+            code: self.handoff().is_some_and(|handoff| handoff.kind == v1::ErrandHandoffKind::Code as i32),
         }
     }
 
@@ -998,9 +1076,19 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk, devi
     if request.resolve {
         return resolve(factory, agent, request, ask);
     }
-    if (!ask.steps.is_empty() && !(request.reply && threaded)) || request.step.is_some() {
+    if request.reply && !ask.steps.is_empty() {
+        // Send on a step (#533): their words on the step waiting, which
+        // stays waiting with nothing marked; the card waits on its agent to
+        // fix the step or answer, as a reply does.
+        let Some(current) = ask.steps.iter().position(|step| step.state.is_empty()) else {
+            return Err(RequestError::Ask("Every step was already answered.".to_owned()));
+        };
+        if request.step.is_some_and(|given| given as usize != current) {
+            return Err(RequestError::Ask("That isn't the step waiting: look at the card again.".to_owned()));
+        }
+    } else if !ask.steps.is_empty() || request.step.is_some() {
         if request.reply {
-            return Err(RequestError::Ask("Answer the step with Done or Can't do this, and a comment if you like.".to_owned()));
+            return Err(RequestError::Ask("This question has no steps.".to_owned()));
         }
         return step(factory, agent, request, ask);
     }
@@ -1016,11 +1104,18 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk, devi
     let text = request.text.trim();
     // A reply (#370 Submit): the person's words, neither a yes nor a no.
     if request.reply {
+        if ask.handoff().is_some_and(|handoff| handoff.kind == v1::ErrandHandoffKind::Code as i32) {
+            return Err(RequestError::Ask("Type the code and press Fill in, or Can't do this.".to_owned()));
+        }
+        if ask.handoff().is_some_and(|handoff| handoff.kind == v1::ErrandHandoffKind::RecoveryCodes as i32) {
+            return Err(RequestError::Ask(CODES_CHOICE.to_owned()));
+        }
         if ask.wants_text && !threaded {
             return Err(RequestError::Ask("This question wants a written answer: send it as the answer.".to_owned()));
         }
-        if text.is_empty() {
-            return Err(RequestError::Ask("Write a reply, or approve or dismiss the question.".to_owned()));
+        // Words, files (#511) or both.
+        if text.is_empty() && request.attachments.is_empty() {
+            return Err(RequestError::Ask("Write a reply or attach a file, or approve or dismiss the question.".to_owned()));
         }
     }
     let dismiss = request.dismiss && !request.reply;
@@ -1038,13 +1133,56 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk, devi
                 "This card runs a command, which this version of the app can't show: update Claktory to run it, or dismiss it.".to_owned(),
             ));
         }
+        // Its agent hears only how the run went (#511): files go with a
+        // dismissal, where it hears their words.
+        if !dismiss && !request.attachments.is_empty() {
+            return Err(RequestError::Ask("Execute runs the command and nothing else: execute it without files, or dismiss it with them.".to_owned()));
+        }
+        // It runs exactly what it shows, and words with it would read as
+        // instructions it doesn't follow: they go with a dismissal (#533 N5).
+        if !dismiss && !text.is_empty() {
+            return Err(RequestError::Ask("Execute runs the command and nothing else: execute it without a comment, or dismiss it with one.".to_owned()));
+        }
+    }
+    // A trust card's words go to the pipe's lead, never to its asker (#471
+    // G7): files can't follow them there, so none go (Fugo 37176).
+    if !request.attachments.is_empty()
+        && matches!(serde_json::from_str::<crate::card_actions::Action>(&ask.action), Ok(crate::card_actions::Action::TrustPipe(_)))
+    {
+        return Err(RequestError::Ask("Files can't go with this answer: its comment goes to the pipe's lead, not the asker.".to_owned()));
     }
     // An errand's handoff (#435): Done, or Can't do this with a comment.
     let handoff = ask.handoff();
-    if handoff.is_some() && request.reply {
+    // An agreement card (#435 W8b): Accept ticks the box, a reply ticks
+    // nothing and goes to the agent, Can't do this ends the errand.
+    let ticks = handoff.as_ref().filter(|handoff| handoff.kind == v1::ErrandHandoffKind::Agreement as i32 && !handoff.agreement.is_empty());
+    if handoff.is_some() && ticks.is_none() && request.reply {
         return Err(RequestError::Ask("Press Done when you've finished, or Can't do this.".to_owned()));
     }
-    if !dismiss && ask.wants_text && text.is_empty() {
+    if ticks.is_some() && deciding && !text.is_empty() {
+        return Err(RequestError::Ask("Accept ticks the box and takes no words: send them as a reply instead, and nothing is ticked.".to_owned()));
+    }
+    // A recovery-codes card (#435 W8b, Fugo 42966): I saved them, with no
+    // words, or Keep in Secrets (its own request); never dismissed, so its
+    // codes go only when the person says.
+    let codes = handoff.as_ref().filter(|handoff| handoff.kind == v1::ErrandHandoffKind::RecoveryCodes as i32);
+    if codes.is_some() && dismiss {
+        return Err(RequestError::Ask(CODES_CHOICE.to_owned()));
+    }
+    if codes.is_some() && (!text.is_empty() || !request.attachments.is_empty()) {
+        return Err(RequestError::Ask("I saved them doesn't take a reply.".to_owned()));
+    }
+    // A code card (#435 W8): the code goes into the page, never into the
+    // card, the conversation or the agent.
+    let code = handoff.as_ref().filter(|handoff| handoff.kind == v1::ErrandHandoffKind::Code as i32);
+    if code.is_some() && !dismiss && !request.attachments.is_empty() {
+        return Err(RequestError::Ask("A code card takes only the code.".to_owned()));
+    }
+    if code.is_some() && !dismiss && text.is_empty() {
+        return Err(RequestError::Ask("Type the code, or press Can't do this.".to_owned()));
+    }
+    // An answer needs words; a reply on its talk can be files alone (#511).
+    if !dismiss && !request.reply && ask.wants_text && text.is_empty() {
         return Err(RequestError::Ask("Write an answer, or dismiss the question.".to_owned()));
     }
     // Asked to clear another agent's conversation (agents_clear): approved,
@@ -1071,13 +1209,30 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk, devi
     if acting {
         crate::card_actions::check(factory, &ask.action).map_err(RequestError::Ask)?;
     }
-    // Drawings on a PDF's pages, answering or dismissing alike: uploads of
-    // this agent's, as a message's attachments are.
+    // Filled before the card is kept, so a code that isn't one leaves it
+    // waiting; a fill that didn't take ends it all the same, saying why.
+    let mut not_filled = None;
+    let acted = if let Some(code) = code.filter(|_| !dismiss) {
+        Some(crate::errands::code::fill(factory, code, text).await)
+    } else if let Some(agreement) = ticks.filter(|_| deciding) {
+        Some(crate::errands::code::tick(factory, agreement).await)
+    } else {
+        None
+    };
+    match acted {
+        Some(Err(crate::errands::code::NotFilled::Retry(why))) => return Err(RequestError::Ask(why)),
+        Some(Err(crate::errands::code::NotFilled::Gone)) => not_filled = Some(crate::errands::code::LOST.to_owned()),
+        Some(Ok(Err(why))) => not_filled = Some(why),
+        Some(Ok(Ok(()))) | None => {}
+    }
+    // Files with any answer (#511), and drawings on a PDF's pages: uploads
+    // of this agent's, as a message's attachments are.
     let attachments = factory.attachments(agent, &request.attachments)?;
     let stored = Some(&attachments).filter(|list| !list.is_empty()).and_then(|list| serde_json::to_string(list).ok());
     // Dismissing, the text is the person's optional comment.
     let state = if dismiss { "dismissed" } else { "answered" };
-    let answer = text;
+    // A code card keeps no code: it's in the page now.
+    let answer = if code.is_some() && !dismiss { "" } else { text };
     let decided = now_ms();
     // Kept only if nothing answered or changed it meanwhile.
     let claimed = factory.store.db().execute(
@@ -1086,6 +1241,10 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk, devi
     )?;
     if claimed == 0 {
         return Err(RequestError::Ask(lost_claim(factory, number)));
+    }
+    // Saved: Claktory's copy goes.
+    if codes.is_some() {
+        crate::errands::code::drop_codes(factory, number);
     }
     (ask.state, ask.answer, ask.decided, ask.answer_attachments, ask.replied) =
         (state.to_owned(), answer.to_owned(), Some(decided), attachments, request.reply);
@@ -1117,9 +1276,14 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk, devi
         if let Some(Err(why)) = &cleared {
             not_made(factory, agent, &mut ask, why);
         }
-        let (summary, text) = told_clear(&person, &ask, &name, cleared);
+        let (summary, mut text) = told_clear(&person, &ask, &name, cleared);
+        text.push_str(&files_said(&person, &ask.review, &ask.answer_attachments));
         factory.deliver_event(agent, text, told_event(&ask, None, summary));
         return Ok(());
+    }
+    if let Some(why) = &not_filled {
+        let what = if ticks.is_some() { "ticked" } else { "filled in" };
+        not_made(factory, agent, &mut ask, &format!("It wasn't {what}: {why}."));
     }
     if let Some(handoff) = handoff {
         crate::errands::handoff::answered(factory, agent, &handoff, !dismiss, &ask.answer).await;
@@ -1129,7 +1293,8 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk, devi
         if acting {
             crate::command_cards::start(factory, agent, ask.id, command, device);
         } else {
-            let (summary, text) = crate::card_actions::told(&person, &ask.title, &ask.answer, false, false, None);
+            let (summary, mut text) = crate::card_actions::told(&person, &ask.title, &ask.answer, false, false, None);
+            text.push_str(&files_said(&person, &ask.review, &ask.answer_attachments));
             factory.deliver_event(agent, text, told_event(&ask, None, summary));
         }
         return Ok(());
@@ -1143,7 +1308,8 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk, devi
         // word to the agent that asked (#471 G7, Fugo 34521).
         let comment = crate::pipes::trust_card::comment_for_asker(factory, &ask.action, &ask.answer, ask.replied);
         let trust = crate::pipes::trust_card::is_trust(&ask.action);
-        let (summary, text) = crate::card_actions::told(&person, &ask.title, &comment, ask.replied, trust, made);
+        let (summary, mut text) = crate::card_actions::told(&person, &ask.title, &comment, ask.replied, trust, made);
+        text.push_str(&files_said(&person, &ask.review, &ask.answer_attachments));
         factory.deliver_event(agent, text, told_event(&ask, None, summary));
         return Ok(());
     }
@@ -1166,6 +1332,169 @@ pub(crate) async fn answer(factory: &Arc<Factory>, request: &v1::AnswerAsk, devi
     }
     factory.deliver_event(agent, text, told_event(&ask, comments, summary));
     Ok(())
+}
+
+/// What a recovery-codes card takes.
+const CODES_CHOICE: &str = "These codes go only when you say: choose I saved them once you have, or Keep in Secrets.";
+
+/// The recovery-codes card at `seq` in `agent`'s conversation, waiting:
+/// its row and handoff; or why not, for the person.
+fn codes_card(factory: &Factory, agent: &str, seq: u64) -> Result<(Row, crate::errands::HandoffRow), RequestError> {
+    factory.known_agent(agent)?;
+    let none = || RequestError::Ask("There's no such recovery-codes card in this agent's conversation.".to_owned());
+    let id = {
+        let inner = factory.lock();
+        let entry =
+            inner.agents.get(agent).and_then(|runtime| runtime.transcript.as_ref()).and_then(|transcript| transcript.entry(seq).cloned());
+        match entry.and_then(|entry| entry.kind) {
+            Some(v1::entry::Kind::AskPerson(ask)) => ask.id,
+            _ => return Err(none()),
+        }
+    };
+    let number: i64 = id.parse().map_err(|_| none())?;
+    let ask = factory
+        .store
+        .db()
+        .query_row(&format!("SELECT {COLUMNS} FROM asks WHERE id = ?1 AND agent = ?2"), params![number, agent], row)
+        .optional()?
+        .ok_or_else(none)?;
+    let handoff = ask.handoff().filter(|handoff| handoff.kind == v1::ErrandHandoffKind::RecoveryCodes as i32).ok_or_else(none)?;
+    if ask.state != "pending" {
+        return Err(RequestError::Ask("These codes are gone: the card was already closed.".to_owned()));
+    }
+    Ok((ask, handoff))
+}
+
+/// ShowRecoveryCodes (#435 W8b): a waiting recovery-codes card's codes, for
+/// the person's device that asked only.
+pub(crate) async fn show_recovery_codes(factory: &Arc<Factory>, request: &v1::ShowRecoveryCodes) -> Result<v1::RecoveryCodes, RequestError> {
+    factory.ensure_loaded(&request.agent_id).await?;
+    let (ask, _) = codes_card(factory, &request.agent_id, request.seq)?;
+    let codes = crate::errands::code::held_codes(factory, ask.id).map_err(RequestError::Ask)?.ok_or_else(|| {
+        RequestError::Ask("These codes are gone: Claktory restarted while Secrets was locked. Choose I saved them to close the card.".to_owned())
+    })?;
+    Ok(v1::RecoveryCodes { agent_id: request.agent_id.clone(), seq: request.seq, codes: codes.to_vec() })
+}
+
+/// KeepRecoveryCodes (#435 W8b): the codes become a secret given to no
+/// agent, Claktory's copy goes, and the card closes; the agent is told.
+pub(crate) async fn keep_recovery_codes(factory: &Arc<Factory>, request: &v1::KeepRecoveryCodes) -> Result<(), RequestError> {
+    let agent = request.agent_id.as_str();
+    factory.ensure_loaded(agent).await?;
+    let (mut ask, handoff) = codes_card(factory, agent, request.seq)?;
+    let codes = crate::errands::code::held_codes(factory, ask.id).map_err(RequestError::Ask)?.ok_or_else(|| {
+        RequestError::Ask("These codes are gone: Claktory restarted while Secrets was locked, so there's nothing to keep. Choose I saved them to close the card.".to_owned())
+    })?;
+    let host = url::Url::parse(&handoff.origin).ok().and_then(|url| url.host_str().map(str::to_owned)).unwrap_or_default();
+    let why = format!("Kept from the recovery-codes card of errand {}.", handoff.errand);
+    let name = factory.vault.keep_codes(&host, &codes, &why).map_err(|error| match error {
+        crate::vault::VaultError::Locked => RequestError::Ask(
+            "Secrets is locked, so the codes can't go there: unlock it in Settings → Secrets, or save them yourself and choose I saved them."
+                .to_owned(),
+        ),
+        error => RequestError::Ask(format!("The codes weren't kept: {error}")),
+    })?;
+    let answer = format!("Kept in Secrets as {name}, given to no agent.");
+    let decided = now_ms();
+    let claimed = factory.store.db().execute(
+        "UPDATE asks SET state = 'answered', answer = ?2, decided = ?3 WHERE id = ?1 AND state = 'pending'",
+        params![ask.id, answer, decided],
+    )?;
+    if claimed == 0 {
+        // Saved meanwhile on another device: the secret stays, as asked.
+        return Err(RequestError::Ask(lost_claim(factory, ask.id)));
+    }
+    crate::errands::code::drop_codes(factory, ask.id);
+    (ask.state, ask.answer, ask.decided) = ("answered".to_owned(), answer, Some(decided));
+    {
+        let mut inner = factory.lock();
+        let entry =
+            inner.agents.get_mut(agent).and_then(|runtime| runtime.transcript.as_mut()).and_then(|transcript| transcript.set_ask(ask.to_proto()));
+        if let Some(entry) = entry {
+            factory.send_change(&inner, agent, crate::transcript::Change::Entry(entry));
+        }
+        factory.broadcast_workspace(&inner);
+    }
+    factory.broadcast_workspace(&factory.lock());
+    crate::errands::code::codes_saved(factory, agent, &handoff, Some(&name)).await;
+    Ok(())
+}
+
+/// A review card waiting, as `crate::review_watch` follows its file.
+pub(crate) struct WaitingReview {
+    pub(crate) id: i64,
+    pub(crate) agent: String,
+    /// The file it shows.
+    pub(crate) review: String,
+    /// What the file held when it was asked or last changed
+    /// (`crate::review_watch::fingerprint`); '' for a card from before.
+    pub(crate) seen: String,
+    pub(crate) revision: i64,
+}
+
+/// The review cards waiting for the person.
+pub(crate) fn waiting_reviews(factory: &Factory) -> Result<Vec<WaitingReview>, String> {
+    crate::store::query(
+        &factory.store.db(),
+        "SELECT id, agent, review, review_seen, revision FROM asks WHERE state = 'pending' AND review != ''",
+        [],
+        |row| Ok(WaitingReview { id: row.get(0)?, agent: row.get(1)?, review: row.get(2)?, seen: row.get(3)?, revision: row.get(4)? }),
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// The file review card `card` shows changed while it waited, and now
+/// holds `print` (Bruno 46189): Claktory marks the card updated by itself,
+/// as an ask_update would, in its own words (AskPerson.update_note). It
+/// redraws in place without notifying again, an answer to the version
+/// before is refused, and its agent is told quietly. A card from before
+/// this (nothing kept of its file) only keeps what the file holds now.
+pub(crate) fn file_changed(factory: &Arc<Factory>, card: &WaitingReview, print: &str) {
+    let db = factory.store.db();
+    if card.seen.is_empty() {
+        if let Err(error) =
+            db.execute("UPDATE asks SET review_seen = ?3 WHERE id = ?1 AND revision = ?2 AND review_seen = ''", params![card.id, card.revision, print])
+        {
+            tracing::warn!(card = card.id, %error, "couldn't keep what a review card's file holds");
+        }
+        return;
+    }
+    let name = factory.agent_name(&card.agent);
+    let note = format!("This file changed since {name} asked. Approving means it as it reads now.");
+    let claimed = db.execute(
+        "UPDATE asks SET revision = revision + 1, updated = ?3, update_reason = '', update_note = ?4, review_seen = ?5,
+         file_updates = file_updates + 1
+         WHERE id = ?1 AND state = 'pending' AND revision = ?2",
+        params![card.id, card.revision, now_ms(), note, print],
+    );
+    if !matches!(claimed, Ok(1)) {
+        // Answered or changed meanwhile: the next look sees it as it is.
+        return;
+    }
+    let ask = db.query_row(&format!("SELECT {COLUMNS} FROM asks WHERE id = ?1"), [card.id], row);
+    drop(db);
+    let Ok(ask) = ask else { return };
+    {
+        let mut inner = factory.lock();
+        let entry = inner
+            .agents
+            .get_mut(&card.agent)
+            .and_then(|runtime| runtime.transcript.as_mut())
+            .and_then(|transcript| transcript.set_ask(ask.to_proto()));
+        if let Some(entry) = entry {
+            factory.send_change(&inner, &card.agent, crate::transcript::Change::Entry(entry));
+        }
+        factory.broadcast_workspace(&inner);
+    }
+    if let Some((whose, _)) = ask.item.rsplit_once('#') {
+        factory.refresh_view(whose);
+    }
+    let person = factory.lock().config.person_capitalized().to_owned();
+    let text = format!(
+        "{} changed while question {} waited, so {person} sees it marked updated and reviews it as it reads now. An approval of the earlier version is refused.",
+        card.review, card.id
+    );
+    factory.deliver_event(&card.agent, text, crate::needs_you::dismissed_event(format!("Question {}: its file changed", card.id)));
 }
 
 /// Keeps why the change an approved card asked for couldn't be made, and
@@ -1508,6 +1837,13 @@ fn withdraw(factory: &Arc<Factory>, agent: &str, args: WithdrawArgs) -> Result<T
     if ask.handoff().is_some() {
         return Err(format!("Question {number} hands {person} the browser: it waits for their Done or Can't do this. Nothing was withdrawn."));
     }
+    // Claktory's own card about the browser's sign-in (#435, Fugo 41236):
+    // the person's, never the agent's to take back.
+    if matches!(serde_json::from_str::<crate::card_actions::Action>(&ask.action), Ok(crate::card_actions::Action::BrowserSignOut { .. })) {
+        return Err(format!(
+            "Question {number} is Claktory's card for {person} about the browser's sign-in, not yours to take back. Nothing was withdrawn."
+        ));
+    }
     let decided = now_ms();
     // Kept only if the person didn't answer it meanwhile.
     let claimed = factory
@@ -1694,7 +2030,7 @@ fn update(factory: &Arc<Factory>, agent: &str, args: UpdateArgs) -> Result<ToolR
             "Question {number} makes a change when {person} approves it, so it can't be changed: take it back with ask_withdraw and ask again. Nothing was changed."
         ));
     }
-    if ask.revision > MAX_UPDATES {
+    if ask.agent_changes() > MAX_UPDATES {
         return Err(too_many_updates("question", number));
     }
     if args.title.is_none() && args.body.is_none() && args.wants_text.is_none() && args.review.is_none() && args.steps.is_none() {
@@ -1756,15 +2092,17 @@ fn update(factory: &Arc<Factory>, agent: &str, args: UpdateArgs) -> Result<ToolR
     }
     let now = now_ms();
     let steps = (!changed.steps.is_empty()).then(|| serde_json::to_string(&changed.steps).unwrap_or_default());
+    // The card shows its file as it reads now.
+    let seen = crate::review_watch::fingerprint(&changed.review);
     // Kept only if the person didn't answer it, nor the agent change it, meanwhile.
     let claimed = factory
         .store
         .db()
         .execute(
             "UPDATE asks SET title = ?3, body = ?4, wants_text = ?5, review = ?6, steps = ?7, taint = ?8,
-             revision = revision + 1, updated = ?9, update_reason = ?10
+             revision = revision + 1, updated = ?9, update_reason = ?10, review_seen = ?12, update_note = ''
              WHERE id = ?1 AND agent = ?2 AND state = 'pending' AND revision = ?11",
-            params![number, agent, changed.title, changed.body, changed.wants_text, changed.review, steps, ask.taint, now, reason, ask.revision],
+            params![number, agent, changed.title, changed.body, changed.wants_text, changed.review, steps, ask.taint, now, reason, ask.revision, seen],
         )
         .map_err(|error| format!("Couldn't change it: {error}"))?;
     if claimed == 0 {
@@ -1773,7 +2111,7 @@ fn update(factory: &Arc<Factory>, agent: &str, args: UpdateArgs) -> Result<ToolR
     let kept = changed.steps.iter().take_while(|step| step.state == "done").count();
     let moved_back = procedure && kept < ask.steps.iter().take_while(|step| step.state == "done").count();
     (ask.title, ask.body, ask.wants_text, ask.review, ask.steps) = (changed.title, changed.body, changed.wants_text, changed.review, changed.steps);
-    (ask.revision, ask.updated, ask.update_reason) = (ask.revision + 1, Some(now), reason);
+    (ask.revision, ask.updated, ask.update_reason, ask.update_note) = (ask.revision + 1, Some(now), reason, String::new());
     // Its card redraws in place; it still waits, at the same seq.
     {
         let mut inner = factory.lock();
@@ -1787,7 +2125,7 @@ fn update(factory: &Arc<Factory>, agent: &str, args: UpdateArgs) -> Result<ToolR
     if let Some((whose, _)) = ask.item.rsplit_once('#') {
         factory.refresh_view(whose);
     }
-    let left = MAX_UPDATES - (ask.revision - 1);
+    let left = MAX_UPDATES - (ask.agent_changes() - 1);
     let mut said = format!(
         "Changed question {number}, \"{}\": {person}'s card shows it as it is now, marked updated{}, without notifying them again. An answer they give to the version before is refused, so they look again.",
         ask.title,
@@ -1825,9 +2163,11 @@ fn answered_on(factory: &Factory, agent: &str, ask: &Row, from: v1::AskAnsweredF
         v1::AskAnsweredFrom::Conversation => said.push("They answered on the card in your conversation.".to_owned()),
         v1::AskAnsweredFrom::Unspecified => {}
     }
-    if !ask.answer.trim().is_empty() && can_reply(factory, agent, ask) {
+    if ask.person_said() && can_reply(factory, agent, ask) {
+        // Files alone (#511) are what they sent.
+        let what = if ask.answer.trim().is_empty() { "sent" } else { "wrote" };
         said.push(format!(
-            "If what they wrote needs an answer from you, reply on the card with {REPLY_TOOL} (id {}) so it reaches them where they are, rather than in your chat.",
+            "If what they {what} needs an answer from you, reply on the card with {REPLY_TOOL} (id {}) so it reaches them where they are, rather than in your chat.",
             ask.id
         ));
     }
@@ -1837,7 +2177,7 @@ fn answered_on(factory: &Factory, agent: &str, ask: &Row, from: v1::AskAnsweredF
 /// Whether the agent may answer the person on `ask` (#430): an ordinary
 /// card, with changes left, from an agent not limited to a pipe.
 fn can_reply(factory: &Factory, agent: &str, ask: &Row) -> bool {
-    ask.clears.is_empty() && ask.action.is_empty() && ask.revision <= MAX_UPDATES && !factory.pipes.contained(agent)
+    ask.clears.is_empty() && ask.action.is_empty() && ask.agent_changes() <= MAX_UPDATES && !factory.pipes.contained(agent)
 }
 
 /// Resolve (#430): the person ends a card they talked over with its agent,
@@ -1847,17 +2187,20 @@ fn resolve(factory: &Arc<Factory>, agent: &str, request: &v1::AnswerAsk, mut ask
         return Err(RequestError::Ask("Only a card talked over with its agent can be resolved: answer or dismiss it.".to_owned()));
     }
     let comment = request.text.trim().to_owned();
+    // Files with it (#511), kept with their comment.
+    let attachments = factory.attachments(agent, &request.attachments)?;
+    let stored = Some(&attachments).filter(|list| !list.is_empty()).and_then(|list| serde_json::to_string(list).ok());
     let decided = now_ms();
     let claimed = factory.store.db().execute(
-        "UPDATE asks SET state = 'answered', answer = ?2, decided = ?3, resolved = 1, replied = 0, answer_attachments = NULL
+        "UPDATE asks SET state = 'answered', answer = ?2, decided = ?3, resolved = 1, replied = 0, answer_attachments = ?5
          WHERE id = ?1 AND state = 'pending' AND revision = ?4",
-        params![ask.id, comment, decided, ask.revision],
+        params![ask.id, comment, decided, ask.revision, stored],
     )?;
     if claimed == 0 {
         return Err(RequestError::Ask(lost_claim(factory, ask.id)));
     }
     (ask.state, ask.answer, ask.decided, ask.resolved, ask.replied) = ("answered".to_owned(), comment.clone(), Some(decided), true, false);
-    ask.answer_attachments = Vec::new();
+    ask.answer_attachments = attachments;
     let person = {
         let mut inner = factory.lock();
         let entry =
@@ -1871,8 +2214,9 @@ fn resolve(factory: &Arc<Factory>, agent: &str, request: &v1::AnswerAsk, mut ask
     let title = &ask.title;
     let summary = format!("{person} resolved \"{title}\".");
     let said = if comment.is_empty() { String::new() } else { format!(" Their comment:\n\n{comment}\n\n") };
+    let files = files_said(&person, &ask.review, &ask.answer_attachments);
     let mut text = format!(
-        "{person} resolved your question \"{title}\" on its card: you talked it through, so it ends there, without a decision.{}Carry on with what you agreed.\n\nYou asked: {title}\n{}",
+        "{person} resolved your question \"{title}\" on its card: you talked it through, so it ends there, without a decision.{}Carry on with what you agreed.{files}\n\nYou asked: {title}\n{}",
         if said.is_empty() { " ".to_owned() } else { said },
         ask.body
     );
@@ -1887,7 +2231,7 @@ fn resolve(factory: &Arc<Factory>, agent: &str, request: &v1::AnswerAsk, mut ask
         }
         factory.broadcast_workspace(&factory.lock());
     }
-    let event = if comment.is_empty() { crate::needs_you::dismissed_event(summary) } else { host_event(summary) };
+    let event = if comment.is_empty() && files.is_empty() { crate::needs_you::dismissed_event(summary) } else { host_event(summary) };
     factory.deliver_event(agent, text, event);
     Ok(())
 }
@@ -1937,9 +2281,9 @@ fn reply(factory: &Arc<Factory>, agent: &str, args: ReplyArgs) -> Result<ToolRes
         .optional()
         .map_err(|error| format!("Couldn't read your questions: {error}"))?;
     let Some(mut ask) = found else { return Err(unknown()) };
-    // A procedure on its way, whose last step done came with their words:
-    // answered where it waits, at the step it's on.
-    let on_step = ask.state == "pending" && !ask.steps.is_empty() && !ask.answer.trim().is_empty();
+    // A procedure on its way, whose last step done came with their words
+    // or files: answered where it waits, at the step it's on.
+    let on_step = ask.state == "pending" && !ask.steps.is_empty() && ask.person_said();
     if args.resolve {
         if args.title.is_some() || args.body.is_some() || args.steps.is_some() {
             return Err("Closing a card changes nothing on it: give only id, text and resolve. Nothing was sent.".to_owned());
@@ -1962,9 +2306,9 @@ fn reply(factory: &Arc<Factory>, agent: &str, args: ReplyArgs) -> Result<ToolRes
         "withdrawn" => return Err(format!("You withdrew question {number}. Nothing was sent.")),
         _ => return Err(format!("Question {number} was closed without an answer. Nothing was sent.")),
     }
-    if ask.answer.trim().is_empty() {
+    if !ask.person_said() && !ask.stopped() {
         return Err(format!(
-            "{named} answered question {number} without words, so there's nothing of theirs to answer on it. Nothing was sent."
+            "{named} answered question {number} without words or files, so there's nothing of theirs to answer on it. Nothing was sent."
         ));
     }
     // What the person approves is what happens (Fugo, #492): a card that
@@ -1975,7 +2319,7 @@ fn reply(factory: &Arc<Factory>, agent: &str, args: ReplyArgs) -> Result<ToolRes
             "Question {number} does exactly what it shows when {person} approves it, so it can't be answered on, opened again or changed in a reply. To ask for something else, ask again with the tool that made it. Nothing was sent."
         ));
     }
-    if ask.revision > MAX_UPDATES {
+    if ask.agent_changes() > MAX_UPDATES {
         return Err(format!(
             "Question {number} was changed or answered on {MAX_UPDATES} times, the most one card can take: ask a new question if it still needs {person}. Nothing was sent."
         ));
@@ -2018,8 +2362,13 @@ fn reply(factory: &Arc<Factory>, agent: &str, args: ReplyArgs) -> Result<ToolRes
     let now = now_ms();
     let mut thread = ask.thread.clone();
     let said_at = ask.decided.or_else(|| ask.steps.iter().filter(|step| step.state == "done").map(|step| step.decided).max());
-    thread.push(ThreadMessage { agent: false, text: ask.answer.clone(), at: said_at.unwrap_or(now) });
-    thread.push(ThreadMessage { agent: true, text: text.clone(), at: now });
+    let about = ask.talk_step(on_step);
+    // Can't do this without words (#533 N3) leaves nothing of theirs to show.
+    if ask.person_said() {
+        let (text, attachments) = (ask.answer.clone(), ask.answer_attachments.clone());
+        thread.push(ThreadMessage { agent: false, text, at: said_at.unwrap_or(now), attachments, step: about });
+    }
+    thread.push(ThreadMessage { agent: true, text: text.clone(), at: now, attachments: Vec::new(), step: about });
     // Read a pipe or a web page since it asked: the card says so now.
     let routes = crate::pipes::agents::routes(factory, agent);
     if !routes.is_empty() {
@@ -2028,13 +2377,14 @@ fn reply(factory: &Arc<Factory>, agent: &str, args: ReplyArgs) -> Result<ToolRes
     let steps = (!changed.steps.is_empty()).then(|| serde_json::to_string(&changed.steps).unwrap_or_default());
     let updated = if edited { Some(now) } else { ask.updated };
     let update_reason = if edited { String::new() } else { ask.update_reason.clone() };
+    let update_note = if edited { String::new() } else { ask.update_note.clone() };
     // Kept only if nothing else opened or changed it meanwhile.
     let claimed = factory
         .store
         .db()
         .execute(
             "UPDATE asks SET title = ?3, body = ?4, steps = ?5, talk = ?6, taint = ?7, state = 'pending', answer = '', decided = NULL,
-             answer_attachments = NULL, replied = 0, revision = revision + 1, updated = ?8, update_reason = ?9
+             answer_attachments = NULL, replied = 0, revision = revision + 1, updated = ?8, update_reason = ?9, update_note = ?12
              WHERE id = ?1 AND agent = ?2 AND state = ?10 AND revision = ?11",
             params![
                 number,
@@ -2047,7 +2397,8 @@ fn reply(factory: &Arc<Factory>, agent: &str, args: ReplyArgs) -> Result<ToolRes
                 updated,
                 update_reason,
                 ask.state,
-                ask.revision
+                ask.revision,
+                update_note
             ],
         )
         .map_err(|error| format!("Couldn't answer on it: {error}"))?;
@@ -2056,7 +2407,7 @@ fn reply(factory: &Arc<Factory>, agent: &str, args: ReplyArgs) -> Result<ToolRes
     }
     (ask.title, ask.body, ask.steps, ask.thread) = (changed.title, changed.body, changed.steps, thread);
     (ask.state, ask.answer, ask.decided, ask.replied, ask.revision) = ("pending".to_owned(), String::new(), None, false, ask.revision + 1);
-    (ask.answer_attachments, ask.updated, ask.update_reason) = (Vec::new(), updated, update_reason);
+    (ask.answer_attachments, ask.updated, ask.update_reason, ask.update_note) = (Vec::new(), updated, update_reason, update_note);
     // Its card waits again, at the same seq, and notifies as a new one does;
     // one that still waited notifies again.
     {
@@ -2074,12 +2425,19 @@ fn reply(factory: &Arc<Factory>, agent: &str, args: ReplyArgs) -> Result<ToolRes
     if let Some((whose, _)) = ask.item.rsplit_once('#') {
         factory.refresh_view(whose);
     }
-    let left = MAX_UPDATES - (ask.revision - 1);
+    let left = MAX_UPDATES - (ask.agent_changes() - 1);
     let mut said = if on_step {
         let at = ask.steps.iter().position(|step| step.state.is_empty()).map_or(0, |at| at + 1);
         format!(
             "Answered on question {number}, \"{}\": your answer shows under their comment, on the card that still waits at step {at} of {} in {person}'s Needs you, and they're notified. You're told as each step is done, or when they reply or resolve it; meanwhile carry on with whatever doesn't depend on it.",
             ask.title,
+            ask.steps.len()
+        )
+    } else if let Some(at) = ask.steps.iter().position(|step| step.state.is_empty()) {
+        format!(
+            "Answered on question {number}, \"{}\": it's open again in {person}'s Needs you at step {} of {}, with your answer under their words, and they're notified as for a new question. You're told as each step is done, or when they reply again or resolve it; meanwhile carry on with whatever doesn't depend on it.",
+            ask.title,
+            at + 1,
             ask.steps.len()
         )
     } else {
@@ -2112,8 +2470,13 @@ fn close(factory: &Arc<Factory>, agent: &str, (person, named): (&str, &str), mut
         ));
     }
     let mut thread = ask.thread.clone();
+    // A procedure stopped at a step they couldn't do (Can't do this, #533):
+    // its agent gives up on it, with words of theirs or none. It stays as
+    // it was, stopped there for good: the card shows "Stopped at step N".
+    let giving_up = ask.stopped() && !ask.resolved && matches!(ask.state.as_str(), "answered" | "dismissed");
     // Their words that closed the round, when they're not on the card yet.
     let theirs = match ask.state.as_str() {
+        _ if giving_up => ask.person_said(),
         "pending" if on_step => true,
         "pending" if ask.thread.last().is_some_and(|last| last.agent) => false,
         "pending" => {
@@ -2124,7 +2487,7 @@ fn close(factory: &Arc<Factory>, agent: &str, (person, named): (&str, &str), mut
         "answered" | "dismissed" if ask.resolved => {
             return Err(format!("{named} resolved question {number}: it's over already. Nothing was sent."));
         }
-        "answered" | "dismissed" if ask.answer.trim().is_empty() => {
+        "answered" | "dismissed" if !ask.person_said() => {
             return Err(format!("{named} decided question {number} without words: it's over already, with nothing to close. Nothing was sent."));
         }
         "answered" | "dismissed" => true,
@@ -2132,15 +2495,22 @@ fn close(factory: &Arc<Factory>, agent: &str, (person, named): (&str, &str), mut
         _ => return Err(format!("Question {number} was closed without an answer. Nothing was sent.")),
     };
     let now = now_ms();
+    let about = ask.talk_step(on_step);
     if theirs {
         let said_at = ask.decided.or_else(|| ask.steps.iter().filter(|step| step.state == "done").map(|step| step.decided).max());
-        thread.push(ThreadMessage { agent: false, text: ask.answer.clone(), at: said_at.unwrap_or(now) });
+        let (said, attachments) = (ask.answer.clone(), ask.answer_attachments.clone());
+        thread.push(ThreadMessage { agent: false, text: said, at: said_at.unwrap_or(now), attachments, step: about });
     }
-    thread.push(ThreadMessage { agent: true, text: text.clone(), at: now });
+    thread.push(ThreadMessage { agent: true, text: text.clone(), at: now, attachments: Vec::new(), step: about });
     let talk = serde_json::to_string(&thread).unwrap_or_default();
     // Approved, answered or dismissed: that decision stands.
-    let decided_already = !on_step && ask.state != "pending" && !ask.replied;
-    let claimed = if decided_already {
+    let decided_already = !on_step && ask.state != "pending" && !ask.replied && !giving_up;
+    let claimed = if giving_up {
+        factory.store.db().execute(
+            "UPDATE asks SET talk = ?3, resolved = 1 WHERE id = ?1 AND agent = ?2 AND state = ?4 AND revision = ?5",
+            params![number, agent, talk, ask.state, ask.revision],
+        )
+    } else if decided_already {
         factory.store.db().execute(
             "UPDATE asks SET talk = ?3 WHERE id = ?1 AND agent = ?2 AND state = ?4 AND revision = ?5",
             params![number, agent, talk, ask.state, ask.revision],
@@ -2157,7 +2527,9 @@ fn close(factory: &Arc<Factory>, agent: &str, (person, named): (&str, &str), mut
         return Err(format!("Question {number} changed meanwhile, so nothing was sent: look at it again."));
     }
     ask.thread = thread;
-    if !decided_already {
+    if giving_up {
+        ask.resolved = true;
+    } else if !decided_already {
         (ask.state, ask.answer, ask.decided, ask.resolved, ask.replied) = ("answered".to_owned(), String::new(), Some(now), true, false);
         (ask.answer_attachments, ask.reason) = (Vec::new(), text);
     }
@@ -2178,9 +2550,16 @@ fn close(factory: &Arc<Factory>, agent: &str, (person, named): (&str, &str), mut
             json!({}),
         ));
     }
-    let mut said = format!(
-        "Closed question {number}, \"{title}\", as settled in the talk: your words stay on the card, it's left {person}'s Needs you without notifying them, and History shows you closed it. Nothing was approved or run."
-    );
+    let mut said = match ask.steps.iter().position(|step| step.state == "cant") {
+        Some(at) if giving_up => format!(
+            "Stopped question {number}, \"{title}\", at step {} of {}, for good: your words stay on the card, which shows it stopped there, without notifying {person}. Nothing more is asked of them on it.",
+            at + 1,
+            ask.steps.len()
+        ),
+        _ => format!(
+            "Closed question {number}, \"{title}\", as settled in the talk: your words stay on the card, it's left {person}'s Needs you without notifying them, and History shows you closed it. Nothing was approved or run."
+        ),
+    };
     if !ask.item.is_empty() {
         match super::checklist::decided(factory, &ask.item, false, "ask") {
             Ok(Some(more)) => said.push_str(&more),
@@ -2205,9 +2584,6 @@ fn step(factory: &Arc<Factory>, agent: &str, request: &v1::AnswerAsk, mut ask: R
     if ask.steps.is_empty() {
         return Err(RequestError::Ask("This question has no steps.".to_owned()));
     }
-    if !request.attachments.is_empty() {
-        return Err(RequestError::Ask("Answer this step in words.".to_owned()));
-    }
     let Some(current) = ask.steps.iter().position(|step| step.state.is_empty()) else {
         return Err(RequestError::Ask("Every step was already answered.".to_owned()));
     };
@@ -2219,8 +2595,18 @@ fn step(factory: &Arc<Factory>, agent: &str, request: &v1::AnswerAsk, mut ask: R
     let before = serde_json::to_string(&ask.steps).unwrap_or_default();
     let now = now_ms();
     let comment = request.text.trim().to_owned();
+    // Files with the step (#511), kept on it, and as the card's latest
+    // answer, as its comment is, for its agent to answer on.
+    let attachments = factory.attachments(agent, &request.attachments)?;
+    let stored = Some(&attachments).filter(|list| !list.is_empty()).and_then(|list| serde_json::to_string(list).ok());
     let done = if request.dismiss { "cant" } else { "done" };
-    ask.steps[current] = Step { text: std::mem::take(&mut ask.steps[current].text), state: done.to_owned(), comment: comment.clone(), decided: now };
+    ask.steps[current] = Step {
+        text: std::mem::take(&mut ask.steps[current].text),
+        state: done.to_owned(),
+        comment: comment.clone(),
+        comment_attachments: attachments.clone(),
+        decided: now,
+    };
     let (state, decided) = match (request.dismiss, current + 1 == ask.steps.len()) {
         (true, _) => ("dismissed", Some(now)),
         (false, true) => ("answered", Some(now)),
@@ -2229,8 +2615,9 @@ fn step(factory: &Arc<Factory>, agent: &str, request: &v1::AnswerAsk, mut ask: R
     // Kept only if nothing answered it meanwhile (another device, a second
     // tap), and its agent didn't change it.
     let claimed = factory.store.db().execute(
-        "UPDATE asks SET steps = ?2, state = ?3, answer = ?4, decided = ?5 WHERE id = ?1 AND state = 'pending' AND steps = ?6 AND revision = ?7",
-        params![ask.id, serde_json::to_string(&ask.steps).unwrap_or_default(), state, comment, decided, before, ask.revision],
+        "UPDATE asks SET steps = ?2, state = ?3, answer = ?4, decided = ?5, answer_attachments = ?8
+         WHERE id = ?1 AND state = 'pending' AND steps = ?6 AND revision = ?7",
+        params![ask.id, serde_json::to_string(&ask.steps).unwrap_or_default(), state, comment, decided, before, ask.revision, stored],
     )?;
     if claimed == 0 {
         let changed = factory
@@ -2240,7 +2627,7 @@ fn step(factory: &Arc<Factory>, agent: &str, request: &v1::AnswerAsk, mut ask: R
             .is_ok_and(|now| now != ask.revision);
         return Err(RequestError::Ask(if changed { CHANGED.to_owned() } else { "That step was already answered.".to_owned() }));
     }
-    (ask.state, ask.answer, ask.decided) = (state.to_owned(), comment, decided);
+    (ask.state, ask.answer, ask.decided, ask.answer_attachments) = (state.to_owned(), comment, decided, attachments);
     // Its entry shows the next step, or that it's over.
     let person = {
         let mut inner = factory.lock();
@@ -2285,6 +2672,7 @@ fn told_step(person: &str, ask: &Row, at: usize, on: &str) -> (String, String) {
     let number = at + 1;
     let title = &ask.title;
     let comment = if step.comment.is_empty() { String::new() } else { format!("\n\nTheir comment:\n\n{}", step.comment) };
+    let comment = format!("{comment}{}", files_said(person, &ask.review, &step.comment_attachments));
     let asked = format!("{on}\n\nYou asked: {title}\n{}", ask.body);
     if step.state == "cant" {
         let rest = match count - number {
@@ -2295,8 +2683,9 @@ fn told_step(person: &str, ask: &Row, at: usize, on: &str) -> (String, String) {
         return (
             format!("{person} couldn't do step {number} of {count} of \"{title}\"."),
             format!(
-                "{person} couldn't do step {number} of {count} of \"{title}\": {}{comment}\n\nThat stops it there.{rest} Work out what to do next: fix what stopped them and ask again with the steps left, or use your best judgment and say what you chose in your report.{asked}",
-                step.text
+                "{person} can't or won't do step {number} of {count} of \"{title}\": {}{comment}\n\nIt stops there, waiting for you, and nothing was marked done.{rest} If they can't, find a way without them and rewrite the steps on this card: {REPLY_TOOL} (id {id}) with steps, step {number} rewritten, and a short answer, and it opens again at step {number}. If their words say they won't, respect it: stop the card, and don't do that step another way. To stop: {REPLY_TOOL} (id {id}) with resolve: true and a short word for them, and the card shows it stopped at step {number}; then use your best judgment and say what you chose in your report.{asked}",
+                step.text,
+                id = ask.id
             ),
         );
     }
@@ -2336,28 +2725,51 @@ fn reviewed(factory: &Arc<Factory>, agent: &str, ask: &Row) -> i64 {
         .unwrap_or(0)
 }
 
-/// What the agent is told of a decided ask: a summary, and the event's
-/// text; with how many comments the person left on a review ask's file.
+/// The page of the PDF a drawing of the person's is of: the app names each
+/// one "<pdf stem>-p<page>.png"; None for any other file.
+fn drawing_page(attachment: &factory_agent::Attachment) -> Option<u32> {
+    let stem = attachment.name.strip_suffix(".png").or_else(|| attachment.name.strip_suffix(".PNG"))?;
+    // A second upload of that name the same day is kept as
+    // "<stem>-p<page> 2.png" (Sorbet's iPad pass).
+    let stem = match stem.rsplit_once(' ') {
+        Some((name, copy)) if !copy.is_empty() && copy.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => stem,
+    };
+    let (_, page) = stem.rsplit_once("-p")?;
+    page.parse().ok().filter(|page| *page > 0)
+}
+
+/// The lines naming the files the person answered with, by path, so its
+/// agent reads them; empty for none. On a PDF's review card their drawings
+/// on its pages say which pages (`drawings`); any other file (#511) is
+/// listed with its name, type and size, as a message's attachments are.
+fn files_said(person: &str, review: &str, attached: &[factory_agent::Attachment]) -> String {
+    let pdf = review.to_ascii_lowercase().ends_with(".pdf");
+    let (drawn, other): (Vec<_>, Vec<_>) = attached.iter().cloned().partition(|attachment| pdf && drawing_page(attachment).is_some());
+    let mut said = drawings(person, &drawn);
+    if other.is_empty() {
+        return said;
+    }
+    let (count, them) = if other.len() == 1 { ("a file".to_owned(), "it") } else { (format!("{} files", other.len()), "them") };
+    said.push_str(&format!("\n\n{person} attached {count}; read {them} at {}:", if other.len() == 1 { "its path" } else { "their paths" }));
+    for file in &other {
+        let kind = if file.mime.is_empty() { String::new() } else { format!(", {}", file.mime) };
+        said.push_str(&format!("\n- {} (\"{}\"{kind}, {} bytes)", file.path, file.name, file.size));
+    }
+    if other.iter().any(|file| file.image_type().is_some()) {
+        said.push_str("\nLook at images with read_image.");
+    }
+    said
+}
+
 /// The line naming the person's drawings on a PDF's pages, by path, so the
-/// agent looks at them; empty for none. The app names each one
-/// "<pdf stem>-p<page>.png", which gives its page.
+/// agent looks at them; empty for none.
 fn drawings(person: &str, attached: &[factory_agent::Attachment]) -> String {
     if attached.is_empty() {
         return String::new();
     }
-    let page = |attachment: &factory_agent::Attachment| -> Option<u32> {
-        let stem = attachment.name.strip_suffix(".png").or_else(|| attachment.name.strip_suffix(".PNG"))?;
-        // A second upload of that name the same day is kept as
-        // "<stem>-p<page> 2.png" (Sorbet's iPad pass).
-        let stem = match stem.rsplit_once(' ') {
-            Some((name, copy)) if !copy.is_empty() && copy.bytes().all(|b| b.is_ascii_digit()) => name,
-            _ => stem,
-        };
-        let (_, page) = stem.rsplit_once("-p")?;
-        page.parse().ok().filter(|page| *page > 0)
-    };
     let count = attached.len();
-    let pages: Option<Vec<String>> = attached.iter().map(|attachment| page(attachment).map(|page| page.to_string())).collect();
+    let pages: Option<Vec<String>> = attached.iter().map(|attachment| drawing_page(attachment).map(|page| page.to_string())).collect();
     let which = match pages {
         Some(pages) if count == 1 => format!(" (page {})", pages[0]),
         Some(pages) => format!(" (pages {} and {})", pages[..count - 1].join(", "), pages[count - 1]),
@@ -2385,7 +2797,14 @@ fn talk_quoted(person: &str, thread: &[ThreadMessage]) -> String {
         let count = text.chars().count();
         let shown = if count <= left { text.to_owned() } else { format!("…{}", text.chars().skip(count - left).collect::<String>()) };
         left = left.saturating_sub(count);
-        kept.push(format!("{}: {shown}", if message.agent { "You" } else { person }));
+        // Their files on that turn (#511), by path.
+        let files = if message.attachments.is_empty() {
+            String::new()
+        } else {
+            let paths: Vec<&str> = message.attachments.iter().map(|attachment| attachment.path.as_str()).collect();
+            format!("\n(Attached: {})", paths.join(", "))
+        };
+        kept.push(format!("{}: {shown}{files}", if message.agent { "You" } else { person }));
     }
     let earlier = if kept.len() < thread.len() { "(Earlier messages left out.)\n" } else { "" };
     kept.reverse();
@@ -2407,14 +2826,25 @@ fn told(person: &str, ask: &Row, comments: Option<i64>, on: &str, talk: Option<&
         }
         None => String::new(),
     };
-    let drew = drawings(person, &ask.answer_attachments);
+    let drew = files_said(person, &ask.review, &ask.answer_attachments);
     let asked = format!("{left}{drew}{on}\n\nYou asked: {}\n{}", ask.title, ask.body);
     // A reply (#370): their words for what they want, never a yes or a no.
     if ask.replied {
-        return (
-            format!("{person} replied to \"{}\".", ask.title),
-            format!("{person} replied to your question \"{}\":\n\n{}{asked}", ask.title, ask.answer),
-        );
+        // Files alone (#511): they're named below.
+        let said = if ask.answer.is_empty() { ", with files only.".to_owned() } else { format!(":\n\n{}", ask.answer) };
+        // Send on a step (#533): the step still waits, nothing marked.
+        if let Some(at) = ask.steps.iter().position(|step| step.state.is_empty()) {
+            let (number, count, title, id) = (at + 1, ask.steps.len(), &ask.title, ask.id);
+            let words = if ask.answer.is_empty() { "They sent files only.".to_owned() } else { format!("Their words:\n\n{}", ask.answer) };
+            return (
+                format!("{person} replied on step {number} of {count} of \"{title}\"."),
+                format!(
+                    "{person} replied on step {number} of {count} of \"{title}\": {}\n\n{words}\n\nStep {number} still waits; nothing was marked done. If the step is wrong, fix it on the card with {REPLY_TOOL} (id {id}, steps: the steps, step {number} rewritten) and a short answer; if it only needs an answer, {REPLY_TOOL} with text. They're shown step {number} again either way.{asked}",
+                    ask.steps[at].text
+                ),
+            );
+        }
+        return (format!("{person} replied to \"{}\".", ask.title), format!("{person} replied to your question \"{}\"{said}{asked}", ask.title));
     }
     let title = &ask.title;
     if let Some(talk) = talk
@@ -2647,12 +3077,14 @@ mod tests {
             resolved: false,
             action_error: String::new(),
             run: None,
+            file_updates: 0,
+            update_note: String::new(),
         }
     }
 
     #[test]
     fn a_changed_procedure_keeps_the_steps_done_up_to_the_first_change() {
-        let step = |text: &str, state: &str| Step { text: text.to_owned(), state: state.to_owned(), comment: String::new(), decided: 0 };
+        let step = |text: &str, state: &str| Step { text: text.to_owned(), state: state.to_owned(), ..Step::default() };
         let old = [step("Open Settings", "done"), step("Sign in", "done"), step("Copy the key", ""), step("Paste it", "")];
         let texts = |list: &[&str]| list.iter().map(|text| (*text).to_owned()).collect::<Vec<_>>();
         let kept = |steps: &[Step]| steps.iter().map(|step| step.state.clone()).collect::<Vec<_>>();
@@ -2720,7 +3152,7 @@ mod tests {
 
     #[test]
     fn approving_after_a_reply_on_an_unchanged_card_follows_the_talk_quoted_fenced_and_capped() {
-        let said = |agent: bool, text: &str, at: i64| ThreadMessage { agent, text: text.to_owned(), at };
+        let said = |agent: bool, text: &str, at: i64| ThreadMessage { agent, text: text.to_owned(), at, attachments: Vec::new(), step: None };
         let talk = vec![said(false, "No paid detectors.", 10), said(true, "Then the free plan: ```GPTZero``` only.", 20)];
         let pending = Row { thread: talk.clone(), ..ask("pending", false, "") };
         assert!(pending.follows_talk());

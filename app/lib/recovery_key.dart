@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
+import 'claktory_identity.dart' show claktoryNameInText;
 import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
@@ -90,16 +91,19 @@ class _SaveRecoveryKeyFormState extends State<SaveRecoveryKeyForm> {
     final check = _check;
     if (check != null) return _checking(check);
     final key = _key;
+    final name = claktoryNameInText(AppScope.of(context));
     return FormFrame(
-      title: 'Save your recovery key',
+      title: 'Save the recovery key for $name',
       body:
-          'Your secrets open with two halves together: one on the computer '
-          'Claktory runs on and one at claktory.com. Neither can open them '
-          'alone. This key opens them by itself, if claktory.com can\'t be '
-          'reached, your account is gone or that computer\'s half is lost.\n\n'
+          'Each Claktory has its own recovery key, even on the same account: '
+          'this one opens the secrets on $name, and no other key does.\n\n'
+          'Those secrets open with two halves together: one on $name and one '
+          'at claktory.com. This key opens them by itself, if claktory.com '
+          'can\'t be reached, your account is gone or the half on $name is '
+          'lost.\n\n'
           'Save it in a password manager, such as Passwords or 1Password, or '
           'on paper kept somewhere safe. Not in a note, a screenshot or a '
-          'message. Never share it: anyone with it can open your secrets.',
+          'message. Never share it: anyone with it can open these secrets.',
       fields: [
         if (key != null) ...[
           RecoveryKeyBox(key),
@@ -136,7 +140,7 @@ class _SaveRecoveryKeyFormState extends State<SaveRecoveryKeyForm> {
   }
 
   Widget _checking(RecoveryKeyCheck check) => FormFrame(
-    title: 'Check your recovery key',
+    title: 'Check the recovery key',
     body:
         'Type block ${check.group} from the key you saved, counting the '
         'blocks of four from the left.',

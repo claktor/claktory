@@ -2,8 +2,9 @@ import 'package:factory_app/changelog.dart' show ChangelogView;
 import 'package:factory_app/name_step.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/controls.dart' show GlyphButton;
+import 'package:factory_app/update.dart' show UpdateBanner;
 import 'package:flutter/foundation.dart';
-import 'package:flutter/widgets.dart' show Size;
+import 'package:flutter/widgets.dart' show EditableText, Size;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
@@ -87,5 +88,28 @@ void main() {
     );
     await pumpFrames(tester);
     expect(find.byType(NameStep), findsOneWidget);
+  });
+
+  testWidgets('on an iPad, over the first-launch question, the banner stays a '
+      'strip at the top and the question stays usable (Zucchero row 635)', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final harness = Harness(_snapshot(), named: false);
+    harness.appVersion = 'v0.1.10';
+    await harness.show(tester, size: const Size(1180, 820));
+    await pumpFrames(tester);
+    expect(find.byType(NameStep), findsOneWidget);
+    final update = find.text('Update').hitTestable();
+    expect(update, findsOneWidget);
+    final banner = find.ancestor(
+      of: update,
+      matching: find.byType(UpdateBanner),
+    );
+    expect(tester.getSize(banner).height, lessThan(120));
+    expect(tester.getTopLeft(banner).dy, 0);
+    // The question's field is reachable under it.
+    expect(find.byType(EditableText).hitTestable(), findsOneWidget);
   });
 }

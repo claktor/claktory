@@ -14,6 +14,13 @@
 //   it's in, so the app sends the next only then.
 // - "finish": the file, complete. Answers its path.
 // - "cancel": stops and deletes it, folder and all.
+// On an iPhone or iPad, where a finished video is saved (a Mac's app moves
+// it into ~/Movies/Claktory itself):
+// - "saveToPhotos" {path}: adds it to Photos (add-only access, asked for
+//   the first time). Errors "denied" when Photos isn't allowed.
+// - "saveToFiles" {path, name}: the Files sheet to export a copy, named
+//   `name`. Answers true once saved, false if the person cancelled.
+// Both take only a video made here (in claktory-share), never another file.
 // Errors: "bad" (arguments), "limit" (too big or too long), "none" (no
 // export started), "failed" (the encoder's).
 //
@@ -22,6 +29,11 @@
 // the app when dates aren't shown.
 import AVFoundation
 import Accelerate
+
+#if os(iOS)
+  import Photos
+  import UIKit
+#endif
 
 // Without Flutter (RunnerTests/ReplayWriterCheck.swift), the encoder alone.
 #if canImport(FlutterMacOS)
@@ -296,10 +308,73 @@ final class ReplayWriter {
         self.encoder = nil
         reply(nil)
       }
+    #if os(iOS)
+      case "saveToPhotos":
+        guard let url = Self.madeHere(arguments?["path"]) else {
+          result(FlutterError(code: "bad", message: "a video made here", details: nil))
+          return
+        }
+        Self.saveToPhotos(url, reply)
+      case "saveToFiles":
+        guard let url = Self.madeHere(arguments?["path"]),
+          let name = arguments?["name"] as? String,
+          Self.plainName(name)
+        else {
+          result(FlutterError(code: "bad", message: "a video made here, and a name", details: nil))
+          return
+        }
+        SaveToFiles.show(url, named: name, result)
+    #endif
     default:
       result(FlutterMethodNotImplemented)
     }
   }
+
+  #if os(iOS)
+    /// [path] when it's a video this writer made: an MP4 in a folder of
+    /// claktory-share, nowhere else.
+    private static func madeHere(_ path: Any?) -> URL? {
+      guard let path = path as? String else { return nil }
+      let shares = FileManager.default.temporaryDirectory
+        .appendingPathComponent("claktory-share", isDirectory: true)
+        .resolvingSymlinksInPath().standardizedFileURL.pathComponents
+      let url = URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL
+      let parts = url.pathComponents
+      guard parts.count == shares.count + 2,
+        Array(parts.prefix(shares.count)) == shares,
+        url.pathExtension == "mp4",
+        FileManager.default.fileExists(atPath: url.path)
+      else { return nil }
+      return url
+    }
+
+    /// A file name without folders in it.
+    private static func plainName(_ name: String) -> Bool {
+      !name.isEmpty && name.count <= 200 && !name.contains("/") && !name.hasPrefix(".")
+    }
+
+    private static func saveToPhotos(_ url: URL, _ reply: @escaping (Any?) -> Void) {
+      PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+        guard status == .authorized || status == .limited else {
+          reply(FlutterError(code: "denied", message: "Photos isn't allowed", details: nil))
+          return
+        }
+        PHPhotoLibrary.shared().performChanges({
+          let options = PHAssetResourceCreationOptions()
+          options.originalFilename = url.lastPathComponent
+          PHAssetCreationRequest.forAsset().addResource(with: .video, fileURL: url, options: options)
+        }) { saved, error in
+          if saved {
+            reply(nil)
+          } else {
+            reply(
+              FlutterError(
+                code: "failed", message: error?.localizedDescription ?? "not saved", details: nil))
+          }
+        }
+      }
+    }
+  #endif
 
   private static func flutterError(_ error: Error) -> FlutterError {
     switch error {
@@ -314,4 +389,64 @@ final class ReplayWriter {
     }
   }
 }
+#endif
+
+#if os(iOS) && canImport(Flutter)
+  /// The Files sheet exporting a copy of a video, under the name the app
+  /// gives it. Answers true once it's saved, false if cancelled.
+  final class SaveToFiles: NSObject, UIDocumentPickerDelegate {
+    /// The sheet showing now, kept until it answers.
+    private static var current: SaveToFiles?
+    private var result: FlutterResult?
+    private var copy: URL?
+
+    static func show(_ url: URL, named name: String, _ result: @escaping FlutterResult) {
+      let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+      let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+      guard let window = scene?.keyWindow ?? scene?.windows.first,
+        var top = window.rootViewController
+      else {
+        result(
+          FlutterError(code: "unavailable", message: "Claktory's window isn't open", details: nil))
+        return
+      }
+      while let shown = top.presentedViewController { top = shown }
+      // A copy under its name, beside it: the sheet names what it saves
+      // after the file.
+      let named = url.deletingLastPathComponent().appendingPathComponent(name)
+      do {
+        if named != url {
+          try? FileManager.default.removeItem(at: named)
+          try FileManager.default.linkItem(at: url, to: named)
+        }
+      } catch {
+        result(FlutterError(code: "failed", message: error.localizedDescription, details: nil))
+        return
+      }
+      current?.answer(false)
+      let save = SaveToFiles()
+      save.result = result
+      save.copy = named == url ? nil : named
+      current = save
+      let picker = UIDocumentPickerViewController(forExporting: [named], asCopy: true)
+      picker.delegate = save
+      top.present(picker, animated: true)
+    }
+
+    private func answer(_ saved: Bool) {
+      if let copy = copy { try? FileManager.default.removeItem(at: copy) }
+      copy = nil
+      result?(saved)
+      result = nil
+      if Self.current === self { Self.current = nil }
+    }
+
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+      answer(!urls.isEmpty)
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+      answer(false)
+    }
+  }
 #endif

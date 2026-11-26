@@ -132,10 +132,7 @@ void main() {
     await native.drew(3, 3);
     await settle(tester);
     expect(find.textContaining('is from the earlier version'), findsOneWidget);
-    expect(
-      find.text('Your drawings on 2 pages go with your answer.'),
-      findsOneWidget,
-    );
+    expect(find.text('Your drawings on 2 pages go with it.'), findsOneWidget);
 
     final before = native.calls.length;
     await tester.tap(find.text('Approve'));
@@ -230,10 +227,7 @@ void main() {
       ),
       findsOneWidget,
     );
-    expect(
-      find.text('Your drawings on 2 pages go with your answer.'),
-      findsOneWidget,
-    );
+    expect(find.text('Your drawings on 2 pages go with it.'), findsOneWidget);
     final before = native.calls.length;
     await tester.tap(find.text('Approve'));
     await settle(tester);

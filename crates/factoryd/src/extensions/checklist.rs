@@ -1448,6 +1448,16 @@ pub(crate) fn check_waits(factory: &Arc<Factory>) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// How many items each agent's checklist has that aren't done or dropped
+/// (Agent.checklist_open), by agent.
+pub(crate) fn open_counts(store: &Store) -> rusqlite::Result<std::collections::HashMap<String, u32>> {
+    let db = store.db();
+    let mut statement =
+        db.prepare("SELECT agent, COUNT(*) FROM checklist_items WHERE status NOT IN ('done', 'dropped') GROUP BY agent")?;
+    let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)))?;
+    rows.collect()
+}
+
 /// An agent is deleted, and its checklist with it.
 pub(crate) fn forget(store: &Store, agent: &str) -> rusqlite::Result<()> {
     let db = store.db();
@@ -1893,6 +1903,8 @@ fn run_add(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<To
     }
     let ids = add(&factory.store, agent, agent, &texts, &owner, goal).map_err(failed)?;
     factory.refresh_view(agent);
+    // Its count of open items (Agent.checklist_open).
+    factory.broadcast_workspace(&factory.lock());
     let said = match ids.as_slice() {
         [id] => format!("Added #{id}."),
         [first, .., last] => format!("Added #{first}-#{last}."),

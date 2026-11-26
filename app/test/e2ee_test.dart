@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:factory_app/device_account.dart';
 import 'package:factory_app/people/dm_keys.dart';
 import 'package:factory_app/people/e2ee.dart';
+import 'package:factory_app/protocol/factory/v1/factory.pb.dart' as pb;
 import 'package:factory_app/tunnel/api/dm.dart';
 import 'package:factory_app/tunnel/api/dm_transfer.dart';
 import 'package:factory_app/user_apps/session.dart';
@@ -1957,6 +1958,319 @@ void main() {
         expect(w.phone.e2ee.failure, DmFailure.none);
       },
     );
+
+    // E11-9 (Abbacchio's row 1453, Fugo 43016): over at the home, the
+    // rotation message the home stored and whose answer was lost was
+    // encrypted again at each Try again, under the same id, which the home
+    // refuses as a conflict: the Lock out never finished.
+    group('the rotation message over the home', () {
+      Future<void> settle() async {
+        for (var i = 0; i < 40; i++) {
+          await Future<void>.delayed(Duration.zero);
+        }
+      }
+
+      Future<FakeHome> overTheHome(
+        ({FakeWorker worker, FakeEndpoint phone}) w,
+      ) async {
+        final home = FakeHome(w.worker);
+        w.phone.e2ee.home = home;
+        await w.phone.e2ee.sync();
+        await settle();
+        expect(w.phone.e2ee.homeIsHere, isTrue);
+        return home;
+      }
+
+      List<pb.DmSend> rotations(FakeHome home) => [
+        for (final send in home.sends)
+          if (send.clientMessageId.startsWith('rotation-')) send,
+      ];
+
+      test('its answer lost: back from the log it counts as said, is never '
+          'encrypted again, and the Lock out finishes by itself', () async {
+        final w = await world();
+        final home = await overTheHome((worker: w.worker, phone: w.phone));
+        final old = w.phone.device.identity!;
+        home.loseAnswer = (send) =>
+            send.clientMessageId.startsWith('rotation-');
+        await w.phone.e2ee.changeKey(remove: ['mac'], keep: ['ipad']);
+        home.loseAnswer = null;
+        await settle();
+        await w.phone.e2ee.finishRemoval();
+        await settle();
+        // Said once: never sent again, under its id or another.
+        expect(rotations(home), hasLength(1));
+        expect(
+          w.phone.e2ee.sending.values.map((each) => each.problem),
+          isNot(contains('DM_SEND_RESULT_CONFLICT')),
+        );
+        expect(w.worker.log, contains('POST me/keys/rotate'));
+        expect(w.phone.device.identity, isNot(old));
+        expect(w.phone.e2ee.removal, isNull);
+        expect(await w.phone.device.rotation(), isNull);
+        w.phone.e2ee.dispose();
+      });
+
+      test('a conflict, the home holding other bytes under its id, is never '
+          'taken as said: the Lock out stops, and says so', () async {
+        final w = await world();
+        final home = await overTheHome((worker: w.worker, phone: w.phone));
+        final old = w.phone.device.identity!;
+        home.answerFor = (send) => send.clientMessageId.startsWith('rotation-')
+            ? pb.DmSendResult.DM_SEND_RESULT_CONFLICT
+            : null;
+        expect(
+          await w.phone.e2ee.changeKey(remove: ['mac'], keep: ['ipad']),
+          DmKeyChange.failed,
+        );
+        await settle();
+        final id = rotations(home).single.clientMessageId;
+        expect(w.phone.e2ee.sending[id]?.state, DmSendState.refused);
+        expect(w.phone.e2ee.sending[id]?.problem, 'DM_SEND_RESULT_CONFLICT');
+        expect((await w.phone.device.rotation())!.said, isFalse);
+        expect(w.worker.log, isNot(contains('POST me/keys/rotate')));
+        expect(w.phone.device.identity, old);
+        expect(w.phone.e2ee.removal, isNotNull);
+        w.phone.e2ee.dispose();
+      });
+
+      // Fugo 43016's point 3: the kept device read only its home, which
+      // hadn't brought the rotation message yet, and said the person's key
+      // was replaced by someone else.
+      test(
+        "a kept device whose home hasn't brought the rotation message "
+        "yet waits for it, and never says someone replaced the key",
+        () async {
+          final w = await world();
+          final ipadHome = FakeHome(w.worker);
+          w.ipad.e2ee.home = ipadHome;
+          await w.ipad.e2ee.sync();
+          await settle();
+          expect(w.ipad.e2ee.homeIsHere, isTrue);
+          expect(
+            await w.phone.e2ee.changeKey(remove: ['mac'], keep: ['ipad']),
+            isNull,
+          );
+          // The worker says the person's keys changed.
+          await w.ipad.e2ee.refreshKeys('matt');
+          await w.ipad.e2ee.sync();
+          await settle();
+          expect(w.ipad.e2ee.failure, DmFailure.none);
+          expect(w.ipad.e2ee.setup, DmSetup.ready);
+
+          // Still the old key, waiting: nothing was taken from the worker
+          // alone.
+          expect(w.ipad.device.identity, isNot(w.phone.device.identity));
+          w.ipad.e2ee.dispose();
+        },
+      );
+
+      test("Try again doesn't spend the kept device's hand-offs or the "
+          "removal limit again", () async {
+        final w = await world();
+        final home = await overTheHome((worker: w.worker, phone: w.phone));
+        // The home doesn't answer: the message waits, Try again after Try
+        // again.
+        home.loseAnswer = (send) =>
+            send.clientMessageId.startsWith('rotation-');
+        home.answerFor = (send) => send.clientMessageId.startsWith('rotation-')
+            ? pb.DmSendResult.DM_SEND_RESULT_HOME_FULL
+            : null;
+        for (var i = 0; i < 3; i++) {
+          expect(
+            await w.phone.e2ee.changeKey(remove: ['mac'], keep: ['ipad']),
+            DmKeyChange.failed,
+          );
+        }
+        expect(w.worker.handoffs['ipad'], hasLength(1));
+        expect(
+          w.worker.log.where((line) => line == 'POST /v1/devices/remove'),
+          hasLength(1),
+        );
+        w.phone.e2ee.dispose();
+      });
+    });
+
+    // Abbacchio's rows 1461 and 1462: Lock out B went through at the worker
+    // with its answer lost (and the check after), so the new key K1 stays
+    // under way here, handed to the iPad. Then Lock out of the iPad: its
+    // list change was signed under the old key and refused as stale at
+    // every Try again; and a relaunch finished K1 and dropped the Lock out
+    // of the iPad with it.
+    group('a Lock out while a new key the worker has is under way', () {
+      Future<
+        ({
+          FakeWorker worker,
+          FakeEndpoint phone,
+          FakeEndpoint ipad,
+          List<int> k1,
+          void Function(bool) offline,
+        })
+      >
+      lostRotation() async {
+        var lose = 0;
+        var offline = false;
+        final w = await world(
+          route: (call) => (method, path, [body]) async {
+            if (offline && path.endsWith('/me/keys') && method == 'PUT') {
+              throw const AccountServiceUnreachable('offline');
+            }
+            if (lose == 1 && path.contains('/dms/keys/matt')) {
+              lose = 2;
+              throw const AccountServiceUnreachable('offline');
+            }
+            final answer = await call(method, path, body);
+            if (path.endsWith('/me/keys/rotate') && lose == 0) {
+              lose = 1;
+              throw const AccountServiceUnreachable('offline');
+            }
+            return answer;
+          },
+        );
+        expect(
+          await w.phone.e2ee.changeKey(remove: ['mac'], keep: ['ipad']),
+          DmKeyChange.failed,
+        );
+        final k1 = (await w.phone.device.rotation())!.identityPublic;
+        expect(w.worker.keys['matt']!['identity_key'], dmB64(k1));
+        return (
+          worker: w.worker,
+          phone: w.phone,
+          ipad: w.ipad,
+          k1: k1,
+          offline: (bool on) => offline = on,
+        );
+      }
+
+      Future<void> lockedOut(
+        ({FakeWorker worker, FakeEndpoint phone, List<int> k1}) w,
+      ) async {
+        // Off the list, signed out, out of every group, and a key it was
+        // never handed.
+        expect(
+          w.phone.device.lists['matt']!.leaves.map((each) => each.leafId),
+          isNot(contains('ipad')),
+        );
+        expect(w.worker.signedOut['matt'], contains('ipad'));
+        for (final group in w.phone.e2ee.groups.values) {
+          expect(
+            await _leafIds(w.phone, group.groupId),
+            isNot(contains('ipad')),
+          );
+        }
+        final now = w.worker.keys['matt']!['identity_key'];
+        expect(now, isNot(dmB64(w.k1)));
+        expect(dmB64(w.phone.device.identity!), now);
+        expect(w.phone.e2ee.removal, isNull);
+      }
+
+      test('it finishes the key the worker has first, then locks the '
+          'device out and makes a key it never had', () async {
+        final w = await lostRotation();
+        expect(
+          await w.phone.e2ee.changeKey(remove: ['ipad'], keep: []),
+          isNull,
+        );
+        await lockedOut((worker: w.worker, phone: w.phone, k1: w.k1));
+      });
+
+      // Abbacchio's row 1463 (Fugo 43221): "Still on your old security
+      // key" kept a device locked out (signed out) since, and offered
+      // Remove… for one listed under the key now: the device itself.
+      test('Still on your old security key leaves out a device listed now '
+          'and one a Lock out signed out', () async {
+        final w = await world();
+        DmMember member(String leaf) => DmMember(
+          account: 'matt',
+          leafId: leaf,
+          kind: DmLeafKind.device,
+          name: leaf,
+          sinceMs: BigInt.one,
+        );
+        w.phone.device.replaced.addAll([member('ipad'), member('mac')]);
+        // Both listed under the key now: neither is offered.
+        expect(await w.phone.e2ee.replacedDevices(), isEmpty);
+        expect(
+          await w.phone.e2ee.changeKey(remove: ['mac'], keep: ['ipad']),
+          isNull,
+        );
+        // The Mac, off the list now, was signed out by the Lock out, and is
+        // in no group.
+        expect(await w.phone.e2ee.replacedDevices(), isEmpty);
+        // Signed out but still in a group here (kept by a removal another
+        // device of the person's made, say): shown, with its Remove, since
+        // that's what the row is for (Fugo 43752); in none, not.
+        w.phone.device.replaced.add(member('mac'));
+        expect(await w.phone.e2ee.replacedDevices(), isEmpty);
+        w.phone.device.holdLeaf(w.chat, 'matt/mac');
+        expect(await w.phone.e2ee.replacedDevices(), {'mac': 'mac'});
+      });
+
+      // Fugo 43752: finishing the key the worker had costs a rotation, so
+      // the one without the locked-out device may meet the worker's 3 a
+      // day. Never the generic failure: said, kept under way, and carried
+      // on by itself once the worker's day is over.
+      test('the worker refusing the new key for today keeps the Lock out '
+          'under way, says so, and makes the key by itself after', () async {
+        final w = await lostRotation();
+        w.worker.refuse = (route) => route == 'POST me/keys/rotate'
+            ? const AccountServiceError(
+                429,
+                'rate_limited',
+                'Too many tries. Try again in 5 hours.',
+              )
+            : null;
+        expect(
+          await w.phone.e2ee.changeKey(remove: ['ipad'], keep: []),
+          DmKeyChange.keyWaitsForLimit,
+        );
+        final e2ee = w.phone.e2ee;
+        expect(e2ee.removalStop, DmKeyChange.keyWaitsForLimit);
+        expect(e2ee.removal?.newKey, isTrue);
+        expect(e2ee.removal?.remove, contains('ipad'));
+        expect(e2ee.keyHeldByLockedOut, isTrue);
+        const day = Duration.millisecondsPerDay;
+        expect(
+          e2ee.keyChangeAtMs,
+          (w.phone.now ~/ day + 1) * day + Duration.millisecondsPerMinute,
+        );
+        // Everything but the key is done meanwhile.
+        expect(w.worker.signedOut['matt'], contains('ipad'));
+        for (final group in e2ee.groups.values) {
+          expect(
+            await _leafIds(w.phone, group.groupId),
+            isNot(contains('ipad')),
+          );
+        }
+        expect(w.worker.keys['matt']!['identity_key'], dmB64(w.k1));
+
+        // Not before its time.
+        await e2ee.sync();
+        expect(e2ee.removal, isNotNull);
+        w.worker.refuse = null;
+        w.phone.now = e2ee.keyChangeAtMs!;
+        expect(e2ee.waitOver, isTrue);
+        await e2ee.sync();
+        await lockedOut((worker: w.worker, phone: w.phone, k1: w.k1));
+        expect(e2ee.removalStop, isNull);
+        expect(e2ee.keyChangeAtMs, isNull);
+        expect(e2ee.keyHeldByLockedOut, isFalse);
+      });
+
+      test('stopped part-way, a relaunch carries the Lock out on, never '
+          'dropping it with the key it finishes', () async {
+        final w = await lostRotation();
+        w.offline(true);
+        expect(
+          await w.phone.e2ee.changeKey(remove: ['ipad'], keep: []),
+          isNotNull,
+        );
+        w.offline(false);
+        await w.phone.e2ee.start();
+        await w.phone.e2ee.finishRemoval();
+        await lockedOut((worker: w.worker, phone: w.phone, k1: w.k1));
+      });
+    });
 
     test('the Claktory this app shows is listed and enrolled again under '
         'the new key, its leaf kept in its channel', () async {

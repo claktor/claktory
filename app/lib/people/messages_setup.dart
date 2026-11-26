@@ -818,12 +818,26 @@ class _DevicesState extends State<_Devices> {
                         "sign ${names.length > 1 ? 'them' : 'it'} out of your "
                         "Claktory account, so your security key hasn't "
                         'changed yet. Try again.',
+                  // Connected to another account's Claktory (row 1453):
+                  // Try again can't finish it from there.
+                  DmKeyChange.waitsForOwnClaktory =>
+                    "$who can't read new messages, but your security key "
+                        "hasn't changed yet. It changes once this device "
+                        'connects to one of your own Claktories.',
+                  // The worker's 3 a day (Fugo 43752): it goes by itself.
+                  DmKeyChange.keyWaitsForLimit => _limitWords(
+                    context,
+                    who: who,
+                    many: names.length > 1,
+                    e2ee: widget.e2ee,
+                  ),
                   _ => '$who $isnt fully locked out yet.',
                 }
         : running
         ? 'Removing $who…'
         : '$who $isnt fully removed yet.';
     final signIn = !running && stop == DmKeyChange.signInAgain;
+    final byItself = removal.newKey && stop == DmKeyChange.keyWaitsForLimit;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: Space.xs),
       child: ActionLine(
@@ -833,7 +847,7 @@ class _DevicesState extends State<_Devices> {
             color: running ? palette.textMuted : palette.danger,
           ),
         ),
-        action: running
+        action: running || byItself
             ? const SizedBox.shrink()
             : Button(
                 label: signIn ? 'Sign in again…' : 'Try again',
@@ -882,7 +896,7 @@ class _DevicesState extends State<_Devices> {
       (context, close) => _RemoveDevice(
         e2ee: widget.e2ee,
         leafId: device.leafId,
-        name: device.name.isEmpty ? 'this device' : device.name,
+        name: device.name,
         since: since,
         close: close,
       ),
@@ -1321,10 +1335,13 @@ class _RemoveDeviceState extends State<_RemoveDevice> {
       _busy = true;
       _error = null;
     });
-    final name = widget.name;
+    // One with no name is "that device", never "this device", the one in
+    // hand (Abbacchio's row 1464).
+    final name = widget.name.isEmpty ? 'That device' : widget.name;
+    final nameIn = widget.name.isEmpty ? 'that device' : widget.name;
     // Kept as under way from here: closed part-way, it carries on at the
     // next launch, and Your devices offers Try again meanwhile.
-    final stopped = await widget.e2ee.remove(widget.leafId, name);
+    final stopped = await widget.e2ee.remove(widget.leafId, widget.name);
     if (stopped == null) {
       widget.close();
       return;
@@ -1333,7 +1350,7 @@ class _RemoveDeviceState extends State<_RemoveDevice> {
     setState(() {
       _busy = false;
       _error = switch (stopped) {
-        DmRemoveStop.failed => "Couldn't remove $name. Try again.",
+        DmRemoveStop.failed => "Couldn't remove $nameIn. Try again.",
         // Unreachable leaves it unknown; anything else was a refusal.
         DmRemoveStop.signOutUnreachable =>
           '$name no longer gets new messages, but it may still be signed '
@@ -1347,7 +1364,8 @@ class _RemoveDeviceState extends State<_RemoveDevice> {
 
   @override
   Widget build(BuildContext context) => FormFrame(
-    title: 'Remove ${proseCodes(widget.name)}?',
+    title:
+        'Remove ${widget.name.isEmpty ? 'the unnamed device' : proseCodes(widget.name)}?',
     body:
         '${widget.since.isEmpty ? '' : '${widget.since}.\n\n'}'
         'It stops getting new messages and is signed out of your '
@@ -1398,8 +1416,15 @@ class _ChangeKeyState extends State<_ChangeKey> {
   var _busy = false;
   String? _error;
 
+  /// The lost device's name, at the start of a sentence; one with none is
+  /// "That device", never "This device", which is the one in hand
+  /// (Abbacchio's row 1464).
   String get _name =>
-      widget.lost.name.isEmpty ? 'This device' : widget.lost.name;
+      widget.lost.name.isEmpty ? 'That device' : widget.lost.name;
+
+  /// [_name] inside a sentence.
+  String get _nameIn =>
+      widget.lost.name.isEmpty ? 'that device' : widget.lost.name;
 
   /// Since when the lost device has been the person's, to tell it from
   /// another of the same name.
@@ -1446,6 +1471,16 @@ class _ChangeKeyState extends State<_ChangeKey> {
               'it stopped.',
         DmKeyChange.signInAgain =>
           'For your security, sign in again to change your security key.',
+        DmKeyChange.waitsForOwnClaktory =>
+          "$_name no longer gets new messages, but your security key hasn't "
+              'changed yet. It changes once this device connects to one of '
+              'your own Claktories.',
+        DmKeyChange.keyWaitsForLimit => _limitWords(
+          context,
+          who: _name,
+          many: false,
+          e2ee: widget.e2ee,
+        ),
       };
       _signInFirst = stopped == DmKeyChange.signInAgain;
     });
@@ -1473,11 +1508,11 @@ class _ChangeKeyState extends State<_ChangeKey> {
     final type = TypeScale.of(context);
     return FormFrame(
       title:
-          'Lock out ${widget.lost.name.isEmpty ? 'this device' : proseCodes(_name)}?',
+          'Lock out ${widget.lost.name.isEmpty ? 'the unnamed device' : proseCodes(_name)}?',
       body:
           '${_lostSince.isEmpty ? '' : '$_lostSince.\n\n'}'
           '$_name is removed and signed out of your Claktory account, and '
-          "you get a new security key, so $_name can't read new messages. "
+          "you get a new security key, so $_nameIn can't read new messages. "
           'Your friends see your security key change.\n\n'
           "Also change your email's password, since your email can sign in "
           "new devices. And remove it in Settings → Devices, so it can't use "
@@ -1595,6 +1630,38 @@ String deviceSince(
     h24: MediaQuery.maybeAlwaysUse24HourFormatOf(context) ?? true,
   );
   return 'Since $day at $time';
+}
+
+/// What a Lock out says while its new key waits for the worker's next day
+/// ([DmKeyChange.keyWaitsForLimit], Fugo 43752): plainly not finished, and
+/// when it carries on by itself.
+String _limitWords(
+  BuildContext context, {
+  required String who,
+  required bool many,
+  required E2ee e2ee,
+}) {
+  final it = many ? 'them' : 'it';
+  final at = e2ee.keyChangeAtMs;
+  final when = at == null ? 'later' : _atWords(context, at);
+  return e2ee.keyHeldByLockedOut
+      ? '$who got your current security key before you locked $it out. '
+            'Claktory changes it again $when to finish locking $it out.'
+      : "$who can't read new messages, but your security key hasn't changed "
+            'yet: it can change only 3 times a day. Claktory changes it $when.';
+}
+
+/// "at 01:00", or "tomorrow at 01:00", on this device's clock.
+String _atWords(BuildContext context, int ms) {
+  final time = clockTime(
+    ms,
+    h24: MediaQuery.maybeAlwaysUse24HourFormatOf(context) ?? true,
+  );
+  final at = DateTime.fromMillisecondsSinceEpoch(ms);
+  final now = DateTime.now();
+  final today =
+      at.year == now.year && at.month == now.month && at.day == now.day;
+  return today ? 'at $time' : 'tomorrow at $time';
 }
 
 /// A device's name, whole (wrapped, never cut short), and since when it's

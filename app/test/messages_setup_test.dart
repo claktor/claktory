@@ -750,6 +750,30 @@ void main() {
       ]);
     });
 
+    // Fugo 43752: the worker's 3 new keys a day, met: said plainly, with
+    // when it carries on by itself, and no Try again in Your devices.
+    testWidgets("the worker refusing a new key for today says it isn't "
+        'finished and when it carries on', (tester) async {
+      final (worker, mac, _, _) = await three();
+      await _show(tester, mac.e2ee);
+      await tester.tap(find.text('Lost or stolen…').first);
+      await _settle(tester);
+      worker.refuse = (route) => route == 'POST me/keys/rotate'
+          ? const AccountServiceError(429, 'rate_limited', 'Too many tries.')
+          : null;
+      await tester.tap(find.text('Lock out'));
+      await _settle(tester);
+      const words =
+          "ipad can't read new messages, but your security key hasn't "
+          'changed yet: it can change only 3 times a day. Claktory changes '
+          'it ';
+      // The dialog's, and Your devices' under it, which has no Try again:
+      // it carries on by itself.
+      expect(find.textContaining(words), findsNWidgets(2));
+      expect(mac.e2ee.removalStop, DmKeyChange.keyWaitsForLimit);
+      expect(find.text('Try again'), findsOneWidget);
+    });
+
     // E11-6 (Fugo 41048, Abbacchio's row 12): the sign-in a new key wants,
     // cancelled, never stalls it silently: Your devices says what's still
     // true and asks to sign in again, after a relaunch too.

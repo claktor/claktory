@@ -437,7 +437,7 @@ void main() {
     await tester.tap(find.text('Show recovery key…'));
     await pumpFrames(tester);
     expect(harness.last.hasShowRecoveryKey(), isTrue);
-    expect(find.text('Your recovery key'), findsOneWidget);
+    expect(find.text('Recovery key for this Mac'), findsOneWidget);
     expect(find.text('ABCD-EFGH-IJKL-MNOP'), findsOneWidget);
     await tester.tap(find.text('Done').last);
     await pumpFrames(tester);
@@ -469,6 +469,29 @@ void main() {
     final sent = harness.backend.sent;
     expect(sent[sent.length - 2].hasAccountSignOut(), isTrue);
     expect(sent.last.setAccountService.url, 'http://127.0.0.1:8080');
+  });
+
+  testWidgets('a sign-out claktory.com will hear later is said on the '
+      'sign-in step that covers Settings', (tester) async {
+    final snapshot = withAccount(signedOut);
+    snapshot.account.problem =
+        'Signed out. Claktory tells claktory.com as soon as it can reach it.';
+    final harness = Harness(snapshot);
+    await harness.show(tester, size: const Size(1200, 900));
+    await pumpFrames(tester);
+    expect(find.text('Sign in to Claktory'), findsOneWidget);
+    expect(
+      find.text(
+        'Signed out. Claktory tells claktory.com as soon as it can reach it.',
+      ),
+      findsOneWidget,
+    );
+    // Told: the line goes with the problem.
+    final told = harness.backend.workspace.workspace.deepCopy()
+      ..account.problem = '';
+    await harness.apply(tester, told);
+    await pumpFrames(tester);
+    expect(find.byKey(const ValueKey('sign-in-notice')), findsNothing);
   });
 
   testWidgets('a Claktory removed at claktory.com says so and signs in '
@@ -547,11 +570,11 @@ void main() {
     await tester.tap(find.text('Show recovery key…'));
     await pumpFrames(tester);
     expect(tester.takeException(), isNull);
-    expect(find.text('Your recovery key'), findsOneWidget);
+    expect(find.text('Recovery key for this Mac'), findsOneWidget);
 
     final sheet = find
         .ancestor(
-          of: find.text('Your recovery key'),
+          of: find.text('Recovery key for this Mac'),
           matching: find.byType(Scrollable),
         )
         .first;
@@ -576,7 +599,7 @@ void main() {
     await pumpFrames(tester);
     await tester.tap(find.text('Done'));
     await pumpFrames(tester);
-    expect(find.text('Your recovery key'), findsNothing);
+    expect(find.text('Recovery key for this Mac'), findsNothing);
     expect(tester.takeException(), isNull);
   });
 }

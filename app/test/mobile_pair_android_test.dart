@@ -93,19 +93,25 @@ void main() {
     harness.camera
       ..granting = false
       ..afterRefusal = CameraAccess.undetermined;
-    // The first screen's way to scan asks at once.
+    // The first screen's way to scan says why first; Continue asks.
     await tester.tap(find.text('Scan code instead'));
     await pumpFrames(tester);
+    expect(harness.camera.asked, 0);
+    expect(find.text('Scan the code'), findsOneWidget);
+    await tester.tap(find.text('Continue'));
+    await pumpFrames(tester);
     expect(harness.camera.asked, 1);
-    expect(find.text('Scan code'), findsOneWidget);
+    // Android can ask once more: why again, with Continue.
+    expect(find.text('Continue'), findsOneWidget);
     expect(find.text('Open Settings'), findsNothing);
 
     harness.camera.afterRefusal = CameraAccess.denied;
-    await tester.tap(find.text('Scan code'));
+    await tester.tap(find.text('Continue'));
     await pumpFrames(tester);
     expect(harness.camera.asked, 2);
+    expect(find.text('The camera is off for Claktory'), findsOneWidget);
     expect(find.text('Open Settings'), findsOneWidget);
-    expect(find.text('Scan code'), findsNothing);
+    expect(find.text('Continue'), findsNothing);
   });
 
   testWidgets('on an iPhone, a no sends the person to Settings at once', (
@@ -119,8 +125,16 @@ void main() {
     harness.camera.granting = false;
     await tester.tap(find.text('Scan code instead'));
     await pumpFrames(tester);
+    await tester.tap(find.text('Continue'));
+    await pumpFrames(tester);
     expect(harness.camera.asked, 1);
     expect(find.text('Open Settings'), findsOneWidget);
+    expect(
+      find.text(
+        "Turn it on in Settings on this iPhone, or paste the code instead.",
+      ),
+      findsOneWidget,
+    );
   });
 
   testWidgets('on Android with the camera refused: Settings, in its words', (
@@ -129,7 +143,9 @@ void main() {
     await _show(tester, TargetPlatform.android, camera: CameraAccess.denied);
     await pastPairStart(tester);
     expect(
-      find.text('To scan, allow Claktory to use the camera in Settings.'),
+      find.text(
+        "Turn it on in Android's Settings, or paste the code instead.",
+      ),
       findsOneWidget,
     );
     expect(find.text('Open Settings'), findsOneWidget);

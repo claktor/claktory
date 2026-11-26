@@ -9,6 +9,10 @@ import 'scope.dart';
 
 /// What dropping files on the window would do now, for the overlay.
 enum DropWhere {
+  /// Onto a card whose field has the keys (#511), to [DropPlace.name]:
+  /// "your answer to June".
+  card,
+
   /// Into the message box showing, to [DropPlace.name].
   box,
 
@@ -53,6 +57,9 @@ class _WindowDropOverlayState extends State<WindowDropOverlay> {
   DropPlace _placeNow(BuildContext context) {
     final takes = FileDrop.takesFiles.value;
     final workspace = AppScope.of(context).workspace;
+    if (FileDrop.cardOver.value ?? FileDrop.divertedTo.value case final card?) {
+      return (where: DropWhere.card, name: card, color: null);
+    }
     if (takes == null) return (where: DropWhere.none, name: '', color: null);
     if (!takes || selectedChat(workspace.workspace) != null) {
       return (where: DropWhere.textOnly, name: '', color: null);
@@ -75,9 +82,11 @@ class _WindowDropOverlayState extends State<WindowDropOverlay> {
     return IgnorePointer(
       // Rebuilt as files come and go; what takes them is read then (boxes
       // claim the window while they're built, so it isn't listened to).
-      child: ValueListenableBuilder<int>(
-        valueListenable: FileDrop.count,
-        builder: (context, count, _) {
+      child: ListenableBuilder(
+        // Where they are too: over a card, they'd go to it (#511).
+        listenable: Listenable.merge([FileDrop.count, FileDrop.cardOver]),
+        builder: (context, _) {
+          final count = FileDrop.count.value;
           final shown = count > 0;
           if (shown) {
             _count = count;
@@ -103,9 +112,13 @@ class _WindowDropOverlayState extends State<WindowDropOverlay> {
   Widget _scrim(BuildContext context, DropPlace place, int count) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    final takes = place.where == DropWhere.box;
+    final takes = place.where == DropWhere.box || place.where == DropWhere.card;
     final color = takes ? place.color ?? palette.signal : palette.textMuted;
     final (String title, String? note) = switch (place.where) {
+      DropWhere.card => (
+        'Drop to add to ${place.name}',
+        count > 1 ? '$count files' : null,
+      ),
       DropWhere.box => (
         place.name.isEmpty
             ? 'Drop to add to your message'

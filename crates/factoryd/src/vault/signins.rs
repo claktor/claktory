@@ -18,13 +18,19 @@
 //!   could go back to reads the vault (`bin/factoryd.previous`'s hash is
 //!   among those that ran with this, `sign-ins-backends`); then it's
 //!   emptied, and stays so.
+//! - Some providers' sign-ins are kept only in the vault
+//!   (`credentials::VAULT_ONLY`: Grok, #493): never in `auth.json`, not in
+//!   its copy for an older backend (which doesn't know them), and signing
+//!   in to them while the vault is locked is refused.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
 use factory_agent::Error;
-use factory_agent::credentials::{CredentialBacking, Loaded, merge, outline, read_document, write_document};
+use factory_agent::credentials::{
+    CredentialBacking, Loaded, merge, outline, plaintext, read_document, vault_only_error, vault_only_in, write_document,
+};
 use rusqlite::OptionalExtension;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -212,7 +218,11 @@ impl CredentialBacking for SignIns {
             if !locked && self.moved() && self.factory.upgrade().is_some_and(|factory| factory.vault.exists()) {
                 return Err(factory_agent::credentials::locked_error(""));
             }
-            // Sign-ins made while it's locked, or before they moved.
+            // Sign-ins made while it's locked, or before they moved: never
+            // those kept only in the vault.
+            if let Some(provider) = vault_only_in(all) {
+                return Err(vault_only_error(provider));
+            }
             return write_document(&self.auth, all);
         };
         let mut all = all.clone();
@@ -226,7 +236,7 @@ impl CredentialBacking for SignIns {
         }
         self.seal(&factory, &all)?;
         if mirror {
-            write_document(&self.auth, &all)?;
+            write_document(&self.auth, &plaintext(&all))?;
             self.note_taken()?;
         }
         Ok(())
@@ -247,8 +257,9 @@ impl CredentialBacking for SignIns {
             }
         }
         if self.mirror.load(Ordering::Relaxed) {
-            if plain != all {
-                write_document(&self.auth, &all)?;
+            let copy = plaintext(&all);
+            if plain != copy {
+                write_document(&self.auth, &copy)?;
             }
         } else if !plain.is_empty() {
             write_document(&self.auth, &Map::new())?;

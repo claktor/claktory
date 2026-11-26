@@ -27,6 +27,12 @@ pub(crate) fn canonical(input: &str) -> Result<String, String> {
         return Err("A session can't be for an IP address: give the site's name.".to_owned());
     };
     let host = host.trim_end_matches('.');
+    // Plain letter-digit-hyphen labels only (Fugo 41161): never a pattern
+    // (`*`), an escape, or an empty label, which Chrome never names as a
+    // page's origin, so they'd only seem to work.
+    if !host.split('.').all(|label| !label.is_empty() && label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')) {
+        return Err(format!("{host} isn't a site's name: give one like https://example.com, exactly, never a pattern."));
+    }
     if !host.contains('.') || LOCAL_NAMES.contains(&host) || LOCAL_SUFFIXES.iter().any(|suffix| host.ends_with(suffix)) {
         return Err(format!("{host} is a name on this computer or its network: a session is only for a site on the internet."));
     }
@@ -49,6 +55,8 @@ mod tests {
         assert_eq!(canonical("https://bücher.example").unwrap(), "https://xn--bcher-kva.example");
         // A Cyrillic а in "clаktory" is another site, spelled so.
         assert_eq!(canonical("https://clаktory.com").unwrap(), "https://xn--clktory-3fg.com");
+        // An escape is the name it stands for, as Chrome reads it.
+        assert_eq!(canonical("https://ex%41mple.com").unwrap(), "https://example.com");
     }
 
     #[test]
@@ -71,6 +79,9 @@ mod tests {
             "chrome://settings",
             "javascript:alert(1)",
             "example.com",
+            "https://*.example.com",
+            "https://shop..example",
+            "https://shop_1.example",
         ] {
             assert!(canonical(refused).is_err(), "{refused}");
         }

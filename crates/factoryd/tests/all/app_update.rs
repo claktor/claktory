@@ -90,11 +90,82 @@ async fn a_release_without_an_app_serves_the_mac_releases() {
     assert_eq!(archive, bytes);
     assert_eq!((last.sha256, last.app_name.as_str()), (sha256(&bytes), "Factory.app"));
 
-    // A Mac release that isn't what the manifest said is refused, once.
+    // A Mac release that isn't what the manifest said is refused, and said
+    // again to every ask for a while rather than downloaded again at each
+    // (friend bug #56): even once it would be right.
     note("2026.11.21-0900", &"0".repeat(64));
     let refused = fetch_all(&mut client, &mut view, "2026.11.21-0900").await.expect_err("refused");
-    assert!(refused.contains("the Mac release isn't what its manifest says: its SHA-256 is"), "{refused}");
+    assert!(refused.contains("the Mac app it downloaded didn't match the release, so it wasn't used"), "{refused}");
+    assert!(!refused.contains("SHA-256") && !refused.contains(&"0".repeat(64)), "no hashes for the person: {refused}");
     assert!(!dir.join("home/releases/2026.11.21-0900/app.tar.gz").exists());
+    note("2026.11.21-0900", &sha256(&bytes));
+    for _ in 0..3 {
+        let again = apply_request(&mut client, &mut view, fetch("2026.11.21-0900", 0)).await;
+        assert!(matches!(&again, Body::Error(error) if error.message == refused), "{again:?}");
+    }
+    assert!(!dir.join("home/releases/2026.11.21-0900/app.tar.gz").exists());
+}
+
+/// The Mac release is a .tar.xz since #454: a Linux Claktory reads its app's
+/// name in Rust, with no xz on the computer, and serves it as it is, which
+/// every Mac app's `tar -xzf` unpacks (friend bug #56).
+#[tokio::test]
+async fn a_mac_release_in_xz_is_served_too() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    // As publish.sh packs it: the app first, then the rest.
+    let published = dir.join("published");
+    std::fs::create_dir_all(published.join("Claktory.app/Contents")).expect("mkdir");
+    std::fs::write(published.join("Claktory.app/Contents/Info.plist"), "<plist/>").expect("write");
+    std::fs::write(published.join("factoryd"), "mac backend").expect("write");
+    let plain = dir.join("factory-mac.tar");
+    let status = std::process::Command::new("tar")
+        .arg("-cf")
+        .arg(&plain)
+        .arg("-C")
+        .arg(&published)
+        .args(["Claktory.app", "factoryd"])
+        .status()
+        .expect("tar");
+    assert!(status.success());
+    // With xz as publish.sh runs it where there is one; else in Rust.
+    let tarball = dir.join("factory-mac.tar.xz");
+    let by_xz = std::process::Command::new("xz")
+        .args(["-T1", "--lzma2=preset=9e,dict=192MiB", "-c"])
+        .arg(&plain)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| output.stdout);
+    let bytes = by_xz.unwrap_or_else(|| {
+        let mut packed = Vec::new();
+        lzma_rs::xz_compress(&mut std::io::BufReader::new(std::fs::File::open(&plain).expect("tar")), &mut packed).expect("xz");
+        packed
+    });
+    assert_eq!(&bytes[..6], b"\xFD7zXZ\0");
+    std::fs::write(&tarball, &bytes).expect("write");
+    let folder = dir.join("home/releases/0.1.24");
+    std::fs::create_dir_all(&folder).expect("mkdir");
+    std::fs::write(folder.join("factoryd"), "linux backend").expect("write");
+    let source = serde_json::json!({"url": format!("file://{}", tarball.display()), "sha256": sha256(&bytes), "size": bytes.len()});
+    std::fs::write(folder.join("app-source.json"), source.to_string()).expect("write");
+
+    let (archive, last) = fetch_all(&mut client, &mut view, "0.1.24").await.expect("the app");
+    assert_eq!(archive, bytes, "served as it is");
+    assert_eq!(last.app_name, "Claktory.app");
+    // And it unpacks as an app does it, where that tar is.
+    if cfg!(target_os = "macos") {
+        let fetched = dir.join("app.tar.gz.part");
+        std::fs::write(&fetched, &archive).expect("write");
+        let into = dir.join("unpacked");
+        std::fs::create_dir_all(&into).expect("mkdir");
+        let status =
+            std::process::Command::new("/usr/bin/tar").arg("-xzf").arg(&fetched).arg("-C").arg(&into).arg("Claktory.app").status().expect("tar");
+        assert!(status.success());
+        assert_eq!(std::fs::read_to_string(into.join("Claktory.app/Contents/Info.plist")).expect("unpacked"), "<plist/>");
+    }
 }
 
 #[tokio::test]

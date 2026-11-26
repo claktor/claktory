@@ -199,11 +199,11 @@ void main() {
     await _open(tester, harness);
 
     expect(
-      find.text('Unlock your secrets with your recovery key'),
+      find.text('Unlock the secrets on this Mac with its recovery key'),
       findsOneWidget,
     );
     expect(find.text('Unlock them with your recovery key.'), findsOneWidget);
-    await tester.tap(find.text('Unlock your secrets with your recovery key'));
+    await tester.tap(find.text('Unlock the secrets on this Mac with its recovery key'));
     await settle(tester);
     expect(find.byType(UnlockSecretsForm), findsOneWidget);
 

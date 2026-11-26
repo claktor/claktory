@@ -148,7 +148,10 @@ CREATE TABLE IF NOT EXISTS devices (
     version TEXT NOT NULL,
     created INTEGER NOT NULL,
     last_seen INTEGER NOT NULL,
-    signed_in INTEGER
+    signed_in INTEGER,
+    -- The Claktory that vouched for it (#529), when it signed in through
+    -- the Claktory on its own computer rather than by email.
+    vouched_by TEXT
 );
 CREATE INDEX IF NOT EXISTS devices_account ON devices (account_id);
 CREATE TABLE IF NOT EXISTS device_keys (
@@ -176,6 +179,13 @@ CREATE TABLE IF NOT EXISTS key_accounts (
     account_id TEXT NOT NULL
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS key_accounts_account ON key_accounts (account_id);
+-- Backend keys of Claktories that signed themselves out (#524): never
+-- registered or taken as proof again, whoever holds a copy. Linked to no
+-- Claktory or account.
+CREATE TABLE IF NOT EXISTS retired_backend_keys (
+    backend_key TEXT PRIMARY KEY,
+    retired INTEGER NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value INTEGER NOT NULL
@@ -237,6 +247,17 @@ CREATE TABLE IF NOT EXISTS apps_sign_outs (
     tries INTEGER NOT NULL,
     next_try INTEGER NOT NULL,
     PRIMARY KEY (account_id, account_key)
+) WITHOUT ROWID;
+-- Claktories' registrations ended (removed, signed out, signed in again)
+-- that the user-apps worker hasn't heard of yet (E11-4): it drops their
+-- grants. Asked until it has, like apps_sign_outs.
+CREATE TABLE IF NOT EXISTS apps_claktory_removals (
+    account_id TEXT NOT NULL,
+    claktory_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL,
+    tries INTEGER NOT NULL,
+    next_try INTEGER NOT NULL,
+    PRIMARY KEY (account_id, claktory_id, epoch)
 ) WITHOUT ROWID;
 -- Each month's usage breakdowns for Charts (#411), published once after
 -- it ends (`stats::publish`): counts only, folded and suppressed as
@@ -334,6 +355,13 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
         tx.query_row("SELECT COUNT(*) > 0 FROM pragma_table_info('devices') WHERE name = 'signed_in'", [], |row| row.get(0))?;
     if !signed_in {
         tx.execute_batch("ALTER TABLE devices ADD COLUMN signed_in INTEGER")?;
+    }
+    // The Claktory each vouched device signed in through (#529): NULL for
+    // every device before, which all signed in by email.
+    let vouched_by: bool =
+        tx.query_row("SELECT COUNT(*) > 0 FROM pragma_table_info('devices') WHERE name = 'vouched_by'", [], |row| row.get(0))?;
+    if !vouched_by {
+        tx.execute_batch("ALTER TABLE devices ADD COLUMN vouched_by TEXT")?;
     }
     // Keys signed in, or removed, before the service kept each key's
     // account (row 671): theirs, so they don't sign in to another either.
@@ -607,7 +635,10 @@ pub fn claktory_by_token(conn: &Connection, token: &str) -> rusqlite::Result<Opt
 
 /// A Claktory moved: its new backend key and token replace the old (which
 /// stop working), and its computer's name, version and platform are the
-/// new computer's. False when the token is another Claktory's already.
+/// new computer's; the devices it vouched for, apps on the computer it
+/// left, are signed out (#529). False when the token is another
+/// Claktory's already.
+#[allow(clippy::too_many_arguments)]
 pub fn moved(
     conn: &Connection,
     id: &str,
@@ -616,6 +647,7 @@ pub fn moved(
     name: &str,
     version: &str,
     platform: &str,
+    apps: Option<i64>,
 ) -> rusqlite::Result<bool> {
     let taken: bool =
         conn.query_row("SELECT EXISTS (SELECT 1 FROM claktories WHERE token_hash = ?1)", params![hash(token)], |row| row.get(0))?;
@@ -626,6 +658,7 @@ pub fn moved(
         "UPDATE claktories SET backend_key = ?2, token_hash = ?3, name = ?4, version = ?5, platform = ?6 WHERE id = ?1",
         params![id, backend_key, hash(token), name, version, platform],
     )?;
+    vouches_end(conn, id, apps)?;
     Ok(true)
 }
 
@@ -674,7 +707,7 @@ pub const CLAKTORIES_PER_ACCOUNT: u32 = 10;
 /// again a new token, backend key and epoch, undoing a removal. `proven`:
 /// the Claktory proved it holds the backend key it has now, so it may move
 /// from another account (signed out there, signing in to this one).
-pub fn register(conn: &mut Connection, request: &Request, token: &str, now: i64, proven: bool) -> rusqlite::Result<Registered> {
+pub fn register(conn: &mut Connection, request: &Request, token: &str, now: i64, proven: bool, apps: bool) -> rusqlite::Result<Registered> {
     let (Some(id), Some(name), Some(backend_key), Some(version), Some(platform)) =
         (&request.claktory_id, &request.name, &request.backend_key, &request.version, &request.platform)
     else {
@@ -700,12 +733,18 @@ pub fn register(conn: &mut Connection, request: &Request, token: &str, now: i64,
     }
     let epoch = match &existing {
         Some(existing) => {
+            // Signed in again without signing out first (here, or moving
+            // to another account): the registration it had ends (E11-4).
+            // A removed one's end was queued when it was removed.
+            if apps && existing.revoked_at.is_none() {
+                registration_ended(&tx, id, now)?;
+            }
             if existing.account_id != account_id {
                 // Removed by its old account, or moving from it: what that
                 // account knew of it goes.
                 tx.execute("DELETE FROM endpoints WHERE claktory_id = ?1", params![id])?;
                 tx.execute("DELETE FROM share_releases WHERE claktory_id = ?1", params![id])?;
-                anonymize(&tx, id)?;
+                anonymize(&tx, id, None)?;
                 tx.execute(
                     "UPDATE claktories SET agents = NULL, projects = NULL, devices = NULL, country = NULL, region = NULL, city = NULL,
                      display_name = NULL, color = NULL, relays = NULL WHERE id = ?1",
@@ -729,6 +768,9 @@ pub fn register(conn: &mut Connection, request: &Request, token: &str, now: i64,
             1
         }
     };
+    // Signed in afresh (after signing out, or to another account): the
+    // devices it vouched for under its last sign-in are signed out (#529).
+    vouches_end(&tx, id, apps.then_some(now))?;
     tx.execute("UPDATE accounts SET last_sign_in = ?2 WHERE id = ?1", params![account_id, now])?;
     tx.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('since', ?1)", params![now])?;
     seen(&tx, id, &account_id, now)?;
@@ -913,8 +955,11 @@ fn add_activity(conn: &Connection, id: &str, activity: &Activity) -> rusqlite::R
 
 /// Unlinks a Claktory's usage and activity from it, keeping the totals:
 /// they join the anonymous ones (Claktory id ""), and the days it was in
-/// touch count under a random stand-in.
-fn anonymize(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+/// touch count under a random stand-in of its own, with `account` (a
+/// stand-in its deleted account's Claktories share, so the account counts
+/// once) as its user, or its own stand-in again when None (it moved to
+/// another account: unlinked from the one it left).
+fn anonymize(conn: &Connection, id: &str, account: Option<&str>) -> rusqlite::Result<()> {
     // `WHERE true` lets SQLite parse the upsert after a SELECT.
     conn.execute(
         &format!(
@@ -956,11 +1001,24 @@ fn anonymize(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM health WHERE claktory_id = ?1", params![id])?;
     conn.execute("DELETE FROM claktory_devices WHERE claktory_id = ?1", params![id])?;
     conn.execute("DELETE FROM devices_connected WHERE claktory_id = ?1", params![id])?;
-    let stand_in = format!("deleted-{}", crate::protocol::b64(&crate::protocol::random_32()[..12]));
-    conn.execute("UPDATE seen_days SET claktory_id = ?2, account_id = ?2 WHERE claktory_id = ?1", params![id, stand_in])?;
+    let own = stand_in();
+    conn.execute(
+        "UPDATE seen_days SET claktory_id = ?2, account_id = ?3 WHERE claktory_id = ?1",
+        params![id, own, account.unwrap_or(&own)],
+    )?;
     conn.execute("DELETE FROM periods WHERE claktory_id = ?1", params![id])?;
     Ok(())
 }
+
+/// What stands in for a Claktory or a user no longer there in the days it
+/// was in touch: random, never derived from what it stands for.
+fn stand_in() -> String {
+    format!("{STAND_IN}{}", crate::protocol::b64(&crate::protocol::random_32()[..12]))
+}
+
+/// How every stand-in starts. A Claktory could choose an id that starts so
+/// too, so a stand-in is one that also has no row in `claktories`.
+pub const STAND_IN: &str = "deleted-";
 
 /// A Claktory's usage since a day, per model: (the model's name as the app
 /// shows it, or its id; requests; all tokens).
@@ -1181,17 +1239,135 @@ pub fn allowlist(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     )
 }
 
-/// Removes a Claktory from its account; false when it isn't the account's,
-/// or is removed already.
-pub fn revoke(conn: &Connection, account_id: &str, id: &str, now: i64) -> rusqlite::Result<bool> {
-    let changed = conn.execute(
+/// Removes a Claktory from its account, and signs out the devices it
+/// vouched for (#529); false when it isn't the account's, or is removed
+/// already. With `apps`, the user-apps worker is to hear of those, and of
+/// the registration's end, so its agents' grants go (E11-4).
+pub fn revoke(conn: &mut Connection, account_id: &str, id: &str, apps: bool, now: i64) -> rusqlite::Result<bool> {
+    let tx = conn.transaction()?;
+    let changed = tx.execute(
         "UPDATE claktories SET revoked_at = ?3 WHERE id = ?1 AND account_id = ?2 AND revoked_at IS NULL",
         params![id, account_id, now],
     )?;
     if changed > 0 {
-        bump_allowlist(conn)?;
+        bump_allowlist(&tx)?;
+        vouches_end(&tx, id, apps.then_some(now))?;
+        if apps {
+            registration_ended(&tx, id, now)?;
+        }
     }
+    tx.commit()?;
     Ok(changed > 0)
+}
+
+/// A Claktory signed itself out (#524), with `token`: its registration
+/// ends as a removal does (`revoke`), its token stops matching any (so it's
+/// `401 unauthorized` from then on, not `403 revoked`), and its backend key
+/// is retired for good; the devices it vouched for are signed out (#529).
+/// Nothing changes when the token is no longer its (it signed in again
+/// meanwhile). With `apps`, the user-apps worker is to hear of those, and
+/// of the registration's end, so its agents' grants go (E11-4).
+pub fn sign_out_claktory(conn: &mut Connection, claktory: &Claktory, token: &str, apps: bool, now: i64) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    // Never a token's hash (64 hex), and unique, as the column must be.
+    let changed = tx.execute(
+        "UPDATE claktories SET revoked_at = coalesce(revoked_at, ?2), token_hash = ?3 WHERE id = ?1 AND token_hash = ?4",
+        params![claktory.id, now, format!("signed-out:{}", claktory.id), hash(token)],
+    )?;
+    if changed > 0 {
+        tx.execute(
+            "INSERT OR IGNORE INTO retired_backend_keys (backend_key, retired) VALUES (?1, ?2)",
+            params![claktory.backend_key, now],
+        )?;
+        bump_allowlist(&tx)?;
+        vouches_end(&tx, &claktory.id, apps.then_some(now))?;
+        if apps {
+            registration_ended(&tx, &claktory.id, now)?;
+        }
+    }
+    tx.commit()
+}
+
+/// Queues telling the user-apps worker that `claktory_id`'s registration
+/// now (its account and epoch, as the row has them) ended (E11-4), in the
+/// caller's transaction, before the row changes.
+fn registration_ended(tx: &Connection, claktory_id: &str, now: i64) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO apps_claktory_removals (account_id, claktory_id, epoch, tries, next_try)
+         SELECT account_id, id, epoch, 0, ?2 FROM claktories WHERE id = ?1
+         ON CONFLICT (account_id, claktory_id, epoch) DO UPDATE SET tries = 0, next_try = ?2",
+        params![claktory_id, now],
+    )?;
+    Ok(())
+}
+
+/// Registrations ended that are due to be told to the user-apps worker at
+/// `now` (at most `limit`): account, Claktory, epoch, and how often it was
+/// asked already.
+pub fn apps_claktory_removals_due(conn: &Connection, now: i64, limit: u32) -> rusqlite::Result<Vec<(String, String, u64, i64)>> {
+    let mut statement = conn.prepare(
+        "SELECT account_id, claktory_id, epoch, tries FROM apps_claktory_removals WHERE next_try <= ?1 ORDER BY next_try LIMIT ?2",
+    )?;
+    statement.query_map(params![now, limit], |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? as u64, row.get(3)?)))?.collect()
+}
+
+/// The worker heard that a registration ended: done.
+pub fn apps_claktory_removed(conn: &Connection, account_id: &str, claktory_id: &str, epoch: u64) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM apps_claktory_removals WHERE account_id = ?1 AND claktory_id = ?2 AND epoch = ?3",
+        params![account_id, claktory_id, epoch as i64],
+    )?;
+    Ok(())
+}
+
+/// The worker didn't hear of it: asked again at `next_try`.
+pub fn apps_claktory_removal_failed(
+    conn: &Connection,
+    account_id: &str,
+    claktory_id: &str,
+    epoch: u64,
+    next_try: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE apps_claktory_removals SET tries = tries + 1, next_try = ?4 WHERE account_id = ?1 AND claktory_id = ?2 AND epoch = ?3",
+        params![account_id, claktory_id, epoch as i64, next_try],
+    )?;
+    Ok(())
+}
+
+/// Whether a backend key was retired by its Claktory's sign-out.
+pub fn backend_key_retired(conn: &Connection, backend_key: &str) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT EXISTS (SELECT 1 FROM retired_backend_keys WHERE backend_key = ?1)", params![backend_key], |row| row.get(0))
+}
+
+/// The codes `claktory_id` vouched with that weren't used yet no longer
+/// work (#529).
+pub fn forget_vouches(conn: &Connection, claktory_id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM requests WHERE kind = 'vouch' AND claktory_id = ?1", params![claktory_id])?;
+    Ok(())
+}
+
+/// What `claktory_id` vouched for ends: the devices signed in through it
+/// are signed out, and its codes not used yet no longer work.
+fn vouches_end(tx: &Connection, claktory_id: &str, apps: Option<i64>) -> rusqlite::Result<Vec<(String, String)>> {
+    forget_vouches(tx, claktory_id)?;
+    unbind_vouched(tx, claktory_id, None, apps)
+}
+
+/// Signs out the devices `claktory_id` vouched for, other than `except`:
+/// (account, key) of each.
+fn unbind_vouched(tx: &Connection, claktory_id: &str, except: Option<&str>, apps: Option<i64>) -> rusqlite::Result<Vec<(String, String)>> {
+    let keys: Vec<String> =
+        query(tx.prepare("SELECT account_key FROM devices WHERE vouched_by = ?1 ORDER BY account_key")?, params![claktory_id], |row| {
+            row.get(0)
+        })?;
+    let mut unbound = Vec::new();
+    for key in keys.into_iter().filter(|key| except != Some(key.as_str())) {
+        if let Some(account) = unbind(tx, &key, None, apps)? {
+            unbound.push((account, key));
+        }
+    }
+    Ok(unbound)
 }
 
 /// Deletes an account and everything linked to it. With `apps` (the service
@@ -1199,8 +1375,10 @@ pub fn revoke(conn: &Connection, account_id: &str, id: &str, now: i64) -> rusqli
 /// same transaction, so a deletion is never left half done.
 pub fn delete_account(conn: &mut Connection, account: &Account, apps: bool, now: i64) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
+    // One user in the days its Claktories were in touch, however many.
+    let user = stand_in();
     for claktory in claktories(&tx, &account.id)? {
-        anonymize(&tx, &claktory.id)?;
+        anonymize(&tx, &claktory.id, Some(&user))?;
     }
     for table in ["endpoints", "share_releases"] {
         tx.execute(
@@ -1217,6 +1395,7 @@ pub fn delete_account(conn: &mut Connection, account: &Account, apps: bool, now:
     tx.execute("DELETE FROM removed_devices WHERE account_id = ?1", params![account.id])?;
     tx.execute("DELETE FROM key_accounts WHERE account_id = ?1", params![account.id])?;
     tx.execute("DELETE FROM apps_sign_outs WHERE account_id = ?1", params![account.id])?;
+    tx.execute("DELETE FROM apps_claktory_removals WHERE account_id = ?1", params![account.id])?;
     tx.execute("DELETE FROM requests WHERE email = ?1", params![account.email])?;
     tx.execute("DELETE FROM sessions WHERE email = ?1", params![account.email])?;
     tx.execute("DELETE FROM accounts WHERE id = ?1", params![account.id])?;
@@ -1376,6 +1555,7 @@ pub fn account_data(conn: &Connection, account: &Account) -> rusqlite::Result<Va
             "version": device.version,
             "signed_in": device.created,
             "last_contact": device.last_seen,
+            "vouched_by": device.vouched_by,
             "assertions": keys,
         }));
     }
@@ -1481,9 +1661,12 @@ pub struct Device {
     /// When it last signed in with a code, the first time or again; None
     /// before the service kept it.
     pub signed_in: Option<i64>,
+    /// The Claktory it signed in through (#529); None when it signed in by
+    /// email.
+    pub vouched_by: Option<String>,
 }
 
-const DEVICE: &str = "SELECT account_key, account_id, name, platform, version, created, last_seen, signed_in FROM devices";
+const DEVICE: &str = "SELECT account_key, account_id, name, platform, version, created, last_seen, signed_in, vouched_by FROM devices";
 
 fn device_row(row: &rusqlite::Row) -> rusqlite::Result<Device> {
     Ok(Device {
@@ -1495,6 +1678,7 @@ fn device_row(row: &rusqlite::Row) -> rusqlite::Result<Device> {
         created: row.get(5)?,
         last_seen: row.get(6)?,
         signed_in: row.get(7)?,
+        vouched_by: row.get(8)?,
     })
 }
 
@@ -1524,12 +1708,20 @@ pub enum Bound {
     Removed,
     /// This key was last signed in to another account (row 671).
     OtherAccount,
+    /// The Claktory that vouched for it is no longer signed in to the
+    /// account (removed, signed in again or elsewhere since): its code
+    /// no longer counts.
+    Unvouched,
 }
 
 /// Signs a device in from a request whose code was right: makes the
 /// account if it's new, then binds the device's account key to it (moving
 /// it from another account, whose assertions for it then stop counting).
-pub fn bind_device(conn: &mut Connection, request: &Request, now: i64) -> rusqlite::Result<Bound> {
+/// A vouch's (#529) binds it as vouched by its Claktory, only while that
+/// Claktory is still the account's, and signs out the key it vouched for
+/// before; one by email binds it as not vouched. With `apps`, the
+/// user-apps worker is to hear of a key signed out so.
+pub fn bind_device(conn: &mut Connection, request: &Request, apps: bool, now: i64) -> rusqlite::Result<Bound> {
     let (Some(account_key), Some(name), Some(version), Some(platform)) =
         (&request.backend_key, &request.name, &request.version, &request.platform)
     else {
@@ -1547,6 +1739,22 @@ pub fn bind_device(conn: &mut Connection, request: &Request, now: i64) -> rusqli
         return Ok(Bound::OtherAccount);
     }
     let account_id = account_for(&tx, &request.email, now)?;
+    let vouched_by = if request.kind == "vouch" {
+        let by = request.claktory_id.clone().unwrap_or_default();
+        let current: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM claktories WHERE id = ?1 AND account_id = ?2 AND revoked_at IS NULL)",
+            params![by, account_id],
+            |row| row.get(0),
+        )?;
+        if !current {
+            tx.execute("DELETE FROM requests WHERE id = ?1", params![request.id])?;
+            tx.commit()?;
+            return Ok(Bound::Unvouched);
+        }
+        Some(by)
+    } else {
+        None
+    };
     let others: u32 = tx.query_row(
         "SELECT count(*) FROM devices WHERE account_id = ?1 AND account_key != ?2",
         params![account_id, account_key],
@@ -1567,12 +1775,16 @@ pub fn bind_device(conn: &mut Connection, request: &Request, now: i64) -> rusqli
     {
         bump_allowlist(&tx)?;
     }
+    if let Some(by) = &vouched_by {
+        // One live key per Claktory: the one it vouched for before goes.
+        unbind_vouched(&tx, by, Some(account_key), apps.then_some(now))?;
+    }
     tx.execute(
-        "INSERT INTO devices (account_key, account_id, name, platform, version, created, last_seen, signed_in)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+        "INSERT INTO devices (account_key, account_id, name, platform, version, created, last_seen, signed_in, vouched_by)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)
          ON CONFLICT (account_key) DO UPDATE SET account_id = ?2, name = ?3, platform = ?4, version = ?5, created = ?6, last_seen = ?7,
-         signed_in = ?7",
-        params![account_key, account_id, name, platform, version, created, now],
+         signed_in = ?7, vouched_by = ?8",
+        params![account_key, account_id, name, platform, version, created, now, vouched_by],
     )?;
     tx.execute(
         "INSERT INTO key_accounts (account_key, account_id) VALUES (?1, ?2) ON CONFLICT (account_key) DO UPDATE SET account_id = ?2",

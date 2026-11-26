@@ -21,6 +21,7 @@ import '../review_answer.dart' show ReviewAnswering;
 import '../paced.dart' show FilePreviews;
 import 'preview_badge.dart';
 import 'registry.dart';
+import '../primary_key.dart';
 
 /// An image: fitted to the pane (never enlarged past its pixels), over a
 /// checkerboard where it's transparent, with its pixel size. Zoom with a
@@ -708,21 +709,11 @@ class _ImageViewerState extends State<ImageViewer>
                 // Not while a comment or an answer is being typed.
                 child: ViewerKeys(
                   bindings: {
-                    const SingleActivator(LogicalKeyboardKey.equal, meta: true):
-                        _zoomIn,
-                    const SingleActivator(
-                      LogicalKeyboardKey.equal,
-                      meta: true,
-                      shift: true,
-                    ): _zoomIn,
-                    const SingleActivator(LogicalKeyboardKey.add, meta: true):
-                        _zoomIn,
-                    const SingleActivator(LogicalKeyboardKey.minus, meta: true):
-                        _zoomOut,
-                    const SingleActivator(
-                      LogicalKeyboardKey.digit0,
-                      meta: true,
-                    ): _fitNow,
+                    primaryKey(LogicalKeyboardKey.equal): _zoomIn,
+                    primaryKey(LogicalKeyboardKey.equal, shift: true): _zoomIn,
+                    primaryKey(LogicalKeyboardKey.add): _zoomIn,
+                    primaryKey(LogicalKeyboardKey.minus): _zoomOut,
+                    primaryKey(LogicalKeyboardKey.digit0): _fitNow,
                     const SingleActivator(LogicalKeyboardKey.escape): () {
                       if (_marking) _toggleMarking();
                     },
@@ -752,11 +743,11 @@ class _ImageViewerState extends State<ImageViewer>
                       child: Listener(
                         // A click takes the keys for zooming.
                         onPointerDown: (_) => _focus.requestFocus(),
-                        // ⌘-scroll zooms about the pointer; a plain scroll pans,
-                        // and a pinch zooms, as InteractiveViewer does.
+                        // ⌘-scroll (Ctrl-scroll off Apple's) zooms about the
+                        // pointer; a plain scroll pans, and a pinch zooms, as
+                        // InteractiveViewer does.
                         onPointerSignal: (event) {
-                          if (event is PointerScrollEvent &&
-                              HardwareKeyboard.instance.isMetaPressed) {
+                          if (event is PointerScrollEvent && primaryPressed) {
                             _zoomTo(
                               _scale *
                                   (event.scrollDelta.dy < 0 ? 1.1 : 1 / 1.1),

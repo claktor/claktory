@@ -1,6 +1,8 @@
-//! The store reviewers' account (`--review-account`): its email signs in
-//! with a fixed code on every route that takes one, is sent nothing, and
-//! locks for the hour after 5 wrong codes. Off, it's an email like any.
+//! The store reviewers' accounts (`--review-account`, one per store): each
+//! email signs in with its fixed code on every route that takes one, is
+//! sent nothing, and locks for the hour after 5 wrong codes. It signs in no
+//! Claktory but the review box, and its account isn't deleted nor loses its
+//! Claktories on the web pages (#319). Off, it's an email like any.
 
 use claktory_account::protocol::*;
 use claktory_account::server::Config;
@@ -8,7 +10,7 @@ use claktory_account::server::review::ReviewAccount;
 use serde_json::json;
 
 use crate::support::*;
-use crate::web::{field, get};
+use crate::web::{field, get, post_form};
 
 const FORM: &str = "application/x-www-form-urlencoded";
 
@@ -16,9 +18,58 @@ const FORM: &str = "application/x-www-form-urlencoded";
 const EMAIL: &str = "review-0123456789abcdef@example.com";
 const CODE: &str = "424242";
 
-async fn with_review() -> Instance {
+/// The second store's, as the wrapper makes them: each its own pair.
+const EMAIL_2: &str = "review-fedcba9876543210@example.com";
+const CODE_2: &str = "171717";
+
+/// The service with the review account on, and `review_box` the Claktory
+/// its email may sign in.
+async fn with_review_box(review_box: &Claktory) -> Instance {
     let review = ReviewAccount::new(EMAIL, "saltsaltsaltsalt", CODE).unwrap();
-    start_with(Config { trust_proxy: true, review_account: Some(review), ..Config::default() }).await
+    let key = b64(review_box.key.verifying_key().to_bytes());
+    start_with(Config { trust_proxy: true, review_accounts: vec![review], review_claktory_key: Some(key), ..Config::default() }).await
+}
+
+/// The service with the review account on and no review box.
+async fn with_review() -> Instance {
+    with_review_box(&Claktory::new("198.51.100.1")).await
+}
+
+/// Signs the review box in with the fixed code, its verify signed by its
+/// key as factoryd signs it; its answer.
+async fn sign_in_box(instance: &Instance, review_box: &Claktory) -> Answer {
+    let answer = instance.start_sign_in(review_box, EMAIL, "Review Mac").await;
+    assert_eq!(answer.status, 200, "{}", answer.text());
+    let started: SignInStarted = answer.json();
+    verify_signed(instance, &review_box.ip, &started.request_id, Some(&review_box.key)).await
+}
+
+/// A Claktory's verify with the fixed code, signed by `key` (no token)
+/// or not at all.
+async fn verify_signed(instance: &Instance, ip: &str, request_id: &str, key: Option<&ed25519_dalek::SigningKey>) -> Answer {
+    let verify = SignInVerify { request_id: request_id.to_owned(), code: format!(" {CODE} "), eph_pub: Ephemeral::new().public_b64() };
+    let body = serde_json::to_vec(&verify).unwrap();
+    let mut headers = vec![("x-forwarded-for", ip.to_owned())];
+    if let Some(key) = key {
+        let time = instance.now();
+        headers.push((TIME_HEADER, time.to_string()));
+        headers.push((SIGNATURE_HEADER, sign_request(key, "POST", "/v1/sign-in/verify", time, &body)));
+    }
+    instance.send("POST", "/v1/sign-in/verify", body, &headers).await
+}
+
+/// Signs `email` in on the account page with `code`; the session cookie.
+async fn web_sign_in_with(instance: &Instance, email: &str, code: &str) -> String {
+    let body = format!("email={}", email.replace('@', "%40")).into_bytes();
+    let page = instance
+        .send("POST", "/account/sign-in", body, &[("content-type", FORM.into()), ("x-forwarded-for", "198.51.100.62".into())])
+        .await;
+    let request = field(&page.text(), "request");
+    let body = format!("request={request}&email={}&code={code}", email.replace('@', "%40")).into_bytes();
+    let answer =
+        instance.send("POST", "/account/verify", body, &[("content-type", FORM.into()), ("x-forwarded-for", "198.51.100.62".into())]).await;
+    assert_eq!(answer.status, 303, "{}", answer.text());
+    answer.headers.get("set-cookie").and_then(|value| value.to_str().ok()).unwrap().split(';').next().unwrap().to_owned()
 }
 
 fn mails_to(instance: &Instance, email: &str) -> usize {
@@ -38,14 +89,10 @@ async fn device_start(instance: &Instance, device: &Device) -> String {
 
 #[tokio::test]
 async fn the_review_account_signs_in_with_its_code_on_every_route_and_is_sent_nothing() {
-    let instance = with_review().await;
-
     // A Claktory (the review box).
     let mut review_box = Claktory::new("198.51.100.60");
-    let started: SignInStarted = instance.start_sign_in(&review_box, EMAIL, "Review Mac").await.json();
-    let ephemeral = Ephemeral::new();
-    let verify = SignInVerify { request_id: started.request_id, code: format!(" {CODE} "), eph_pub: ephemeral.public_b64() };
-    let answer = instance.post("/v1/sign-in/verify", &verify, &review_box.ip).await;
+    let instance = with_review_box(&review_box).await;
+    let answer = sign_in_box(&instance, &review_box).await;
     assert_eq!(answer.status, 200, "{}", answer.text());
     let signed_in: SignedIn = answer.json();
     assert_eq!(signed_in.email, EMAIL);
@@ -59,17 +106,8 @@ async fn the_review_account_signs_in_with_its_code_on_every_route_and_is_sent_no
     let answer = device_verify(&instance, &phone, &request_id, CODE).await;
     assert_eq!(answer.json::<DeviceAccount>().account_id, signed_in.account_id);
 
-    // The web pages, the account page and Delete account's among them.
-    let body = format!("email={}", EMAIL.replace('@', "%40")).into_bytes();
-    let page = instance
-        .send("POST", "/account/sign-in", body, &[("content-type", FORM.into()), ("x-forwarded-for", "198.51.100.62".into())])
-        .await;
-    let request = field(&page.text(), "request");
-    let body = format!("request={request}&email={}&code={CODE}", EMAIL.replace('@', "%40")).into_bytes();
-    let answer =
-        instance.send("POST", "/account/verify", body, &[("content-type", FORM.into()), ("x-forwarded-for", "198.51.100.62".into())]).await;
-    assert_eq!(answer.status, 303, "{}", answer.text());
-    let cookie = answer.headers.get("set-cookie").and_then(|value| value.to_str().ok()).unwrap().split(';').next().unwrap().to_owned();
+    // The web pages.
+    let cookie = web_sign_in_with(&instance, EMAIL, CODE).await;
     assert!(get(&instance, "/account", &cookie).await.text().contains("Review Mac"));
 
     assert_eq!(mails_to(&instance, EMAIL), 0, "nothing goes to it");
@@ -185,11 +223,9 @@ async fn the_review_email_signs_in_on_many_devices_but_wrong_codes_and_one_ip_st
 /// "emailed you"; an ordinary account's still are.
 #[tokio::test]
 async fn the_review_accounts_unlocks_are_never_mailed_nor_recorded_as_mailed() {
-    let instance = with_review().await;
     let mut review_box = Claktory::new("198.51.100.60");
-    let started: SignInStarted = instance.start_sign_in(&review_box, EMAIL, "Review Mac").await.json();
-    let verify = SignInVerify { request_id: started.request_id, code: CODE.into(), eph_pub: Ephemeral::new().public_b64() };
-    review_box.token = instance.post("/v1/sign-in/verify", &verify, &review_box.ip).await.json::<SignedIn>().machine_token;
+    let instance = with_review_box(&review_box).await;
+    review_box.token = sign_in_box(&instance, &review_box).await.json::<SignedIn>().machine_token;
     let mut ordinary = Claktory::new("203.0.113.7");
     instance.sign_in(&mut ordinary, "ana@example.com", "Mac mini").await;
 
@@ -232,4 +268,172 @@ fn the_file_is_off_when_missing_and_refused_when_others_can_read_it() {
     let review = ReviewAccount::read(&path).unwrap().expect("on");
     assert!(review.is(EMAIL));
     assert_eq!(review.digest_of(CODE), review.digest(), "the shell's digest is the service's");
+}
+
+#[test]
+fn the_service_takes_two_review_accounts_at_most_each_its_own_email() {
+    let account = |email: &str| ReviewAccount::new(email, "saltsaltsaltsalt", CODE).unwrap();
+    assert!(ReviewAccount::check_all(&[]).is_ok());
+    assert!(ReviewAccount::check_all(&[account(EMAIL), account(EMAIL_2)]).is_ok());
+    assert!(ReviewAccount::check_all(&[account(EMAIL), account(&EMAIL.to_uppercase())]).unwrap_err().contains("same email"));
+    let third = "review-00000000000000ff@example.com";
+    assert!(ReviewAccount::check_all(&[account(EMAIL), account(EMAIL_2), account(third)]).unwrap_err().contains("at most 2"));
+}
+
+/// App Store's and Play's accounts, each rotated on its own (#319): each
+/// signs in with its own code only, and neither is sent anything.
+#[tokio::test]
+async fn two_review_accounts_each_sign_in_with_their_own_code() {
+    let reviews = vec![
+        ReviewAccount::new(EMAIL, "saltsaltsaltsalt", CODE).unwrap(),
+        ReviewAccount::new(EMAIL_2, "pepperpepperpepper", CODE_2).unwrap(),
+    ];
+    let instance = start_with(Config { trust_proxy: true, review_accounts: reviews, ..Config::default() }).await;
+
+    let mut accounts = Vec::new();
+    for (email, code, other) in [(EMAIL, CODE, CODE_2), (EMAIL_2, CODE_2, CODE)] {
+        let phone = Device::new("198.51.100.90");
+        let answer = instance.start_device_sign_in(&phone, email, "Review iPhone").await;
+        let request_id = answer.json::<SignInStarted>().request_id;
+        assert_eq!(device_verify(&instance, &phone, &request_id, other).await.error(), "wrong_code", "the other store's code");
+        let answer = device_verify(&instance, &phone, &request_id, code).await;
+        assert_eq!(answer.status, 200, "{}", answer.text());
+        accounts.push(answer.json::<DeviceAccount>().account_id);
+    }
+    assert_ne!(accounts[0], accounts[1], "two accounts");
+    assert_eq!(mails_to(&instance, EMAIL) + mails_to(&instance, EMAIL_2), 0, "nothing goes to either");
+}
+
+/// Fugo 34608: the details the stores hold are no relay credential. A
+/// review email signs in only the review box's key, and the box moves to
+/// no other; any other email signs in any Claktory, as always.
+#[tokio::test]
+async fn a_review_email_signs_in_only_the_review_box() {
+    let mut review_box = Claktory::new("198.51.100.60");
+    let instance = with_review_box(&review_box).await;
+
+    let stranger = Claktory::new("203.0.113.20");
+    let answer = instance.start_sign_in(&stranger, &EMAIL.to_uppercase(), "Someone's Mac").await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "review_account"));
+    let mut ordinary = Claktory::new("203.0.113.21");
+    instance.sign_in(&mut ordinary, "ana@example.com", "Mac mini").await;
+
+    let answer = sign_in_box(&instance, &review_box).await;
+    assert_eq!(answer.status, 200, "{}", answer.text());
+    let signed_in: SignedIn = answer.json();
+    review_box.token = signed_in.machine_token;
+    review_box.epoch = signed_in.epoch;
+
+    // Fugo 46276: the box's key is public, so naming it proves nothing. A
+    // sign-in naming the box's id and key, verified unsigned or signed by
+    // another key, is refused and its code spent: the box keeps its
+    // registration, and no other takes a place on the account.
+    for key in [None, Some(new_signing_key())] {
+        let impostor =
+            Claktory { id: review_box.id.clone(), key: review_box.key.clone(), token: String::new(), epoch: 0, ip: "203.0.113.30".into() };
+        let started: SignInStarted = instance.start_sign_in(&impostor, EMAIL, "Review Mac").await.json();
+        let answer = verify_signed(&instance, &impostor.ip, &started.request_id, key.as_ref()).await;
+        assert_eq!((answer.status, answer.error().as_str()), (403, "review_account"), "{}", answer.text());
+        let answer = verify_signed(&instance, &impostor.ip, &started.request_id, Some(&review_box.key)).await;
+        assert_eq!(answer.error(), "code_expired", "the code is spent");
+    }
+    assert!(instance.share(&review_box, None).await.is_ok(), "the box is still signed in");
+    let fresh = Claktory {
+        id: Claktory::new("203.0.113.31").id,
+        key: review_box.key.clone(),
+        token: String::new(),
+        epoch: 0,
+        ip: "203.0.113.31".into(),
+    };
+    let started: SignInStarted = instance.start_sign_in(&fresh, EMAIL, "Review Mac").await.json();
+    assert_eq!(verify_signed(&instance, &fresh.ip, &started.request_id, None).await.error(), "review_account");
+
+    // Moved to another key, it would be another Claktory on the account.
+    let request = MoveRequest {
+        backend_key: b64(new_signing_key().verifying_key().as_bytes()),
+        machine_token: b64(*random_32()),
+        name: "elsewhere".into(),
+        version: "v0.1.15".into(),
+        platform: "linux-x86_64".into(),
+        from: "Review Mac".into(),
+    };
+    let answer = instance.signed(&review_box, "POST", "/v1/move", &request, None).await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "review_account"));
+    // A minute later, past the share's own limit.
+    instance.advance(60);
+    if let Err(answer) = instance.share(&review_box, None).await {
+        panic!("the box keeps working: {}", answer.text());
+    }
+
+    // Without a review box, none signs in with it.
+    let instance = start_with(Config {
+        trust_proxy: true,
+        review_accounts: vec![ReviewAccount::new(EMAIL, "saltsaltsaltsalt", CODE).unwrap()],
+        ..Config::default()
+    })
+    .await;
+    let answer = instance.start_sign_in(&review_box, EMAIL, "Review Mac").await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "review_account"));
+}
+
+/// Fugo 34608: a reviewer trying Remove doesn't take away the box the
+/// next review connects to, so the web pages don't remove a review
+/// account's Claktory. Delete account works, as Apple's review needs (Bruno
+/// 46782): the account comes back at the next sign-in, and only the review
+/// box signs a Claktory in to it again.
+#[tokio::test]
+async fn a_review_account_keeps_its_claktory_on_the_web_and_comes_back_after_its_deletion() {
+    let mut review_box = Claktory::new("198.51.100.60");
+    let instance = with_review_box(&review_box).await;
+    let first = sign_in_box(&instance, &review_box).await.json::<SignedIn>();
+    review_box.token = first.machine_token;
+    let cookie = web_sign_in_with(&instance, EMAIL, CODE).await;
+
+    let page = get(&instance, "/account", &cookie).await.text();
+    assert!(page.contains("Review Mac"), "{page}");
+    assert!(!page.contains("/account/remove\""), "no Remove: {page}");
+    assert!(page.contains("/account/delete"), "Delete account is there: {page}");
+    let csrf = field(&page, "csrf");
+    let answer = post_form(&instance, "/account/remove", &cookie, &format!("csrf={csrf}&claktory={}&confirm=yes", review_box.id)).await;
+    assert_eq!(answer.status, 403, "{}", answer.text());
+    assert!(answer.text().contains("can't be removed"), "{}", answer.text());
+    assert!(instance.share(&review_box, None).await.is_ok(), "the box is still signed in");
+
+    let answer = post_form(&instance, "/account/delete", &cookie, &format!("csrf={csrf}&confirm=yes")).await;
+    assert!(answer.text().contains("Your account was deleted."), "{}", answer.text());
+    instance.advance(60);
+    assert!(instance.share(&review_box, None).await.is_err(), "the box went with the account");
+
+    // It comes back: the box signs in again, a new account; any other
+    // Claktory still can't.
+    let again = sign_in_box(&instance, &review_box).await;
+    assert_eq!(again.status, 200, "{}", again.text());
+    assert_ne!(again.json::<SignedIn>().account_id, first.account_id, "a new account");
+    let stranger = Claktory::new("203.0.113.50");
+    let answer = instance.start_sign_in(&stranger, EMAIL, "Someone's Mac").await;
+    assert_eq!(answer.error(), "review_account");
+}
+
+async fn relay_token(instance: &Instance, claktory: &Claktory) -> Answer {
+    instance.signed(claktory, "POST", "/v1/relay/token", &RelayTokenRequest { endpoint_id: "ab".repeat(32) }, None).await
+}
+
+/// Fugo 46276: a review account's Claktory under another key than the
+/// review box's (one signed in before the pin) gets no relay token; the
+/// box does.
+#[tokio::test]
+async fn only_the_review_box_gets_a_relay_token_for_a_review_account() {
+    let mut review_box = Claktory::new("198.51.100.60");
+    let instance = with_review_box(&review_box).await;
+    review_box.token = sign_in_box(&instance, &review_box).await.json::<SignedIn>().machine_token;
+    assert_eq!(relay_token(&instance, &review_box).await.status, 200);
+
+    // As before the pin: a Claktory on the account with a key of its own.
+    let mut earlier = Claktory::new("203.0.113.40");
+    instance.sign_in(&mut earlier, "earlier@example.com", "Old review box").await;
+    let conn = rusqlite::Connection::open(&instance.db).expect("the database");
+    conn.execute("DELETE FROM accounts WHERE email = ?1", [EMAIL]).unwrap();
+    conn.execute("UPDATE accounts SET email = ?1 WHERE email = 'earlier@example.com'", [EMAIL]).unwrap();
+    let answer = relay_token(&instance, &earlier).await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "review_account"), "{}", answer.text());
 }

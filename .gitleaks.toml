@@ -24,9 +24,9 @@ regex = '''/(?:Users|home)/[A-Za-z0-9._-]+'''
 keywords = ["/users/", "/home/"]
 
 [[rules.allowlists]]
-description = "Placeholder home folders in tests and docs (mex is the prefix-boundary case beside me: /Users/me must not move /Users/mex; someone and myself are the Android build checks' made-up homes, myself being the literal text Flutter's debug engine carries; a is the app's shared-build test's made-up home, app/test/hook_shared_build_test.dart since 9b5a7d73)"
+description = "Placeholder home folders in tests and docs (mex is the prefix-boundary case beside me: /Users/me must not move /Users/mex; someone and myself are the Android build checks' made-up homes, myself being the literal text Flutter's debug engine carries; a is the app's shared-build test's made-up home, app/test/hook_shared_build_test.dart since 9b5a7d73; ann is the made-up home in factoryd's annotations/embeds.rs tests, since 833c59aed)"
 regexTarget = "match"
-regexes = ['''^/(?:Users|home)/(?:me|mex|x|a|you|user|runner|linuxbrew|Shared|someone|myself)$''']
+regexes = ['''^/(?:Users|home)/(?:me|mex|x|a|ann|you|user|runner|linuxbrew|Shared|someone|myself)$''']
 
 [[rules.allowlists]]
 description = "The Map tests' made-up home folder in the fixture's sample paths (workspace, projects, factory.db): not this machine's home, nothing real behind it; new fixtures use /Users/me"

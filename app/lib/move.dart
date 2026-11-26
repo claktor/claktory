@@ -375,6 +375,7 @@ class _MoveFormState extends State<MoveForm> {
       check: (text) => parseReceiveCode(text) == null
           ? "This isn't the code the other computer shows."
           : null,
+      onPasteInstead: pasteCodeInto(_code),
     );
     if (scanned != null && mounted) _code.text = scanned;
   }
@@ -1461,7 +1462,7 @@ class MoveSettingRow extends StatelessWidget {
 /// What the person pastes in a terminal on the other computer: the online
 /// installer, in receive mode, installs Claktory there and shows the code.
 const receiveCommand =
-    'curl -fsSL https://github.com/claktor/claktory/releases/latest/'
+    'curl -fsSL https://github.com/claktory/claktory/releases/latest/'
     'download/install.sh | bash -s -- --receive';
 
 /// A command to run, in mono on a hairline panel, with Copy.

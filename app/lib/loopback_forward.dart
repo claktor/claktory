@@ -235,6 +235,13 @@ class LoopbackForwards extends ChangeNotifier {
   /// isn't.
   int? sharePort(String shareId) => _shares[shareId]?.forward.port;
 
+  /// What went wrong with [shareId]'s last connection here (the sentence
+  /// of the Claktory it's from, or why the tunnel couldn't carry it); empty
+  /// while all's well or while it isn't forwarded. Said on an iPhone or
+  /// iPad once its page didn't load (W6, #505).
+  String shareLastError(String shareId) =>
+      _shares[shareId]?.forward.lastError ?? '';
+
   /// Why [shareId] couldn't be forwarded the last time it was tried; null
   /// when it could, or wasn't tried.
   ForwardFailure? shareProblem(String shareId) => _shareProblems[shareId];
@@ -587,14 +594,6 @@ String? forwardingProblem(
   final error = forwards.lastError(forwarding);
   return error.isEmpty ? null : error;
 }
-
-/// Whether this device can't open a website shared over a pipe from a
-/// Claktory on another machine yet: a phone or a tablet, whose browser
-/// takes the front, leaving the app (and what it forwards) behind.
-bool get cantOpenSharesHere => switch (defaultTargetPlatform) {
-  TargetPlatform.iOS || TargetPlatform.android => true,
-  _ => false,
-};
 
 /// Whether this device is a phone or tablet: it forwards only the shares
 /// opened on it, never all of them in the background, and has no use for a

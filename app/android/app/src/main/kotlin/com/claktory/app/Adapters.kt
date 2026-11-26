@@ -67,8 +67,10 @@ class Adapters private constructor(private val all: List<AutoCloseable>) : AutoC
         fun register(engine: FlutterEngine, activity: Activity): Adapters {
             val messenger = engine.dartExecutor.binaryMessenger
             val context = activity.applicationContext
-            // The system's pickers for factory/device's pickAttachments.
-            val attachments = AttachmentPicker(activity)
+            // The phone's camera app for factory/device's takePhoto, and the
+            // system's pickers for its pickAttachments.
+            val photos = PhotoCapture(activity)
+            val attachments = AttachmentPicker(activity, camera = photos)
             // The camera's permission, and the pairing screen's camera views.
             val camera = CameraAccess(activity)
             val scanner = ScannerFactory(messenger)
@@ -84,7 +86,7 @@ class Adapters private constructor(private val all: List<AutoCloseable>) : AutoC
                     // factory/network: iroh can't see network moves on Android.
                     NetworkPath(messenger, context),
                     // factory/device: what this phone keeps and what it is.
-                    DeviceChannel(messenger, context, attachments, camera, webAuth, share),
+                    DeviceChannel(messenger, context, attachments, camera, webAuth, share, photos),
                     // factory/dm-keys: the keys of end-to-end direct messages.
                     DmKeysChannel(messenger, context),
                     // factory/secret-clipboard: Copy code's secret, cleared only if still there.
@@ -95,9 +97,12 @@ class Adapters private constructor(private val all: List<AutoCloseable>) : AutoC
                     BackGestureExclusion(messenger, activity),
                     // factory/links: claktory://add?code=… opens the app.
                     LinksChannel(messenger, activity),
+                    // factory/share-browser: a friend's shared website, in a Custom Tab kept alive.
+                    ShareBrowser(messenger, activity),
                     // factory/shared: what other apps share to Claktory.
                     SharedChannel(messenger, activity),
                     attachments,
+                    photos,
                     camera,
                     scanner,
                     // factory/recorder: voice messages.

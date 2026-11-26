@@ -1,7 +1,8 @@
 // The Map on an iPad keeps what it shows when the window is resized across
 // the phone's layout (Sale's row 149): History, and where it is in it,
 // come back as they were, whether the Map is a page or a pane beside a
-// conversation, as a phone's rotation keeps them (Zucchero's row 525).
+// conversation, as a phone's rotation keeps them (Zucchero's row 525), and
+// whether the window widens or narrows (Sale's row 151).
 import 'package:factory_app/history/view.dart' show HistoryView, MapModeSwitch;
 import 'package:factory_app/ipad/workbench.dart'
     show WorkbenchFocus, WorkbenchScope;
@@ -94,4 +95,38 @@ void main() {
       expect(tester.state(find.byType(HistoryView)), same(history));
     }
   });
+
+  for (final (wide, narrow) in [
+    (const Size(1366, 1024), const Size(487, 1024)),
+    (const Size(1366, 1024), const Size(321, 1024)),
+    (const Size(823, 1024), const Size(487, 1024)),
+    (const Size(653, 1024), const Size(321, 1024)),
+  ]) {
+    testWidgets('the Map beside a conversation, read last: History and '
+        'where it is stay as the window narrows ${wide.width.toInt()} to '
+        '${narrow.width.toInt()} and widens back', (tester) async {
+      final workspace = claktoryWorkspace();
+      final agent = workspace.agents.first;
+      agent.layout = split('s1', row, [
+        leaf('chat', 'chat'),
+        leaf('map', 'map'),
+      ]);
+      workspace.selectedAgentId = agent.id;
+      await _show(tester, workspace);
+      // History chosen on the Map, the pane read last, at full width.
+      final history = await _toHistory(tester);
+
+      for (final size in [wide, narrow, wide, narrow]) {
+        _resize(tester, size);
+        await pumpFrames(tester);
+        expect(find.byType(MapView), findsOneWidget, reason: '$size');
+        expect(_history(tester), isTrue, reason: '$size');
+        expect(
+          tester.state(find.byType(HistoryView)),
+          same(history),
+          reason: '$size',
+        );
+      }
+    });
+  }
 }

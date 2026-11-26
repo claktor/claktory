@@ -5,19 +5,19 @@
 #   scripts/browser-image.sh base [--push]
 #       The base: Ubuntu, Chrome stable, Xvfb, fonts, policy, firewall
 #       (browser-image/Containerfile.base). Pushed as
-#       ghcr.io/claktor/claktory-browser:base-<Chrome version>, and its digest
+#       ghcr.io/claktory/claktory-browser:base-<Chrome version>, and its digest
 #       written to browser-image/base.txt (commit it). Run when Chrome moves.
 #   scripts/browser-image.sh release VERSION RUNNER [--push]
 #       One release's image: base.txt's base plus RUNNER (that release's
 #       linux-aarch64 static factoryd) and the entrypoint. Pushed as
-#       ghcr.io/claktor/claktory-browser:VERSION; prints the reference
+#       ghcr.io/claktory/claktory-browser:VERSION; prints the reference
 #       factoryd is built with, CLAKTORY_BROWSER_IMAGE=REPO@sha256:…
 #       BASE=REF overrides base.txt (a local base, to try one out).
 #
 # --push needs the vault's "GitHub packages token (browser image)" (GHCR_TOKEN).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO=ghcr.io/claktor/claktory-browser
+REPO=ghcr.io/claktory/claktory-browser
 ENGINE="${ENGINE:-podman}"
 die() { echo "browser-image.sh: $*" >&2; exit 1; }
 push=0; args=()

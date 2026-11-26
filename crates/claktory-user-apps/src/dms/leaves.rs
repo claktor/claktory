@@ -43,6 +43,16 @@ CREATE TABLE IF NOT EXISTS dm_retired_identities (
     retired INTEGER NOT NULL,
     PRIMARY KEY (account_id, identity_key)
 ) WITHOUT ROWID;
+-- An account whose list update under its current identity key took a
+-- device leaf off (a Lock out takes the device off first, then makes a new
+-- key): its next rotation is one that locks a device out, counted apart
+-- (ROTATIONS_DROPPING_A_DAY). Only while identity_key is still current;
+-- gone at the rotation.
+CREATE TABLE IF NOT EXISTS dm_dropped_devices (
+    account_id TEXT PRIMARY KEY,
+    identity_key BLOB NOT NULL,
+    dropped INTEGER NOT NULL
+);
 -- Each leaf's KeyPackages, by their reference (OpenMLS's hash): one-time
 -- ones, and at most one last-resort one.
 CREATE TABLE IF NOT EXISTS dm_key_packages (
@@ -70,6 +80,12 @@ pub const KEY_PACKAGES_MOST: i64 = 100;
 /// Claims per claiming device an hour, and identity rotations per account a day.
 const CLAIMS_AN_HOUR: i64 = 60;
 const ROTATIONS_A_DAY: i64 = 3;
+/// Rotations a day that lock a device out (Fugo 43753): a new list without
+/// a device leaf the current one names, or after a list update under the
+/// current key took one off. Apart from the 3, so a Lock out that has to
+/// make the key twice (one it was handed to is locked out, Abbacchio's
+/// case 4) isn't refused on a day with a rotation already.
+const ROTATIONS_DROPPING_A_DAY: i64 = 10;
 /// How recently the device must have signed in with an emailed code to make
 /// a new security key (row 630, Fugo): a device that lost every key starts
 /// over this way, so a session alone, stolen or left open, can't.
@@ -325,6 +341,15 @@ fn put_keys(
     if list.identity != identity {
         return Err(invalid("That device list isn't signed by the account's identity key."));
     }
+    if let Some(current) = &current
+        && drops_device(&current.list, &list)
+    {
+        transaction.execute(
+            "INSERT INTO dm_dropped_devices (account_id, identity_key, dropped) VALUES (?1, ?2, ?3)
+             ON CONFLICT (account_id) DO UPDATE SET identity_key = ?2, dropped = ?3",
+            params![account, identity.0.to_vec(), now_ms],
+        )?;
+    }
     transaction.execute(
         "INSERT INTO dm_identities (account_id, identity_key, device_list, version, updated) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT (account_id) DO UPDATE SET device_list = ?3, version = ?4, updated = ?5",
@@ -333,6 +358,14 @@ fn put_keys(
     keep_listed(transaction, account, &list)?;
     tell(transaction, account, now_ms)?;
     Ok(Ok(shown(account, &Keys { identity, list, raw_list: raw })))
+}
+
+/// Whether `new` leaves out a device leaf `old` names.
+fn drops_device(old: &SignedDeviceList, new: &SignedDeviceList) -> bool {
+    old.list.leaves.iter().any(|leaf| {
+        leaf.kind == LeafKind::Device
+            && !new.list.leaves.iter().any(|kept| kept.kind == LeafKind::Device && kept.leaf_id == leaf.leaf_id)
+    })
 }
 
 fn stale(keys: Value) -> Value {
@@ -405,7 +438,19 @@ fn rotate(
     if replaced {
         return Err(invalid("That security key was replaced before; it's never the account's again."));
     }
-    take(transaction, &format!("rotate:{account}"), 86_400, ROTATIONS_A_DAY, now_ms)?;
+    // One that locks a device out counts apart: its list leaves one out, or
+    // a list update under this key took one off already.
+    let dropped_before: bool = transaction.query_row(
+        "SELECT COUNT(*) > 0 FROM dm_dropped_devices WHERE account_id = ?1 AND identity_key = ?2",
+        params![account, current.identity.0.to_vec()],
+        |row| row.get(0),
+    )?;
+    if dropped_before || drops_device(&current.list, &list) {
+        take(transaction, &format!("rotate-drop:{account}"), 86_400, ROTATIONS_DROPPING_A_DAY, now_ms)?;
+    } else {
+        take(transaction, &format!("rotate:{account}"), 86_400, ROTATIONS_A_DAY, now_ms)?;
+    }
+    transaction.execute("DELETE FROM dm_dropped_devices WHERE account_id = ?1", [account])?;
     transaction.execute(
         "UPDATE dm_identities SET identity_key = ?2, device_list = ?3, version = ?4, updated = ?5 WHERE account_id = ?1",
         params![account, identity.0.to_vec(), raw, list.list.version as i64, now_ms],
@@ -725,6 +770,7 @@ pub fn signed_out(db: &Connection, account: &str, leaf_id: &str, until_ms: i64) 
 pub fn purge(transaction: &Transaction<'_>, account: &str) -> rusqlite::Result<()> {
     transaction.execute("DELETE FROM dm_identities WHERE account_id = ?1", [account])?;
     transaction.execute("DELETE FROM dm_retired_identities WHERE account_id = ?1", [account])?;
+    transaction.execute("DELETE FROM dm_dropped_devices WHERE account_id = ?1", [account])?;
     transaction.execute("DELETE FROM dm_key_packages WHERE account_id = ?1", [account])?;
     transaction.execute("DELETE FROM dm_claims WHERE account_id = ?1", [account])?;
     transaction.execute("DELETE FROM dm_limits WHERE key = ?1", [format!("rotate:{account}")])?;
@@ -1430,8 +1476,9 @@ pub(super) mod tests {
         assert_eq!((status, &keys["replaced_identity_keys"]), (200, &json!([b64(&old.0)])), "{keys}");
         assert_eq!(call(&mut world, &phone, "POST", "me/keys/rotate", rotate(&ana.identity.public(), 1)).0, 400, "the same key");
 
-        // Three a day.
-        for n in 1..ROTATIONS_A_DAY {
+        // Three a day. The first came after the Mac was dropped under the
+        // key before, so it counted apart (a_rotation_that_locks_a_device_out_counts_apart).
+        for n in 0..ROTATIONS_A_DAY {
             ana.identity = IdentityKey::generate().expect("a key");
             ana.version = 0;
             let list = ana.list();
@@ -1444,6 +1491,64 @@ pub(super) mod tests {
         let list = ana.list();
         let body = json!({"identity_key": b64(&ana.identity.public().0), "device_list": list, "version": 1});
         assert_eq!(call(&mut world, &phone, "POST", "me/keys/rotate", body).0, 429);
+    }
+
+    /// A rotation that locks a device out (Fugo 43753, 43768) counts apart
+    /// from the 3 a day, up to 10: one whose list leaves out a device the
+    /// current list names, or the first after a list update under the
+    /// current key took one off (as Lock out does, then makes the key).
+    #[test]
+    fn a_rotation_that_locks_a_device_out_counts_apart() {
+        let mut world = World::new();
+        let mut ana = set_up(&mut world, "ana");
+        for n in 0..=ROTATIONS_DROPPING_A_DAY {
+            ana.add(device("ana", &format!("ana-device-{n}")));
+        }
+        assert_eq!(call(&mut world, &ana.caller(0), "PUT", "me/keys", ana.put(false)).0, 200);
+        // A new key for the leaves listed now; kept only when it's taken.
+        let rotate = |world: &mut World, ana: &mut Person| -> u16 {
+            let old = std::mem::replace(&mut ana.identity, IdentityKey::generate().expect("a key"));
+            let version = std::mem::replace(&mut ana.version, 0);
+            let body = json!({"identity_key": b64(&ana.identity.public().0), "device_list": ana.list(), "version": 1});
+            let (status, answer) = call(world, &ana.caller(0), "POST", "me/keys/rotate", body);
+            assert!(status == 200 || answer["error"] == "rate_limited", "{answer}");
+            if status != 200 {
+                (ana.identity, ana.version) = (old, version);
+            }
+            status
+        };
+        let drop_one = |ana: &mut Person| {
+            ana.leaves.remove(1);
+            ana.stores.remove(1);
+        };
+        let marked = |world: &World| -> i64 {
+            world.db.query_row("SELECT COUNT(*) FROM dm_dropped_devices", [], |row| row.get(0)).expect("count")
+        };
+
+        for n in 0..ROTATIONS_A_DAY {
+            assert_eq!(rotate(&mut world, &mut ana), 200, "rotation {n}");
+        }
+        assert_eq!(rotate(&mut world, &mut ana), 429, "the 3 a day are used");
+
+        // Taken off the list first, then a new key: through, and only once.
+        drop_one(&mut ana);
+        assert_eq!(call(&mut world, &ana.caller(0), "PUT", "me/keys", ana.put(false)).0, 200);
+        assert_eq!(marked(&world), 1);
+        assert_eq!(rotate(&mut world, &mut ana), 200, "a list update under this key took a device off");
+        assert_eq!(marked(&world), 0, "taken with the rotation");
+        assert_eq!(rotate(&mut world, &mut ana), 429, "the next drops none: one of the 3 again");
+        // One kept under a key that's no longer the account's counts for nothing.
+        world.db.execute("INSERT INTO dm_dropped_devices VALUES ('ana', x'00', 0)", []).expect("kept");
+        assert_eq!(rotate(&mut world, &mut ana), 429, "under an earlier key");
+        world.db.execute("DELETE FROM dm_dropped_devices", []).expect("gone");
+
+        // A new key whose own list leaves one out: through, up to 10 a day.
+        for n in 1..ROTATIONS_DROPPING_A_DAY {
+            drop_one(&mut ana);
+            assert_eq!(rotate(&mut world, &mut ana), 200, "drop {n}");
+        }
+        drop_one(&mut ana);
+        assert_eq!(rotate(&mut world, &mut ana), 429, "10 a day that lock a device out");
     }
 
     /// A Claktory reads its own account's keys, and a friend's only while

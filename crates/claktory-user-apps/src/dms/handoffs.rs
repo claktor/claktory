@@ -103,6 +103,16 @@ fn waiting(db: &Connection, account: &str, to: &str, now_ms: i64) -> Result<Valu
     Ok(json!({"handoffs": handoffs}))
 }
 
+/// Deletes the hand-offs waiting for a device removed from the account
+/// (E11-10, Fugo 43699): as any of its devices calls, from the removed
+/// keys the service gives with the call.
+fn forget_removed(transaction: &Transaction<'_>, account: &str, removed: &[String]) -> rusqlite::Result<()> {
+    for key in removed {
+        transaction.execute("DELETE FROM dm_handoffs WHERE account_id = ?1 AND to_key = ?2", params![account, key])?;
+    }
+    Ok(())
+}
+
 /// Deletes hand-offs past their time.
 pub fn sweep(db: &Connection, now_ms: i64) -> rusqlite::Result<usize> {
     db.execute("DELETE FROM dm_handoffs WHERE accepted <= ?1", [now_ms - KEEP_MS])
@@ -123,8 +133,11 @@ pub fn answer(db: &mut Connection, method: &str, route: &str, caller: &Caller, b
         return Err(Refusal(403, "device_only", "Only your own signed-in devices can do this.".to_owned()));
     };
     let transaction = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    forget_removed(&transaction, account_id, removed_devices)?;
     let answer = match (method, route) {
         ("POST", "me/handoffs") => (200, send(&transaction, account_id, device_key, removed_devices, body(bytes)?, now_ms)?),
+        // A removed device, still signed in for now, reads nothing.
+        ("GET", "me/handoffs") if removed_devices.contains(device_key) => (200, json!({"handoffs": []})),
         ("GET", "me/handoffs") => (200, waiting(&transaction, account_id, device_key, now_ms)?),
         ("DELETE", route) => {
             let id = &route["me/handoffs/".len()..];
@@ -162,6 +175,25 @@ mod tests {
         removed_devices.push("ana-mac".into());
         let (status, refused) = call(&mut world, &ana.caller(0), "POST", "me/handoffs", to_mac);
         assert_eq!((status, &refused["error"]), (409, &json!("removed_device")), "{refused}");
+        let waiting: i64 = world.db.query_row("SELECT COUNT(*) FROM dm_handoffs", [], |row| row.get(0)).expect("counted");
+        assert_eq!(waiting, 0);
+    }
+
+    /// E11-10 (Fugo 43699): a hand-off to a device that's then removed
+    /// from the account goes: the device, still signed in, reads nothing,
+    /// and the row is deleted.
+    #[test]
+    fn a_hand_off_to_a_device_removed_since_is_gone() {
+        let mut world = World::new();
+        let mut ana = set_up(&mut world, "ana");
+        ana.add(device("ana", "ana-mac"));
+        assert_eq!(call(&mut world, &ana.caller(0), "PUT", "me/keys", ana.put(false)).0, 200);
+        let to_mac = json!({"to": "ana-mac", "sealed": b64(&[7; 64])});
+        assert_eq!(call(&mut world, &ana.caller(0), "POST", "me/handoffs", to_mac).0, 200);
+        let mut mac = device("ana", "ana-mac");
+        let Caller::Device { removed_devices, .. } = &mut mac else { unreachable!() };
+        removed_devices.push("ana-mac".into());
+        assert_eq!(call(&mut world, &mac, "GET", "me/handoffs", Value::Null).1, json!({"handoffs": []}));
         let waiting: i64 = world.db.query_row("SELECT COUNT(*) FROM dm_handoffs", [], |row| row.get(0)).expect("counted");
         assert_eq!(waiting, 0);
     }

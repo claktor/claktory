@@ -42,6 +42,13 @@ fn state(view: &View) -> Option<State> {
     view.workspace.agent_browser.as_ref().map(|browser| browser.state())
 }
 
+/// Its live view on, as QA and debugging turn it on (#435: off in the
+/// product, where agents use the browser on their own).
+fn live_view_on(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir.join("home")).expect("home");
+    std::fs::write(dir.join("home/config.json"), r#"{"browser": {"live_view": true}}"#).expect("config");
+}
+
 fn refused(body: Body) -> String {
     match body {
         Body::Error(error) => error.message,
@@ -59,6 +66,7 @@ async fn the_person_opens_watches_types_in_and_stops_claktorys_browser() {
     factoryd::browser_host::enable_for_test();
     factoryd::browser_host::standin_for_test();
     let dir = temp_dir();
+    live_view_on(&dir);
     let (addr, _factory) = start(&dir).await;
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
@@ -135,6 +143,7 @@ fn locale(view: &View) -> (String, Vec<String>) {
 async fn the_browsers_time_zone_and_languages_are_the_persons() {
     factoryd::browser_host::enable_for_test();
     let dir = temp_dir();
+    live_view_on(&dir);
     let (addr, _factory) = start(&dir).await;
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
@@ -238,6 +247,7 @@ async fn a_stopped_browser_ends_even_while_an_errand_holds_its_connection() {
     factoryd::browser_host::enable_for_test();
     factoryd::browser_host::standin_for_test();
     let dir = temp_dir();
+    live_view_on(&dir);
     let (addr, factory) = start(&dir).await;
     let url = page().await;
     let held = factoryd::browser_host::connect_for_test(&factory, "errand-1", Some(url.clone())).await.expect("driven");
@@ -267,4 +277,278 @@ async fn a_stopped_browser_ends_even_while_an_errand_holds_its_connection() {
         .expect("it opens again");
     client.ok(Request::StopAgentBrowser(v1::StopAgentBrowser {})).await;
     drop(held);
+}
+
+/// Off, as in the product (#435, Matt's card 222): no device watches,
+/// opens, types in, takes over or hands back Claktory's browser; stopping
+/// it and deleting its data aren't held back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn without_its_live_view_no_device_watches_or_drives_claktorys_browser() {
+    factoryd::browser_host::enable_for_test();
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, _, _) = Client::connect(addr).await;
+    let no_view = "has no live view";
+    let requests = [
+        Request::WatchAgentBrowser(v1::WatchAgentBrowser { on: true, ..Default::default() }),
+        Request::OpenAgentBrowser(v1::OpenAgentBrowser { url: "https://example.com/".into(), ..Default::default() }),
+        Request::AgentBrowserInput(v1::AgentBrowserInput {
+            events: vec![v1::AgentBrowserEvent { event: Some(v1::agent_browser_event::Event::Text("hi".into())) }],
+        }),
+        Request::TakeOverAgentBrowser(v1::TakeOverAgentBrowser {}),
+        Request::HandBackAgentBrowser(v1::HandBackAgentBrowser::default()),
+    ];
+    for request in requests {
+        let message = refused(client.request(request.clone()).await.body);
+        assert!(message.contains(no_view), "{request:?}: {message}");
+    }
+    client.ok(Request::WatchAgentBrowser(v1::WatchAgentBrowser { on: false, ..Default::default() })).await;
+    // Stopping isn't gated (here it's refused only because it isn't open).
+    let stop = client.request(Request::StopAgentBrowser(v1::StopAgentBrowser {})).await.body;
+    assert!(refused(stop).contains("isn't open"));
+    client.ok(Request::DeleteAgentBrowserData(v1::DeleteAgentBrowserData {})).await;
+}
+
+fn chrome_here() -> bool {
+    let here = std::path::Path::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome").is_file();
+    if !here {
+        eprintln!("no Chrome on this Mac: skipped");
+    }
+    here
+}
+
+/// Whether a CDP answer is the lease's refusal.
+fn no_lease(answer: &serde_json::Value) -> bool {
+    answer["error"]["code"] == -32001 && answer["error"]["message"] == "no input lease"
+}
+
+/// R11.3 #5 (#530): an errand's Input.* reaches Chrome only under its
+/// lease, held by the host as well as the runner (the Mac's stand-in grants
+/// every lease, so this is the host's gate): refused at once without one,
+/// through with one, refused again once it's dropped, and once the errand
+/// stopped driving (the person's turn) however long the old one had left.
+/// A message to another target, which could carry Input inside it, never
+/// goes.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_errands_input_reaches_the_page_only_under_its_lease() {
+    if !chrome_here() {
+        return;
+    }
+    factoryd::browser_host::enable_for_test();
+    factoryd::browser_host::standin_for_test();
+    let dir = temp_dir();
+    let (_addr, factory) = start(&dir).await;
+    let mut drive = factoryd::browser_host::drive_for_test(&factory, "errand-1", None).await.expect("driven");
+    let page = drive.page().await;
+    assert!(!page.is_empty());
+    let moved = serde_json::json!({"type": "mouseMoved", "x": 10, "y": 10});
+
+    let refused = drive.call_in(&page, "Input.dispatchMouseEvent", moved.clone()).await;
+    assert!(no_lease(&refused), "{refused}");
+    assert_eq!(refused["sessionId"], page.as_str(), "answered in its session");
+    let lease = drive.lease(30_000).expect("a lease");
+    let through = drive.call_in(&page, "Input.dispatchMouseEvent", moved.clone()).await;
+    assert!(through.get("result").is_some(), "{through}");
+    // Not Input: through either way.
+    let other = drive.call("Browser.getVersion", serde_json::json!({})).await;
+    assert!(other.get("result").is_some(), "{other}");
+    let wrapped = drive
+        .call("Target.sendMessageToTarget", serde_json::json!({"message": r#"{"id":1,"method":"Input.insertText","params":{"text":"x"}}"#}))
+        .await;
+    assert_eq!(wrapped["error"]["code"], -32001, "{wrapped}");
+    drop(lease);
+    let after = drive.call_in(&page, "Input.dispatchMouseEvent", moved.clone()).await;
+    assert!(no_lease(&after), "{after}");
+
+    // The person's turn ends it: back to the errand, the old lease (still
+    // kept, with time left) holds nothing.
+    let kept = drive.lease(60_000).expect("a lease");
+    factoryd::browser_host::turn_for_test(&factory, false).expect("a turn and back");
+    drop(drive);
+    let mut again = factoryd::browser_host::drive_for_test(&factory, "errand-1", None).await.expect("driven again");
+    let page = again.page().await;
+    let refused = again.call_in(&page, "Input.dispatchMouseEvent", moved).await;
+    assert!(no_lease(&refused), "{refused}");
+    drop(kept);
+    assert_eq!(again.bootstrapped().await, Ok(()));
+    factoryd::browser_host::end_for_test(&factory, "errand-1");
+}
+
+/// Ghiaccio 43216: the errand's turn back right after an undriven one, its
+/// mode change not reported yet, drives Chrome again: DRIVEN only once the
+/// runner says Chrome is, never DRIVEN with Chrome undriven (where the
+/// errand's connection would hang, and no lease could be had).
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_back_right_after_an_undriven_one_drives_chrome_again() {
+    if !chrome_here() {
+        return;
+    }
+    factoryd::browser_host::enable_for_test();
+    factoryd::browser_host::standin_for_test();
+    let dir = temp_dir();
+    let (_addr, factory) = start(&dir).await;
+    let drive = factoryd::browser_host::drive_for_test(&factory, "errand-1", None).await.expect("driven");
+    drop(drive);
+    // Handed over undriven and back at once, before the runner reports.
+    factoryd::browser_host::turn_for_test(&factory, true).expect("a turn and back");
+    let mut again = factoryd::browser_host::drive_for_test(&factory, "errand-1", None).await.expect("driven again");
+    let version = again.call("Browser.getVersion", serde_json::json!({})).await;
+    assert!(version.get("result").is_some(), "{version}");
+    // Every report of the two mode changes is in by now.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let driven = State::Driven as i32;
+    assert_eq!(factoryd::browser_host::mode_for_test(&factory), (Some("driven"), driven), "DRIVEN with Chrome driven");
+    let lease = again.lease(10_000).expect("a lease, Chrome being driven");
+    drop(lease);
+    factoryd::browser_host::end_for_test(&factory, "errand-1");
+}
+
+/// A cookie of `domain` named `name`, for Storage.setCookies, kept an hour.
+fn cookie(name: &str, domain: &str) -> serde_json::Value {
+    let expires = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600;
+    serde_json::json!({"name": name, "value": "v", "domain": domain, "path": "/", "secure": true, "expires": expires})
+}
+
+/// The cookies' domains Chrome holds now.
+async fn domains(drive: &mut factoryd::browser_host::DriveForTest) -> Vec<String> {
+    let jar = drive.call("Storage.getCookies", serde_json::json!({})).await;
+    let mut domains: Vec<String> = jar["result"]["cookies"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|cookie| cookie["domain"].as_str().map(str::to_owned))
+        .collect();
+    domains.sort();
+    domains
+}
+
+async fn until(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("{what} never happened");
+}
+
+/// #435 W6 (Fugo 41228, 41235, 41632): a sign-in is noticed by the
+/// provider's session cookies when the errand ends, and recorded once; a
+/// sign-out while an errand drives waits (nothing filled on Google
+/// meanwhile), is applied when the errand ends, deletes every cookie Google
+/// owns (google.com, google.co.uk, youtube.com) and no other, and only then
+/// has the vault forget the account.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sign_out_waits_for_the_errand_and_deletes_only_the_providers_cookies() {
+    if !chrome_here() {
+        return;
+    }
+    factoryd::browser_host::enable_for_test();
+    factoryd::browser_host::standin_for_test();
+    let dir = temp_dir();
+    let (_addr, factory) = start(&dir).await;
+    let account = || factoryd::errands::browser_account_for_test(&factory, "Google");
+    let mut drive = factoryd::browser_host::drive_for_test(&factory, "errand-1", None).await.expect("driven");
+    // A sign-in page's cookie alone isn't a sign-in.
+    let set = drive.call("Storage.setCookies", serde_json::json!({"cookies": [cookie("NID", ".google.com")]})).await;
+    assert!(set.get("result").is_some(), "{set}");
+    factoryd::browser_host::end_for_test(&factory, "errand-1");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(account(), None);
+
+    let mut drive = factoryd::browser_host::drive_for_test(&factory, "errand-2", None).await.expect("driven");
+    let cookies =
+        [cookie("SID", ".google.com"), cookie("NID", ".google.co.uk"), cookie("VISITOR", ".youtube.com"), cookie("sid", "shop.example")];
+    let set = drive.call("Storage.setCookies", serde_json::json!({ "cookies": cookies })).await;
+    assert!(set.get("result").is_some(), "{set}");
+    drop(drive);
+    factoryd::browser_host::end_for_test(&factory, "errand-2");
+    // The session cookie: signed in, recorded with no secret.
+    until("the sign-in noticed", || account().is_some()).await;
+    assert_eq!(account().as_deref(), Some(""));
+
+    let mut drive = factoryd::browser_host::drive_for_test(&factory, "errand-3", None).await.expect("driven");
+    assert_eq!(factoryd::browser_host::sign_out_for_test(&factory, "google").await, Ok("pending"));
+    assert!(factoryd::browser_host::signing_out_for_test(&factory, "Google"));
+    assert!(dir.join("home/browser-sign-outs.json").is_file(), "kept for a restart");
+    // Still signed in while the errand drives.
+    assert!(domains(&mut drive).await.contains(&".google.com".to_owned()));
+    assert!(account().is_some());
+    drop(drive);
+    factoryd::browser_host::end_for_test(&factory, "errand-3");
+    until("the sign-out applied", || !factoryd::browser_host::signing_out_for_test(&factory, "Google")).await;
+    until("the vault forgot the account", || account().is_none()).await;
+    assert!(!dir.join("home/browser-sign-outs.json").exists());
+
+    let mut drive = factoryd::browser_host::drive_for_test(&factory, "errand-4", None).await.expect("driven");
+    assert_eq!(domains(&mut drive).await, ["shop.example"]);
+    // Not signed in: nothing to sign out of waits, and an unknown one is refused.
+    assert!(factoryd::browser_host::sign_out_for_test(&factory, "Evil").await.is_err());
+    factoryd::browser_host::end_for_test(&factory, "errand-4");
+}
+
+/// A sign-out asked while the browser is off waits in its file, and is
+/// applied before the next driven start lets the errand in.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_waiting_sign_out_is_applied_before_the_errand_drives() {
+    if !chrome_here() {
+        return;
+    }
+    factoryd::browser_host::enable_for_test();
+    factoryd::browser_host::standin_for_test();
+    let dir = temp_dir();
+    let (_addr, factory) = start(&dir).await;
+    assert_eq!(factoryd::browser_host::sign_out_for_test(&factory, "Apple").await, Ok("pending"));
+    assert!(factoryd::browser_host::signing_out_for_test(&factory, "Apple"));
+    let drive = factoryd::browser_host::drive_for_test(&factory, "errand-1", None).await.expect("driven");
+    // DRIVEN only once it was applied.
+    assert!(!factoryd::browser_host::signing_out_for_test(&factory, "Apple"));
+    assert!(!dir.join("home/browser-sign-outs.json").exists());
+    assert_eq!(drive.bootstrapped().await, Ok(()));
+    factoryd::browser_host::end_for_test(&factory, "errand-1");
+}
+
+/// A driven start restores no pages (Fugo 42798): whatever the errand left
+/// open last time, Chrome starts again on blank pages only, so no page runs
+/// before the host has set the browser up.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_driven_start_restores_no_page() {
+    if !chrome_here() {
+        return;
+    }
+    factoryd::browser_host::enable_for_test();
+    factoryd::browser_host::standin_for_test();
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    let url = page().await;
+    let mut drive = factoryd::browser_host::drive_for_test(&factory, "errand-1", None).await.expect("driven");
+    let session = drive.page().await;
+    let went = drive.call_in(&session, "Page.navigate", serde_json::json!({ "url": url })).await;
+    assert!(went.get("result").is_some(), "{went}");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    drop(drive);
+    factoryd::browser_host::end_for_test(&factory, "errand-1");
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    client.ok(Request::StopAgentBrowser(v1::StopAgentBrowser {})).await;
+    tokio::time::timeout(Duration::from_secs(30), view.follow(&mut client, |view| state(view) == Some(State::Off)))
+        .await
+        .expect("it stops");
+
+    let mut drive = factoryd::browser_host::drive_for_test(&factory, "errand-2", None).await.expect("driven again");
+    let targets = drive.call("Target.getTargets", serde_json::json!({})).await;
+    let pages: Vec<&str> = targets["result"]["targetInfos"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|target| target["type"] == "page")
+        .filter_map(|target| target["url"].as_str())
+        .collect();
+    assert!(!pages.is_empty() && pages.iter().all(|url| *url == "about:blank"), "{pages:?}");
+    factoryd::browser_host::end_for_test(&factory, "errand-2");
 }
