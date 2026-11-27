@@ -2,8 +2,7 @@
 // permission sheet ([Permission], permission.dart) needs them: the
 // microphone (voice messages), the camera (scanning a pairing code) and
 // notifications (iPhone and iPad). Local Network is local_network.dart's.
-// Words are Trish's (ux/permissions.md §3); each names the device as
-// itself.
+// Each names the device as itself.
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -18,7 +17,7 @@ import 'popover.dart' show presentPopover;
 import 'push.dart' show PushRegistrar, openNotificationSettings;
 
 /// Where the person turns a permission on, in a sentence: "Settings on
-/// this iPhone" (Trish 44387), "Android's Settings", "System Settings".
+/// this iPhone", "Android's Settings", "System Settings".
 String settingsAppName() => switch (defaultTargetPlatform) {
   TargetPlatform.iOS => 'Settings on this $thisDeviceKind',
   TargetPlatform.android => "Android's Settings",
@@ -107,15 +106,14 @@ class CameraPermission extends Permission {
   final Camera camera;
 
   /// Turned on from Settings' row, for everything the camera's for:
-  /// scanning codes and taking photos (Lucy 49815, Trish 49822).
+  /// scanning codes and taking photos.
   final bool settings;
 
   /// Taking a photo to send (the paperclip's Take Photo), not scanning.
   final bool photo;
 
   /// Scanning the code a Claktory shows to pair with it; else any code
-  /// (someone's invite, a pipe's): its words don't say whose (Zucchero
-  /// 44139).
+  /// (someone's invite, a pipe's): its words don't say whose.
   final bool pairing;
 
   /// Whether Paste code instead is beside it, so its words can offer it.

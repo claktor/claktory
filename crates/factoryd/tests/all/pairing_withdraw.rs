@@ -1,5 +1,5 @@
 //! A device waiting to be allowed takes back its own request when the
-//! person taps Cancel on it (#603): sent on its waiting connection, it
+//! person taps Cancel on it: sent on its waiting connection, it
 //! leaves the pending devices at once, and its code waits again; sent on
 //! any other connection it's refused.
 

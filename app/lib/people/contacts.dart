@@ -26,7 +26,7 @@ class PeoplePerson {
   });
 
   // The name they chose, which only ever shows: what reorders text shows by
-  // its code (proseCodes, Fugo).
+  // its code (proseCodes).
   factory PeoplePerson.fromJson(Map<String, Object?> json) => PeoplePerson(
     name: proseCodes(_text(json, 'name')),
     avatarSeed: _text(json, 'avatar_seed'),
@@ -51,7 +51,7 @@ class PeoplePerson {
 
   /// [label] inside a sentence ("Block Ana · K7QF2M?"): the name, which
   /// they chose, shown so it can't reorder the words around it
-  /// (nameInText; Fugo 51059), the tag as it is.
+  /// (nameInText), the tag as it is.
   String get labelInText {
     final shown = name.isEmpty ? 'No name' : nameInText(name);
     return tag.isEmpty ? shown : '$shown · $tag';

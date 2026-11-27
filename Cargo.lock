@@ -2139,6 +2139,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "idna",
  "ignore",
  "image",
  "iroh",

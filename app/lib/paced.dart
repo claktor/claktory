@@ -1,4 +1,4 @@
-// Big files over a slow link (#375). A file's bytes go over the same
+// Big files over a slow link. A file's bytes go over the same
 // WebSocket as everything else, one frame per request, and the app's
 // pings wait behind whatever frame is on its way: an 8 MB frame on two
 // bars of 4G takes a minute, the pong comes too late, and the connection
@@ -20,10 +20,10 @@ import 'protocol/factory/v1/factory.pb.dart';
 /// and what has come since) of its whole [size].
 typedef ReadProgress = void Function(int through, int size);
 
-/// The screen a preview is made for, in pixels, portrait (#379).
+/// The screen a preview is made for, in pixels, portrait.
 typedef PreviewBox = ({int width, int height});
 
-/// What a read says of whether it's a preview (#379).
+/// What a read says of whether it's a preview.
 extension FilePreviews on FileContent {
   /// A smaller copy made for this screen, in place of the file itself.
   bool get isPreview => preview == FilePreview.FILE_PREVIEW_MADE;
@@ -60,7 +60,7 @@ class Pace {
   Duration? _roundTrip;
 
   /// Bytes a second once the round trip is taken out: what a big file
-  /// moves at (#379). Null before a piece bigger than a tiny one.
+  /// moves at. Null before a piece bigger than a tiny one.
   double? _bandwidth;
 
   /// The last piece bigger than a tiny one: with the next, bigger one,
@@ -75,7 +75,7 @@ class Pace {
   /// and a piece, or two pieces of different sizes), or once a piece took
   /// half the [target] or more. On a slow link the pieces stay about one
   /// size and nothing tiny may come on a new connection, so the round
-  /// trip may never be known (Zucchero's row 341); but a piece that long
+  /// trip may never be known; but a piece that long
   /// is mostly the link's speed, the round trip a small part of it, so its
   /// own speed says enough. Null before either: a short piece on a quick
   /// link far away is mostly round trip, and would make it look slow.
@@ -132,7 +132,7 @@ class Pace {
     // Smoothed, so one slow or quick piece doesn't swing it; but a piece
     // that took far longer than it should is the link now (a fast one gone
     // slow, two bars of 4G), not a blip: half the old speed would still
-    // be pieces that hold the connection's pings up (Sale's row 68).
+    // be pieces that hold the connection's pings up.
     _rate = rate == null || elapsed > target * 2
         ? measured
         : (rate + measured) / 2;
@@ -141,7 +141,7 @@ class Pace {
     // times a step and settles from there; twice, till the link's speed
     // can be told ([estimate]): enough for the round trip to show, and on
     // a slow link that let a first piece through quickly (a burst), the
-    // next isn't one that holds up saying so (Sale's row 87).
+    // next isn't one that holds up saying so.
     final grown = math.min(
       ideal,
       _next * (estimate(_next) == null ? 2.0 : 4.0),
@@ -151,7 +151,7 @@ class Pace {
 
   /// A piece of [bytes] didn't make it (the connection dropped under it,
   /// most likely because it held the pings up): the next is a quarter of
-  /// it, so a retry isn't the same piece cut off again (Sale's row 68).
+  /// it, so a retry isn't the same piece cut off again.
   void failed(int bytes) {
     if (bytes <= 0) return;
     _next = (math.min(_next, bytes) ~/ 4).clamp(least, most);
@@ -202,12 +202,12 @@ typedef ReadRange = Future<FileContent> Function(
 );
 
 /// Whether a read that has got [through] of [size] goes on: false stops
-/// it there, answering what came (a preview would come sooner, #379).
+/// it there, answering what came (a preview would come sooner).
 typedef ReadOnward = bool Function(int through, int size);
 
 /// Whether a read goes on past its [first] piece: false answers that
-/// piece alone (a page image that didn't come needs none of the PDF,
-/// #379).
+/// piece alone (a page image that didn't come needs none of the
+/// PDF).
 typedef ReadFirst = bool Function(FileContent first);
 
 /// A read of up to [maxBytes] (0: the backend's limit) from [offset], in
@@ -304,8 +304,8 @@ Future<FileContent?> _readOnce({
     } on RequestFailure catch (failure) {
       // Gone with the connection: from here once it's back. Lost while
       // the connection still says it's up (its socket closed a moment
-      // before the app hears so, Sale's row 87): it will say otherwise in
-      // a moment, so it waits for that too rather than failing.
+      // before the app hears so): it will say otherwise in a moment, so
+      // it waits for that too rather than failing.
       final lost = _lost.contains(failure.message);
       if (connected.value && !lost) rethrow;
       final since = lostSince ??= DateTime.now();
@@ -359,7 +359,7 @@ Future<FileContent?> _readOnce({
 
 /// Whether [connected] is true, or becomes so within [within].
 /// What a request lost with its connection fails with (Backend's).
-const _lost = {'Connection lost.', 'Not connected to the backend.'};
+const _lost = {'Connection lost.', "Can't reach your Claktory right now."};
 
 /// How long a connection that lost a request may take to say it's down.
 const _sayingSo = Duration(seconds: 2);

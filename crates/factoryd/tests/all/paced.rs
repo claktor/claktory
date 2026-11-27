@@ -1,5 +1,5 @@
 //! A device on another machine (the iPhone, over the tunnel) gets the
-//! Workspace at most once a second (Polpo's iphone-efficiency.md, fix 2):
+//! Workspace at most once a second:
 //! the first change at once, a burst after it as one patch a second later,
 //! and the answer to its own request after what the request changed, at
 //! once.

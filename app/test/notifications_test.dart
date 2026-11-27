@@ -3,11 +3,14 @@ import 'dart:async';
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/drafts.dart';
 import 'package:factory_app/needs_you_entries.dart';
+import 'package:factory_app/needs_you_focus.dart'
+    show focusModeOf, setFocusMode;
 import 'package:factory_app/notifications.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/rail.dart';
 import 'package:factory_app/scope.dart' show AppPage;
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -183,7 +186,7 @@ void main() {
     );
     expect(system.posted.last.target.deviceId, 'd4');
 
-    // What waited out quiet hours (#364 O3): Needs you, about no one thing.
+    // What waited out quiet hours: Needs you, about no one thing.
     local().notifies.add(
       Notify(
         id: 'n5',
@@ -224,7 +227,7 @@ void main() {
     expect(claktories.selected.backend, same(nixos()));
     expect(page.value, AppPage.inbox);
 
-    // What waited out quiet hours: Needs you too (#364 O3). A Needs-you
+    // What waited out quiet hours: Needs you too. A Needs-you
     // click about an agent still goes to the agent.
     page.value = AppPage.settings;
     system.clicks.add(
@@ -349,6 +352,50 @@ void main() {
     expect(page.value, AppPage.agent);
     expect(local().sent.last.selectAgent.agentId, 'rivet');
     expect(NeedsYouEntries.of(local()).revealAlert.value, isNull);
+  });
+
+  testWidgets('on a computer, what opened Needs you opens focus mode at it: '
+      'a device to allow, an alert, what waited out quiet hours', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await start(tester);
+    final page = claktories.all.last.page..value = AppPage.settings;
+    system.clicks.add(NotificationTarget(claktory: 'c' * 64, deviceId: 'd4'));
+    await tester.pump();
+    expect(claktories.selected.backend, same(nixos()));
+    expect(focusModeOf(nixos()).value, isTrue);
+    expect(nixos().needsYouCard.value, 'device:d4');
+    expect(page.value, AppPage.settings, reason: 'no Needs you page');
+
+    setFocusMode(nixos(), false);
+    nixos().workspace.apply(
+      nixos().workspace.workspace.deepCopy()
+        ..alerts.add(Alert(id: 'al1', agentId: 'rivet', title: 'Down')),
+    );
+    system.clicks.add(
+      NotificationTarget(
+        claktory: 'c' * 64,
+        agentId: 'rivet',
+        seq: 40,
+        alertId: 'al1',
+      ),
+    );
+    await tester.pump();
+    expect(focusModeOf(nixos()).value, isTrue);
+    expect(nixos().needsYouCard.value, 'alert:al1');
+    expect(page.value, AppPage.settings);
+
+    setFocusMode(nixos(), false);
+    nixos().needsYouCard.value = null;
+    system.clicks.add(
+      NotificationTarget(claktory: 'c' * 64, kind: 'needs_you'),
+    );
+    await tester.pump();
+    expect(focusModeOf(nixos()).value, isTrue);
+    expect(nixos().needsYouCard.value, isNull);
+    expect(page.value, AppPage.settings);
   });
 
   testWidgets("a Mac's: whether in use, posting, and clicks, through "

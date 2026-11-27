@@ -144,16 +144,28 @@ pub(crate) fn open(home: &Home, target: &Target, create: bool) -> Result<Option<
 /// agent's database doesn't exist yet. An agent's database that's a link
 /// (to factory.db, say) isn't opened.
 pub(crate) fn open_read_only(home: &Home, target: &Target) -> Result<Option<Connection>, String> {
-    use std::os::unix::fs::MetadataExt;
     let path = path(home, target);
     let Ok(found) = std::fs::symlink_metadata(&path) else { return Ok(None) };
-    if matches!(target, Target::Own(_)) && (!found.file_type().is_file() || found.nlink() > 1) {
+    if matches!(target, Target::Own(_)) && (!found.file_type().is_file() || links(&path, &found) > 1) {
         return Err("This database is a link to another file, so it can't be read.".to_owned());
     }
     let failed = |error: rusqlite::Error| format!("The database couldn't be opened: {error}");
     let mut db = read_only(&path).map_err(failed)?;
     guard(&mut db, target, true).map_err(failed)?;
     Ok(Some(db))
+}
+
+/// How many names the file has (a hard link to factory.db has two).
+#[cfg(unix)]
+fn links(_path: &std::path::Path, found: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    found.nlink()
+}
+
+/// How many names the file has; one that can't be read counts as linked.
+#[cfg(windows)]
+fn links(path: &std::path::Path, _found: &std::fs::Metadata) -> u64 {
+    crate::windows::fs::identity(path).map_or(u64::MAX, |identity| identity.links)
 }
 
 fn read_only(path: &std::path::Path) -> rusqlite::Result<Connection> {

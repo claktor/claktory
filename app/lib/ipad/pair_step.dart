@@ -1,4 +1,4 @@
-// An iPad with no Claktory yet, at any width (#363 F3): the phone's way of
+// An iPad with no Claktory yet, at any width: the phone's way of
 // connecting (PairScreen: what Claktory needs, Send me the link, signing in
 // with an email, scanning or pasting a code), never the Mac's ConnectStep,
 // which only pastes. A narrow window takes the phone's layout and shows
@@ -15,7 +15,7 @@ import '../phone.dart' show PairScreen;
 /// and the wide one's: crossing between them (Split View and full screen,
 /// a rotation from 504 to 809) builds a new window (main.dart), and the
 /// key carries the screen across, at its step, rather than starting over
-/// (Sale's row 198, Lucy 49619). Only one is ever there at a time.
+/// . Only one is ever there at a time.
 final pairScreenKey = GlobalKey(debugLabel: 'pairing');
 
 /// [PairScreen] filling the window beside the rail (Shell's steps place

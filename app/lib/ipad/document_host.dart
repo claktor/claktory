@@ -1,5 +1,5 @@
 // A document pane on an iPad (docs/ipad-workbench.md §6): a PDF, with ink
-// on its pages, in Gelato's native surface (ink_surface.dart), under
+// on its pages, in the native surface (ink_surface.dart), under
 // Claktory's own drawing tools (ink_tools.dart) and a line saying whether
 // the ink is kept.
 //
@@ -13,10 +13,10 @@
 // - The tools are Flutter's: PencilKit's picker takes the keyboard.
 //
 // What's drawn is kept on the backend as ink layers
-// (docs/ipad-phase3-contract.md §3, §4) by Gelato's InkLayerSync, one per
+// (docs/ipad-phase3-contract.md §3) by InkLayerSync, one per
 // surface: the host tells it what native says (ready, a drawing changed, a
 // new version shown, the view going) and shows what it says under the
-// page, in Trish's words.
+// page.
 import 'dart:async';
 import 'dart:io' show Directory, File;
 
@@ -55,7 +55,7 @@ import 'workbench.dart' show WorkbenchScope;
 const documentKind = 'pdf';
 
 /// The pane kind of an image, drawn on once the person taps Draw
-/// (#362 I2).
+/// .
 const imageKind = 'image';
 
 /// [node]'s pane on an iPad when it's a document ([documentKind]): the
@@ -305,7 +305,7 @@ class DocumentSurface extends ChangeNotifier {
 
   /// What the person typed in answer to each question on this file, by
   /// the ask's seq, while the pane stays in the agent's layout: showing
-  /// another agent and coming back keeps it (Prosciutto's S5). In memory
+  /// another agent and coming back keeps it. In memory
   /// only, never kept on the device.
   final answers = <int, String>{};
 
@@ -705,8 +705,8 @@ class DocumentSurface extends ChangeNotifier {
 
   Future<_Version> _versionOnce(Backend backend, String claktory) async {
     // From a Claktory on another machine (an iPad's always is), the copies
-    // this device keeps, which Settings → Storage counts and clears
-    // (#446); else the render cache. A byte first: the file's version, so
+    // this device keeps, which Settings → Storage counts and clears;
+    // else the render cache. A byte first: the file's version, so
     // a copy already here isn't brought over the link again.
     final cache = FileCache.of(backend);
     final first = await backend.readFile(
@@ -848,7 +848,7 @@ class DocumentSurface extends ChangeNotifier {
     }
   }
 
-  /// The kept copy the surface shows (#446): held, so the device's
+  /// The kept copy the surface shows: held, so the device's
   /// storage limit or Clear never takes it from under the view.
   ({FileCache cache, File file})? _held;
 

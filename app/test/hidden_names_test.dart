@@ -1,9 +1,9 @@
-// A file an agent named with characters that reorder text or show nothing
-// (Fugo's row 1026, Abbacchio's s418-40): `invoice\u202Efdp.exe` read as
+// A file an agent named with characters that reorder text or show nothing:
+// `invoice\u202Efdp.exe` read as
 // "invoiceexe.pdf" in its pane's header. Every name the app draws shows
 // them as their codes, as the conversation's tool lines do; and what's done
 // with the file (opened, shared) is the file itself, not the name as shown
-// (Zucchero's row 343: "No such file …\u{202E}…").
+// ("No such file …\u{202E}…").
 import 'dart:async';
 import 'dart:io';
 

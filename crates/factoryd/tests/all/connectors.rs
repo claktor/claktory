@@ -433,7 +433,7 @@ async fn an_agent_suggests_a_service_the_person_connects_it_and_only_a_narrower_
             == "event from Claktory: The person connected Demo (matt@example.com) for your proposal. You don't have it: an admin agent decides what you get.")
     })
     .await;
-    // With the person's comment, as theirs (#289).
+    // With the person's comment, as theirs.
     let noted = |entry: &v1::Entry| matches!(&entry.kind, Some(v1::entry::Kind::Event(event)) if event.text.ends_with("\n\nThe person's note: Use the staging zone."));
     assert!(view.entries.iter().any(noted), "{:?}", describe(&view.entries));
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
@@ -557,7 +557,7 @@ async fn a_pasted_token_is_checked_with_what_the_flow_kept_when_it_started() {
     assert_eq!(vault(&view).secrets[0].name, "Pasty (matt@example.com)");
 }
 
-/// Submit (#370): a comment instead of Connect or Dismiss is a reply.
+/// Submit: a comment instead of Connect or Dismiss is a reply.
 /// Nothing is connected, and the agent gets the person's words.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_reply_to_a_suggested_service_connects_nothing_and_tells_the_agent() {

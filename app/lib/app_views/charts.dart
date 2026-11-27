@@ -691,6 +691,26 @@ FlLine chartGridLine(BuildContext context) => FlLine(
   strokeWidth: 1 / MediaQuery.devicePixelRatioOf(context),
 );
 
+/// Where a value axis's label sits: the top one inside the chart, never
+/// over its label, and the bottom one centred on its line, as Grafana keeps
+/// 0 level with the baseline (Zucchero row 794).
+SideTitleFitInsideData _valueFit(TitleMeta meta, double value) =>
+    value <= meta.min + (meta.max - meta.min) * 1e-6
+    ? SideTitleFitInsideData.disable()
+    : SideTitleFitInsideData.fromTitleMeta(meta);
+
+/// The gridline at the plot's foot, which fl_chart leaves out of its grid:
+/// drawn when the axis starts on a step (0, say), as Grafana's is.
+FlBorderData _foot(BuildContext context, bool onStep) {
+  final line = chartGridLine(context);
+  return FlBorderData(
+    show: onStep,
+    border: Border(
+      bottom: BorderSide(color: line.color!, width: line.strokeWidth),
+    ),
+  );
+}
+
 /// A Chart's or Stat's label as Grafana's panel title: 14px, weight 500,
 /// in [chartText].
 TextStyle panelTitle(BuildContext context) => TypeScale.of(context).caption
@@ -1112,8 +1132,7 @@ class _AppChartState extends State<AppChart> {
       interval: step,
       getTitlesWidget: (value, meta) => SideTitleWidget(
         meta: meta,
-        // The top one inside the chart, never over its label.
-        fitInside: SideTitleFitInsideData.fromTitleMeta(meta),
+        fitInside: _valueFit(meta, value),
         child: Text(
           shortNumber(value),
           maxLines: 1,
@@ -1282,7 +1301,7 @@ class _AppChartState extends State<AppChart> {
                   getDrawingHorizontalLine: (_) => chartGridLine(context),
                   getDrawingVerticalLine: (_) => chartGridLine(context),
                 ),
-                borderData: FlBorderData(show: false),
+                borderData: _foot(context, onStep(range.min, 0, step)),
                 titlesData: FlTitlesData(
                   topTitles: _none,
                   rightTitles: _none,
@@ -1298,7 +1317,7 @@ class _AppChartState extends State<AppChart> {
                         return SideTitleWidget(
                           meta: meta,
                           space: Space.s,
-                          fitInside: SideTitleFitInsideData.fromTitleMeta(meta),
+                          fitInside: _valueFit(meta, value),
                           child: Text(
                             valueLabel(value),
                             maxLines: 1,
@@ -2081,7 +2100,7 @@ class _AppChartState extends State<AppChart> {
                   getDrawingHorizontalLine: (_) => chartGridLine(context),
                   getDrawingVerticalLine: (_) => chartGridLine(context),
                 ),
-                borderData: FlBorderData(show: false),
+                borderData: _foot(context, onStep(ys.min, yStep)),
                 titlesData: FlTitlesData(
                   topTitles: _none,
                   rightTitles: _none,
@@ -2107,7 +2126,7 @@ class _AppChartState extends State<AppChart> {
                         return SideTitleWidget(
                           meta: meta,
                           space: Space.s,
-                          fitInside: SideTitleFitInsideData.fromTitleMeta(meta),
+                          fitInside: _valueFit(meta, value),
                           child: Text(
                             yLabel(value),
                             maxLines: 1,

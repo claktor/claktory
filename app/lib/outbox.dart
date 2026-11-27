@@ -14,7 +14,7 @@ import 'voice_keep.dart';
 /// was lost, or wasn't there. What failed so goes again once it's back.
 bool connectionLost(RequestFailure failure) =>
     failure.message == 'Connection lost.' ||
-    failure.message == 'Not connected to the backend.' ||
+    failure.message == "Can't reach your Claktory right now." ||
     failure.message == decisionWaiting;
 
 /// What a decision on a card cut off by the connection fails with: the
@@ -76,8 +76,9 @@ abstract interface class OutboxBackend {
 class OutgoingFile {
   OutgoingFile._(this.file, this.uploadId);
 
-  /// The file on this device.
-  final LocalFile file;
+  /// The file on this device: moved into a voice message's kept folder
+  /// when it was one of the app's temporary copies ([keepWith]).
+  LocalFile file;
 
   /// Made up here, so an upload cut off can be picked up again.
   final String uploadId;
@@ -215,6 +216,25 @@ class Outbox extends ChangeNotifier {
     if (voice != null && claktory != null && kind != null) {
       final file = message.files.first;
       final folder = await keptVoiceFolder();
+      final keeps = folder != null && file.file.path.startsWith('$folder/');
+      if (keeps) {
+        // What goes with it, when the app made the copy (a photo picked or
+        // pasted), stays with the recording: the system may clear the
+        // temporary folder, or move the app's, before it's sent (#615).
+        final into = File(file.file.path).parent.path;
+        for (final (index, other) in message.files.indexed.skip(1)) {
+          final path = await keepWith(other.file.path, into, index);
+          if (path != other.file.path) {
+            other.file = LocalFile(
+              path: path,
+              name: other.file.name,
+              size: other.file.size,
+            );
+          }
+        }
+        // Its pictures show from where they are now.
+        notifyListeners();
+      }
       final kept = KeptVoice(
         path: file.file.path,
         duration: voice,
@@ -223,7 +243,7 @@ class Outbox extends ChangeNotifier {
         target: message.agentId,
         clientId: message.clientId,
         uploadId: file.uploadId,
-        kept: folder != null && file.file.path.startsWith('$folder/'),
+        kept: keeps,
         // What goes with it, so it goes again whole after a relaunch.
         text: message.text,
         files: [

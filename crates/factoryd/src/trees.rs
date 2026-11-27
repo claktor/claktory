@@ -208,6 +208,13 @@ fn ignore_missing(error: std::io::Error) -> std::io::Result<()> {
     if error.kind() == std::io::ErrorKind::NotFound { Ok(()) } else { Err(error) }
 }
 
+#[cfg(windows)]
+fn same_volume(a: &Path, b: &Path) -> bool {
+    use crate::windows::fs::identity;
+    matches!((identity(a), identity(b)), (Ok(a), Ok(b)) if a.volume == b.volume)
+}
+
+#[cfg(unix)]
 fn same_volume(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     match (std::fs::metadata(a), std::fs::metadata(b)) {
@@ -220,7 +227,6 @@ fn same_volume(a: &Path, b: &Path) -> bool {
 /// they are there, a few threads at a time. A tracked file that's missing
 /// there (deleted, not committed) or a submodule is left to git.
 fn clone_tracked(repo: &Path, tree: &Path) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
     let listed = Command::new("git").arg("-C").arg(repo).args(["ls-files", "-z"]).output()?;
     if !listed.status.success() {
         return Err(std::io::Error::other("git ls-files failed"));
@@ -229,8 +235,8 @@ fn clone_tracked(repo: &Path, tree: &Path) -> std::io::Result<()> {
         .stdout
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
-        .map(|path| Path::new(std::ffi::OsStr::from_bytes(path)))
-        .collect();
+        .map(git_path_bytes)
+        .collect::<std::io::Result<_>>()?;
     let mut folders: Vec<&Path> = files.iter().filter_map(|file| file.parent()).filter(|folder| !folder.as_os_str().is_empty()).collect();
     folders.sort_unstable();
     folders.dedup();
@@ -279,7 +285,7 @@ fn clone(from: &Path, to: &Path) -> std::io::Result<()> {
 
 /// Clones a file with a reflink (`FICLONE`), where the filesystem has them
 /// (btrfs, XFS…); a symbolic link is made again.
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn clone(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::io::AsRawFd;
@@ -296,6 +302,26 @@ fn clone(from: &Path, to: &Path) -> std::io::Result<()> {
         return Err(std::io::Error::last_os_error());
     }
     target.set_permissions(std::fs::Permissions::from_mode(meta.permissions().mode()))
+}
+
+/// No reflinks on NTFS (only ReFS, a Dev Drive's, has block cloning): the
+/// checkout is written plain.
+#[cfg(windows)]
+fn clone(_from: &Path, _to: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "files aren't cloned on Windows"))
+}
+
+/// A path as `git ls-files -z` gives it: its bytes on a Mac or Linux.
+#[cfg(unix)]
+fn git_path_bytes(path: &[u8]) -> std::io::Result<&Path> {
+    use std::os::unix::ffi::OsStrExt;
+    Ok(Path::new(std::ffi::OsStr::from_bytes(path)))
+}
+
+/// On Windows, Git for Windows gives UTF-8.
+#[cfg(windows)]
+fn git_path_bytes(path: &[u8]) -> std::io::Result<&Path> {
+    std::str::from_utf8(path).map(Path::new).map_err(|_| std::io::Error::other("git listed a path that isn't UTF-8"))
 }
 
 /// Gives the checkout the main checkout's index, so git sees the cloned
@@ -565,12 +591,23 @@ mod tests {
         let repo = dir.join("site");
         std::fs::create_dir_all(&repo).expect("repo");
         run(&repo, &["git", "init", "-q", "-b", "main"]);
+        // Files as committed, and links as links, whatever Git for Windows
+        // was installed with (checkouts share the repository's settings).
+        #[cfg(windows)]
+        {
+            run(&repo, &["git", "config", "core.autocrlf", "false"]);
+            run(&repo, &["git", "config", "core.symlinks", "true"]);
+        }
         std::fs::write(repo.join(".gitignore"), "target/\n").expect("ignore");
         run(&repo, &["git", "add", ".gitignore"]);
         commit(&repo, "lib.rs", "one\n");
         std::fs::create_dir_all(repo.join("src/deep")).expect("src");
         commit(&repo, "src/deep/mod.rs", "nested\n");
+        #[cfg(unix)]
         std::os::unix::fs::symlink("lib.rs", repo.join("link.rs")).expect("symlink");
+        // Developer Mode lets this user make one.
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file("lib.rs", repo.join("link.rs")).expect("symlink");
         run(&repo, &["git", "add", "link.rs"]);
         run(&repo, &["git", "-c", "user.name=T", "-c", "user.email=t@t", "commit", "-q", "-m", "link"]);
         std::fs::create_dir_all(repo.join("target/debug")).expect("target");

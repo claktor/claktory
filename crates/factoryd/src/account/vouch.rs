@@ -48,6 +48,7 @@ pub(crate) async fn vouch(factory: &Arc<Factory>, request: &v1::VouchDevice) -> 
     match answered {
         Ok(given) if !given.request_id.is_empty() && !given.code.is_empty() && given.expires_in > 0 => {
             tracing::info!("this computer's app was given a code to sign in to the account as a device");
+            factory.account.note_vouched_app(&body.account_key);
             Ok(v1::DeviceVouched {
                 request_id: given.request_id,
                 code: given.code,

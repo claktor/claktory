@@ -1,7 +1,8 @@
 //! Keeping the vault's key out of reach while it's in memory: in a page of
 //! its own that's never swapped out (mlock) or written into a core dump, and
 //! a process that doesn't dump core and, on Linux, can't be read by other
-//! processes of the same user, agents included (PR_SET_DUMPABLE 0).
+//! processes of the same user, agents included (PR_SET_DUMPABLE 0). On
+//! Windows, a locked page left out of crash reports (`windows::memory`).
 
 use std::ptr::NonNull;
 
@@ -19,6 +20,16 @@ unsafe impl Sync for Locked {}
 
 impl Locked {
     /// `key` in a locked page; None if no page can be had.
+    #[cfg(windows)]
+    pub(crate) fn new(key: &[u8; 32]) -> Option<Locked> {
+        let (page, size) = crate::windows::memory::page()?;
+        // SAFETY: `page` is `size` (at least 32) bytes we own.
+        unsafe { std::ptr::copy_nonoverlapping(key.as_ptr(), page.as_ptr(), 32) };
+        Some(Locked { page, size })
+    }
+
+    /// `key` in a locked page; None if no page can be had.
+    #[cfg(unix)]
     pub(crate) fn new(key: &[u8; 32]) -> Option<Locked> {
         // SAFETY: an anonymous private mapping of one page, checked below.
         let size = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).ok().filter(|size| *size >= 32).unwrap_or(4096);
@@ -56,8 +67,13 @@ impl Drop for Locked {
         // SAFETY: the page is ours until munmap.
         unsafe {
             std::slice::from_raw_parts_mut(self.page.as_ptr(), self.size).zeroize();
-            libc::munlock(self.page.as_ptr().cast(), self.size);
-            libc::munmap(self.page.as_ptr().cast(), self.size);
+            #[cfg(unix)]
+            {
+                libc::munlock(self.page.as_ptr().cast(), self.size);
+                libc::munmap(self.page.as_ptr().cast(), self.size);
+            }
+            #[cfg(windows)]
+            crate::windows::memory::free(self.page, self.size);
         }
     }
 }
@@ -66,6 +82,7 @@ impl Drop for Locked {
 /// the same user from reading its memory. For the backend and the
 /// supervisor, which hold the vault's key. Children are unaffected but for
 /// the core size, which they inherit and may raise again.
+#[cfg(unix)]
 pub fn harden() {
     // SAFETY: plain system calls on this process.
     unsafe {
@@ -80,6 +97,12 @@ pub fn harden() {
         }
     }
 }
+
+/// On Windows the key's pages are left out of crash reports as they're
+/// made (`windows::memory`), and no process setting stops another of the
+/// same user reading this one's memory: nothing more to do.
+#[cfg(windows)]
+pub fn harden() {}
 
 #[cfg(test)]
 mod tests {

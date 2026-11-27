@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering}
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::endpoint::{Connection, ConnectionError, RecvStream, SendStream};
 use iroh::{EndpointId, SecretKey, Signature};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -98,8 +98,8 @@ pub struct Outgoing {
     pub via: Via,
     pub text: String,
     pub files: Vec<OutFile>,
-    /// From a member that only sends (#414): the peer's loop breaker leaves
-    /// it out (friend bug #33). Kept in the signed frame as it was queued.
+    /// From a member that only sends: the peer's loop breaker leaves
+    /// it out. Kept in the signed frame as it was queued.
     pub sends_only: bool,
 }
 
@@ -124,7 +124,7 @@ pub struct Incoming {
     pub files: Vec<InFile>,
     /// When the peer sent it, by its clock, in ms since 1970.
     pub sent_at_ms: i64,
-    /// The peer says an agent that only sends wrote it (friend bug #33): its
+    /// The peer says an agent that only sends wrote it: its
     /// word, honoured only to leave the message out of the loop breaker.
     pub sends_only: bool,
 }
@@ -144,7 +144,7 @@ pub struct LinkStatus {
     pub offline_since_ms: i64,
 }
 
-/// What one side tells the other of its liaison (#343 U18, Fugo's ruling):
+/// What one side tells the other of its liaison:
 /// that it waits, and until when when that's known (rounded up to a quarter
 /// of an hour by the sender, checked by the receiver), or that it's awake.
 /// Only the time, never why it waits.
@@ -337,6 +337,12 @@ const ANSWER: Duration = Duration::from_secs(30);
 /// How often an idle link checks that its peer is there.
 const PING: Duration = Duration::from_secs(20);
 use crate::iroh_link::{FIRST_BACKOFF, MAX_BACKOFF};
+/// The code a Claktory that stops closes its pipes' connections with, so
+/// each peer shows it offline at once rather than at its next ping.
+const STOPPING: u32 = 2;
+/// Why the peer can't be reached once it said it stopped, kept while it
+/// stays unreachable.
+const STOPPED: &str = "it stopped";
 /// How long a closed pipe keeps trying to tell its peer.
 const CLOSE_TRIES: i64 = 7 * 24 * 60 * 60 * 1000;
 /// Files that came with messages and weren't moved are deleted after this.
@@ -388,6 +394,9 @@ pub(crate) struct State {
     first_backoff_ms: AtomicU64,
     /// A test's stand-in for a Claktory that's away (`set_away`).
     away: AtomicBool,
+    /// The connections peers dialed here, for `stopping` to close.
+    served: Mutex<HashMap<u64, Connection>>,
+    served_next: AtomicU64,
 }
 
 impl State {
@@ -593,7 +602,7 @@ struct Payload {
     identity: Option<String>,
     /// waiting: until when, in ms since 1970; absent when there's no known
     /// end. Whatever the peer put here is checked (`heard_liaison`). share:
-    /// when the website stops being shared (#46), shown only, checked too
+    /// when the website stops being shared, shown only, checked too
     /// (`shares::heard_end`); absent for none.
     #[serde(skip_serializing_if = "Option::is_none")]
     until_ms: Option<serde_json::Value>,
@@ -601,7 +610,7 @@ struct Payload {
     /// receiving side uses for its own address when it's free there.
     #[serde(skip_serializing_if = "Option::is_none")]
     port: Option<u16>,
-    /// message: written by a member that only sends (friend bug #33);
+    /// message: written by a member that only sends;
     /// absent otherwise, so a frame is what a Claktory from before sent.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     sends_only: bool,
@@ -691,10 +700,9 @@ fn frame(key: &SecretKey, payload: &Payload, files: &[Vec<u8>]) -> Vec<u8> {
 
 /// Why a frame wasn't read: the stream failed before it arrived whole
 /// (`Io`: no answer, so its sender tries again on its usual schedule), or
-/// it arrived and isn't one to take (`Bad`: answered "bad"). Friend bug
-/// #32: an answer of "bad" to a website's offer reads as a Claktory from
+/// it arrived and isn't one to take (`Bad`: answered "bad"). An answer of "bad" to a website's offer reads as a Claktory from
 /// before, which ended that share there for good, so a dropped stream
-/// mustn't get it (Fugo 35687).
+/// mustn't get it.
 #[derive(Debug)]
 enum Unread {
     Io(String),
@@ -909,6 +917,43 @@ pub fn set_away(factory: &Factory, away: bool) {
         for worker in lock(&factory.remote.pipes.workers).values() {
             worker.wake.notify_one();
         }
+    }
+}
+
+/// This Claktory is stopping: every pipe connection, dialed or served,
+/// closes with `STOPPING`, so each peer shows it offline at once. Before
+/// the endpoint closes, which then waits for the peers to hear it.
+pub(crate) fn stopping(factory: &Factory) {
+    let state = &factory.remote.pipes;
+    let dialed = lock(&state.workers).values().filter_map(|worker| lock(&worker.connection).take()).collect::<Vec<_>>();
+    for connection in dialed.iter().chain(lock(&state.served).values()) {
+        connection.close(STOPPING.into(), b"stopping");
+    }
+}
+
+/// Whether a connection ended because the peer said it's stopping.
+fn peer_stopped(error: &ConnectionError) -> bool {
+    matches!(error, ConnectionError::ApplicationClosed(close) if close.error_code == STOPPING.into())
+}
+
+/// The peer `peer` said it's stopping: each of its pipes shows it offline.
+fn heard_stopping(factory: &Arc<Factory>, peer: &str) {
+    let pipes: Vec<String> = {
+        let db = factory.store.db();
+        let read = db
+            .prepare("SELECT pipe FROM pipe_links WHERE peer = ?1")
+            .and_then(|mut query| query.query_map([peer], |row| row.get(0))?.collect::<rusqlite::Result<Vec<String>>>());
+        match read {
+            Ok(pipes) => pipes,
+            Err(error) => {
+                tracing::error!(%error, "could not read the pipes' links");
+                return;
+            }
+        }
+    };
+    for pipe in pipes {
+        let Some(worker) = lock(&factory.remote.pipes.workers).get(&pipe).cloned() else { continue };
+        set_status(factory, &pipe, &worker, |status| offline(status, STOPPED));
     }
 }
 
@@ -1279,7 +1324,7 @@ pub(crate) fn share(factory: &Arc<Factory>, pipe: &str, id: &str, offer: Option<
             payload.msg_id = id.to_owned();
             payload.text = name.to_owned();
             payload.port = Some(port);
-            // When it ends (#46), for the other side to show; absent for
+            // When it ends, for the other side to show; absent for
             // none. Only this side ends it.
             payload.until_ms = (until > 0).then(|| serde_json::json!(until));
         }),
@@ -1415,8 +1460,11 @@ fn queued(factory: &Factory, pipe: &str) -> u32 {
 /// The peer couldn't be reached: why, and since when (kept from the
 /// first failure).
 fn offline(status: &mut LinkStatus, reason: &str) {
+    let stopped = !status.online && status.reason == STOPPED;
     status.online = false;
-    status.reason = reason.lines().next().unwrap_or_default().to_owned();
+    if !stopped {
+        status.reason = reason.lines().next().unwrap_or_default().to_owned();
+    }
     if status.offline_since_ms == 0 {
         status.offline_since_ms = now_ms();
     }
@@ -1478,7 +1526,22 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
         let ping_due = contact.elapsed() >= PING;
         if next.is_none() && liaison.is_none() && !ping_due {
             drop(strong);
-            let _ = tokio::time::timeout_at(contact + PING, worker.wake.notified()).await;
+            let open = connection.clone();
+            let closed = async {
+                match open {
+                    Some(open) => open.closed().await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                _ = tokio::time::timeout_at(contact + PING, worker.wake.notified()) => {}
+                error = closed => {
+                    connection = None;
+                    if peer_stopped(&error) && let Some(strong) = factory.upgrade() {
+                        set_status(&strong, &pipe, &worker, |status| offline(status, STOPPED));
+                    }
+                }
+            }
             continue;
         }
         if connection.as_ref().is_some_and(|connection| connection.close_reason().is_some()) {
@@ -1659,6 +1722,30 @@ async fn work(factory: Weak<Factory>, pipe: String, worker: Arc<Worker>) {
     }
 }
 
+/// A connection a peer dialed here, in `State::served` while it's served.
+struct Served {
+    factory: Weak<Factory>,
+    id: u64,
+}
+
+impl Served {
+    fn new(factory: &Weak<Factory>, connection: &Connection) -> Option<Served> {
+        let factory_now = factory.upgrade()?;
+        let state = &factory_now.remote.pipes;
+        let id = state.served_next.fetch_add(1, Ordering::Relaxed);
+        lock(&state.served).insert(id, connection.clone());
+        Some(Served { factory: factory.clone(), id })
+    }
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        if let Some(factory) = self.factory.upgrade() {
+            lock(&factory.remote.pipes.served).remove(&self.id);
+        }
+    }
+}
+
 /// Frames read at once per peer connection: enough for a busy pipe, and
 /// a bound on what one connection can make this side hold in memory.
 const STREAMS_AT_ONCE: usize = 8;
@@ -1674,7 +1761,17 @@ pub(crate) async fn serve(connection: Connection, factory: Weak<Factory>) {
     let peer = connection.remote_id();
     let reading = Arc::new(tokio::sync::Semaphore::new(STREAMS_AT_ONCE));
     let mut unpinned_streams = 0;
-    while let Ok((send, receive)) = connection.accept_bi().await {
+    let Some(_served) = Served::new(&factory, &connection) else { return };
+    loop {
+        let (send, receive) = match connection.accept_bi().await {
+            Ok(streams) => streams,
+            Err(error) => {
+                if peer_stopped(&error) && let Some(strong) = factory.upgrade() {
+                    heard_stopping(&strong, &peer.to_string());
+                }
+                return;
+            }
+        };
         let Some(strong) = factory.upgrade() else { return };
         if strong.remote.pipes.away.load(Ordering::Relaxed) {
             connection.close(0u32.into(), b"away");
@@ -2016,7 +2113,7 @@ fn clear_old(root: &Path) {
 mod tests {
     use super::*;
 
-    /// Friend bug #33 (Fugo 33515): the mark goes only on a message from a
+    /// The mark goes only on a message from a
     /// member that only sends; any other frame is what a Claktory from
     /// before sent, byte for byte, and one from before reads as unmarked.
     #[test]
@@ -2035,7 +2132,7 @@ mod tests {
         assert!(marked.contains("\"sends_only\":true"), "{marked}");
         assert!(serde_json::from_str::<Payload>(&marked).expect("read").sends_only);
         assert!(!serde_json::from_str::<Payload>(&plain).expect("read").sends_only);
-        // The same for a pause by the loop breaker (Abbacchio row 1177).
+        // The same for a pause by the loop breaker.
         let pause = |looped: bool| Payload { v: 1, kind: KIND_PAUSE.to_owned(), looped, ..Payload::default() };
         assert!(!serde_json::to_string(&pause(false)).expect("json").contains("looped"));
         assert!(serde_json::to_string(&pause(true)).expect("json").contains("\"looped\":true"));

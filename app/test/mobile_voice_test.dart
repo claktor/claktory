@@ -1,5 +1,4 @@
-// Voice messages on an iPhone (#197 slice 5; research voice.md and
-// mobile.md "Voice memo placement"): the mic in Send's place while the box
+// Voice messages on an iPhone: the mic in Send's place while the box
 // is empty; hold to record, let go to send, slide toward the start to
 // cancel; a tap records with Send and Cancel, which VoiceOver uses too; a
 // call pauses it rather than sending; the microphone turned off offers
@@ -96,7 +95,7 @@ void main() {
     await tester.enterText(find.byType(EditableText).last, 'Hi');
     await pumpFrames(tester);
     // With text, Send takes its place and the mic moves beside it, for a
-    // voice note to go with the text (#425).
+    // voice note to go with the text.
     expect(find.byType(SendButton), findsOneWidget);
     expect(mic, findsOneWidget);
     expect(
@@ -215,7 +214,7 @@ void main() {
         greaterThan(17),
         reason: '$size at $scale',
       );
-      // The time is never cut off at the bottom (Zucchero's row 339): it
+      // The time is never cut off at the bottom: it
       // has the height its text needs, and the row holds it.
       final time = find.descendant(
         of: find.byType(PhoneRecordingRow),

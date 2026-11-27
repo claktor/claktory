@@ -1,4 +1,4 @@
-//! Ink layers (#209 phase 3 §4): saved with compare and set, a retry
+//! Ink layers: saved with compare and set, a retry
 //! answering what the save answered, durable before they're said to be
 //! saved, kept per version of the file, deleted only at the revision seen,
 //! and pruned with the blobs nothing refers to any more.

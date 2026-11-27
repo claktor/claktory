@@ -235,7 +235,7 @@ class _Waiting {
   var gone = false;
 
   /// The person's message on its way to an agent that wasn't working when
-  /// it was sent: shown whole and bright from the tap (#453), not faded.
+  /// it was sent: shown whole and bright from the tap, not faded.
   var toIdle = false;
 }
 
@@ -434,7 +434,7 @@ class _TranscriptViewState extends State<TranscriptView>
   late final _find = ConversationFind(
     search: _searchLog,
     pipe: widget.pipeFind != null,
-    // What waits at its end shows, so it's found too (Zucchero's row 207).
+    // What waits at its end shows, so it's found too.
     queued: () => [
       for (final waiting in _waiting)
         if (!waiting.gone) (waiting, _queuedWords(waiting.message)),
@@ -613,7 +613,7 @@ class _TranscriptViewState extends State<TranscriptView>
     _exact.value = exact;
     // On a long line in a block that scrolls sideways (code, a tool's
     // input and output), sideways first: the occurrence gone to, or, where
-    // every one is marked, the first in each block (Zucchero's row 121).
+    // every one is marked, the first in each block.
     _revealAcross(context, [if (single) shown[index] else ...shown]);
     final transform = target.getTransformTo(view);
     final top = MatrixUtils.transformPoint(transform, rect.topLeft).dy;
@@ -716,7 +716,7 @@ class _TranscriptViewState extends State<TranscriptView>
   }
 
   /// Whether this is an agent's own conversation, which can go back to an
-  /// earlier message (friend bug #9): not a chat's, nor a pipe's view.
+  /// earlier message: not a chat's, nor a pipe's view.
   bool get _goesBack =>
       widget.pipeFind == null &&
       widget.transcript.agentId.isNotEmpty &&
@@ -743,7 +743,7 @@ class _TranscriptViewState extends State<TranscriptView>
   final _fromQueue = <int>{};
 
   /// Of those, the ones whose bubble was already bright (the person's
-  /// message to an idle agent, #453): they just stay as they are.
+  /// message to an idle agent): they just stay as they are.
   final _fromSent = <int>{};
 
   @override
@@ -1041,7 +1041,7 @@ class _TranscriptViewState extends State<TranscriptView>
     for (final outgoing in current) {
       if (_waiting.any((waiting) => waiting.outgoing == outgoing)) continue;
       final now = clock.now();
-      // As the backend will have it (#453): when it was sent and where
+      // As the backend will have it: when it was sent and where
       // from, so it shows whole from the tap, not a piece at a time.
       final stand = QueuedMessage(
         source: 'person',
@@ -1106,8 +1106,8 @@ class _TranscriptViewState extends State<TranscriptView>
         // The person's message just sent: it's queued, where it shows.
         sent.message = message;
         _arrived(sent);
-        // To a working agent it waits for the step to end: Queued at once
-        // (Zucchero's row 447), never its time first.
+        // To a working agent it waits for the step to end: Queued at once,
+        // never its time first.
         if (widget.working) continue;
         sent.justSent = true;
         _relabel?.cancel();
@@ -1286,8 +1286,7 @@ class _TranscriptViewState extends State<TranscriptView>
 
   /// Glides to the bottom, or with reduced motion, goes there at once; so
   /// too while nothing moves (the window reported unseen): a glide waiting
-  /// on a stopped clock would keep the new entry below the fold (friend bug
-  /// #31).
+  /// on a stopped clock would keep the new entry below the fold.
   void _startGlide() {
     if (!_controller.hasClients ||
         _reducedMotion ||
@@ -1588,7 +1587,7 @@ class _TranscriptViewState extends State<TranscriptView>
   }
 
   /// The person's typed message, shown whole as its entry will be, its
-  /// time and the device it was sent from with it, and not faded (#453):
+  /// time and the device it was sent from with it, and not faded:
   /// from the tap when the agent was idle, while it isn't waiting in the
   /// queue (just sent, or taken and its entry on its way), and never once
   /// sending it failed.
@@ -1630,7 +1629,7 @@ class _TranscriptViewState extends State<TranscriptView>
         waiting.outgoing == null &&
         message.transcription.state ==
             TranscriptionState.TRANSCRIPTION_STATE_FAILED;
-    // Typed with a voice message (#425): over its recording while it
+    // Typed with a voice message: over its recording while it
     // waits; once heard, the rest of the text is what was said.
     final typed = message.typed.isNotEmpty
         ? message.typed
@@ -1866,7 +1865,7 @@ class _TranscriptViewState extends State<TranscriptView>
   }
 
   /// Deletes a voice message that wasn't sent, once the person says so:
-  /// its recording goes from the device (#401).
+  /// its recording goes from the device.
   Future<void> _deleteVoice(Outgoing outgoing) async {
     final sure = await showActions<bool>(
       context,
@@ -1943,7 +1942,7 @@ class _TranscriptViewState extends State<TranscriptView>
                       ),
                     ),
                   ],
-                  // Back to this message (friend bug #9), where the
+                  // Back to this message, where the
                   // conversation can go back to it.
                   if (_pointed.value?.entry case final entry?
                       when _goesBack && canGoBackTo(widget.transcript, entry))
@@ -1951,7 +1950,7 @@ class _TranscriptViewState extends State<TranscriptView>
                       'Go back to here…',
                       () => goBackTo(context, widget.transcript, entry),
                     ),
-                  // The files sent with it, to send on (#418).
+                  // The files sent with it, to send on.
                   if (_pointed.value?.entry case final entry?
                       when entry.hasUser() &&
                           entry.user.attachments.isNotEmpty &&
@@ -2125,7 +2124,7 @@ class _WithLatestState extends State<_WithLatest> with WidgetsBindingObserver {
 
   /// On a phone, whether something in the conversation has focus (a card's
   /// comment being typed): Latest steps aside meanwhile, rather than sit on
-  /// the field (#321).
+  /// the field.
   var _typing = false;
 
   @override
@@ -2187,7 +2186,7 @@ class _WithLatestState extends State<_WithLatest> with WidgetsBindingObserver {
 
   /// Brings the focused field into sight whole, with room under it for the
   /// line it may have beneath, above the message box and the keyboard
-  /// (#321). The field's own scrolling shows only its caret, which can leave
+  /// . The field's own scrolling shows only its caret, which can leave
   /// it half behind the box. After the frame that lays the conversation out
   /// at its new height.
   void _revealFocused() {
@@ -2698,7 +2697,7 @@ class _EntryViewState extends State<EntryView> {
     final (Widget child, double gap) = switch (entry.whichKind()) {
       Entry_Kind.user => (
         _UserText(
-          // Typed and said in one message (#425): each in its place.
+          // Typed and said in one message: each in its place.
           entry.user.typed.isNotEmpty && entry.user.hasVoice()
               ? entry.user.heard
               : entry.user.text,
@@ -2812,7 +2811,7 @@ class _EntryViewState extends State<EntryView> {
         PipeStartCard(key: ValueKey(entry.pipeStart.id), entry.pipeStart),
         Space.l,
       ),
-      // Priya's ask card (#208) replaces this.
+      // Priya's ask card replaces this.
       Entry_Kind.askPerson => (
         AskPersonCard(
           key: ValueKey(seq),
@@ -2855,7 +2854,7 @@ class _EntryViewState extends State<EntryView> {
     };
     // The agent's own reply can be reported to Claktory's team.
     final report = entry.whichKind() == Entry_Kind.assistant ? seq : null;
-    // The agent's conversation it can go back to (friend bug #9); null in
+    // The agent's conversation it can go back to; null in
     // a chat or a pipe's view.
     final back = context.getInheritedWidgetOfExactType<_ReplyScope>()?.back;
     final from = entry.whichKind() == Entry_Kind.event
@@ -2955,7 +2954,7 @@ class _UserText extends StatelessWidget {
   /// ([UserText.heard]) when [typed] goes with it.
   final String text;
 
-  /// What was typed with a voice message (#425), over its recording.
+  /// What was typed with a voice message, over its recording.
   final String typed;
 
   /// The checklist item it replies on, over the bubble; null for none.
@@ -2991,7 +2990,7 @@ class _UserText extends StatelessWidget {
     );
     final voice = this.voice;
     final waiting = waitingVoice;
-    // Typed with a voice message (#425): first, the recording under it.
+    // Typed with a voice message: first, the recording under it.
     final typed = this.typed.isEmpty
         ? null
         : Text.rich(
@@ -3036,7 +3035,7 @@ class _UserText extends StatelessWidget {
           : words,
     );
     // A voice message's recording plays from its bubble; files sent with
-    // it (#425) are under it, as any message's.
+    // it are under it, as any message's.
     final files = voice != null || waiting != null
         ? this.files.skip(1).toList()
         : this.files;
@@ -3131,7 +3130,7 @@ class SentFiles extends StatelessWidget {
     runSpacing: Space.xs,
     children: [
       for (final file in files)
-        // Touched and held: Share…, or all of them (#418).
+        // Touched and held: Share…, or all of them.
         ShareHold(
           path: file.path,
           all: [for (final file in files) file.path],
@@ -3149,9 +3148,9 @@ class SentFiles extends StatelessWidget {
 
 /// A file going with one of the person's messages, as it uploads: a
 /// picture shows from this device at once, in the frame it will keep once
-/// sent, with how far it got along its foot (Matt: a photo sent took
-/// seconds to show); any other file, or a picture that can't be shown, is
-/// a chip with its progress.
+/// sent, with how far it got along its foot (a photo sent took seconds to
+/// show); any other file, or a picture that can't be shown, is a chip
+/// with its progress.
 class _Uploading extends StatelessWidget {
   const _Uploading(this.file);
 
@@ -3244,8 +3243,8 @@ class _LocalPicture extends StatelessWidget {
 /// A picture sent with a message, fitted in 240×180 at most, 10px radius
 /// and a hairline; it opens in the image viewer. One sent from this device
 /// this session shows from its file here, nothing coming back over the
-/// link; any other comes as a preview made for this screen (#379), never
-/// the whole original, kept on the device for next time (#446). One that
+/// link; any other comes as a preview made for this screen, never
+/// the whole original, kept on the device for next time. One that
 /// can't be shown is a chip instead.
 class _Thumbnail extends StatefulWidget {
   const _Thumbnail(this.file);
@@ -3458,7 +3457,7 @@ String deviceGlyph(DeviceKind kind) => switch (kind) {
 
 /// What the mark under a message says on hover: the device's name, or
 /// its kind when it has none.
-/// What was heard of a voice message sent with [typed] text (#425), from
+/// What was heard of a voice message sent with [typed] text, from
 /// its whole [text]: what was typed, a blank line, and "Voice note: " with
 /// what was heard (as the agent reads it). The whole text if it isn't so.
 String heardOf(String text, String typed) {
@@ -3551,8 +3550,8 @@ class _ProposalCardState extends State<ProposalCard> {
   }
 
   /// The connection is back: the decision that waited for it goes, and
-  /// what comes of it shows (Abbacchio's row 1052: the proposal changed
-  /// meanwhile, and it said "Not sent yet" for good).
+  /// what comes of it shows (the proposal changed meanwhile, and it
+  /// said "Not sent yet" for good).
   void _connectedChanged() {
     final whenBack = _whenBack;
     if (whenBack == null || _deciding || _backend?.connected.value != true) {
@@ -3569,7 +3568,7 @@ class _ProposalCardState extends State<ProposalCard> {
     super.dispose();
   }
 
-  /// [approve] or dismiss; with [reply] (#370), what's typed is the
+  /// [approve] or dismiss; with [reply], what's typed is the
   /// person's answer for Rivet to act on, neither. Cut off by the
   /// connection, it goes again by itself once it's back ([again]), for the
   /// [revision] pressed: a decision the Claktory already has counts as
@@ -3603,7 +3602,7 @@ class _ProposalCardState extends State<ProposalCard> {
         comment: _comment.text.trim(),
         chatId: chatId,
         reply: reply,
-        // The proposal as the person read it (#428).
+        // The proposal as the person read it.
         revision: seen,
       );
     } on RequestFailure catch (failure) {
@@ -3686,12 +3685,12 @@ class _ProposalCardState extends State<ProposalCard> {
           ),
           const SizedBox(height: Space.s),
           // What the agent proposes, to decide on: what reorders text shows
-          // by its code (proseCodes, Fugo).
+          // by its code (proseCodes).
           Markdown(
             proseCodes(proposal.text),
             color: dismissed ? palette.textMuted : null,
           ),
-          // Changed by the agent that made it while it waited (#428).
+          // Changed by the agent that made it while it waited.
           if (proposal.updatedMs > 0) ...[
             const SizedBox(height: Space.s),
             UpdatedLine(
@@ -3707,7 +3706,7 @@ class _ProposalCardState extends State<ProposalCard> {
           ],
           const SizedBox(height: Space.m),
           if (proposal.withdrawn)
-            // Taken back by the agent that made it (#407), not dismissed.
+            // Taken back by the agent that made it, not dismissed.
             WithdrawnLine(
               agent: proposer,
               name: proposer?.name ?? 'the agent',
@@ -3715,7 +3714,7 @@ class _ProposalCardState extends State<ProposalCard> {
               decidedMs: decided,
             )
           else if (pending) ...[
-            // The field first, open from the start (Lucy's rule 4).
+            // The field first, open from the start.
             DecisionComment(
               controller: _comment,
               agent: name,
@@ -3725,7 +3724,7 @@ class _ProposalCardState extends State<ProposalCard> {
             const SizedBox(height: Space.s),
             // Once a comment is typed, one Submit in place of both: the
             // proposal goes to Rivet with the person's words as what to do
-            // (#370).
+            // .
             CommentTyped(
               controller: _comment,
               builder: (context, typed) => Row(
@@ -3848,7 +3847,7 @@ String proposalGrantsHeading(Proposal proposal, String rivet) {
 /// `canvas` with Claktory's heading, each grant's sentence as a bullet in
 /// body `text`, and its warnings under it in the warning box the consent
 /// cards use (`signal` at 6%, its border at 40%). Names and paths show
-/// every hidden character by its code (visibleCodes, Fugo). Once approved,
+/// every hidden character by its code (visibleCodes). Once approved,
 /// each says whether Rivet used it, and when.
 class ProposalGrants extends StatelessWidget {
   const ProposalGrants({
@@ -4013,7 +4012,7 @@ class _AgentMessageState extends State<_AgentMessage> {
     final palette = Palette.of(context);
     final tints = AgentTints.of(context);
     // What reorders text shows by its code: a message can repeat what
-    // came from outside (proseCodes, Fugo).
+    // came from outside (proseCodes).
     final (message, also) = splitAlsoSentTo(proseCodes(widget.event.text));
     final color = tints?.byId[_sender];
     final known = color != null && tints?.open != null;
@@ -4104,9 +4103,8 @@ class _AgentMessageState extends State<_AgentMessage> {
 }
 
 /// The agent whose conversation [context] is in: the view's own (focus
-/// mode's Context shows one that isn't selected, #514), or the selected
-/// one's. In a chat, as before, the selected agent's (its cards go by the
-/// chat).
+/// mode's Context shows one that isn't selected), or the selected one's.
+/// In a chat, as before, the selected agent's (its cards go by the chat).
 String _shownAgentId(BuildContext context) {
   final selected = AppScope.of(context).transcript.agentId;
   if (ChatScope.chatIdOf(context) != null) return selected;
@@ -4128,7 +4126,7 @@ ReportedReply _reportedIn(BuildContext context, int seq) {
 /// A message in the conversation, its words and who sent it when it's
 /// another agent (null for the agent's own and the person's), and, for
 /// the agent's own reply, its seq, to report it; and its entry, to go back
-/// to it (friend bug #9).
+/// to it.
 typedef _Pointed = ({
   String text,
   String? from,
@@ -4257,13 +4255,13 @@ class _OwnReply extends StatelessWidget {
       outgoing: false,
       wide: true,
       sentMs: sentMs,
-      // With a pointer, Copy beside its foot while it's under the pointer
-      // (friend bug #5); a phone's is in its touch and hold.
+      // With a pointer, Copy beside its foot while it's under the pointer;
+      // a phone's is in its touch and hold.
       beside: isPhoneLayout(context) || text.trim().isEmpty
           ? null
           : _CopyReply(text: text, seq: seq),
       // What reorders text shows by its code: a reply can repeat what came
-      // from outside (proseCodes, Fugo).
+      // from outside (proseCodes).
       child: Markdown(proseCodes(text)),
     );
     final answers = this.answers;
@@ -4539,7 +4537,7 @@ class _EventLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    // What reorders text shows by its code (proseCodes, Fugo).
+    // What reorders text shows by its code (proseCodes).
     final text = proseCodes(event.text);
     final line = event.summary.isEmpty ? text : proseCodes(event.summary);
     final more = event.summary.isNotEmpty && event.text != event.summary;
@@ -4826,7 +4824,7 @@ class _RenderFootBeside extends RenderBox
 
 /// Copy, beside an agent's reply's foot while it's under the pointer, or
 /// just copied: Lucide's copy, and for a moment after a click a check and
-/// "Copied" (friend bug #5). It copies what Copy message in the right
+/// "Copied". It copies what Copy message in the right
 /// click's menu does, the whole reply ([messageCopyText]).
 class _CopyReply extends StatefulWidget {
   const _CopyReply({required this.text, required this.seq});
@@ -4887,7 +4885,7 @@ class _CopyReplyState extends State<_CopyReply> {
         );
         if (!copied) return Unselectable(child: button);
         // The button's size alone, where it was: "Copied" floats over it, a
-        // card's capsule, clear of the bubble's time (Abbacchio's row 668).
+        // card's capsule, clear of the bubble's time.
         return Unselectable(
           child: Stack(
             clipBehavior: Clip.none,
@@ -5518,7 +5516,7 @@ class _ToolCallView extends StatelessWidget {
       );
     }
     // What it does, and its name, as the agent wrote them: shown so
-    // nothing in them can make them read as something else (Fugo).
+    // nothing in them can make them read as something else.
     final named = toolSummary(call.name, call.input);
     final summary = ToolSummary(
       named.code ? visibleCodes(named.text) : proseCodes(named.text),
@@ -5607,7 +5605,7 @@ class _ToolCallView extends StatelessWidget {
             ),
             // Its name first, cut short only when there's no room for it
             // at all; what it does gives way before it (a narrow pane,
-            // Abbacchio's row 552: the name ran over how long it took).
+            // the name ran over how long it took).
             Expanded(
               child: LayoutBuilder(
                 builder: (context, constraints) {

@@ -1,5 +1,5 @@
 //! Builds factoryd's one piece of C, on macOS only: the kernel's power
-//! manager as far as a laptop's lid goes (`native/clamshell.c`, #371).
+//! manager as far as a laptop's lid goes (`native/clamshell.c`).
 
 fn main() {
     println!("cargo:rerun-if-changed=native/clamshell.c");

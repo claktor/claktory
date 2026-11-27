@@ -7,6 +7,6 @@ pub mod dm;
 pub mod forward;
 mod frb_generated;
 pub mod tunnel;
-// Tests of iroh's UDP socket, Claktory's copy of netwatch (#490).
+// Tests of iroh's UDP socket, Claktory's copy of netwatch.
 #[cfg(test)]
 mod udp_rebind;

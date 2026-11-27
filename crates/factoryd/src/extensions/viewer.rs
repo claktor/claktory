@@ -44,7 +44,7 @@ pub(crate) const SCHEMA: &str = "
 CREATE TABLE layouts (agent TEXT PRIMARY KEY, layout BLOB NOT NULL);
 ";
 
-/// The migration that added the pane shown in focus (#272): a leaf's id
+/// The migration that added the pane shown in focus: a leaf's id
 /// in the layout, '' for none.
 pub(crate) const FOCUS: &str = "
 ALTER TABLE layouts ADD COLUMN focus TEXT NOT NULL DEFAULT '';
@@ -560,7 +560,7 @@ pub(crate) fn set_layout(factory: &Factory, agent: &str, root: Option<v1::ViewNo
 }
 
 /// PaneOpened: the person opened the agent's pane `pane`, which counts as
-/// opened now (#347).
+/// opened now.
 pub(crate) fn pane_opened(factory: &Factory, agent: &str, pane: &str) -> Result<(), RequestError> {
     factory.known_agent(agent)?;
     let has = factory.viewer.layout(agent).is_some_and(|root| leaves(&root).iter().any(|(id, _)| *id == pane));
@@ -749,7 +749,7 @@ fn show(factory: &Factory, agent: &str, args: Value) -> Result<ToolResult, Strin
     let path = std::fs::canonicalize(&path).unwrap_or(path);
     // Only a file: opening a named pipe, a socket or a device would hold
     // the agent's step (and Stop with it) until something wrote to it
-    // (row 1322). Finding out doesn't open it.
+    // . Finding out doesn't open it.
     if std::fs::metadata(&path).is_ok_and(|metadata| !metadata.is_file() && !metadata.is_dir()) {
         return Err(format!("{} isn't a file the app can show: it's a named pipe, a socket or a device.", path.display()));
     }
@@ -815,7 +815,7 @@ fn show(factory: &Factory, agent: &str, args: Value) -> Result<ToolResult, Strin
             id
         }
     };
-    // A phone that opens it gets its preview without waiting for it (#379).
+    // A phone that opens it gets its preview without waiting for it.
     if kind == "image" || kind == "video" || kind == "pdf" {
         crate::previews::ahead(factory.home.root(), &path);
     }
@@ -858,7 +858,7 @@ impl Extension for Viewer {
         });
         // Opened on a thread of its own, so a file that never answers (a
         // drive that's gone, say) holds up neither Claktory nor Stop, and
-        // the agent hears about it after a while (row 1322).
+        // the agent hears about it after a while.
         let handler = agent_handler(factory, agent, |factory, agent, args| async move {
             let factory = live(factory)?;
             let asked = args.get("path").and_then(Value::as_str).unwrap_or_default().trim().to_owned();

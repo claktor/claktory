@@ -249,6 +249,23 @@ void main() {
     expect(find.text('Open conversation'), findsOneWidget);
   });
 
+  testWidgets("an alert others' alerts folded into says who else sent one", (
+    tester,
+  ) async {
+    await _open(
+      tester,
+      _workspace([
+        _alert('a1', 'june', title: 'tprime2 stopped answering')
+          ..alsoFrom.addAll(['Fugo', 'Pericolo']),
+        _alert('a2', 'omar', title: 'Low disk'),
+      ], card: false),
+    );
+    expect(find.text('tprime2 stopped answering'), findsOneWidget);
+    expect(find.text('Also from Fugo and Pericolo'), findsOneWidget);
+    // One that nothing folded into says nothing more.
+    expect(find.textContaining('Also from'), findsOneWidget);
+  });
+
   testWidgets("Claktory's own alert is from it, by name", (tester) async {
     await _open(
       tester,

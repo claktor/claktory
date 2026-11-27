@@ -274,3 +274,20 @@ Widget withoutInsets(
       .removeViewInsets(removeBottom: keyboard),
   child: child,
 );
+
+/// [glyph], drawn at [size] points, grown with the person's text size as
+/// SF Symbols grow, up to twice its size, in a box that size: beside a
+/// label at an accessibility size it keeps its weight next to the words.
+Widget glyphWithText(BuildContext context, Widget glyph, {double size = 16}) {
+  final grow = glyphGrowth(context, size: size);
+  if (grow == 1.0) return glyph;
+  return SizedBox.square(
+    dimension: size * grow,
+    child: FittedBox(child: glyph),
+  );
+}
+
+/// How much [glyphWithText] grows a glyph of [size] points: with the text,
+/// from 1 up to 2.
+double glyphGrowth(BuildContext context, {double size = 16}) =>
+    (MediaQuery.textScalerOf(context).scale(size) / size).clamp(1.0, 2.0);

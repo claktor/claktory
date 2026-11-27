@@ -333,6 +333,12 @@ pub(crate) fn stop_leftovers_but(home: &crate::home::Home, spare: &dyn Fn(&str, 
         return;
     }
     eprintln!("stopping {} background tasks and watches", running.len());
+    // Each in its job on Windows, ended whole (`factory_agent::windows::job`).
+    #[cfg(windows)]
+    for pid in &running {
+        factory_agent::windows::job::stop(*pid);
+    }
+    #[cfg(unix)]
     for signal in [libc::SIGTERM, libc::SIGKILL] {
         for pid in &running {
             // SAFETY: a plain syscall on a process group factory.db says Claktory started.
@@ -382,13 +388,30 @@ fn delete(root: &Path, plan: &Plan) -> Result<(), String> {
             failed.push(format!("{}: {error}", path.display()));
         }
     }
-    use std::os::unix::process::CommandExt;
-    let mut remove = Command::new("/bin/rm");
-    remove.arg("-rf").arg(&aside).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    // SAFETY: setsid is async-signal-safe and touches nothing else.
-    unsafe {
-        remove.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
-    }
+    #[cfg(unix)]
+    let mut remove = {
+        use std::os::unix::process::CommandExt;
+        let mut remove = Command::new("/bin/rm");
+        remove.arg("-rf").arg(&aside).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        // SAFETY: setsid is async-signal-safe and touches nothing else.
+        unsafe {
+            remove.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) });
+        }
+        remove
+    };
+    // On Windows, Windows' own `rmdir /s /q`, in a process group of its own
+    // with no console, so it carries on once this ends.
+    #[cfg(windows)]
+    let mut remove = {
+        use std::os::windows::process::CommandExt;
+        /// CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW.
+        const DETACHED: u32 = 0x0000_0200 | 0x0800_0000;
+        let system = std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+        let mut remove = Command::new(system.join("System32").join("cmd.exe"));
+        remove.args(["/D", "/C", "rmdir", "/S", "/Q"]).arg(&aside).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        remove.creation_flags(DETACHED);
+        remove
+    };
     if let Err(error) = remove.spawn() {
         failed.push(format!("{}: {error}", aside.display()));
     }

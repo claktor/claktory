@@ -703,7 +703,7 @@ void main() {
         harness: Harness(Workspace(), localBackend: false),
       );
       expect(find.byType(PairScreen), findsOneWidget);
-      // First, what's needed and the ways in (#363).
+      // First, what's needed and the ways in.
       await pastPairStart(tester, paste: true);
       expect(find.text('Paste code'), findsOneWidget);
       final code = 'factory://?t=${'a' * 64}&e=${'c' * 64}&name=Fixture';

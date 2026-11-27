@@ -137,7 +137,7 @@ pub(super) mod tests {
         );
     }
 
-    /// Abbacchio's row 1125: in a page as in an event, a hidden character
+    /// In a page as in an event, a hidden character
     /// right after a tag's name ends it.
     #[test]
     fn a_hidden_character_after_a_tags_name_ends_it_in_a_page_too() {

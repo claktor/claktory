@@ -234,7 +234,11 @@ class _IPadFocusState extends State<IPadFocus> {
         return Row(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            FocusQueue(session: _session, width: columns.queue),
+            FocusQueue(
+              session: _session,
+              width: columns.queue,
+              leave: widget.leave,
+            ),
             Expanded(
               child: FocusStage(
                 session: _session,
@@ -258,7 +262,11 @@ class _IPadFocusState extends State<IPadFocus> {
         return Row(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            FocusQueue(session: _session, width: columns.queue),
+            FocusQueue(
+              session: _session,
+              width: columns.queue,
+              leave: widget.leave,
+            ),
             Expanded(
               child: _OverStage(
                 stage: FocusStage(
@@ -269,7 +277,7 @@ class _IPadFocusState extends State<IPadFocus> {
                 ),
                 panel: contextOpen ? FocusContext(session: _session) : null,
                 panelWidth: columns.contextPanel,
-                // Under the stage's header: its Done, Context and Go to
+                // Under the stage's header: its Context and Go to
                 // conversation stay in reach.
                 panelTop: _stageHeader,
                 title: 'Context',
@@ -320,6 +328,8 @@ class _IPadFocusState extends State<IPadFocus> {
           leave: widget.leave,
           showContextButton: true,
           reviewBody: _reviewBody,
+          // No queue beside it: Done stays at the header's end.
+          done: true,
           trailing: [
             _Position(session: _session, onTap: _toggleQueue),
             _Step(

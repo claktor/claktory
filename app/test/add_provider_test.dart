@@ -1,7 +1,9 @@
-// The + after the usage circles in the sidebar's footer (Matt, from a
-// friend who had one AI provider and couldn't find where to add another):
-// it opens Settings at Providers, on a Mac, an iPad and a phone's drawer,
-// with one provider or several, and the footer is no taller for it.
+// The + after the usage circles in the sidebar's footer (from a friend
+// who had one AI provider and couldn't find where to add another): it
+// opens Settings at Providers, on a Mac, an iPad and a phone's drawer,
+// with one provider or several, and the footer is no taller for it with a
+// pointer; with touch it's a finger's target. It stays at the end of the
+// circles' first line when they wrap (PS11).
 import 'package:factory_app/mobile/drawer.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart' show AppPage;
@@ -56,7 +58,9 @@ void main() {
     await harness.show(tester, size: const Size(1180, 820));
     await pumpFrames(tester);
     expect(_add, findsOneWidget);
-    expect(tester.getSize(find.byType(ProviderUsageCircles)).height, 24);
+    // A finger's target, the row as tall.
+    expect(tester.getSize(find.byType(AddProviderButton)), const Size(44, 44));
+    expect(tester.getSize(find.byType(ProviderUsageCircles)).height, 44);
     await tester.tap(find.byType(AddProviderButton));
     await pumpFrames(tester);
     expect(harness.backend.settingsSection.value, 'providers');
@@ -72,6 +76,56 @@ void main() {
     expect(find.byType(UsageCircle), findsNothing);
     expect(_add, findsOneWidget);
   });
+
+  for (final touch in [false, true]) {
+    testWidgets('with circles on two lines${touch ? ' and touch' : ''}, the + '
+        "stays at the first line's end (projects-sidebar.md §9, PS11)", (
+      tester,
+    ) async {
+      if (touch) {
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      }
+      final providers = [
+        for (var i = 0; i < 6; i++)
+          Provider(id: 'p$i', name: 'P$i', signedInWith: 'P$i'),
+      ];
+      final harness = Harness(workspace());
+      await harness.show(
+        tester,
+        home: Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            width: 150,
+            child: ProviderUsageCircles(providers: providers, onAdd: () {}),
+          ),
+        ),
+      );
+      await pumpFrames(tester);
+      final circles = find.byType(UsageCircle);
+      final tops = {
+        for (final element in circles.evaluate())
+          tester.getTopLeft(find.byWidget(element.widget)).dy,
+      };
+      expect(tops, hasLength(greaterThan(1)), reason: 'they wrap');
+      final row = tester.getRect(find.byType(ProviderUsageCircles));
+      final add = tester.getRect(find.byType(AddProviderButton));
+      expect(add.right, row.right, reason: 'at the right end');
+      expect(
+        add.center.dy,
+        closeTo(tester.getCenter(circles.first).dy, 0.5),
+        reason: 'level with the first line',
+      );
+      for (final element in circles.evaluate()) {
+        expect(
+          tester.getRect(find.byWidget(element.widget)).right,
+          lessThanOrEqualTo(add.left),
+          reason: 'no circle under or past it',
+        );
+      }
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets('on a phone, the drawer\'s + opens Settings at Providers', (
     tester,
@@ -97,7 +151,8 @@ void main() {
     );
     await pumpFrames(tester);
     expect(_add, findsOneWidget);
-    expect(tester.getSize(find.byType(ProviderUsageCircles)).height, 24);
+    expect(tester.getSize(find.byType(AddProviderButton)), const Size(44, 44));
+    expect(tester.getSize(find.byType(ProviderUsageCircles)).height, 44);
     await tester.tap(find.byType(AddProviderButton));
     await pumpFrames(tester);
     // Straight to the Providers page, not the list of sections.

@@ -1,7 +1,7 @@
 // What a code pasted (or scanned) into a field that connects to a
 // Claktory is: a pairing code, which connects, or another of Claktory's
-// codes, which goes somewhere else (friend bug #2: a friend pasted one of
-// those into Android's pairing field and was told to copy it again).
+// codes, which goes somewhere else (a friend pasted one of those into
+// Android's pairing field and was told to copy it again).
 import 'connections.dart';
 import 'links.dart' show linkSchemes, parseLink;
 
@@ -72,7 +72,7 @@ final _pairingStart = RegExp(r'\b(factory|claktory)://', caseSensitive: false);
 /// another of Claktory's codes: what it is, then [where] to get the right
 /// one ([onMac], [whereItRuns]). Null when it isn't one of them, for the
 /// field's own words. A [scanned] code is never cut off: a damaged one is
-/// just not a code. Trish's words.
+/// just not a code.
 String? otherCodeProblem(
   String text, {
   required String device,

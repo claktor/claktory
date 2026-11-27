@@ -99,7 +99,7 @@ class InkStore extends RecordingBackend {
   /// Not connected: nothing reaches the Claktory.
   void _online() {
     if (!connected.value) {
-      throw const RequestFailure('Not connected to the backend.');
+      throw const RequestFailure("Can't reach your Claktory right now.");
     }
   }
 

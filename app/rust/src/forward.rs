@@ -10,7 +10,7 @@
 //! the stream (nothing listens there, a port of Claktory's own, a device
 //! that isn't paired).
 //!
-//! A website a pipe's peer shares, opened here (#503), is forwarded the same
+//! A website a pipe's peer shares, opened here, is forwarded the same
 //! way from a port of this device's own ([forward_to]): the share's port on
 //! the backend's machine is often one this device uses itself (3000, say).
 

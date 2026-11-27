@@ -3,7 +3,7 @@
 //! folder it's in) giving full access to this user and SYSTEM only, set as
 //! it's created, never after, so there's no moment it's readable by others.
 //!
-//! As 0600 is elsewhere, it keeps other users of the computer out, not this
+//! Like mode 0600 elsewhere, it keeps other users of the computer out, not this
 //! user's own programs (agents' commands among them, under authority B).
 
 use std::fs::File;
@@ -19,25 +19,40 @@ use windows_sys::Win32::Storage::FileSystem::{CREATE_NEW, CreateDirectoryW, Crea
 use super::system::{Protected, hex, is_private_path, owned_by_user, random_bytes};
 use super::wide::{check, owned, wide};
 
-/// Makes `path` a private folder: created so if it's missing (its parents
-/// as ordinary folders), made so if it's there (`protect`). What's made
-/// inside it later inherits its DACL.
+/// Makes `path` a private folder: created so if it's missing, with every
+/// missing folder above it (as 0700 with `DirBuilder::recursive` makes each
+/// one it creates), made so if it's there (`protect`). Folders above it
+/// that are there already are left as they are. What's made inside it
+/// later inherits its DACL.
 pub fn create_dir_all(path: &Path) -> std::io::Result<()> {
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
-    }
     let protected = Protected::for_folder()?;
     let attributes = protected.attributes();
-    let name = wide(path)?;
-    // SAFETY: a NUL-terminated path and attributes that outlive the call.
-    if unsafe { CreateDirectoryW(name.as_ptr(), &raw const attributes) } != 0 {
-        return Ok(());
+    let mut missing = Vec::new();
+    let mut at = Some(path);
+    while let Some(folder) = at.filter(|folder| !folder.as_os_str().is_empty() && std::fs::symlink_metadata(folder).is_err()) {
+        missing.push(folder);
+        at = folder.parent();
     }
-    let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) && path.is_dir() {
+    if missing.is_empty() {
         return protect(path);
     }
-    Err(error)
+    for folder in missing.into_iter().rev() {
+        let name = wide(folder)?;
+        // SAFETY: a NUL-terminated path and attributes that outlive the call.
+        if unsafe { CreateDirectoryW(name.as_ptr(), &raw const attributes) } != 0 {
+            continue;
+        }
+        let error = std::io::Error::last_os_error();
+        // Made meanwhile by someone else: made private only if it's `path`.
+        if error.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) && folder.is_dir() {
+            if folder == path {
+                return protect(path);
+            }
+            continue;
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Creates the private folder `path`, whose parent is there; fails if it's
@@ -55,7 +70,7 @@ pub fn create_dir(path: &Path) -> std::io::Result<()> {
 /// it. Nothing to do when it's private already (so a big home isn't walked
 /// at every start). Refused for a junction or symbolic link, which would
 /// make private whatever it points at, and for something another account
-/// owns (Fugo 45257, LOW 3).
+/// owns.
 pub fn protect(path: &Path) -> std::io::Result<()> {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
@@ -103,8 +118,8 @@ pub fn create_new(path: &Path) -> std::io::Result<File> {
     let attributes = protected.attributes();
     let name = wide(path)?;
     // SAFETY: a NUL-terminated path; the handle is checked and owned.
-    let handle: OwnedHandle = owned(unsafe {
-        CreateFileW(
+    let handle: OwnedHandle = unsafe {
+        owned(CreateFileW(
             name.as_ptr(),
             GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ,
@@ -112,8 +127,8 @@ pub fn create_new(path: &Path) -> std::io::Result<File> {
             CREATE_NEW,
             FILE_ATTRIBUTE_NORMAL,
             std::ptr::null_mut(),
-        )
-    })?;
+        ))
+    }?;
     Ok(File::from(handle))
 }
 
@@ -165,6 +180,8 @@ mod tests {
     fn a_private_folder_and_file_are_made_and_replaced_whole() {
         let folder = scratch().join("inner");
         create_dir_all(&folder).expect("a private folder");
+        assert!(is_private_path(folder.parent().unwrap()).unwrap(), "every folder it made is private, as 0700 makes each");
+        assert!(!is_private_path(&std::env::temp_dir()).unwrap(), "one that was there is left as it was");
         create_dir_all(&folder).expect("made private again");
         assert_eq!(create_dir(&folder).unwrap_err().kind(), std::io::ErrorKind::AlreadyExists);
         create_dir(&folder.join("secrets")).expect("a new private folder");

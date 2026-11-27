@@ -71,7 +71,7 @@ ToolView? toolViewFor(ToolCallInfo call) {
 /// A tool call as its view reads it. Every string in its input and
 /// details shows what could make it read as something else by its code
 /// ([visibleCodes]; the words under [proseKeys] what reorders them,
-/// [proseCodes]): an agent chose them (Fugo).
+/// [proseCodes]): an agent chose them.
 class ToolCallInfo {
   factory ToolCallInfo(ToolCall call, {int seq = 0}) {
     final rawInput = _raw(call.input);
@@ -132,7 +132,7 @@ class ToolCallInfo {
 
   /// [input] and [details] as the agent wrote them, hidden characters and
   /// all: never to show, only to act on (a file's path, to open or share
-  /// it, Zucchero's row 343).
+  /// it).
   final Map<String, Object?>? rawInput;
   final Map<String, Object?> rawDetails;
 
@@ -506,7 +506,7 @@ class ShowMore extends StatefulWidget {
 
   /// Its height cut, in pixels at the standard text size: four lines of
   /// body text by default. It grows with the person's text size, so larger
-  /// text still shows as many lines (Zucchero's row 140).
+  /// text still shows as many lines.
   final double height;
 
   @override
@@ -1204,7 +1204,7 @@ class _TalkButton extends StatelessWidget {
           builder: (context, hovered) => AnimatedContainer(
             duration: Motion.fast,
             // A finger's height on a phone; both grow with larger text
-            // rather than cutting it (Zucchero's row 140, iPad at AX5).
+            // rather than cutting it (iPad at AX5).
             constraints: BoxConstraints(
               minHeight: isPhoneLayout(context) ? Touch.target : 28,
             ),
@@ -1560,7 +1560,7 @@ String describeWhen(Object? when) {
   return '';
 }
 
-/// A pipes monitor's `when` (friend bug #34): which pipes ("*", a name or
+/// A pipes monitor's `when`: which pipes ("*", a name or
 /// id, or a list) and on which changes (all when left out), in words:
 /// "when pipe Website opens or closes", "when any pipe changes".
 String _pipesWhen(Object? pipes, Object? on) {
@@ -1816,14 +1816,14 @@ class _ShowLine extends StatelessWidget {
         ),
         const SizedBox(width: Space.xs),
         // The file's name first; its folder gives way before it does (a
-        // narrow pane, Abbacchio's row 544, showed "Showing" and no name).
+        // narrow pane, showed "Showing" and no name).
         Expanded(
           child: LayoutBuilder(
             builder: (context, constraints) => Row(
               children: [
                 ConstrainedBox(
                   constraints: BoxConstraints(maxWidth: constraints.maxWidth),
-                  // Touched and held: Share… (#418).
+                  // Touched and held: Share….
                   child: ShareHold(
                     path: call.done ? actual : '',
                     child: _Link(
@@ -1860,7 +1860,7 @@ class _ShowLine extends StatelessWidget {
     final root = layoutOf(agent);
     // The pane it opened in, while that still shows this file: a later
     // show in place of the oldest pane keeps the pane's id for another file
-    // or page (Zucchero's row 136: Needs you came forward). Else the pane
+    // or page (Needs you came forward). Else the pane
     // that shows it now, or a new one.
     final pane = _string(call.details['pane']);
     final kept = pane.isEmpty ? null : find(root, pane);
@@ -1868,7 +1868,7 @@ class _ShowLine extends StatelessWidget {
         ? (root: root, paneId: pane)
         : open(root, path);
     // A phone shows no panes beside the conversation: the file as a page
-    // over it, as Files in ⋯ opens it (Zucchero's #379 find), put in the
+    // over it, as Files in ⋯ opens it, put in the
     // layout first if it isn't there.
     final phone = context
         .getInheritedWidgetOfExactType<PhoneRoutesScope>()
@@ -1892,7 +1892,7 @@ class _ShowLine extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------------------
-// Images (#403).
+// Images.
 
 /// `image_generate`: what it was asked for, and the picture it made.
 Widget _imageLine(BuildContext context, ToolCallInfo call) => ToolLine(
@@ -1914,12 +1914,12 @@ Widget? _imageBody(BuildContext context, ToolCallInfo call) {
       style: TypeScale.of(context).caption.copyWith(color: palette.textFaint),
     );
   }
-  // The file itself, every character as it is (Zucchero's row 343).
+  // The file itself, every character as it is.
   final path = call.actual('path');
   if (!call.done || path.isEmpty) return null;
   return Align(
     alignment: AlignmentDirectional.centerStart,
-    // Touched and held: Share… (#418), to save it to Photos say.
+    // Touched and held: Share…, to save it to Photos say.
     child: ShareHold(
       path: path,
       child: MadeImage(
@@ -1935,7 +1935,7 @@ Widget? _imageBody(BuildContext context, ToolCallInfo call) {
 
 /// A picture an agent made, at most [side] points either way, the room
 /// for it kept from its size before it comes; a click or tap opens it in
-/// the image viewer. It's read as a preview made for its size (#379), so a
+/// the image viewer. It's read as a preview made for its size, so a
 /// phone doesn't fetch the whole PNG to show a thumbnail.
 class MadeImage extends StatefulWidget {
   const MadeImage({

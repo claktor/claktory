@@ -36,7 +36,7 @@ fn folders(view: &View, project: &str) -> Vec<v1::ProjectFolder> {
 }
 
 fn write(path: &std::path::Path, content: &str) -> String {
-    format!(r#"call write_file {{"path":"{}","content":"{content}"}}"#, path.display())
+    format!(r#"call write_file {{"path":"{}","content":"{content}"}}"#, crate::common::json_text(path.display()))
 }
 
 #[tokio::test]
@@ -77,7 +77,9 @@ async fn agents_work_in_their_folder_and_read_the_whole_project() {
     assert!(matches!(reply, Body::Ack(_)), "{reply:?}");
     assert_eq!(view.agent("researcher").folder_id, "research");
     std::fs::write(research.join("notes.md"), "# Notes").expect("write");
-    let said = talk(&mut client, &mut view, "researcher", r#"call bash {"command":"pwd; cat notes.md"}"#).await;
+    // Git Bash's pwd says /tmp/…: Windows's own form of it, there.
+    let pwd = if cfg!(windows) { r#"cygpath -w \"$PWD\""# } else { "pwd" };
+    let said = talk(&mut client, &mut view, "researcher", &format!(r#"call bash {{"command":"{pwd}; cat notes.md"}}"#)).await;
     let canonical = research.canonicalize().expect("canonical");
     assert!(
         said[1].contains(&format!("{}\n# Notes", canonical.display())) || said[1].contains(&format!("{}\n# Notes", research.display())),
@@ -96,7 +98,7 @@ async fn agents_work_in_their_folder_and_read_the_whole_project() {
 
     // It reads the whole project, and changes files only in its folder.
     std::fs::write(site.join("plan.md"), "the plan").expect("write");
-    let read = format!(r#"call read_file {{"path":"{}"}}"#, site.join("plan.md").display());
+    let read = format!(r#"call read_file {{"path":"{}"}}"#, crate::common::json_text(site.join("plan.md").display()));
     assert!(talk(&mut client, &mut view, "researcher", &read).await[1].contains("the plan"));
     let said = talk(&mut client, &mut view, "researcher", &write(&site.join("plan.md"), "mine")).await;
     assert!(said[1].contains("read only"), "{said:?}");
@@ -170,7 +172,7 @@ async fn agents_work_in_their_folder_and_read_the_whole_project() {
     assert_eq!(folders(&view, "site").len(), 1);
     assert!(research.join("notes.md").exists());
     view.follow(&mut client, |view| roots(view).len() == 1).await;
-    let said = talk(&mut client, &mut view, "researcher", r#"call bash {"command":"pwd"}"#).await;
+    let said = talk(&mut client, &mut view, "researcher", &format!(r#"call bash {{"command":"{pwd}"}}"#)).await;
     // It's told first, and its shell starts there at once.
     assert!(
         said[0].starts_with(&format!(
@@ -201,8 +203,9 @@ async fn a_folder_the_project_lacks_is_ignored_and_bad_folders_are_refused() {
         r#"{{"projects":[{{"id":"site","name":"Site","path":"{site}","folders":[{{"id":"app","name":"App","path":"{app}"}}]}}],
             "agents":[{{"id":"lead","name":"Lead","model":"a/b","effort":"high","project":"site","folder":"gone"}},
                       {{"id":"dev","name":"Dev","model":"a/b","effort":"high","project":"site","folder":"app"}}]}}"#,
-        site = dir.join("site").display(),
-        app = dir.join("app").display()
+        // As JSON strings: a Windows path's backslashes escaped.
+        site = crate::common::json_text(dir.join("site").display()),
+        app = crate::common::json_text(dir.join("app").display())
     );
     let config = factoryd::config::Config::parse(&text, &dir.join("home")).expect("valid");
     assert!(config.agent_folder(config.agent("lead").expect("lead")).is_none());
@@ -219,9 +222,11 @@ async fn a_folder_the_project_lacks_is_ignored_and_bad_folders_are_refused() {
     // A relative folder path is Claktory's own territory: under the home
     // the file was read from (and written back relative; see config.rs).
     let text = r#"{"projects":[{"id":"site","name":"Site","path":"workspace/site","folders":[{"id":"notes","name":"Notes","path":"workspace/site/notes"}]}]}"#;
-    let config = factoryd::config::Config::parse(text, std::path::Path::new("/claktory")).expect("territory paths resolve");
-    assert_eq!(config.projects[0].path, std::path::Path::new("/claktory/workspace/site"));
-    assert_eq!(config.projects[0].folders[0].path, std::path::Path::new("/claktory/workspace/site/notes"));
+    // A home that's a full path here (a drive's on Windows).
+    let claktory = if cfg!(windows) { "C:/claktory" } else { "/claktory" };
+    let config = factoryd::config::Config::parse(text, std::path::Path::new(claktory)).expect("territory paths resolve");
+    assert_eq!(config.projects[0].path, std::path::Path::new(claktory).join("workspace/site"));
+    assert_eq!(config.projects[0].folders[0].path, std::path::Path::new(claktory).join("workspace/site/notes"));
 }
 
 #[tokio::test]

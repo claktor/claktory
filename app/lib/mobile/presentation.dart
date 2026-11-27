@@ -835,7 +835,7 @@ class PhoneSheet extends StatelessWidget {
     if (host != null) {
       // Content that doesn't scroll (a short sheet's words: a scroll view
       // that fits takes no drag) is dragged away anywhere, as iOS's sheets
-      // are (row 206); one that scrolls takes the drag first, its own.
+      // are; one that scrolls takes the drag first, its own.
       body = draggable(body);
       // Pulled down past its top, the content takes the sheet with it: so
       // it doesn't bounce there, and the pull reaches the sheet instead.
@@ -974,7 +974,10 @@ class _ActionList<T> extends StatelessWidget {
             child: Row(
               children: [
                 if (glyph != null) ...[
-                  SizedBox(width: 20, child: Center(child: glyph(ink))),
+                  SizedBox(
+                    width: 20 * glyphGrowth(context),
+                    child: Center(child: glyphWithText(context, glyph(ink))),
+                  ),
                   const SizedBox(width: Space.m),
                 ],
                 Expanded(

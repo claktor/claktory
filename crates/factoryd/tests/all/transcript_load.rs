@@ -1,4 +1,4 @@
-//! Reading a conversation back from its segment files (#377): what it shows
+//! Reading a conversation back from its segment files: what it shows
 //! and what the model is given.
 
 use std::path::Path;
@@ -19,7 +19,7 @@ fn user(text: &str, image: &str, timestamp: u64) -> Value {
     })
 }
 
-/// An older segment is read without its images' data (step 1 of #377): it
+/// An older segment is read without its images' data: it
 /// shows the same, a message compaction carried over is still shown once,
 /// and the newest segment, the model's context, keeps its images whole.
 #[tokio::test]
@@ -259,7 +259,7 @@ fn same(read: &Transcript, whole: &Transcript) {
     assert!(page(read, len + 1, 0, None).is_none());
 }
 
-/// Step 2 of #377: a restart reads only the newest segment, and the older
+/// A restart reads only the newest segment, and the older
 /// ones' entries come back from disk as they were. A conversation read from
 /// its index shows exactly what it shows read whole; one that has grown since
 /// (a compaction) or whose older segment changed (taken back) too.

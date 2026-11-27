@@ -1,7 +1,7 @@
-// Pinned agents on an iPad's keyboard (pinned-agents.md §7b, Bruno 46948):
-// ⌘1 to ⌘9 open the first nine pins, named in the system's menu and its
-// ⌘-hold list ("Open Bruno"), as clicking the pin does. Only pins that
-// are there show; one whose agent went is skipped.
+// Pinned agents on an iPad's keyboard: ⌘1 to ⌘9 open the first nine pins,
+// named in the system's menu and its ⌘-hold list ("Open Bruno"), as
+// clicking the pin does. Only pins that are there show; one whose agent
+// went is skipped.
 import 'package:factory_app/ipad/columns.dart';
 import 'package:factory_app/ipad/commands.dart';
 import 'package:factory_app/ipad/workbench.dart'

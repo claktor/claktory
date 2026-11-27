@@ -23,12 +23,12 @@ import '../user_apps/session.dart' show UserAppError, UserAppProblem;
 import 'secret_clipboard.dart';
 import 'chat_view.dart' show shownClaktoryName;
 
-// E5: People's part for end-to-end messages on this device (dms-e2ee §2,
-// §5.3; Trish's words): set up messages on the person's first device; on
-// another, its QR code for a set-up device to scan, and waiting; once set
-// up, the person's devices, adding one by scanning its code and removing
-// one. Messages off on a build that can't keep the keys safely, and what
-// went wrong when a key can't be read or the account's key was replaced.
+// E5: People's part for end-to-end messages on this device (dms-e2ee §2):
+// set up messages on the person's first device; on another, its QR code
+// for a set-up device to scan, and waiting; once set up, the person's
+// devices, adding one by scanning its code and removing one. Messages off
+// on a build that can't keep the keys safely, and what went wrong when a
+// key can't be read or the account's key was replaced.
 
 /// Where a new device's code is copied and pasted; tests give their own.
 SecretClipboard secretClipboard = const SecretClipboard();
@@ -55,7 +55,7 @@ class MessagesSetup extends StatelessWidget {
         ],
       ),
       _ when devices => const SizedBox.shrink(),
-      // Taken from another device: said once (Fugo M2).
+      // Taken from another device: said once.
       DmSetup.ready when e2ee.newKeyFrom != null => _Note(
         title: 'Your security key changed',
         'A new security key was made for your account on '
@@ -83,9 +83,9 @@ class MessagesSetup extends StatelessWidget {
   );
 }
 
-/// Where the person's messages are kept (#451): the home Claktory their
+/// Where the person's messages are kept: the home Claktory their
 /// list names, and Keep them on this Claktory when it's another; and that
-/// friends' Claktories see its network address (Fugo).
+/// friends' Claktories see its network address.
 class _Home extends StatelessWidget {
   const _Home({required this.e2ee});
 
@@ -99,13 +99,13 @@ class _Home extends StatelessWidget {
     final here = e2ee.homeIsHere;
     final String where;
     if (e2ee.ownership == DmOwnership.notOurs) {
-      // Not on the person's account (Fugo 39894): given nothing.
+      // Not on the person's account: given nothing.
       where =
           "This Claktory is signed in to another account, so your messages "
           "aren't kept on it. What you send waits until you connect to one "
           'of your own.';
     } else if (e2ee.ownership == DmOwnership.unconfirmable) {
-      // Paired with a code from before the private tunnel (Fugo 40182).
+      // Paired with a code from before the private tunnel.
       where =
           "Your messages aren't kept on ${shownClaktoryName(context)}: it "
           "was added with an older code that can't confirm it's yours. Add "
@@ -417,7 +417,7 @@ class _AddThisState extends State<_AddThis> {
           ),
           // A hand-off came for a code this one replaced (its app closed
           // before it was added, say): the other device's add didn't take
-          // (row 564).
+          // .
           if (widget.e2ee.earlierCodeSpent) ...[
             const SizedBox(height: Space.s),
             Text(
@@ -448,8 +448,8 @@ class _AddThisState extends State<_AddThis> {
             'Waiting for your other device…',
             style: type.caption.copyWith(color: palette.textFaint),
           ),
-          // All devices lost, or a reinstall on the only one (dms-e2ee §2,
-          // Abbacchio's row 630): a new security key here, never a dead end.
+          // All devices lost, or a reinstall on the only one (dms-e2ee §2):
+          // a new security key here, never a dead end.
           const SizedBox(height: Space.s),
           Button(
             label: 'No other device?',
@@ -495,7 +495,7 @@ class _AddThisState extends State<_AddThis> {
   }
 }
 
-/// A fresh sign-in before a new security key (403 sign_in_again, Fugo):
+/// A fresh sign-in before a new security key (403 sign_in_again):
 /// the device's own sign-in, again, saying why ([intro]). True once it
 /// went through.
 Future<bool> _signInAgain(BuildContext context, String intro) async {
@@ -577,7 +577,7 @@ class _SignInAgainState extends State<_SignInAgain> {
           ),
           const SizedBox(height: Space.l),
           // Only the account this device is signed in to: a mistyped
-          // address would sign it in to another (Abbacchio's row 644).
+          // address would sign it in to another.
           DeviceSignInForm(
             intro: widget.intro,
             email: switch (_account?.email) {
@@ -705,7 +705,7 @@ class _DevicesState extends State<_Devices> {
   List<DmOwnDevice> _devices = const [];
 
   /// Reads again once a device still setting up has had its code's time
-  /// (row 564).
+  /// .
   Timer? _setUpBy;
 
   /// The person's devices off the list but still in a group here, by
@@ -714,7 +714,7 @@ class _DevicesState extends State<_Devices> {
 
   /// The person's devices a start-over took out (under the key it
   /// replaced), by leaf with their names: never signed out until the
-  /// person removes them (Fugo, row 630).
+  /// person removes them.
   Map<String, String> _replaced = const {};
 
   /// The account's Claktories by id, to name those still to finish a new
@@ -727,7 +727,7 @@ class _DevicesState extends State<_Devices> {
     widget.e2ee.addListener(_read);
     _read();
     unawaited(_readClaktories());
-    // Which of them signed out, as the service says now (row 671).
+    // Which of them signed out, as the service says now.
     unawaited(widget.e2ee.readSignedOut());
   }
 
@@ -804,7 +804,7 @@ class _DevicesState extends State<_Devices> {
     final isnt = names.length > 1 ? "aren't" : "isn't";
     final running = widget.e2ee.removing;
     final stop = widget.e2ee.removalStop;
-    // What's still true, as it stopped (Fugo 41048).
+    // What's still true, as it stopped.
     final words = removal.newKey
         ? running
               ? 'Locking out $who…'
@@ -818,13 +818,13 @@ class _DevicesState extends State<_Devices> {
                         "sign ${names.length > 1 ? 'them' : 'it'} out of your "
                         "Claktory account, so your security key hasn't "
                         'changed yet. Try again.',
-                  // Connected to another account's Claktory (row 1453):
+                  // Connected to another account's Claktory:
                   // Try again can't finish it from there.
                   DmKeyChange.waitsForOwnClaktory =>
                     "$who can't read new messages, but your security key "
                         "hasn't changed yet. It changes once this device "
                         'connects to one of your own Claktories.',
-                  // The worker's 3 a day (Fugo 43752): it goes by itself.
+                  // The worker's 3 a day: it goes by itself.
                   DmKeyChange.keyWaitsForLimit => _limitWords(
                     context,
                     who: who,
@@ -859,7 +859,7 @@ class _DevicesState extends State<_Devices> {
   }
 
   /// Try again: carries on with the removal, and when a new key wants a
-  /// fresh sign-in, asks for it there and then (Fugo 41048).
+  /// fresh sign-in, asks for it there and then.
   Future<void> _finishRemoval() async {
     final stopped = await widget.e2ee.finishRemoval();
     if (stopped == DmKeyChange.signInAgain && mounted) {
@@ -919,7 +919,7 @@ class _DevicesState extends State<_Devices> {
         children: [
           // Each named in full, with since when to tell two of the same
           // name apart; the buttons go under it when they don't fit beside
-          // it (Zucchero's row 198).
+          // it.
           for (final device in devices)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: Space.xs),
@@ -952,8 +952,8 @@ class _DevicesState extends State<_Devices> {
                       ),
               ),
             ),
-          // Off the list, still in a group: a removal that stopped part-way
-          // (Abbacchio's R5b), finished from here.
+          // Off the list, still in a group: a removal that stopped part-way,
+          // finished from here.
           for (final MapEntry(key: leaf, value: name) in _strays.entries)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: Space.xs),
@@ -1014,7 +1014,7 @@ class _DevicesState extends State<_Devices> {
           ],
           ?_underWay(palette, type),
           // After a new security key: each Claktory until the app connects
-          // to it, when it takes the key (Fugo, Ghiaccio).
+          // to it, when it takes the key.
           for (final id in widget.e2ee.claktoriesToFinish)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: Space.xs),
@@ -1024,8 +1024,8 @@ class _DevicesState extends State<_Devices> {
                 style: type.caption.copyWith(color: palette.textMuted),
               ),
             ),
-          // A device of the person's under their old key holds a chat back
-          // (Abbacchio's row 611); this one joins by itself once it moves.
+          // A device of the person's under their old key holds a chat back;
+          // this one joins by itself once it moves.
           if (widget.e2ee.waitingForOtherDevices)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: Space.xs),
@@ -1090,7 +1090,7 @@ class _AddDeviceState extends State<_AddDevice> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  // Back from Settings, the camera may be allowed now (friend bug #2).
+  // Back from Settings, the camera may be allowed now.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed && _found == null) {
@@ -1124,7 +1124,7 @@ class _AddDeviceState extends State<_AddDevice> with WidgetsBindingObserver {
         });
       }
     } on DmCodeRefused {
-      // Used already, or for a device removed (Abbacchio's row 612).
+      // Used already, or for a device removed.
       if (mounted) setState(() => _error = DmCodeRefused.message);
     } catch (_) {
       if (mounted) {
@@ -1159,8 +1159,8 @@ class _AddDeviceState extends State<_AddDevice> with WidgetsBindingObserver {
     } catch (error) {
       if (error is UserAppError &&
           error.problem == UserAppProblem.removedDevice) {
-        // Removed on another device, which this one didn't know yet
-        // (Abbacchio's row 617): Try again would fail the same way.
+        // Removed on another device, which this one didn't know yet:
+        // Try again would fail the same way.
         if (mounted) {
           setState(() {
             _busy = false;
@@ -1301,7 +1301,7 @@ class _AddDeviceState extends State<_AddDevice> with WidgetsBindingObserver {
 }
 
 /// Removing one of the person's devices: out of their list and every
-/// group, then signed out of their account (L0, Fugo), so a lost or stolen
+/// group, then signed out of their account, so a lost or stolen
 /// one can do nothing with what it holds; if the sign-out doesn't go
 /// through, it says so and tries again.
 class _RemoveDevice extends StatefulWidget {
@@ -1336,7 +1336,7 @@ class _RemoveDeviceState extends State<_RemoveDevice> {
       _error = null;
     });
     // One with no name is "that device", never "this device", the one in
-    // hand (Abbacchio's row 1464).
+    // hand.
     final name = widget.name.isEmpty ? 'That device' : nameInText(widget.name);
     final nameIn = widget.name.isEmpty
         ? 'that device'
@@ -1420,7 +1420,7 @@ class _ChangeKeyState extends State<_ChangeKey> {
 
   /// The lost device's name, at the start of a sentence; one with none is
   /// "That device", never "This device", which is the one in hand
-  /// (Abbacchio's row 1464).
+  /// .
   String get _name =>
       widget.lost.name.isEmpty ? 'That device' : nameInText(widget.lost.name);
 
@@ -1488,7 +1488,7 @@ class _ChangeKeyState extends State<_ChangeKey> {
     });
   }
 
-  /// A new key wants a recent sign-in (row 630): signed in again, it
+  /// A new key wants a recent sign-in: signed in again, it
   /// carries on where it stopped.
   var _signInFirst = false;
 
@@ -1600,7 +1600,7 @@ class _Digits extends StatelessWidget {
 }
 
 /// [dayLabel] mid-line: "today", "yesterday", or the date as it is
-/// ("Since today", Trish).
+/// ("Since today").
 String _sinceDay(String label) => switch (label) {
   'Today' => 'today',
   'Yesterday' => 'yesterday',
@@ -1609,7 +1609,7 @@ String _sinceDay(String label) => switch (label) {
 
 /// Since when [device] has been one of the person's: "Since Mon 16 Nov",
 /// with the time too when another of [devices] has its name, so two Macs
-/// both called "Mac Studio" read apart (Zucchero's row 198); empty when it
+/// both called "Mac Studio" read apart; empty when it
 /// isn't known.
 String deviceSince(
   BuildContext context,
@@ -1635,7 +1635,7 @@ String deviceSince(
 }
 
 /// What a Lock out says while its new key waits for the worker's next day
-/// ([DmKeyChange.keyWaitsForLimit], Fugo 43752): plainly not finished, and
+/// ([DmKeyChange.keyWaitsForLimit]): plainly not finished, and
 /// when it carries on by itself.
 String _limitWords(
   BuildContext context, {
@@ -1679,10 +1679,10 @@ class _DeviceName extends StatelessWidget {
   final String name;
   final String since;
 
-  /// Listed, but its code ran out before it set up (row 564).
+  /// Listed, but its code ran out before it set up.
   final bool notSetUp;
 
-  /// It signed out of the person's Claktory account (row 671): still on
+  /// It signed out of the person's Claktory account: still on
   /// their list until they remove it.
   final bool signedOut;
 

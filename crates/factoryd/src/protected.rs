@@ -448,7 +448,8 @@ pub(crate) fn between(db: &Connection, since: i64, before: i64, limit: i64) -> r
     rows.collect()
 }
 
-#[cfg(test)]
+// Its places are a Mac's.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

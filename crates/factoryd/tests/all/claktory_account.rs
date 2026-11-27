@@ -171,7 +171,7 @@ fn unlocked(workspace: &v1::Workspace) -> bool {
 }
 
 fn mode(path: &Path) -> u32 {
-    std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(path).expect("a file").permissions()) & 0o777
+    crate::common::mode(path)
 }
 
 #[tokio::test]
@@ -300,6 +300,8 @@ async fn signing_in_protects_the_vault_with_the_account_which_opens_it_after_a_r
         let path = dir.join("home/account/account.json");
         let mut saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).expect("account.json")).expect("json");
         saved["periods_until"] = serde_json::json!(hour - 7200);
+        // Its name as an older Claktory kept it, hidden characters and all.
+        saved["name"] = serde_json::json!("\u{202E}Mac\u{200B} mini");
         std::fs::write(&path, saved.to_string()).expect("account.json");
     }
 
@@ -316,6 +318,7 @@ async fn signing_in_protects_the_vault_with_the_account_which_opens_it_after_a_r
     assert_eq!(period["to"].as_i64().zip(period["from"].as_i64()).map(|(to, from)| to - from), Some(7200), "the two whole hours");
     assert_eq!(period["usage"][0]["requests"], 3, "{sent}");
     assert_eq!(sent["counts"]["agents"], 1);
+    assert_eq!(account(&workspace).name, "Mac mini", "shown without what it hides");
     assert_eq!(instance.count("SELECT COUNT(*) FROM periods"), 1, "recorded");
     let saved = std::fs::read_to_string(dir.join("home/account/account.json")).expect("account.json");
     assert!(saved.contains("\"periods\": []"), "dropped once accepted: {saved}");
@@ -804,10 +807,13 @@ async fn a_claktory_that_moved_here_changes_its_credentials_once_and_its_vault_s
     let instance = Instance::start(&dir).await;
     let account_file = |name: &str| std::fs::read_to_string(dir.join("home/account").join(name)).expect("a file");
     let (old_key, old_token) = {
-        let (addr, _factory) = open(&dir, &instance.url).await;
+        let (addr, factory) = open(&dir, &instance.url).await;
         let (mut client, _, _) = Client::connect(addr).await;
         let workspace = sign_in(&mut client, &instance, "matt@example.com").await;
         assert!(unlocked(&workspace));
+        // It serves on in this process: its account, still the one from
+        // before the move, mustn't write over the next one's.
+        factoryd::stop_account_for_tests(&factory);
         let saved: serde_json::Value = serde_json::from_str(&account_file("account.json")).expect("json");
         (account_file("claktory.key"), saved["machine_token"].as_str().expect("a token").to_owned())
     };
@@ -851,6 +857,7 @@ async fn a_claktory_that_moved_here_changes_its_credentials_once_and_its_vault_s
     assert_eq!(answer.status().as_u16(), 401);
 
     // Started again, nothing more is changed.
+    factoryd::stop_account_for_tests(&_factory);
     let token = account_file("account.json");
     drop(client);
     drop(_factory);

@@ -40,7 +40,7 @@ import 'metrics.dart' show TypeScale;
 /// that's always open. With nothing typed, Approve (or Send, for a
 /// question that wants words) and Dismiss, quieter. Once a comment is
 /// typed, one Submit (Return too) sends it as a reply, never a yes or a
-/// no (#370); a question that wants words keeps Send and Dismiss. Answered, the viewer closes ([finishReview]),
+/// no; a question that wants words keeps Send and Dismiss. Answered, the viewer closes ([finishReview]),
 /// back where the person was. While the question waits, nothing else is added
 /// to the file: on text, comments on lines go with the answer.
 class PhoneReviewBar extends StatefulWidget {
@@ -72,9 +72,8 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
 
   /// What's typed, each card's own draft ([CardDrafts]): a card closed
   /// while the bar held it leaves its words with it, never in the next
-  /// card's field, where they'd answer the wrong question (Zucchero's row
-  /// 513); kept while the app runs, wherever the card's reopened (Bruno's
-  /// Q11).
+  /// card's field, where they'd answer the wrong question; kept while the
+  /// app runs, wherever the card's reopened.
   final _answers = <TextEditingController>{};
 
   TextEditingController _answerFor(PendingReview ask) {
@@ -138,7 +137,7 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
   }
 
   /// Answers [ask]: Approve with nothing typed, the words a question that
-  /// wants them asked for, Dismiss, or a typed comment as a reply (#370),
+  /// wants them asked for, Dismiss, or a typed comment as a reply,
   /// which carries out nothing. A failure keeps the words and says so
   /// under the field.
   Future<void> _send(PendingReview ask, {bool dismiss = false}) async {
@@ -154,7 +153,7 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
     });
     try {
       final watch = _watch!;
-      // The card as the bar shows it (#428), and its talk (#492).
+      // The card as the bar shows it, and its talk.
       await sendReview(
         watch.backend,
         widget.agentId,
@@ -179,7 +178,7 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
       }
       return;
     } on FileSystemException catch (error) {
-      // A file to go with it couldn't be read (#511).
+      // A file to go with it couldn't be read.
       unawaited(Haptics.warning());
       if (mounted) {
         setState(() {
@@ -203,7 +202,7 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
   }
 
   /// A reply has [ask] wait on its agent: the bar holds, nothing to send
-  /// until the agent answers (Abbacchio's row 1325).
+  /// until the agent answers.
   bool _held(PendingReview ask) {
     final backend = _watch?.backend;
     return backend == null || !reviewWaits(backend, widget.agentId, ask.seq);
@@ -285,7 +284,7 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
     );
     final stacked = largeText(context);
     final asks = '$name asks you to review this';
-    // Files with the answer (#511), the card's: what was added on it comes
+    // Files with the answer, the card's: what was added on it comes
     // here too.
     final files = cardFilesKey(widget.agentId, ask.ask.id);
     void filesNote(String? note) {
@@ -365,7 +364,7 @@ class _PhoneReviewBarState extends State<PhoneReviewBar> {
                 if (ask.ask.title.isNotEmpty) ...[
                   if (!stacked) const SizedBox(height: Space.xs),
                   // The agent's words: what reorders them shows by its code
-                  // (proseCodes, Fugo).
+                  // (proseCodes).
                   Text(
                     proseCodes(ask.ask.title),
                     maxLines: stacked ? 2 : 3,

@@ -32,6 +32,8 @@ required-features = ["server"]
 
 [dependencies]
 base64 = "0.23"
+# Which characters a name hides, as DM certificates' names are checked.
+claktory-dm-crypto = { path = "../claktory-dm-crypto" }
 chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
 curve25519-dalek = "5"
 ed25519-dalek = "3"
@@ -58,8 +60,6 @@ tracing = { version = "0.1.44", optional = true }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"], optional = true }
 
 [dev-dependencies]
-# Device lists signed as a person's device signs them (hostile test 24).
-claktory-dm-crypto = { path = "../claktory-dm-crypto" }
 claktory-user-apps = { path = "../claktory-user-apps" }
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

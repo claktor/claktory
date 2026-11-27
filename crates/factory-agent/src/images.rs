@@ -1,4 +1,4 @@
-//! Images an agent's model makes (#403): what's asked, what comes back, and
+//! Images an agent's model makes: what's asked, what comes back, and
 //! why one couldn't be made. Each provider that makes images has its own
 //! request (`Provider::images`); phase 1 is ChatGPT's subscription
 //! (`providers::openai_codex::images`).

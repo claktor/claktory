@@ -9,7 +9,7 @@
 //!   format 1 is refused from then on.
 //! - **2, end to end** (E2): the sender's own MLS message (an `Envelope`),
 //!   which the worker stores and hands back as it came, and never opens.
-//! - **3, at the home** (#451): the message itself goes through the
+//! - **3, at the home**: the message itself goes through the
 //!   person's home Claktory, never here; only the SHA-256 of its MLS bytes
 //!   is kept, which the person's device matches it by.
 

@@ -1,10 +1,10 @@
-//! Signing in to Grok with a SuperGrok or X Premium+ subscription (#493):
-//! xAI's device sign-in (RFC 8628) at auth.x.ai, as its own command-line
-//! tool signs in, with the narrowest scopes that chat. The person opens
-//! xAI's page on any device and confirms the code there; Claktory never
-//! sees a password. Tokens last 6 hours and refresh with a refresh token
-//! that changes each time. A refusal from xAI ends the sign-in with what
-//! xAI said: never asked again another way (Fugo's conditions).
+//! Signing in to Grok with a SuperGrok or X Premium+ subscription: xAI's
+//! device sign-in (RFC 8628) at auth.x.ai, as its own command-line tool
+//! signs in, with the narrowest scopes that chat. The person opens xAI's
+//! page on any device and confirms the code there; Claktory never sees a
+//! password. Tokens last 6 hours and refresh with a refresh token that
+//! changes each time. A refusal from xAI ends the sign-in with what xAI
+//! said: never asked again another way.
 
 use std::time::Duration;
 
@@ -21,13 +21,13 @@ use crate::providers::{client, response_text};
 /// xAI's sign-in.
 pub const ISSUER: &str = "https://auth.x.ai";
 /// The Grok command-line tool's client: xAI registers no other for
-/// subscription sign-ins (Matt's decision, #493).
+/// subscription sign-ins.
 pub const CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 /// The least that chats: no access to Grok's conversations or workspaces,
 /// nothing on X. xAI granted exactly what's asked in the probe (25 Nov 2026).
 /// `api:access`: the proxy refuses a model request without it (403, "OAuth2
 /// token missing required scope: api:access", 2026-11-25); the tool itself
-/// is granted it (Bruno and Fugo, #493). Its token goes only to the proxy
+/// is granted it. Its token goes only to the proxy
 /// (`super::allowed`), never to xAI's API.
 pub const SCOPE: &str = "openid offline_access grok-cli:access api:access";
 const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";

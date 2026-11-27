@@ -306,6 +306,136 @@ void main() {
       expect(voice.folder.existsSync(), isFalse);
     });
 
+    test("a voice message's photo stays with its recording: after a "
+        "relaunch that cleared the app's temporary folder and moved its "
+        'own, it goes whole (#615)', () async {
+      final temp = Directory.systemTemp.createTempSync('app-tmp');
+      final was = appTempFolder;
+      appTempFolder = () => temp;
+      addTearDown(() {
+        appTempFolder = was;
+        if (temp.existsSync()) temp.deleteSync(recursive: true);
+      });
+      // As the iPhone's picker copies a photo.
+      final picked = File('${temp.path}/Attachments/A1/Photo.jpg')
+        ..createSync(recursive: true)
+        ..writeAsBytesSync([for (var i = 0; i < 5000; i++) i % 249]);
+      final bytes = picked.readAsBytesSync();
+      final voice = recording(300);
+      // Sent while the Claktory can't be reached: it waits.
+      connected.value = false;
+      final first = outboxFor(FakeOutboxBackend());
+      final message = first.send(
+        'a',
+        'Here is the photo',
+        files: [
+          voice,
+          LocalFile(path: picked.path, name: 'Photo.jpg', size: 5000),
+        ],
+        voice: const Duration(seconds: 3),
+      );
+      await until(() => message.waiting);
+      final photo = message.files.last.file;
+      expect(picked.existsSync(), isFalse, reason: 'moved, not copied');
+      expect(File(photo.path).parent.path, File(voice.path).parent.path);
+      expect(photo.name, 'Photo.jpg');
+      first.dispose();
+
+      // The app ends; the system clears its temporary folder and puts its
+      // own folder somewhere else.
+      temp.deleteSync(recursive: true);
+      final moved = Directory('${kept.path}-moved');
+      kept.renameSync(moved.path);
+      addTearDown(() => moved.renameSync(kept.path));
+      final back = KeptVoice.read(Directory('${moved.path}/123-abc'))!;
+      expect(back.files.single.path, '${moved.path}/123-abc/1-Photo.jpg');
+
+      // Back, with the Claktory there: it goes, the photo whole.
+      connected.value = true;
+      final backend = FakeOutboxBackend();
+      final again = outboxFor(backend)..restore(back);
+      await until(() => backend.answers.isNotEmpty);
+      final restored = again.of('a').single;
+      expect(restored.failure, isNull);
+      expect(backend.uploads[restored.files.last.uploadId], bytes);
+      expect(backend.sent.single, hasLength(2));
+      backend.answers.single.complete();
+      await until(() => !back.folder.existsSync());
+      expect(back.folder.existsSync(), isFalse, reason: 'sent: all of it goes');
+    });
+
+    test("Android: the picker's copy in the app's cache folder, beside "
+        'code_cache, moves beside the recording', () async {
+      final base = Directory.systemTemp.createTempSync('app-data');
+      final codeCache = Directory('${base.path}/code_cache')..createSync();
+      final was = appTempFolder;
+      appTempFolder = () => codeCache;
+      addTearDown(() {
+        appTempFolder = was;
+        base.deleteSync(recursive: true);
+      });
+      final picked = File('${base.path}/cache/Attachments/A1/18.png')
+        ..createSync(recursive: true)
+        ..writeAsBytesSync([1, 2, 3]);
+      connected.value = false;
+      final outbox = outboxFor(FakeOutboxBackend());
+      final message = outbox.send(
+        'a',
+        '',
+        files: [
+          recording(30),
+          LocalFile(path: picked.path, name: '18.png', size: 3),
+        ],
+        voice: const Duration(seconds: 1),
+      );
+      await until(() => message.waiting);
+      expect(picked.existsSync(), isFalse);
+      expect(
+        File(message.files.last.file.path).parent.path,
+        File(message.files.first.file.path).parent.path,
+      );
+      outbox.dispose();
+    });
+
+    test('a photo an older app kept by its path is found where the '
+        "temporary folder is now", () {
+      final temp = Directory.systemTemp.createTempSync('app-tmp');
+      final was = appTempFolder;
+      appTempFolder = () => temp;
+      addTearDown(() {
+        appTempFolder = was;
+        temp.deleteSync(recursive: true);
+      });
+      File('${temp.path}/Attachments/B2/Shot.png')
+        ..createSync(recursive: true)
+        ..writeAsStringSync('png');
+      final file = KeptFile.fromJson({
+        'path': '/old/container/tmp/Attachments/B2/Shot.png',
+        'name': 'Shot.png',
+        'size': 3,
+        'upload_id': 'u1',
+      })!;
+      expect(file.path, '${temp.path}/Attachments/B2/Shot.png');
+    });
+
+    test('a file the person chose where it lives stays there', () async {
+      final was = appTempFolder;
+      appTempFolder = () => Directory('/nowhere');
+      addTearDown(() => appTempFolder = was);
+      final backend = FakeOutboxBackend();
+      final outbox = outboxFor(backend);
+      final voice = recording(30);
+      final message = outbox.send(
+        'a',
+        '',
+        files: [voice, small],
+        voice: const Duration(seconds: 1),
+      );
+      await until(() => backend.answers.isNotEmpty);
+      expect(message.files.last.file.path, small.path);
+      expect(File(small.path).existsSync(), isTrue);
+    });
+
     test('a kept voice message waits for the connection', () async {
       final backend = FakeOutboxBackend();
       connected.value = false;

@@ -182,17 +182,26 @@ async fn an_ungranted_or_unknown_secret_is_refused_and_nothing_runs() {
 async fn a_file_secret_is_a_private_file_removed_when_its_command_ends() {
     let dir = tempfile::tempdir().unwrap();
     let mut watched = watched(dir.path());
-    let command = "ls -l \"$KUBECONFIG\" | cut -c1-10; echo \"path=$KUBECONFIG\"; cat \"$KUBECONFIG\"";
+    #[cfg(unix)]
+    let (command, private) = ("ls -l \"$KUBECONFIG\" | cut -c1-10; echo \"path=$KUBECONFIG\"; cat \"$KUBECONFIG\"", "-rw-------\n");
+    // Git for Windows shows no real modes: its DACL's entries for anyone
+    // but this user and SYSTEM (the builtin groups, Everyone, any signed-in
+    // user), counted.
+    #[cfg(windows)]
+    let (command, private) = (
+        "{ icacls \"$KUBECONFIG\" | grep -ciE 'BUILTIN|Everyone|Authenticated|INTERACTIVE' || true; }; echo \"path=$KUBECONFIG\"; cat \"$KUBECONFIG\"",
+        "0\n",
+    );
     for background in [None, Some(&watched.background)] {
         let (secrets, _) = vault();
         let tool = bash(dir.path(), background);
         let (result, _) = call(&tool, json!({"command": command, "secrets": ["Kube"]}), Some(&secrets)).await;
         let shown = text(&result.expect("ran"));
-        assert!(shown.starts_with("-rw-------\n"), "{shown}");
+        assert!(shown.starts_with(private), "{shown}");
         assert!(!shown.contains(TOKEN), "{shown}");
         assert!(shown.contains("[secret Kube/KUBECONFIG]"), "{shown}");
         let path = shown.lines().find_map(|line| line.strip_prefix("path=")).expect("its path");
-        assert!(path.ends_with("/KUBECONFIG"), "{path}");
+        assert!(path.ends_with(&format!("{}KUBECONFIG", std::path::MAIN_SEPARATOR)), "{path}");
         assert!(!Path::new(path).exists(), "gone after the command: {path}");
         assert!(!Path::new(path).parent().unwrap().exists(), "its folder too");
     }
@@ -327,7 +336,20 @@ async fn a_command_with_secrets_writes_its_log_through_the_filter() {
     let (mut secrets, _) = vault();
     // Stands in for factoryd's `redact`: it says what it was given, and
     // copies the output in capitals.
-    secrets.filter = ["bash", "-c", "printf 'filter has %s\\n' \"${CLAKTORY_REDACT:+the values}\"; tr a-z A-Z"].map(Into::into).to_vec();
+    #[cfg(unix)]
+    {
+        secrets.filter = ["bash", "-c", "printf 'filter has %s\\n' \"${CLAKTORY_REDACT:+the values}\"; tr a-z A-Z"].map(Into::into).to_vec();
+    }
+    // On Windows a native program, as factoryd's filter is: Git Bash can't
+    // write to the log it's given, which is opened to append only.
+    #[cfg(windows)]
+    {
+        let tools = std::path::PathBuf::from(std::env::var_os("FACTORY_WINDOWS_TOOLS").expect("FACTORY_WINDOWS_TOOLS"));
+        let jq = tools.join("bin").join("jq.exe").display().to_string();
+        let program = r#""filter has " + (if env.CLAKTORY_REDACT then "the values" else "" end), (inputs | ascii_upcase)"#;
+        // -b: jq on Windows writes \n as it is, not \r\n.
+        secrets.filter = [jq.as_str(), "-bnRr", program].map(Into::into).to_vec();
+    }
     let tool = bash(dir.path(), Some(&watched.background));
     let command = "echo \"command has ${CLAKTORY_REDACT:-nothing extra}\"; [ -n \"$STRIPE_KEY\" ] && echo set; exit 3";
 

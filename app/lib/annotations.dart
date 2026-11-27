@@ -819,7 +819,7 @@ class CommentsController extends ChangeNotifier {
 
   /// Accepts [thread]'s suggested change, which Claktory makes in the
   /// file, or rejects it. The person's own, never sent, is taken back
-  /// instead: deleting its comments deletes it. [reply] (#370) does
+  /// instead: deleting its comments deletes it. [reply] does
   /// neither: [comment] goes into the thread, which stays open. Whether
   /// it went.
   Future<bool> decide(
@@ -2005,7 +2005,7 @@ class _Suggestion extends StatelessWidget {
 }
 
 /// A suggestion not decided yet: the agent's to accept or reject, or, once
-/// a comment is typed, to answer with it (Submit, or Return: #370), the
+/// a comment is typed, to answer with it (Submit, or Return), the
 /// suggestion left open; the person's own to apply or take back.
 /// Accepting needs the text as it was.
 class _Decide extends StatefulWidget {
@@ -2069,8 +2069,8 @@ class _DecideState extends State<_Decide> {
     return Unselectable(
       child: own
           ? CardRow(quiet: [reject], primary: accept)
-          // The field, open from the start, above the row (Lucy's rules 2
-          // and 4); words typed: one Submit, saying what it does.
+          // The field, open from the start, above the row; words typed:
+          // one Submit, saying what it does.
           : CardAnswerBlock(
               field: (focus) => DecisionComment(
                 controller: _comment,

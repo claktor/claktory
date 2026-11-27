@@ -40,7 +40,7 @@ pub fn recoverable_response(reason: &str) -> bool {
     !TERMINAL.is_match(reason) && RECOVERABLE.is_match(reason)
 }
 
-/// A failure worth waiting out at length (#490): one that passes, unless the
+/// A failure worth waiting out at length: one that passes, unless the
 /// provider refused the request as it is (its text starts with a 4xx status
 /// other than 408, 409 or 429), which no wait changes, whatever number its
 /// text mentions.

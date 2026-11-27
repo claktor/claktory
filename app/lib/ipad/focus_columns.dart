@@ -2,9 +2,9 @@ import 'dart:math' as math;
 
 import 'columns.dart';
 
-/// How Needs you's focus mode (#514) is laid out in an iPad's window: the
+/// How Needs you's focus mode is laid out in an iPad's window: the
 /// workbench's own tiers ([tierFor]), with the queue, the stage and
-/// Context arranged to fit (the spec's §6.2). Nothing here keeps state;
+/// Context arranged to fit. Nothing here keeps state;
 /// the session (needs_you_focus.dart) holds the card, its draft and
 /// whether Context is open, so a resize only lays them out again.
 enum FocusComposition {
@@ -18,7 +18,7 @@ enum FocusComposition {
   /// popover from the count, Context a panel over nearly all of the stage.
   stageOnly,
 
-  /// The phone's focus mode, one card a screen (spec §7), with the iPad's
+  /// The phone's focus mode, one card a screen, with the iPad's
   /// keys and Pencil.
   phone,
 }
@@ -137,7 +137,7 @@ FocusColumns focusColumnsFor(
         stage: width,
         context: 0,
         // Over the one-card screen, a strip of it left to tap back to
-        // (Gelato, row 183).
+        // .
         contextPanel: width - FocusGeometry.stageStrip,
       );
   }

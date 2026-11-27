@@ -1,4 +1,4 @@
-//! Request bodies sent gzip-compressed (#454), to providers that take them.
+//! Request bodies sent gzip-compressed, to providers that take them.
 //!
 //! A request carries the whole conversation, so most of what Claktory
 //! uploads is request bodies; their JSON shrinks about 2× with gzip at its

@@ -222,7 +222,7 @@ void main() {
   });
 
   // The Mac's traffic lights don't zoom with the app: the band keeps their
-  // room in the window's points at any zoom (Abbacchio, at 80% and 75%).
+  // room in the window's points at any zoom.
   for (final zoom in [0.75, 0.8, 1.0, 1.25]) {
     testWidgets("the band's Back chip keeps clear of the traffic lights at "
         '${(zoom * 100).round()}%', (tester) async {
@@ -241,7 +241,7 @@ void main() {
     }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
   }
 
-  // #366 A3: Android's Back (the window's registry) collapses an expanded
+  // Android's Back (the window's registry) collapses an expanded
   // pane, as its Back chip does, and then closes the pane beside.
   testWidgets("the window's Back collapses an expanded pane, below a dialog "
       'still open over it', (tester) async {
@@ -271,7 +271,7 @@ void main() {
     await settle(tester);
     expect(_lastLayout(harness).focus, '');
     expect(_expanded, findsNothing);
-    // On Android the pane beside is the next target (Sale's A3): Back
+    // On Android the pane beside is the next target: Back
     // closes it, and the conversation alone is the root.
     expect(back.commit(back.target!), isTrue);
     await settle(tester);

@@ -107,7 +107,7 @@ class _PeopleViewState extends State<PeopleView> {
 
   /// Reads made so far: only the latest one's answer is shown, so a read
   /// from before an action that answers after it never shows the lists as
-  /// they were (row 1441: a removed friend back).
+  /// they were (a removed friend back).
   var _loads = 0;
 
   Future<void> _load() async {
@@ -591,7 +591,7 @@ class _PeopleViewState extends State<PeopleView> {
   }
 }
 
-/// What waits for the person in [conversation] (Trish's words): "June
+/// What waits for the person in [conversation]: "June
 /// wants to send a message", or "2 messages waiting"; with none, an
 /// agent's reply drafted there, "June suggests a reply" or "2 replies
 /// suggested"; null for nothing.

@@ -358,9 +358,9 @@ Map<String, Object?> _agentDraft({
   ),
 };
 
-/// What Matt's device sent approving (#451: the approval, then the
-/// message itself into the conversation): the approval's body, and the
-/// message as the conversation's group has it.
+/// What Matt's device sent approving (the approval, then the message
+/// itself into the conversation): the approval's body, and the message
+/// as the conversation's group has it.
 ({Map<String, Object?> body, Map<String, Object?> sealed}) _approval(
   _World world,
   String line,
@@ -392,7 +392,7 @@ DmConversation _conversation({bool active = true}) => DmConversation(
   lastSeq: 0,
 );
 
-/// An agent's proposal through the home (#451): the service's record,
+/// An agent's proposal through the home: the service's record,
 /// which names only the digest of the channel message, and that message
 /// as the Claktory's leaf sends it into Matt's channel.
 ({Map<String, Object?> record, String envelope}) _homeProposal({
@@ -838,8 +838,7 @@ void main() {
     expect(skipped(''), [
       "Some messages sent while this device was away can't be shown on it.",
     ]);
-    // Sent while a device they took off their list was in the chat (row
-    // 561, Trish 40465).
+    // Sent while a device they took off their list was in the chat.
     expect(skipped('device:ana'), [
       "Some earlier messages can't be shown here: they were sent while a "
           'device Ana has since removed was in this chat.',
@@ -879,7 +878,7 @@ void main() {
       expect(hasHidden('caf\u00e9 \u{1F600}'), isFalse);
       expect(hasHidden('x\u2066y'), isTrue);
       // Variation selectors: one after a visible character is its own;
-      // more, or anywhere else, can carry hidden words (Fugo).
+      // more, or anywhere else, can carry hidden words.
       expect(hasHidden('\u2764\uFE0F \u{1F44D}\u{1F3FD}'), isFalse);
       expect(hasHidden('\u{1F44D}${'\uFE00' * 8}'), isTrue);
       expect(reviewRuns('\u{1F44D}\uFE0F\uFE01'), [
@@ -909,7 +908,7 @@ void main() {
         (l) => l.startsWith('POST approve'),
       );
       final (:body, :sealed) = _approval(world, approval);
-      // The approval carries no message (Mista 32507).
+      // The approval carries no message.
       expect(body.keys.toSet(), {'revision', 'proposal_digest'});
       expect(body['revision'], 1);
       expect(body['proposal_digest'], DmProposal.fromJson(_proposal()).digest);
@@ -1002,7 +1001,7 @@ void main() {
     test(
       'ended while open (unfriended), what waits goes with the box',
       () async {
-        // Abbacchio's D3d pass: the card stayed, Decline and Edit live.
+        // The card stayed, Decline and Edit live.
         final service = world.service..proposals.add(_proposal());
         service.agentDrafts.add(
           _agentDraft(id: 'd1', name: 'June', text: 'Maybe Friday?'),
@@ -1089,7 +1088,7 @@ void main() {
         'proposal_digest': record['proposal_digest'],
       });
       final send = home.sends.last;
-      // Under the id the service lists for it (Mista 32744).
+      // Under the id the service lists for it.
       expect(send.clientMessageId, 'Kq3hR7mWx2LpN8vT4cYb1A');
       final said =
           readFake(dmEnvelopeOf(send.envelope))['c']! as Map<String, Object?>;
@@ -1170,7 +1169,7 @@ void main() {
       await _settleHome();
       expect(line(), "Not delivered yet: Ana's Claktory is offline.");
       // Another of Matt's Claktories, not his home, sends nothing: its
-      // word on Ana's is no word on this message (row 567).
+      // word on Ana's is no word on this message.
       home
         ..isHome = false
         ..endpointId = List<int>.filled(32, 6)
@@ -1183,7 +1182,7 @@ void main() {
         ..said();
       await _settleHome();
       expect(line(), "Not delivered yet: Ana's Claktory is offline.");
-      // Her home turns Matt's away (row 567): said as such.
+      // Her home turns Matt's away: said as such.
       home
         ..peers.first.refused = dmTurnedAway
         ..said();
@@ -1198,7 +1197,7 @@ void main() {
         ..said();
       await _settleHome();
       expect(line(), "Not delivered yet: Ana's Claktory is offline.");
-      // Sent before this Claktory became the home (row 595): an earlier
+      // Sent before this Claktory became the home: an earlier
       // home sent it on and knew if it arrived, so only Sent.
       home
         ..homeSinceMs = mine.acceptedMs + 1
@@ -1444,7 +1443,7 @@ void main() {
       await close(tester);
     });
 
-    // E11-3 (Bruno 40394, Fugo 40427): a friend whose key changed is said
+    // E11-3: a friend whose key changed is said
     // to have a new key, never to be waiting to join, which their devices
     // under it can't; a key this device refuses says so too, with Verify
     // and no OK, and a message that can't go points to a note that's there.
@@ -1494,7 +1493,7 @@ void main() {
       await close(tester);
     });
 
-    // Row 1440 (Fugo 41212, Mista 41215): the service lied about her key,
+    // The service lied about her key,
     // then told the truth, and the note waited for OK meanwhile: OK and her
     // device is added at once, the chat open, with no relaunch or sync.
     testWidgets('a lie and the truth about her key, then OK: she joins at '
@@ -1528,7 +1527,7 @@ void main() {
       await close(tester);
     });
 
-    // E11-3 (Bruno 40394, Fugo 41541): The numbers don't match on Verify
+    // E11-3: The numbers don't match on Verify
     // goes back to the key before the change. A service still giving the
     // one that didn't match brings its note back at once, saying so; one
     // giving the earlier key again leaves it kept, and the sheet says so.
@@ -1609,7 +1608,7 @@ void main() {
       await close(tester);
     });
 
-    // Row 556: the sender's time shows; one held up on the way more than
+    // The sender's time shows; one held up on the way more than
     // five minutes says when it arrived too; a clock ahead shows arrival.
     testWidgets('a message shows when it was sent, and when it arrived '
         'once held up', (tester) async {
@@ -1640,7 +1639,7 @@ void main() {
       await close(tester);
     });
 
-    // Row 561: Ana added a tablet and took it out again while Matt's
+    // Ana added a tablet and took it out again while Matt's
     // device was away; what it said shows, marked.
     testWidgets('a message from a device since removed shows, marked', (
       tester,
@@ -1767,7 +1766,7 @@ void main() {
       await close(tester);
     });
 
-    // Row 551: a message from past this device's place waits, said, until
+    // A message from past this device's place waits, said, until
     // what it missed comes; never passed over unread.
     testWidgets('a message waiting for this device to catch up is said', (
       tester,
@@ -2432,7 +2431,7 @@ void main() {
       findsOneWidget,
     );
     // Opening the chat is the action: one button, on the card, and no
-    // second link under it (#325).
+    // second link under it.
     expect(
       find.descendant(
         of: find.byType(Button),

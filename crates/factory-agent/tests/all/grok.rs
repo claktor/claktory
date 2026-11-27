@@ -1,4 +1,4 @@
-//! Grok on a subscription (#493): xAI's device sign-in, its refresh and
+//! Grok on a subscription: xAI's device sign-in, its refresh and
 //! revoke, the proxy's requests and refusals, its model list and who a
 //! sign-in is.
 

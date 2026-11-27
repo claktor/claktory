@@ -76,6 +76,10 @@ const IDLE_CHECK: Duration = Duration::from_secs(10);
 const FAILURE_PAUSE: Duration = Duration::from_secs(1);
 /// A pairing code nobody used stops working after this long.
 pub const CODE_LIFETIME: Duration = Duration::from_secs(10 * 60);
+
+/// What this computer's own app hears when it reaches this Claktory
+/// through the account instead of as its own (#619).
+const OWN_APP: &str = "This is this computer's own Claktory. Open it as this computer's, not through your account.";
 /// How long making a pairing code waits for the tunnel to reach its relay,
 /// so the code can name it.
 const ONLINE_WAIT: Duration = Duration::from_secs(5);
@@ -114,6 +118,7 @@ fn dir(home: &Home) -> PathBuf {
 /// Makes `path` a folder only this user can open, as `<home>` and
 /// `<home>/remote` are: what other users of this machine could read or
 /// change there is removed from its permissions.
+#[cfg(unix)]
 pub(crate) fn private_dir(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(path)?;
@@ -124,7 +129,15 @@ pub(crate) fn private_dir(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// On Windows: this user and SYSTEM only, made so if it's there already
+/// (`windows::private`).
+#[cfg(windows)]
+pub(crate) fn private_dir(path: &Path) -> std::io::Result<()> {
+    factory_agent::windows::private::create_dir_all(path)
+}
+
 /// Written so only this user can read it.
+#[cfg(unix)]
 pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -142,6 +155,13 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         std::fs::File::open(parent)?.sync_all()?;
     }
     Ok(())
+}
+
+/// On Windows: into a new private file beside it, flushed, then renamed
+/// over it (`windows::private::write`). NTFS journals the rename itself.
+#[cfg(windows)]
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    factory_agent::windows::private::write(path, bytes)
 }
 
 /// Factory's iroh key, made the first time: its public half is the
@@ -902,26 +922,36 @@ pub(crate) fn machine_name() -> &'static str {
         } else {
             None
         };
-        if let Some(name) = mac {
+        if let Some(name) = mac.map(|name| crate::config::clean_name(&name)).filter(|name| !name.is_empty()) {
             return name;
         }
         // The system call, not the `hostname` program, which a minimal
         // Linux (NixOS, say) may not have.
-        let mut buffer = [0u8; 256];
-        // SAFETY: gethostname writes at most `buffer.len()` bytes into it.
-        let got = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } == 0;
-        let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
-        let name = if got { String::from_utf8_lossy(&buffer[..end]).trim().to_owned() } else { String::new() };
-        let name = name.split('.').next().unwrap_or_default().to_owned();
+        #[cfg(unix)]
+        let name = {
+            let mut buffer = [0u8; 256];
+            // SAFETY: gethostname writes at most `buffer.len()` bytes into it.
+            let got = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } == 0;
+            let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(buffer.len());
+            if got { String::from_utf8_lossy(&buffer[..end]).trim().to_owned() } else { String::new() }
+        };
+        #[cfg(windows)]
+        let name = crate::windows::machine::computer_name().trim().to_owned();
+        let name = crate::config::clean_name(name.split('.').next().unwrap_or_default());
         if name.is_empty() { "factory".to_owned() } else { name }
     })
 }
 
 /// The name `FACTORY_MACHINE_NAME` gives, when it's one: trimmed, not
-/// empty, with no control characters, and at most 64 characters.
+/// empty, with no control characters, without what it hides, and at most
+/// 64 characters.
 fn chosen_machine_name(value: Option<std::ffi::OsString>) -> Option<String> {
     let name = value?.to_string_lossy().trim().to_owned();
-    (!name.is_empty() && !name.chars().any(char::is_control)).then(|| name.chars().take(64).collect::<String>().trim_end().to_owned())
+    if name.chars().any(char::is_control) {
+        return None;
+    }
+    let name = crate::config::clean_name(&name);
+    (!name.is_empty()).then(|| name.chars().take(64).collect::<String>().trim_end().to_owned())
 }
 
 /// How a connection travels now, and the address it comes from when it
@@ -1672,6 +1702,30 @@ impl Drop for Connected {
 }
 
 impl Factory {
+    /// Before the backend stops: closes the tunnel's endpoints, for devices
+    /// on other machines and for this machine's app, so the devices, pipes
+    /// and friends connected see the connection end at once instead of
+    /// waiting for it to time out, and the next start finds its port free
+    /// (Jotaro 51447). Waits at most `within` for them to say goodbye.
+    pub async fn close_tunnel(&self, within: Duration) {
+        crate::pipe_link::stopping(self);
+        let close = async {
+            let mut tunnel = self.remote.tunnel.lock().await;
+            lock(&self.remote.endpoint).take();
+            if let Some((_, endpoint, accept)) = tunnel.remote.take() {
+                accept.abort();
+                endpoint.close().await;
+            }
+            if let Some((endpoint, accept)) = tunnel.local.take() {
+                accept.abort();
+                endpoint.close().await;
+            }
+        };
+        if tokio::time::timeout(within, close).await.is_err() {
+            tracing::info!("the tunnel didn't close in time; stopping anyway");
+        }
+    }
+
     /// Who may come in with `knock`, and how: the paired device whose token
     /// it brings, if `peer` may use it (the key bound to it; for this
     /// machine's app, any key from this machine), or one found through the
@@ -1688,11 +1742,20 @@ impl Factory {
             email: self.account.where_to_sign_in(&account).1,
         });
         // What its assertion shows, if it brought one through the tunnel.
-        let shown = (!knock.assertion.is_empty() && !peer.endpoint_id.is_empty()).then(|| {
-            crate::account::check_assertion(self, &account, knock.assertion, &peer.endpoint_id)
-                .map(|assertion| assertion.account_id)
-                .map_err(refusal)
-        });
+        let checked = (!knock.assertion.is_empty() && !peer.endpoint_id.is_empty())
+            .then(|| crate::account::check_assertion(self, &account, knock.assertion, &peer.endpoint_id));
+        // This computer's own app, by the account key this Claktory vouched
+        // for it (#619, Fugo 53968), reaching it through the account rather
+        // than as its own: only turned away. It gets no entry, no Allow and
+        // no alert, and its key lets nothing in.
+        if let Some(Ok(said)) = &checked
+            && self.account.is_vouched_app(&said.account_key)
+        {
+            tracing::info!(endpoint = %peer.endpoint_id, "this computer's own app came through the account; turned away");
+            let refusal = v1::Error { code: v1::ErrorCode::InvalidRequest.into(), message: OWN_APP.to_owned(), ..Default::default() };
+            return self.turn_away(peer, false, refusal).await;
+        }
+        let shown = checked.map(|checked| checked.map(|assertion| assertion.account_id).map_err(refusal));
         let proved = shown.as_ref().and_then(|shown| shown.as_ref().ok().cloned());
         let mut replaced = Vec::new();
         let mut noted = false;
@@ -2731,9 +2794,15 @@ fn list_folders(path: &str) -> Result<v1::FolderList, String> {
         },
     };
     if !wanted.is_absolute() {
-        return Err(format!("{path} isn't a full path: start it with / or ~"));
+        let start = if cfg!(windows) { r"a drive, such as C:\," } else { "/" };
+        return Err(format!("{path} isn't a full path: start it with {start} or ~"));
     }
-    let folder = std::fs::canonicalize(&wanted).map_err(|error| format!("Can't open {}: {}", wanted.display(), plain_error(&error)))?;
+    #[cfg(unix)]
+    let canonical = std::fs::canonicalize(&wanted);
+    // Windows' own resolved form starts `\\?\`, which isn't how people read a path.
+    #[cfg(windows)]
+    let canonical = crate::windows::fs::canonical(&wanted);
+    let folder = canonical.map_err(|error| format!("Can't open {}: {}", wanted.display(), plain_error(&error)))?;
     if !folder.is_dir() {
         return Err(format!("{} isn't a folder", folder.display()));
     }
@@ -3051,7 +3120,12 @@ async fn bind(
             (true, Some(network)) => (network.lookup)(Endpoint::builder(presets::Minimal)),
         };
         let relay_mode = if wanted.on { RelayMode::Custom(relays.clone()) } else { RelayMode::Disabled };
-        let ip: IpAddr = if wanted.on { Ipv4Addr::UNSPECIFIED.into() } else { Ipv4Addr::LOCALHOST.into() };
+        // On Windows, relay only: a socket on every address would raise the
+        // firewall's "Allow access" prompt, which a Standard account can
+        // only cancel. The relays are outbound connections, which never
+        // prompt; direct paths aren't tried there.
+        let direct = wanted.on && !cfg!(windows);
+        let ip: IpAddr = if direct { Ipv4Addr::UNSPECIFIED.into() } else { Ipv4Addr::LOCALHOST.into() };
         let mut builder = builder
             .secret_key(key.clone())
             .alpns(vec![
@@ -3067,7 +3141,7 @@ async fn bind(
             .clear_ip_transports()
             .bind_addr(SocketAddr::new(ip, port))
             .map_err(|error| failed(&error))?;
-        if wanted.on {
+        if direct {
             let optional = BindOpts::default().set_is_required(false);
             builder =
                 builder.bind_addr_with_opts(SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)), optional).map_err(|error| failed(&error))?;
@@ -3425,6 +3499,8 @@ mod tests {
         assert_eq!(chosen_machine_name(None), None, "unset: the machine's own");
         assert_eq!(chosen("   "), None);
         assert_eq!(chosen("Mac\nmini"), None, "no control characters");
+        assert_eq!(chosen("\u{202E}Mac\u{200B} mini").as_deref(), Some("Mac mini"), "nothing hidden");
+        assert_eq!(chosen("\u{2066}\u{2069}"), None, "nothing but what's hidden");
         assert_eq!(chosen(&"x".repeat(100)).map(|name| name.chars().count()), Some(64));
     }
 

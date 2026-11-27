@@ -318,6 +318,87 @@ async fn a_request_over_one_accounts_limit_carries_on_with_the_next_in_order() {
     assert_eq!(said.lock().len(), 1);
 }
 
+/// Anthropic kept answering an account whose usage
+/// read weekly 100% while another read 0%, so nothing moved off it. A full
+/// read now sends requests to the next account with room first, without a
+/// note or a mark; once every one reads full they go as before, to the first
+/// that answers, and back to the first once its window resets or a read
+/// shows room.
+#[tokio::test]
+async fn an_account_whose_usage_reads_full_comes_after_those_with_room_and_first_again_once_it_resets() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let server = mock(Arc::new(|_| claude_reply())).await;
+    store_accounts(
+        &file,
+        "anthropic",
+        vec![
+            account("a", "a@x.com", &claude_token("a")),
+            account("b", "b@x.com", &claude_token("b")),
+            account("c", "c@x.com", &claude_token("c")),
+        ],
+    );
+    let registry = registry(&file, &server.base_url);
+    let (notes, said) = recorder();
+    let in_use = |accounts: &[factory_agent::providers::models::AccountInfo]| {
+        accounts.iter().filter(|account| account.in_use).map(|account| account.id.clone()).collect::<Vec<_>>()
+    };
+    let answered = |server: &Mock| server.tokens("/v1/messages").last().cloned();
+    let later = now_ms() + 3 * 24 * 3_600_000;
+
+    // A's weekly limit reads full: B takes the requests, and shows in use.
+    assert!(registry.note_full("anthropic", "a", vec![("weekly".into(), later)]));
+    assert!(!registry.note_full("anthropic", "a", vec![("weekly".into(), later)]), "the same read changes nothing");
+    assert_eq!(ask(&registry, &notes, &claude(&server.base_url), StreamOptions::default()).await, Ok("hi".into()));
+    assert_eq!(answered(&server), Some(claude_token("b")));
+    assert_eq!(in_use(&registry.accounts("anthropic").await.expect("accounts")), ["b"]);
+    // So does Fable: the weekly limit covers every model.
+    assert_eq!(ask(&registry, &notes, &fable(&server.base_url), StreamOptions::default()).await, Ok("hi".into()));
+    assert_eq!(answered(&server), Some(claude_token("b")));
+
+    // B reads full too: C, the one with room.
+    registry.note_full("anthropic", "b", vec![("five_hour".into(), later)]);
+    assert_eq!(ask(&registry, &notes, &claude(&server.base_url), StreamOptions::default()).await, Ok("hi".into()));
+    assert_eq!(answered(&server), Some(claude_token("c")));
+
+    // Every one reads full: as before, the first, which still answers.
+    registry.note_full("anthropic", "c", vec![("weekly".into(), 0)]);
+    assert_eq!(ask(&registry, &notes, &claude(&server.base_url), StreamOptions::default()).await, Ok("hi".into()));
+    assert_eq!(answered(&server), Some(claude_token("a")));
+    assert!(said.lock().is_empty(), "no switch said, and nothing marked");
+    let accounts = registry.accounts("anthropic").await.expect("accounts");
+    assert!(accounts.iter().all(|account| account.exhausted_until == 0), "{accounts:?}");
+
+    // C reads with room again: it's the one with room.
+    registry.note_full("anthropic", "c", Vec::new());
+    assert_eq!(ask(&registry, &notes, &claude(&server.base_url), StreamOptions::default()).await, Ok("hi".into()));
+    assert_eq!(answered(&server), Some(claude_token("c")));
+
+    // A's window resets: A is first again, before any read says so.
+    registry.note_full("anthropic", "a", vec![("weekly".into(), now_ms() - 1)]);
+    assert_eq!(ask(&registry, &notes, &claude(&server.base_url), StreamOptions::default()).await, Ok("hi".into()));
+    assert_eq!(answered(&server), Some(claude_token("a")));
+    assert_eq!(in_use(&registry.accounts("anthropic").await.expect("accounts")), ["a"]);
+}
+
+/// A model's own weekly limit read full puts the account after the others
+/// only for that model's requests: Fable's for Fable, not for the rest.
+#[tokio::test]
+async fn a_models_own_limit_read_full_moves_only_that_models_requests() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join("auth.json");
+    let server = mock(Arc::new(|_| claude_reply())).await;
+    store_accounts(&file, "anthropic", vec![account("a", "a@x.com", &claude_token("a")), account("b", "b@x.com", &claude_token("b"))]);
+    let registry = registry(&file, &server.base_url);
+    let (notes, _) = recorder();
+    registry.note_full("anthropic", "a", vec![("weekly_fable".into(), now_ms() + 3_600_000)]);
+
+    ask(&registry, &notes, &fable(&server.base_url), StreamOptions::default()).await.expect("Fable runs");
+    assert_eq!(server.tokens("/v1/messages").last(), Some(&claude_token("b")), "Fable: the one with room");
+    ask(&registry, &notes, &claude(&server.base_url), StreamOptions::default()).await.expect("Claude runs");
+    assert_eq!(server.tokens("/v1/messages").last(), Some(&claude_token("a")), "the others: the first, as before");
+}
+
 #[tokio::test]
 async fn a_passing_rate_limit_fails_the_request_as_before_without_changing_accounts() {
     let dir = tempfile::tempdir().expect("dir");

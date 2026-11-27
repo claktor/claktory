@@ -1,4 +1,4 @@
-// The pieces Settings is made of at every width (Lucy's Settings spec §4):
+// The pieces Settings is made of at every width:
 // the search field, the Claktory's heading, a section's row in the index or
 // the list, a search result, and the anchors a link or a result brings into
 // view and glows. settings_view.dart puts them together.
@@ -18,8 +18,8 @@ import 'mobile/platform_policy.dart' show PhonePlatformPolicy;
 import 'scope.dart';
 import 'settings_search.dart';
 
-/// Settings' search, always on screen at the top of the index or the list
-/// (§4.3): "Search", with Clear once something's typed.
+/// Settings' search, always on screen at the top of the index or the list:
+/// "Search", with Clear once something's typed.
 class SettingsSearchField extends StatelessWidget {
   const SettingsSearchField({
     super.key,
@@ -108,7 +108,7 @@ class SettingsSearchField extends StatelessWidget {
   }
 }
 
-/// The Claktory being shown, over its sections (§3): its 8px color dot and
+/// The Claktory being shown, over its sections: its 8px color dot and
 /// its name, in caption weight 600 `textFaint`. Switching Claktory in the
 /// rail changes it. [dense] for the index; the list's sits in its gutter.
 class SettingsClaktoryHeading extends StatelessWidget {
@@ -132,7 +132,7 @@ class SettingsClaktoryHeading extends StatelessWidget {
 
 /// A Claktory's dot and name in [style]: the index's heading, and a
 /// narrow section page's first line when more than one Claktory is saved
-/// (§4.2).
+/// .
 class SettingsClaktoryLine extends StatelessWidget {
   const SettingsClaktoryLine({
     super.key,
@@ -215,7 +215,7 @@ class _SettingsSectionRowState extends State<SettingsSectionRow> {
     final large = widget.list && largeText(context);
     final bodyStyle = phone ? PhoneType.body : TypeScale.of(context).body;
     // Never broken inside a word ("Notification / s" at the largest text
-    // on an iPhone SE, Zucchero's row 510): drawn smaller to fit.
+    // on an iPhone SE): drawn smaller to fit.
     final title = FittedHeading(
       widget.title,
       style: bodyStyle.copyWith(color: palette.text),
@@ -318,7 +318,7 @@ class _SettingsSectionRowState extends State<SettingsSectionRow> {
   }
 }
 
-/// A search result (§4.3): the setting's label in body, its section in
+/// A search result: the setting's label in body, its section in
 /// caption `textMuted` under it; an answer alone, in `textMuted`, leading
 /// nowhere.
 class SettingsResultRow extends StatefulWidget {
@@ -481,7 +481,7 @@ class SettingAnchorsState extends State<SettingAnchors> {
   final _anchors = <String, BuildContext>{};
 
   /// Brings the setting [id] into view once it's laid out, its top near
-  /// the top, and glows it in signal as a Highlight (§4.3). Whether it's
+  /// the top, and glows it in signal as a Highlight. Whether it's
   /// there.
   bool reveal(String id) {
     final anchor = _anchors[id];
@@ -563,7 +563,7 @@ class _SettingAnchorState extends State<SettingAnchor> {
 }
 
 /// A sentence that names a place in Settings, with the place as a link to
-/// it (Lucy's Settings spec §5): [before], then [label] ("Settings →
+/// it: [before], then [label] ("Settings →
 /// General"), then [after], in [style]. The link opens [section], with
 /// [setting] in it glowing; [onOpen] runs first (a dialog closing, say).
 class SettingsLink extends StatefulWidget {

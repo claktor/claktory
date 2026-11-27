@@ -1,9 +1,9 @@
-//! An agent changes its own cards while they wait (#428): ask_update for its
+//! An agent changes its own cards while they wait: ask_update for its
 //! questions (title, body, wants_text, review, a procedure's steps),
 //! proposal_update for its proposals' text. The card redraws in place, at
 //! the same seq, as a new version, marked updated with the agent's reason;
 //! it doesn't count again in Needs you. An answer to the version before is
-//! refused; one that names no version (an app before #428) is refused only
+//! refused; one that names no version (an older app's) is refused only
 //! just after a change. At most 10 changes a card, never another agent's,
 //! and History keeps one record, saying how many times it changed.
 
@@ -133,7 +133,7 @@ async fn an_agent_changes_its_own_question_in_place_and_an_answer_to_the_old_one
     apply_request(&mut client, &mut view, select("builder")).await;
 
     // An answer to the version before is refused, and so is one naming
-    // none just after the change (an app before #428).
+    // none just after the change (an older app's).
     assert_eq!(reply_to(&mut client, &mut view, answer(seq, "Yes.", Some(1))).await, Err("This card changed. Look at it again.".to_owned()));
     assert_eq!(reply_to(&mut client, &mut view, answer(seq, "Yes.", None)).await, Err("This card changed. Look at it again.".to_owned()));
     assert_eq!(card(&view, &id).1.state(), AskPersonState::Pending);
@@ -309,7 +309,7 @@ async fn a_review_card_follows_its_file_and_an_approval_of_the_file_before_is_re
 }
 
 /// An approval given after its file changed but before the watch marked it
-/// (Abbacchio 1570) is refused, and the card is marked at once.
+/// is refused, and the card is marked at once.
 #[tokio::test]
 async fn an_approval_between_a_save_and_the_mark_is_refused() {
     let dir = temp_dir();
@@ -335,7 +335,7 @@ async fn an_approval_between_a_save_and_the_mark_is_refused() {
     assert_eq!(card(&view, &id).1.state(), AskPersonState::Answered);
 }
 
-/// Squalo's B3: the Workspace carries each waiting card's version, so Needs
+/// The Workspace carries each waiting card's version, so Needs
 /// you fetches again only a card that changed, even with no conversation
 /// open: ask_update, a step done and proposal_update change it; the agent's
 /// other work doesn't, and a restart keeps it.

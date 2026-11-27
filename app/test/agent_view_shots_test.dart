@@ -1,6 +1,6 @@
 // Pictures of the agent's header, its model popover, its menu and its
-// panel over the conversation (agent-view.md), for Lucy to check against
-// her mock-ups. With SHOTS set they're drawn to PNGs there:
+// panel over the conversation, to check against the
+// mock-ups. With SHOTS set they're drawn to PNGs there:
 //   SHOTS=/tmp/agent-view flutter test test/agent_view_shots_test.dart
 // Without it they only check that each scene lays out without an error.
 import 'dart:io';
@@ -104,7 +104,7 @@ void main() {
   });
 
   // The header's right-hand group ends at the conversation's right edge,
-  // not at the messages' width (Matt, Bruno 45208; Lucy 45210).
+  // not at the messages' width.
   testWidgets('a wide Mac window', (tester) async {
     final harness = Harness(header(checklistOpen: 2, tasksRunning: 2));
     await harness.show(tester, size: const Size(1900, 900));

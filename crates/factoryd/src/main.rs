@@ -28,6 +28,7 @@ const STOP_WITHIN: Duration = Duration::from_secs(10);
 /// Quick failures in a row, outside an update's trial, after which the
 /// supervisor puts the previous backend back.
 const FAILURES_TO_FALL_BACK: u32 = 5;
+#[cfg(unix)]
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -49,10 +50,16 @@ enum MainError {
     Bind { addr: SocketAddr, source: std::io::Error },
     /// The port is taken, most likely by another user's Claktory on this
     /// computer: said plainly, since it's what the person can act on.
+    #[cfg(unix)]
     #[error(
         "Another Claktory on this computer already uses port {0} (another user's, say), so this one can't start. Stop that one, or start this one on another port with FACTORY_PORT."
     )]
     PortInUse(u16),
+    /// On Windows: the port is held, by whom when Windows says
+    /// (`windows::listener::taken_by`).
+    #[cfg(windows)]
+    #[error("{0}")]
+    PortTaken(String),
     #[error("login failed: {0}")]
     Login(#[from] factory_agent::Error),
     #[error("FACTORY_PORT must be a port number: {0}")]
@@ -77,6 +84,17 @@ enum MainError {
 }
 
 fn main() -> ExitCode {
+    // Claktory's browser gate, before anything else: it runs as the
+    // browser's user for whoever can use its sudo line, so it reads no
+    // settings, environment or logs before it has checked factoryd's answer.
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "browser-gate") {
+        return factoryd::browser_runner::gate::main(&std::env::args_os().collect::<Vec<_>>());
+    }
+    // On Windows, before anything else (logs included) could start a
+    // process: the vault's handover pipes, if the supervisor gave this
+    // backend any, no longer inheritable.
+    #[cfg(windows)]
+    factoryd::windows::handoff::seal();
     // A command's log filter (see factory_agent::secrets::filter_main): one
     // per command with secrets, so it starts lean, without a runtime or logs.
     if std::env::args().nth(1).as_deref() == Some("redact") {
@@ -104,6 +122,14 @@ fn main() -> ExitCode {
         let mut flags: Vec<String> = args[..at].to_vec();
         flags.extend_from_slice(&args[at + 1..]);
         return if args[at] == "install" { factoryd::install::main(&flags) } else { factoryd::uninstall::main(&flags) };
+    }
+    // Moving isn't on Windows yet: its commands say so, and do nothing.
+    #[cfg(windows)]
+    if let Some(at) = args.iter().position(|arg| arg != "--dev")
+        && matches!(args[at].as_str(), "export" | "move" | "import" | "receive")
+    {
+        eprintln!("{}", factoryd::move_run::NOT_ON_WINDOWS);
+        return ExitCode::from(2);
     }
     // Moving a Claktory to another computer (#217): no logs on stdout,
     // which says what happened (one JSON line with --json).
@@ -444,7 +470,11 @@ async fn receive(instance: &Instance, args: &[String]) -> Result<(), MainError> 
     };
     // Stopped by Ctrl-C, or by a TERM signal (an agent stopping its task):
     // a code no source has is forgotten, and running it again carries on.
+    #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(MainError::Signal)?;
+    // On Windows: the stop event, Ctrl-Break, the console closing, signing out.
+    #[cfg(windows)]
+    let mut terminate = factoryd::windows::stop::listen().map_err(MainError::Signal)?;
     let done = tokio::select! {
         done = receive::receive(&instance.home, instance.addr, &options, &ui) => done,
         _ = tokio::signal::ctrl_c() => stop_receiving(&instance.home, json),
@@ -574,12 +604,26 @@ async fn allow_in_terminal(home: &Home, device: &factoryd::remote::Device) -> Re
 /// it again after a pause, and an update that dies before passing its trial is
 /// undone. Stops it on SIGTERM or SIGINT. A change to what it does needs
 /// update::SUPERVISOR_VERSION bumped, or installed Claktories keep the old.
+/// On Windows it stops on its stop event or a console's (`windows::stop`),
+/// and hands the vault's key over through a pair of anonymous pipes only
+/// the backend inherits (`windows::handoff`); its backend there is
+/// `bin\factoryd.exe` (`home::program`).
 async fn supervise_backend(home: Home, dev: bool) -> Result<(), MainError> {
+    #[cfg(unix)]
     use tokio::signal::unix::{SignalKind, signal};
+    #[cfg(unix)]
     let mut terminate = signal(SignalKind::terminate()).map_err(MainError::Signal)?;
+    #[cfg(unix)]
     let mut interrupt = signal(SignalKind::interrupt()).map_err(MainError::Signal)?;
+    #[cfg(windows)]
+    let mut terminate = factoryd::windows::stop::listen().map_err(MainError::Signal)?;
     let mut pause = Duration::from_millis(500);
     let mut failures = 0;
+    // The sign-in task gives it no output anyone reads.
+    #[cfg(windows)]
+    if let Err(error) = factoryd::windows::log::to_log(&home.root().join("factoryd.log")) {
+        tracing::warn!(%error, "could not open factoryd.log");
+    }
     tracing::info!(backend = %home.backend().display(), version = update::VERSION, "supervising");
     // It may hold the vault's key between two backends.
     factoryd::vault::memory::harden();
@@ -593,12 +637,30 @@ async fn supervise_backend(home: Home, dev: bool) -> Result<(), MainError> {
             tracing::error!(%error, "could not start the update's trial");
         }
         let started = Instant::now();
+        // On Windows the backend is started with the attribute list that
+        // hands it only its own ends of the vault's handover
+        // (`windows::handoff::spawn`), not by tokio's Command.
+        #[cfg(windows)]
+        let spawned = {
+            let args: Vec<std::ffi::OsString> = if dev { vec!["--dev".into()] } else { Vec::new() };
+            let held = holder.for_next(update::on_trial(&home));
+            factoryd::windows::handoff::spawn(
+                &home.backend(),
+                &args,
+                &[(update::SUPERVISED, "1")],
+                held.as_deref().map(|held| held.as_slice()),
+            )
+        };
+        #[cfg(unix)]
         let mut command = tokio::process::Command::new(home.backend());
+        #[cfg(unix)]
         if dev {
             command.arg("--dev");
         }
+        #[cfg(unix)]
         command.env(update::SUPERVISED, "1").kill_on_drop(true);
         // The vault's key goes from one backend to the next through a pair.
+        #[cfg(unix)]
         let channel = match holder.channel(update::on_trial(&home)) {
             Ok((ours, theirs)) => {
                 command.env(factoryd::vault::handoff::FD_ENV, std::os::fd::AsRawFd::as_raw_fd(&theirs).to_string());
@@ -609,14 +671,42 @@ async fn supervise_backend(home: Home, dev: bool) -> Result<(), MainError> {
                 None
             }
         };
+        #[cfg(unix)]
         let spawned = command.spawn();
         // Only the backend holds its end now, so the pair ends with it.
+        #[cfg(unix)]
         let mut ours = channel.and_then(|(ours, theirs)| {
             drop(theirs);
             ours.set_nonblocking(true).ok()?;
             tokio::net::UnixStream::from_std(ours).ok()
         });
         let ended = match spawned {
+            #[cfg(windows)]
+            Ok(factoryd::windows::handoff::Started { mut child, mut written }) => {
+                let status = loop {
+                    tokio::select! {
+                        status = child.wait() => break status,
+                        _ = terminate.recv() => return stop(child).await,
+                        bytes = async { match written.as_mut() { Some(written) => written.recv().await, None => std::future::pending().await } } => match bytes {
+                            Some(bytes) => holder.read(&bytes),
+                            None => written = None,
+                        },
+                    }
+                };
+                // What it wrote just before it exited.
+                if let Some(written) = written.as_mut() {
+                    while let Ok(Some(bytes)) = tokio::time::timeout(Duration::from_millis(200), written.recv()).await {
+                        holder.read(&bytes);
+                    }
+                }
+                match status {
+                    Ok(status) if status.success() && update::on_trial(&home) => None,
+                    Ok(status) if status.success() => Some("It stopped by itself.".to_owned()),
+                    Ok(status) => Some(format!("It stopped ({status}).")),
+                    Err(error) => Some(format!("It stopped: {error}.")),
+                }
+            }
+            #[cfg(unix)]
             Ok(mut child) => {
                 let mut buffer = zeroize::Zeroizing::new([0u8; 256]);
                 let status = loop {
@@ -698,11 +788,22 @@ async fn supervise_backend(home: Home, dev: bool) -> Result<(), MainError> {
 /// Stops the backend: SIGTERM, so it can finish what it's writing, then
 /// SIGKILL if it hasn't stopped within STOP_WITHIN (launchd allows the
 /// supervisor 20 s).
-async fn stop(mut child: tokio::process::Child) -> Result<(), MainError> {
+/// On Windows its stop event stands for SIGTERM, and TerminateProcess for
+/// SIGKILL.
+async fn stop(mut child: Backend) -> Result<(), MainError> {
     if let Some(pid) = child.id() {
         // SAFETY: kill only sends a signal to the backend, our child.
+        #[cfg(unix)]
         unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-        if tokio::time::timeout(STOP_WITHIN, child.wait()).await.is_ok() {
+        #[cfg(unix)]
+        let asked = true;
+        // A backend that has no stop event yet is stopped at once, as one
+        // sent SIGTERM before its handler is.
+        #[cfg(windows)]
+        let asked = factoryd::windows::stop::ask_to_stop(pid)
+            .inspect_err(|error| tracing::warn!(%error, "could not ask the backend to stop; stopping it now"))
+            .is_ok();
+        if asked && tokio::time::timeout(STOP_WITHIN, child.wait()).await.is_ok() {
             return Ok(());
         }
         tracing::warn!("the backend didn't stop within {}s; killing it", STOP_WITHIN.as_secs());
@@ -712,6 +813,12 @@ async fn stop(mut child: tokio::process::Child) -> Result<(), MainError> {
     }
     Ok(())
 }
+
+/// The backend the supervisor started.
+#[cfg(unix)]
+type Backend = tokio::process::Child;
+#[cfg(windows)]
+type Backend = factory_agent::windows::child::Child;
 
 /// The models and sign-ins factoryd uses. Built for QA (the `qa-provider`
 /// feature, claktory-qa's sandboxes only), FACTORY_QA_ANTHROPIC_URL points
@@ -731,7 +838,7 @@ fn registry(home: &Home, port: u16) -> Result<Registry, MainError> {
         let url = std::env::var_os(qa::URL_VAR).map(|url| url.to_string_lossy().into_owned());
         if let Some((base, anthropic)) = qa::provider_for(url.as_deref(), home.root(), port).map_err(MainError::QaProvider)? {
             tracing::warn!("QA provider override: {base}");
-            let mut providers = providers(home);
+            let mut providers = factory_agent::providers::models::default_providers();
             if let Some(slot) = providers.iter_mut().find(|provider| provider.id == anthropic.id) {
                 *slot = anthropic;
             }
@@ -745,23 +852,7 @@ fn registry(home: &Home, port: u16) -> Result<Registry, MainError> {
     let _ = port;
     let store = factory_agent::credentials::FileCredentialStore::new(home.auth_path());
     let files = home.auth_path().with_file_name(factory_agent::providers::models::IMAGE_FILES);
-    Ok(Registry::with_providers(store, factory_agent::auth::process_env(), providers(home)).keeping_image_files(Some(files)))
-}
-
-/// The providers Claktory offers. Grok waits for a real sign-in and an
-/// agent's reply on it before a release shows it (Bruno 46121): until then
-/// only a debug build or the dev Claktory has it.
-fn providers(home: &Home) -> Vec<factory_agent::providers::Provider> {
-    providers_for(home, !cfg!(debug_assertions))
-}
-
-fn providers_for(home: &Home, release: bool) -> Vec<factory_agent::providers::Provider> {
-    let mut providers = factory_agent::providers::models::default_providers();
-    let dev = home.root().file_name().is_some_and(|name| name == ".factory-dev");
-    if release && !dev {
-        providers.retain(|provider| provider.id != factory_agent::providers::grok::ID);
-    }
-    providers
+    Ok(Registry::with_providers(store, factory_agent::auth::process_env(), factory_agent::providers::models::default_providers()).keeping_image_files(Some(files)))
 }
 
 /// The backend's listener. On Windows it's bound for this process alone
@@ -791,6 +882,13 @@ async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Hand
     // A helper an older backend's update left out goes in beside this one.
     factoryd::update::heal_helpers(&home);
     let listener = listen(addr).await.map_err(|source| match source.kind() {
+        // An exclusive bind of a port another socket holds is refused
+        // as in use, or as access denied.
+        #[cfg(windows)]
+        std::io::ErrorKind::AddrInUse | std::io::ErrorKind::PermissionDenied => {
+            MainError::PortTaken(factoryd::windows::listener::taken_by(addr.port()))
+        }
+        #[cfg(unix)]
         std::io::ErrorKind::AddrInUse => MainError::PortInUse(addr.port()),
         _ => MainError::Bind { addr, source },
     })?;
@@ -814,7 +912,7 @@ async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Hand
     }
     let factory = Factory::open(home.clone(), models).await?;
     #[cfg(windows)]
-    factory.set_app_token(app_token);
+    factory.set_app_token(app_token.clone());
     if let Some(handed) = handed {
         factory.take_vault_key(handed);
     }
@@ -829,40 +927,32 @@ async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Hand
     }
     // Older installs' LaunchAgent gets what installers write now, once.
     tokio::spawn(factoryd::launch_agent::update(home.clone(), addr.port()));
+    // On Windows, the supervisor's own copy, when its version went up.
+    #[cfg(windows)]
+    tokio::spawn(factoryd::windows::supervisor_copy::update(home.clone()));
     tracing::info!(%addr, home = %home.root().display(), version = factoryd::update::VERSION, "factoryd listening");
     // SIGTERM (the supervisor stopping, at a restart or shutdown): what's
-    // being written is finished first. On Windows, Ctrl-C for now; Jotaro's
-    // stop event replaces it (49761).
+    // being written is finished first. On Windows, the supervisor's stop
+    // event, a console's Ctrl+C or close, signing out or shutting down.
     #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(MainError::Signal)?;
     #[cfg(unix)]
     let stop = terminate.recv();
     #[cfg(windows)]
-    let stop = tokio::signal::ctrl_c();
+    let stop = factoryd::windows::stop::listen().map_err(MainError::Signal)?.requested();
     tokio::select! {
         () = factoryd::serve(listener, factory.clone()) => {}
         _ = stop => {
             tracing::info!("stopping");
             factory.finish_writes(Duration::from_secs(5)).await;
             factory.stopping();
+            factory.close_tunnel(Duration::from_secs(2)).await;
             factoryd::backend_stopped(&home);
+            #[cfg(windows)]
+            if let Some(token) = &app_token {
+                factoryd::windows::app_token::forget(home.root(), token);
+            }
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn grok_shows_only_in_a_debug_build_or_the_dev_claktory() {
-        let ids = |root: &str, release: bool| -> Vec<String> {
-            providers_for(&Home::new(std::path::PathBuf::from(root)), release).into_iter().map(|provider| provider.id.to_owned()).collect()
-        };
-        assert!(!ids("/tmp/someone/.factory", true).contains(&"grok".to_owned()));
-        assert!(ids("/tmp/someone/.factory-dev", true).contains(&"grok".to_owned()));
-        assert!(ids("/tmp/someone/.factory", false).contains(&"grok".to_owned()));
-        assert_eq!(ids("/tmp/someone/.factory", true), ["anthropic", "openai", "openai-codex", "openrouter"]);
-    }
 }

@@ -336,7 +336,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("dir");
         let path = dir.path().join("notes.m4a");
         std::fs::write(&path, b"not audio at all").expect("write");
-        // In plain words; the decoder's own go to the log (#367, Trish).
+        // In plain words; the decoder's own go to the log.
         let damaged = decode(&path).expect_err("not audio");
         assert_eq!((damaged.code, damaged.error.as_str()), ("decode_failed", "Couldn't read the recording. It may be damaged."));
         assert!(damaged.detail.starts_with("probe: "), "{}", damaged.detail);

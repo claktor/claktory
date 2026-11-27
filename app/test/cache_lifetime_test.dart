@@ -1,4 +1,4 @@
-// #281: how long a provider keeps a conversation ready, in Settings →
+// How long a provider keeps a conversation ready, in Settings →
 // Providers: a choice from what the backend offers (Provider.
 // cache_ttl_choices), or, where nothing can be chosen, a line saying how
 // long (Provider.cache_lifetime).

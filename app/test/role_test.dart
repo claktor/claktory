@@ -97,7 +97,7 @@ void main() {
             seq: Int64(1),
             event: Event(
               source: EventSource.EVENT_SOURCE_AGENT,
-              // Signed as the receiving agent read it (#251).
+              // Signed as the receiving agent read it.
               from: 'Mike (Coordinator)',
               fromId: 'mike',
               text: 'Take the next task.',

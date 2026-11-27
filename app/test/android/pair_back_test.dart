@@ -1,4 +1,4 @@
-// #363, Sale's row 21: on Android with no Claktory yet, Back from a way to
+// On Android with no Claktory yet, Back from a way to
 // connect (Paste code instead, Sign in with your email) goes back to the
 // first screen's choices, and only from there leaves the app.
 import 'package:factory_app/android/window_back_host.dart';

@@ -4,9 +4,9 @@
 // for that Claktory (Workspace.diagnostics.share, remembered here so a
 // device that can't connect still records), kept in a file as it happens (a
 // force-quit loses nothing), capped, and sent to the Claktory once it
-// connects (backend.dart). Connections (#214) are the first area.
+// connects (backend.dart). Connections are the first area.
 //
-// What it may say is fixed here, not free text (Fugo): an event is a
+// What it may say is fixed here, not free text: an event is a
 // [DiagnosticKind] of its area, and a detail made only of that area's
 // [DiagnosticKey]s, each with a number, yes or no, or a [DiagnosticWord]
 // from a fixed list. No address, relay, endpoint id, code, name or message
@@ -74,7 +74,7 @@ enum ConnectionKind implements DiagnosticKind {
 
   /// Advanced diagnostics were turned on while connected: how the
   /// connection goes now, so the Claktory hears from this device at once,
-  /// not at its next reconnect (friend bug #53).
+  /// not at its next reconnect.
   recording;
 
   @override
@@ -113,7 +113,7 @@ enum ConnectionKey implements DiagnosticKey {
   /// Whether the try was welcomed before it ended.
   welcomed,
 
-  /// Why the relay can't be reached, roughly: [RelayTrouble] (#388).
+  /// Why the relay can't be reached, roughly: [RelayTrouble].
   err,
 
   /// What a direct path crosses: [PathReach].
@@ -538,7 +538,7 @@ Directory? diagnosticsFolderFor({
   bool dev = false,
 }) {
   if (operatingSystem == 'android') {
-    // As for kept voice recordings (#401): Flutter gives Dart the app's
+    // As for kept voice recordings: Flutter gives Dart the app's
     // code_cache as systemTemp. Its sibling no_backup is Android's
     // Context.getNoBackupFilesDir(): private, persistent across updates,
     // and excluded from backup and device transfer. Never clear its other

@@ -1,4 +1,4 @@
-//! Usage findings (#343): how long waits last and what they say, and
+//! Usage findings: how long waits last and what they say, and
 //! which accounts show in use.
 
 use std::sync::Arc;
@@ -160,7 +160,7 @@ async fn in_flight_once(seconds: u64) -> String {
 /// A key's limit that lifts within moments (OpenRouter's in-flight budget,
 /// whose Retry-After is seconds) is waited out quietly: the wait line says
 /// so, but there's no notice, no Needs you item and no other provider
-/// offered (Abbacchio's row 750).
+/// offered.
 #[tokio::test]
 async fn a_limit_that_lifts_in_moments_is_waited_out_quietly() {
     let dir = temp_dir();
@@ -188,7 +188,7 @@ async fn a_limit_that_lifts_in_moments_is_waited_out_quietly() {
     assert_eq!(describe(&view.entries), ["user: hello", "assistant: hi from openrouter"], "no notice");
 }
 
-/// #364 O2: a run whose model calls can't connect doesn't fail after the
+/// A run whose model calls can't connect doesn't fail after the
 /// quick retries: it waits for the network, says so, and carries on by
 /// itself once it's back.
 #[tokio::test]
@@ -223,8 +223,8 @@ async fn an_agent_that_cant_connect_waits_for_the_network_and_carries_on() {
     .await;
 
     // The network looks back, but OpenRouter still can't be reached: it
-    // waits again, each time, without the quick retries again (Abbacchio's
-    // row 759: two more notices on every look).
+    // waits again, each time, without the quick retries again (two more
+    // notices on every look).
     factory.set_network_up(Some(true));
     tokio::time::sleep(Duration::from_millis(1500)).await;
     // A round trip, so the view has everything said meanwhile.
@@ -277,7 +277,7 @@ async fn cut_off(
     (factory, client, view)
 }
 
-/// Squalo's N2: an outage of any length is waited out (a night, say), and
+/// An outage of any length is waited out (a night, say), and
 /// the time it lasted doesn't count against the provider once the network
 /// is back but the provider isn't yet.
 #[tokio::test]

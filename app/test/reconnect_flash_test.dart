@@ -1,4 +1,4 @@
-// Matt's reconnect flash (#214): a Claktory connected afresh (opening the
+// Matt's reconnect flash: a Claktory connected afresh (opening the
 // app, switching to another) knows nothing until its workspace arrives,
 // and shows that: "Connecting…", never what an empty Claktory would ask
 // (the name, a new project, signing in to a provider) in between.

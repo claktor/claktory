@@ -1,4 +1,4 @@
-//! Newer models (#404): when a provider's list brings a newer version of a
+//! Newer models: when a provider's list brings a newer version of a
 //! model an agent runs on, Rivet hears of it once, with the agents on the
 //! older one, across list reads and restarts; a later version is news
 //! again. One already out when Claktory first saw the list isn't news.

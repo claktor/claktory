@@ -9,7 +9,7 @@
 //!
 //! An agent that has read a stranger's words can't change models: what it
 //! read may be someone else's instructions, and a model is where an agent's
-//! work goes and what it costs. Since #346 that's only a web page it read
+//! work goes and what it costs. That's only a web page it read
 //! through browser control (`Pipes::tainted`); pipes and direct messages
 //! are friends' words and mark no one.
 
@@ -26,7 +26,7 @@ use crate::config::{AgentConfig, Config};
 use crate::factory::{AgentChange, Factory, Inner};
 
 pub(crate) const ID: &str = "models";
-/// The option that gives it models_set; off, it only lists (friend bug #8).
+/// The option that gives it models_set; off, it only lists.
 pub(crate) const CAN_SET: &str = "can_set";
 /// The tool that puts one of a provider's accounts in another place.
 pub(crate) const ORDER_TOOL: &str = "models_account_order";
@@ -166,7 +166,7 @@ struct ListArgs {
 
 fn list(factory: &Arc<Factory>, agent: &str, args: ListArgs) -> Result<ToolResult, String> {
     // An agent that has read a web page doesn't see whose accounts these
-    // are or their usage: a stranger's page could ask for them (Fugo).
+    // are or their usage: a stranger's page could ask for them.
     let hidden = (!factory.pipes.tainted(agent).is_empty()).then(|| crate::pipes::agents::what_was_read(factory, agent));
     let inner = factory.lock();
     super::caller(&inner.config, agent)?;
@@ -247,7 +247,7 @@ async fn set(factory: Arc<Factory>, caller: String, args: SetArgs) -> Result<Too
         return Err(format!("Say why in {MOST_REASON} characters at most. Nothing was changed."));
     }
     // A model its provider's list doesn't have is checked with the provider
-    // and added first (friend bug #14); refused, the provider's word comes
+    // and added first; refused, the provider's word comes
     // before the ids that come close.
     let listed = model.is_empty() || factory.lock().models.iter().any(|known| known.id == model);
     let provider_said = match listed {
@@ -279,7 +279,7 @@ async fn set(factory: Arc<Factory>, caller: String, args: SetArgs) -> Result<Too
         let now = factory_agent::clock::now_ms();
         let warning = provider.and_then(|provider| busy(provider, now, false).map(|why| format!("{} {why}", provider.name)));
         let before = (agent.model.clone(), agent.effort.clone());
-        // What it hears (friend bug #43): who changed it, and why.
+        // What it hears: who changed it, and why.
         let who = match inner.config.agent(&caller) {
             _ if caller == agent.id => "you".to_owned(),
             Some(by) => by.name.clone(),
@@ -549,7 +549,7 @@ struct AutoArgs {
     proposal: Option<String>,
 }
 
-/// models_auto_continue (#423): asks the person, on a card, to turn
+/// models_auto_continue: asks the person, on a card, to turn
 /// Continue automatically on or off; only their approval does.
 async fn auto_continue(factory: Arc<Factory>, agent: String, args: AutoArgs) -> Result<ToolResult, String> {
     let (factory, agent) = (&factory, agent.as_str());

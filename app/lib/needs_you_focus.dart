@@ -11,36 +11,53 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart'
     show ValueListenable, TargetPlatform, defaultTargetPlatform;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'ask_card.dart' show askOutcome;
 import 'backend.dart';
 import 'characters/character.dart';
-import 'chats.dart' show ChatMessageTarget, ChatScope;
-import 'claktory_identity.dart' show claktoryName;
+import 'chats.dart' show ChatMessageTarget, ChatScope, chatColor;
+import 'claktory_identity.dart' show claktoryName, claktoryNameInText;
+import 'command_card.dart' show commandSummary;
 import 'controls.dart';
 import 'dictation.dart' show Dictation, DictationFor, DictationHold;
 import 'identity.dart';
 import 'inbox.dart';
+import 'ipad/workbench.dart' show WorkbenchScope;
 import 'name_role_line.dart';
 import 'layout.dart' show viewerKindFor;
 import 'message_box.dart' show AgentMessageTarget, MessageBox, MessageTarget;
 import 'card_answer.dart';
-import 'card_files.dart' show CardAttachButton, CardFileDrop;
+import 'card_files.dart' show CardAttachButton, CardDropArea, CardFileDrop;
+import 'needs_you_alerts.dart' show alertsOf, isUrgentAlert;
 import 'needs_you_entries.dart';
+import 'needs_you_history.dart'
+    show
+        HistoryRow,
+        NeedsYouTabs,
+        historyEnded,
+        historyPage,
+        historyWhere,
+        historyWho,
+        openHistoryRecord;
+import 'needs_you_hold.dart' show HeldBox, NewAbovePill;
 import 'mobile/metrics.dart';
 import 'pipes.dart' show PipeMessageView;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'review_answer.dart' show ReviewAnswering, rememberReviewTalk;
-import 'rail.dart' show ClaktoriesScope;
+import 'rail.dart' show Claktories, ClaktoriesScope, Claktory;
 import 'scope.dart';
+import 'secrets.dart' show secretOutcome;
 import 'state.dart' show PipeChat;
-import 'transcript.dart' show TimelineItem, TranscriptView;
+import 'transcript.dart' show AgentTints, TimelineItem, TranscriptView;
 import 'usage.dart' show formatAge;
 import 'viewers/registry.dart' show viewerBody;
 import 'usage_wait.dart' show atWork;
+import 'visible_codes.dart' show visibleCodes;
 import 'voice_session.dart' show activeVoice;
 import 'waiting.dart' show NeedsYouMark;
 
@@ -71,6 +88,30 @@ const focusReasonsFor = Duration(seconds: 3);
 /// How long the receipt of an accepted answer shows (§5.3).
 const focusReceiptFor = Duration(seconds: 2);
 
+/// What the stage's button that opens [item]'s conversation says, as
+/// History's does: Open chat, Open pipe or Open conversation.
+String focusOpenLabel(NeedsYouItem item) =>
+    item.kind == NeedsYouKind.chat || item.kind == NeedsYouKind.dmSend
+    ? 'Open chat'
+    : item.pipeId.isNotEmpty
+    ? 'Open pipe'
+    : 'Open conversation';
+
+/// Whether [item] has a conversation for Open conversation to open
+/// ([openNeedsYouItem]): signing in again, the secrets, the recovery key,
+/// a device, Claktory's own alerts and this computer's own questions have
+/// none.
+bool focusGoesSomewhere(NeedsYouItem item) => switch (item.kind) {
+  NeedsYouKind.entry ||
+  NeedsYouKind.chat ||
+  NeedsYouKind.browser ||
+  NeedsYouKind.dmSend ||
+  NeedsYouKind.providerWait => true,
+  NeedsYouKind.alert ||
+  NeedsYouKind.alertGroup => item.agentId.isNotEmpty || item.pipeId.isNotEmpty,
+  _ => item.pipeId.isNotEmpty,
+};
+
 /// What stops agents now, first in the queue with a flag (§4.1): a device
 /// waiting to be allowed, the secrets locked while agents wait, a usage
 /// limit or a sign-in stopping them, a pipe its loop breaker paused.
@@ -82,6 +123,17 @@ bool focusUrgent(NeedsYouItem item) => switch (item.kind) {
   NeedsYouKind.pipeLoop => true,
   _ => false,
 };
+
+/// Where [item] goes in Needs you's order, on every device (Lucy's
+/// what stops agents and urgent alerts first
+/// (0), then the requests (1), then the other alerts (2); each newest
+/// first.
+int needsYouRank(Workspace workspace, NeedsYouItem item) =>
+    focusUrgent(item) || isUrgentAlert(workspace.alerts, item)
+    ? 0
+    : item.isAlert
+    ? 2
+    : 1;
 
 /// Where an answered card stands in the sitting.
 enum FocusOutcomeState {
@@ -141,6 +193,11 @@ class FocusSession extends ChangeNotifier {
   /// fetched (times come in as the cards do); from then it holds still.
   var _settled = false;
 
+  /// What waited when the sitting began: while the order settles, the
+  /// stage shows the first of these, so one that comes in meanwhile never
+  /// takes it over.
+  Set<String>? _initial;
+
   /// The card showing was asked for ([Backend.needsYouCard]): it stays
   /// while the order still settles around it.
   var _pinned = false;
@@ -166,6 +223,43 @@ class FocusSession extends ChangeNotifier {
   /// [focusReceiptFor].
   String? get receipt => _receipt;
   String? _receipt;
+
+  /// The queue shows History, what the person already decided, in place
+  /// of what waits: its tabs.
+  bool get history => _history;
+  var _history = false;
+  set history(bool value) {
+    if (value == _history) return;
+    _history = value;
+    // Back on Waiting, the stage shows what waits again.
+    if (!value) _record = null;
+    notifyListeners();
+  }
+
+  /// The History row chosen: its card on the stage, as it ended, read
+  /// only; null for the card that waits.
+  NeedsYouRecord? get record => _record;
+  NeedsYouRecord? _record;
+  set record(NeedsYouRecord? value) {
+    if (value == _record) return;
+    _record = value;
+    notifyListeners();
+  }
+
+  /// The queue's find (⌘F): shown under its tabs, and its words, which
+  /// filter its rows.
+  bool get finding => _finding;
+  var _finding = false;
+  final findWords = TextEditingController();
+  final findFocus = FocusNode(debugLabel: 'Search Needs you');
+
+  /// Shows the queue's find; [finding] false hides it, its words cleared.
+  set finding(bool value) {
+    if (value == _finding) return;
+    _finding = value;
+    if (!value) findWords.clear();
+    notifyListeners();
+  }
 
   /// Context, beside the stage or over it.
   bool get contextOpen => _contextOpen;
@@ -222,7 +316,11 @@ class FocusSession extends ChangeNotifier {
   /// waits, unchanged for a moment, with no key held over from before.
   bool get answerable {
     final key = _current;
-    return key != null && _waiting.contains(key) && _armed && !guarded;
+    return key != null &&
+        _record == null &&
+        _waiting.contains(key) &&
+        _armed &&
+        !guarded;
   }
 
   /// ⌘↩: the card's main action, or its Submit with words typed.
@@ -381,7 +479,12 @@ class FocusSession extends ChangeNotifier {
 
   /// Makes [key] the card on the stage.
   void select(String key) {
-    if (!_items.containsKey(key) || key == _current) return;
+    if (!_items.containsKey(key)) return;
+    if (key == _current) {
+      record = null;
+      return;
+    }
+    _record = null;
     _settled = true;
     _setCurrent(key);
     notifyListeners();
@@ -397,6 +500,7 @@ class FocusSession extends ChangeNotifier {
   void _step(int by) {
     final waiting = this.waiting;
     if (waiting.isEmpty) return;
+    _record = null;
     _settled = true;
     final keys = [for (final item in waiting) item.key];
     var at = keys.indexOf(_current ?? '');
@@ -479,8 +583,9 @@ class FocusSession extends ChangeNotifier {
       }
       _items[item.key] = item;
       entries.hold(item);
-      _place(item.key, focusUrgent(item));
+      _place(item.key, needsYouRank(workspace, item));
     }
+    _initial ??= {...keys};
     if (!_settled) _sort(workspace);
 
     // Gone from what waits: answered (here or elsewhere), or taken back.
@@ -494,14 +599,10 @@ class FocusSession extends ChangeNotifier {
         entries.entryOf(item),
         here: here,
         who: focusWho(workspace, item),
+        alert: item.isAlert,
+        saidNo: _saidNo.remove(key),
       );
-      final saidNo = _saidNo.remove(key);
-      _outcomes[key] = FocusOutcome(
-        FocusOutcomeState.ended,
-        // Taken back still says so; a no from here, Dismissed.
-        here && saidNo && !ended.startsWith('Withdrawn') ? 'Dismissed' : ended,
-        here: here,
-      );
+      _outcomes[key] = FocusOutcome(FocusOutcomeState.ended, ended, here: here);
       if (here) {
         _answered++;
         _showReceipt(key);
@@ -543,12 +644,16 @@ class FocusSession extends ChangeNotifier {
       return gone;
     });
 
-    // Nothing showing yet, nothing left before, or the order still
-    // settling as the cards come in: the first that waits.
-    if (_current == null ||
-        !_items.containsKey(_current) ||
-        (!_settled && !_pinned && _waiting.contains(_current))) {
+    // Nothing showing yet, or nothing left before: the first that waits.
+    // The order still settling as the cards come in: the first of what
+    // waited when it began, never one that came in since.
+    if (_current == null || !_items.containsKey(_current)) {
       _setCurrent(waiting.firstOrNull?.key);
+    } else if (!_settled && !_pinned && _waiting.contains(_current)) {
+      final first = waiting
+          .where((item) => _initial!.contains(item.key))
+          .firstOrNull;
+      if (first != null) _setCurrent(first.key);
     }
 
     // A card asked for (a notification tapped): there once it's come.
@@ -584,32 +689,31 @@ class FocusSession extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// A new item's place: an urgent one after the last urgent, the rest at
-  /// the end (§8: the order holds still for the sitting).
-  void _place(String key, bool urgent) {
-    if (!urgent) {
-      _order.add(key);
-      return;
-    }
+  /// A new item's place: at the top of its kind ([needsYouRank]), as the
+  /// newest; the rest hold still for the sitting.
+  void _place(String key, int rank) {
+    final workspace = backend.workspace.workspace;
     var at = 0;
     while (at < _order.length &&
-        focusUrgent(_items[_order[at]] ?? const NeedsYouItem.vault())) {
+        needsYouRank(workspace, _items[_order[at]]!) < rank) {
       at++;
     }
     _order.insert(at, key);
   }
 
-  /// Urgent first, then the oldest; those without a time yet after the
-  /// rest, by their key, never first.
+  /// What stops agents first, then the newest; those without a time
+  /// yet after the rest, by their key, never first.
   void _sort(Workspace workspace) {
-    int rank(String key) => focusUrgent(_items[key]!) ? 0 : 1;
+    final ranks = {
+      for (final key in _order) key: needsYouRank(workspace, _items[key]!),
+    };
     _order.sort((a, b) {
-      final ra = rank(a), rb = rank(b);
+      final ra = ranks[a]!, rb = ranks[b]!;
       if (ra != rb) return ra.compareTo(rb);
-      final ta = entries.timeOf(_items[a]!, workspace);
-      final tb = entries.timeOf(_items[b]!, workspace);
+      final ta = focusTimeOf(entries, _items[a]!, workspace);
+      final tb = focusTimeOf(entries, _items[b]!, workspace);
       if ((ta == 0) != (tb == 0)) return ta == 0 ? 1 : -1;
-      if (ta != tb) return ta.compareTo(tb);
+      if (ta != tb) return tb.compareTo(ta);
       return a.compareTo(b);
     });
   }
@@ -650,6 +754,8 @@ class FocusSession extends ChangeNotifier {
     _reasonsTimer?.cancel();
     _pressAgainTimer?.cancel();
     answer.dispose();
+    findWords.dispose();
+    findFocus.dispose();
     _guardTimer?.cancel();
     _receiptTimer?.cancel();
     backend.workspace.removeListener(_sync);
@@ -676,16 +782,22 @@ String focusWho(Workspace workspace, NeedsYouItem item) {
   return '';
 }
 
-/// How a card that stopped waiting ended, in a word or two (§4.1):
-/// "Approved", "Answered", "Dismissed", "Withdrawn by June", "Answered on
-/// another device"; [here] when it was this device's answer, [who] whose
-/// card it was.
+/// How a card that stopped waiting ended, in its card's own words (§4.1):
+/// "Approved", "Dismissed", "Paid", "Gave Hetzner", "Withdrawn by June",
+/// "Answered on another device"; [here] when it was this device's answer,
+/// [who] whose card it was. [saidNo]: its no went from here, while the
+/// card held may still read as it was before the answer.
 String focusEnded(
   Entry? entry, {
   required bool here,
   String who = '',
   String device = '',
+  bool alert = false,
+  bool saidNo = false,
 }) {
+  // An alert is read, as History says, not answered.
+  if (alert) return here ? 'Read' : 'Read on another device';
+  if (here && saidNo && entry != null) entry = _declined(entry);
   final ask = entry?.hasAskPerson() == true ? entry!.askPerson : null;
   final proposal = entry?.hasProposal() == true ? entry!.proposal : null;
   if (ask?.withdrawn == true || proposal?.withdrawn == true) {
@@ -696,22 +808,46 @@ String focusEnded(
         ? 'Answered on another device'
         : 'Answered on $device';
   }
-  if (ask != null) {
-    if (ask.resolved) return 'Resolved';
-    if (ask.state == AskPersonState.ASK_PERSON_STATE_DISMISSED) {
-      return 'Dismissed';
-    }
-    // Words sent back with Submit rather than a yes (#533).
-    if (ask.replied) return 'Replied';
-    if (ask.wantsText) return 'Answered';
-    return 'Approved';
+  final agent = who.isEmpty ? 'the agent' : who;
+  // In the card's own words: "Paid", "Couldn't pay", "Replied"…
+  if (ask != null) return askOutcome(ask, agent: agent, short: true);
+  if (entry?.hasSecretRequest() == true) {
+    return secretOutcome(entry!.secretRequest, agent: agent);
+  }
+  if (entry?.hasSecretApproval() == true) {
+    return switch (entry!.secretApproval.state) {
+      SecretApprovalState.SECRET_APPROVAL_STATE_ALLOWED => 'Allowed once',
+      SecretApprovalState.SECRET_APPROVAL_STATE_DENIED => 'Not allowed',
+      SecretApprovalState.SECRET_APPROVAL_STATE_EXPIRED => 'Expired',
+      _ => 'Answered',
+    };
   }
   if (proposal != null) {
     return proposal.state == ProposalState.PROPOSAL_STATE_DISMISSED
         ? 'Dismissed'
         : 'Approved';
   }
-  return 'Answered';
+  return saidNo && here ? 'Dismissed' : 'Answered';
+}
+
+/// [entry] as its card reads once declined, unless its agent took it back
+/// first.
+Entry _declined(Entry entry) {
+  final declined = entry.deepCopy();
+  if (declined.hasAskPerson() && !declined.askPerson.withdrawn) {
+    declined.askPerson.state = AskPersonState.ASK_PERSON_STATE_DISMISSED;
+  } else if (declined.hasSecretRequest() &&
+      declined.secretRequest.state !=
+          SecretRequestState.SECRET_REQUEST_STATE_WITHDRAWN) {
+    declined.secretRequest.state =
+        SecretRequestState.SECRET_REQUEST_STATE_DISMISSED;
+  } else if (declined.hasSecretApproval()) {
+    declined.secretApproval.state =
+        SecretApprovalState.SECRET_APPROVAL_STATE_DENIED;
+  } else if (declined.hasProposal() && !declined.proposal.withdrawn) {
+    declined.proposal.state = ProposalState.PROPOSAL_STATE_DISMISSED;
+  }
+  return declined;
 }
 
 /// Keys the shell binds for focus mode, the app over: ⌘⇧N turns it on or
@@ -797,7 +933,7 @@ class _NeedsYouFocusState extends State<NeedsYouFocus> {
               builder: (context, _) => Row(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  FocusQueue(session: session),
+                  FocusQueue(session: session, leave: leave),
                   Expanded(
                     child: Stack(
                       children: [
@@ -855,15 +991,16 @@ class _NeedsYouFocusState extends State<NeedsYouFocus> {
   }
 }
 
-/// The queue (§4.1): what waits, urgent first, then the oldest, and what
-/// was answered this sitting dimmed where it was. The sidebar's width,
-/// colour and hairline, under the window's traffic lights.
+/// The queue: what waits, what stops agents first, then the newest, and
+/// what was answered this sitting dimmed where it was. The sidebar's width, colour and hairline, under the
+/// window's traffic lights.
 class FocusQueue extends StatelessWidget {
   const FocusQueue({
     super.key,
     required this.session,
     this.width = sidebarWidth,
     this.onPicked,
+    this.leave,
   });
 
   final FocusSession session;
@@ -872,12 +1009,18 @@ class FocusQueue extends StatelessWidget {
   /// After a row's tap selects its card (the iPad's popover closes).
   final VoidCallback? onPicked;
 
+  /// Leaves focus mode: Done at the queue's top right, the one way out.
+  /// Null where the queue is a popover and the stage's header has Done
+  /// instead.
+  final VoidCallback? leave;
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     final backend = session.backend;
     final count = session.waiting.length;
+    final leave = this.leave;
     return Container(
       width: width,
       decoration: BoxDecoration(
@@ -890,56 +1033,95 @@ class FocusQueue extends StatelessWidget {
           // The traffic lights sit over its top row, as over the sidebar.
           const WindowDrag(child: SizedBox(height: titleBarHeight)),
           Padding(
-            padding: const EdgeInsets.fromLTRB(Space.l, 0, Space.l, Space.s),
+            padding: const EdgeInsets.fromLTRB(Space.l, 0, Space.m, Space.s),
             child: Row(
               children: [
-                Flexible(
-                  child: Text(
-                    'Needs you',
-                    // Whole at large text sizes, on two lines if need be.
-                    maxLines: 2,
-                    style: type.label.copyWith(
-                      color: palette.text,
-                      fontWeight: FontWeight.w600,
-                    ),
+                // The title takes the room Done leaves it.
+                Expanded(
+                  child: Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          'Needs you',
+                          // Whole at large text sizes, on two lines if need
+                          // be.
+                          maxLines: 2,
+                          style: type.label.copyWith(
+                            color: palette.text,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      if (count > 0) ...[
+                        const SizedBox(width: Space.s),
+                        NeedsYouMark(count: count, label: needsYouLabel(count)),
+                      ],
+                    ],
                   ),
                 ),
-                if (count > 0) ...[
-                  const SizedBox(width: Space.s),
-                  NeedsYouMark(count: count, label: needsYouLabel(count)),
-                ],
-                const Spacer(),
                 ListenableBuilder(
                   listenable: backend.connected,
                   builder: (context, _) => backend.connected.value
                       ? const SizedBox.shrink()
-                      : Text(
-                          'Reconnecting…',
-                          style: type.caption.copyWith(
-                            color: palette.textFaint,
+                      : Padding(
+                          padding: const EdgeInsets.only(left: Space.s),
+                          child: Text(
+                            'Reconnecting…',
+                            style: type.caption.copyWith(
+                              color: palette.textFaint,
+                            ),
                           ),
                         ),
                 ),
+                if (leave != null) ...[
+                  const SizedBox(width: Space.s),
+                  // Where the sidebar's Needs you row was that came in.
+                  HoverCard(
+                    end: true,
+                    card: (context) => const Text(focusLeaveHint),
+                    child: Button(
+                      key: const ValueKey('focus-done'),
+                      label: 'Done',
+                      semanticLabel: 'Leave focus mode',
+                      filled: true,
+                      onPressed: leave,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
-          const _OtherClaktories(),
-          Expanded(
-            child: ListenableBuilder(
-              listenable: session.entries,
-              builder: (context, _) => ListView(
-                padding: const EdgeInsets.only(bottom: Space.l),
-                children: [
-                  for (final item in session.items)
-                    _QueueRow(
-                      key: ValueKey(item.key),
-                      session: session,
-                      item: item,
-                      onPicked: onPicked,
-                    ),
-                ],
+          Padding(
+            padding: const EdgeInsets.fromLTRB(Space.l, 0, Space.l, Space.s),
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: NeedsYouTabs(
+                history: session.history,
+                choose: (history) => session.history = history,
               ),
             ),
+          ),
+          if (session.finding)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(Space.m, 0, Space.m, Space.s),
+              child: TextField(
+                key: const ValueKey('focus-find'),
+                controller: session.findWords,
+                focusNode: session.findFocus,
+                autofocus: true,
+                placeholder: session.history
+                    ? 'Search by agent or words'
+                    : 'Search Needs you',
+                semanticsLabel: session.history
+                    ? 'Search history'
+                    : 'Search Needs you',
+              ),
+            ),
+          if (!session.history) const _OtherClaktories(),
+          Expanded(
+            child: session.history
+                ? _QueueHistory(session: session, onPicked: onPicked)
+                : _QueueWaiting(session: session, onPicked: onPicked),
           ),
         ],
       ),
@@ -947,33 +1129,586 @@ class FocusQueue extends StatelessWidget {
   }
 }
 
+/// Done's hint (Trish's words): what it does, and its key.
+const focusLeaveHint = 'Leave focus mode · Esc';
+
+/// Whether [words] (the queue's find) are in [text]: each word, in any
+/// case, anywhere.
+bool _found(String words, String text) {
+  final wanted = words.trim().toLowerCase();
+  if (wanted.isEmpty) return true;
+  final haystack = text.toLowerCase();
+  return wanted.split(RegExp(r'\s+')).every((word) => haystack.contains(word));
+}
+
+/// The queue's waiting rows, in the sitting's order, those found by its
+/// find only. They hold still as one comes in above them (HeldBox, as
+/// Needs you's list), and the pill at the top says what came in above and
+/// isn't seen yet.
+class _QueueWaiting extends StatefulWidget {
+  const _QueueWaiting({required this.session, this.onPicked});
+
+  final FocusSession session;
+  final VoidCallback? onPicked;
+
+  @override
+  State<_QueueWaiting> createState() => _QueueWaitingState();
+}
+
+class _QueueWaitingState extends State<_QueueWaiting> {
+  final _scroll = ScrollController();
+  final _content = GlobalKey();
+  final _places = <String, GlobalKey>{};
+
+  /// Every row shown, and those that came in since and haven't been in
+  /// view yet: what the pill counts.
+  Set<String>? _known;
+  final _fresh = <String>{};
+  var _kinds = const <String, ({bool alert, bool urgent})>{};
+  var _above = (requests: 0, alerts: 0, urgent: 0);
+
+  FocusSession get _session => widget.session;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_seeAbove);
+    _session.findWords.addListener(_findChanged);
+    _session.entries.addListener(_rebuild);
+  }
+
+  @override
+  void dispose() {
+    _session.findWords.removeListener(_findChanged);
+    _session.entries.removeListener(_rebuild);
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  void _rebuild() {
+    if (mounted) setState(() {});
+  }
+
+  /// Where the queue was scrolled when a find began: it's back there once
+  /// the find is cleared, rather than held at the row found.
+  double? _beforeFind;
+
+  void _findChanged() {
+    final finding = _session.findWords.text.trim().isNotEmpty;
+    if (finding) {
+      if (_scroll.hasClients) _beforeFind ??= _scroll.offset;
+    } else if (_beforeFind case final offset?) {
+      _beforeFind = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_scroll.hasClients) return;
+        final position = _scroll.position;
+        _scroll.jumpTo(
+          offset.clamp(position.minScrollExtent, position.maxScrollExtent),
+        );
+      });
+    }
+    _rebuild();
+  }
+
+  Map<String, RenderBox> _rowBoxes() => {
+    for (final MapEntry(:key, :value) in _places.entries)
+      if (value.currentContext?.findRenderObject() case final RenderBox box)
+        key: box,
+  };
+
+  /// What came in above the rows in view and isn't seen yet.
+  void _seeAbove() {
+    if (!mounted) return;
+    var requests = 0, alerts = 0, urgent = 0;
+    final content = _content.currentContext?.findRenderObject();
+    if (_fresh.isNotEmpty && content is RenderBox && _scroll.hasClients) {
+      final top = _scroll.offset;
+      for (final key in [..._fresh]) {
+        final box = _places[key]?.currentContext?.findRenderObject();
+        if (box is! RenderBox || !box.attached || !box.hasSize) {
+          _fresh.remove(key);
+          continue;
+        }
+        final at = box.getTransformTo(content).getTranslation().y;
+        if (at >= top - 1) {
+          _fresh.remove(key);
+          continue;
+        }
+        final kind = _kinds[key];
+        if (kind == null) continue;
+        if (kind.urgent) urgent++;
+        kind.alert ? alerts++ : requests++;
+      }
+    } else {
+      _fresh.clear();
+    }
+    final above = (requests: requests, alerts: alerts, urgent: urgent);
+    if (above != _above) setState(() => _above = above);
+  }
+
+  void _pushedAbove(List<String> keys) {
+    if (!mounted) return;
+    _fresh.addAll(keys);
+    _seeAbove();
+  }
+
+  void _toNew() {
+    if (!_scroll.hasClients) return;
+    final to = _scroll.position.minScrollExtent;
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _scroll.jumpTo(to);
+    } else {
+      unawaited(
+        _scroll.animateTo(to, duration: Motion.base, curve: Curves.easeOut),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final session = _session;
+    final backend = session.backend;
+    final workspace = backend.workspace.workspace;
+    final words = session.findWords.text;
+    final items = [
+      for (final item in session.items)
+        if (words.trim().isEmpty ||
+            _found(words, () {
+              final said = needsYouWords(
+                backend,
+                workspace,
+                item,
+                entry: item.isEntry ? session.entries.entryOf(item) : null,
+                message: session.entries.messageOf(item),
+              );
+              return '${said.who}\n${said.what}';
+            }()))
+          item,
+    ];
+    final keys = {for (final item in items) item.key};
+    final known = _known;
+    if (known == null) {
+      _known = {...keys};
+    } else {
+      for (final key in keys) {
+        if (known.add(key)) _fresh.add(key);
+      }
+    }
+    _kinds = {
+      for (final item in items)
+        item.key: (
+          alert: item.isAlert,
+          urgent: needsYouRank(workspace, item) == 0,
+        ),
+    };
+    _places.removeWhere((key, _) => !keys.contains(key));
+    if (_fresh.isNotEmpty || _above.requests + _above.alerts > 0) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _seeAbove());
+    }
+    return Stack(
+      children: [
+        CustomScrollView(
+          controller: _scroll,
+          slivers: [
+            SliverPadding(
+              padding: const EdgeInsets.only(bottom: Space.l),
+              sliver: HeldBox(
+                rows: _rowBoxes,
+                onPushedAbove: _pushedAbove,
+                holdsAtTop: false,
+                child: Column(
+                  key: _content,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    for (final item in items)
+                      KeyedSubtree(
+                        key: _places[item.key] ??= GlobalKey(),
+                        child: _QueueRow(
+                          key: ValueKey(item.key),
+                          session: session,
+                          item: item,
+                          onPicked: widget.onPicked,
+                        ),
+                      ),
+                    if (items.isEmpty && words.trim().isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.all(Space.l),
+                        child: Text(
+                          'Nothing matches “${words.trim()}”.',
+                          style: TypeScale.of(context).body
+                              .copyWith(color: Palette.of(context).textFaint),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+        Positioned(
+          top: Space.s,
+          left: 0,
+          right: 0,
+          child: Center(
+            child: NewAbovePill(
+              requests: _above.requests,
+              alerts: _above.alerts,
+              urgent: _above.urgent,
+              onTap: _toNew,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// History in the queue: what the person
+/// already decided, newest first, found by the queue's find; a row shows
+/// its card on the stage, read only, as it ended. Asked for each time it
+/// shows and as the find changes, as Needs you's History is.
+class _QueueHistory extends StatefulWidget {
+  const _QueueHistory({required this.session, this.onPicked});
+
+  final FocusSession session;
+  final VoidCallback? onPicked;
+
+  @override
+  State<_QueueHistory> createState() => _QueueHistoryState();
+}
+
+class _QueueHistoryState extends State<_QueueHistory> {
+  var _records = <NeedsYouRecord>[];
+  var _more = false;
+  var _loading = true;
+  String? _failed;
+  var _asked = 0;
+  var _query = '';
+  Timer? _typing;
+
+  /// What waits, as last seen: answered meanwhile, History asks again.
+  var _waiting = '';
+
+  FocusSession get _session => widget.session;
+
+  @override
+  void initState() {
+    super.initState();
+    _session.findWords.addListener(_searchChanged);
+    _waiting = _waitingNow();
+    _session.addListener(_sessionChanged);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _load();
+    });
+  }
+
+  @override
+  void dispose() {
+    _typing?.cancel();
+    _session.findWords.removeListener(_searchChanged);
+    _session.removeListener(_sessionChanged);
+    super.dispose();
+  }
+
+  String _waitingNow() =>
+      [for (final item in _session.waiting) item.key].join(',');
+
+  void _sessionChanged() {
+    final waiting = _waitingNow();
+    if (waiting == _waiting) return;
+    _waiting = waiting;
+    if (mounted) _load();
+  }
+
+  void _searchChanged() {
+    final query = _session.findWords.text.trim();
+    if (query == _query) return;
+    _typing?.cancel();
+    _typing = Timer(const Duration(milliseconds: 300), () {
+      if (mounted) _load();
+    });
+  }
+
+  Future<void> _load({bool earlier = false}) async {
+    final query = _session.findWords.text.trim();
+    final asked = ++_asked;
+    setState(() {
+      _loading = true;
+      _failed = null;
+    });
+    try {
+      final page = await _session.backend.listNeedsYouHistory(
+        ListNeedsYouHistory(
+          query: query,
+          beforeMs: earlier && _records.isNotEmpty
+              ? _records.last.decidedMs
+              : Int64.ZERO,
+          limit: historyPage,
+        ),
+      );
+      if (!mounted || asked != _asked) return;
+      setState(() {
+        _query = query;
+        _records = earlier ? [..._records, ...page.records] : page.records;
+        _more = page.more;
+        _loading = false;
+      });
+    } on RequestFailure catch (error) {
+      if (!mounted || asked != _asked) return;
+      setState(() {
+        _failed = error.message;
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final query = _session.findWords.text.trim();
+    Widget line(String text, {Color? color}) => Padding(
+      padding: const EdgeInsets.all(Space.l),
+      child: Text(
+        text,
+        style: type.body.copyWith(color: color ?? palette.textFaint),
+      ),
+    );
+    return ListView(
+      padding: const EdgeInsets.only(bottom: Space.l),
+      children: [
+        if (_records.isEmpty)
+          if (_failed case final why?)
+            Padding(
+              padding: const EdgeInsets.all(Space.l),
+              child: Wrap(
+                spacing: Space.s,
+                runSpacing: Space.s,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Text(
+                    why,
+                    style: type.caption.copyWith(color: palette.danger),
+                  ),
+                  Button(label: 'Try again', onPressed: _load),
+                ],
+              ),
+            )
+          else
+            line(
+              _loading
+                  ? 'Loading…'
+                  : query.isEmpty
+                  ? 'Nothing in the last 30 days.'
+                  : 'Nothing matches “$query”.',
+            ),
+        for (final record in _records)
+          _HistoryQueueRow(
+            key: ValueKey(
+              '${record.kind}/${record.agentId}${record.chatId}'
+              '/${record.seq}/${record.decidedMs}',
+            ),
+            record: record,
+            chosen:
+                identical(_session.record, record) || _session.record == record,
+            onTap: () {
+              _session.record = record;
+              widget.onPicked?.call();
+            },
+          ),
+        if (_records.isNotEmpty && _more)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(Space.l, Space.s, Space.l, 0),
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: _loading
+                  ? Text(
+                      'Loading…',
+                      style: type.caption.copyWith(color: palette.textFaint),
+                    )
+                  : Button(
+                      label: 'Show earlier',
+                      onPressed: () => _load(earlier: true),
+                    ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// One History row in the queue: who, when it was decided, what it asked
+/// and how it ended, as a waiting row is laid out.
+class _HistoryQueueRow extends StatelessWidget {
+  const _HistoryQueueRow({
+    super.key,
+    required this.record,
+    required this.chosen,
+    required this.onTap,
+  });
+
+  final NeedsYouRecord record;
+  final bool chosen;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final workspace = AppScope.of(context).workspace.workspace;
+    final agent = workspace.agents
+        .where((agent) => agent.id == record.agentId)
+        .firstOrNull;
+    final who = historyWho(workspace, record);
+    final ended = historyEnded(workspace, record);
+    final title = record.title;
+    final decided = record.decidedMs.toInt();
+    return Semantics(
+      button: true,
+      selected: chosen,
+      label: [who, title, ended].where((part) => part.isNotEmpty).join(', '),
+      excludeSemantics: true,
+      onTap: onTap,
+      child: Pressable(
+        onTap: onTap,
+        builder: (context, hovered) => Container(
+          constraints: const BoxConstraints(minHeight: focusRowHeight),
+          decoration: BoxDecoration(
+            color: chosen
+                ? palette.selected
+                : hovered
+                ? palette.hover
+                : null,
+            border: Border(
+              left: BorderSide(
+                color: chosen ? palette.signal : const Color(0x00000000),
+                width: 2,
+              ),
+            ),
+          ),
+          padding: const EdgeInsets.fromLTRB(
+            Space.m - 2,
+            Space.xs + 2,
+            Space.m,
+            Space.xs + 2,
+          ),
+          child: Row(
+            children: [
+              SizedBox.square(
+                dimension: 24,
+                child: Center(
+                  child: agent != null
+                      ? AgentCharacter(agent: agent, size: 24)
+                      : ExtensionGlyph(
+                          icon: record.chatId.isNotEmpty
+                              ? 'message-circle'
+                              : 'history',
+                          name: '',
+                          color: palette.textFaint,
+                        ),
+                ),
+              ),
+              const SizedBox(width: Space.s + 2),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            who,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: type.label.copyWith(
+                              color: palette.text,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        if (decided > 0) ...[
+                          const SizedBox(width: Space.s),
+                          Ticking(
+                            active: true,
+                            builder: (context, now) => Text(
+                              formatAge(decided, now),
+                              style: type.caption.copyWith(
+                                color: palette.textFaint,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    if (title.isNotEmpty)
+                      Text(
+                        // As History's own row reads it.
+                        record.proposalId.isNotEmpty
+                            ? visibleCodes(title)
+                            : record.hasCommand()
+                            ? commandSummary(record.command)
+                            : title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: type.body.copyWith(color: palette.textMuted),
+                      ),
+                    if (ended.isNotEmpty)
+                      Text(
+                        ended,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: type.caption.copyWith(color: palette.textFaint),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// What waits on the person's other Claktories, under the queue's title
-/// ("Laptop 2"), since focus mode hides the rail; a tap carries on in
-/// focus mode there (Q10). Counted as the rail counts them.
+/// ("nixos · 3"), since focus mode hides the rail; a tap carries on in
+/// focus mode there. Counted as the rail counts them. [centered]:
+/// under "Nothing needs you on Studio." on the stage, when only they
+/// wait.
 class _OtherClaktories extends StatelessWidget {
-  const _OtherClaktories();
+  const _OtherClaktories({this.centered = false});
+
+  final bool centered;
 
   @override
   Widget build(BuildContext context) {
     final claktories = ClaktoriesScope.of(context);
     if (claktories == null) return const SizedBox.shrink();
-    final others = [
-      for (final claktory in claktories.all)
-        if (claktory != claktories.selected) claktory,
-    ];
-    if (others.isEmpty) return const SizedBox.shrink();
     return ListenableBuilder(
       listenable: Listenable.merge([
-        for (final claktory in others) claktory.backend.workspace,
+        for (final claktory in claktories.all)
+          if (claktory != claktories.selected) claktory.backend.workspace,
       ]),
       builder: (context, _) {
-        final waiting = [
-          for (final claktory in others)
-            if (needsYouCount(claktory.backend.workspace.workspace)
-                case final count when count > 0)
-              (claktory, count),
-        ];
+        final waiting = otherClaktoriesWaiting(claktories);
         if (waiting.isEmpty) return const SizedBox.shrink();
+        final buttons = Wrap(
+          spacing: Space.xs,
+          runSpacing: Space.xs,
+          alignment: centered ? WrapAlignment.center : WrapAlignment.start,
+          children: [
+            for (final (claktory, count) in waiting)
+              Button(
+                label: '${claktoryName(claktory.backend)} · $count',
+                onPressed: () {
+                  setFocusMode(claktory.backend, true);
+                  claktories.select(claktory);
+                },
+              ),
+          ],
+        );
+        if (centered) return buttons;
         return Padding(
           padding: const EdgeInsets.fromLTRB(
             Space.l - Space.m,
@@ -981,25 +1716,33 @@ class _OtherClaktories extends StatelessWidget {
             Space.l,
             Space.s,
           ),
-          child: Wrap(
-            spacing: Space.xs,
-            runSpacing: Space.xs,
-            children: [
-              for (final (claktory, count) in waiting)
-                Button(
-                  label: '${claktoryName(claktory.backend)} $count',
-                  onPressed: () {
-                    setFocusMode(claktory.backend, true);
-                    claktories.select(claktory);
-                  },
-                ),
-            ],
-          ),
+          child: buttons,
         );
       },
     );
   }
 }
+
+/// The person's other Claktories with something waiting, and how much.
+List<(Claktory, int)> otherClaktoriesWaiting(Claktories claktories) => [
+  for (final claktory in claktories.all)
+    if (claktory != claktories.selected)
+      if (needsYouCount(claktory.backend.workspace.workspace) case final count
+          when count > 0)
+        (claktory, count),
+];
+
+/// When [item] came, as the queue orders and shows it: an alert's (a
+/// fold's newest) too, which the page's list doesn't time.
+int focusTimeOf(
+  NeedsYouEntries entries,
+  NeedsYouItem item,
+  Workspace workspace,
+) => switch (item.kind) {
+  NeedsYouKind.alert || NeedsYouKind.alertGroup =>
+    alertsOf(workspace.alerts, item).firstOrNull?.sentMs.toInt() ?? 0,
+  _ => entries.timeOf(item, workspace),
+};
 
 class _QueueRow extends StatelessWidget {
   const _QueueRow({
@@ -1031,7 +1774,7 @@ class _QueueRow extends StatelessWidget {
     final current = session.current?.key == item.key;
     final waiting = session.isWaiting(item.key);
     final outcome = session.outcomeOf(item.key);
-    final time = entries.timeOf(item, workspace);
+    final time = focusTimeOf(entries, item, workspace);
     final agent = workspace.agents
         .where((agent) => agent.id == item.agentId)
         .firstOrNull;
@@ -1194,6 +1937,7 @@ class FocusStage extends StatelessWidget {
     this.showContextButton = false,
     this.trailing = const [],
     this.reviewBody,
+    this.done = false,
   });
 
   final FocusSession session;
@@ -1202,8 +1946,13 @@ class FocusStage extends StatelessWidget {
   /// Context is folded: its button in the header opens it.
   final bool showContextButton;
 
-  /// More in the header's right, before Done (the iPad's "3 of 7" ‹ ›).
+  /// More in the header's right (the iPad's "3 of 7" ‹ ›).
   final List<Widget> trailing;
+
+  /// Done at the header's end too: only where no queue shows beside the
+  /// stage with its own (the iPad's stage alone). Everywhere else the
+  /// queue's Done is the one way out.
+  final bool done;
 
   /// A review the platform shows itself (the iPad's PDFs and pictures,
   /// with Pencil); null, or returning null, for the stage's own.
@@ -1216,6 +1965,22 @@ class FocusStage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // A History row chosen: its card as it ended, read only.
+    if (session.record case final record?) {
+      return _HistoryStage(
+        key: ValueKey(
+          '${record.kind}/${record.agentId}${record.chatId}'
+          '/${record.seq}/${record.decidedMs}',
+        ),
+        session: session,
+        record: record,
+        leave: leave,
+        trailing: [
+          ...trailing,
+          if (done) Button(label: 'Done', onPressed: leave),
+        ],
+      );
+    }
     final item = session.current;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1224,14 +1989,17 @@ class FocusStage extends StatelessWidget {
           session: session,
           leave: leave,
           showContextButton: showContextButton && item != null,
-          trailing: trailing,
+          trailing: [
+            ...trailing,
+            if (done) Button(label: 'Done', onPressed: leave),
+          ],
         ),
         // The next card fades up as the last goes (§5.3); with Reduce
         // Motion it simply swaps. Only one card is ever built, so only
         // one answers the keys.
         Expanded(
           child: item == null
-              ? _NothingLeft(session: session)
+              ? _NothingLeft(session: session, leave: leave)
               : TweenAnimationBuilder<double>(
                   key: ValueKey(item.key),
                   tween: Tween(begin: 0, end: 1),
@@ -1318,7 +2086,7 @@ class _StageHeader extends StatelessWidget {
             Expanded(
               child: LayoutBuilder(
                 builder: (context, box) {
-                  final go = item != null && item.kind != NeedsYouKind.signIn;
+                  final go = item != null && focusGoesSomewhere(item);
                   void goThere() {
                     leave();
                     openNeedsYouItem(context, item!, closePage: false);
@@ -1327,7 +2095,7 @@ class _StageHeader extends StatelessWidget {
                   void toggleContext() =>
                       session.contextOpen = !session.contextOpen;
                   final labels = [
-                    if (go) 'Go to conversation',
+                    if (go) focusOpenLabel(item),
                     if (showContextButton) 'Context',
                   ];
                   final words =
@@ -1393,11 +2161,11 @@ class _StageHeader extends StatelessWidget {
                       if (go)
                         words
                             ? Button(
-                                label: 'Go to conversation',
+                                label: focusOpenLabel(item),
                                 onPressed: goThere,
                               )
                             : GlyphButton(
-                                label: 'Go to conversation',
+                                label: focusOpenLabel(item),
                                 active: false,
                                 onTap: goThere,
                                 glyph: (color) => ExtensionGlyph(
@@ -1408,7 +2176,15 @@ class _StageHeader extends StatelessWidget {
                               ),
                       if (showContextButton)
                         words
-                            ? Button(label: 'Context', onPressed: toggleContext)
+                            // On while its pane is open: it folds it.
+                            ? Semantics(
+                                selected: session.contextOpen,
+                                child: Button(
+                                  label: 'Context',
+                                  selected: session.contextOpen,
+                                  onPressed: toggleContext,
+                                ),
+                              )
                             : GlyphButton(
                                 label: 'Context',
                                 active: session.contextOpen,
@@ -1425,10 +2201,228 @@ class _StageHeader extends StatelessWidget {
               ),
             ),
             ...trailing,
-            Button(label: 'Done', onPressed: leave),
           ],
         ),
       ),
+    );
+  }
+}
+
+/// A History row's card on the stage: who
+/// asked and when it was decided above, then the card as it ended, read
+/// only, with how it ended; what has no card of its own (a change in
+/// Settings, a pipe's decision) as History's row says it. Its button goes
+/// where History's row goes.
+class _HistoryStage extends StatefulWidget {
+  const _HistoryStage({
+    super.key,
+    required this.session,
+    required this.record,
+    required this.leave,
+    required this.trailing,
+  });
+
+  final FocusSession session;
+  final NeedsYouRecord record;
+  final VoidCallback leave;
+  final List<Widget> trailing;
+
+  @override
+  State<_HistoryStage> createState() => _HistoryStageState();
+}
+
+class _HistoryStageState extends State<_HistoryStage> {
+  Entry? _card;
+  var _loading = false;
+
+  NeedsYouRecord get _record => widget.record;
+
+  /// The card it was, as its conversation has it: an agent's or a chat's.
+  NeedsYouItem? get _item => _record.seq <= 0
+      ? null
+      : _record.chatId.isNotEmpty
+      ? NeedsYouItem.chat(_record.chatId, _record.seq.toInt())
+      : _record.agentId.isNotEmpty &&
+            _record.pipeId.isEmpty &&
+            _cards.contains(_record.kind)
+      ? NeedsYouItem.entry(_record.agentId, _record.seq.toInt())
+      : null;
+
+  /// What History keeps of an agent's own cards, which its conversation
+  /// still has.
+  static const _cards = {
+    NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_QUESTION,
+    NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_REVIEW,
+    NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_SECRET_REQUEST,
+    NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_SECRET_USE,
+    NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PROPOSAL,
+    NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_CONNECT,
+    NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_START,
+    NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_APP_GRANT,
+    NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_APP_ACCESS,
+    NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_COMMAND,
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    final item = _item;
+    if (item != null) unawaited(_fetch(item));
+  }
+
+  Future<void> _fetch(NeedsYouItem item) async {
+    setState(() => _loading = true);
+    final backend = widget.session.backend;
+    Entry? card;
+    try {
+      card = item.kind == NeedsYouKind.chat
+          ? await backend.fetchChatEntry(item.chatId, item.seq)
+          : await backend.fetchEntry(item.agentId, item.seq);
+    } on RequestFailure {
+      card = null;
+    }
+    if (!mounted) return;
+    setState(() {
+      _card = card;
+      _loading = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final record = _record;
+    final workspace = widget.session.backend.workspace.workspace;
+    final agent = workspace.agents
+        .where((agent) => agent.id == record.agentId)
+        .firstOrNull;
+    final decided = record.decidedMs.toInt();
+    final item = _item;
+    final card = _card;
+    final ended = historyEnded(workspace, record);
+    final reply = record.reply.trim();
+    final where = historyWhere(record);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        WindowDrag(
+          child: Container(
+            constraints: const BoxConstraints(
+              minHeight: titleBarHeight + Space.l,
+            ),
+            padding: const EdgeInsets.fromLTRB(
+              Space.xl,
+              Space.s,
+              Space.m,
+              Space.s,
+            ),
+            decoration: BoxDecoration(
+              color: agent == null
+                  ? null
+                  : agentColor(agent.color).withValues(alpha: 0.06),
+              border: Border(bottom: BorderSide(color: palette.hairline)),
+            ),
+            child: Row(
+              children: [
+                if (agent != null) ...[
+                  AgentCharacter(agent: agent, size: 32),
+                  const SizedBox(width: Space.m),
+                ],
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        historyWho(workspace, record),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: type.emphasis.copyWith(color: palette.text),
+                      ),
+                      if (decided > 0)
+                        Ticking(
+                          active: true,
+                          builder: (context, now) => Text(
+                            'Decided ${formatAge(decided, now)}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: type.caption.copyWith(
+                              color: palette.textFaint,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: Space.s),
+                Button(
+                  label: where,
+                  onPressed: () {
+                    widget.leave();
+                    openHistoryRecord(context, record);
+                  },
+                ),
+                ...widget.trailing,
+              ],
+            ),
+          ),
+        ),
+        Expanded(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(
+              Space.xl,
+              Space.xxl,
+              Space.xl,
+              Space.xxl,
+            ),
+            child: Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: focusStageMaxWidth),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // How it ended, first: it's decided.
+                    if (ended.isNotEmpty || reply.isNotEmpty) ...[
+                      Text(
+                        [
+                          if (ended.isNotEmpty) ended,
+                          if (reply.isNotEmpty) '“$reply”',
+                        ].join(' · '),
+                        key: const ValueKey('focus-history-ended'),
+                        style: type.label.copyWith(color: palette.textMuted),
+                      ),
+                      const SizedBox(height: Space.l),
+                    ],
+                    if (item != null && card != null)
+                      // As it ended, its controls taking nothing.
+                      IgnorePointer(
+                        child: ExcludeFocus(
+                          child: NeedsYouCard(
+                            item: item,
+                            entry: card,
+                            message: null,
+                            failed: null,
+                            workspace: workspace,
+                          ),
+                        ),
+                      )
+                    else if (item != null && _loading)
+                      Text(
+                        'Loading…',
+                        style: type.body.copyWith(color: palette.textFaint),
+                      )
+                    else
+                      IgnorePointer(
+                        child: ExcludeFocus(child: HistoryRow(record: record)),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1673,23 +2667,48 @@ class _StageCard extends StatelessWidget {
                   answer: session.answer,
                   draft: null,
                   itemKey: item.key,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      // Changed by its agent a moment ago: its buttons
-                      // take nothing until it's been seen (§8).
-                      AbsorbPointer(
-                        absorbing: session.guarded,
-                        child: NeedsYouCard(
-                          item: item,
-                          entry: item.isEntry ? entries.entryOf(item) : null,
-                          message: entries.messageOf(item),
-                          failed: entries.failedOf(item),
-                          workspace: session.backend.workspace.workspace,
+                  // Files dropped anywhere on the request go to its answer.
+                  child: CardDropArea(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        // Changed by its agent a moment ago: its buttons
+                        // take nothing until it's been seen (§8).
+                        AbsorbPointer(
+                          absorbing: session.guarded,
+                          child: NeedsYouCard(
+                            item: item,
+                            entry: item.isEntry ? entries.entryOf(item) : null,
+                            message: entries.messageOf(item),
+                            failed: entries.failedOf(item),
+                            workspace: session.backend.workspace.workspace,
+                          ),
                         ),
-                      ),
-                      _AnswerBar(session: session, item: item),
-                    ],
+                        _AnswerBar(session: session, item: item),
+                        // Signing in again, unlocking the secrets, saving
+                        // the recovery key: no card of their own, so what
+                        // waits and the way on.
+                        if (item.isAction) ...[
+                          Text(
+                            needsYouWords(
+                              session.backend,
+                              session.backend.workspace.workspace,
+                              item,
+                            ).what,
+                            style: type.body.copyWith(color: palette.text),
+                          ),
+                          const SizedBox(height: Space.l),
+                          Align(
+                            alignment: AlignmentDirectional.centerEnd,
+                            child: Button(
+                              label: needsYouActionLabel(item),
+                              primary: true,
+                              onPressed: () => actOnNeedsYouItem(context, item),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
                 ),
               ],
@@ -1754,12 +2773,15 @@ class _AnswerBarState extends State<_AnswerBar> {
     if (mounted) setState(() {});
   }
 
-  /// Return in the field sends what's typed; on an empty field it does
-  /// nothing, so a stray Return never approves (Q12).
+  /// Return in the field sends what's typed: Submit, or on a card that
+  /// asks for words, its yes (the words are its answer). On an
+  /// empty field it does nothing, so a stray Return never approves (Q12).
   void _return() {
-    if (_session.answer.value?.typed ?? false) {
-      unawaited(_session.yes(byKey: true));
-    }
+    final answer = _session.answer.value;
+    if (answer == null) return;
+    final written =
+        answer.wantsText && (answer.field?.text.trim().isNotEmpty ?? false);
+    if (answer.typed || written) unawaited(_session.yes(byKey: true));
   }
 
   /// Shift-Return: a new line where the cursor is, replacing what's
@@ -2017,11 +3039,14 @@ class _Receipt extends StatelessWidget {
 }
 
 /// Nothing left (§4.2): "Nothing needs you.", what the person did this
-/// sitting, and the agents at work now.
+/// sitting, the agents at work now, and Done, on every device. Only
+/// other Claktories waiting: "Nothing needs you on Studio.", with theirs
+/// to go to. It never leaves by itself, so the last outcome is seen.
 class _NothingLeft extends StatelessWidget {
-  const _NothingLeft({required this.session});
+  const _NothingLeft({required this.session, required this.leave});
 
   final FocusSession session;
+  final VoidCallback leave;
 
   @override
   Widget build(BuildContext context) {
@@ -2034,6 +3059,9 @@ class _NothingLeft extends StatelessWidget {
     ];
     final answered = session.answered;
     final minutes = DateTime.now().difference(session.startedAt).inMinutes;
+    final claktories = ClaktoriesScope.of(context);
+    final others =
+        claktories != null && otherClaktoriesWaiting(claktories).isNotEmpty;
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(Space.xl),
@@ -2041,10 +3069,17 @@ class _NothingLeft extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              'Nothing needs you.',
+              others
+                  ? 'Nothing needs you on '
+                        '${claktoryNameInText(session.backend)}.'
+                  : 'Nothing needs you.',
               textAlign: TextAlign.center,
               style: type.title.copyWith(color: palette.textMuted),
             ),
+            if (others) ...[
+              const SizedBox(height: Space.l),
+              const _OtherClaktories(centered: true),
+            ],
             if (answered > 0) ...[
               const SizedBox(height: Space.s),
               Text(
@@ -2069,6 +3104,8 @@ class _NothingLeft extends StatelessWidget {
                 ],
               ),
             ],
+            const SizedBox(height: Space.xl),
+            Button(label: 'Done', primary: true, onPressed: leave),
           ],
         ),
       ),
@@ -2248,6 +3285,20 @@ class _FocusContextState extends State<FocusContext> {
       agentId: transcript.agentId,
       extras: _marker,
       hidden: (entry) => entry.seq.toInt() == item.seq,
+    );
+    // Its bubbles in the agent's color and the others' in theirs, as its
+    // own conversation draws them, so it reads as that conversation; a
+    // chat's in the chat's.
+    final agents = workspace.agents;
+    view = AgentTints(
+      own: agent != null ? agentColor(agent.color) : chatColor,
+      byId: agent == null
+          ? const {}
+          : {for (final other in agents) other.id: agentColor(other.color)},
+      agents: agent == null
+          ? const {}
+          : {for (final other in agents) other.id: identityOf(other)},
+      child: view,
     );
     if (chat != null) view = ChatScope(chatId: chat.id, child: view);
     final MessageTarget? target = agent != null
@@ -2521,6 +3572,10 @@ class _FocusKeysState extends State<FocusKeys> {
   void _escape() {
     if (_session.reasonsShowing) {
       _session.reasonsShowing = false;
+    } else if (_session.finding) {
+      // The queue's find, cleared and gone; the next Esc leaves.
+      _session.finding = false;
+      _focus.requestFocus();
     } else if (focusFieldHasKeys) {
       // Out of the field; what's typed stays.
       FocusManager.instance.primaryFocus?.unfocus();
@@ -2572,6 +3627,11 @@ class _FocusKeysState extends State<FocusKeys> {
         bindings: {
           // ⌘⇧N is FocusModeLayer's, wherever the keys are.
           const SingleActivator(LogicalKeyboardKey.escape): _escape,
+          // The queue's find.
+          const SingleActivator(LogicalKeyboardKey.keyF, meta: true): () {
+            session.finding = true;
+            session.findFocus.requestFocus();
+          },
         },
         child: ViewerKeys(
           bindings: {
@@ -2700,9 +3760,24 @@ ValueListenable<bool> focusModeOf(Backend backend) => _focusModeOf(backend);
 /// Focus mode on or off on this device.
 void setFocusMode(Backend backend, bool on) => _focusModeOf(backend).set(on);
 
-/// Into focus mode, from the chip's panel, the page's Focus or ⌘⇧N.
-void openFocusMode(BuildContext context) =>
-    setFocusMode(AppScope.of(context), true);
+/// Into focus mode, from the sidebar's Needs you, the chip, the page's
+/// Focus mode, the View menu or ⌘⇧N; [at], with that request on the
+/// stage (the chip's: its conversation's own).
+void openFocusMode(BuildContext context, {String? at}) {
+  final backend = AppScope.of(context);
+  if (at != null) backend.needsYouCard.value = at;
+  // An iPad's sidebar over the window goes, as for anything chosen there.
+  WorkbenchScope.maybeOf(context)?.closeOverlay();
+  setFocusMode(backend, true);
+}
+
+/// Whether Needs you is focus mode here: on a
+/// computer and in an iPad's window at its wide tiers, the sidebar's Needs
+/// you and the conversation's chip open it at once. A phone's layout (an
+/// iPhone, an iPad in Slide Over or a narrow split) and Android keep the
+/// Needs you page.
+bool needsYouIsFocusMode(BuildContext context) =>
+    defaultTargetPlatform != TargetPlatform.android && !isPhoneLayout(context);
 
 /// The window, or focus mode over it (§3): the window stays as it was
 /// underneath, out of sight and still, so leaving comes back to exactly

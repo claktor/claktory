@@ -60,7 +60,7 @@ const NAME_LIMIT: usize = 200;
 const DEFAULT_MAX_TOKENS: u64 = 4096;
 
 /// QA only (`qa-provider`): where qa-model serves OpenRouter's model list,
-/// set once by factoryd after Fugo's guard (`anthropic::qa::models_url_for`).
+/// set once by factoryd after its guard (`anthropic::qa::models_url_for`).
 #[cfg(feature = "qa-provider")]
 static QA_MODELS_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
@@ -162,7 +162,7 @@ pub fn parse_openrouter(body: &[u8]) -> Result<Vec<Model>, String> {
     Ok(listed.into_values().collect())
 }
 
-/// One model of OpenRouter's list, for an id typed in (friend bug #14):
+/// One model of OpenRouter's list, for an id typed in:
 /// the bundled entry, else one from its listing; why not, in a sentence,
 /// when OpenRouter doesn't list it or an agent can't run on it.
 pub fn openrouter_model(body: &[u8], id: &str) -> Result<Model, String> {

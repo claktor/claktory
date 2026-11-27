@@ -250,7 +250,7 @@ impl Manifest {
                 return bad(format!("the view \"{}\" has no title", view.id));
             }
             // Shown after the app's name, and alone where a surface forgets
-            // it: held to the same rule (Fugo).
+            // it: held to the same rule.
             if let Err(why) = plain(&view.title, &format!("view \"{}\"'s title", view.id)) {
                 return bad(why);
             }

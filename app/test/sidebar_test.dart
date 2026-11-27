@@ -248,85 +248,102 @@ void main() {
     expect(harness.backend.sent, isEmpty);
   });
 
-  group('folders', () {
-    Workspace withFolders({bool collapsed = false, bool working = false}) {
-      final snapshot = workspace(backWorking: working);
+  group('folders (Lucy projects-sidebar.md §3)', () {
+    Workspace withFolders() {
+      final snapshot = workspace();
       snapshot.projects[0].folders.addAll([
         ProjectFolder(
           id: 'research',
           name: 'Research',
           path: '/Users/me/notes',
-          collapsed: collapsed,
         ),
         ProjectFolder(id: 'site', name: 'Site', path: '/Users/me/site'),
       ]);
-      // Back is in Research, though its parent isn't: it stands at the
-      // folder's top level.
+      // Back works in Research, under Lead in the project's own folder;
+      // Scout works in Research at the top level, Pilot in Research under
+      // Scout, like its lead, and Deck in the project's own under Scout.
+      // (The tests' font is wide: a short role.)
       snapshot.agents[1].folderId = 'research';
-      snapshot.agents.add(agent('scout', 'Scout')..folderId = 'research');
+      snapshot.agents.add(
+        agent('scout', 'Scout')
+          ..folderId = 'research'
+          ..role = 'Lab',
+      );
+      snapshot.agents.add(
+        agent('pilot', 'Pilot', parent: 'scout')..folderId = 'research',
+      );
+      snapshot.agents.add(agent('deck', 'Deck', parent: 'scout'));
       return snapshot;
     }
 
-    testWidgets("agents without a folder first, then each folder's", (
+    testWidgets('one tree by lead, whatever folder: a folder is no '
+        "heading, it's a tag on the row where it differs from the lead's", (
       tester,
     ) async {
       await show(tester, withFolders());
       double top(String text) => tester.getTopLeft(find.text(text)).dy;
-      expect(top('Solo'), lessThan(top('Research')));
-      expect(top('Research'), lessThan(top('Back')));
-      expect(top('Back'), lessThan(top('Scout')));
-      expect(top('Scout'), lessThan(top('Site')));
-      // Its agents sit in from its heading.
+      // In config order, each under its lead: no folder splits the team.
+      expect(top('Lead'), lessThan(top('Back')));
+      expect(top('Back'), lessThan(top('Front')));
+      expect(top('Solo'), lessThan(top('Scout')));
+      expect(top('Scout'), lessThan(top('Pilot')));
       expect(
-        tester.getTopLeft(find.text('Back')).dx,
-        greaterThan(tester.getTopLeft(find.text('Research')).dx),
+        tester.getTopLeft(find.text('Pilot')).dx,
+        greaterThan(tester.getTopLeft(find.text('Scout')).dx),
       );
+      // Back (under Lead, in the project's folder) and Scout (top level)
+      // name Research; Pilot, in Research like Scout, names nothing; Deck,
+      // in the project's own under Scout, names the project's.
+      expect(find.text('Research'), findsNWidgets(2));
+      expect(find.text('Site'), findsNothing, reason: 'no heading');
+      expect(find.text('Lab · '), findsOneWidget);
+      expect(find.text('Factory'), findsNWidgets(2), reason: 'row and tag');
+      expect(labeled('works in Research'), findsNWidgets(2));
+      expect(labeled('works in Factory'), findsOneWidget);
+      // Nothing to fold a folder with.
+      expect(find.bySemanticsLabel(RegExp('agents in Research')), findsNothing);
     });
 
-    testWidgets('a folder folds its agents away', (tester) async {
-      final harness = await show(tester, withFolders());
-      await tester.tap(find.text('Research'));
-      await settle(tester);
+    testWidgets('the folder is cut before the role, the role before the '
+        'name', (tester) async {
+      final long = withFolders();
+      long.agents[1].role = 'A role long enough to fill the row on its own';
+      await show(tester, long);
       expect(
-        harness.last.setFolderCollapsed,
-        SetFolderCollapsed(
-          projectId: 'p1',
-          folderId: 'research',
-          collapsed: true,
+        labeled(
+          'A role long enough to fill the row on its own, works in Research',
         ),
-      );
-      await harness.apply(tester, withFolders(collapsed: true, working: true));
-      await settle(tester);
-      expect(find.text('Back'), findsNothing);
-      expect(find.text('Scout'), findsNothing);
-      expect(find.text('2'), findsOneWidget, reason: 'how many it hides');
-      expect(
-        find.byType(WorkingWave),
         findsOneWidget,
-        reason: 'on its heading: one of them works',
+        reason: 'the folder said, not shown, where the role takes the line',
       );
+      expect(find.text('Back'), findsOneWidget);
+      expect(labeled('works in Research'), findsOneWidget, reason: 'Scout');
+      expect(tester.takeException(), isNull);
     });
 
-    testWidgets('dropping on a folder puts the agent in it', (tester) async {
+    testWidgets('a drop never changes where an agent works (§5.1)', (
+      tester,
+    ) async {
       final harness = await show(tester, withFolders());
-      await drag(tester, 'Solo', tester.getCenter(find.text('Site')));
+      // Under Scout, by its row's middle.
+      await drag(tester, 'Solo', tester.getCenter(find.text('Scout')));
       expect(harness.last.arrangeAgent.agentId, 'solo');
-      expect(harness.last.arrangeAgent.folderId, 'site');
+      expect(harness.last.arrangeAgent.parentId, 'scout');
+      expect(harness.last.arrangeAgent.hasFolderId(), isFalse);
 
-      // Between a folder's agents: in the folder, at that place.
+      // Between Scout's reports.
       await drag(
         tester,
         'Solo',
-        row(tester, 'Scout').topCenter + const Offset(0, 3),
+        row(tester, 'Deck').topCenter + const Offset(0, 3),
       );
-      expect(harness.last.arrangeAgent.folderId, 'research');
-      expect(harness.last.arrangeAgent.beforeId, 'scout');
+      expect(harness.last.arrangeAgent.beforeId, 'deck');
+      expect(harness.last.arrangeAgent.hasFolderId(), isFalse);
 
-      // On the project itself: out of its folder.
-      await drag(tester, 'Scout', tester.getCenter(find.text('Factory').last));
-      expect(harness.last.arrangeAgent.agentId, 'scout');
-      expect(harness.last.arrangeAgent.hasFolderId(), isTrue);
-      expect(harness.last.arrangeAgent.folderId, '');
+      // On the project itself: from under its lead, its folder kept.
+      await drag(tester, 'Pilot', tester.getCenter(find.text('Factory').first));
+      expect(harness.last.arrangeAgent.agentId, 'pilot');
+      expect(harness.last.arrangeAgent.hasFolderId(), isFalse);
     });
   });
 

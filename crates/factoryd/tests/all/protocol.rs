@@ -112,9 +112,8 @@ async fn the_loopback_port_wants_this_users_token() {
     drop(factory);
 
     // Only this user can open the home, its remote folder and the code.
-    use std::os::unix::fs::PermissionsExt;
     let root = home(&dir).root().to_owned();
-    let mode = |path: &std::path::Path| std::fs::metadata(path).expect("metadata").permissions().mode() & 0o777;
+    let mode = crate::common::mode;
     assert_eq!(mode(&root), 0o700);
     assert_eq!(mode(&root.join("remote")), 0o700);
     assert_eq!(mode(&root.join("remote/local-pairing")), 0o600);
@@ -124,15 +123,19 @@ async fn the_loopback_port_wants_this_users_token() {
 /// opens, and its code still lets this machine's app in.
 #[tokio::test]
 async fn an_open_home_is_made_private() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = temp_dir();
     let root = home(&dir).root().to_owned();
     std::fs::create_dir_all(root.join("remote")).expect("remote");
+    // On Windows, folders made in the temporary folder take its DACL, open
+    // to the administrators.
+    #[cfg(unix)]
     for path in [&root, &root.join("remote")] {
+        use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("permissions");
     }
+    assert_eq!(crate::common::mode(&root), if cfg!(unix) { 0o755 } else { 0o777 }, "open to start with");
     let (addr, _factory) = start(&dir).await;
-    let mode = |path: &std::path::Path| std::fs::metadata(path).expect("metadata").permissions().mode() & 0o777;
+    let mode = crate::common::mode;
     assert_eq!(mode(&root), 0o700);
     assert_eq!(mode(&root.join("remote")), 0o700);
     Client::connect(addr).await;

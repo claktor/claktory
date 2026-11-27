@@ -1,4 +1,4 @@
-//! Notifications (#273; the plan is notifications.md in Research): what's
+//! Notifications (the plan is notifications.md in Research): what's
 //! worth telling the person when they aren't looking, decided here, the same
 //! for every device (tenet 7).
 //!
@@ -19,13 +19,14 @@
 //! pushed for two minutes after.
 //!
 //! An agent that has read a web page (or is quarantined for a pipe) never puts its
-//! own words on the person's lock screen (threat model, Fugo's change B):
+//! own words on the person's lock screen (threat model):
 //! its notifications say only "<agent> has something for you". A pipe's
 //! held messages never carry what the other side wrote.
 
 pub(crate) mod alerts;
 pub(crate) mod push;
 pub(crate) mod tool;
+pub(crate) mod urgent;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -60,7 +61,7 @@ const RETRY: Duration = Duration::from_secs(30);
 /// usage read wake the waiters for a moment, and they wait again.
 const WAIT_AGAIN_MS: i64 = 10 * 60_000;
 /// How many devices waiting to be allowed notify in an hour, all of them
-/// together (#352 P4, Fugo): past it they show only in Needs you.
+/// together: past it they show only in Needs you.
 pub(crate) const DEVICES_PER_HOUR: usize = 3;
 
 // ---- Settings ----
@@ -150,6 +151,9 @@ impl NotificationsConfig {
             relay: self.relay.clone(),
             time_zone: jiff::tz::TimeZone::system().iana_name().unwrap_or_default().to_owned(),
             utc_offset_minutes: jiff::ZonedDateTime::now().offset().seconds() / 60,
+            // Who may send urgent alerts: `shown` fills it in.
+            urgent_from: Vec::new(),
+            urgent_from_custom: false,
         }
     }
 
@@ -306,6 +310,9 @@ pub(crate) struct State {
     /// Held while the settings are read, changed and saved, so two changes
     /// at once both stay.
     editing: Mutex<()>,
+    /// Who may send urgent alerts, as the person chose, once read from
+    /// factory.db (`urgent`).
+    urgent_from: Mutex<Option<urgent::UrgentFrom>>,
 }
 
 #[derive(Default)]
@@ -347,7 +354,7 @@ struct Data {
     waiting: BTreeSet<String>,
     /// The first Workspace was seen: what waits then isn't new.
     started: bool,
-    /// The Mac couldn't sleep with its lid closed (#371's STUCK), as last
+    /// The Mac couldn't sleep with its lid closed (STUCK), as last
     /// seen: noted once when it starts, at a start too.
     lid_stuck: bool,
     /// How many items wait for the person, as last seen: a push's badge.
@@ -412,7 +419,7 @@ impl State {
 
     /// Entry `seq` of `agent`, which already waits for the person, notifies
     /// at the next Workspace as if it newly waited: its agent answered them
-    /// on a card that still waits (#430, ask_reply on a procedure).
+    /// on a card that still waits (ask_reply on a procedure).
     pub(crate) fn waits_again(&self, agent: &str, seq: u64) {
         if let Some(seen) = self.data().agents.get_mut(agent) {
             seen.waiting.remove(&seq);
@@ -495,7 +502,7 @@ impl State {
 
 /// Whether an app on `platform` (Hello.platform) shows a Notify as a
 /// notification: the Mac's, the iPhone's and the iPad's do; Android's
-/// can't yet (#366 A2), nor Linux's or Windows'. Apps from before
+/// can't yet, nor Linux's or Windows'. Apps from before
 /// platform was sent were the Mac's and the iPhone's.
 fn shows_notifications(platform: &str) -> bool {
     matches!(platform, "" | "macos" | "ios" | "ipados")
@@ -744,10 +751,29 @@ pub(crate) fn change(factory: &Factory, change: &v1::NotificationSettingsChange)
     let old = settings(factory);
     let settings = old.changed(change);
     settings.check()?;
+    // Who may send urgent alerts, kept in a row of its own (`urgent`).
+    let senders = match &change.urgent_from {
+        Some(senders) => {
+            let config = factory.lock().config.clone();
+            urgent::change(factory, &config, senders)?
+        }
+        None => false,
+    };
     if settings == old {
+        if senders {
+            factory.broadcast_workspace(&factory.lock());
+        }
         return Ok(());
     }
     save(factory, settings)
+}
+
+/// Workspace.settings.notifications: the settings, and who may send urgent
+/// alerts as that resolves under `config` now.
+pub(crate) fn shown(factory: &Factory, config: &Config) -> v1::NotificationSettings {
+    let mut shown = settings(factory).to_proto();
+    urgent::fill(factory, config, &mut shown);
+    shown
 }
 
 /// UpdateAgent.notify: `agent`'s "Notify me".
@@ -931,7 +957,7 @@ fn changes(data: &mut Data, factory: &Factory, inner: &Inner, settings: &Notific
 }
 
 /// Whether the Mac can't sleep with its lid closed although Claktory isn't
-/// keeping it awake (#371, LID_CLOSED_STUCK).
+/// keeping it awake (LID_CLOSED_STUCK).
 fn lid_stuck(workspace: &v1::Workspace) -> bool {
     workspace.keep_awake.as_ref().is_some_and(|keep| keep.lid_closed() == v1::LidClosedState::LidClosedStuck)
 }
@@ -954,7 +980,7 @@ fn lid(data: &mut Data, inner: &Inner, workspace: &v1::Workspace) -> Vec<Note> {
     vec![note]
 }
 
-/// Devices that started waiting to be allowed (#352 P4, Fugo's rules): in
+/// Devices that started waiting to be allowed: in
 /// Claktory's words only, never the name the device gave itself, which an
 /// account thief chooses; one per device, never again, and at most
 /// `DEVICES_PER_HOUR` an hour in all. A notification can't allow it: a tap
@@ -1051,7 +1077,7 @@ fn provider_waits(
 /// What notifications noted, kept in factory.db (notify_settings' row
 /// `key`: 'provider_waits', 'devices'); empty when there's none or it
 /// can't be read.
-fn read_row<T: serde::de::DeserializeOwned + Default>(factory: &Factory, key: &str) -> T {
+pub(crate) fn read_row<T: serde::de::DeserializeOwned + Default>(factory: &Factory, key: &str) -> T {
     let read =
         factory.store.db().query_row("SELECT value FROM notify_settings WHERE key = ?1", [key], |row| row.get::<_, String>(0)).optional();
     match read {
@@ -1084,7 +1110,7 @@ fn save_row<T: Serialize>(factory: &Factory, key: &str, noted: &T) {
 }
 
 /// What a Needs-you item says, and whether it carries a taint of its own
-/// (asked while its agent had read a pipe, before #346, or a web page).
+/// (asked while its agent had read a pipe, in older versions, or a web page).
 fn waiting_text(kind: Option<&EntryKind>, tainted: bool) -> (String, bool) {
     match kind {
         Some(EntryKind::AskPerson(ask)) => (ask.title.clone(), tainted || !ask.taint.is_empty()),
@@ -1300,7 +1326,7 @@ fn send(factory: &Factory, config: &Config, settings: &NotificationsConfig, note
         thread: note.source.clone(),
         sent_ms: now,
     };
-    // Only apps that show it count as reaching the person (#366 A2).
+    // Only apps that show it count as reaching the person.
     let apps = factory.notify.showing();
     factory.send(Body::Notify(notify.clone()));
     let pushed = push::queue(factory, config, settings, &notify, now);
@@ -1346,7 +1372,7 @@ pub(crate) async fn monitor(factory: Weak<Factory>) {
 }
 
 /// When quiet hours have ended and Needs-you items that came during them
-/// still wait, one notification says how many (O3; Trish's words): "2
+/// still wait, one notification says how many: "2
 /// things need you", "They came during your quiet hours.". A tap opens
 /// Needs you. When the next look is due while they last.
 fn morning(factory: &Factory) -> Option<i64> {

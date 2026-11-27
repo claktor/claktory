@@ -15,6 +15,7 @@
 //!   showing it never helps guess a weak password inside a known template.
 
 use std::io::Read as _;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -61,20 +62,42 @@ fn refused(why: impl Into<String>) -> VaultError {
 }
 
 /// The person's home folder.
+#[cfg(windows)]
+fn home_dir() -> Option<PathBuf> {
+    std::env::home_dir()
+}
+
+/// The person's home folder.
+#[cfg(unix)]
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").filter(|home| !home.is_empty()).map(PathBuf::from)
 }
+
+/// How a full path starts, for the person.
+#[cfg(unix)]
+const FULL_PATH: &str = "starting with / or ~/";
+#[cfg(windows)]
+const FULL_PATH: &str = "starting with its drive (C:\\) or ~\\";
 
 /// `raw` as an absolute path: absolute already, or `~/…`; never with `.`
 /// or `..` in it.
 pub(crate) fn absolute(raw: &str) -> Result<PathBuf, VaultError> {
     let raw = raw.trim();
-    let path = match raw.strip_prefix("~/") {
+    // `~\…` too on Windows, where that's how a path is written.
+    let path = match raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\").filter(|_| cfg!(windows))) {
         Some(rest) => home_dir().ok_or_else(|| refused("This computer's home folder isn't known."))?.join(rest),
         None => PathBuf::from(raw),
     };
     if !path.is_absolute() {
-        return Err(refused(format!("Give the file's full path, starting with / or ~/, not \"{raw}\".")));
+        return Err(refused(format!("Give the file's full path, {FULL_PATH}, not \"{raw}\".")));
+    }
+    // `\\?\…` and `\\.\…` reach past the checks below (no `.` or `..`
+    // is ever seen in them, `/` isn't a separator there) and to devices.
+    #[cfg(windows)]
+    if let Some(Component::Prefix(prefix)) = path.components().next()
+        && (prefix.kind().is_verbatim() || matches!(prefix.kind(), std::path::Prefix::DeviceNS(_)))
+    {
+        return Err(refused(format!("Give the file's full path, {FULL_PATH}, not \"{raw}\".")));
     }
     if path.components().any(|component| matches!(component, Component::CurDir | Component::ParentDir)) {
         return Err(refused(format!("Give the file's own path, without . or .. in it: \"{raw}\".")));
@@ -102,10 +125,14 @@ fn forbidden(path: &Path, homes: &[PathBuf]) -> Option<String> {
 /// has no link in it, so it's compared with the real one).
 pub(crate) fn homes(this: &Path) -> Vec<PathBuf> {
     let mut given = vec![this.to_path_buf()];
+    #[cfg(unix)]
     if let Some(home) = home_dir() {
         given.push(home.join(".factory"));
         given.push(home.join(".factory-dev"));
     }
+    // On Windows the real and dev homes are in LocalAppData (`windows::dirs`).
+    #[cfg(windows)]
+    given.extend([false, true].into_iter().filter_map(|dev| crate::windows::dirs::factory_home(dev).ok()));
     let mut homes = given.clone();
     homes.extend(given.iter().filter_map(|home| home.canonicalize().ok()).filter(|real| !given.contains(real)));
     homes
@@ -116,7 +143,7 @@ fn no_links(path: &Path) -> Result<(), VaultError> {
     let mut so_far = PathBuf::new();
     for component in path.components() {
         so_far.push(component);
-        if matches!(component, Component::RootDir) {
+        if matches!(component, Component::RootDir | Component::Prefix(_)) {
             continue;
         }
         match std::fs::symlink_metadata(&so_far) {
@@ -167,8 +194,9 @@ pub(crate) fn read(path: &Path, homes: &[PathBuf]) -> Result<Opened, VaultError>
     if !meta.file_type().is_file() {
         return Err(refused(format!("{} isn't a file: only a regular file can be imported.", path.display())));
     }
+    let (dev, ino, links) = identity(&file, &meta).map_err(|error| refused(format!("{} can't be read: {error}", path.display())))?;
     // Another name for the same file would be another path than the card's.
-    if meta.nlink() != 1 {
+    if links != 1 {
         return Err(refused(format!(
             "{} has other names on this computer (hard links), so it can't be shown for sure which file it is. Copy it to a file of its own and ask for that.",
             path.display()
@@ -182,13 +210,38 @@ pub(crate) fn read(path: &Path, homes: &[PathBuf]) -> Result<Opened, VaultError>
     if bytes.len() as u64 > MOST_BYTES {
         return Err(refused(format!("{} is over 1 MB, too big to keep as a secret.", path.display())));
     }
-    Ok(Opened { size: bytes.len() as u64, modified_ms: modified_ms(&meta), dev: meta.dev(), ino: meta.ino(), bytes })
+    Ok(Opened { size: bytes.len() as u64, modified_ms: modified_ms(&meta), dev, ino, bytes })
+}
+
+/// An open file's device, inode and how many names it has.
+#[cfg(unix)]
+fn identity(_file: &std::fs::File, meta: &std::fs::Metadata) -> std::io::Result<(u64, u64, u64)> {
+    Ok((meta.dev(), meta.ino(), meta.nlink()))
+}
+
+/// On Windows: its volume, its index there and how many names it has.
+#[cfg(windows)]
+fn identity(file: &std::fs::File, _meta: &std::fs::Metadata) -> std::io::Result<(u64, u64, u64)> {
+    let identity = crate::windows::fs::identity_of(file)?;
+    Ok((identity.volume, identity.index, identity.links))
+}
+
+/// The device and inode of what `path` names (not followed), as `identity`.
+#[cfg(unix)]
+fn named(_path: &Path, meta: &std::fs::Metadata) -> (u64, u64) {
+    (meta.dev(), meta.ino())
+}
+
+#[cfg(windows)]
+fn named(path: &Path, _meta: &std::fs::Metadata) -> (u64, u64) {
+    crate::windows::fs::identity(path).map_or((u64::MAX, u64::MAX), |identity| (identity.volume, identity.index))
 }
 
 /// Opens `path` (absolute, plain) one folder at a time from `/`, each with
 /// openat and O_NOFOLLOW, so no link is followed anywhere in it, even one
 /// swapped in after `no_links` looked: what's opened is the file at this
 /// very path.
+#[cfg(unix)]
 fn open_walked(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
@@ -225,8 +278,21 @@ fn open_walked(path: &Path) -> std::io::Result<std::fs::File> {
     Ok(std::fs::File::from(file))
 }
 
+/// On Windows, through no junction, symbolic link or mount point, each
+/// folder held so it can't be swapped meanwhile (`windows::fs::open_walked`).
+#[cfg(windows)]
+fn open_walked(path: &Path) -> std::io::Result<std::fs::File> {
+    crate::windows::fs::open_walked(path)
+}
+
+#[cfg(unix)]
 fn modified_ms(meta: &std::fs::Metadata) -> i64 {
     meta.mtime() * 1000 + meta.mtime_nsec() / 1_000_000
+}
+
+#[cfg(windows)]
+fn modified_ms(meta: &std::fs::Metadata) -> i64 {
+    meta.modified().ok().and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |since| since.as_millis() as i64)
 }
 
 /// Why the file asked for can't be imported now, from what's there (no
@@ -238,7 +304,7 @@ pub(crate) fn problem(asked: &Asked) -> String {
         Ok(meta) if meta.file_type().is_symlink() || !meta.file_type().is_file() => {
             "It isn't the same file any more: it's been replaced.".to_owned()
         }
-        Ok(meta) if (meta.dev(), meta.ino()) != (asked.dev, asked.ino) => "It isn't the same file any more: it's been replaced.".to_owned(),
+        Ok(meta) if named(Path::new(&asked.path), &meta) != (asked.dev, asked.ino) => "It isn't the same file any more: it's been replaced.".to_owned(),
         Ok(meta) if meta.len() != asked.size || modified_ms(&meta) != asked.modified_ms => {
             "The file changed since it was asked for.".to_owned()
         }
@@ -381,7 +447,7 @@ impl Vault {
 /// still the same file (device and inode): a plain delete. Whether it was.
 pub(crate) fn delete_original(asked: &Asked) -> bool {
     match std::fs::symlink_metadata(&asked.path) {
-        Ok(meta) if meta.file_type().is_file() && (meta.dev(), meta.ino()) == (asked.dev, asked.ino) => {
+        Ok(meta) if meta.file_type().is_file() && named(Path::new(&asked.path), &meta) == (asked.dev, asked.ino) => {
             std::fs::remove_file(&asked.path).is_ok()
         }
         _ => false,
@@ -394,14 +460,65 @@ mod tests {
 
     #[test]
     fn paths_are_absolute_and_plain() {
-        assert!(absolute("relative/file").is_err());
-        assert!(absolute("/a/../etc/passwd").is_err());
-        assert_eq!(absolute("/a//b/").expect("plain"), PathBuf::from("/a/b"));
+        #[cfg(unix)]
+        {
+            assert!(absolute("relative/file").is_err());
+            assert!(absolute("/a/../etc/passwd").is_err());
+            assert_eq!(absolute("/a//b/").expect("plain"), PathBuf::from("/a/b"));
+        }
+        #[cfg(windows)]
+        {
+            assert!(absolute(r"relative\file").is_err());
+            assert!(absolute("/a/b").unwrap_err().to_string().contains(r"its drive (C:\)"), "no drive, no full path");
+            assert!(absolute(r"C:\a\..\Windows").is_err());
+            // Verbatim and device paths: `..` and `/` pass unseen there.
+            assert!(absolute(r"\\?\C:\a/../Windows/x").is_err());
+            assert!(absolute(r"\\?\C:\a\x").is_err());
+            assert!(absolute(r"\\.\PhysicalDrive0").is_err());
+            assert!(absolute(r"\\server\share\x").is_ok(), "a share is a full path");
+            assert_eq!(absolute(r"C:\a\\b\").expect("plain"), PathBuf::from(r"C:\a\b"));
+            assert_eq!(absolute(r"~\keys\key.p12").expect("home"), std::env::home_dir().expect("home").join(r"keys\key.p12"));
+        }
         assert_eq!(shown("3f9a21c07d44e1ff"), "3f9a 21c0 7d44");
         assert!(!value(b"text\n").1);
         assert!(value(&[0xff, 0x00, 0x80]).1);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_file_is_read_only_as_itself_through_no_link_or_junction() {
+        let dir = std::env::temp_dir().join(format!("import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("real")).expect("dir");
+        let dir = dir.canonicalize().expect("canonical");
+        let file = dir.join("real").join("key.p12");
+        std::fs::write(&file, [0u8, 1, 2, 255]).expect("written");
+        let none: Vec<PathBuf> = Vec::new();
+        assert_eq!(read(&file, &none).expect("read").bytes.as_slice(), [0u8, 1, 2, 255]);
+        // A symbolic link as the file (Developer Mode lets this user make
+        // one), a junction in the middle.
+        std::os::windows::fs::symlink_file(&file, dir.join("link.p12")).expect("link");
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(dir.join("folder")).arg(dir.join("real")).output();
+        assert!(made.expect("mklink").status.success());
+        assert!(read(&dir.join("link.p12"), &none).unwrap_err().to_string().contains("is a symbolic link"));
+        assert!(read(&dir.join("folder").join("key.p12"), &none).unwrap_err().to_string().contains("is a symbolic link"));
+        // A folder, one byte over 1 MiB.
+        assert!(read(&dir.join("real"), &none).unwrap_err().to_string().contains("is a folder"));
+        let big = dir.join("big");
+        std::fs::write(&big, vec![b'a'; MOST_BYTES as usize + 1]).expect("written");
+        assert!(read(&big, &none).unwrap_err().to_string().contains("over 1 MB"));
+        // A hard link: the same file by another name.
+        std::fs::hard_link(&file, dir.join("other.p12")).expect("hard link");
+        assert!(read(&dir.join("other.p12"), &none).unwrap_err().to_string().contains("hard links"));
+        assert!(read(&file, &none).unwrap_err().to_string().contains("hard links"));
+        std::fs::remove_file(dir.join("other.p12")).expect("removed");
+        assert!(read(&file, &none).is_ok());
+        // Claktory's own folder.
+        assert!(read(&file, std::slice::from_ref(&dir)).unwrap_err().to_string().contains("Claktory's own folder"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn a_file_is_read_only_as_itself() {
         let dir = std::env::temp_dir().join(format!("import-{}", std::process::id()));

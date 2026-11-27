@@ -426,6 +426,7 @@ fn device_key(factory: &Factory) -> [u8; 32] {
         }
         let mut key = [0u8; 32];
         getrandom::fill(&mut key).expect("the system's random source");
+        #[cfg(unix)]
         let kept = (|| -> std::io::Result<()> {
             use std::io::Write as _;
             use std::os::unix::fs::OpenOptionsExt as _;
@@ -436,6 +437,10 @@ fn device_key(factory: &Factory) -> [u8; 32] {
             file.sync_all()?;
             std::fs::rename(&temporary, &path)
         })();
+        // 0600 on Windows: created private, then renamed over (`windows::private`).
+        #[cfg(windows)]
+        let kept = std::fs::create_dir_all(path.parent().expect("in apps"))
+            .and_then(|()| factory_agent::windows::private::write(&path, &key));
         if let Err(error) = kept {
             tracing::warn!(%error, "couldn't keep the key apps' device ids are made with; one for this run");
         }

@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter/widgets.dart';
 
 import 'agent_view.dart' show ArchivedLine, ReconnectingLine, WorkingLine;
+import 'approve_elsewhere.dart';
 import 'attachments.dart' show LocalFile;
 import 'backend.dart';
 import 'characters/character.dart';
@@ -79,14 +80,16 @@ class PipeMessageTarget extends MessageTarget {
   Color get accent => pipeColor;
 
   @override
-  MessageBlocked? blocked(BuildContext context) =>
-      pipe.state == PipeState.PIPE_STATE_OPEN
+  MessageBlocked? blocked(BuildContext context) => approvesElsewhere
+      // The person's own words through a pipe: never from Windows.
+      ? const MessageBlocked(pipeChangeElsewhereText)
+      : pipe.state == PipeState.PIPE_STATE_OPEN
       ? null
       : MessageBlocked(pipeStatus(pipe));
 
   @override
   void send(String text, {List<LocalFile> files = const [], Duration? voice}) {
-    if (text.isEmpty) return;
+    if (text.isEmpty || approvesElsewhere) return;
     unawaited(
       backend.sendPipeMessage(pipe.id, text).catchError((Object error) {
         onFailed?.call(
@@ -303,8 +306,11 @@ class _LiaisonPipeBodyState extends State<LiaisonPipeBody> {
     final liaison = widget.liaison;
     final pipe = widget.pipe;
     final open = pipe.state == PipeState.PIPE_STATE_OPEN;
-    // Only an open pipe takes the person's messages.
-    if (!open && _targets.value == PipeTarget.pipe) _targets.reset();
+    // Only an open pipe takes the person's messages, and never on Windows,
+    // where the box writes only to the liaison.
+    if ((!open || approvesElsewhere) && _targets.value == PipeTarget.pipe) {
+      _targets.reset();
+    }
     final timeline = AgentTints(
       own: agentColor(liaison.color),
       byId: {
@@ -370,7 +376,7 @@ class _LiaisonPipeBodyState extends State<LiaisonPipeBody> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 ArchivedLine(agent: liaison),
-                // Back to its own provider once it has room (#341).
+                // Back to its own provider once it has room.
                 UsageSwitchLine(id: liaison.id),
                 ReconnectingLine(
                   otherwise: _working
@@ -384,7 +390,9 @@ class _LiaisonPipeBodyState extends State<LiaisonPipeBody> {
                 ?pipeStateBar(context, pipe),
                 if (open && !pipe.online)
                   _SeenBy(text: pipeOfflineText(pipe), top: true),
-                if (open)
+                if (open && approvesElsewhere)
+                  const _SeenBy(text: pipeChangeElsewhereText, top: true)
+                else if (open)
                   // On a phone, one chip at the box's leading edge.
                   isPhoneLayout(context)
                       ? PhonePipeTarget(
@@ -418,7 +426,7 @@ class _LiaisonPipeBodyState extends State<LiaisonPipeBody> {
                         failed ??
                         (toPipe
                             ? '${pipePeerClaktory(pipe)} sees this.'
-                            // The liaison can pass it on (friend bug #1).
+                            // The liaison can pass it on.
                             : pipe.reviewOutgoing
                             ? 'Goes to ${liaison.name}. If ${liaison.name} '
                                   'passes it on to ${pipePeerClaktory(pipe)}, '

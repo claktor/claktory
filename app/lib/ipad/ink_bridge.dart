@@ -1354,7 +1354,7 @@ class InkJournalEntry {
 }
 
 /// Drawings not yet saved, kept on the iPad until the backend has them
-/// (Matt's decision: the fourth thing a device keeps), by Claktory and
+/// (the fourth thing a device keeps), by Claktory and
 /// document, both named by hash. Native keeps them in the app's private
 /// support folder, protected while the iPad is locked, never backed up.
 class InkJournal {

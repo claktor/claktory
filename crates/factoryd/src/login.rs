@@ -137,7 +137,7 @@ impl Factory {
     /// a key tried again): agents waiting out its usage ask again now,
     /// whatever the providers listing shows. Signing in to an account again
     /// forgets its limits, Fable's too, which the listing doesn't carry, so
-    /// it can look the same (friend bug #3). An agent whose accounts are
+    /// it can look the same. An agent whose accounts are
     /// still all spent asks nothing and waits on. With `read`, its usage and
     /// plan are read again now (a plan upgraded before signing in again).
     pub(crate) fn accounts_changed(&self, provider_id: &str, read: bool) {
@@ -154,7 +154,7 @@ impl Factory {
                 // The new credential changes which providers and models are available.
                 self.refresh_models().await;
                 // What a new key has to spend, before the sign-in shows as
-                // done, so the step can say when it has none (#343 U14).
+                // done, so the step can say when it has none.
                 self.read_provider_credit(provider_id).await;
                 self.accounts_changed(provider_id, true);
                 let mut inner = self.lock();

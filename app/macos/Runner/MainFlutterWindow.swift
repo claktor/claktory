@@ -3,6 +3,7 @@ import Cocoa
 import CoreImage
 import CoreText
 import FlutterMacOS
+import UniformTypeIdentifiers
 
 class MainFlutterWindow: NSWindow {
   /// Key for the window's frame in this app's user defaults on this device.
@@ -147,6 +148,19 @@ class MainFlutterWindow: NSWindow {
       NSWorkspace.shared.notificationCenter.addObserver(
         self, selector: #selector(sightChanged), name: name, object: nil)
     }
+    // The displays asleep, the screen locked or the screen saver up: no one
+    // sees the window, though nothing covers it as an ordinary window would.
+    for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification] {
+      NSWorkspace.shared.notificationCenter.addObserver(
+        self, selector: #selector(screensChanged), name: name, object: nil)
+    }
+    for name in [
+      "com.apple.screenIsLocked", "com.apple.screenIsUnlocked",
+      "com.apple.screensaver.didstart", "com.apple.screensaver.didstop",
+    ] {
+      DistributedNotificationCenter.default().addObserver(
+        self, selector: #selector(screensChanged), name: Notification.Name(name), object: nil)
+    }
     // And the pointer over the window says it's seen, whichever app is in
     // front: Flutter's own hover follows only the key window.
     let pointer = SightPointer { [weak self] in self?.pointerSeen() }
@@ -162,7 +176,7 @@ class MainFlutterWindow: NSWindow {
 
     deviceChannel = FlutterMethodChannel(
       name: "factory/device", binaryMessenger: flutterViewController.engine.binaryMessenger)
-    deviceChannel?.setMethodCallHandler { call, result in
+    deviceChannel?.setMethodCallHandler { [weak self] call, result in
       switch call.method {
       // The Mac's time zone by its IANA name ("Europe/London"), which
       // Flutter can't read: Claktory's browser takes it (#435).
@@ -213,6 +227,18 @@ class MainFlutterWindow: NSWindow {
       case "cancelWebAuth":
         WebAuth.shared.cancel()
         result(nil)
+      case "saveText":
+        // The recovery key as a file (lib/recovery_key.dart): the person
+        // chooses its name and place; nothing is written anywhere else.
+        guard let arguments = call.arguments as? [String: Any],
+          let name = arguments["name"] as? String,
+          let text = arguments["text"] as? String
+        else {
+          result(FlutterError(code: "bad", message: "a name and the text", details: nil))
+          return
+        }
+        guard let self else { return result(nil) }
+        self.saveText(text, named: name, result)
       case "shareFiles":
         // The share menu for files the app fetched (lib/share_files.dart,
         // #418): AirDrop, Messages, Mail…
@@ -257,6 +283,7 @@ class MainFlutterWindow: NSWindow {
   deinit {
     if let pasteMonitor { NSEvent.removeMonitor(pasteMonitor) }
     NSWorkspace.shared.notificationCenter.removeObserver(self)
+    DistributedNotificationCenter.default().removeObserver(self)
   }
 
   /// Height of the band at the top of the window: the sidebar's top row and
@@ -317,8 +344,34 @@ class MainFlutterWindow: NSWindow {
   /// changes draws for no one (Abbacchio's #384 d).
   private var seen: Bool {
     if isMiniaturized || !isVisible || NSApp.isHidden || !isOnActiveSpace { return false }
+    if unwatched { return false }
     if isKeyWindow { return true }
     return Self.uncovered(windowNumber) ?? occlusionState.contains(.visible)
+  }
+
+  /// The displays are asleep, the screen saver is up or the screen is
+  /// locked: what the window server says of the windows then still has
+  /// this one uncovered, since the lock and the screen saver aren't
+  /// ordinary windows.
+  private var displaysAsleep = false
+  private var screenSaver = false
+  private var unwatched: Bool { displaysAsleep || screenSaver || Self.sessionLocked }
+
+  /// The login session's screen is locked, as the window server has it now.
+  private static var sessionLocked: Bool {
+    guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
+    return (session["CGSSessionScreenIsLocked"] as? NSNumber)?.boolValue ?? false
+  }
+
+  @objc private func screensChanged(_ notification: Notification) {
+    switch notification.name {
+    case NSWorkspace.screensDidSleepNotification: displaysAsleep = true
+    case NSWorkspace.screensDidWakeNotification: displaysAsleep = false
+    case Notification.Name("com.apple.screensaver.didstart"): screenSaver = true
+    case Notification.Name("com.apple.screensaver.didstop"): screenSaver = false
+    default: break
+    }
+    sightChanged(notification)
   }
 
   /// Whether any of window `number` on screen is left uncovered by other
@@ -396,6 +449,7 @@ class MainFlutterWindow: NSWindow {
 
   /// The pointer is over the window: it's seen, whatever occlusion said.
   private func pointerSeen() {
+    if unwatched { return }
     let now = Date()
     // Moves come many times a second; once a second is plenty.
     guard now.timeIntervalSince(lastPointerSeen) >= 1 else { return }
@@ -426,8 +480,10 @@ class MainFlutterWindow: NSWindow {
   private func tellSight() {
     let now = sight
     nudgeLifecycle(seen: now["shown"] == true)
+    // Locked or asleep, waking or unlocking says so: nothing to look for.
     let covered =
       now["shown"] != true && isVisible && !isMiniaturized && !NSApp.isHidden && isOnActiveSpace
+      && !unwatched
     if covered, coverWatch == nil {
       let watch = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.tellSight() }
       watch.tolerance = 0.25
@@ -443,6 +499,8 @@ class MainFlutterWindow: NSWindow {
   }
 
   /// Actual Size, Zoom In and Zoom Out at the top of the View menu, as in
+  /// Safari, then Focus on Needs You (added by AppDelegate once the menu is
+  /// loaded). Before: Actual Size, Zoom In and Zoom Out, as in
   /// Safari (added by AppDelegate once the menu is loaded). The app's own keys (app/lib/zoom.dart) get ⌘+, ⌘− and ⌘0
   /// first; these items are how the menu shows them, and take the keys when
   /// nothing in the window has focus.
@@ -468,11 +526,19 @@ class MainFlutterWindow: NSWindow {
       view.insertItem(item, at: index)
     }
     view.insertItem(.separator(), at: items.count)
+    // Focus mode's key, where the menu shows it:
+    // ⇧⌘N, which the app takes first, as the zoom keys.
+    let focus = NSMenuItem(
+      title: "Focus on Needs You", action: #selector(focusMode(_:)), keyEquivalent: "n")
+    focus.keyEquivalentModifierMask = [.command, .shift]
+    view.insertItem(focus, at: items.count + 1)
+    view.insertItem(.separator(), at: items.count + 2)
   }
 
   @objc func actualSize(_ sender: Any?) { menuChannel?.invokeMethod("actualSize", arguments: nil) }
   @objc func zoomIn(_ sender: Any?) { menuChannel?.invokeMethod("zoomIn", arguments: nil) }
   @objc func zoomOut(_ sender: Any?) { menuChannel?.invokeMethod("zoomOut", arguments: nil) }
+  @objc func focusMode(_ sender: Any?) { menuChannel?.invokeMethod("focusMode", arguments: nil) }
 
   // Unsent drafts in the agents' message boxes, by agent id (app/lib/drafts.dart),
   // in this app's user defaults on this device: the person's decision, the one
@@ -592,6 +658,34 @@ class MainFlutterWindow: NSWindow {
     }
     panel.beginSheetModal(for: self) { response in
       result(response == .OK ? panel.url?.path : nil)
+    }
+  }
+
+  /// Asks where to save `text` in a sheet on this window, as `name` in
+  /// Downloads unless the person picks another name or folder, and writes
+  /// it readable by them alone; answers its path, or nil when cancelled.
+  private func saveText(_ text: String, named name: String, _ result: @escaping FlutterResult) {
+    let panel = NSSavePanel()
+    panel.nameFieldStringValue = name
+    panel.allowedContentTypes = [.plainText]
+    panel.canCreateDirectories = true
+    panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)
+      .first
+    panel.beginSheetModal(for: self) { response in
+      guard response == .OK, let url = panel.url else { return result(nil) }
+      let files = FileManager.default
+      // The panel asked before replacing one already there.
+      try? files.removeItem(at: url)
+      if files.createFile(
+        atPath: url.path, contents: Data(text.utf8), attributes: [.posixPermissions: 0o600])
+      {
+        result(url.path)
+      } else {
+        result(
+          FlutterError(
+            code: "failed", message: "\(url.deletingLastPathComponent().path) can't be written to",
+            details: nil))
+      }
     }
   }
 

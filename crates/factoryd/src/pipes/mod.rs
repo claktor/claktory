@@ -1,4 +1,4 @@
-//! Pipes (#196): narrow, deliberate chats between one of this Claktory's
+//! Pipes: narrow, deliberate chats between one of this Claktory's
 //! projects and one of another Claktory's. Both people approve a pipe, pick
 //! the agents granted it (its members) and the one woken by what arrives
 //! (its lead), and write their own side's prompt for it. The person can write
@@ -7,7 +7,7 @@
 //! This is the store: what a pipe is and who may use it, its messages, and
 //! the limits code enforces whatever the model does (an outgoing secret scan,
 //! files only from the outbox unless the person approves, Review outgoing,
-//! rate limits and a loop breaker: `agents`; since #346 reading a pipe marks
+//! rate limits and a loop breaker: `agents`; reading a pipe marks
 //! no one, and only a web page read through browser control does). The transport (`crate::pipe_link`)
 //! only carries what this hands it.
 //!
@@ -47,7 +47,7 @@ use crate::pipe_link::{self, Incoming, LinkStatus, Outgoing, Peer, PipeError, Si
 use crate::transcript::now_ms;
 
 /// Where an agent's taint came from: the agents, by id, that what it read
-/// came through (JSON list). Since #346 a mark never spreads, so it's null
+/// came through (JSON list). A mark never spreads, so it's null
 /// on new rows, kept for old ones; the same on the asks and proposals of an
 /// agent that had read a web page (`agents::routes_json`); null for none.
 pub(crate) const TAINT_VIA: &str = "
@@ -106,10 +106,10 @@ CREATE TABLE pipe_secret_approvals (
 );
 ";
 
-/// The migration that added replies (#370 Submit): a held message the
+/// The migration that added replies: a held message the
 /// person sent back to its writer with a comment (state 'discarded'), and a
 /// use of a secret they answered with a comment (state 'denied'). The
-/// comment itself is in decision_notes, never in a pipe table (Fugo).
+/// comment itself is in decision_notes, never in a pipe table.
 pub(crate) const REPLIED: &str = "
 ALTER TABLE pipe_messages ADD COLUMN replied INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE pipe_secret_approvals ADD COLUMN replied INTEGER NOT NULL DEFAULT 0;
@@ -313,20 +313,20 @@ pub(crate) struct Record {
     /// Hashes of the latest agents' messages, to tell repeats.
     pub recent: Vec<u64>,
     /// The loop breaker's latest pause (`count_for_loop`), which a card to
-    /// continue it is bound to (friend bug #32); None in pipes from before.
+    /// continue it is bound to; None in pipes from before.
     pub looped: Option<Looped>,
     /// The other side says its loop breaker paused it (`Pause::Peer`).
     pub peer_looped: bool,
     pub next_seq: u64,
     /// Members quarantined for it (`quarantine`): the person's choice alone.
     pub quarantined: Vec<String>,
-    /// Members that only send to it (#414): pipe_send and pipe_status, never
+    /// Members that only send to it: pipe_send and pipe_status, never
     /// pipe_read, never woken by what arrives nor told the other side's
     /// words, never its lead. Any agent of this Claktory, its project's or
     /// not (Rivet in the workspace), as it never reads the pipe. Never
     /// quarantined as well.
     pub send_only: Vec<String>,
-    /// Agents that gave up leading it (#236's pipe_leave, only:
+    /// Agents that gave up leading it (pipe_leave, only:
     /// "leading"): never made its lead again unless the person chooses
     /// one so.
     pub declined_lead: Vec<String>,
@@ -496,15 +496,6 @@ impl Pipes {
             || data.pipes.values().any(|record| record.quarantined.iter().any(|id| id == agent))
     }
 
-    pub(crate) fn set_errand_agent(&self, agent: &str, errand: bool) {
-        let mut data = self.data();
-        if errand {
-            data.errand_agents.insert(agent.to_owned());
-        } else {
-            data.errand_agents.remove(agent);
-        }
-    }
-
     pub(crate) fn set_curator(&self, agent: &str, curator: bool) {
         let mut data = self.data();
         if curator {
@@ -594,7 +585,7 @@ pub(crate) fn start(factory: &Arc<Factory>) {
     }
 }
 
-/// The pipes, who's marked, and the secret uses retired at start (#346):
+/// The pipes, who's marked, and the secret uses retired at start:
 /// each asker and the secrets it asked for.
 type Loaded = (BTreeMap<String, Record>, BTreeMap<String, Taint>, Vec<(String, Vec<String>)>);
 
@@ -612,7 +603,7 @@ fn load(factory: &Factory) -> rusqlite::Result<Loaded> {
             Err(error) => tracing::error!(pipe = %id, %error, "could not read a pipe"),
         }
     }
-    // #346: reading a pipe or a direct message marks no one any more, so
+    // Reading a pipe or a direct message marks no one any more, so
     // nobody stays marked by one read before, and a secret's use waiting
     // for the person only because of one goes (`expired`, out of Needs
     // you): run again, the command simply runs, or asks afresh if one of its
@@ -723,7 +714,7 @@ pub(crate) struct Message {
     pub files: Vec<FileRecord>,
     pub state: MessageState,
     pub note: String,
-    /// Sent back to its writer by the person's reply (#370): never sent.
+    /// Sent back to its writer by the person's reply: never sent.
     /// The reply is in decision_notes, shown as its note (`for_person`).
     pub replied: bool,
     /// A Claktory line announcing a website shared with this side: its
@@ -978,7 +969,7 @@ pub(crate) fn set_state(factory: &Factory, pipe: &str, seq: u64, state: MessageS
     Some(message)
 }
 
-/// A held message goes back to its writer with the person's reply (#370):
+/// A held message goes back to its writer with the person's reply:
 /// discarded, never sent. The reply is in decision_notes.
 fn sent_back(factory: &Factory, pipe: &str, seq: u64) {
     let changed = factory.store.db().execute(
@@ -1084,7 +1075,7 @@ fn shown(factory: &Factory, pipe: &str, message: &Message) {
 }
 
 /// A message as the person's app shows it: one sent back with their reply
-/// (#370) has the reply as its note, from decision_notes, which nothing
+/// has the reply as its note, from decision_notes, which nothing
 /// that reaches the other side reads.
 fn for_person(factory: &Factory, pipe: &str, message: &Message) -> v1::PipeMessage {
     let mut shown = message.to_proto();
@@ -1277,7 +1268,7 @@ fn over_incoming(factory: &Factory, record: &Record) -> Option<String> {
     None
 }
 
-/// How many agents' messages in a row pause the pipe (#345: 10 tripped on
+/// How many agents' messages in a row pause the pipe (10 tripped on
 /// ordinary conversations; the rate limits and the spend cap bound the
 /// cost, not this).
 const LOOP_AFTER: u32 = 50;
@@ -1286,7 +1277,7 @@ const LOOP_AFTER: u32 = 50;
 const REPEATS: usize = 3;
 const REPEAT_WINDOW: usize = 10;
 /// Only a text at least this long counts as repeated: "OK" or "Thanks" said
-/// again is no loop (Fugo's #345 rule).
+/// again is no loop.
 const REPEAT_MIN_CHARS: usize = 40;
 
 /// Which rule paused a pipe.
@@ -1307,7 +1298,7 @@ fn repeatable(text: &str) -> Option<String> {
 /// it (the other side's can't: it could claim any message is its
 /// person's); `LOOP_AFTER` others in a row, or a long text `REPEATS` times
 /// among the latest `REPEAT_WINDOW`, pause the pipe. Only exchanges count:
-/// a member that only sends never comes here (friend bug #33).
+/// a member that only sends never comes here.
 pub(crate) fn count_for_loop(factory: &Arc<Factory>, pipe: &str, author: Author, text: &str) {
     use std::hash::{Hash, Hasher};
     let tripped = {
@@ -1432,7 +1423,7 @@ fn known(factory: &Factory, id: &str) -> Result<Record, RequestError> {
 
 /// CreatePipeInvite: a pipe from `project`, INVITED, and its code.
 pub(crate) async fn create_invite(factory: &Arc<Factory>, request: &v1::CreatePipeInvite) -> Result<v1::PipeInvite, RequestError> {
-    // From an agent's card (#244): only while it waits.
+    // From an agent's card: only while it waits.
     if !request.start_id.is_empty() {
         start::check(factory, &request.start_id, v1::PipeStartKind::Invite)?;
     }
@@ -1652,7 +1643,7 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
         return Err(RequestError::Pipe("This pipe isn't waiting for your approval.".to_owned()));
     }
     let starter = || replies_to(factory, &factory.lock().config, &record.id);
-    // A reply (#370 Submit): the pipe still waits, unchanged; the agent
+    // A reply: the pipe still waits, unchanged; the agent
     // that set it up gets the person's words.
     if request.reply {
         if comment.is_empty() {
@@ -1667,7 +1658,7 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
         factory.deliver_event(&agent, text, crate::factory::host_event(summary));
         return Ok(());
     }
-    // From an agent's card (#471 G1): only approving, with the person's
+    // From an agent's card: only approving, with the person's
     // own choices; dismissing or replying is on the card itself.
     if !request.card_id.trim().is_empty() && (!request.approve || request.reply) {
         return Err(RequestError::Pipe("Dismiss the request, or reply on it, in the request itself.".to_owned()));
@@ -1838,7 +1829,7 @@ fn checked_members(factory: &Factory, record: &Record, ids: &[String]) -> Result
 }
 
 /// The same, where those in `send_only` may be agents outside the pipe's
-/// project (#414): they never read it.
+/// project: they never read it.
 fn checked_members_sending(factory: &Factory, record: &Record, ids: &[String], send_only: &[String]) -> Result<Vec<String>, RequestError> {
     let inner = factory.lock();
     let mut members = Vec::new();
@@ -1847,7 +1838,7 @@ fn checked_members_sending(factory: &Factory, record: &Record, ids: &[String], s
         if agent.project.as_deref() != Some(record.project.as_str()) && !send_only.contains(id) {
             return Err(RequestError::Pipe(format!("{} isn't in this pipe's project.", agent.name)));
         }
-        // A curator never reaches a pipe (pipes-automation.md §3).
+        // A curator never reaches a pipe.
         if factory.pipes.curator(id) {
             return Err(RequestError::Pipe(format!("{} reads reports, so it can't be in a pipe.", agent.name)));
         }
@@ -1858,7 +1849,7 @@ fn checked_members_sending(factory: &Factory, record: &Record, ids: &[String], s
     Ok(members)
 }
 
-/// The members to only send (#414), checked against the members after the
+/// The members to only send, checked against the members after the
 /// change (`members`), who's quarantined, the lead and the liaison
 /// (`bound`): refused, saying why, when one isn't a member, is quarantined,
 /// leads or is the liaison.
@@ -2111,7 +2102,7 @@ pub(crate) fn update(factory: &Arc<Factory>, request: &v1::UpdatePipe) -> Result
 }
 
 /// Whether Review outgoing turns itself on when a member that can run
-/// commands joins a pipe (Fugo's suggestion): the person's decision, off
+/// commands joins a pipe: the person's decision, off
 /// until they make it.
 const REVIEW_WITH_COMMANDS: bool = false;
 
@@ -2139,7 +2130,7 @@ pub(crate) fn set_pipe_state(factory: &Arc<Factory>, request: &v1::SetPipeState)
 }
 
 /// SetPipeState by the person (`by` None), or by an admin agent, by its
-/// name (#423's pipes_settings): the pipe's line says who.
+/// name (pipes_settings): the pipe's line says who.
 pub(crate) fn set_pipe_state_by(factory: &Arc<Factory>, request: &v1::SetPipeState, by: Option<&str>) -> Result<(), RequestError> {
     let who = by.unwrap_or("You");
     let record = known(factory, &request.pipe_id)?;
@@ -2290,11 +2281,42 @@ fn delete(factory: &Factory, id: &str) {
     factory.broadcast_workspace(&factory.lock());
 }
 
-/// A project is deleted: its pipes close.
+/// A project is deleted: its open pipes close, the other side told as when
+/// the person closes one, and all its pipes go with it, closed ones too,
+/// with their messages here, since nothing could show or open them again
+/// . Its pipe groups go too. The other
+/// side keeps its own copy.
 pub(crate) fn project_gone(factory: &Arc<Factory>, project: &str) {
-    for record in factory.pipes.all().into_iter().filter(|record| record.project == project && record.state != State::Closed) {
-        pipe_link::close(factory, &record.id);
-        close_with(factory, &record.id, "Its project was deleted.");
+    for record in factory.pipes.all().into_iter().filter(|record| record.project == project) {
+        if record.state != State::Closed {
+            pipe_link::close(factory, &record.id);
+            close_with(factory, &record.id, "Its project was deleted.");
+        }
+        delete(factory, &record.id);
+    }
+    groups::project_gone(factory, project);
+}
+
+/// Agents moved to another project leave its pipes' member lists, as if
+/// they'd left, so the list says who's in it; before, they were only left
+/// out of what it shows. Never one limited to the pipe: that containment
+/// is the person's to lift, and it stays one of its agents. A lead among
+/// them is replaced by `lead::settle_all`, which runs next.
+pub(crate) fn moved_out(factory: &Arc<Factory>) {
+    let config = factory.lock().config.clone();
+    let elsewhere = |record: &Record, id: &String| {
+        !record.quarantined.contains(id) && config.agent(id).is_some_and(|agent| agent.project.as_deref() != Some(record.project.as_str()))
+    };
+    for record in factory.pipes.all() {
+        if !record.members.iter().any(|id| elsewhere(&record, id)) {
+            continue;
+        }
+        change(factory, &record.id, |record| {
+            let gone: Vec<String> = record.members.iter().filter(|id| elsewhere(record, id)).cloned().collect();
+            record.members.retain(|id| !gone.contains(id));
+            record.send_only.retain(|id| !gone.contains(id));
+            record.declined_lead.retain(|id| !gone.contains(id));
+        });
     }
 }
 
@@ -2383,7 +2405,7 @@ pub(crate) fn not_open(record: &Record) -> String {
 }
 
 /// How a message's note starts when the other side refused it; their
-/// words follow, so a member that only sends (#414) is never shown the rest.
+/// words follow, so a member that only sends is never shown the rest.
 pub(crate) const PEER_REFUSED: &str = "The other side refused it.";
 
 /// Hands a message that passed every check to the transport, once its
@@ -2401,7 +2423,7 @@ pub(crate) fn transmit(factory: &Arc<Factory>, pipe: &str, message: &Message, vi
     }
     let files = message.files.iter().map(|file| pipe_link::OutFile { name: file.name.clone(), path: file.path.clone() }).collect();
     // Its writer only sends, as it stands now: the other side's loop
-    // breaker leaves it out too (friend bug #33).
+    // breaker leaves it out too.
     let sends_only = matches!(via, Via::Agent { .. }) && factory.pipes.get(pipe).is_some_and(|record| record.sends_only(&message.agent));
     let outgoing = Outgoing { msg_id: message.msg_id.clone(), via, text: message.text.clone(), files, sends_only };
     match pipe_link::send(factory, pipe, outgoing) {
@@ -2427,7 +2449,7 @@ pub(crate) fn decide_message(factory: &Arc<Factory>, request: &v1::DecidePipeMes
         return Err(RequestError::Pipe("No such message in this pipe.".to_owned()));
     };
     let person = factory.person_capitalized();
-    // A reply (#370 Submit), on a message this side's agent wrote: it isn't
+    // A reply, on a message this side's agent wrote: it isn't
     // sent, and goes back to its writer with the person's words.
     if request.reply {
         if comment.is_empty() {
@@ -2510,7 +2532,7 @@ pub(crate) fn decide_message(factory: &Arc<Factory>, request: &v1::DecidePipeMes
     Ok(())
 }
 
-/// pipe_withdraw (friend bug #19): `agent` takes back its own message held
+/// pipe_withdraw: `agent` takes back its own message held
 /// for the person, once it no longer applies (they settled it in its chat,
 /// say). It's discarded, never sent, and leaves their Needs you at once;
 /// `reason` is kept apart from the pipe tables (decision_notes, kind
@@ -2556,7 +2578,7 @@ fn unchanged(factory: &Factory, message: &Message) -> Result<(), (String, &'stat
     for file in &message.files {
         let bytes = std::fs::read(&file.path).map_err(|_| (format!("{} is gone.", file.name), ""))?;
         if !file.sha256.is_empty() && agents::sha256(&bytes) != file.sha256 {
-            // A file the person attached is sent from their upload (friend bug #15).
+            // A file the person attached is sent from their upload.
             let uploads = factory.home.agent_dir(&message.agent).join("uploads");
             let attached = file.path.starts_with(&uploads) || uploads.canonicalize().is_ok_and(|real| file.path.starts_with(real));
             let when = if attached { "it was attached" } else { "the message was written" };
@@ -2744,8 +2766,8 @@ impl pipe_link::Store for Link {
             return Err("It couldn't be kept.".to_owned());
         }
         // What the other side says an agent that only sends wrote takes no
-        // part in the loop breaker, not even a place among the latest
-        // (friend bug #33; Fugo 33515); a person's counts whatever it says.
+        // part in the loop breaker, not even a place among the latest;
+        // a person's counts whatever it says.
         if !(message.sends_only && author == Author::TheirAgent) {
             count_for_loop(factory, pipe, author, &message.text);
         }
@@ -2791,7 +2813,7 @@ impl pipe_link::Store for Link {
         if paused == Some(true) {
             let record = factory.pipes.get(pipe);
             let who = record.as_ref().map(|record| record.peer_who()).unwrap_or_default();
-            // Their loop breaker, not their person (Abbacchio row 1177):
+            // Their loop breaker, not their person:
             // "Ana's Claktory paused it".
             let said = if looped {
                 let whose = record.as_ref().map_or(who, Record::peer_claktory_owned);
@@ -2813,9 +2835,9 @@ impl pipe_link::Store for Link {
             record.peer_looped = false;
             // Their person continued their loop breaker's pause: this
             // side's repeats start over too, so the post that waited behind
-            // it doesn't trip it here at once (Abbacchio rows 1193-1195).
+            // it doesn't trip it here at once.
             // Never the count: their word can't lift that bound, which only
-            // this side's person resets (Fugo 33882).
+            // this side's person resets.
             if looped {
                 record.recent.clear();
             }
@@ -2990,7 +3012,7 @@ pub fn upgrade_for_test(factory: &Arc<Factory>, pipe: &str) {
 }
 
 /// Tests: `agent` on `pipe` (and limited to it, `limited`) as a Claktory
-/// from before #414's boundary could have it, unchecked.
+/// from an older version could have it, unchecked.
 #[doc(hidden)]
 pub fn join_unchecked_for_test(factory: &Arc<Factory>, pipe: &str, agent: &str, limited: bool) {
     change(factory, pipe, |record| {
@@ -3161,7 +3183,7 @@ pub fn messages_for_test(factory: &Factory, pipe: &str) -> Vec<v1::PipeMessage> 
 
 #[cfg(test)]
 mod tests {
-    /// Row 1730: the other side's words about itself arrive without what
+    /// The other side's words about itself arrive without what
     /// could hide or reorder text where they show.
     #[test]
     fn the_other_side_s_names_arrive_without_hidden_characters() {

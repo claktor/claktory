@@ -1,9 +1,10 @@
-// Usage on a phone (#227, Matt): what's left of each subscription first,
+// Usage on a phone: what's left of each subscription first,
 // each account a row of the same width with its limits at a glance and the
 // rest a tap away; the range a segmented control that fits; then the
 // report. A Mac's page keeps its tabs, report and cards as they were.
 import 'dart:io';
 
+import 'package:factory_app/identity.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/usage_view.dart';
@@ -127,12 +128,13 @@ Future<Harness> _phone(
   WidgetTester tester, {
   Size size = const Size(375, 667),
   double text = 1,
+  Workspace? workspace,
 }) async {
   debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
   addTearDown(() => debugDefaultTargetPlatformOverride = null);
   tester.platformDispatcher.textScaleFactorTestValue = text;
   addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
-  final harness = Harness(_workspace());
+  final harness = Harness(workspace ?? _workspace());
   harness.backend.usageReport = _report();
   await harness.show(tester, size: size);
   await pumpFrames(tester);
@@ -243,6 +245,25 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('at the largest text, an open row keeps each limit\'s name '
+      'whole, its percent under it when they don\'t fit side by side', (
+    tester,
+  ) async {
+    await _phone(tester, text: 3.1, size: const Size(375, 1600));
+    await tester.tap(find.text('matt@claktory.com'));
+    await pumpFrames(tester);
+    for (final (label, percent) in [('Weekly', '92%'), ('5-hour', '34%')]) {
+      final name = find.descendant(of: _details, matching: find.text(label));
+      final share = find.descendant(of: _details, matching: find.text(percent));
+      expect(
+        tester.getSize(name).height,
+        tester.getSize(share).height,
+        reason: '$label on one line',
+      );
+    }
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets("a row says what's used at a glance, or why it's paused; a "
       'tap opens every limit and its resets, another folds them', (
     tester,
@@ -266,6 +287,55 @@ void main() {
     await tester.tap(find.text('matt@claktory.com'));
     await pumpFrames(tester);
     expect(find.text('Weekly (Opus)'), findsNothing);
+  });
+
+  testWidgets('an open row says what extra usage may spend past the '
+      'limits, in danger once its cap is reached', (tester) async {
+    final workspace = _workspace();
+    final accounts = workspace.providers.first.accounts;
+    accounts[0].usage.extraUsage = ExtraUsage(
+      enabled: true,
+      usedMinor: Int64(1250),
+      limitMinor: Int64(5000),
+      currency: 'USD',
+      decimalPlaces: 2,
+    );
+    accounts[1].usage.extraUsage = ExtraUsage(
+      enabled: true,
+      usedMinor: Int64(2000),
+      limitMinor: Int64(2000),
+      currency: 'EUR',
+      decimalPlaces: 2,
+      limitReached: true,
+    );
+    workspace.providers[1].accounts.first.usage.extraUsage = ExtraUsage();
+    await _phone(tester, workspace: workspace, size: const Size(375, 1600));
+    expect(find.textContaining('Extra usage'), findsNothing);
+
+    await tester.tap(find.text('matt@claktory.com'));
+    await tester.tap(find.text('matt@home.test'));
+    await tester.tap(find.text('matt@openai.test'));
+    await pumpFrames(tester);
+    expect(
+      find.text('Extra usage on · used \$12.50 of \$50 this month'),
+      findsOneWidget,
+    );
+    final reached = find.text(
+      'Extra usage limit reached · used €20 of €20 this month',
+    );
+    expect(reached, findsOneWidget);
+    expect(find.text('Extra usage off'), findsOneWidget);
+    final palette = Palette.of(tester.element(reached));
+    expect(tester.widget<Text>(reached).style?.color, palette.danger);
+    expect(
+      tester
+          .widget<Text>(
+            find.text('Extra usage on · used \$12.50 of \$50 this month'),
+          )
+          .style
+          ?.color,
+      palette.textMuted,
+    );
   });
 
   testWidgets('a range chosen asks for it, and reads as chosen', (

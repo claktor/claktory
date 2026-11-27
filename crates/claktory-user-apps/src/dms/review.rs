@@ -1,11 +1,11 @@
 //! An agent's message, sent only once the person approved exactly it
-//! (D4b; dms.md §7, "Rivet path and exact-content review").
+//! (D4b, "Rivet path and exact-content review").
 //!
 //! - **Proposal.** An agent with a live `dm.send` grant on a conversation
 //!   proposes a message (`POST conversations/<id>/proposals`, from its
 //!   Claktory's backend, for the agent). The message itself is an MLS
 //!   application message in the Claktory's channel with the person's
-//!   devices, which goes through the person's home (#451), never here: the
+//!   devices, which goes through the person's home, never here: the
 //!   worker keeps only its digest (SHA-256 of its MLS bytes), bound to one
 //!   revision, the conversation and its generation, and the agent (its
 //!   Claktory, registration epoch and incarnation) and grant.

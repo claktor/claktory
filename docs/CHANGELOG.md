@@ -6,6 +6,63 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.27
+Released 2026-11-27 20:55 UTC.
+See each project's agents as a team in the sidebar, sign in to Grok, and give any agent Claktory's browser with one switch.
+- Fixed: In focus mode on an iPad, Return and the on-screen keyboard's Send key answer a request that asks for your words, as they already did for a reply.
+- Fixed: In Charts, a chart's lowest value label sits level with its line, now drawn, so a point at 1 no longer reads as 0.
+- Changed: On a phone, every question that asks you to confirm puts its action full width at the bottom, within your thumb's reach, with Cancel under it, so no button's words are ever cut.
+- Fixed: In the phone's search, a pipe whose agent reached its daily limit says it's paused, as its row in the list does.
+- Added: Download beside Copy when you save your recovery key saves it as a text file wherever you choose, such as a USB drive or Files.
+- Changed: On your iPhone and Android phone, the icons in a menu that rises from the bottom, and those in the list of projects and agents, grow with your text size, up to twice their size, so they keep up with the words at the largest sizes.
+- Changed: Settings → Secrets no longer shows the last characters of a password, passphrase or PIN, so a glance at your screen gives none of it away. A login that's only ever typed into its site no longer warns that its username is too short to hide.
+- Changed: The foot of the sidebar is simpler: Settings, and More for Usage, Monitors, the Map, the Marketplace and What's new. On a Mac, ⌘, opens Settings.
+- Fixed: When the Claktory at the other end of a pipe stops, the pipe shows it offline right away instead of up to half a minute later.
+- Added: When an agent asks to sign in to a site you already have a login for, Use a different login… lets you sign in with another one instead.
+- Changed: While Rivet is paused on a usage limit, + in the sidebar opens the New project or New agent form at once and says why, instead of a message Rivet can't read yet. The + buttons now say what they add, such as "New agent in Bakery".
+- Added: On an iPad with a keyboard, ⌘Z puts back an agent you just moved in the sidebar, while its row offers Undo, and Undo Move is in the menu you see when you hold ⌘. With a trackpad or mouse, the sidebar's rows now light up under the pointer, as on a Mac.
+- Changed: On a phone, the list always shows all your projects, each folding with a tap. Show only this project is now only on a Mac and an iPad, and focusing a project there no longer narrows your phone's list.
+- Added: After you drag an agent in the sidebar, its row says whom it now reports to, with Undo for a few seconds; on a phone, close the list before then and Undo waits at the foot of the screen. Moving it into another project asks first and lists what changes, such as its folder, whom it can message and the pipes it stops answering. Dropping it into a folded project or agent opens it, so you see where it went. Holding it still at the top or bottom of the list keeps the list scrolling.
+- Added: Usage and the usage circles' cards show whether a Claude subscription's extra usage is on, and what it spent this month of its cap, so you know when you're paying past your plan's limits.
+- Changed: To give an agent the browser, turn on Browser in its settings, or ask Rivet. Each agent's browser is its own, and Settings → Claktory's browser shows where each is signed in, with Sign out, and History shows who turned each agent's browser on or off. Errands, and Use for errands…, are gone.
+- Added: Once a day, agents with a checklist are reminded of items nobody has touched in a while, so queued work isn't forgotten. Their lead hears about items left longer, and which agents are free. Change how long, or turn it off, in the agent's Checklist options.
+- Changed: The sidebar shows each project's agents as a team, each under the agent it reports to, with the folder it works in beside its role. Click a project to fold it away; its ⋯ menu holds Files, Add an agent…, Connect a pipe…, New pipe group…, Show only this project and Project settings….
+- Added: You can sign in to Grok with your SuperGrok or X Premium+ subscription in Settings → Providers, and run agents on Grok 4.7 and xAI's other models. Your sign-in is kept with your secrets, nowhere else.
+- Added: Pull requests, issues and comments your agents write on GitHub and similar sites end with a short "Made with Claktory" line. Turn it off in Settings → General.
+- Fixed: Agents with a standing monitor are reminded of their open checklist items again, and an agent tracking items someone else owns hears about the ones that haven't moved for a day.
+- Added: On an iPad, drag files, photos and videos from Files, Photos or another app onto Claktory to add them to your message or to a request's answer, as the paperclip does. Text you drag in goes into the message box.
+- Changed: When an agent needs a website login, it asks in one request that names the site and has fields for your email and password, which your iPhone or Android phone can fill from your saved passwords. If one of your saved logins fits, one tap gives it. Claktory types the login on that site itself, so the agent never sees it, and you're warned when the page only looks like the site your login is for.
+- Changed: When an agent needs you to pay, its request opens the payment page in your own browser on the device you're using, then asks you to say when you've paid.
+- Fixed: In History, requests from an agent's browser show their own heading instead of the web page's title.
+- Changed: On a Mac with Claktory's browser set up, agents can't use Apple's container tool or read its folder, where the browser keeps its sessions. Claktory itself still runs the browser there.
+- Changed: Claktory's browser closes after 10 minutes unused, even when an agent leaves it open, and doesn't start when your computer is short of memory: the agent is told why.
+- Changed: On Linux, Claktory's browser asks you to run its setup command once more. After that, only Claktory itself can start its browser, never another program running as you.
+- Changed: History videos keep their numbers steady as they count, show the tokens your agents used, and say what's being done on a line of its own at their foot.
+- Changed: When you share a History replay, choose where it's going, such as X or TikTok, and Claktory makes the video in that place's shape, with its words away from where the app crops and puts its buttons.
+- Fixed: With many usage circles at the foot of the sidebar, the + that adds an AI provider stays at the end of their first line instead of wrapping onto a line of its own.
+- Changed: Files for a project whose agent isn't the one shown open as a page of their own, instead of beside another project's agent; a file opens on the page, and ‹ Files goes back. Files also show where the project's folder is, with Show in Finder on the Mac that runs your agents, and right-clicking a file there offers Show in Finder.
+- Fixed: While Claktory makes your History video, you see its progress in the full-screen Map too.
+- Changed: Deleting a project now also closes its pipes, telling the people at the other end, and deletes them with its pipe groups. An agent you move to another project leaves its old project's pipes, unless it's limited to one.
+- Fixed: On your iPhone, tapping a notification about an alert opens Needs you at that alert, as it does on Android.
+- Added: Android phones get notifications from your Claktory even while Claktory is closed, once you allow them. They're private: only your phone can read what they say.
+- Changed: On a phone, Needs you is the list, with no Focus mode button: tap a request to answer it on its own screen, and you're back at the list once it's answered. Focus mode stays on a Mac and an iPad.
+- Fixed: Signing in on a device always uses claktory.com unless a Claktory you connect to asks for its own server, and then it says which.
+- Changed: Only Rivet and agents that lead others can send you urgent alerts, and several agents' alerts about the same thing reach you as one. Choose who else can in Settings → Notifications.
+- Changed: The examples that take turns in a message box stop after one round while you're not using Claktory, which saves battery on a phone. They start again when you tap, type or scroll.
+- Changed: Project settings starts with the project's folder, with Show in Finder on the Mac that runs your agents, and New project shows where its folder will be as you type its name.
+- Changed: Deleting a project says where its files stay and which pipes close, and offers Archive instead.
+- Changed: In an agent's settings, choosing another project says what that changes: which folder it works in and whom it can message.
+- Fixed: A message with a voice note or a photo sent while your Claktory was offline now sends once it's back.
+- Fixed: After an update, a Mac no longer asks you to allow itself as a new device.
+- Fixed: Names can hold emoji made of several joined together again, such as 👩‍💻 or 🏳️‍🌈.
+- Fixed: When Claktory restarts, such as for an update, your phones and other computers see it at once and connect again sooner, instead of waiting for the connection to time out.
+- Fixed: When one of your accounts with a provider shows its usage at 100%, agents use another account that still has room, and go back once its limit resets. Before, they could stay on the full account until the provider refused a request.
+- Fixed: A Claktory's name with unusual characters reads as it should when you connect with a code, in an app's access and when you sign out, in older versions of the app too.
+- Fixed: Claktory uses almost no power while your Mac is locked or its display is asleep.
+- Changed: On a computer or a full-width iPad, Needs you in the sidebar opens focus mode straight away, with what's stopping your agents first, then the newest. Done or Esc takes you back.
+- Changed: On your phone, documents, PDFs and text files get the screen as pictures and videos do. Tap the page to hide or show its header, and turned sideways the header steps aside after a moment. The page reaches the edges of the screen with the words clear of the notch, turning your phone keeps your place, and a picture in a document is never taller than the screen.
+- Fixed: On iPhone, videos play with their sound when the ring switch is on silent, as in Photos. Other apps' sound pauses while a video plays and comes back when it stops.
+
 ## v0.1.26
 Released 2026-11-27 09:54 UTC.
 Let your agents run errands on websites in a browser of their own, while your phone uses less battery when you leave Claktory open.
@@ -21,6 +78,7 @@ Let your agents run errands on websites in a browser of their own, while your ph
 - Fixed: In focus mode on an iPad, Return in the answer field sends what you typed, and the on-screen keyboard's Return key reads Send. Shift-Return still starts a new line.
 - Fixed: A long secret made of the same few characters over and over no longer makes every command that uses it wait minutes to start.
 - Fixed: On an iMac, a Mac mini or a Mac Studio, this Mac's section in Settings now shows a desktop, as its tile does, instead of a laptop.
+- Fixed: If the connection drops while you're signing in to Claktory, the sign-in stays, with what you typed, instead of showing the app behind it.
 
 ## v0.1.25
 Released 2026-11-27 06:29 UTC.

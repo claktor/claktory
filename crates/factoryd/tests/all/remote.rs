@@ -114,7 +114,7 @@ pub(crate) type Socket = WebSocketStream<tokio::io::Join<RecvStream, SendStream>
 /// the tunnel fails connect.
 async fn loopback(addr: SocketAddr) -> WebSocketStream<tokio::net::TcpStream> {
     let tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
-    tokio_tungstenite::client_async("ws://factory/", tcp).await.expect("websocket").0
+    tokio_tungstenite::client_async(format!("ws://{addr}/"), tcp).await.expect("websocket").0
 }
 
 /// A client on a new stream of the connection, as the app's tunnel makes one.
@@ -206,15 +206,28 @@ pub(crate) async fn another_device(addr: SocketAddr, name: &str) -> (Client, v1:
     (client, workspace)
 }
 
+/// Jotaro 51447: a backend stopping closes its tunnel, so a device sees
+/// its connection end at once, not after a timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stopping_backend_closes_the_tunnel() {
+    let dir = temp_dir();
+    let (_addr, factory) = start(&dir).await;
+    let local = parse(&local_pairing(&dir).await);
+    let app = new_device().await;
+    let connection = dial(&app, &local, &local.addresses).await.expect("let in");
+    let mut socket = open(&connection).await;
+    assert!(matches!(hello(&mut socket, &local.token).await, Body::Welcome(_)));
+    factory.close_tunnel(std::time::Duration::from_secs(2)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), connection.closed()).await.expect("closed at once, not timed out");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn this_machines_app_connects_through_the_tunnel_with_remote_access_off() {
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
     let written = local_pairing(&dir).await;
     let local = parse(&written);
-    use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(dir.join("home/remote/local-pairing")).expect("file").permissions().mode();
-    assert_eq!(mode & 0o777, 0o600, "only this user reads it");
+    assert_eq!(crate::common::mode(&dir.join("home/remote/local-pairing")), 0o600, "only this user reads it");
     assert!(local.relays.is_empty(), "no relays while remote access is off: {written}");
     assert!(matches!(local.addresses.as_slice(), [address] if address.ip().is_loopback()), "{written}");
 
@@ -245,7 +258,8 @@ async fn this_machines_app_connects_through_the_tunnel_with_remote_access_off() 
     match hello(&mut unknown, "").await {
         Body::Error(error) => {
             assert_eq!(error.code(), ErrorCode::Unauthorized);
-            assert!(error.message.contains("remote/local-pairing"), "{}", error.message);
+            let says = if cfg!(windows) { "own Claktory app" } else { "remote/local-pairing" };
+            assert!(error.message.contains(says), "{}", error.message);
         }
         other => panic!("expected unauthorized, got {other:?}"),
     }
@@ -275,6 +289,29 @@ async fn this_machines_app_connects_through_the_tunnel_with_remote_access_off() 
     assert!(matches!(hello(&mut unknown, "").await, Body::Error(error) if error.code() == ErrorCode::Unauthorized));
 }
 
+/// On Windows remote access goes through the relays only: listening on a
+/// network address would raise the firewall's "Allow access" prompt, which
+/// a Standard account can only cancel. So a pairing code names its relay
+/// and no address.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn on_windows_remote_access_goes_through_the_relays_only() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let relay = "http://127.0.0.1:9/";
+    let relays = v1::SetRemoteAccess { relays: vec![relay.into()], set_relays: true, ..Default::default() };
+    assert!(matches!(apply_request(&mut client, &mut view, client_message::Body::SetRemoteAccess(relays)).await, Body::Ack(_)));
+    let pairing = client_message::Body::CreatePairing(v1::CreatePairing { name: "Phone".into(), host: String::new() });
+    let Body::PairingCode(made) = apply_request(&mut client, &mut view, pairing).await else { panic!("a pairing code") };
+    let code = parse(&made.code);
+    assert_eq!(code.relays, [relay], "{}", made.code);
+    assert!(code.addresses.is_empty(), "{}", made.code);
+    view.follow(&mut client, |view| view.workspace.remote.as_ref().is_some_and(|remote| remote.on)).await;
+}
+
+#[cfg_attr(windows, ignore = "its device reaches this machine directly, and on Windows remote access goes through the relays only")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_and_unpair_cuts_them_off() {
     let dir = temp_dir();
@@ -429,6 +466,7 @@ async fn device_that_never_checks() -> Endpoint {
 /// before; let in, it's checked only every 25 s, which leaves an idle phone's
 /// radio alone; and unpaired then, its session and connection still close at
 /// once, without waiting for any timeout.
+#[cfg_attr(windows, ignore = "its device reaches this machine directly, and on Windows remote access goes through the relays only")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn claktory_checks_a_device_rarely_only_once_its_let_in_and_still_closes_it_at_once_when_unpaired() {
     let dir = temp_dir();
@@ -480,6 +518,8 @@ async fn claktory_checks_a_device_rarely_only_once_its_let_in_and_still_closes_i
 /// paired device still comes in (only when it came isn't noted), one that
 /// would be new is told it's the disk, a devices file that can't be read
 /// keeps the devices connected, and none of it says "not paired".
+// The disk turns read-only by modes; on Windows that would take DACLs.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_disk_that_fails_unpairs_nobody() {
     use std::os::unix::fs::PermissionsExt;
@@ -587,12 +627,15 @@ async fn an_app_browses_this_machines_folders() {
         std::fs::create_dir_all(browse.join(folder)).expect("folder");
     }
     std::fs::write(browse.join("notes.txt"), "a file").expect("file");
-    std::os::unix::fs::symlink(browse.join("beta"), browse.join("linked")).expect("link");
+    crate::common::symlink(&browse.join("beta"), &browse.join("linked")).expect("link");
     let list = |path: &str| client_message::Body::ListFolders(v1::ListFolders { path: path.into() });
 
     // Folders only, links to folders too, sorted, hidden ones flagged.
     let Body::FolderList(listed) = client.request(list(&browse.display().to_string())).await.body else { panic!("no list") };
+    #[cfg(unix)]
     let browse = std::fs::canonicalize(&browse).expect("real path");
+    #[cfg(windows)]
+    let browse = factoryd::windows::fs::canonical(&browse).expect("real path");
     assert_eq!(
         (listed.path.as_str(), listed.parent.as_str()),
         (browse.to_str().expect("utf-8"), browse.parent().expect("parent").to_str().expect("utf-8"))
@@ -611,7 +654,7 @@ async fn an_app_browses_this_machines_folders() {
     // What can't be listed is refused, saying why.
     for (path, why) in [
         ("relative/path", "isn't a full path"),
-        ("/no/such/folder", "doesn't exist"),
+        (if cfg!(windows) { r"C:\no\such\folder" } else { "/no/such/folder" }, "doesn't exist"),
         (&*browse.join("notes.txt").display().to_string(), "isn't a folder"),
     ] {
         match client.request(list(path)).await.body {
@@ -642,6 +685,7 @@ async fn ask<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     }
 }
 
+#[cfg_attr(windows, ignore = "its device reaches this machine directly, and on Windows remote access goes through the relays only")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn remote_access_turning_on_and_off_keeps_this_machines_app_connected() {
     let dir = temp_dir();
@@ -728,6 +772,7 @@ pub(crate) async fn turned_away(socket: &mut Socket, case: &str) -> String {
     }
 }
 
+#[cfg_attr(windows, ignore = "its device reaches this machine directly, and on Windows remote access goes through the relays only")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_code_lets_a_device_in_only_once_the_person_allows_it_and_ends_when_they_stop_pairing() {
     let dir = temp_dir();
@@ -846,6 +891,7 @@ async fn forward_to(connection: &Connection, port: u16) -> (String, SendStream, 
 /// A paired device reaches what listens on this machine's localhost, as a
 /// browser on the device coming back from a sign-in does; nobody else does,
 /// nor Claktory's own port, and unpairing ends it.
+#[cfg_attr(windows, ignore = "its device reaches this machine directly, and on Windows remote access goes through the relays only")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_paired_device_forwards_to_this_machines_localhost() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1096,6 +1142,9 @@ fn lan_ipv4(code: &Code) -> Option<SocketAddr> {
 /// address dialled, never completed: a direct path that stalled for good.
 /// Here the device sends from 127.0.0.1 to this machine's network address:
 /// the route back to 127.0.0.1 is 127.0.0.1's.
+/// Not on Windows: a socket bound to 127.0.0.1 can't send to the machine's
+/// own network address there (WSAENETUNREACH), so the device can't dial.
+#[cfg_attr(windows, ignore = "a socket on 127.0.0.1 can't reach this machine's network address on Windows")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_device_reaching_claktory_at_an_address_other_than_its_route_back_gets_answers_from_it() {
     let dir = temp_dir();

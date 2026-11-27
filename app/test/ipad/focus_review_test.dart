@@ -77,7 +77,8 @@ Future<Harness> _show(WidgetTester tester, {bool image = false}) async {
     )
     ..entriesById['a1/7'] = Entry(
       seq: Int64(7),
-      timestampMs: Int64(1000),
+      // The newer: first in the queue.
+      timestampMs: Int64(2000),
       askPerson: AskPerson(
         id: 'q1',
         title: 'Check the figures on page 3',
@@ -88,7 +89,7 @@ Future<Harness> _show(WidgetTester tester, {bool image = false}) async {
     )
     ..entriesById['a1/8'] = Entry(
       seq: Int64(8),
-      timestampMs: Int64(2000),
+      timestampMs: Int64(1000),
       askPerson: AskPerson(id: 'q2', title: 'Ship it on Friday?'),
     );
   final focus = WorkbenchFocus();

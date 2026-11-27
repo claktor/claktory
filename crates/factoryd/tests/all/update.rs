@@ -3,6 +3,11 @@
 use crate::common::{Client, View, apply_request, start, temp_dir};
 use factory_protocol::v1::{self, ErrorCode, client_message, server_message::Body};
 
+/// The backend's file name in a release: `factoryd.exe` on Windows.
+fn backend() -> String {
+    factoryd::home::program("factoryd")
+}
+
 fn install(app_path: &str) -> client_message::Body {
     client_message::Body::InstallUpdate(v1::InstallUpdate { app_path: app_path.into() })
 }
@@ -25,7 +30,7 @@ async fn a_published_release_is_offered_once_it_is_complete() {
     std::fs::create_dir_all(releases.join("2099.01.01-0000")).expect("mkdir");
     std::fs::write(releases.join("latest"), "2099.01.01-0000\n").expect("write");
     // Then the backend lands and the name is written again, as release.sh does.
-    std::fs::write(releases.join("2099.01.01-0000/factoryd"), "binary").expect("write");
+    std::fs::write(releases.join("2099.01.01-0000").join(backend()), "binary").expect("write");
     std::fs::write(releases.join("latest"), "2099.01.01-0000").expect("write");
     view.follow(&mut client, |view| view.workspace.latest_release == "2099.01.01-0000").await;
 
@@ -34,7 +39,7 @@ async fn a_published_release_is_offered_once_it_is_complete() {
         Body::Error(error) => assert_eq!(error.code(), ErrorCode::InvalidRequest),
         other => panic!("expected an error, got {other:?}"),
     }
-    assert!(!dir.join("home/bin/factoryd").exists());
+    assert!(!dir.join("home/bin").join(backend()).exists());
 }
 
 #[tokio::test]
@@ -45,7 +50,7 @@ async fn a_release_that_only_changed_the_app_leaves_the_backend_running() {
     let mut view = View::default();
     let release = dir.join("home/releases/2099.01.01-0000");
     std::fs::create_dir_all(&release).expect("mkdir");
-    std::fs::write(release.join("factoryd"), "binary").expect("write");
+    std::fs::write(release.join(backend()), "binary").expect("write");
     // The backend in it is the one running (test builds are "dev").
     std::fs::write(release.join("backend-version"), "dev\n").expect("write");
     std::fs::write(dir.join("home/releases/latest"), "2099.01.01-0000").expect("write");
@@ -56,11 +61,11 @@ async fn a_release_that_only_changed_the_app_leaves_the_backend_running() {
         Body::Ack(_) => {}
         other => panic!("expected an ack, got {other:?}"),
     }
-    assert!(!dir.join("home/bin/factoryd").exists(), "the backend wasn't replaced or restarted");
+    assert!(!dir.join("home/bin").join(backend()).exists(), "the backend wasn't replaced or restarted");
 }
 
 /// An update to a backend on another line names the paired devices whose
-/// app it would leave behind (#355 D1), by the app version each last said.
+/// app it would leave behind, by the app version each last said.
 #[tokio::test]
 async fn an_update_names_the_devices_whose_app_it_would_leave_behind() {
     let dir = temp_dir();
@@ -94,7 +99,7 @@ async fn an_update_names_the_devices_whose_app_it_would_leave_behind() {
 
     let release = dir.join("home/releases/v9.0.4");
     std::fs::create_dir_all(&release).expect("mkdir");
-    std::fs::write(release.join("factoryd"), "binary").expect("write");
+    std::fs::write(release.join(backend()), "binary").expect("write");
     std::fs::write(dir.join("home/releases/latest"), "v9.0.4").expect("write");
     view.follow(&mut client, |view| view.workspace.latest_release == "v9.0.4").await;
     let row = |name: &str, version: &str, left: bool| (name.to_owned(), version.to_owned(), left);

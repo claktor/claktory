@@ -1,6 +1,6 @@
-// #375 (Matt, two bars of 4G): a big file comes in pieces sized to the
-// link, answered as one read would be, with progress as each comes, and
-// it carries on from where it got when the connection drops and comes
+// On a slow link (two bars of 4G), a big file comes in pieces sized to the link,
+// answered as one read would be, with progress as each comes, and it
+// carries on from where it got when the connection drops and comes
 // back. Uploads go in pieces the same way.
 import 'dart:math' as math;
 
@@ -112,7 +112,7 @@ void main() {
     expect(edge.next, 32 * 1024);
   });
 
-  // Sale's row 68: a pace learned on a quick link kept whole-file pieces
+  // A pace learned on a quick link kept whole-file pieces
   // on a slow one.
   test('a quick link gone slow: the next piece is the slow one\'s at once; '
       'a piece cut off shrinks it; a new connection starts it again', () {

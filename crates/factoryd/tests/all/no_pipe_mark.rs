@@ -1,4 +1,4 @@
-//! Reading a pipe marks no one (#346, Fugo's design §8): an agent that read
+//! Reading a pipe marks no one: an agent that read
 //! one messages, copies and sets monitors for others like any agent, and
 //! nothing it sends marks them. Only a web page read through browser
 //! control marks its reader, never anyone else. Marks kept from before are
@@ -51,7 +51,7 @@ async fn a_pipe_reader_messages_copies_and_sets_monitors_and_marks_no_one() {
     }
 }
 
-/// A Claktory from before #346: the marks pipes left are dropped at start,
+/// A Claktory from when pipes marked agents: the marks pipes left are dropped at start,
 /// and so are the secret approvals they alone were waiting on; a web page's
 /// mark stays, and so does an approval its reader still needs.
 #[tokio::test]

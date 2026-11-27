@@ -126,7 +126,7 @@ void main() {
     });
 
     test("strings 4 bytes off: refused, naming the slice", () {
-      // Abbacchio's arm64 Mac slice, 2026-11-22.
+      // A real arm64 Mac slice, 2026-11-22.
       expect(misalignedStringPools(thin(15392364)), [
         'arm64: the symbol strings start at 15392364, 4 bytes off 8',
       ]);

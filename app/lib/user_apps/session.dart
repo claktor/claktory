@@ -24,11 +24,11 @@ enum UserAppProblem {
   stale,
 
   /// A device list naming a device removed from the account (409
-  /// removed_device): it never comes back (Abbacchio's row 612).
+  /// removed_device): it never comes back.
   removedDevice,
 
   /// This needs a recent sign-in (403 sign_in_again): a new security key
-  /// with no other device to hand it over (row 630, Fugo).
+  /// with no other device to hand it over.
   signInAgain,
 
   /// Too many tries for now; the message says how long to wait.
@@ -76,7 +76,7 @@ enum UserAppProblem {
   identityChanged,
 
   /// End to end: the friend isn't in the conversation yet (409
-  /// waiting_for_friend, row 676): nothing goes until they are.
+  /// waiting_for_friend): nothing goes until they are.
   waitingForFriend,
 }
 

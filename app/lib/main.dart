@@ -41,7 +41,7 @@ Future<void> main() async {
   // Windows shows the window on the first frame that reaches it
   // (app/windows/runner/flutter_window.cpp), and the runner asks for one at
   // once: without this, that's an empty frame, a blank white window, until
-  // the first screen is built after the loading below (Hermes, row 21).
+  // the first screen is built after the loading below.
   final deferred = defaultTargetPlatform == TargetPlatform.windows;
   if (deferred) binding.deferFirstFrame();
   try {
@@ -62,9 +62,9 @@ Future<void> _start() async {
   // Third-party licences the app ships, before anything can list them.
   registerLicenses();
   // Codes copied marked sensitive and now dead come off the clipboard, at
-  // launch and on each return (Fugo's row 181).
+  // launch and on each return.
   startClipboardSweeps();
-  // What a share cut short left in the temporary folder goes (#418).
+  // What a share cut short left in the temporary folder goes.
   unawaited(sweepSharedFiles());
   // What this device is (an iPad, a phone), before the first frame: so
   // nothing lays out as another device first.
@@ -77,6 +77,7 @@ Future<void> _start() async {
       drafts: drafts,
       connections: connections,
       localBackend: localBackend,
+      ownCode: readLocalPairing,
     ),
   );
   final connections = await Connections.load(storage);
@@ -99,6 +100,7 @@ class FactoryApp extends StatefulWidget {
     this.open,
     this.localBackend,
     this.setupChannel,
+    this.ownCode,
   });
 
   /// The drafts this device keeps, for every Claktory.
@@ -119,6 +121,10 @@ class FactoryApp extends StatefulWidget {
   /// set up with anywhere.
   final SetupChannel? setupChannel;
 
+  /// Reads this Mac's own Claktory's pairing code, so the account's list
+  /// knows it as this Mac's ([Claktories.ownCode]); null reads none.
+  final Future<RemoteFactory?> Function()? ownCode;
+
   @override
   State<FactoryApp> createState() => _FactoryAppState();
 }
@@ -131,6 +137,7 @@ class _FactoryAppState extends State<FactoryApp> {
     drafts: widget.drafts,
     // A Mac keeps whether it runs a Claktory of its own.
     keepLocal: _canChooseLocal ? _keepLocal : null,
+    ownCode: widget.ownCode,
   );
   Claktories? _made;
   final _appBuild = AppBuild.current();
@@ -168,7 +175,7 @@ class _FactoryAppState extends State<FactoryApp> {
       ask: ask,
       elsewhere: () => _claktories.setLocalBackend(false),
     );
-    // Quitting, and the app menu's Stop or Start Claktory (friend bug #27).
+    // Quitting, and the app menu's Stop or Start Claktory.
     _engine = EngineControl(backend: local.backend, setup: setup);
     unawaited(setup.start());
   }
@@ -216,7 +223,7 @@ class _FactoryAppState extends State<FactoryApp> {
     if (defaultTargetPlatform == TargetPlatform.macOS) {
       _browser = BrowserHost.of(_claktories);
       // Signed in to the person's account through this Mac's own
-      // Claktory, with no code (#529).
+      // Claktory, with no code.
       _vouch = LocalVouch.current = LocalVouch(
         account: widget.connections.account,
         local: () =>
@@ -326,7 +333,7 @@ class _FactoryAppState extends State<FactoryApp> {
           ? PhoneClaktories(shell: Shell(key: ObjectKey(shown)))
           : Shell(key: ObjectKey(shown), rail: const ClaktoryRail()),
     );
-    // What other apps share to Claktory on Android (#366 A6): one queue for
+    // What other apps share to Claktory on Android: one queue for
     // the window, inside its overlay so the picker can show, the same
     // whichever Claktory and layout show.
     return _androidPolicy ? AndroidIncomingShareHost(child: window) : window;
@@ -364,7 +371,7 @@ class _FactoryAppState extends State<FactoryApp> {
                           children: [
                             Positioned.fill(
                               // A voice message or answer being recorded
-                              // away from its box or field (#409): its bar
+                              // away from its box or field: its bar
                               // over the window, sheets and pages too, on
                               // every screen.
                               child: VoiceBarHost(
@@ -373,7 +380,7 @@ class _FactoryAppState extends State<FactoryApp> {
                             ),
                             // Files dragged over the window from the Finder.
                             const Positioned.fill(child: WindowDropOverlay()),
-                            // Messages followed from launch (row 569).
+                            // Messages followed from launch.
                             const Positioned(child: StartMessages()),
                             // A change to what this device keeps that wasn't
                             // saved says so.
@@ -488,7 +495,7 @@ class DevMark extends StatelessWidget {
       children: [
         child,
         // Never a click, and never read aloud: VoiceOver otherwise fused
-        // it with whatever lay under it (Sale's row 198).
+        // it with whatever lay under it.
         IgnorePointer(
           child: ExcludeSemantics(
             child: Center(

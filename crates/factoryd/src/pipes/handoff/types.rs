@@ -1,10 +1,9 @@
-//! Report types as data (pipes-automation.md §11): anyone untainted defines
-//! one (the person in the app, an admin agent through pipes_report_type
-//! while it has read nothing from outside), and a pipe enables a few of
-//! them. A type can only narrow what crosses from a liaison to its reader:
-//! its fields are of the closed kinds (`schema::Kind`), within the ceilings
-//! in code, and no field addresses anyone (Fugo's invariants, §11.1, each
-//! checked in `validate`).
+//! Report types as data: anyone untainted defines one (the person in the
+//! app, an admin agent through pipes_report_type while it has read nothing
+//! from outside), and a pipe enables a few of them. A type can only narrow
+//! what crosses from a liaison to its reader: its fields are of the closed
+//! kinds (`schema::Kind`), within the ceilings in code, and no field
+//! addresses anyone (each rule checked in `validate`).
 //!
 //! Kept in factory.db, `pipe_handoff_types`, keyed on (id, version): a
 //! version never changes, an edit makes the next, and a deleted type keeps
@@ -353,9 +352,9 @@ fn cap(asked: u64, ceiling: usize, what: &str, label: &str) -> Result<usize, Str
     }
 }
 
-/// Checks a definition against every rule (§11.1, 1–10, but for who may
-/// make it, which the caller checks): its name, fields and outcomes as
-/// kept, or the rule it breaks, in Claktory's words.
+/// Checks a definition against every rule (1–10, but for who may make
+/// it, which the caller checks): its name, fields and outcomes as kept,
+/// or the rule it breaks, in Claktory's words.
 pub(crate) fn validate(draft: &Draft) -> Result<(String, Vec<Field>, Vec<Outcome>), String> {
     let name = line(&draft.name, schema::NAME_CHARS).filter(|name| !name.is_empty());
     let name = name.ok_or_else(|| format!("A report type needs a name of up to {} characters.", schema::NAME_CHARS))?;
@@ -371,7 +370,7 @@ pub(crate) fn validate(draft: &Draft) -> Result<(String, Vec<Field>, Vec<Outcome
         let label = line(&asked.label, schema::LABEL_CHARS).filter(|label| !label.is_empty());
         let label = label.ok_or_else(|| format!("Each field needs a label of up to {} characters.", schema::LABEL_CHARS))?;
         // A label that reads as routing does so whatever id it gets: what
-        // the reader sees is the label (Fugo, on minting "to_2" from "To").
+        // the reader sees is the label (on minting "to_2" from "To").
         if asked.name.is_empty() && schema::routing(&minted(&label, "field", &|_| false)) {
             return Err(format!(
                 "A field can't be called \"{label}\": it would read as where the report goes, which only the pipe's settings decide. Name it for what it holds."

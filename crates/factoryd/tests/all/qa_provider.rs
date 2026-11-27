@@ -1,4 +1,4 @@
-//! Fugo's guard for qa-model's fake Claude sign-in (#332 tooling): the QA
+//! A guard for qa-model's fake Claude sign-in: the QA
 //! override of Anthropic's address (FACTORY_QA_ANTHROPIC_URL) exists only
 //! in a build with the `qa-provider` feature, which scripts/qa.sh builds
 //! sandboxes with. The workspace's own build, like a release, has no trace

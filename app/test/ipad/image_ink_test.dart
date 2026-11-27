@@ -1,4 +1,4 @@
-// Drawing on an image on an iPad (#362 I2): the image's pane offers Draw,
+// Drawing on an image on an iPad: the image's pane offers Draw,
 // which turns it into the document host on an image surface (one drawing,
 // no pages), saved as the image's ink layer; Done turns it back into the
 // image's viewer. Wherever the image shows, on any device, the ink saved
@@ -347,7 +347,7 @@ void main() {
       before: (harness) => harness.backend.partsUnhashed = true,
     );
     // The image itself is kept too (the viewer's), real work on the disk;
-    // cleared, as when the viewer kept only a preview (Zucchero's row 468),
+    // cleared, as when the viewer kept only a preview,
     // so Draw reads and keeps the original.
     await working();
     await _decode(tester);
@@ -411,7 +411,7 @@ void main() {
     await settle(tester);
     await _ready(native);
     native.ink
-      ..failNextSave = const RequestFailure('Not connected to the backend.')
+      ..failNextSave = const RequestFailure("Can't reach your Claktory right now.")
       ..connected.value = false;
     await _drew(native, 1);
     await settle(tester);
@@ -456,7 +456,7 @@ void main() {
     });
     final answer = sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk;
     expect([for (final a in answer.attachments) a.name], ['shot-drawing.png']);
-    // Sent with Submit: a reply, the drawing with it (#370).
+    // Sent with Submit: a reply, the drawing with it.
     expect(answer.reply, isTrue);
   });
 

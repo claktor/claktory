@@ -562,7 +562,7 @@ impl Factory {
     pub(crate) fn browser_owner(&self, agent: &str) -> Option<Owner> {
         let inner = self.lock();
         let config = inner.config.agent(agent)?;
-        if !crate::extensions::enabled(config, crate::extensions::browser::ID) {
+        if !crate::extensions::enabled(config, crate::extensions::browser_control::ID) {
             return None;
         }
         let epoch = inner.agents.get(agent).map_or(0, |runtime| runtime.epoch);
@@ -588,7 +588,7 @@ impl Factory {
         }
         let mut state = self.browser.state();
         if state.sessions.iter().any(|session| session.owner.agent == agent && !matches!(session.phase, Phase::Ended { .. })) {
-            return Err("You already have a browser session: end it (browser_session with action \"end\") before asking for another.".to_owned());
+            return Err("You already have a browser session: end it (chrome_session with action \"end\") before asking for another.".to_owned());
         }
         let id = format!("bs-{}", random(12));
         state.sessions.push(Session {

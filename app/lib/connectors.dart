@@ -915,7 +915,7 @@ class _ConnectProposalCardState extends State<ConnectProposalCard>
     if (typed != _typed && mounted) setState(() => _typed = typed);
   }
 
-  /// For focus mode's keys (#514): Connect, which starts its flow on the
+  /// For focus mode's keys: Connect, which starts its flow on the
   /// card, Dismiss, and Submit once a comment's typed.
   @override
   CardAnswer? answerNow() {
@@ -974,7 +974,7 @@ class _ConnectProposalCardState extends State<ConnectProposalCard>
 
   void _connect(ConnectRun run) {
     final fields = _fields;
-    // A typed comment is a reply (#370): Submit, never Connect.
+    // A typed comment is a reply: Submit, never Connect.
     if (fields == null || run.busy || commentTyped(_comment)) return;
     final missing = fields.missing;
     setState(() => _error = missing);
@@ -990,7 +990,7 @@ class _ConnectProposalCardState extends State<ConnectProposalCard>
     );
   }
 
-  /// [reply]: Submit (#370), the comment going to the agent as the
+  /// [reply]: Submit, the comment going to the agent as the
   /// person's reply, and nothing connected; it can ask again. A
   /// backend that doesn't know replies dismisses it with the comment.
   /// [reason]: the no's, from focus mode's dock, with the comment;
@@ -1180,10 +1180,10 @@ class _ConnectProposalCardState extends State<ConnectProposalCard>
     ];
   }
 
-  /// The field, open from the start, above the row (Lucy's rules 2 and 4):
+  /// The field, open from the start, above the row:
   /// Dismiss and the card's [primary], with [line]; once something is
   /// typed, one Submit in their place (Return too), the words going as a
-  /// reply (#370).
+  /// reply.
   Widget _answer(
     String agent, {
     String? line,
@@ -1241,7 +1241,7 @@ class _ConnectProposalCardState extends State<ConnectProposalCard>
                 children: [
                   TextSpan(
                     text: dismissed && proposal.replied
-                        // Answered with a comment (#370).
+                        // Answered with a comment.
                         ? 'Replied'
                         : dismissed
                         ? 'Dismissed'

@@ -23,9 +23,9 @@ pub const TABLE_ROWS: usize = 200;
 /// The most rows of all a view's panels together, so a refresh stays well
 /// under a message's megabyte.
 const VIEW_ROWS: usize = 16_000;
-/// A variable's most options shown: 50 agents and more (Scolippi 27155:
-/// at 40, the last ten couldn't be chosen), within a view's 1,000
-/// components while its menu is open.
+/// A variable's most options shown: 50 agents and more (at 40, the last
+/// ten couldn't be chosen), within a view's 1,000 components while its
+/// menu is open.
 pub const MAX_OPTIONS: usize = 200;
 
 /// What one surface shows, besides the dashboard itself.
@@ -332,8 +332,8 @@ impl Draft {
             decimals: self.decimals.parse().ok(),
             legend: (!self.legend).then_some(false),
             // A stat's always says, so a new one's last stays last.
-            // Kept as the person left it, as the other hidden settings are
-            // (Abbacchio row 1050): changed while it was a number, then
+            // Kept as the person left it, as the other hidden settings are:
+            // changed while it was a number, then
             // saved as something else, it's what they chose.
             reduce: if self.kind == "stat" || old.is_some_and(|old| shown_reduce(old) != self.reduce) || (old.is_none() && self.reduce != model::NEW_REDUCE) {
                 Some(self.reduce.clone())
@@ -648,7 +648,7 @@ fn more_choices(view: &View, scene: &Scene, dashboard: &Dashboard, granted: bool
     }
     let starred = scene.prefs.starred.contains(&dashboard.id);
     // The filled star once starred, as Grafana's toggle; none before
-    // (Scolippi 27596: a star on "Star" read as starred already).
+    // (a star on "Star" read as starred already).
     choices.push(Choice {
         icon: starred.then_some(STAR_ICON),
         ..Choice::new(if starred { "Unstar" } else { "Star" }, "star_board", json!({"on": !starred}), false)
@@ -781,7 +781,7 @@ pub fn components(view: &View, scene: &Scene) -> Vec<Value> {
     }
     let dashboard = scene.dashboard;
 
-    // The bar, on one line as on a phone (Scolippi 27155): the
+    // The bar, on one line as on a phone: the
     // dashboard's name, the range, the variables (past one, folded into
     // Filters) and \u{2022}\u{2022}\u{2022}, each a menu over the page. An app without
     // menus sends the button's action instead, and the menu opens inline
@@ -796,8 +796,8 @@ pub fn components(view: &View, scene: &Scene) -> Vec<Value> {
         }
     };
     let name = dashboard.map_or("Charts", |d| d.name.as_str());
-    // A menu even of one dashboard, so every part of the bar is a button
-    // (Luca 27397); the name takes what the others leave, ending in "…".
+    // A menu even of one dashboard, so every part of the bar is a button;
+    // the name takes what the others leave, ending in "…".
     if !scene.boards.is_empty() {
         let choices = board_choices(scene, dashboard);
         menu_button(&mut bar, "name", json!(name), "board", "Dashboards", &choices, None);
@@ -812,7 +812,7 @@ pub fn components(view: &View, scene: &Scene) -> Vec<Value> {
         let (from, to) = range(view, Some(dashboard));
         let choices = range_choices(view, dashboard);
         // No clock: "7 days" reads as a range, and a phone's bar needs the
-        // room (Scolippi 27596).
+        // room.
         menu_button(&mut bar, "range", json!(bar_range(&from, &to, scene.ran.now)), "range", "Time range", &choices, None);
         ids.push("range".into());
         open("range", &choices);
@@ -854,8 +854,8 @@ pub fn components(view: &View, scene: &Scene) -> Vec<Value> {
         ids.push("more".into());
         open("more", &choices);
     }
-    // One line, never stacked (no stackBelow): Luca draws a Row of buttons
-    // as a bar.
+    // One line, never stacked (no stackBelow): the renderer draws a Row of
+    // buttons as a bar.
     bar.insert(0, json!({"id": "bar", "component": "Row", "align": "center", "children": ids}));
     add(&mut out, &mut children, "bar", bar);
     // The variables, folded: on a line of their own while Filters is open,
@@ -1119,7 +1119,7 @@ pub fn panel_body(id: &str, at: &str, title: &str, viz: &Viz, grid: Grid, outcom
         }
         "table" => {
             // As tall as a chart of its height beside it, as Grafana's table
-            // fills its panel: its rows scroll inside (Zucchero row 454).
+            // fills its panel: its rows scroll inside.
             let mut table = json!({"id": format!("{id}_table"), "component": "Table", "data": path("data"), "height": height(grid)});
             if !viz.columns.is_empty() {
                 table["columns"] = json!(viz.columns);
@@ -1358,8 +1358,7 @@ pub fn editor_components(editor: &Editor, sources: &[DataSource], kind_open: boo
         json!({"id": "ed_size_max", "component": "TextField", "label": "Largest dot", "value": {"@path": "/editor/size_max"}, "placeholder": "15", "variant": "number", "weight": 1}),
     ];
     // Show as: a menu, as Grafana's visualization picker; choosing one
-    // draws the settings that kind has, and only those (Abbacchio, Bruno
-    // 28309).
+    // draws the settings that kind has, and only those.
     let kinds: Vec<Choice> = KIND_LABELS
         .iter()
         .map(|(value, label)| {

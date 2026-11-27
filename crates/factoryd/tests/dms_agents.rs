@@ -8,6 +8,9 @@
 //! A file of its own: agents in direct messages are a process-wide preview
 //! until People ships, and the shared test binary counts the extensions it
 //! lists.
+//!
+//! DMs reach the user-apps worker over a Unix socket: not on Windows.
+#![cfg(unix)]
 
 #[path = "common/mod.rs"]
 mod common;

@@ -1,6 +1,6 @@
 // An iPad's paperclip menu (Choose from Photos, Choose from Files, Paste
 // image) is a popover, which iOS ends the app for when it has nothing to
-// point at (Zucchero row 630). The message box's paperclip and a card's
+// point at. The message box's paperclip and a card's
 // say where they are: pickAttachments carries the button's rect in the
 // window, which the native side points the menu at (and the middle,
 // arrowless, when there's none).

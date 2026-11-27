@@ -4,7 +4,11 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../backend.dart';
+import '../characters/character.dart';
+import '../claktory_identity.dart' show claktoryName;
 import '../controls.dart';
+import '../devices.dart' show QuietLink;
+import '../extensions.dart' show logTime;
 import '../forms.dart' show FormFrame;
 import '../identity.dart';
 import '../markdown.dart' show CodeBlock;
@@ -14,38 +18,22 @@ import '../mobile/presentation.dart' show SheetAction, showActions;
 import '../protocol/factory/v1/factory.pb.dart';
 import '../scope.dart';
 import '../tell_rivet.dart' show ErrorLine;
+import 'browser_agent.dart';
 import 'browser_session.dart';
-import 'errand_panel.dart';
 import 'origin.dart';
-
-// Settings → Claktory's browser (#435 P5, agent-browser.md R8): whether
-// it can run here (and the one command, or NixOS lines, that sets it up),
-// how it is, Close browser while it runs, the time zone and languages its pages see (#435 change 3), the
-// identity providers it's signed in to, each with Sign out, and the sites
-// (their addresses, never their cookies), its
-// errands of the last 7 days with their logs, and Delete
-// browser data. Only where the backend has it.
-
-/// What a state says, in a few words.
-String agentBrowserStateLabel(AgentBrowser browser) => switch (browser.state) {
-  AgentBrowserState.AGENT_BROWSER_STATE_OFF => 'Closed',
-  AgentBrowserState.AGENT_BROWSER_STATE_STARTING => 'Starting',
-  AgentBrowserState.AGENT_BROWSER_STATE_WARM => 'Open, not in use',
-  AgentBrowserState.AGENT_BROWSER_STATE_DRIVEN => 'An agent is using it',
-  AgentBrowserState.AGENT_BROWSER_STATE_PERSONS_TURN => 'Waiting for you',
-  AgentBrowserState.AGENT_BROWSER_STATE_TAKEN_OVER => 'You took over',
-  AgentBrowserState.AGENT_BROWSER_STATE_BROWSING => 'Yours to use',
-  AgentBrowserState.AGENT_BROWSER_STATE_STOPPING => 'Closing',
-  AgentBrowserState.AGENT_BROWSER_STATE_UNAVAILABLE => 'Not set up',
-  _ => '',
-};
 
 /// Why the browser can't run on this computer, and what sets it up: the
 /// command, whole and in monospace with Copy, or the NixOS lines.
 class AgentBrowserSetupView extends StatelessWidget {
-  const AgentBrowserSetupView({super.key, required this.setup});
+  const AgentBrowserSetupView({
+    super.key,
+    required this.setup,
+    this.problem = true,
+  });
 
   final AgentBrowserSetup setup;
+
+  final bool problem;
 
   @override
   Widget build(BuildContext context) {
@@ -54,14 +42,15 @@ class AgentBrowserSetupView extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text(
-          setup.problem.isEmpty
-              ? "Claktory's browser can't run on this computer."
-              : setup.problem,
-          style: type.body.copyWith(color: palette.text),
-        ),
+        if (problem)
+          Text(
+            setup.problem.isEmpty
+                ? "Claktory's browser can't run on this computer."
+                : setup.problem,
+            style: type.body.copyWith(color: palette.text),
+          ),
         if (!setup.unsupported && setup.command.isNotEmpty) ...[
-          const SizedBox(height: Space.s),
+          if (problem) const SizedBox(height: Space.s),
           Text(
             // Linux's runs through sudo; a Mac's (brew, container) doesn't.
             setup.command.contains('sudo ')
@@ -112,54 +101,20 @@ class _CopyableState extends State<_Copyable> {
   );
 }
 
-/// Settings → Claktory's browser.
-class AgentBrowserSettings extends StatefulWidget {
+class AgentBrowserSettings extends StatelessWidget {
   const AgentBrowserSettings({super.key, required this.workspace});
 
   final Workspace workspace;
 
   @override
-  State<AgentBrowserSettings> createState() => _AgentBrowserSettingsState();
-}
-
-class _AgentBrowserSettingsState extends State<AgentBrowserSettings> {
-  String? _error;
-  var _deleting = false;
-
-  Future<void> _delete() async {
-    final sure = await showActions<bool>(
-      context,
-      title: "Delete Claktory's browser data?",
-      message:
-          'This signs it out of every site and deletes its history, and '
-          'stops any errand using it. Agents will need you to sign in '
-          'again.',
-      actions: const [SheetAction('Delete', true, destructive: true)],
-    );
-    if (sure != true || !mounted) return;
-    setState(() {
-      _deleting = true;
-      _error = null;
-    });
-    try {
-      await AgentBrowserSession.of(AppScope.of(context)).deleteData();
-    } on RequestFailure catch (error) {
-      if (mounted) setState(() => _error = error.message);
-    }
-    if (mounted) setState(() => _deleting = false);
-  }
-
-  @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    final backend = AppScope.of(context);
-    final workspace = widget.workspace;
     final browser = workspace.agentBrowser;
-    final unavailable =
-        browser.state == AgentBrowserState.AGENT_BROWSER_STATE_UNAVAILABLE;
-    final errands = workspace.errands.toList()
-      ..sort((a, b) => b.createdMs.compareTo(a.createdMs));
+    final agents = [
+      for (final agent in workspace.agents)
+        if (hasBrowser(agent)) agent,
+    ];
     Widget heading(String text) => Padding(
       padding: const EdgeInsets.only(top: Space.l, bottom: Space.xs),
       child: Text(
@@ -173,116 +128,31 @@ class _AgentBrowserSettingsState extends State<AgentBrowserSettings> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text(
-          'A browser of its own, on this Claktory, that agents use for '
-          "errands on the web. You don't use it yourself: when an errand "
-          'needs something only you have, like a code, it asks you in '
-          'Needs you.',
-          style: type.body.copyWith(color: palette.textMuted),
-        ),
-        const SizedBox(height: Space.m),
-        if (unavailable)
-          AgentBrowserSetupView(setup: browser.setup)
-        else
-          ActionLine(
-            lead: Text(
-              [
-                agentBrowserStateLabel(browser),
-                if (browser.chromeVersion.isNotEmpty)
-                  // The number alone, as the protocol says, even from a
-                  // Claktory that sends Chrome's product ("Chrome/158…":
-                  // Abbacchio's nit, "Chrome Chrome/158").
-                  'Chrome ${browser.chromeVersion.replaceFirst(RegExp(r'^[A-Za-z]+/'), '')}',
-              ].join(' · '),
-              style: type.body.copyWith(color: palette.text),
-            ),
-            action: agentBrowserRunning(browser.state)
-                ? Button(
-                    label: 'Close browser',
-                    onPressed: AgentBrowserSession.of(backend).stop,
-                  )
-                : const SizedBox.shrink(),
-          ),
-        heading('Time zone and languages'),
-        ActionLine(
-          lead: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                browser.timeZone.isEmpty
-                    ? "Time zone: this computer's"
-                    : 'Time zone: ${browser.timeZone}',
-                style: type.body.copyWith(color: palette.text),
-              ),
-              Text(
-                browser.languages.isEmpty
-                    ? 'Languages: en-US'
-                    : 'Languages: ${browser.languages.join(', ')}',
-                style: type.body.copyWith(color: palette.text),
-              ),
-              Text(
-                'What sites see in it. A change applies the next time it '
-                'starts.',
-                style: type.caption.copyWith(color: palette.textMuted),
-              ),
-            ],
-          ),
-          action: Button(
-            label: 'Change…',
-            onPressed: () => showModal(
-              context,
-              (context, close) =>
-                  AgentBrowserLocaleForm(browser: browser, close: close),
-            ),
-          ),
-        ),
-        heading('Signed in to'),
-        for (final account in browser.accounts)
-          Padding(
-            padding: const EdgeInsets.only(bottom: Space.xs),
-            child: AgentBrowserAccountLine(
-              key: ValueKey(account.provider),
-              account: account,
-            ),
-          ),
-        if (browser.signedInSites.isEmpty && browser.accounts.isEmpty)
+        _Status(browser: browser),
+        heading("Agents' browsers"),
+        if (agents.isEmpty)
           Text(
-            'No sites yet.',
+            'No agent has the browser yet. Ask Rivet to give it to one, or '
+            "turn on Browser in an agent's settings.",
             style: type.body.copyWith(color: palette.textMuted),
           )
         else
-          for (final site in browser.signedInSites)
-            Text(
-              originHost(site),
-              style: type.body.copyWith(color: palette.text),
-            ),
-        if (errands.isNotEmpty) ...[
-          heading('Errands in the last 7 days'),
-          for (final errand in errands)
-            Padding(
-              padding: const EdgeInsets.only(bottom: Space.xs),
-              child: ErrandLine(
-                errand: errand,
-                agent: backend.workspace.agent(errand.agentId),
-              ),
-            ),
-        ],
-        const SizedBox(height: Space.l),
-        if (_error case final error?) ...[
-          ErrorLine(
-            error,
-            about: "Claktory couldn't delete the browser's data.",
-          ),
-          const SizedBox(height: Space.s),
-        ],
+          for (final agent in agents)
+            AgentBrowserRow(key: ValueKey(agent.id), agent: agent),
+        heading('Time zone and languages'),
+        _Locale(browser: browser),
+        heading('Browser log'),
         ActionLine(
           lead: Text(
-            'Signs it out of every site and deletes its history.',
-            style: type.caption.copyWith(color: palette.textMuted),
+            'What agents did in their browsers',
+            style: type.body.copyWith(color: palette.text),
           ),
           action: Button(
-            label: 'Delete browser data…',
-            onPressed: _deleting ? null : _delete,
+            label: 'Open',
+            onPressed: () => showModal(
+              context,
+              (context, close) => BrowserLog(close: close),
+            ),
           ),
         ),
       ],
@@ -290,88 +160,446 @@ class _AgentBrowserSettingsState extends State<AgentBrowserSettings> {
   }
 }
 
-/// An identity provider Claktory's browser is signed in to (#435): "Google
-/// as Work Gmail", the vault secret it signed in with, and Sign out; while
-/// a sign-out waits for the errand using the browser, it says so instead.
-class AgentBrowserAccountLine extends StatefulWidget {
-  const AgentBrowserAccountLine({super.key, required this.account});
+class _Status extends StatefulWidget {
+  const _Status({required this.browser});
 
-  final AgentBrowserAccount account;
+  final AgentBrowser browser;
 
   @override
-  State<AgentBrowserAccountLine> createState() =>
-      _AgentBrowserAccountLineState();
+  State<_Status> createState() => _StatusState();
 }
 
-class _AgentBrowserAccountLineState extends State<AgentBrowserAccountLine> {
-  var _sending = false;
-  String? _error;
+class _StatusState extends State<_Status> {
+  var _unfolded = false;
 
-  String get _provider => widget.account.name.isEmpty
-      ? widget.account.provider
-      : widget.account.name;
-
-  Future<void> _signOut() async {
-    final provider = _provider;
-    final sure = await showActions<bool>(
-      context,
-      title: "Sign Claktory's browser out of $provider?",
-      message:
-          'Agents will need your help to sign in to $provider again. If an '
-          'errand is using the browser, it signs out when the errand ends.',
-      actions: const [SheetAction('Sign out', true, destructive: true)],
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final browser = widget.browser;
+    final setup = browser.setup;
+    if (browser.state == AgentBrowserState.AGENT_BROWSER_STATE_UNAVAILABLE) {
+      if (setup.unsupported) {
+        final name = claktoryName(AppScope.of(context));
+        return Text(
+          setup.problem.isEmpty
+              ? "$name can't run it. It needs a Mac with Apple silicon and "
+                    'macOS 26 or later.'
+              : "$name can't run it. ${setup.problem}",
+          style: type.body.copyWith(color: palette.text),
+        );
+      }
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Not set up yet. An agent sets it up the first time it needs it.',
+            style: type.body.copyWith(color: palette.text),
+          ),
+          if (setup.command.isNotEmpty || setup.nixosLines.isNotEmpty) ...[
+            const SizedBox(height: Space.xs),
+            Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: QuietLink(
+                label: _unfolded ? 'Hide' : 'Set it up yourself',
+                onTap: () => setState(() => _unfolded = !_unfolded),
+              ),
+            ),
+            if (_unfolded) ...[
+              const SizedBox(height: Space.s),
+              AgentBrowserSetupView(setup: setup, problem: false),
+            ],
+          ],
+        ],
+      );
+    }
+    // Some Claktories send Chrome's product with it ("Chrome/158…").
+    final version = browser.chromeVersion
+        .replaceFirst(RegExp(r'^[A-Za-z]+/'), '')
+        .split('.')
+        .first;
+    return Row(
+      children: [
+        Dot(
+          color: browser.state == AgentBrowserState.AGENT_BROWSER_STATE_OFF
+              ? palette.textFaint
+              : palette.signal,
+        ),
+        const SizedBox(width: Space.s),
+        Expanded(
+          child: Text.rich(
+            TextSpan(
+              children: [
+                TextSpan(
+                  text: 'Ready',
+                  style: type.body.copyWith(
+                    color: palette.text,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if (version.isNotEmpty)
+                  TextSpan(
+                    text: ' · Chrome $version',
+                    style: type.body.copyWith(color: palette.textMuted),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
-    if (sure != true || !mounted) return;
+  }
+}
+
+class AgentBrowserRow extends StatefulWidget {
+  const AgentBrowserRow({super.key, required this.agent});
+
+  final Agent agent;
+
+  @override
+  State<AgentBrowserRow> createState() => _AgentBrowserRowState();
+}
+
+class _AgentBrowserRowState extends State<AgentBrowserRow> {
+  String? _error;
+  var _busy = false;
+
+  Future<void> _run(Future<void> Function() request) async {
     setState(() {
-      _sending = true;
+      _busy = true;
       _error = null;
     });
     try {
-      await AgentBrowserSession.of(AppScope.of(context))
-          .signOut(widget.account.provider);
-    } on RequestFailure catch (error) {
-      if (mounted) setState(() => _error = error.message);
+      await request();
+    } on RequestFailure catch (failure) {
+      if (mounted) setState(() => _error = failure.message);
     }
-    if (mounted) setState(() => _sending = false);
+    if (mounted) setState(() => _busy = false);
+  }
+
+  Future<void> _actions(BuildContext context) async {
+    final backend = AppScope.of(context);
+    final agent = widget.agent;
+    final workspace = backend.workspace.workspace;
+    final session = AgentBrowserSession.of(backend);
+    // "www.x.com" and "x.com" read as one site, so signing out clears both.
+    final sites = <String, List<String>>{};
+    for (final origin
+        in browserOf(workspace, agent.id)?.signedInSites ?? const <String>[]) {
+      (sites[siteName(origin)] ??= []).add(origin);
+    }
+    final action = await showActions<String>(
+      context,
+      title: agent.name,
+      actions: [
+        for (final host in sites.keys)
+          SheetAction('Sign out of $host', 'site:$host'),
+        const SheetAction('Delete browser data…', 'delete'),
+        const SheetAction('Turn off browser…', 'off', destructive: true),
+      ],
+    );
+    if (!context.mounted || action == null) return;
+    if (action.startsWith('site:')) {
+      final origins = sites[action.substring(5)] ?? const [];
+      await _run(() async {
+        for (final origin in origins) {
+          await session.signOut(agentId: agent.id, site: origin);
+        }
+      });
+    } else if (action == 'delete') {
+      final sure = await showActions<bool>(
+        context,
+        title: "Delete ${agent.name}'s browser data?",
+        message:
+            '${agent.name} is signed out of every site, and the browser’s '
+            'data is deleted. Your logins stay in Secrets.',
+        actions: const [SheetAction('Delete', true, destructive: true)],
+      );
+      if (sure != true || !mounted) return;
+      await _run(() => session.deleteData(agentId: agent.id));
+    } else if (action == 'off') {
+      await _run(() => turnOffBrowser(context, backend, agent));
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    final account = widget.account;
-    final name = account.secretName;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        ActionLine(
-          lead: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+    final backend = AppScope.of(context);
+    final agent = widget.agent;
+    final hosts = signedInHosts(backend.workspace.workspace, agent.id);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: Space.s),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
             children: [
-              Text(
-                name.isEmpty ? _provider : '$_provider as $name',
-                style: type.body.copyWith(color: palette.text),
-              ),
-              if (account.signingOut)
-                Text(
-                  'Signing out when the errand using the browser ends.',
-                  style: type.caption.copyWith(color: palette.textMuted),
+              ExcludeSemantics(child: AgentCharacter(agent: agent, size: 28)),
+              const SizedBox(width: Space.s),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      agent.name,
+                      style: type.body.copyWith(
+                        color: palette.text,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    Text(
+                      signedInText(hosts),
+                      style: type.caption.copyWith(color: palette.textMuted),
+                    ),
+                  ],
                 ),
+              ),
+              const SizedBox(width: Space.s),
+              Builder(
+                builder: (context) => GlyphButton(
+                  label: "${agent.name}'s browser",
+                  active: false,
+                  onTap: () {
+                    if (!_busy) unawaited(_actions(context));
+                  },
+                  glyph: (color) => ExtensionGlyph(
+                    icon: 'ellipsis',
+                    name: 'More',
+                    color: color,
+                  ),
+                ),
+              ),
             ],
           ),
-          action: account.signingOut
-              ? const SizedBox.shrink()
-              : Button(
-                  label: 'Sign out',
-                  onPressed: _sending ? null : _signOut,
-                ),
-        ),
-        if (_error case final error?)
-          ErrorLine(
-            error,
-            about: "Claktory couldn't sign the browser out of $_provider.",
+          if (_error case final error?)
+            ErrorLine(error, about: "Couldn't change ${agent.name}'s browser"),
+        ],
+      ),
+    );
+  }
+}
+
+class _Locale extends StatefulWidget {
+  const _Locale({required this.browser});
+
+  final AgentBrowser browser;
+
+  @override
+  State<_Locale> createState() => _LocaleState();
+}
+
+class _LocaleState extends State<_Locale> {
+  String? _deviceZone;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    unawaited(_ask());
+  }
+
+  Future<void> _ask() async {
+    final zone = await AgentBrowserSession.of(AppScope.of(context)).timeZone();
+    if (mounted && zone != _deviceZone) setState(() => _deviceZone = zone);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final browser = widget.browser;
+    final session = AgentBrowserSession.of(AppScope.of(context));
+    final languages = browser.languages.isEmpty
+        ? const ['en-US']
+        : browser.languages.toList();
+    final device =
+        browser.timeZone.isNotEmpty &&
+        browser.timeZone == _deviceZone &&
+        _sameList(languages, session.languages());
+    final words = [
+      browser.timeZone.isEmpty ? "This computer's time zone" : browser.timeZone,
+      languages.join(', '),
+    ].join(' · ');
+    return ActionLine(
+      lead: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            device ? "This device's: $words" : words,
+            style: type.body.copyWith(color: palette.text),
           ),
+          Text(
+            device
+                ? 'Sites see these. They match this device, so the browser '
+                      'looks like yours.'
+                : 'Sites see these.',
+            style: type.caption.copyWith(color: palette.textMuted),
+          ),
+        ],
+      ),
+      action: Button(
+        label: 'Change…',
+        onPressed: () => showModal(
+          context,
+          (context, close) =>
+              AgentBrowserLocaleForm(browser: browser, close: close),
+        ),
+      ),
+    );
+  }
+}
+
+bool _sameList(List<String> a, List<String> b) =>
+    a.length == b.length &&
+    [for (var i = 0; i < a.length; i++) a[i] == b[i]].every((same) => same);
+
+class BrowserLog extends StatefulWidget {
+  const BrowserLog({super.key, required this.close});
+
+  final VoidCallback close;
+
+  @override
+  State<BrowserLog> createState() => _BrowserLogState();
+}
+
+class _BrowserLogState extends State<BrowserLog> {
+  var _agentId = '';
+  ErrandLog? _log;
+  String? _error;
+  var _asked = 0;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_asked == 0) unawaited(_load());
+  }
+
+  Future<void> _load() async {
+    final asked = ++_asked;
+    final agentId = _agentId;
+    try {
+      final log = await AppScope.of(context).listErrandLog(agentId: agentId);
+      if (mounted && asked == _asked) {
+        setState(() {
+          _log = log;
+          _error = null;
+        });
+      }
+    } on RequestFailure catch (failure) {
+      if (mounted && asked == _asked) setState(() => _error = failure.message);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final store = AppScope.of(context).workspace;
+    final workspace = store.workspace;
+    final agents = [
+      for (final agent in workspace.agents)
+        if (hasBrowser(agent) || agent.id == _agentId) agent,
+    ];
+    return FormFrame(
+      title: 'Browser log',
+      body: 'What agents did in their browsers in the last 7 days.',
+      error: null,
+      submitLabel: 'Done',
+      onSubmit: widget.close,
+      onCancel: widget.close,
+      fields: [
+        if (agents.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: Space.m),
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: SizedBox(
+                width: 220,
+                child: Select<String>(
+                  title: 'Agent',
+                  value: _agentId,
+                  options: [
+                    const SelectOption('', 'All agents'),
+                    for (final agent in agents)
+                      SelectOption(agent.id, agent.name),
+                  ],
+                  onChanged: (id) {
+                    setState(() {
+                      _agentId = id;
+                      _log = null;
+                    });
+                    unawaited(_load());
+                  },
+                ),
+              ),
+            ),
+          ),
+        if (_error case final error?)
+          ErrorLine(error, about: "Claktory couldn't show the browser log.")
+        else if (_log case final log?)
+          if (log.entries.isEmpty)
+            Text(
+              'Nothing done yet.',
+              style: type.body.copyWith(color: palette.textMuted),
+            )
+          else
+            for (final entry in log.entries.reversed)
+              _LogRow(entry: entry, agent: store.agent(entry.agentId)),
       ],
+    );
+  }
+}
+
+/// One thing done: when, who, what, where; the element it was done to as
+/// the page's words, in quotes.
+class _LogRow extends StatelessWidget {
+  const _LogRow({required this.entry, required this.agent});
+
+  final ErrandLogEntry entry;
+  final Agent? agent;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final who = entry.agentId.isEmpty ? 'You' : (agent?.name ?? 'An agent');
+    final where = [
+      if (entry.origin.isNotEmpty) originHost(entry.origin),
+      entry.path,
+    ].join();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: Space.s),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text.rich(
+            TextSpan(
+              children: [
+                TextSpan(
+                  text: '$who: ${entry.action}',
+                  style: type.body.copyWith(color: palette.text),
+                ),
+                if (entry.target.isNotEmpty)
+                  TextSpan(
+                    text: ' “${entry.target}”',
+                    style: type.body.copyWith(color: palette.textMuted),
+                  ),
+              ],
+            ),
+          ),
+          Text(
+            [
+              logTime(DateTime.fromMillisecondsSinceEpoch(entry.atMs.toInt())),
+              if (where.isNotEmpty) where,
+              if (entry.outcome.isNotEmpty) entry.outcome,
+            ].join(' · '),
+            style: type.caption.copyWith(
+              color: entry.outcome.isEmpty ? palette.textFaint : palette.danger,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

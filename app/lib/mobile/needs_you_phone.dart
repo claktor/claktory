@@ -1,14 +1,15 @@
-// Needs you's cards on an iPhone (#514, Formaggio's spec §7), one a
-// screen: focus mode, which the person starts from the list, or one request
-// they tapped in it, alone ([PhoneNeedsYou.only]; #599, needs-you-cards.md
-// §4.5), which goes back to the list once answered. Its title says where the card is among
-// those waiting ("3 of 7") and opens the queue as a sheet; ˄ ˅ move
-// between cards, as Mail's do between messages; who asks is a row that
-// pushes the card's conversation; and the answer is pinned at the foot,
-// over the keyboard, its yes under the thumb. After an answer Claktory
-// accepted, the next card comes by itself. The sitting's rules are the
-// shared FocusSession (needs_you_focus.dart): only the layout is a
-// phone's.
+// Needs you's cards one a screen (#514, Formaggio's spec §7). On an
+// iPhone, one request the person tapped in the list, alone
+// ([PhoneNeedsYou.only]; #599, needs-you-cards.md §4.5), which goes back
+// to the list once answered: a phone has no focus mode (#606, Matt). Who
+// asks is a row that pushes the card's conversation, and the answer is
+// pinned at the foot, over the keyboard, its yes under the thumb. On a
+// narrow iPad (Slide Over, ⅓ Split View), focus mode's sitting, every card
+// in turn (ipad/focus.dart): its title says where the card is among those
+// waiting ("3 of 7") and opens the queue as a sheet, ˄ ˅ move between
+// cards, as Mail's do between messages, and after an answer Claktory
+// accepted, the next card comes by itself. Both run on the shared
+// FocusSession (needs_you_focus.dart): only the layout is a phone's.
 import 'dart:async';
 
 import 'package:flutter/widgets.dart';
@@ -68,7 +69,8 @@ class PhoneNeedsYou extends StatefulWidget {
   /// One request alone, by its key, tapped in the list: titled with who
   /// asks, with no place among the rest nor ˄ ˅, and closed once its
   /// answer is accepted (after [phoneAnsweredFor], its receipt showing),
-  /// or when it's gone. Null: focus mode, every card in turn.
+  /// or when it's gone: an iPhone's. Null: a narrow iPad's focus mode,
+  /// every card in turn.
   final String? only;
 
   /// The sitting to show (an iPad's focus mode, kept above a resize, or a

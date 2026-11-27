@@ -115,11 +115,14 @@ void main() {
     );
   });
 
-  testWidgets('a click still opens the project', (tester) async {
+  testWidgets('a click still folds the project, moving nothing', (
+    tester,
+  ) async {
     final harness = await _show(tester);
     await tester.tap(find.text('Beta'));
     await settle(tester);
-    expect(harness.last.focusProject.projectId, 'p2');
+    expect(harness.last.setProjectCollapsed.projectId, 'p2');
+    expect(harness.backend.sent.where((m) => m.hasUpdateProject()), isEmpty);
   });
 
   group('by touch', () {
@@ -151,7 +154,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 600));
       await gesture.up();
       await settle(tester);
-      expect(find.text('Project settings'), findsOneWidget);
+      expect(find.text('Project settings…'), findsOneWidget);
       expect(harness.backend.sent.where((m) => m.hasUpdateProject()), isEmpty);
     });
   });

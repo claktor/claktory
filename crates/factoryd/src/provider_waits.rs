@@ -1,5 +1,5 @@
 //! Agents and chats waiting on a provider's usage limit or credit, grouped
-//! by provider (#343 U6, Workspace.provider_waits): one Needs you item each,
+//! by provider (Workspace.provider_waits): one Needs you item each,
 //! which notifies when it appears (`crate::notify`), so the person hears that
 //! their agents stopped without having to look.
 

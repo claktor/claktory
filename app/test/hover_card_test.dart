@@ -1,8 +1,8 @@
-// A HoverCard's card stays inside the screen's safe area (Zucchero's row
-// 604): held on a footer circle past the middle of a phone, it's shifted
-// in from the right edge rather than cut off; with no room above, it goes
-// below; it never covers the status bar or the home indicator; and where
-// there's room it's where it always was, left-aligned above its child.
+// A HoverCard's card stays inside the screen's safe area: held on a
+// footer circle past the middle of a phone, it's shifted in from the
+// right edge rather than cut off; with no room above, it goes below; it
+// never covers the status bar or the home indicator; and where there's
+// room it's where it always was, left-aligned above its child.
 import 'package:factory_app/controls.dart';
 import 'package:factory_app/identity.dart' show Space;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart' show Workspace;

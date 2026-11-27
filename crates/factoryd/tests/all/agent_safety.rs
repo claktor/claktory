@@ -186,7 +186,7 @@ impl Agent {
     /// instead (None: closed).
     async fn hello(addr: SocketAddr, token: &str, patches: bool) -> Result<Agent, Option<Body>> {
         let tcp = TcpStream::connect(addr).await.expect("connect");
-        let (mut socket, _) = tokio_tungstenite::client_async("ws://factory/", tcp).await.expect("websocket");
+        let (mut socket, _) = tokio_tungstenite::client_async(format!("ws://{addr}/"), tcp).await.expect("websocket");
         let hello = v1::Hello {
             protocol_version: PROTOCOL_VERSION,
             client_version: "agent".into(),
@@ -718,6 +718,7 @@ async fn no_file_under_home_opens_a_persons_connection() {
 /// own signed app. This test's binary is signed ad hoc by the linker, so it
 /// never gets Welcome there: turned away before it, or closed. (Another
 /// user's connection, refused too, is Abbacchio's to try in a sandbox.)
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "#546 A"]
 async fn the_app_socket_turns_away_a_binary_that_isnt_claktorys_app() {
@@ -1778,7 +1779,7 @@ async fn an_agents_commands_cant_read_claktorys_keys() {
         denied.extend(DENIED_READS.iter().take(3).map(|file| format!("/System/Volumes/Data{}", real.join(file).display())));
     }
     let link = dir.join("key-link");
-    std::os::unix::fs::symlink(root.join("remote/iroh.key"), &link).expect("a symlink");
+    crate::common::symlink(&root.join("remote/iroh.key"), &link).expect("a symlink");
     denied.push(link.display().to_string());
     denied.push(format!("{}/../{}/remote/iroh.key", root.join("agents").display(), root.file_name().expect("its name").to_string_lossy()));
     let allowed: Vec<String> = ["tool-token", "config.json"]

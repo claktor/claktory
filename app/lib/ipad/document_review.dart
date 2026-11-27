@@ -1,16 +1,16 @@
 // A review an agent asks of a PDF, answered on an iPad right where it's
-// read, with what the person drew on it (#275; docs/ipad-workbench.md §6):
+// read, with what the person drew on it (docs/ipad-workbench.md §6):
 // at the foot of the document's pane while the question waits, who asks
 // and what, the pages drawn on, and the answer field, always open. With
 // nothing typed, Approve (or Send, for a question that wants words), and
 // Dismiss quiet beside it; once a comment is typed, one Submit (Return
-// too) sends it as a reply, never a yes or a no (#370). Each takes the
+// too) sends it as a reply, never a yes or a no. Each takes the
 // drawings with it: each page with ink, whole,
 // as a PNG with the ink on it, uploaded to the agent and named in the
 // answer (AnswerAsk.attachments), so they reach the agent only when the
 // person answers. Answered, the pane closes and the person is back where
 // they were. Nothing here is a comment of its own. In Needs you's focus
-// mode (#514) the bar is the stage's answer for a PDF or a picture: its
+// mode the bar is the stage's answer for a PDF or a picture: its
 // answer goes in the stage's dock, ⌘↩, ⌘⌫ and its buttons go through the
 // focus session, and answered, nothing closes; the next card comes in.
 //
@@ -183,8 +183,8 @@ class ReviewWatch extends ChangeNotifier {
   }
 
   /// The question on this file the bar answers: the card whose Review was
-  /// pressed (Abbacchio's row 1312), else the oldest; held while a reply
-  /// has it wait on its agent (row 1325, [reviewPick]).
+  /// pressed, else the oldest; held while a reply
+  /// has it wait on its agent ([reviewPick]).
   PendingReview? get ask {
     final backend = _backend;
     return reviewPick(
@@ -229,7 +229,7 @@ class DocumentReviewBar extends StatefulWidget {
   final ReviewWatch watch;
   final DocumentSurface surface;
 
-  /// Focus mode's, when the bar is its stage's answer (#514, spec §6.4):
+  /// Focus mode's, when the bar is its stage's answer:
   /// it puts the card's answer in the stage's dock, so ⌘↩, ⌘⌫ and its own
   /// buttons go through the session, which moves on once the answer is
   /// accepted; answered, nothing closes (the next card comes in).
@@ -245,9 +245,9 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
   /// Whether the bar moved on to its card by itself.
   final _moves = ReviewMoves();
 
-  /// The person's answer, sent with either button (Matt's rule: approve
-  /// or dismiss, always with an optional comment); the answer itself when
-  /// the agent wants words.
+  /// The person's answer, sent with either button (approve or dismiss,
+  /// always with an optional comment); the answer itself when the agent
+  /// wants words.
   final _comment = TextEditingController();
   final _field = FocusNode(debugLabel: 'review answer');
 
@@ -291,8 +291,8 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
     _restored = seq;
     final kept = widget.surface.answers[seq];
     // From another card, its words stay with it (kept above), never in
-    // this one's field, where they'd answer the wrong question (Zucchero's
-    // row 513): this card's own, or none.
+    // this one's field, where they'd answer the wrong question: this
+    // card's own, or none.
     if (!another && (kept == null || _comment.text.isNotEmpty)) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _restored != seq) return;
@@ -512,7 +512,7 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
           ? reason
           : '$reason\n\n$typed';
       final watch = widget.watch;
-      // The card as the bar shows it (#428), and its talk (#492).
+      // The card as the bar shows it, and its talk.
       await sendReview(
         backend,
         watch.agentId,
@@ -521,7 +521,7 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
         text: text,
         dismiss: dismiss,
         // A comment typed on a question that doesn't want words is a
-        // reply (#370), the drawings with it; it carries out nothing.
+        // reply, the drawings with it; it carries out nothing.
         reply: !dismiss && !ask.ask.wantsText && text.isNotEmpty,
         attachments: attachments,
         // Cut off: "Not sent yet", and it goes once the connection's back.
@@ -534,7 +534,6 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
       // Answered: the file's pane closes and the person is back where
       // they pressed Review. In focus mode nothing closes: the next card
       // comes in once this one stops waiting.
-      // (Illuso's forgetReview goes here then, once it lands.)
       if (mounted && widget.session == null) {
         unawaited(
           finishReview(
@@ -553,8 +552,8 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
       }
       return false;
     } on FileSystemException catch (error) {
-      // A drawn page couldn't be read, or a file added to the answer
-      // (#511), after the drawings went up.
+      // A drawn page couldn't be read, or a file added to the answer,
+      // after the drawings went up.
       if (mounted) {
         setState(
           () => _error = drawn
@@ -606,7 +605,7 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
   Widget _build(BuildContext context) {
     // Focus mode's card answered on another device or taken back while
     // it was read: how it ended, and Next; the document stays, its ink
-    // saving as ever (§6.6).
+    // saving as ever.
     if (widget.session case final session?) {
       final key = session.current?.key;
       final outcome = key == null ? null : session.outcomeOf(key);
@@ -628,7 +627,7 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
     final placeholder = ask.ask.wantsText
         ? 'Your answer'
         : replyPlaceholder(agent.name);
-    // Held while a reply has it wait on its agent (Abbacchio's row 1325).
+    // Held while a reply has it wait on its agent.
     final held = !widget.watch.waits(ask);
     final session = widget.session;
     if (session != null) {
@@ -642,7 +641,7 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
         error: _error,
       );
     }
-    // In focus mode, a card changed a moment ago takes no answer yet (§8):
+    // In focus mode, a card changed a moment ago takes no answer yet:
     // the main button says so.
     final guarded = session?.guarded ?? false;
     final off = _busy || held || (session != null && !session.answerable);
@@ -655,9 +654,9 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
     final error = _error ?? (held ? reviewHeld(ask.ask, agent.name) : null);
     // The line at the row's start says what pressing does (the Needs you
     // cards' rule 2): sending, then what went wrong, then what Submit
-    // does instead and the drawings that go with any answer (§3.1: a
-    // drawing leaves the buttons as they are). Nothing when the buttons
-    // say it all.
+    // does instead and the drawings that go with any answer (a drawing
+    // leaves the buttons as they are). Nothing when the buttons say it
+    // all.
     final String? line = sending != null
         ? (sending.of == 1
               ? 'Sending your drawing…'
@@ -726,7 +725,7 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
                     children: [
                       if (ask.ask.title.isNotEmpty)
                         // The agent's words: what reorders them shows by
-                        // its code (proseCodes, Fugo).
+                        // its code (proseCodes).
                         Text(
                           proseCodes(ask.ask.title),
                           style: type.body.copyWith(color: palette.text),
@@ -760,7 +759,7 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
               controller: _comment,
               focusNode: _field,
               enabled: !_busy,
-              // Files with the answer (#511), the card's: what was added
+              // Files with the answer, the card's: what was added
               // on it comes here too. The drawings go with them.
               trailing: CardAttachButton(
                 card: cardFilesKey(widget.watch.agentId, ask.ask.id),
@@ -813,7 +812,7 @@ class _DocumentReviewBarState extends State<DocumentReviewBar> {
               action: _rowOf(
                 reasons: session != null && session.reasonsShowing,
                 [
-                  // Focus mode's no, asked why first (§5.4): the quick
+                  // Focus mode's no, asked why first: the quick
                   // reasons, or none.
                   if (session != null && session.reasonsShowing) ...[
                     for (final (index, reason) in focusDismissReasons.indexed)

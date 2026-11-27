@@ -1,4 +1,4 @@
-//! Websites shared over pipes (pipe-port-sharing.md) end to end: two
+//! Websites shared over pipes end to end: two
 //! Claktories pair through an invite, one shares a port on its computer,
 //! and the other reaches it through the pipe. A file of its own: the pipes'
 //! transport store is process-wide, and the transport's own tests register
@@ -167,9 +167,9 @@ async fn websites_shared_between_two_claktories() {
     a_shared_website_stops_when_its_time_is_up().await;
 }
 
-/// #46: a share lasts as long as asked, its end shown on both sides; the
+/// A share lasts as long as asked, its end shown on both sides; the
 /// person changes it from now; once it's up, this side stops it as Stop
-/// does, its streams cut even before the timer wakes (Fugo 46375).
+/// does, its streams cut even before the timer wakes.
 async fn a_shared_website_stops_when_its_time_is_up() {
     let (mut a, mut b) = paired().await;
     let port = echo_server().await;
@@ -230,7 +230,7 @@ async fn a_shared_website_stops_when_its_time_is_up() {
 }
 
 /// C is pinned to A too, on a pipe of its own: asking for the website A
-/// shares with B, by its id, it gets nothing (Fugo 31072).
+/// shares with B, by its id, it gets nothing.
 async fn a_third_claktory_pinned_to_another_pipe_gets_nothing() {
     let (mut a, mut b) = paired().await;
     let mut c = claktory(&temp_dir(), "Press", "Pia").await;
@@ -295,7 +295,7 @@ async fn browse(address: &str, host: &str, path: &str, cookie: &str) -> Result<(
     Ok((status, head.to_owned(), body.to_owned()))
 }
 
-/// The receiving side (Cioccolata): B opens A's website in a browser on its
+/// The receiving side: B opens A's website in a browser on its
 /// own computer, at an address of its own for the share, through the pipe.
 async fn the_other_side_opens_it_in_a_browser_at_its_own_address() {
     let (mut a, mut b) = paired().await;
@@ -328,7 +328,7 @@ async fn the_other_side_opens_it_in_a_browser_at_its_own_address() {
     assert_eq!(checked.pid, std::process::id(), "{checked:?}");
     assert!(!checked.program.is_empty() && !checked.program.contains('/'), "{checked:?}");
     // Shared with that pipe already: the form says so, and once is enough
-    // (row 1340).
+    // .
     assert_eq!(checked.shared_pipe_ids, [a.pipe().id], "{checked:?}");
     let again = v1::SharePipeWebsite { port: u32::from(port), name: "Dashboard".into(), pipe_ids: vec![a.pipe().id], ..Default::default() };
     match a.request(Request::SharePipeWebsite(again)).await {
@@ -399,7 +399,7 @@ async fn the_other_side_opens_it_in_a_browser_at_its_own_address() {
     let again = b.shares().into_iter().find(|share| share.id == theirs.id).expect("B's");
     assert_eq!(again.address, theirs.address);
 
-    // The same when B pauses and resumes it (Abbacchio, row 1106).
+    // The same when B pauses and resumes it.
     b.pipe_state(v1::PipeAction::Pause).await;
     b.until(|view| view.workspace.pipe_shares.iter().any(|share| share.id == theirs.id && !share.listening)).await;
     assert!(browse(&at, &host, "/", &key).await.is_err(), "listening while paused");
@@ -460,7 +460,7 @@ async fn a_shared_website_reaches_the_other_side_while_its_pipe_is_open() {
 
     // Its bytes go both ways through the pipe.
     assert_eq!(through(&b, &theirs.id, "hello").await.as_deref(), Ok("hello"));
-    // A's agents read that B opened it (#502): when, never what went through.
+    // A's agents read that B opened it: when, never what went through.
     let listed = pipes::shares::listing_for_test(&a.factory, &a_pipe).join("\n");
     assert!(listed.contains("; active; the other side opened it first "), "{listed}");
     assert!(!listed.contains("hello"), "{listed}");
@@ -504,7 +504,7 @@ async fn a_shared_website_reaches_the_other_side_while_its_pipe_is_open() {
     assert!(matches!(a.request(Request::CreatePipeGroup(group)).await, Body::Ack(_)));
     a.until(|view| !view.workspace.pipe_groups.is_empty()).await;
     let group = a.view.workspace.pipe_groups[0].id.clone();
-    // A name with spaces, accents and a dash reaches the other side as it is (Abbacchio row 1105).
+    // A name with spaces, accents and a dash reaches the other side as it is.
     const BOARD: &str = "Café board — Ünïcode ok";
     let share = v1::SharePipeWebsite { port: u32::from(port), name: BOARD.into(), group_id: group.clone(), ..Default::default() };
     assert!(matches!(a.request(Request::SharePipeWebsite(share)).await, Body::Ack(_)));
@@ -528,7 +528,7 @@ async fn a_shared_website_reaches_the_other_side_while_its_pipe_is_open() {
     b.until(|view| view.workspace.pipe_shares.is_empty()).await;
 
     // Shared again, then another key pinned during a pause: resume doesn't
-    // bring it back, there or anywhere (Fugo 30940).
+    // bring it back, there or anywhere.
     let share = v1::SharePipeWebsite { port: u32::from(port), name: "Metrics".into(), pipe_ids: vec![a_pipe.clone()], ..Default::default() };
     assert!(matches!(a.request(Request::SharePipeWebsite(share)).await, Body::Ack(_)));
     b.until(|view| view.workspace.pipe_shares.iter().any(|share| share.name == "Metrics" && share.live)).await;

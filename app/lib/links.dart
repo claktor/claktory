@@ -28,6 +28,7 @@ import 'mobile/local_network.dart' show connectNewClaktory;
 import 'mobile/permission.dart' show permissionHost;
 import 'rail.dart' show PhoneClaktories;
 import 'scope.dart';
+import 'visible_codes.dart' show nameInText;
 
 /// The schemes this app's builds open links with.
 const linkSchemes = {'claktory', 'claktory-dev', 'claktory-debug'};
@@ -53,7 +54,7 @@ AddLink? parseLink(Uri link) {
     return AddLink(parsePairingCode(link.toString()));
   }
   // The pairing page's link, as a Universal Link or App Link opens the app
-  // with it (#352 P6): only the code after its `#` is read.
+  // with it: only the code after its `#` is read.
   if (link.scheme == 'https') {
     final code = pairLinkCode(link.toString());
     return code == null ? null : AddLink(parsePairingCode(code));
@@ -174,14 +175,14 @@ Future<bool?> _onAccount(BuildContext context, RemoteFactory target) async {
 /// (a link, a QR code, a paste): true only for the person's Connect. It
 /// leads with the code's fingerprint; the name is the other side's own
 /// words, so it shows only quoted, never as the title; and it warns when
-/// the Claktory isn't on the person's account (Fugo's rules), when that's
+/// the Claktory isn't on the person's account, when that's
 /// known: signed out or unreadable, it only cautions.
 Future<bool> confirmPairing(BuildContext context, RemoteFactory target) async {
   final onAccount = await pairingOnAccount(context, target);
   if (!context.mounted) return false;
   var connect = false;
   // On an iPad a dialog at every width, which a change between Split View
-  // and full screen keeps (Sale's row 198).
+  // and full screen keeps.
   final iPad =
       defaultTargetPlatform == TargetPlatform.iOS &&
       deviceCapabilities.idiom == Idiom.pad;
@@ -207,12 +208,12 @@ Future<bool?> pairingOnAccount(BuildContext context, RemoteFactory target) =>
     _onAccount(context, target);
 
 /// What asks before a code connects: [confirmPairing]'s, and Add a
-/// Claktory's once a code is pasted or scanned (devices-signin.md §3).
+/// Claktory's once a code is pasted or scanned.
 const pairingCheckTitle = 'Connect to this Claktory?';
 
 /// What's checked before a code connects: the code's fingerprint, the
 /// other side's name only quoted, and whether it's on the person's account
-/// as far as that's known ([onAccount], Fugo's rules).
+/// as far as that's known ([onAccount]).
 class PairingCheck extends StatelessWidget {
   const PairingCheck({
     super.key,
@@ -234,9 +235,9 @@ class PairingCheck extends StatelessWidget {
           TextSpan(
             children: [
               // What the code's four groups are for, with no noun of
-              // their own: "code" is only what's pasted or scanned (Trish
-              // 41557). Its name only in the line under it, quoted, its
-              // own words (Fugo), so not twice.
+              // their own: "code" is only what's pasted or scanned. Its
+              // name only in the line under it, quoted, its own words, so
+              // not twice.
               TextSpan(
                 text: 'Check that it matches what it showed there: ',
                 style: TextStyle(color: palette.textMuted),
@@ -255,17 +256,18 @@ class PairingCheck extends StatelessWidget {
         const SizedBox(height: Space.xs),
         Text(
           [
-            if (target.name.isNotEmpty) 'It calls itself “${target.name}”.',
+            if (target.name.isNotEmpty)
+              'It calls itself “${nameInText(target.name)}”.',
             // One on this device's account lets it in with no Allow
-            // (Abbacchio's row 1667).
+            // .
             if (onAccount != true)
               "You'll still need to allow this $thisDeviceKind on it.",
           ].join(' '),
           style: TextStyles.body.copyWith(color: palette.textMuted),
         ),
-        // Off the account only once its list was read and says so (#529,
-        // Squalo's MC3): signed out, or the list unreadable, nothing is
-        // known of whose it is, so there's no claim, only the caution.
+        // Off the account only once its list was read and says so:
+        // signed out, or the list unreadable, nothing is known of whose
+        // it is, so there's no claim, only the caution.
         if (onAccount == false) ...[
           const SizedBox(height: Space.m),
           Text(
@@ -367,8 +369,7 @@ class _LinkOpenerState extends State<LinkOpener> {
       return;
     }
     // Added already: it shows; on a phone, in place of its list of
-    // Claktories or Add a Claktory, where a link is taken too (Zucchero's
-    // row 685).
+    // Claktories or Add a Claktory, where a link is taken too.
     if (connections.saved.contains(target)) {
       AppScope.switchFactory(context, target);
       PhoneClaktories.showConversation();
@@ -379,7 +380,7 @@ class _LinkOpenerState extends State<LinkOpener> {
       // Crossing between the narrow and wide layouts while Connect to this
       // Claktory? waits builds a new window, and this opener with it: Connect
       // goes on from the pairing screen, which crosses whole, or else the
-      // screen showing now (Sale's row 202).
+      // screen showing now.
       final from = mounted
           ? context
           : pairScreenKey.currentContext ?? permissionHost;

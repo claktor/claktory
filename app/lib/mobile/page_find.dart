@@ -4,6 +4,8 @@
 // usually there (a conversation's message box steps aside). Search, in the
 // page's menu, or ⌘F from a keyboard opens it; Done closes it.
 
+import 'dart:math' as math;
+
 import 'package:flutter/widgets.dart';
 
 import '../find.dart';
@@ -12,9 +14,14 @@ import 'find_bar.dart';
 /// Around a phone page: the find of the pane in it, if it can be searched,
 /// for its menu ([PhonePageFind]) and its foot (the find bar).
 class PhoneFindHost extends StatefulWidget {
-  const PhoneFindHost({super.key, required this.child});
+  const PhoneFindHost({super.key, this.insets = false, required this.child});
 
   final Widget child;
+
+  /// The page has the whole screen, its safe areas and the keyboard in
+  /// the [MediaQuery]: the bar keeps inside them and above the keyboard,
+  /// and the page over it has nothing at its foot to keep clear of.
+  final bool insets;
 
   @override
   State<PhoneFindHost> createState() => PhoneFindHostState();
@@ -63,14 +70,53 @@ class PhoneFindHostState extends State<PhoneFindHost> {
   Widget build(BuildContext context) {
     final session = _session;
     final open = session != null && session.isOpen.value;
+    Widget bar = open
+        ? PhoneSessionFindBar(session: session)
+        : const SizedBox.shrink();
+    var child = widget.child;
+    if (widget.insets) {
+      // Always under a MediaQuery of its own, so opening find doesn't
+      // build the page again.
+      final media = MediaQuery.of(context);
+      child = MediaQuery(
+        data: open
+            ? media
+                  .removePadding(removeBottom: true)
+                  .removeViewInsets(removeBottom: true)
+            : media,
+        child: child,
+      );
+    }
+    if (widget.insets && open) {
+      final safe = MediaQuery.paddingOf(context);
+      final keyboard = MediaQuery.viewInsetsOf(context).bottom;
+      bar = Padding(
+        padding: EdgeInsets.only(
+          left: safe.left,
+          right: safe.right,
+          bottom: math.max(safe.bottom, keyboard),
+        ),
+        child: MediaQuery.removePadding(
+          context: context,
+          removeLeft: true,
+          removeRight: true,
+          removeBottom: true,
+          child: MediaQuery.removeViewInsets(
+            context: context,
+            removeBottom: true,
+            child: bar,
+          ),
+        ),
+      );
+    }
     return PhonePageFind(
       session: session,
       open: open,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Expanded(child: widget.child),
-          if (open) PhoneSessionFindBar(session: session),
+          Expanded(child: child),
+          if (open) bar,
         ],
       ),
     );

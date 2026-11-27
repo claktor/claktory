@@ -1,4 +1,4 @@
-// An agent's header on a phone (agent-view.md §5): Back or Menu, the
+// An agent's header on a phone: Back or Menu, the
 // character and the name over "role · model", Needs you and ⋯. A tap on
 // the name opens Agent settings, whose first field is the model.
 import 'package:flutter/widgets.dart';
@@ -127,7 +127,7 @@ String? phoneModelName(BuildContext context, Agent agent) {
 /// "Coordinator · Opus 4.8" on one line, never wrapping: when it doesn't
 /// fit, the role is cut first, then the model at its end. With no role,
 /// the model; with no model, "No model available" ("No model" where that
-/// doesn't fit), muted as the Mac's header has it (Lucy 44844).
+/// doesn't fit), muted as the Mac's header has it.
 class RoleAndModel extends StatelessWidget {
   const RoleAndModel({super.key, required this.role, required this.model});
 

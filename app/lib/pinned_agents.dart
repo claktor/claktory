@@ -7,7 +7,7 @@ import 'package:flutter/widgets.dart';
 import 'backend.dart';
 import 'identity.dart';
 import 'mobile/metrics.dart' show TypeScale;
-import 'mobile/presentation.dart' show SheetAction, showActions;
+import 'mobile/presentation.dart' show SheetAction, SheetOverlay, showActions;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 
@@ -64,10 +64,21 @@ final justPinned = ValueNotifier<String?>(null);
 final sidebarDragging = ValueNotifier<bool>(false);
 
 /// Pins [agent] at the end of the pins, or unpins it; a refusal says why.
-Future<void> togglePin(BuildContext context, Agent agent) {
-  final pinned = pinnedIds(AppScope.of(context).workspace.workspace)
-      .contains(agent.id);
-  return pinned ? _unpin(context, agent) : pinAgentBefore(context, agent, '');
+Future<void> togglePin(BuildContext context, Agent agent) =>
+    togglePinLater(context, agent)();
+
+/// [togglePin] for a menu that may outlive [context]: what it needs is
+/// taken now, so the agent deleted while its menu is open still sends the
+/// pin and says why it was refused, over the window if [context] has gone
+/// (Abbacchio's row 1734).
+Future<void> Function() togglePinLater(BuildContext context, Agent agent) {
+  final backend = AppScope.of(context);
+  final origin = _Origin(context);
+  // As the menu showed it: deleted meanwhile, the agent is in no pins.
+  final pinned = pinnedIds(backend.workspace.workspace).contains(agent.id);
+  return () => pinned
+      ? _unpin(backend, origin, agent)
+      : _pin(backend, origin, agent, '');
 }
 
 /// Pins [agent] before the pin [beforeId] (empty: last), or moves its pin
@@ -76,10 +87,17 @@ Future<void> pinAgentBefore(
   BuildContext context,
   Agent agent,
   String beforeId,
-) async {
-  final backend = AppScope.of(context);
-  final origin = _Origin(context);
-  final wasPinned = pinnedIds(backend.workspace.workspace).contains(agent.id);
+) => _pin(AppScope.of(context), _Origin(context), agent, beforeId);
+
+Future<void> _pin(
+  Backend backend,
+  _Origin origin,
+  Agent agent,
+  String beforeId, {
+  bool? moving,
+}) async {
+  final wasPinned =
+      moving ?? pinnedIds(backend.workspace.workspace).contains(agent.id);
   try {
     await backend.pinAgent(agent.id, beforeId: beforeId);
     if (!wasPinned) {
@@ -94,9 +112,7 @@ Future<void> pinAgentBefore(
   }
 }
 
-Future<void> _unpin(BuildContext context, Agent agent) async {
-  final backend = AppScope.of(context);
-  final origin = _Origin(context);
+Future<void> _unpin(Backend backend, _Origin origin, Agent agent) async {
   try {
     await backend.unpinAgent(agent.id);
   } on RequestFailure catch (failure) {
@@ -105,18 +121,20 @@ Future<void> _unpin(BuildContext context, Agent agent) async {
 }
 
 /// Moves [agent]'s pin one place up ([by] -1) or down (1); null at that
-/// end of the pins, or when it isn't pinned.
+/// end of the pins, or when it isn't pinned. What it needs is taken now,
+/// as for [togglePinLater].
 VoidCallback? movePin(BuildContext context, Agent agent, int by) {
+  final backend = AppScope.of(context);
   final pins = [
-    for (final pin in pinnedAgents(AppScope.of(context).workspace.workspace))
-      pin.id,
+    for (final pin in pinnedAgents(backend.workspace.workspace)) pin.id,
   ];
   final at = pins.indexOf(agent.id);
   final to = at + by;
   if (at < 0 || to < 0 || to >= pins.length) return null;
   // Up: before the one above. Down: before the one after the next.
   final before = by < 0 ? pins[to] : (to + 1 < pins.length ? pins[to + 1] : '');
-  return () => unawaited(pinAgentBefore(context, agent, before));
+  final origin = _Origin(context);
+  return () => unawaited(_pin(backend, origin, agent, before, moving: true));
 }
 
 /// Opens the pinned agent [agentId]'s conversation, as a click on its row
@@ -146,13 +164,32 @@ void openPinned(BuildContext context, String agentId) {
 class _Origin {
   _Origin(this.row)
     : list = row.findAncestorStateOfType<ScrollableState>()?.context,
-      root = Navigator.maybeOf(row, rootNavigator: true)?.context;
+      window = _windowOf(row);
   final BuildContext row;
   final BuildContext? list;
-  final BuildContext? root;
+
+  /// The window's own content, which lasts as long as the window: where
+  /// it's said once the row and its list have gone (the agent deleted
+  /// while its menu was open, Abbacchio's row 1734).
+  final BuildContext? window;
+
+  /// The element just under the window's [SheetOverlay] on [row]'s way up.
+  static BuildContext? _windowOf(BuildContext row) {
+    BuildContext? below;
+    BuildContext? found;
+    row.visitAncestorElements((element) {
+      if (element.widget is SheetOverlay) {
+        found = below;
+        return false;
+      }
+      below = element;
+      return true;
+    });
+    return found;
+  }
 
   Future<void> say(String title, String why) async {
-    for (final here in [row, list, root]) {
+    for (final here in [row, list, window]) {
       if (here != null && here.mounted) {
         await showActions<void>(
           here,
@@ -170,13 +207,21 @@ class _Origin {
 /// A row of [showPointerMenu]; null in its list is a hairline between
 /// groups.
 class PointerMenuItem<T> {
-  const PointerMenuItem(this.label, this.value, {this.glyph});
+  const PointerMenuItem(
+    this.label,
+    this.value, {
+    this.glyph,
+    this.checked = false,
+  });
 
   final String label;
   final T value;
 
   /// A 16px glyph before the label, in the color given.
   final Widget Function(Color color)? glyph;
+
+  /// What it opens is showing: a check at the row's end.
+  final bool checked;
 }
 
 /// A right click's menu at [at] (global): a floating layer like the Copy
@@ -332,6 +377,7 @@ class _PointerMenuRowState<T> extends State<_PointerMenuRow<T>> {
     final item = widget.item;
     return Semantics(
       button: true,
+      selected: item.checked,
       label: item.label,
       // Its own tap, as excluding drops the row's: VoiceOver's VO-Space
       // (Abbacchio's row 1716).
@@ -377,6 +423,14 @@ class _PointerMenuRowState<T> extends State<_PointerMenuRow<T>> {
                         .copyWith(color: palette.text),
                   ),
                 ),
+                if (item.checked) ...[
+                  const SizedBox(width: Space.m),
+                  Text(
+                    '✓',
+                    style: TypeScale.of(context).body
+                        .copyWith(color: palette.textMuted),
+                  ),
+                ],
               ],
             ),
           ),

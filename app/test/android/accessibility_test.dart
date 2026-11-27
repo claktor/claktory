@@ -94,6 +94,9 @@ Future<void> _settings(WidgetTester tester) async {
         .descendant(of: find.byType(Sidebar), matching: find.byType(Scrollable))
         .first,
   );
+  // Its whole row in the middle, not at the edge a step of the scroll
+  // stopped at.
+  await Scrollable.ensureVisible(tester.element(target), alignment: 0.5);
   await pumpFrames(tester);
   _action(tester, 'Settings');
   await pumpFrames(tester);

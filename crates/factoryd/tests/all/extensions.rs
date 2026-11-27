@@ -726,7 +726,7 @@ async fn an_idle_agent_with_work_outstanding_is_reminded_once_until_something_ch
     let reminder = reminder.expect("a reminder");
     assert_eq!(
         reminder.text,
-        "You have 1 outstanding item and nothing running will wake you: #1 Fix login. Carry on, or mark what's waiting with status blocked and a note saying on what."
+        "You have 1 outstanding item and nothing is due to wake you soon: #1 Fix login. Carry on, or mark what's waiting with status blocked and a note saying on what."
     );
     assert_eq!((reminder.from.as_str(), reminder.summary.as_str()), ("Claktory", "Reminder: 1 outstanding checklist item"));
     quiet(&mut client, &mut view).await;
@@ -766,6 +766,66 @@ async fn an_idle_agent_with_work_outstanding_is_reminded_once_until_something_ch
     call(&mut client, &mut view, "lead", "checklist_update", reopen).await;
     quiet(&mut client, &mut view).await;
     assert_eq!(reminders(&view), 2);
+}
+
+#[tokio::test]
+async fn an_item_unchanged_for_a_day_is_reminded_of_daily_while_its_owner_works_on_others() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    factory.set_nudge_after(std::time::Duration::from_millis(150));
+    // A minute lasts 2ms: a day is under 3 s.
+    factory.set_nudge_minute(std::time::Duration::from_millis(2));
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Lead", "")).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Worker", "")).await;
+    ack(apply_request(&mut client, &mut view, turn("lead", "checklist", true)).await);
+    let stuck = |view: &View| {
+        view.entries
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                Some(Kind::Event(event)) if event.summary.ends_with("unchanged for a day") => Some(event.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let others = |view: &View| {
+        view.entries.iter().filter(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.text.starts_with("You have"))).count()
+    };
+    let quiet = async |client: &mut Client, view: &mut View| {
+        let until = tokio::time::Instant::now() + std::time::Duration::from_millis(700);
+        while let Ok(message) = tokio::time::timeout_at(until, client.receive()).await {
+            if let Some(body) = &message.body {
+                view.apply(body);
+            }
+        }
+    };
+
+    // The worker it gave both items to keeps working: fresh items aren't news.
+    apply_request(&mut client, &mut view, send_message("worker", "hang")).await;
+    let added = r#"{"items":["Fix login","Write the docs"],"owner":"worker"}"#;
+    call(&mut client, &mut view, "lead", "checklist_add", added).await;
+    quiet(&mut client, &mut view).await;
+    assert!(stuck(&view).is_empty());
+
+    // #2 hasn't changed for a day: Lead hears of it, and only of it.
+    let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("db");
+    db.busy_timeout(std::time::Duration::from_secs(5)).expect("busy timeout");
+    db.execute("UPDATE checklist_items SET updated = 0 WHERE agent = 'lead' AND id = 2", []).expect("age");
+    drop(db);
+    view.follow(&mut client, |view| !stuck(view).is_empty()).await;
+    let reminder = stuck(&view)[0].clone();
+    assert_eq!(
+        reminder.text,
+        "1 of your outstanding items hasn't changed for a day, though their owners are working: #2 Write the docs. Check on them: \
+         ask their owner, carry on yourself, or mark what's waiting with status blocked and a note saying on what."
+    );
+    assert_eq!((reminder.from.as_str(), reminder.summary.as_str()), ("Claktory", "Reminder: 1 checklist item unchanged for a day"));
+    view.follow(&mut client, |view| idle(view, "lead")).await;
+    quiet(&mut client, &mut view).await;
+    assert_eq!(stuck(&view).len(), 1, "not again within the day");
+    assert_eq!(others(&view), 0, "nothing about the items that move");
 }
 
 #[tokio::test]

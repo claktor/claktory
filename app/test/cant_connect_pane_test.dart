@@ -10,9 +10,9 @@ import 'package:flutter_test/flutter_test.dart';
 import 'harness.dart';
 import 'tunnel_test.dart' show tunnelStatus;
 
-// Zucchero's row 480 (#37): while the drawer and the connection sheet said
+// While the drawer and the connection sheet said
 // "Can't connect", the main pane behind them said "Connecting…". It says
-// the same now, as a problem page (devices-signin.md §4): what to check,
+// the same now, as a problem page: what to check,
 // Details and Try again.
 
 void main() {
@@ -89,7 +89,7 @@ void main() {
     });
   }
 
-  // Trish (#37): the Claktory by its own name wherever the app knows it,
+  // The Claktory by its own name wherever the app knows it,
   // never the machine's from an old pairing code; and the tunnel's "can't
   // reach the relay or the machine" in the sheet's words.
   testWidgets("can't connect, it names the Claktory as it calls itself, and "
@@ -136,7 +136,7 @@ void main() {
     expect(Connection(backend).error, 'no route');
   });
 
-  // An iPhone or iPad (devices-signin.md §7): whether Local Network is on,
+  // An iPhone or iPad: whether Local Network is on,
   // asked, never checked unasked; Details is the connection in full.
   testWidgets("on an iPhone, can't connect asks whether Local Network is on, "
       'and Check Local Network opens its sheet', (tester) async {

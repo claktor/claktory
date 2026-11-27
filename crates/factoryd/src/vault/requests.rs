@@ -55,6 +55,13 @@ pub(crate) async fn unlock(factory: &Arc<Factory>, passphrase: &str) -> Result<(
     let (vmk, opened_by) = prove_which(factory, passphrase).await?;
     if !factory.vault.is_open() {
         factory.vault.unlock(vmk);
+        // Its key on disk didn't open it: a fresh one, so the next start
+        // doesn't ask again.
+        match blocking(factory, |vault| vault.mend_auto_key()).await {
+            Ok(true) => tracing::info!("the vault's key on disk didn't open it; a new one is written"),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(?error, "could not write the vault a new key on disk"),
+        }
         // A recovery key typed here has been seen here (#239): the app
         // offers to make a new one. A passphrase's hash matches none.
         if let Err(error) = factory.vault.note_recovery_used(&opened_by) {
@@ -137,9 +144,48 @@ pub(crate) fn revoke_secret(factory: &Factory, request: &v1::RevokeSecret) -> Re
 /// the person). Returns its name.
 pub(crate) fn give(factory: &Factory, secret: &str, agent: &str, by: &str) -> Result<String, RequestError> {
     factory.known_agent(agent)?;
+    if !by.is_empty() {
+        not_a_login(factory, secret, agent, Giver::Admin)?;
+    }
     let name = factory.vault.grant(secret, agent, by)?;
     factory.vault_changed();
     Ok(name)
+}
+
+/// Who gives a secret for an agent's commands, other than the person in
+/// Settings → Secrets.
+enum Giver {
+    /// The person, on the agent's request.
+    Card,
+    /// An admin agent.
+    Admin,
+}
+
+/// Refuses `secret` (by id or name) for `agent`'s commands when it's a
+/// website login (it has sites) and `giver` isn't the person in Settings →
+/// Secrets: on a request, or from an admin agent, a login would reach
+/// commands without the person choosing exactly that.
+fn not_a_login(factory: &Factory, secret: &str, agent: &str, giver: Giver) -> Result<(), RequestError> {
+    let state = factory.vault.state(|_, _| false);
+    let Some(login) = state.secrets.iter().find(|found| (found.id == secret || found.name == secret) && !found.sites.is_empty()) else {
+        return Ok(());
+    };
+    let (person, agent) = {
+        let inner = factory.lock();
+        let name = inner.config.agent(agent).map_or_else(|| agent.to_owned(), |found| found.name.clone());
+        (inner.config.person().to_owned(), name)
+    };
+    let why = match giver {
+        Giver::Card => format!(
+            "{} is a website login: Claktory types it only on its sites, so it isn't given for commands on a request. To let {agent}'s commands use it, give it to {agent} in Settings → Secrets.",
+            login.name
+        ),
+        Giver::Admin => format!(
+            "{} is a website login: Claktory types it only on its sites, and only {person} gives one to an agent's commands, in Settings → Secrets.",
+            login.name
+        ),
+    };
+    Err(VaultError::Invalid(why).into())
 }
 
 /// Takes the secret (by id or name) back from `agent`, `by` an admin agent
@@ -302,6 +348,10 @@ pub(crate) async fn grant_secret(
         // Only for filling in Claktory's browser: no request for a command's
         // secret is answered by it.
         factory.known_agent(&request.agent_id)?;
+        if let Some(why) = crate::errands::refused(factory, &request.agent_id) {
+            let name = factory.lock().config.agent(&request.agent_id).map(|agent| agent.name.clone()).unwrap_or_default();
+            return Err(VaultError::Invalid(format!("{name} can't be given a secret to fill in: {why}")).into());
+        }
         factory.vault.grant_fill_only(&request.id, &request.agent_id, "")?;
         factory.vault_changed();
         return Ok(session.answer());
@@ -325,7 +375,8 @@ fn answer_waiting(factory: &Arc<Factory>, secret: &str, agent: &str) -> Result<(
         .requests_of(agent)?
         .into_iter()
         .filter(|asked| matches!(asked.state(), v1::SecretRequestState::Pending | v1::SecretRequestState::Approved))
-        .filter(|asked| asked.imports.is_empty() && asked.generate.is_empty())
+        // A login is answered only on its card, bound to its site.
+        .filter(|asked| asked.imports.is_empty() && asked.generate.is_empty() && !asked.login)
         .collect();
     let sets: Vec<&str> = given.variables.iter().map(|variable| variable.name.as_str()).collect();
     let (answered, others): (Vec<_>, Vec<_>) = waiting.into_iter().partition(|asked| {
@@ -512,6 +563,9 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
         }
         return settle_request(factory, &asked, None, &request.comment, true);
     }
+    if asked.login && request.approve {
+        return decide_login(factory, &asked, request);
+    }
     if !asked.imports.is_empty() && request.approve {
         if request.approve_only {
             return Err(
@@ -559,6 +613,9 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
             return Err(VaultError::Invalid("Choose a secret to give, or add a new one with its values.".to_owned()).into());
         };
         factory.known_agent(agent)?;
+        if !added {
+            not_a_login(factory, &secret, agent, Giver::Card)?;
+        }
         let name = factory.vault.grant_as(&secret, agent, "", &aliases)?;
         Some((secret, name))
     } else {
@@ -568,6 +625,92 @@ pub(crate) fn decide_request(factory: &Arc<Factory>, request: &v1::DecideSecretR
         factory.vault.mark_added(&asked.id)?;
     }
     settle_request(factory, &asked, given, &request.comment, false)
+}
+
+/// The person signs an agent in on its login card: Sign in
+/// with the two values, saved as a new login bound to the page's origin
+/// (or, after the site refused it, as the same login's new values); or
+/// Use it, one of theirs bound to exactly that origin. Either way the
+/// agent gets it fill-only, never for a command, and is told
+/// to sign in again; the card says Signing in.
+fn decide_login(factory: &Arc<Factory>, asked: &v1::SecretRequest, request: &v1::DecideSecretRequest) -> Result<(), RequestError> {
+    let agent = asked.agent_id.as_str();
+    let Some(login) = super::asks::login_of(asked) else {
+        return Err(VaultError::Invalid("This request isn't a login's.".to_owned()).into());
+    };
+    if request.approve_only {
+        return Err(VaultError::Invalid("A login is yours to give: there's nothing for an admin agent to find.".to_owned()).into());
+    }
+    let state = factory.vault.state(|_, _| false);
+    let named = |reference: &str| state.secrets.iter().find(|secret| secret.id == reference || secret.name == reference);
+    let mut added = false;
+    let (secret, name) = if !request.secret_id.is_empty() {
+        let Some(found) = named(&request.secret_id) else { return Err(VaultError::NoSecret(request.secret_id.clone()).into()) };
+        // Only a login bound to exactly this page's origin, whatever card
+        // an app shows: never one of another site's.
+        if !found.sites.contains(&login.origin) {
+            return Err(VaultError::Invalid(format!(
+                "{} isn't for {}: only a login for exactly {} can be used here. Type the login instead.",
+                found.name, login.site, login.origin
+            ))
+            .into());
+        }
+        (found.id.clone(), found.name.clone())
+    } else if !request.entries.is_empty() {
+        let values = values(&request.entries);
+        if !values.iter().any(|value| value.variable == super::logins::PASSWORD && !value.value.is_empty()) {
+            return Err(VaultError::Invalid("Type the password too.".to_owned()).into());
+        }
+        match named(&asked.given_secret_id).filter(|_| !asked.given_secret_id.is_empty()) {
+            // The site refused it: Sign in again replaces its values.
+            Some(refused) => {
+                factory.vault.update_secret(&refused.id, &refused.name, &refused.description, Some(&values))?;
+                factory.vault.set_sites(&refused.id, &union(&refused.sites, &login.origin))?;
+                (refused.id.clone(), refused.name.clone())
+            }
+            None => {
+                let wanted = asked.new_secret.clone().unwrap_or_default();
+                let chosen = if request.name.trim().is_empty() { asked.secret_name.clone() } else { request.name.trim().to_owned() };
+                let name = free_name(&state.secrets, &chosen);
+                let id = factory.vault.create_secret(&name, &wanted.description, &values, "")?;
+                factory.vault.set_sites(&id, std::slice::from_ref(&login.origin))?;
+                added = true;
+                (id, name)
+            }
+        }
+    } else {
+        return Err(VaultError::Invalid("Type the email or username and the password, or use one of your logins.".to_owned()).into());
+    };
+    factory.known_agent(agent)?;
+    // Fill-only for this agent; a full grant it already holds stays.
+    if !factory.vault.holds_fully(&secret, agent) {
+        factory.vault.grant_fill_only(&secret, agent, "")?;
+    }
+    if added {
+        factory.vault.mark_added(&asked.id)?;
+    }
+    settle_request(factory, asked, Some((secret, name)), &request.comment, false)?;
+    let signing = factory.vault.set_login_outcome(&asked.id, v1::SecretLoginOutcome::SigningIn)?;
+    show_everywhere(factory, signing);
+    Ok(())
+}
+
+/// `sites` with `origin` added, once.
+fn union(sites: &[String], origin: &str) -> Vec<String> {
+    let mut all = sites.to_vec();
+    if !all.iter().any(|site| site == origin) {
+        all.push(origin.to_owned());
+    }
+    all
+}
+
+/// `name`, or "name 2", "name 3"… when the vault has a secret by it.
+fn free_name(secrets: &[v1::SecretInfo], name: &str) -> String {
+    let taken = |candidate: &str| secrets.iter().any(|secret| secret.name.eq_ignore_ascii_case(candidate));
+    (1..)
+        .map(|n| if n == 1 { name.to_owned() } else { format!("{name} {n}") })
+        .find(|candidate| !taken(candidate))
+        .unwrap_or_else(|| name.to_owned())
 }
 
 /// The person gave `asked`'s agent `given` (the secret's id and name) for
@@ -625,7 +768,12 @@ fn settle_request(
             let label = factory.vault.granted(agent).remove(id).unwrap_or_else(|| name.clone());
             // This answer says it; the note of what changed needn't too.
             factory.told_secret(agent, id);
-            (format!("{person} gave you {name}: pass it in bash's `secrets`"), format!("\n\nIt's {label}."))
+            if asked.login {
+                // A login is typed by Claktory, never passed to a command.
+                (format!("{person} gave you {name} for {}: call browser_sign_in again on the page to sign in", asked.login_site), String::new())
+            } else {
+                (format!("{person} gave you {name}: pass it in bash's `secrets`"), format!("\n\nIt's {label}."))
+            }
         }
         None if replied => (format!("{person} replied to your request for {}", asked.secret_name), String::new()),
         None => (format!("{person} dismissed your request for {}", asked.secret_name), String::new()),
@@ -741,6 +889,7 @@ pub(crate) fn fulfil_request(
     }
     factory.known_agent(&agent)?;
     let (secret_id, aliases) = alias_plan(factory, &asked, secret_ref, aliases, as_is)?;
+    not_a_login(factory, &secret_id, &agent, Giver::Admin)?;
     let name = factory.vault.grant_as(&secret_id, &agent, admin, &aliases)?;
     // The person's approval comment stays with the decided request.
     let decided = factory.vault.decide_request(&agent, &asked.id, Some((secret_id.as_str(), name.as_str())), &asked.comment, false)?;
@@ -1076,6 +1225,17 @@ pub(crate) fn reshow(factory: &Factory, id: &str) {
 /// fitting_secret_id, #360 K4), while it waits; decided, none.
 pub(crate) fn fitted(factory: &Factory, mut request: v1::SecretRequest) -> v1::SecretRequest {
     let open = matches!(request.state(), v1::SecretRequestState::Pending | v1::SecretRequestState::Approved);
+    if request.login {
+        // A login: only one bound to exactly its origin fits ("One of yours
+        // fits"), and one named like it for another site is the card's
+        // warning.
+        let origin = request.sites.first().cloned().unwrap_or_default();
+        let fits = open.then(|| factory.vault.logins_at(&request.agent_id, &origin).into_iter().next()).flatten();
+        (request.fitting_secret_id, request.fitting_secret_name) = fits.unwrap_or_default();
+        let like = open.then(|| factory.vault.lookalike(&origin)).flatten();
+        (request.lookalike_secret_name, request.lookalike_site) = like.unwrap_or_default();
+        return request;
+    }
     let (id, name) = if open && request.imports.is_empty() && request.generate.is_empty() {
         fitting(&factory.vault.state(|_, _| false).secrets, &request).unwrap_or_default()
     } else {
@@ -1089,11 +1249,12 @@ pub(crate) fn fitted(factory: &Factory, mut request: v1::SecretRequest) -> v1::S
 /// The secret in `secrets` that fits `asked`: the one it named, else one
 /// named what it asks for (ignoring case), else one that sets every
 /// variable it asks for; else a connected service whose connector or name
-/// it names, which an admin agent makes one from. Its id and name.
+/// it names, which an admin agent makes one from; never a website login,
+/// which isn't given for commands on a request. Its id and name.
 fn fitting(secrets: &[v1::SecretInfo], asked: &v1::SecretRequest) -> Option<(String, String)> {
     let wanted: Vec<&str> =
         asked.new_secret.iter().flat_map(|wanted| wanted.variables.iter().map(|variable| variable.name.as_str())).collect();
-    let plain = || secrets.iter().filter(|secret| secret.connection.is_none());
+    let plain = || secrets.iter().filter(|secret| secret.connection.is_none() && secret.sites.is_empty());
     let found = plain()
         .find(|secret| !asked.secret_id.is_empty() && secret.id == asked.secret_id)
         .or_else(|| plain().find(|secret| secret.name.trim().eq_ignore_ascii_case(asked.secret_name.trim())))
@@ -1125,12 +1286,14 @@ pub(crate) fn refresh_fitting(factory: &Factory) {
             let inner = factory.lock();
             inner.agents.get(&now.agent_id).and_then(|runtime| runtime.transcript.as_ref()).and_then(|transcript| {
                 transcript.in_memory().rev().find_map(|entry| match &entry.kind {
-                    Some(v1::entry::Kind::SecretRequest(shown)) if shown.id == now.id => Some(shown.fitting_secret_id.clone()),
+                    Some(v1::entry::Kind::SecretRequest(shown)) if shown.id == now.id => {
+                        Some((shown.fitting_secret_id.clone(), shown.lookalike_secret_name.clone()))
+                    }
                     _ => None,
                 })
             })
         };
-        if shown.is_some_and(|shown| shown != now.fitting_secret_id) {
+        if shown.is_some_and(|shown| shown != (now.fitting_secret_id.clone(), now.lookalike_secret_name.clone())) {
             show(factory, now);
         }
     }

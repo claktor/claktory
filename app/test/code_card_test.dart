@@ -1,5 +1,4 @@
-// The code card (#435 W8, Lucy's needs-you-cards.md §3.6; Fugo 41442;
-// Prosciutto 41451): a site an errand is on asks for a code sent to the
+// The code card: a site an errand is on asks for a code sent to the
 // person. Claktory's heading with the site, one field for the code only,
 // Can't do this… with its reasons and Fill in; the code never reaches the
 // agent, a draft or the card once sent.
@@ -41,7 +40,7 @@ Entry _card({
   timestampMs: Int64(1004),
   askPerson: AskPerson(
     id: 'ask4',
-    // The agent's words: never the card's heading (Fugo).
+    // The agent's words: never the card's heading.
     title: 'Enter the code Google sent',
     body: 'Google wants a code.',
     state: state,
@@ -86,7 +85,7 @@ void main() {
   testWidgets("Claktory's heading with the site, never the agent's words; "
       'one field for the code, no comment, mic or files', (tester) async {
     await _show(tester, _card());
-    expect(find.text("June's errand needs a code"), findsOneWidget);
+    expect(find.text('June needs a code'), findsOneWidget);
     expect(
       find.text('accounts.google.com asks for a code', findRichText: true),
       findsOneWidget,
@@ -231,7 +230,7 @@ void main() {
   testWidgets('answered: Filled in on the site, never the code; the page '
       "changed: said in danger; can't: with the reason", (tester) async {
     await _show(tester, _card(state: AskPersonState.ASK_PERSON_STATE_ANSWERED));
-    expect(find.text("June's errand needed a code"), findsOneWidget);
+    expect(find.text('June needed a code'), findsOneWidget);
     expect(
       find.textContaining(
         'Filled in on accounts.google.com',

@@ -1,4 +1,4 @@
-// A baseline of the iPhone app on an iPad (#209), against the dev Claktory,
+// A baseline of the iPhone app on an iPad, against the dev Claktory,
 // in the Simulator: what the app does there today, nothing changed for the
 // shots. Pairing, the conversation, the drawer, a draft with the keyboard,
 // the More sheet, a file in its viewer and a selection in it, then the same

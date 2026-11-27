@@ -1,4 +1,4 @@
-//! Grok on a SuperGrok or X Premium+ subscription (#493): signed in as
+//! Grok on a SuperGrok or X Premium+ subscription: signed in as
 //! xAI's own command-line tool signs in (`oauth`), asked through the chat
 //! proxy that tool uses, which speaks OpenAI's Responses API. The proxy
 //! answers only clients that say which version of the tool they are
@@ -20,11 +20,10 @@ pub const ID: &str = "grok";
 /// The proxy xAI's command-line tool asks.
 pub const BASE_URL: &str = "https://cli-chat-proxy.grok.com/v1";
 /// The version of xAI's command-line tool Claktory says it is: the proxy
-/// turns away a client that names none, or one older than it takes
-/// (426, "Your Grok CLI version (none) is outdated"). Matt's decision
-/// (#493): Claktory says it's the tool. One fixed version, never fetched,
-/// worked out or changed after a refusal; moving it on is a reviewed code
-/// change (Fugo's condition). 1.0.45 is the tool's version on 25 Nov 2026.
+/// turns away a client that names none, or one older than it takes (426,
+/// "Your Grok CLI version (none) is outdated"). Claktory says it's
+/// the tool. One fixed version, never fetched, worked out or
+/// changed after a refusal; moving it on is a reviewed code change. 1.0.45 is the tool's version on 25 Nov 2026.
 pub const CLIENT_VERSION: &str = "1.0.45";
 
 /// The headers every request to the proxy carries besides the token: that
@@ -41,8 +40,8 @@ pub fn provider() -> Provider {
     provider
 }
 
-/// What the proxy's failed answers mean (Fugo's condition, #493): 401 is
-/// an access token it no longer takes, renewed once as for any provider;
+/// What the proxy's failed answers mean: 401 is an
+/// access token it no longer takes, renewed once as for any provider;
 /// 402 the plan's usage used up, a usage limit until the period resets;
 /// 408 and 429 (and 5xx) pass, and are waited out; any other 4xx is xAI
 /// turning the sign-in away, said as such and never tried again.
@@ -65,14 +64,14 @@ fn failed(status: u16, body: &str, output: &mut AssistantMessage) -> Option<Stri
 
 const DIALECT: Dialect = Dialect { prefix: "xAI error", session_headers: false, failed: Some(failed) };
 
-/// The proxy's host: the only one a Grok sign-in's token is ever sent to
-/// (Fugo's condition, #493), since `api:access` may let it use xAI's API,
+/// The proxy's host: the only one a Grok sign-in's token is ever sent to,
+/// since `api:access` may let it use xAI's API,
 /// billed apart from the subscription.
 pub const PROXY_HOST: &str = "cli-chat-proxy.grok.com";
 
 /// Whether a Grok token may go to `url`: the proxy over https, or, in a
 /// debug build only (tests' stand-ins), this computer, so no override in a
-/// release can send it to a local listener (Fugo 37861).
+/// release can send it to a local listener.
 pub fn allowed(url: &str) -> bool {
     let Ok(url) = url::Url::parse(url) else { return false };
     match (url.scheme(), url.host_str()) {
@@ -94,7 +93,7 @@ const CONVERSATIONS_KEPT: usize = 4096;
 /// The conversation id the proxy keeps a prompt cache by
 /// (`x-grok-conv-id`): random, one per agent context, a new one once the
 /// context starts again (compaction, /clear, new instructions). Made of
-/// nothing of Claktory's (Fugo's condition): only looked up, on this
+/// nothing of Claktory's: only looked up, on this
 /// computer, by the session and the context's start. Forgotten at a
 /// restart, which costs the cache once.
 fn conversation(session: &str, context: &LlmContext) -> String {
@@ -144,7 +143,7 @@ fn claims(token: &str) -> Option<Value> {
 
 /// Who a sign-in is, from its token: its user (`sub`) to tell accounts
 /// apart, shown as "Grok" and its last four characters, since the scopes
-/// asked for give no email or name (Fugo: never more scopes for a label).
+/// asked for give no email or name (never more scopes for a label).
 pub fn identity_of(token: &str) -> crate::limits::Identity {
     let sub = claims(token).and_then(|claims| claims["sub"].as_str().map(str::to_owned)).unwrap_or_default();
     let end: String = sub.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();

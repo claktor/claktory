@@ -1,4 +1,4 @@
-// A video coming when its Claktory goes away (Zucchero's row 588, iPhone):
+// A video coming when its Claktory goes away (iPhone):
 // it waited for the connection with no end, never giving up after the
 // minute a read waits, and as the Claktory came back it said "Connection
 // lost." with the file's path for the seconds the read took to get going
@@ -50,7 +50,7 @@ Future<void> _loading(WidgetTester tester) async {
     // As the backend fails a request in flight when the connection goes.
     ..holdRead = (request) async {
       if (!harness.backend.connected.value) {
-        throw const RequestFailure('Not connected to the backend.');
+        throw const RequestFailure("Can't reach your Claktory right now.");
       }
       if (!dropped && request.offset >= 10 * _mb) {
         dropped = true;
@@ -163,7 +163,7 @@ void main() {
     await _loading(tester);
     expect(find.text(lostWhileReading), findsNothing);
     expect(find.textContaining('Waiting for the connection'), findsOneWidget);
-    expect(find.text('Not connected to the backend.'), findsNothing);
+    expect(find.text("Can't reach your Claktory right now."), findsNothing);
     final before = harness.backend.sent.length;
 
     harness.backend.connected.value = true;

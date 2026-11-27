@@ -15,7 +15,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'harness.dart';
 import 'panes_test.dart' show glyphButton, leaf, row, snapshot, split;
 
-/// Sale's A4 and A3 (Bruno 23882): the conversation is never squeezed below
+/// The conversation is never squeezed below
 /// its least by the panes beside it. A pane that doesn't fit replaces the
 /// oldest beside it; a page with no room for it beside opens in the
 /// conversation's place; in a layout the window narrowed under, the
@@ -108,7 +108,7 @@ void main() {
     )..backend.appliesLayouts = true;
     await harness.show(tester, size: const Size(1400, 900));
     await settle(tester);
-    await tester.tap(glyphButton('Usage'));
+    await openFromMore(tester, 'Usage');
     await settle(tester);
     expect(kinds(harness), ['chat', 'usage', 'settings']);
     expect(chatWidth(tester), greaterThanOrEqualTo(chatMinWidth - 1));
@@ -212,7 +212,7 @@ void main() {
 
   testWidgets('a pane squeezed to its least on touch keeps × whole: Expand '
       'and then its name give way', (tester) async {
-    // Android's own policy, a finger's targets (Sale's tablet).
+    // Android's own policy, a finger's targets.
     PhonePlatformPolicy.debugAndroidPolicy = true;
     addTearDown(() => PhonePlatformPolicy.debugAndroidPolicy = false);
     final harness = Harness(

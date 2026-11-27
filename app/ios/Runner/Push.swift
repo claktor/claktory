@@ -34,8 +34,9 @@ struct PushNotice: Equatable {
   let target: PushTarget
 }
 
-/// What a tap on a push opens: an agent (at its Needs-you item, `seq`), a
-/// pipe (at its held message), a chat, or Needs you for a device waiting
+/// What a tap on a push opens: an agent (at its Needs-you item, `seq`, or
+/// its alert, `alert`), a pipe (at its held message), a chat, or Needs you
+/// for a device waiting
 /// to be allowed (`device`, #352 P4) or for a Needs-you push about no one
 /// thing (`kind` "needs_you": what waited out quiet hours, #364 O3); none
 /// of them for a test.
@@ -45,6 +46,8 @@ struct PushTarget: Equatable {
   var chat = ""
   var seq: UInt64 = 0
   var device = ""
+  /// The alert it's about: the app opens Needs you at it.
+  var alert = ""
   /// The push's kind, "needs_you" or another.
   var kind = ""
 
@@ -53,7 +56,7 @@ struct PushTarget: Equatable {
   func map(claktory: String) -> [String: Any] {
     [
       "claktory": claktory, "agentId": agent, "pipeId": pipe, "chatId": chat, "seq": Int(seq),
-      "deviceId": device, "kind": kind,
+      "deviceId": device, "alertId": alert, "kind": kind,
     ]
   }
 }
@@ -165,7 +168,8 @@ enum PushOpener {
         chat: text("chat", in: target),
         seq: (target["seq"] as? NSNumber)?.uint64Value ?? 0,
         // Older Claktories send none: no device.
-        device: text("device", in: target), kind: text("kind")))
+        device: text("device", in: target), alert: text("alert", in: target),
+        kind: text("kind")))
   }
 }
 

@@ -20,6 +20,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::io::Write as _;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -164,7 +165,17 @@ pub(crate) fn path(dir: &Path, number: u32, lines: bool) -> PathBuf {
 /// Whether a segment is saved by appending to its file: it's JSON Lines and
 /// no other name links to it.
 pub(crate) fn appendable(path: &Path) -> bool {
-    is_lines(path) && std::fs::metadata(path).is_ok_and(|meta| meta.nlink() == 1)
+    is_lines(path) && links(path) == Some(1)
+}
+
+#[cfg(unix)]
+fn links(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|meta| meta.nlink())
+}
+
+#[cfg(windows)]
+fn links(path: &Path) -> Option<u64> {
+    crate::windows::fs::identity(path).ok().map(|identity| identity.links)
 }
 
 /// A segment to write whole.

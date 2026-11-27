@@ -238,7 +238,7 @@ class _VersionsState extends State<_Versions> {
     _count = _backend.workspace.agent(widget.agentId)?.branches ?? 0;
     // Another device or an agent's tool may go back or switch meanwhile:
     // the count changes (not on a switch, which sets one aside as it
-    // brings one back), or the conversation comes again (Cioccolata).
+    // brings one back), or the conversation comes again.
     _backend.workspace.addListener(_workspaceChanged);
     _backend.transcript.addListener(_transcriptChanged);
     unawaited(_load());

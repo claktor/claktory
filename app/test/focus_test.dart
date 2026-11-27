@@ -74,11 +74,20 @@ Future<Harness> showFocused(
 
 void main() {
   testWidgets(
-    'a click focuses a project; focused, the sidebar is only that project',
+    "a click folds a project; its menu's Show only this project focuses "
+    'it, and focused, the sidebar is only that project (§4)',
     (tester) async {
       final harness = await showFocused(tester, focusedOn(''));
       expect(find.text('Rivet'), findsOneWidget);
       await tester.tap(find.text('Site'));
+      await settle(tester);
+      expect(
+        harness.last.setProjectCollapsed,
+        SetProjectCollapsed(projectId: 'p2', collapsed: true),
+      );
+      await tester.tap(find.text('Site'), buttons: kSecondaryButton);
+      await settle(tester);
+      await tester.tap(find.text('Show only this project'));
       await settle(tester);
       expect(harness.last.focusProject.projectId, 'p2');
 
@@ -93,11 +102,22 @@ void main() {
       // The Projects section's heading stays, over the focused project.
       expect(find.text('Projects'), findsOneWidget);
 
-      // The heading opens the project's settings, by click or right click.
+      // The heading opens the project's menu, as its row does, by click
+      // or right click.
       await tester.tap(find.text('Factory').first, buttons: kSecondaryButton);
+      await settle(tester);
+      expect(find.text('Show all projects'), findsOneWidget);
+      await tester.tap(find.text('Project settings…'));
       await settle(tester);
       expect(find.text('Delete project…'), findsOneWidget);
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await settle(tester);
+      await tester.tap(find.text('Factory').first);
+      await settle(tester);
+      await tester.tap(find.text('Show all projects'));
+      await settle(tester);
+      expect(harness.last.focusProject.projectId, '');
+      await harness.apply(tester, focusedOn('p1'));
       await settle(tester);
 
       await tester.tap(find.text('‹ All projects'));
@@ -153,7 +173,11 @@ void main() {
     await tester.tap(find.text('Create'));
     await settle(tester);
     expect(
-      harness.backend.sent.map((message) => message.whichBody()).toList(),
+      [
+        for (final message in harness.backend.sent)
+          // Where its folder would go, asked as it's named.
+          if (!message.hasPreviewProjectFolder()) message.whichBody(),
+      ],
       [ClientMessage_Body.createProject, ClientMessage_Body.focusProject],
     );
     expect(harness.last.focusProject.projectId, 'docs');

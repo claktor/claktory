@@ -391,7 +391,7 @@ type Socket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
 
 async fn connect(addr: std::net::SocketAddr) -> Socket {
     let tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
-    let (mut socket, _) = tokio_tungstenite::client_async("ws://factory/", tcp).await.expect("websocket");
+    let (mut socket, _) = tokio_tungstenite::client_async(format!("ws://{addr}/"), tcp).await.expect("websocket");
     let hello = v1::Hello {
         protocol_version: PROTOCOL_VERSION,
         client_version: "traffic".into(),

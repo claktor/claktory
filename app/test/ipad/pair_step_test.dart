@@ -1,5 +1,5 @@
-// An iPad with no Claktory yet connects the phone's way at every width
-// (#363 F3): PairScreen (scan, sign in, paste), beside the rail when the
+// An iPad with no Claktory yet connects the phone's way at every width:
+// PairScreen (scan, sign in, paste), beside the rail when the
 // window is wide, never the Mac's ConnectStep, which only pastes.
 import 'package:factory_app/connect_step.dart';
 import 'package:factory_app/connections.dart';

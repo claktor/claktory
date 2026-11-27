@@ -1,4 +1,4 @@
-//! The Monitors overview (friend bug #10): every agent's monitors in one
+//! The Monitors overview: every agent's monitors in one
 //! list, each monitor's history a page at a time, and a signal to clients
 //! when any of them changed, so a list on screen stays true.
 

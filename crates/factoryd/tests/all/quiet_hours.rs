@@ -1,7 +1,7 @@
-//! Notifications that wait (#364 O3): a Needs-you item that comes during
+//! Notifications that wait: a Needs-you item that comes during
 //! quiet hours notifies once they end, all of them in one notification, if
 //! it still waits. And only apps that show notifications count as reaching
-//! the person (#366 A2): Android's can't yet.
+//! the person: Android's can't yet.
 
 use std::time::Duration;
 
@@ -96,7 +96,7 @@ async fn needs_you_during_quiet_hours_notifies_once_they_end() {
 }
 
 /// An alert during quiet hours isn't pushed, but waits in Needs you and
-/// counts in the one notification when they end (Bruno 44235).
+/// counts in the one notification when they end.
 #[tokio::test]
 async fn an_alert_during_quiet_hours_waits_in_needs_you() {
     let dir = temp_dir();

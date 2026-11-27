@@ -1,4 +1,4 @@
-// #533 (Squalo's needs-you-card-stories.md §1, N1, N2, N5, N6): a step takes
+// A step takes
 // words without deciding (Send: the step stays, its agent fixes or answers
 // it), Return in its field never presses Done, the talk shows above the
 // step it's about, an Execute card's Dismiss can say why (Execute never

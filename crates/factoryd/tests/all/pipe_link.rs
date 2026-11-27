@@ -1,4 +1,4 @@
-//! The pipes' transport (#196): two Factories, an invite and a join, the
+//! The pipes' transport: two Factories, an invite and a join, the
 //! same four digits on both sides, approval from both people before
 //! anything flows, signed messages with files delivered in order and
 //! acked, refusals heard back, the queue while the peer is away, close.
@@ -311,7 +311,7 @@ async fn shows_online(factory: &Factory, want: bool) -> bool {
     false
 }
 
-/// Polpo's pipe-redial.md: a worker waiting a long time before it tries an
+/// A worker waiting a long time before it tries an
 /// away peer again still shows the peer online the moment it's back, since
 /// the peer's ping wakes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -339,6 +339,30 @@ async fn a_peer_back_is_online_at_once_even_during_a_long_backoff() {
     pipe_link::set_away(&b, false);
     assert!(shows_online(&a, true).await, "Ana's Claktory is online again");
     assert!(back.elapsed() < Duration::from_secs(30), "{:?}", back.elapsed());
+}
+
+/// A Claktory that stops says so on its pipes' connections: the other side
+/// shows it offline at once, saying it stopped, not at its next ping.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_that_stops_shows_offline_at_once() {
+    let (dir_a, dir_b) = (temp_dir(), temp_dir());
+    let a = claktory(&dir_a).await;
+    let b = claktory(&dir_b).await;
+    let (code, _) = pipe_link::invite(&a, "pipe", &side("Matt")).await.expect("a code");
+    pipe_link::join(&b, "pipe", &code, &side("Ana")).await.expect("joined");
+    pipe_link::approve(&a, "pipe").expect("approved");
+    pipe_link::approve(&b, "pipe").expect("approved");
+    wait_for(&a, |event| matches!(event, Event::PeerApproved { pipe } if pipe == "pipe").then_some(())).await;
+    wait_for(&b, |event| matches!(event, Event::PeerApproved { pipe } if pipe == "pipe").then_some(())).await;
+    assert!(shows_online(&a, true).await && shows_online(&b, true).await, "both reached");
+
+    let stopped = std::time::Instant::now();
+    b.close_tunnel(Duration::from_secs(2)).await;
+    assert!(shows_online(&a, false).await, "Ana's Claktory shows offline");
+    assert!(stopped.elapsed() < Duration::from_secs(5), "at once, not at the next ping: {:?}", stopped.elapsed());
+    assert_eq!(pipe_link::status(&a, "pipe").reason, "it stopped");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(pipe_link::status(&a, "pipe").reason, "it stopped", "a failed try after keeps why");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -396,7 +420,7 @@ async fn a_join_that_cannot_reach_the_inviter_keeps_trying_until_it_can() {
     let (code, _) = pipe_link::invite(&a, "p-a", &side("Matt")).await.expect("a code");
 
     // A gate between the two: closed, the joiner's packets go nowhere, as
-    // when macOS's local-network prompt was denied (#246); open, they flow.
+    // when macOS's local-network prompt was denied; open, they flow.
     let a_port = code_values(&code, "a")
         .first()
         .and_then(|address| address.parse::<std::net::SocketAddr>().ok())
@@ -709,7 +733,7 @@ fn liaisons(factory: &Factory, pipe: &str) -> Vec<Liaison> {
         .collect()
 }
 
-/// #343 U18 (Fugo's ruling): what a peer says of its liaison is taken only
+/// What a peer says of its liaison is taken only
 /// on an open pipe, at most one a pace, its time only a number in the
 /// future at most 8 days ahead; and a real peer's word reaches the other
 /// side's store, which hears back that it was heard.

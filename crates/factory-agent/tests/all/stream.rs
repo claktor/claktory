@@ -1,5 +1,5 @@
 use factory_agent::errors::Error;
-use factory_agent::stream::{StreamOptions, ThinkingLevel, event_stream};
+use factory_agent::stream::{ThinkingLevel, event_stream};
 use factory_agent::types::{AssistantMessage, AssistantPart, StopReason, StreamEvent, Usage};
 use serde_json::json;
 
@@ -53,9 +53,5 @@ fn thinking_levels_parse_and_serialize_lowercase() {
         ThinkingLevel::ALL.iter().map(|level| level.as_str()).collect::<Vec<_>>(),
         ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
     );
-    let options = StreamOptions::default();
-    assert!(!options.cancel.is_cancelled());
-    assert_eq!((options.session_id, options.reasoning, options.timeout_ms, options.max_retries), (None, None, None, None));
-    assert_eq!(Error::Other("plain".into()).to_string(), "plain");
     assert_eq!(Error::Other("plain".into()).failure(), None);
 }

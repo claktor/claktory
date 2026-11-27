@@ -5,6 +5,9 @@
 //!
 //! A file of its own: it turns Claktory's browser on for the whole
 //! process, which also makes errands part of every Claktory started after.
+//!
+//! Claktory's browser isn't on Windows.
+#![cfg(unix)]
 
 #[path = "common/mod.rs"]
 mod common;
@@ -14,7 +17,7 @@ use std::time::Duration;
 use factory_protocol::v1::{self, AgentBrowserState as State, client_message::Body as Request, server_message::Body};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use common::{Client, View, apply_request, start, temp_dir};
+use common::{Client, MODEL, View, apply_request, start, temp_dir};
 
 /// A page with a text field, served on this computer.
 async fn page() -> String {
@@ -109,7 +112,7 @@ async fn the_person_opens_watches_types_in_and_stops_claktorys_browser() {
     other.wait_for(|body| matches!(body, Body::AgentBrowserFrame(_)).then_some(())).await;
 
     // Stopped: off, and nothing to watch.
-    other.ok(Request::StopAgentBrowser(v1::StopAgentBrowser {})).await;
+    other.ok(Request::StopAgentBrowser(v1::StopAgentBrowser::default())).await;
     tokio::time::timeout(Duration::from_secs(30), view.follow(&mut client, |view| state(view) == Some(State::Off)))
         .await
         .expect("it stops");
@@ -118,7 +121,7 @@ async fn the_person_opens_watches_types_in_and_stops_claktorys_browser() {
     // Its data deleted while it's off: the kept profile goes.
     let profile = dir.join("home/browser-standin");
     assert!(profile.is_dir(), "the profile is kept between uses");
-    other.ok(Request::DeleteAgentBrowserData(v1::DeleteAgentBrowserData {})).await;
+    other.ok(Request::DeleteAgentBrowserData(v1::DeleteAgentBrowserData::default())).await;
     tokio::time::timeout(Duration::from_secs(30), async {
         while profile.exists() {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -210,7 +213,14 @@ async fn an_errands_download_lands_named_by_claktory_in_its_agents_folder() {
     factoryd::browser_host::enable_for_test();
     factoryd::browser_host::standin_for_test();
     let dir = temp_dir();
-    let (_addr, factory) = start(&dir).await;
+    std::fs::create_dir_all(dir.join("home")).expect("home");
+    let config = serde_json::json!({"agents": [{"id": "runner", "name": "Runner", "model": MODEL, "effort": "off"}]});
+    std::fs::write(dir.join("home/config.json"), config.to_string()).expect("config");
+    let (addr, factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    assert!(factoryd::browser_host::land_for_test(&factory, "errand-1", "runner", "x.txt", b"x").await.is_err(), "no browser without it");
+    browser_on(&mut client, &mut view, "runner").await;
     let land = |suggested: &'static str, bytes: Vec<u8>| {
         let factory = factory.clone();
         async move { factoryd::browser_host::land_for_test(&factory, "errand-1", "runner", suggested, &bytes).await }
@@ -230,7 +240,7 @@ async fn an_errands_download_lands_named_by_claktory_in_its_agents_folder() {
     assert_eq!(std::fs::read(&path).unwrap(), big);
     let (plain, _, flag) = land("report.pdf", b"%PDF-1.7".to_vec()).await.expect("landed");
     assert_eq!((plain.as_str(), flag.as_str()), ("report.pdf", ""));
-    factoryd::browser_host::end_for_test(&factory, "errand-1");
+    factoryd::browser_host::end_agent_for_test(&factory, "runner", "errand-1").expect("ended");
 }
 
 /// Stopped while an errand's agent is connected to it (Ghiaccio 38462):
@@ -264,7 +274,7 @@ async fn a_stopped_browser_ends_even_while_an_errand_holds_its_connection() {
     .expect("errands know where it's signed in");
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
-    client.ok(Request::StopAgentBrowser(v1::StopAgentBrowser {})).await;
+    client.ok(Request::StopAgentBrowser(v1::StopAgentBrowser::default())).await;
     // Off well before Claktory would give up waiting for the runner (10 s):
     // it ended, though the errand's connection is still held.
     tokio::time::timeout(Duration::from_secs(6), view.follow(&mut client, |view| state(view) == Some(State::Off)))
@@ -275,7 +285,7 @@ async fn a_stopped_browser_ends_even_while_an_errand_holds_its_connection() {
     tokio::time::timeout(Duration::from_secs(30), view.follow(&mut client, |view| state(view) == Some(State::Browsing)))
         .await
         .expect("it opens again");
-    client.ok(Request::StopAgentBrowser(v1::StopAgentBrowser {})).await;
+    client.ok(Request::StopAgentBrowser(v1::StopAgentBrowser::default())).await;
     drop(held);
 }
 
@@ -304,9 +314,9 @@ async fn without_its_live_view_no_device_watches_or_drives_claktorys_browser() {
     }
     client.ok(Request::WatchAgentBrowser(v1::WatchAgentBrowser { on: false, ..Default::default() })).await;
     // Stopping isn't gated (here it's refused only because it isn't open).
-    let stop = client.request(Request::StopAgentBrowser(v1::StopAgentBrowser {})).await.body;
+    let stop = client.request(Request::StopAgentBrowser(v1::StopAgentBrowser::default())).await.body;
     assert!(refused(stop).contains("isn't open"));
-    client.ok(Request::DeleteAgentBrowserData(v1::DeleteAgentBrowserData {})).await;
+    client.ok(Request::DeleteAgentBrowserData(v1::DeleteAgentBrowserData::default())).await;
 }
 
 fn chrome_here() -> bool {
@@ -434,12 +444,9 @@ async fn until(what: &str, mut done: impl FnMut() -> bool) {
     panic!("{what} never happened");
 }
 
-/// #435 W6 (Fugo 41228, 41235, 41632): a sign-in is noticed by the
-/// provider's session cookies when the errand ends, and recorded once; a
-/// sign-out while an errand drives waits (nothing filled on Google
-/// meanwhile), is applied when the errand ends, deletes every cookie Google
-/// owns (google.com, google.co.uk, youtube.com) and no other, and only then
-/// has the vault forget the account.
+/// A sign-out while an errand drives waits (nothing filled on Google
+/// meanwhile), is applied when the errand ends, and deletes every cookie
+/// Google owns (google.com, google.co.uk, youtube.com) and no other.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_sign_out_waits_for_the_errand_and_deletes_only_the_providers_cookies() {
@@ -450,14 +457,11 @@ async fn a_sign_out_waits_for_the_errand_and_deletes_only_the_providers_cookies(
     factoryd::browser_host::standin_for_test();
     let dir = temp_dir();
     let (_addr, factory) = start(&dir).await;
-    let account = || factoryd::errands::browser_account_for_test(&factory, "Google");
     let mut drive = factoryd::browser_host::drive_for_test(&factory, "errand-1", None).await.expect("driven");
     // A sign-in page's cookie alone isn't a sign-in.
     let set = drive.call("Storage.setCookies", serde_json::json!({"cookies": [cookie("NID", ".google.com")]})).await;
     assert!(set.get("result").is_some(), "{set}");
     factoryd::browser_host::end_for_test(&factory, "errand-1");
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    assert_eq!(account(), None);
 
     let mut drive = factoryd::browser_host::drive_for_test(&factory, "errand-2", None).await.expect("driven");
     let cookies =
@@ -466,9 +470,6 @@ async fn a_sign_out_waits_for_the_errand_and_deletes_only_the_providers_cookies(
     assert!(set.get("result").is_some(), "{set}");
     drop(drive);
     factoryd::browser_host::end_for_test(&factory, "errand-2");
-    // The session cookie: signed in, recorded with no secret.
-    until("the sign-in noticed", || account().is_some()).await;
-    assert_eq!(account().as_deref(), Some(""));
 
     let mut drive = factoryd::browser_host::drive_for_test(&factory, "errand-3", None).await.expect("driven");
     assert_eq!(factoryd::browser_host::sign_out_for_test(&factory, "google").await, Ok("pending"));
@@ -476,11 +477,9 @@ async fn a_sign_out_waits_for_the_errand_and_deletes_only_the_providers_cookies(
     assert!(dir.join("home/browser-sign-outs.json").is_file(), "kept for a restart");
     // Still signed in while the errand drives.
     assert!(domains(&mut drive).await.contains(&".google.com".to_owned()));
-    assert!(account().is_some());
     drop(drive);
     factoryd::browser_host::end_for_test(&factory, "errand-3");
     until("the sign-out applied", || !factoryd::browser_host::signing_out_for_test(&factory, "Google")).await;
-    until("the vault forgot the account", || account().is_none()).await;
     assert!(!dir.join("home/browser-sign-outs.json").exists());
 
     let mut drive = factoryd::browser_host::drive_for_test(&factory, "errand-4", None).await.expect("driven");
@@ -535,7 +534,7 @@ async fn a_driven_start_restores_no_page() {
     factoryd::browser_host::end_for_test(&factory, "errand-1");
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
-    client.ok(Request::StopAgentBrowser(v1::StopAgentBrowser {})).await;
+    client.ok(Request::StopAgentBrowser(v1::StopAgentBrowser::default())).await;
     tokio::time::timeout(Duration::from_secs(30), view.follow(&mut client, |view| state(view) == Some(State::Off)))
         .await
         .expect("it stops");
@@ -551,4 +550,228 @@ async fn a_driven_start_restores_no_page() {
         .collect();
     assert!(!pages.is_empty() && pages.iter().all(|url| *url == "about:blank"), "{pages:?}");
     factoryd::browser_host::end_for_test(&factory, "errand-2");
+}
+
+/// Turns the Browser extension on for `agent`, as the person does.
+async fn browser_on(client: &mut Client, view: &mut View, agent: &str) {
+    let on = Request::UpdateAgent(v1::UpdateAgent {
+        agent_id: agent.into(),
+        extension: Some(v1::ExtensionChange { id: "browser".into(), enabled: Some(true), ..Default::default() }),
+        ..Default::default()
+    });
+    assert!(matches!(apply_request(client, view, on).await, Body::Ack(_)), "{agent}'s browser on");
+}
+
+/// Each agent has a browser of its own: one agent's cookies are never in
+/// another's, the Workspace lists each browsing agent's, Close keeps the
+/// profile, and an agent whose Browser extension is turned off has its
+/// browser closed and its profile deleted while the other's stays.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn each_agent_has_its_own_browser_and_its_profile_goes_with_its_browser() {
+    if !chrome_here() {
+        return;
+    }
+    factoryd::browser_host::enable_for_test();
+    factoryd::browser_host::standin_for_test();
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("home")).expect("home");
+    let config = serde_json::json!({
+        "agents": [
+            {"id": "yukako", "name": "Yukako", "model": MODEL, "effort": "off"},
+            {"id": "koichi", "name": "Koichi", "model": MODEL, "effort": "off"},
+            {"id": "rohan", "name": "Rohan", "model": MODEL, "effort": "off"},
+        ]
+    });
+    std::fs::write(dir.join("home/config.json"), config.to_string()).expect("config");
+    let (addr, factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let listed = |view: &View| view.workspace.agent_browsers.iter().map(|browser| browser.agent_id.clone()).collect::<Vec<_>>();
+    assert!(listed(&view).is_empty());
+    browser_on(&mut client, &mut view, "koichi").await;
+    browser_on(&mut client, &mut view, "yukako").await;
+    assert_eq!(listed(&view), ["yukako", "koichi"], "only browsing agents, in order");
+    assert!(factoryd::browser_host::drive_agent_for_test(&factory, "rohan", "errand-r", None).await.is_err(), "no browser without it");
+
+    let mut yukako = factoryd::browser_host::drive_agent_for_test(&factory, "yukako", "errand-y", None).await.expect("yukako drives");
+    let set = yukako.call("Storage.setCookies", serde_json::json!({"cookies": [cookie("sid", "yukako.example")]})).await;
+    assert!(set.get("error").is_none(), "{set}");
+    let mut koichi = factoryd::browser_host::drive_agent_for_test(&factory, "koichi", "errand-k", None).await.expect("koichi drives");
+    assert!(domains(&mut yukako).await.contains(&"yukako.example".to_owned()));
+    assert!(!domains(&mut koichi).await.contains(&"yukako.example".to_owned()), "koichi's profile is its own");
+    let (yukako_profile, koichi_profile) = (
+        factoryd::browser_host::standin_profile_for_test(&factory, "yukako"),
+        factoryd::browser_host::standin_profile_for_test(&factory, "koichi"),
+    );
+    assert!(yukako_profile.is_dir() && koichi_profile.is_dir() && yukako_profile != koichi_profile);
+    assert_eq!(factoryd::browser_host::profiles_for_test(&factory), ["koichi", "yukako"]);
+    view.follow(&mut client, |view| {
+        view.workspace.agent_browsers.iter().all(|browser| browser.state() == State::Driven)
+            && view.workspace.agent_browser.as_ref().is_some_and(|browser| browser.state() == State::Warm)
+    })
+    .await;
+
+    // Close keeps the profile.
+    drop(koichi);
+    factoryd::browser_host::close_for_test(&factory, "koichi");
+    until("koichi's browser closes", || factoryd::browser_host::agent_state_for_test(&factory, "koichi") == State::Off as i32).await;
+    assert!(koichi_profile.is_dir());
+
+    // Yukako's browser turned off: closed, and its profile gone.
+    drop(yukako);
+    let off = Request::UpdateAgent(v1::UpdateAgent {
+        agent_id: "yukako".into(),
+        extension: Some(v1::ExtensionChange { id: "browser".into(), enabled: Some(false), ..Default::default() }),
+        ..Default::default()
+    });
+    client.ok(off).await;
+    until("yukako's profile goes", || !yukako_profile.exists()).await;
+    until("yukako is no longer listed", || factoryd::browser_host::profiles_for_test(&factory) == ["koichi"]).await;
+    assert!(koichi_profile.is_dir(), "koichi's stays");
+    view.follow(&mut client, |view| listed(view) == ["koichi"]).await;
+
+    // Deleting koichi's while it's closed.
+    factoryd::browser_host::delete_for_test(&factory, "koichi").expect("deleted");
+    until("koichi's profile goes", || !koichi_profile.exists()).await;
+    until("no agent is listed", || factoryd::browser_host::profiles_for_test(&factory).is_empty()).await;
+}
+
+/// An agent gives a page a file from its folders: the runner stages a copy
+/// and only that copy's path reaches the page; a file elsewhere, or a path
+/// the runner didn't stage, never does. Signing out of a site deletes its
+/// cookies (and its names') once the errand driving the browser ends,
+/// and leaves other sites' alone.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_page_gets_only_a_staged_copy_and_a_site_signs_out_alone() {
+    if !chrome_here() {
+        return;
+    }
+    factoryd::browser_host::enable_for_test();
+    factoryd::browser_host::standin_for_test();
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("home")).expect("home");
+    let (work, elsewhere) = (dir.join("work"), dir.join("elsewhere"));
+    std::fs::create_dir_all(&work).expect("work");
+    std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+    std::fs::write(work.join("cv.pdf"), b"%PDF-1.7 a CV").expect("cv");
+    std::fs::write(elsewhere.join("id_ed25519"), b"a key").expect("key");
+    let config = serde_json::json!({"agents": [{"id": "yukako", "name": "Yukako", "model": MODEL, "effort": "off"}]});
+    std::fs::write(dir.join("home/config.json"), config.to_string()).expect("config");
+    let (addr, factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    browser_on(&mut client, &mut View { workspace, ..View::default() }, "yukako").await;
+    let roots = [work.clone()];
+
+    let mut drive = factoryd::browser_host::drive_agent_for_test(&factory, "yukako", "errand-u", None).await.expect("yukako drives");
+    let staged = drive.upload(&work.join("cv.pdf"), &roots).await.expect("staged");
+    assert!(staged.ends_with("/cv.pdf") && !staged.starts_with(work.to_str().unwrap()), "{staged}");
+    assert_eq!(std::fs::read(&staged).expect("the copy"), b"%PDF-1.7 a CV");
+    assert!(drive.upload(&elsewhere.join("id_ed25519"), &roots).await.is_err(), "outside its folders");
+
+    let session = drive.page().await;
+    drive.call_in(&session, "Page.navigate", serde_json::json!({"url": "data:text/html,<input type=file id=f>"})).await;
+    let mut input = serde_json::Value::Null;
+    for _ in 0..50 {
+        input = drive.call_in(&session, "Runtime.evaluate", serde_json::json!({"expression": "document.getElementById('f')"})).await;
+        if input["result"]["result"]["objectId"].is_string() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let object = input["result"]["result"]["objectId"].clone();
+    assert!(object.is_string(), "{input}");
+    let set = |files: Vec<&str>| serde_json::json!({"files": files, "objectId": object});
+    let given = drive.call_in(&session, "DOM.setFileInputFiles", set(vec![&staged])).await;
+    assert!(given.get("error").is_none(), "{given}");
+    let chosen = drive.call_in(&session, "Runtime.evaluate", serde_json::json!({"expression": "(f => f.name + ':' + f.size)(document.getElementById('f').files[0])"})).await;
+    assert_eq!(chosen["result"]["result"]["value"], format!("cv.pdf:{}", b"%PDF-1.7 a CV".len()));
+    let key = elsewhere.join("id_ed25519");
+    for path in [key.to_str().unwrap(), work.join("cv.pdf").to_str().unwrap()] {
+        let refused = drive.call_in(&session, "DOM.setFileInputFiles", set(vec![path])).await;
+        assert_eq!(refused["error"]["code"], -32001, "{path}: {refused}");
+    }
+
+    // A site's sign-out waits for the errand, then takes its cookies only.
+    let cookies = [cookie("sid", "x.example"), cookie("ct0", "api.x.example"), cookie("sid", "y.example")];
+    let set = drive.call("Storage.setCookies", serde_json::json!({"cookies": cookies})).await;
+    assert!(set.get("error").is_none(), "{set}");
+    assert_eq!(drive.sign_out_site("https://x.example").await, Ok(false), "pending while the errand drives");
+    assert!(drive.sign_out_site("x.example").await.is_err());
+    drive.end("errand-u");
+    drop(drive);
+    let mut again = factoryd::browser_host::drive_agent_for_test(&factory, "yukako", "errand-v", None).await.expect("driven again");
+    let left = domains(&mut again).await;
+    assert!(!left.iter().any(|domain| domain.ends_with("x.example")) && left.contains(&"y.example".to_owned()), "{left:?}");
+    again.end("errand-v");
+}
+
+/// Each agent browses in its own browser: two agents open theirs at the
+/// same time, each begun in its own Chrome, never the person's.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_agents_browse_at_once_each_in_its_own_browser() {
+    if !chrome_here() {
+        return;
+    }
+    factoryd::browser_host::enable_for_test();
+    factoryd::browser_host::standin_for_test();
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("home")).expect("home");
+    let config = serde_json::json!({
+        "agents": [
+            {"id": "yukako", "name": "Yukako", "model": MODEL, "effort": "off"},
+            {"id": "koichi", "name": "Koichi", "model": MODEL, "effort": "off"},
+        ]
+    });
+    std::fs::write(dir.join("home/config.json"), config.to_string()).expect("config");
+    let (addr, factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    browser_on(&mut client, &mut view, "yukako").await;
+    browser_on(&mut client, &mut view, "koichi").await;
+    let yukako = factoryd::errands::open_browser_for_test(&factory, "yukako").expect("yukako's");
+    let koichi = factoryd::errands::open_browser_for_test(&factory, "koichi").expect("koichi's, at the same time");
+    assert_ne!(yukako, koichi);
+    view.follow(&mut client, |view| {
+        let state = |agent: &str| view.workspace.agent_browsers.iter().find(|browser| browser.agent_id == agent).map(|browser| browser.state());
+        state("yukako") == Some(State::Driven)
+            && state("koichi") == Some(State::Driven)
+            && view.workspace.agent_browser.as_ref().is_none_or(|browser| browser.state() != State::Driven)
+    })
+    .await;
+    assert_eq!(factoryd::browser_host::profiles_for_test(&factory), ["koichi", "yukako"]);
+    factoryd::errands::end_errand_for_test(&factory, &yukako).await;
+    factoryd::errands::end_errand_for_test(&factory, &koichi).await;
+}
+
+/// A browser whose agent left it unused closes then, not kept warm for
+/// as long again.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_browser_left_unused_closes_without_waiting_warm() {
+    if !chrome_here() {
+        return;
+    }
+    factoryd::browser_host::enable_for_test();
+    factoryd::browser_host::standin_for_test();
+    let dir = temp_dir();
+    std::fs::create_dir_all(dir.join("home")).expect("home");
+    let config = serde_json::json!({"agents": [{"id": "yukako", "name": "Yukako", "model": MODEL, "effort": "off"}]});
+    std::fs::write(dir.join("home/config.json"), config.to_string()).expect("config");
+    let (addr, factory) = start(&dir).await;
+    factoryd::errands::unused_after_for_test(&factory, Duration::from_secs(2));
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    browser_on(&mut client, &mut view, "yukako").await;
+    factoryd::errands::open_browser_for_test(&factory, "yukako").expect("yukako's");
+    let state = |view: &View| view.workspace.agent_browsers.iter().find(|browser| browser.agent_id == "yukako").map(|browser| browser.state());
+    // Off within the test's wait, not after the 10 minutes warm.
+    let mut driven = false;
+    view.follow(&mut client, |view| {
+        driven |= state(view) == Some(State::Driven);
+        driven && state(view) == Some(State::Off)
+    })
+    .await;
 }

@@ -71,8 +71,22 @@ async fn setup_at() -> (std::path::PathBuf, std::sync::Arc<factoryd::Factory>, C
     (dir, factory, client, view, addr)
 }
 
+#[cfg(unix)]
 fn running(pattern: &str) -> bool {
     std::process::Command::new("pgrep").args(["-f", pattern]).output().is_ok_and(|output| output.status.success())
+}
+
+/// On Windows, a process whose command line holds each word of `pattern`
+/// (Git Bash's `sleep 71.25` runs as `…\sleep.exe 71.25`).
+#[cfg(windows)]
+fn running(pattern: &str) -> bool {
+    let filter: Vec<String> = pattern.split_whitespace().map(|word| format!("$_.CommandLine -like '*{word}*'")).collect();
+    // Not this search itself, whose own command line holds the words.
+    let script = format!("@(Get-CimInstance Win32_Process | Where-Object {{ $_.ProcessId -ne $PID -and {} }}).Count", filter.join(" -and "));
+    std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).trim().parse::<u32>().is_ok_and(|count| count > 0))
 }
 
 #[tokio::test]
@@ -340,28 +354,31 @@ async fn a_deleted_agent_takes_its_monitors_and_their_processes_with_it() {
 }
 
 #[tokio::test]
-async fn an_agent_a_monitor_will_wake_is_not_reminded_of_its_checklist() {
+async fn only_a_monitor_due_soon_keeps_an_agent_from_being_reminded_of_its_checklist() {
     let (_dir, factory, mut client, mut view) = setup().await;
     factory.set_nudge_after(Duration::from_millis(150));
     let on = v1::ExtensionChange { id: "checklist".into(), enabled: Some(true), ..Default::default() };
     let turn_on = client_message::Body::UpdateAgent(v1::UpdateAgent { agent_id: "lead".into(), extension: Some(on), ..Default::default() });
     apply_request(&mut client, &mut view, turn_on).await;
-    call(
-        &mut client,
-        &mut view,
-        "lead",
-        "monitors_add",
-        r#"{"monitors":[{"name":"ci","prompt":"CI is green.","when":{"check":"false","every":"5m"}}]}"#,
-    )
-    .await;
-    call(&mut client, &mut view, "lead", "checklist_add", r#"{"items":["Ship it"]}"#).await;
     let reminders = |view: &View| {
         view.entries.iter().filter(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.text.starts_with("You have"))).count()
     };
-    settle(&mut client, &mut view, 700).await;
-    assert_eq!(reminders(&view), 0, "the check will wake it");
-    call(&mut client, &mut view, "lead", "monitors_change", r#"{"changes":[{"id":"m1","action":"cancel"}]}"#).await;
+
+    // A check that may never pass and a daily job aren't due soon: reminded.
+    let standing = r#"{"monitors":[{"name":"ci","prompt":"CI is green.","when":{"check":"false","every":"5m"}},
+        {"name":"daily","prompt":"Look at the logs.","when":{"every":"24h"}}]}"#;
+    call(&mut client, &mut view, "lead", "monitors_add", standing).await;
+    call(&mut client, &mut view, "lead", "checklist_add", r#"{"items":["Ship it"]}"#).await;
     view.follow(&mut client, |view| reminders(view) == 1).await;
+
+    // One due within the hour will wake it: no reminder while it waits.
+    call(&mut client, &mut view, "lead", "monitors_add", r#"{"monitors":[{"name":"soon","prompt":"Look again.","when":{"in":"30m"}}]}"#)
+        .await;
+    call(&mut client, &mut view, "lead", "checklist_add", r#"{"items":["Tell the team"]}"#).await;
+    settle(&mut client, &mut view, 700).await;
+    assert_eq!(reminders(&view), 1, "the monitor due soon will wake it");
+    call(&mut client, &mut view, "lead", "monitors_change", r#"{"changes":[{"id":"m3","action":"cancel"}]}"#).await;
+    view.follow(&mut client, |view| reminders(view) == 2).await;
 }
 
 #[tokio::test]
@@ -602,7 +619,7 @@ async fn a_check_gets_the_secrets_it_names_with_their_values_hidden_and_files_re
     assert!(fire.contains("token [secret Export/TOKEN]\nfile [secret Export/KEYFILE]\npath "), "{fire}");
     assert!(!fire.contains("0123456789"), "{fire}");
     let path = fire.split("path ").nth(1).and_then(|rest| rest.lines().next()).expect("the file's path");
-    assert!(path.ends_with("/monitors/m1.secrets/KEYFILE"), "{path}");
+    assert!(std::path::Path::new(path).ends_with("monitors/m1.secrets/KEYFILE"), "{path}");
     assert!(!std::path::Path::new(path).exists(), "removed after the run");
     view.follow(&mut client, |view| {
         view.workspace.vault.as_ref().is_some_and(|vault| vault.secrets.iter().any(|secret| secret.name == "Export" && secret.last_used_by == "lead"))

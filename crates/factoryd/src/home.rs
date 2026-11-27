@@ -54,7 +54,7 @@ impl Home {
 
     /// The installed backend, which updates replace.
     pub fn backend(&self) -> PathBuf {
-        self.root.join("bin").join("factoryd")
+        self.root.join("bin").join(program("factoryd"))
     }
 
     /// The backend before the last update, to go back to if it fails.
@@ -93,6 +93,13 @@ pub fn instance(dev: bool, user_home: &Path) -> Instance {
     instance_in(dev, user_home.join(if dev { ".factory-dev" } else { ".factory" }))
 }
 
+/// The file a program of Claktory's (`factoryd`, a helper) is in: its name,
+/// with `.exe` on Windows, where Windows, Defender and the firewall know a
+/// program by it; as it is elsewhere.
+pub fn program(name: &str) -> String {
+    format!("{name}{}", std::env::consts::EXE_SUFFIX)
+}
+
 /// Where this computer's Claktory keeps its files, the dev one's with
 /// `dev`: `~/.factory` (`~/.factory-dev`), and on Windows
 /// `%LOCALAPPDATA%\Claktory\factory` (`factory-dev`). None when there's no
@@ -118,6 +125,7 @@ pub fn instance_in(dev: bool, root: PathBuf) -> Instance {
 
 #[cfg(test)]
 mod tests {
+    #[cfg_attr(windows, allow(unused_imports, reason = "its one test isn't Windows's"))]
     use super::*;
 
     #[cfg(not(windows))]

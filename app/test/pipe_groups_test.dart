@@ -1,4 +1,4 @@
-// Pipe groups (#359): a project's pipes gathered under named rows in the
+// Pipe groups: a project's pipes gathered under named rows in the
 // sidebar, folded away the same on every device. A pipe moves to a group
 // from its right click or touch and hold (Move to group…, New group…,
 // Remove from group), or by a pointer dragging it onto the group's row; a

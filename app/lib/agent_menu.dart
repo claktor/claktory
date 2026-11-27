@@ -20,7 +20,7 @@ import 'identity.dart';
 import 'mobile/device.dart' as device;
 import 'mobile/metrics.dart';
 import 'mobile/popover.dart' show popoverHere, presentPopover;
-import 'pinned_agents.dart' show movePin, pinLabel, togglePin;
+import 'pinned_agents.dart' show movePin, pinLabel, togglePinLater;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'selection.dart' show Unselectable;
@@ -130,6 +130,8 @@ List<AgentMenuItem> agentMenuItems(
   // Pin or Unpin, and a pin's moves (pinned-agents.md §4): here too, where
   // VoiceOver on a Mac reaches them (Abbacchio's row 1661).
   final pin = pinLabel(workspace, agent);
+  // Taken now: the menu may outlive [context] (Abbacchio's row 1734).
+  final toggle = togglePinLater(context, agent);
   final up = movePin(context, agent, -1);
   final down = movePin(context, agent, 1);
   return [
@@ -183,7 +185,7 @@ List<AgentMenuItem> agentMenuItems(
           name: pin,
           color: color,
         ),
-        onSelect: () => unawaited(togglePin(context, agent)),
+        onSelect: () => unawaited(toggle()),
       ),
     if (up != null)
       AgentMenuItem(

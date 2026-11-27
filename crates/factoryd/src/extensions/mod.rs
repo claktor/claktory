@@ -19,12 +19,12 @@ pub(crate) mod agents;
 pub(crate) mod app_grants;
 pub(crate) mod ask;
 pub(crate) mod browser;
+pub(crate) mod browser_control;
 pub(crate) mod checklist;
 pub(crate) mod comments;
 pub(crate) mod conversations;
 pub(crate) mod database;
 pub(crate) mod devices;
-pub(crate) mod errands;
 pub(crate) mod handoff;
 pub(crate) mod highlight;
 pub(crate) mod images;
@@ -235,13 +235,13 @@ pub(crate) const ALL: [&dyn Extension; 27] = [
     &app_grants::AppGrants,
     &ask::Ask,
     &browser::Browser,
+    &browser_control::BrowserControl,
     &checklist::Checklist,
     &comments::Comments,
     &conversations::Conversations,
     &database::Database,
     &devices::Devices,
     &crate::user_apps::dms::Dms,
-    &errands::Errands,
     &handoff::Handoff,
     &highlight::Highlight,
     &images::Images,

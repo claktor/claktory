@@ -432,7 +432,7 @@ async fn the_real_host_runs_a_real_apps_views() {
     client.ok(Request::CloseAppView(v1::CloseAppView { surface_id: shown.surface_id })).await;
 }
 
-/// Bruno 28347, Fugo 28393: each device has its own surface of a view
+/// Each device has its own surface of a view
 /// (the app asks with "device" in the params, which is always the device
 /// the connection is from), the app is given only an opaque stand-in for
 /// it, the same every time, and the views an app may have open count per

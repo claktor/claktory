@@ -256,7 +256,20 @@ impl Factory {
                         let read = !usage.windows.is_empty();
                         let full: Vec<String> =
                             usage.windows.iter().filter(|window| window.used_percent >= 100.0).map(|window| window.id.clone()).collect();
+                        // Requests go to the provider's accounts with
+                        // room first while this one reads full (Bruno
+                        // 52170): shown at once as the account in use.
+                        let windows_full: Vec<(String, u64)> = usage
+                            .windows
+                            .iter()
+                            .filter(|window| window.used_percent >= 100.0)
+                            .map(|window| (window.id.clone(), u64::try_from(window.resets_at).unwrap_or(0)))
+                            .collect();
+                        let preferred = !account.is_empty() && self.models.note_full(&id, &account, windows_full);
                         self.set_usage(&key, Some(v1::ProviderUsage { updated: now, error: String::new(), ..usage }));
+                        if preferred {
+                            self.refresh_models().await;
+                        }
                         if read {
                             match self.models.forget_spent_with_room(&id, &account, &full).await {
                                 Ok(true) => {
@@ -408,13 +421,27 @@ impl Factory {
             let windows = usage.map(|usage| usage.windows.iter().map(|window| format!("{} {}%", window.id, window.used_percent)));
             windows.into_iter().flatten().collect::<Vec<_>>().join(", ")
         };
-        let before = (resets(inner.usage.get(key)), used(inner.usage.get(key)));
+        // Extra usage: on or off, and what it spent: billed
+        // past the plan's limits, so the log keeps each change of it.
+        let extra = |usage: Option<&v1::ProviderUsage>| {
+            usage.and_then(|usage| usage.extra_usage.as_ref()).map_or_else(String::new, |extra| {
+                let unit = 10f64.powi(i32::try_from(extra.decimal_places).unwrap_or(2));
+                let amount = |minor: i64| format!("{:.2} {}", minor as f64 / unit, extra.currency);
+                let cap = if extra.limit_minor > 0 { format!(" of {}", amount(extra.limit_minor)) } else { String::new() };
+                let reached = if extra.limit_reached { ", cap reached" } else { "" };
+                format!("{}, used {}{cap}{reached}", if extra.enabled { "on" } else { "off" }, amount(extra.used_minor))
+            })
+        };
+        let before = (resets(inner.usage.get(key)), used(inner.usage.get(key)), extra(inner.usage.get(key)));
         let changed = match usage {
             Some(usage) => inner.usage.insert(key.clone(), usage.clone()).as_ref() != Some(&usage),
             None => inner.usage.remove(key).is_some(),
         };
         if changed {
-            let after = (resets(inner.usage.get(key)), used(inner.usage.get(key)));
+            let after = (resets(inner.usage.get(key)), used(inner.usage.get(key)), extra(inner.usage.get(key)));
+            if after.2 != before.2 && !after.2.is_empty() {
+                tracing::info!(provider = %key.0, account = %key.1, extra_usage = %after.2, "extra usage");
+            }
             if after.0 != before.0 {
                 tracing::info!(provider = %key.0, account = %key.1, resets = %after.0, "usage resets");
             }

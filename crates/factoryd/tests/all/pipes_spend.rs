@@ -67,7 +67,7 @@ async fn a_liaison_past_its_cap_waits_until_it_has_more() {
     assert_eq!(spend(&view, "liaison").cap_usd, 10.0, "0 keeps the default");
 
     // The other side hears it waits until midnight, rounded up to a quarter
-    // of an hour as any wait, and nothing of why (#357 L2).
+    // of an hour as any wait, and nothing of why.
     factoryd::pipe_link::set_liaison_every(std::time::Duration::from_millis(600));
     let quarter = 15 * 60 * 1000;
     let midnight = spend(&view, "liaison").resumes_ms;

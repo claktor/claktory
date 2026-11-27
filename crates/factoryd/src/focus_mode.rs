@@ -1,4 +1,4 @@
-//! Needs you's focus mode, per device (#514, spec §9.1): which devices
+//! Needs you's focus mode, per device: which devices
 //! are in it, so each app opens as it left it. Kept in factory.db (it
 //! changes with every ⌘⇧N, so not config.json) and shown in
 //! Settings.focus_mode; each device sets only its own (SetFocusMode, the

@@ -1,13 +1,12 @@
-// This device's permissions in Settings (Lucy's permissions spec §2.1, area
-// 5a): in the device's own section (This Mac, This iPhone…), a row for each
-// permission this device can ask for, with its state as the system says it
-// now and at most one button: Turn on… while it hasn't been asked (the
-// permission's sheet), Open Settings once it's off. Read again whenever the
-// app comes back to the front, so a change made in the system's Settings
-// shows at once. Only what the system lets the app read without asking:
-// Files and Folders, which can't be, shows the backend's last check of
-// each place macOS protects (item 12), on the Mac that runs the Claktory;
-// Local Network joins once the backend keeps its last check (item 11).
+// This device's permissions in Settings: in the device's own section (This
+// Mac, This iPhone…), a row for each permission this device can ask for, with
+// its state as the system says it now and at most one button: Turn on… while
+// it hasn't been asked (the permission's sheet), Open Settings once it's off.
+// Read again whenever the app comes back to the front, so a change made in
+// the system's Settings shows at once. Only what the system lets the app read
+// without asking: Files and Folders, which can't be, shows the backend's last
+// check of each place macOS protects, on the Mac that runs the Claktory;
+// Local Network joins once the backend keeps its last check.
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -47,7 +46,7 @@ typedef _Row = ({
 
 /// Android's word that the person said no once and it will still ask
 /// (shouldShowRequestPermissionRationale), which its access reads as not
-/// asked yet (Risotto 49885): false where the platform doesn't say.
+/// asked yet: false where the platform doesn't say.
 Future<bool> _refused(String channel, String method) async {
   if (defaultTargetPlatform != TargetPlatform.android) return false;
   try {
@@ -140,7 +139,7 @@ class _DevicePermissionsState extends State<DevicePermissions>
   }
 
   /// Rows Android was refused once in and will still ask: Off, with
-  /// Turn on… asking again (Lucy's ruling 6, permissions spec §2.1).
+  /// Turn on… asking again (permissions spec §2.1).
   final _refusedOnce = <String>{};
 
   Future<void> _read() async {
@@ -234,7 +233,7 @@ class _DevicePermissionsState extends State<DevicePermissions>
           const SizedBox(height: Space.s),
           // Each row its own node for VoiceOver and TalkBack, its button
           // apart: a row with no button doesn't take in the next one's
-          // (Sale's row 201).
+          // .
           for (final (:row, :access) in shown)
             _PermissionRow(
               key: ValueKey('permission:${row.label}'),

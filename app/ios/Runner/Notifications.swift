@@ -45,12 +45,16 @@ final class Notifications: NSObject, UNUserNotificationCenterDelegate {
   var keys: PushKeyStore = KeychainPushKeys()
   var registrations = PushRegistrations()
 
-  #if DEBUG
-    /// A build for development: its pushes come through Apple's sandbox.
-    static let platform = "apns_sandbox"
-  #else
-    static let platform = "apns"
-  #endif
+  /// Which of Apple's push services this build's tokens are for: "apns"
+  /// for the App Store's and TestFlight's, "apns_sandbox" for any build
+  /// for development (Claktory Dev, Debug, the Simulator). Read from what
+  /// the build was signed with, not a compile flag: the Runner's Debug sets
+  /// no DEBUG, so Debug builds asked Apple's production service with
+  /// sandbox tokens and their pushes never came (the 11-26 board).
+  static let platform = ApsEnvironment.platform(
+    profile: Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision")
+      .flatMap { try? Data(contentsOf: $0) },
+    bundleId: Bundle.main.bundleIdentifier)
 
   /// At launch, before it finishes: a tap that opened the app reaches it.
   func launch() {
@@ -337,5 +341,39 @@ struct PushRegistrations {
 
   func remove(_ claktory: String) {
     SecItemDelete(query(claktory) as CFDictionary)
+  }
+}
+
+/// The push environment a build's tokens belong to (Notifications.platform).
+enum ApsEnvironment {
+  /// From the provisioning profile the build carries ([profile], its
+  /// embedded.mobileprovision): its aps-environment says. The App Store's
+  /// builds carry none and push through production; nor does the
+  /// Simulator's, which pushes through the sandbox. Without a profile, the
+  /// App Store's bundle id is production and any other the sandbox.
+  static func platform(profile: Data?, bundleId: String?) -> String {
+    if let profile, let environment = apsEnvironment(profile) {
+      return environment == "production" ? "apns" : "apns_sandbox"
+    }
+    #if targetEnvironment(simulator)
+      return "apns_sandbox"
+    #else
+      return bundleId == AppStoreBuild.bundleId ? "apns" : "apns_sandbox"
+    #endif
+  }
+
+  /// The aps-environment in a provisioning profile: the plist inside its
+  /// signed envelope, read as it is.
+  static func apsEnvironment(_ profile: Data) -> String? {
+    guard let start = profile.range(of: Data("<?xml".utf8)),
+      let end = profile.range(of: Data("</plist>".utf8), in: start.lowerBound..<profile.endIndex)
+    else { return nil }
+    let plist = profile.subdata(in: start.lowerBound..<end.upperBound)
+    guard
+      let parsed = try? PropertyListSerialization.propertyList(from: plist, format: nil)
+        as? [String: Any],
+      let entitlements = parsed["Entitlements"] as? [String: Any]
+    else { return nil }
+    return entitlements["aps-environment"] as? String
   }
 }

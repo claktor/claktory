@@ -1,4 +1,4 @@
-// A video opened on a phone (#417, Matt): from the moment it's opened
+// A video opened on a phone: from the moment it's opened
 // until it plays, its name, how much of how much has come, and a bar that
 // moves, never an empty screen; on a slow link too, its preview's.
 import 'dart:async';

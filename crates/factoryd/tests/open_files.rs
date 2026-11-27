@@ -2,6 +2,9 @@
 //! from launchd's 256 or systemd's 1024 to the hard limit (at most 65,536),
 //! and agents' commands inherit it. A file of its own: the limit is the
 //! process's.
+//!
+//! Windows has no open-files limit to raise.
+#![cfg(unix)]
 
 #[path = "common/mod.rs"]
 mod common;

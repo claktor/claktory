@@ -698,7 +698,7 @@ class _ProviderCardState extends State<ProviderCard> {
             ],
           ],
           // Signed in isn't in use: none of its models run yet, so the
-          // agents are still where they were (#343 U1).
+          // agents are still where they were.
           if (signedIn && provider.agents == 0) ...[
             const SizedBox(height: Space.s),
             Text(
@@ -765,7 +765,7 @@ class _ProviderCardState extends State<ProviderCard> {
                   .copyWith(color: palette.textMuted),
             ),
           ],
-          // Where its models come from, and Refresh models (friend bug #14).
+          // Where its models come from, and Refresh models.
           if (signedIn) ...[
             const SizedBox(height: Space.m),
             ProviderModels(provider: provider),
@@ -1182,7 +1182,7 @@ class _GripPainter extends CustomPainter {
 
 /// The lifetimes the person can choose for how long [provider] keeps a
 /// conversation ready, default first; a backend from before the choices
-/// came (#281) offers Anthropic's two through its cache_ttl alone.
+/// came offers Anthropic's two through its cache_ttl alone.
 List<String> cacheChoices(Provider provider) {
   if (provider.cacheTtlChoices.isNotEmpty) return provider.cacheTtlChoices;
   return provider.cacheTtl.isEmpty ? const [] : const ['5m', '1h'];

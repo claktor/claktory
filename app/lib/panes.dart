@@ -10,6 +10,7 @@ import 'characters/character.dart';
 import 'controls.dart';
 import 'explorer.dart' show FilesPane;
 import 'highlights.dart';
+import 'history/export_job.dart' show ReplayJobBanner;
 import 'identity.dart';
 import 'changelog.dart';
 import 'layout.dart';
@@ -1014,7 +1015,16 @@ class _ExpandedPaneState extends State<ExpandedPane> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Unselectable(child: band),
-                  Expanded(child: widget.child),
+                  // A History video being made shows here too, under the
+                  // band, as over the window it covers (Matt, Bruno 52981):
+                  // the pane makes room for it rather than going under it.
+                  Expanded(
+                    child: MediaQuery.removePadding(
+                      context: context,
+                      removeTop: true,
+                      child: ReplayJobBanner(child: widget.child),
+                    ),
+                  ),
                 ],
               ),
             ),

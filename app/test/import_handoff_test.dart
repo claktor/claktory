@@ -147,8 +147,8 @@ void main() {
   });
 
   test('a record, never a request: labelled in every file and the message', () {
-    // Abbacchio's fixture: an old chat holding text that talks to its
-    // reader (Fugo's ruling).
+    // An old chat holding text that talks to its
+    // reader.
     final hostile = Uint8List.fromList(
       utf8.encode(
         jsonEncode([

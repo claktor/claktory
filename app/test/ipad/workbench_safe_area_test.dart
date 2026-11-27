@@ -1,5 +1,4 @@
-// The iPad's window around the workbench (Prosciutto's no-go on the
-// phase-1 pass): the toolbar and rail clear of the status bar or a window's
+// The iPad's window around the workbench: the toolbar and rail clear of the status bar or a window's
 // controls, the message box above the on-screen keyboard, the keyboard not
 // raised by opening an agent, and the device called an iPad.
 import 'package:factory_app/devices.dart' show thisDeviceKind;

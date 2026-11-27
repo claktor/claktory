@@ -1,4 +1,4 @@
-//! After a move (#243 S3): what Rivet checks on the new computer and tells
+//! After a move: what Rivet checks on the new computer and tells
 //! the person, with `move_report` (the Move extension), while the copy left
 //! behind can still be gone back to. One report in plain words: Claktory
 //! runs here; the vault (the person's secrets) is unlocked, or waits to be;

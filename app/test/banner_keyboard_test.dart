@@ -1,4 +1,4 @@
-// Sale's row 22: a phone on its side, typing, with "Sign in to your
+// A phone on its side, typing, with "Sign in to your
 // Claktory account in this app by …" showing. The banner steps aside while the keyboard leaves
 // little room, so the message box stays in sight, and comes back when it's
 // down. Upright on a big phone, with room, it stays.

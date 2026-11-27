@@ -1,4 +1,4 @@
-//! Tokens for Claktory's relays (#450; coordination/security/relay-access.md).
+//! Tokens for Claktory's relays.
 //! Our relays carry a packet only when its sender or its recipient is a
 //! signed-in Claktory, which shows it with a token from here: bound to its
 //! endpoint, naming its account only by an opaque id (`a`, for the relays'
@@ -78,7 +78,7 @@ pub(super) fn token(service: &Service, call: &Call) -> Result<Reply, ApiError> {
         };
         drop(conn);
         // A review account's Claktory under any key but the review box's,
-        // one signed in before the pin, say, gets no relay (#319, Fugo 46276).
+        // one signed in before the pin, say, gets no relay.
         api::review_box_only(service, &email, &claktory.backend_key)?;
     }
     service.limit(&[(&format!("relay-token:{}", claktory.id), 86_400, TOKENS_PER_DAY)])?;

@@ -19,7 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::factory::Factory;
 
 /// The longest wait between tries to reach a peer. Long, since each try at
-/// a peer that's away sends ~46 KB for nothing (Polpo's pipe-redial.md): a
+/// a peer that's away sends ~46 KB for nothing: a
 /// frame from the peer, or something queued for it, wakes the worker anyway.
 pub(crate) const MAX_BACKOFF: Duration = Duration::from_secs(15 * 60);
 /// The first wait after a try fails, which then doubles.

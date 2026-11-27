@@ -10,7 +10,9 @@ import UIKit
 /// The ink bridge's native side (app/ios/Runner/Ink) against the frozen
 /// fixtures in app/test/ipad/fixtures/bridge, read by #filePath.
 // Serialized: some tests post app-wide notifications (background, memory)
-// that every live surface hears.
+// that every live surface hears. Each wait for the surface's answer has a
+// limit ([answer]), so a surface that never answers fails its test instead
+// of holding the whole run.
 @Suite(.serialized)
 @MainActor
 struct InkTests {
@@ -44,15 +46,15 @@ struct InkTests {
       self.handler = handler
     }
 
-    func call(_ method: String, _ arguments: Any? = nil) async -> Any? {
-      await withCheckedContinuation { done in
-        // As Flutter calls it: on the main thread.
+    /// Calls the surface as Flutter does, on the main thread, and waits
+    /// for its answer: nil, and a failure naming [method], past [within].
+    func call(_ method: String, _ arguments: Any? = nil, within seconds: Double = 30) async -> Any? {
+      let answer: Any?? = await InkTests.answer(method, within: seconds) { done in
         DispatchQueue.main.async {
-          self.handler!(FlutterMethodCall(methodName: method, arguments: arguments)) {
-            done.resume(returning: $0)
-          }
+          self.handler!(FlutterMethodCall(methodName: method, arguments: arguments)) { done($0) }
         }
       }
+      return answer ?? nil
     }
 
     func named(_ method: String) -> [[String: Any]] {
@@ -73,6 +75,25 @@ struct InkTests {
     window.layoutIfNeeded()
     _ = await events.call("attach")
     return (surface, events, window)
+  }
+
+  /// Waits for [start] to call back, at most [seconds]: past that it
+  /// records a failure naming [what] and gives nil, so a surface that never
+  /// answers fails its test rather than hanging the run.
+  nonisolated static func answer<T>(
+    _ what: String, within seconds: Double = 30, _ start: (@escaping (T) -> Void) -> Void
+  ) async -> T? {
+    let once = AnswerOnce()
+    return await withCheckedContinuation { (done: CheckedContinuation<T?, Never>) in
+      start { value in
+        if once.first() { done.resume(returning: value) }
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+        guard once.first() else { return }
+        Issue.record("\(what) didn't answer within \(Int(seconds)) s")
+        done.resume(returning: nil)
+      }
+    }
   }
 
   static func settle(_ seconds: Double = 0.4) async {
@@ -499,13 +520,13 @@ struct InkTests {
     let (paper, events, window) = try await Self.openPaper()
     // Both asked before either is answered, as typing does.
     var answers: [String: [String: Any]] = [:]
-    await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+    let _: Void? = await Self.answer("both searches") { done in
       var left = 2
       for query in ["gradient", "vanishing"] {
         events.handler!(FlutterMethodCall(methodName: "search", arguments: ["query": query])) {
           answers[query] = $0 as? [String: Any]
           left -= 1
-          if left == 0 { done.resume() }
+          if left == 0 { done(()) }
         }
       }
     }
@@ -973,14 +994,14 @@ struct InkTests {
     let canvas = try #require(surface.liveCanvases.first)
     canvas.drawing = PKDrawing(strokes: Self.handwritten("HELLO", at: CGPoint(x: 100, y: 300)))
     let answer: [String: Any] = try #require(
-      await withCheckedContinuation { done in
+      await Self.answer("recognizeText") { (done: @escaping ([String: Any]?) -> Void) in
         events.handler!(
           FlutterMethodCall(methodName: "recognizeText", arguments: ["page_1based": NSNull(), "scope": "all"])
-        ) { done.resume(returning: $0 as? [String: Any]) }
+        ) { done($0 as? [String: Any]) }
         // Before the recognizer answers (it can't: this is the main actor):
         // the person draws on.
         canvas.drawing = PKDrawing(strokes: canvas.drawing.strokes + [Self.circle(at: CGPoint(x: 800, y: 600))])
-      })
+      } ?? nil)
     let fixture = try #require(try Self.fixture("bridge/cmd_recognize_text_stale.json")["result"] as? [String: Any])
     #expect(Self.keys(answer) == Self.keys(fixture))
     #expect(answer["stale"] as? Bool == true)
@@ -1712,13 +1733,13 @@ struct InkTests {
     let token = try cache.begin(url, sha256: sha)
     cache.append(token, bytes.prefix(3))
     cache.append(token, bytes.dropFirst(3))
-    let done = await withCheckedContinuation { c in cache.finish(token) { c.resume(returning: $0) } }
+    let done = try #require(await Self.answer("finish") { c in cache.finish(token) { c($0) } })
     #expect(try done.get() == url)
     #expect(try Data(contentsOf: url) == bytes)
 
     let wrong = try cache.begin(url, sha256: String(repeating: "b", count: 64))
     cache.append(wrong, bytes)
-    let refused = await withCheckedContinuation { c in cache.finish(wrong) { c.resume(returning: $0) } }
+    let refused = try #require(await Self.answer("finish") { c in cache.finish(wrong) { c($0) } })
     if case .failure(let error) = refused { #expect(error.code == "hash_mismatch") } else {
       Issue.record("a wrong hash was accepted")
     }
@@ -1802,7 +1823,7 @@ struct InkTests {
       let url = try #require(cache.file(["backend": "b", "sha256": sha, "name": name]))
       let token = try cache.begin(url, sha256: sha)
       cache.append(token, bytes)
-      _ = await withCheckedContinuation { c in cache.finish(token) { c.resume(returning: $0) } }
+      _ = await Self.answer("finish") { c in cache.finish(token) { c($0) } }
       // Distinct use times, older first.
       try await Task.sleep(nanoseconds: 1_100_000_000)
       return url
@@ -1810,12 +1831,12 @@ struct InkTests {
     let a = try await keep("a.pdf", 1)
     let b = try await keep("b.pdf", 2)
     // a used again: b is now the one used longest ago.
-    _ = await withCheckedContinuation { c in
+    _ = await Self.answer("cacheLookup") { c in
       cache.handle(
         FlutterMethodCall(
           methodName: "cacheLookup",
           arguments: ["backend": "b", "sha256": InkHash.sha256(Data(repeating: 1, count: 1000)), "name": "a.pdf"])
-      ) { c.resume(returning: $0) }
+      ) { c($0) }
     }
     try await Task.sleep(nanoseconds: 1_100_000_000)
     let c = try await keep("c.pdf", 3)
@@ -1823,5 +1844,21 @@ struct InkTests {
     #expect(exists(a) && exists(c))
     #expect(!exists(b))
     #expect(!FileManager.default.fileExists(atPath: b.deletingLastPathComponent().path))
+  }
+}
+
+/// Whether a wait ([InkTests.answer]) ended: by its answer or its limit,
+/// whichever came first.
+private final class AnswerOnce: @unchecked Sendable {
+  private let lock = NSLock()
+  private var done = false
+
+  /// True the first time only.
+  func first() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    if done { return false }
+    done = true
+    return true
   }
 }

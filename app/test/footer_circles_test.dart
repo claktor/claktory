@@ -1,8 +1,9 @@
-// The sidebar footer's row with many providers (Matt, Bruno 41265): who's
-// at work, then each account's usage circle and the + to add a provider,
-// wrapping together from the row's left edge, each line's cells centred on
-// one another, at the narrowest and widest sidebar and at large text, from
-// 1 to 6 accounts. With SHOTS set, each case is drawn to a PNG there:
+// The sidebar footer's row with many providers: who's at work, then each
+// account's usage circle, wrapping together from the row's left edge,
+// each line's cells centred on one another, and the + to add a provider
+// pinned at the end of the first line, at the narrowest and widest
+// sidebar and at large text, from 1 to 6 accounts. With SHOTS set, each
+// case is drawn to a PNG there:
 //   SHOTS=/tmp/footer flutter test test/footer_circles_test.dart
 import 'dart:io';
 import 'dart:ui' as ui;
@@ -103,9 +104,9 @@ void main() {
           final cells = [
             for (final element in find.byType(UsageCircle).evaluate())
               tester.getRect(find.byWidget(element.widget)),
-            tester.getRect(find.byType(AddProviderButton).first),
           ];
-          expect(cells, hasLength(count + 1));
+          expect(cells, hasLength(count));
+          final add = tester.getRect(find.byType(AddProviderButton).first);
           final row = [badge, ...cells];
           // The badge is as wide as its count, the first of the row.
           expect(badge.width, lessThan(80));
@@ -113,16 +114,23 @@ void main() {
           final left = badge.left - Space.s - Space.xs;
           final edge = left + width;
           final top = badge.top - 12;
-          final bottom = cells
-              .map((cell) => cell.bottom)
-              .reduce((a, b) => a > b ? a : b);
+          final bottom = [
+            add,
+            ...cells,
+          ].map((cell) => cell.bottom).reduce((a, b) => a > b ? a : b);
           await _shot(
             tester,
             'w${width.toInt()}-x$scale-n$count',
             Rect.fromLTRB(left, top, edge, bottom + 12),
           );
-          for (final cell in row) {
+          for (final cell in [...row, add]) {
             expect(cell.right, lessThanOrEqualTo(edge), reason: '$cell');
+          }
+          // The + ends the first line, level with the badge, and nothing
+          // goes under or past it.
+          expect(add.center.dy, moreOrLessEquals(badge.center.dy, epsilon: 1));
+          for (final cell in row) {
+            expect(cell.right, lessThanOrEqualTo(add.left), reason: '$cell');
           }
           for (var i = 1; i < row.length; i++) {
             final before = row[i - 1];

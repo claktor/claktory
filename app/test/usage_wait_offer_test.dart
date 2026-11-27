@@ -102,7 +102,7 @@ void main() {
         if (message.hasContinueOnAlternative()) message.continueOnAlternative,
     ];
     // One request for all: moving one wakes the others for a moment, so a
-    // request each was refused as not waiting (Abbacchio's rows 692-694).
+    // request each was refused as not waiting.
     expect(asked, hasLength(1));
     expect(asked.single.agentId, 'a1');
     expect(asked.single.allWaiting, isTrue);

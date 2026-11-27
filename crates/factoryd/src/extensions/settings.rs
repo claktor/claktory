@@ -1,4 +1,4 @@
-//! The Settings extension (#422): an admin agent such as Rivet reads and
+//! The Settings extension: an admin agent such as Rivet reads and
 //! changes the settings Claktory keeps in factory.db rather than in the
 //! settings file, each through the same path as the app's request for it:
 //! advanced diagnostics (SetDiagnostics), keeping this Mac awake
@@ -236,7 +236,9 @@ fn changes(factory: &Factory, agent: &str, args: SettingsArgs) -> Result<Vec<Cha
             quiet_start: given.quiet_start.as_deref().map(minute_of_day).transpose()?,
             quiet_end: given.quiet_end.as_deref().map(minute_of_day).transpose()?,
             urgent_breaks_quiet: given.urgent_breaks_quiet,
+            // Both the person's alone.
             relay: None,
+            urgent_from: None,
         };
         let request = v1::UpdateSettings { notification_change: Some(change), ..Default::default() };
         changes.push(Change::Settings(Box::new(request), "notifications".to_owned()));
@@ -340,7 +342,7 @@ async fn settings(factory: Arc<Factory>, agent: String, args: SettingsArgs) -> R
     let changes = changes(&factory, &agent, args)?;
     if !changes.is_empty() {
         // A page or a pipe it read mustn't change the person's settings
-        // (Fugo, as for agents_stop); reading them is fine.
+        // (as for agents_stop); reading them is fine.
         super::untainted(&factory, &agent, "change these settings", "change them in Settings. Nothing was changed.")?;
     }
     let mut done = Vec::new();

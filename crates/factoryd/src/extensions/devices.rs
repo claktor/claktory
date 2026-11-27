@@ -488,7 +488,7 @@ fn tell(factory: &Arc<Factory>, row: &Row) {
 
 /// Keeps agents' pairings up to date: whenever devices may have changed,
 /// and every second while one waits (its code runs out); with none waiting,
-/// only when they change (#454).
+/// only when they change.
 pub(crate) async fn monitor(factory: Weak<Factory>) {
     while let Some(strong) = factory.upgrade() {
         let waiting = sync(&strong);

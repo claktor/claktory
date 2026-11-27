@@ -1,4 +1,4 @@
-// Scanning a code with the camera wherever one is entered (friend bug #2):
+// Scanning a code with the camera wherever one is entered:
 // scanCode says why before the camera's first use, then asks (area 5a,
 // P7), takes the first code its check
 // accepts, says why another can't be used, and says how to allow a refused
@@ -53,7 +53,7 @@ void main() {
     // Why first (area 5a, P7): nothing asked until Continue.
     expect(harness.camera.asked, 0);
     expect(find.text('Scan the code'), findsOneWidget);
-    // Any code, not only a Claktory's own (Zucchero 44139).
+    // Any code, not only a Claktory's own.
     expect(
       find.text(
         'Claktory uses the camera to read the code. '

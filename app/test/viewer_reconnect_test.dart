@@ -13,11 +13,11 @@ void main() {
     final harness = Harness(snapshot(layout: beside()));
     harness.backend.files['/w/main.rs'] = text('/w/main.rs', 'fn main() {}\n');
     harness.backend.connected.value = false;
-    harness.backend.refuse = 'Not connected to the backend.';
+    harness.backend.refuse = "Can't reach your Claktory right now.";
     await harness.show(tester);
     await settle(tester);
-    // It waits for the connection, rather than saying it failed (#375).
-    expect(find.text('Not connected to the backend.'), findsNothing);
+    // It waits for the connection, rather than saying it failed.
+    expect(find.text("Can't reach your Claktory right now."), findsNothing);
     expect(
       find.text(
         "Waiting for the connection. It carries on from here when it's back.",
@@ -30,7 +30,7 @@ void main() {
     harness.backend.connected.value = true;
     await settle(tester);
     expect(find.text('fn main() {}'), findsOneWidget);
-    expect(find.text('Not connected to the backend.'), findsNothing);
+    expect(find.text("Can't reach your Claktory right now."), findsNothing);
     final after = reads(harness);
 
     // Still connected: nothing to read again.

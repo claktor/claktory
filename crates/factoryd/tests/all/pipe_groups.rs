@@ -1,4 +1,4 @@
-//! Pipe groups (#359): a project's pipes gathered under named rows that fold
+//! Pipe groups: a project's pipes gathered under named rows that fold
 //! away the same on every device, arranged by the person or by Rivet.
 //! Arrangement only, so pipes work as before; deleting a group keeps its
 //! pipes.

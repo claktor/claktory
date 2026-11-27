@@ -431,8 +431,10 @@ void main() {
   ) async {
     final harness = await showApp(tester, workspace());
 
-    // A right click opens a project's settings; a left click focuses it.
+    // A right click opens the project's menu, with its settings.
     await tester.tap(find.text('Factory'), buttons: kSecondaryButton);
+    await settle(tester);
+    await tester.tap(find.text('Project settings…').last);
     await settle(tester);
     await tester.enterText(find.byType(EditableText).last, 'Factory app');
     await tester.pump();
@@ -442,12 +444,14 @@ void main() {
 
     await tester.tap(find.text('Factory'), buttons: kSecondaryButton);
     await settle(tester);
+    await tester.tap(find.text('Project settings…').last);
+    await settle(tester);
     await tester.tap(find.text('Delete project…'));
     await settle(tester);
     expect(
       find.text(
-        "Its agent and its conversation are deleted. The project's folder "
-        'and its files are kept.',
+        'This deletes its agent and its conversation. Its folder and files '
+        'stay.',
       ),
       findsOneWidget,
     );
@@ -486,7 +490,12 @@ void main() {
     await dragTo(tester.getCenter(find.text('Factory')));
     expect(harness.backend.sent, isEmpty);
 
+    // Into another project: asked first, with what it changes.
     await dragTo(tester.getCenter(find.text('Site')));
+    expect(harness.last.previewArrange.projectId, 'p2');
+    expect(find.text('Move Builder to Site?'), findsOneWidget);
+    await tester.tap(find.text('Move'));
+    await settle(tester);
     expect(harness.last.arrangeAgent.agentId, 'a1');
     expect(harness.last.arrangeAgent.projectId, 'p2');
     expect(harness.last.arrangeAgent.parentId, '', reason: 'its top level');
@@ -502,6 +511,10 @@ void main() {
 
     // Onto Rivet's row: out of its project, reporting to Rivet.
     await dragTo(rivet.center);
+    expect(find.text('Move Builder out of Factory?'), findsOneWidget);
+    expect(find.text('Builder will report to Rivet.'), findsOneWidget);
+    await tester.tap(find.text('Move'));
+    await settle(tester);
     expect(harness.last.arrangeAgent.projectId, '');
     expect(harness.last.arrangeAgent.hasProjectId(), isTrue);
     expect(harness.last.arrangeAgent.parentId, 'rivet');
@@ -624,6 +637,66 @@ void main() {
     await tester.enterText(find.byType(EditableText), 'Hi');
     await tester.pump();
     expect(find.byType(RotatingText), findsNothing);
+  });
+
+  // Polpo's placeholder carousel (Lucy 51826): one round, then it rests on
+  // the first line, drawing nothing; a touch, key or scroll wakes it for
+  // another round, from the second line, a full turn later. Hover doesn't.
+  testWidgets('hints rest on the first after one round, until a touch', (
+    tester,
+  ) async {
+    await showApp(
+      tester,
+      workspace(
+        agents: [builder(working: false)..placeholder = 'One idea\nAnother'],
+      ),
+    );
+    Finder hint(String text) => find.descendant(
+      of: find.byType(RotatingText),
+      matching: find.text(text),
+    );
+    Future<void> turn() async {
+      await tester.pump(rotateEvery);
+      await tester.pump(rotateSlide);
+      await tester.pump(rotateSlide);
+    }
+
+    await turn();
+    expect(hint('Another'), findsOneWidget);
+    await turn();
+    expect(hint('One idea'), findsOneWidget);
+    // At rest: nothing scheduled, nothing drawn.
+    await turn();
+    await turn();
+    expect(hint('One idea'), findsOneWidget);
+    expect(tester.binding.hasScheduledFrame, isFalse);
+
+    // A mouse passing over doesn't wake it.
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: Offset.zero);
+    await mouse.moveTo(const Offset(5, 5));
+    await mouse.removePointer();
+    await turn();
+    expect(hint('One idea'), findsOneWidget);
+
+    // A touch somewhere else does: not at once, a full turn later.
+    await tester.tapAt(const Offset(5, 5));
+    await tester.pump(rotateEvery ~/ 2);
+    expect(hint('Another'), findsNothing);
+    await tester.pump(rotateEvery);
+    await tester.pump(rotateSlide);
+    expect(hint('Another'), findsOneWidget);
+    // Each turn counts from the frame the last slide ended on.
+    await tester.pump(rotateEvery);
+    await turn();
+    expect(hint('One idea'), findsOneWidget);
+    await turn();
+    expect(hint('One idea'), findsOneWidget, reason: 'resting again');
+
+    // A key wakes it too.
+    await tester.sendKeyEvent(LogicalKeyboardKey.shiftLeft);
+    await turn();
+    expect(hint('Another'), findsOneWidget);
   });
 
   testWidgets('with reduced motion, hints just swap', (tester) async {
@@ -910,7 +983,7 @@ void main() {
     tester,
   ) async {
     final harness = await showApp(tester, workspace());
-    harness.backend.refuse = 'Not connected to the backend.';
+    harness.backend.refuse = "Can't reach your Claktory right now.";
 
     await tester.enterText(find.byType(EditableText).first, 'run the tests');
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);

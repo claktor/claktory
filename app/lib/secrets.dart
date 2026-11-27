@@ -13,6 +13,7 @@ import 'claktory_identity.dart' show claktoryNameInText;
 import 'connectors.dart';
 import 'controls.dart';
 import 'decision.dart';
+import 'errands/browser_agent.dart' show browserRefusal;
 import 'extensions.dart' show logTime;
 import 'forms.dart';
 import 'identity.dart';
@@ -524,9 +525,10 @@ class _SecretRowState extends State<_SecretRow> {
       context,
       (context, close) => _AgentPicker(
         title: fillOnly
-            ? 'Whose errands may fill in ${secret.name}?'
+            ? 'Whose browser may fill in ${secret.name}?'
             : 'Give ${secret.name} to',
         agents: agents,
+        refusal: fillOnly ? browserRefusal : null,
         pick: (picked) {
           agent = picked;
           close();
@@ -587,10 +589,8 @@ class _SecretRowState extends State<_SecretRow> {
       Text(
         sites.isEmpty
             ? "Claktory's browser doesn't fill it in anywhere yet. Add a "
-                  'site, such as https://shop.example, where errands may fill '
-                  'it in.'
-            : "Claktory's browser fills it in for an agent's errand only on "
-                  'these sites.',
+                  'site, such as https://shop.example, where it may.'
+            : "Claktory's browser fills it in only on these sites.",
         style: type.caption.copyWith(color: palette.textFaint),
       ),
       // Asks each time: no errand can wait for an Allow, so it's filled
@@ -598,7 +598,7 @@ class _SecretRowState extends State<_SecretRow> {
       if (sites.isNotEmpty && secret.askEachTime)
         Text(
           "It asks each time, so it isn't filled in anywhere. Turn off Ask "
-          'each time to let errands fill it in.',
+          "each time to let Claktory's browser fill it in.",
           style: type.caption.copyWith(color: palette.signal),
         ),
       const SizedBox(height: Space.xs),
@@ -912,7 +912,7 @@ class _SecretRowState extends State<_SecretRow> {
               // Only where it has sites to fill in on (#435).
               if (secret.sites.isNotEmpty)
                 Button(
-                  label: 'Let errands fill it in…',
+                  label: "Let Claktory's browser fill it in…",
                   onPressed: () => _give(fillOnly: true),
                 ),
               Button(
@@ -1153,10 +1153,12 @@ class _TakeBackFormState extends State<TakeBackForm> {
     final tasks = widget.grant.runningTasks;
     return FormFrame(
       title: 'Take back ${widget.secret.name} from $name?',
-      body:
-          "$name can't use it from now on. It may still know a value it has "
-          'used: to be sure, make a new key where it came from and update '
-          'it here.',
+      // A fill-only grant never showed it a value.
+      body: widget.grant.fillOnly
+          ? "$name's browser can't fill it in from now on."
+          : "$name can't use it from now on. It may still know a value it "
+                'has used: to be sure, make a new key where it came from and '
+                'update it here.',
       fields: [
         if (tasks > 0) ...[
           _ToggleRow(
@@ -1228,10 +1230,14 @@ class _AgentPicker extends StatelessWidget {
     required this.agents,
     required this.pick,
     required this.close,
+    this.refusal,
   });
 
   final String title;
   final List<Agent> agents;
+
+  /// Why an agent can't be picked, said under it, greyed; null when it can.
+  final String? Function(Agent agent)? refusal;
   final ValueChanged<Agent> pick;
   final VoidCallback close;
 
@@ -1242,42 +1248,83 @@ class _AgentPicker extends StatelessWidget {
       title: title,
       fields: [
         for (final agent in agents)
-          Unselectable(
-            child: Semantics(
-              button: true,
-              label: agent.name,
-              child: Pressable(
-                onTap: () => pick(agent),
-                builder: (context, hovered) => Container(
-                  height: 32,
-                  padding: const EdgeInsets.symmetric(horizontal: Space.s),
-                  decoration: BoxDecoration(
-                    color: hovered ? palette.hover : null,
-                    borderRadius: BorderRadius.circular(Radii.control),
+          if (refusal?.call(agent) case final why?)
+            Semantics(
+              label: '${agent.name}, $why',
+              child: ExcludeSemantics(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: Space.s,
+                    vertical: Space.xs,
                   ),
                   child: Row(
                     children: [
-                      AgentCharacter(agent: agent, size: 20),
-                      const SizedBox(width: Space.s),
-                      Text(
-                        agent.name,
-                        style: TypeScale.of(context).body
-                            .copyWith(color: palette.text),
+                      Opacity(
+                        opacity: 0.5,
+                        child: AgentCharacter(agent: agent, size: 20),
                       ),
-                      if (agent.role.isNotEmpty) ...[
-                        const SizedBox(width: Space.s),
-                        Text(
-                          agent.role,
-                          style: TypeScale.of(context).caption
-                              .copyWith(fontSize: 11, color: palette.textFaint),
+                      const SizedBox(width: Space.s),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              agent.name,
+                              style: TypeScale.of(context).body
+                                  .copyWith(color: palette.textFaint),
+                            ),
+                            Text(
+                              why,
+                              style: TypeScale.of(context).caption
+                                  .copyWith(color: palette.textFaint),
+                            ),
+                          ],
                         ),
-                      ],
+                      ),
                     ],
                   ),
                 ),
               ),
+            )
+          else
+            Unselectable(
+              child: Semantics(
+                button: true,
+                label: agent.name,
+                child: Pressable(
+                  onTap: () => pick(agent),
+                  builder: (context, hovered) => Container(
+                    height: 32,
+                    padding: const EdgeInsets.symmetric(horizontal: Space.s),
+                    decoration: BoxDecoration(
+                      color: hovered ? palette.hover : null,
+                      borderRadius: BorderRadius.circular(Radii.control),
+                    ),
+                    child: Row(
+                      children: [
+                        AgentCharacter(agent: agent, size: 20),
+                        const SizedBox(width: Space.s),
+                        Text(
+                          agent.name,
+                          style: TypeScale.of(context).body
+                              .copyWith(color: palette.text),
+                        ),
+                        if (agent.role.isNotEmpty) ...[
+                          const SizedBox(width: Space.s),
+                          Text(
+                            agent.role,
+                            style: TypeScale.of(context).caption.copyWith(
+                              fontSize: 11,
+                              color: palette.textFaint,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+              ),
             ),
-          ),
         const SizedBox(height: Space.l),
       ],
       error: null,
@@ -1466,8 +1513,8 @@ class _SecretFormState extends State<SecretForm> {
           Field(
             label: 'Sites (optional)',
             note:
-                "Where Claktory's browser may fill it in for an agent's "
-                'errand, one per line. Each is an exact https:// address.',
+                "Where Claktory's browser may fill it in, one per line. "
+                'Each is an exact https:// address.',
             child: TextField(
               controller: _sites,
               placeholder: 'https://shop.example',
@@ -2306,6 +2353,12 @@ String secretRequestSummary(
   final name = request.newSecret.name.isNotEmpty
       ? request.newSecret.name
       : request.secretName;
+  if (request.login) {
+    return request.fittingSecretId.isNotEmpty
+        ? 'Asks to use your ${request.fittingSecretName} on '
+              '${loginSite(request)}'
+        : 'Asks to sign in to ${loginSite(request)}';
+  }
   if (request.collecting &&
       request.adminAgentId.isNotEmpty &&
       shownIn == request.adminAgentId &&
@@ -2370,6 +2423,7 @@ String secretOutcome(
     SecretRequestState.SECRET_REQUEST_STATE_DISMISSED when request.replied =>
       'Replied',
     SecretRequestState.SECRET_REQUEST_STATE_DISMISSED => 'Dismissed',
+    _ when request.login => _loginOutcome(request, given),
     // Made, to no one as it asked.
     SecretRequestState.SECRET_REQUEST_STATE_GENERATED =>
       imports
@@ -2381,6 +2435,31 @@ String secretOutcome(
     _ when _byAdmin(request) => '$agent got $given',
     _ when request.added => 'Added and gave $given',
     _ => 'Gave $given',
+  };
+}
+
+String loginSite(SecretRequest request) {
+  if (request.loginSite.isNotEmpty) return request.loginSite;
+  final host = request.sites.isEmpty
+      ? ''
+      : Uri.tryParse(request.sites.first)?.host ?? '';
+  return host.isNotEmpty ? host : 'the site';
+}
+
+/// One of the person's own logins (Use it) isn't "saved".
+String _loginOutcome(SecretRequest request, String given) {
+  final site = loginSite(request);
+  final saved = request.added && given.isNotEmpty;
+  return switch (request.loginOutcome) {
+    SecretLoginOutcome.SECRET_LOGIN_OUTCOME_SIGNING_IN =>
+      'Signing in to $site…',
+    SecretLoginOutcome.SECRET_LOGIN_OUTCOME_SIGNED_IN =>
+      saved ? 'Signed in to $site · Saved as $given' : 'Signed in to $site',
+    SecretLoginOutcome.SECRET_LOGIN_OUTCOME_CODE_NEXT =>
+      saved
+          ? 'Saved as $given. $site asks for a code next.'
+          : '$site asks for a code next.',
+    _ => saved ? 'Saved as $given' : 'Gave $given',
   };
 }
 
@@ -2532,9 +2611,19 @@ class _SecretRequestCardState extends State<SecretRequestCard>
   /// name, a value) stays when the card scrolls out of view and back
   /// (Zucchero's row 189); it goes with the conversation, as before.
   @override
-  bool get wantKeepAlive => _waiting;
+  bool get wantKeepAlive => _waiting || _signingIn;
 
   late final _name = TextEditingController(text: widget.request.newSecret.name);
+
+  /// Kept only on this screen: the backend never holds a vault value in
+  /// the Workspace, so after a refusal the username is still here to fix.
+  final _loginUser = TextEditingController();
+  final _loginPassword = TextEditingController();
+
+  bool get _signingIn =>
+      request.login &&
+      request.loginOutcome ==
+          SecretLoginOutcome.SECRET_LOGIN_OUTCOME_SIGNING_IN;
   late final _description = TextEditingController(
     text: widget.request.newSecret.description,
   );
@@ -2574,6 +2663,12 @@ class _SecretRequestCardState extends State<SecretRequestCard>
     super.didUpdateWidget(old);
     // Decided, it scrolls away like any entry.
     updateKeepAlive();
+    if (widget.request.loginOutcome ==
+            SecretLoginOutcome.SECRET_LOGIN_OUTCOME_REFUSED &&
+        old.request.loginOutcome !=
+            SecretLoginOutcome.SECRET_LOGIN_OUTCOME_REFUSED) {
+      _loginPassword.clear();
+    }
     // The agent changed what it asks for: the form starts from that.
     if (old.request.updatedMs != widget.request.updatedMs) {
       // Changed while words were typed (N4b): they stay, and the field
@@ -2619,10 +2714,64 @@ class _SecretRequestCardState extends State<SecretRequestCard>
     }
     _comment.dispose();
     _commentFocus.dispose();
+    _loginUser.dispose();
+    _loginPassword
+      ..clear()
+      ..dispose();
     super.dispose();
   }
 
   SecretRequest get request => widget.request;
+
+  String? get _replaces =>
+      request.loginOutcome == SecretLoginOutcome.SECRET_LOGIN_OUTCOME_REFUSED &&
+          request.givenSecretName.isNotEmpty
+      ? request.givenSecretName
+      : null;
+
+  bool get _loginReady =>
+      _loginUser.text.trim().isNotEmpty && _loginPassword.text.isNotEmpty;
+
+  Future<void> _signIn() async {
+    if (!_loginReady) {
+      _notSent();
+      return;
+    }
+    final name = _replaces ?? _name.text.trim();
+    if (name.isEmpty) {
+      setState(() {
+        _error = 'Enter a name for the login.';
+        _editing = true;
+      });
+      _notSent();
+      return;
+    }
+    await _decide(() async {
+      await AppScope.of(context).decideSecretRequest(
+        request.agentId,
+        request.id,
+        approve: true,
+        name: name,
+        description: request.newSecret.description,
+        comment: _comment.text.trim(),
+        entries: [
+          SecretEntry(variable: 'USERNAME', value: _loginUser.text.trim()),
+          SecretEntry(variable: 'PASSWORD', value: _loginPassword.text),
+        ],
+      );
+      _loginPassword.clear();
+    });
+  }
+
+  Future<void> _useLogin() => _decide(
+    () => AppScope.of(context).decideSecretRequest(
+      request.agentId,
+      request.id,
+      approve: true,
+      secretId: request.fittingSecretId,
+      comment: _comment.text.trim(),
+    ),
+  );
 
   /// From before agents described what they need: it names a secret.
   bool get _names => request.secretId.isNotEmpty;
@@ -2661,6 +2810,12 @@ class _SecretRequestCardState extends State<SecretRequestCard>
   /// that fits, or add the one asked for, or let the admin agent choose.
   /// Not the admin agent's add-secret card, a request naming a secret, a
   /// key to make or files to import.
+  /// One of the person's secrets this card may give: not a connected
+  /// service (given to no one), nor a website login (given only in Settings
+  /// → Secrets, never for commands).
+  static bool _givable(SecretInfo secret) =>
+      !secret.hasConnection() && secret.sites.isEmpty;
+
   bool get _answers =>
       !widget.direct && !_collect && !_names && !_generates && !_imports;
 
@@ -2874,6 +3029,8 @@ class _SecretRequestCardState extends State<SecretRequestCard>
         store,
         _comment,
         for (final value in _values) value.value,
+        _loginUser,
+        _loginPassword,
       ]),
       builder: (context, _) {
         // Emptied, what the agent changed is no longer news over the field.
@@ -2902,6 +3059,22 @@ class _SecretRequestCardState extends State<SecretRequestCard>
   @override
   CardAnswer? answerNow() {
     if (!_waiting || widget.direct) return null;
+    if (request.login) {
+      final fits = _fits;
+      final Future<void> Function() yes = fits ? _useLogin : _signIn;
+      return CardAnswer(
+        key: 'agent:${request.agentId}/secret/${request.id}',
+        docked: false,
+        yes: fits ? 'Use it' : 'Sign in',
+        no: 'Dismiss',
+        busy: _deciding,
+        error: _error,
+        onYes: _deciding || (!fits && !_loginReady) ? null : () => _docked(yes),
+        onNo: _deciding
+            ? null
+            : (reason) => _docked(() => _dismiss(reason: reason)),
+      );
+    }
     final secrets = _secrets;
     String yes = '';
     Future<void> Function()? onYes;
@@ -2950,7 +3123,7 @@ class _SecretRequestCardState extends State<SecretRequestCard>
             : () => _give(secrets);
         choices = [
           for (final secret in secrets)
-            if (!secret.hasConnection()) choice(secret),
+            if (_givable(secret)) choice(secret),
         ];
       }
     } else {
@@ -3009,6 +3182,9 @@ class _SecretRequestCardState extends State<SecretRequestCard>
               ].firstOrNull ??
               ''
         : '';
+    if (request.login && !widget.direct) {
+      return _loginCard(context, palette, agent, color);
+    }
     if (widget.direct && widget.onDecided != null) {
       // In Choose a secret…'s dialog, which says whose it is.
       return Column(
@@ -3125,6 +3301,247 @@ class _SecretRequestCardState extends State<SecretRequestCard>
       ),
     );
   }
+
+  Widget _loginCard(
+    BuildContext context,
+    Palette palette,
+    Agent? agent,
+    Color color,
+  ) {
+    final type = TypeScale.of(context);
+    final name = _agentName;
+    final pending = _waiting;
+    final site = loginSite(request);
+    final fits = _fits;
+    const bold = TextStyle(fontWeight: FontWeight.w600);
+    return Container(
+      padding: const EdgeInsets.all(Space.l),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.06),
+        border: Border.all(
+          color: color.withValues(alpha: pending ? 0.55 : 0.25),
+        ),
+        borderRadius: BorderRadius.circular(Radii.panel),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              if (agent != null) ...[
+                AgentCharacter(agent: agent, size: 20),
+                const SizedBox(width: Space.xs + 2),
+              ],
+              // The site is Claktory's reading of the page, never the
+              // agent's words.
+              Flexible(
+                child: Text.rich(
+                  TextSpan(
+                    children: fits
+                        ? [
+                            TextSpan(
+                              text: proseCodes(
+                                'Use your ${request.fittingSecretName} on ',
+                              ),
+                            ),
+                            TextSpan(text: site, style: bold),
+                            const TextSpan(text: '?'),
+                          ]
+                        : [
+                            TextSpan(text: '$name asks to sign in to '),
+                            TextSpan(text: site, style: bold),
+                          ],
+                  ),
+                  style: type.emphasis.copyWith(
+                    color: pending ? palette.text : palette.textMuted,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (request.reason.isNotEmpty) ...[
+            const SizedBox(height: Space.xs),
+            Markdown(
+              proseCodes(request.reason),
+              color: palette.textMuted,
+              shortLinks: true,
+            ),
+          ],
+          const SizedBox(height: Space.m),
+          if (pending)
+            ..._login(context, palette, name, site, fits)
+          else
+            ..._decided(palette, color, name),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _login(
+    BuildContext context,
+    Palette palette,
+    String agent,
+    String site,
+    bool fits,
+  ) {
+    final type = TypeScale.of(context);
+    if (fits) {
+      return [
+        Text(
+          proseCodes('${request.fittingSecretName} · yours'),
+          style: type.caption.copyWith(color: palette.textMuted),
+        ),
+        const SizedBox(height: Space.s),
+        CardAnswerBlock(
+          focus: _commentFocus,
+          field: (_) => _commentField(agent),
+          row: _loginRow(
+            agent,
+            site,
+            base: '$agent never sees it.',
+            primary: Button(
+              label: 'Use it',
+              primary: true,
+              onPressed: _deciding ? null : _useLogin,
+            ),
+          ),
+        ),
+        const SizedBox(height: Space.s),
+        QuietLink(
+          label: 'Use a different login…',
+          onTap: _deciding ? null : _useOtherLogin,
+        ),
+      ];
+    }
+    final lookalike =
+        request.lookalikeSecretName.isNotEmpty &&
+        request.lookalikeSite.isNotEmpty;
+    return [
+      if (lookalike) ...[
+        Text(
+          proseCodes(
+            'This page is $site, not ${request.lookalikeSite}. Your '
+            '${request.lookalikeSecretName} is for ${request.lookalikeSite}.',
+          ),
+          style: type.body.copyWith(color: palette.danger),
+        ),
+        const SizedBox(height: Space.m),
+      ],
+      // Cancel: the device never offers to save what goes to the vault.
+      AutofillGroup(
+        onDisposeAction: AutofillContextAction.cancel,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Field(
+              label: 'Email or username',
+              child: TextField(
+                controller: _loginUser,
+                kind: InputKind.email,
+                keyboardType: TextInputType.emailAddress,
+                autofillHints: const [AutofillHints.username],
+                textInputAction: TextInputAction.next,
+                semanticsLabel: 'Email or username for $site',
+              ),
+            ),
+            Field(
+              label: 'Password',
+              child: TextField(
+                controller: _loginPassword,
+                kind: InputKind.secret,
+                autofillHints: const [AutofillHints.password],
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) {
+                  if (_loginReady && !_deciding) unawaited(_signIn());
+                },
+                semanticsLabel: 'Password for $site',
+              ),
+            ),
+          ],
+        ),
+      ),
+      if (_replaces case final given?)
+        Text(
+          proseCodes(
+            'Signing in updates your $given for every agent that uses it.',
+          ),
+          style: type.caption.copyWith(color: palette.textMuted),
+        )
+      else if (_editing)
+        Field(
+          label: 'Name',
+          child: TextField(
+            controller: _name,
+            kind: InputKind.text,
+            semanticsLabel: 'Name',
+          ),
+        )
+      else
+        _summary(context, palette, const []),
+      const SizedBox(height: Space.s),
+      CardAnswerBlock(
+        focus: _commentFocus,
+        field: (_) => _commentField(agent),
+        row: _loginRow(
+          agent,
+          site,
+          base: 'Claktory types it on $site only. $agent never sees it.',
+          refused:
+              request.loginOutcome ==
+              SecretLoginOutcome.SECRET_LOGIN_OUTCOME_REFUSED,
+          primary: Button(
+            label: 'Sign in',
+            primary: true,
+            onPressed: _deciding || !_loginReady ? null : _signIn,
+          ),
+        ),
+      ),
+      if (_otherLogin) ...[
+        const SizedBox(height: Space.s),
+        QuietLink(
+          label: proseCodes('Use your ${request.fittingSecretName} instead'),
+          onTap: _deciding ? null : () => setState(() => _otherLogin = false),
+        ),
+      ],
+    ];
+  }
+
+  Widget _loginRow(
+    String agent,
+    String site, {
+    required String base,
+    bool refused = false,
+    required Widget primary,
+  }) => ListenableBuilder(
+    listenable: _comment,
+    builder: (context, _) {
+      final palette = Palette.of(context);
+      final typed = commentTyped(_comment);
+      var color = palette.textFaint;
+      final String line;
+      if (_deciding) {
+        line = 'Sending…';
+      } else if (_error case final error?) {
+        line = error;
+        color = palette.danger;
+      } else if (refused) {
+        line = _replaces == null
+            ? "$site didn't accept it. Check it and try again."
+            : "$site didn't accept your $_replaces. Check it and try again.";
+        color = palette.danger;
+      } else {
+        line = typed ? '$base $agent gets your words either way.' : base;
+      }
+      return CardRow(
+        quietLine: !typed && !refused && _error == null && !_deciding,
+        line: CardLine(line, color: color),
+        quiet: [
+          Button(label: 'Dismiss', onPressed: _deciding ? null : _dismiss),
+        ],
+        primary: primary,
+      );
+    },
+  );
 
   /// A request naming one of the person's secrets (from before agents
   /// described what they need), or the admin agent's card to add the one
@@ -3466,11 +3883,11 @@ class _SecretRequestCardState extends State<SecretRequestCard>
     final adding = _adding! || chosen == null;
     // A connected service makes one: the admin agent does it.
     final derives = !adding && chosen.hasConnection() && hasAdmin;
-    // What can be given instead: the person's own secrets (a connected
-    // service is given to no one), a new one, or the admin agent's choice.
+    // What can be given instead: the person's own secrets ([_givable]), a
+    // new one, or the admin agent's choice.
     final others = [
       for (final secret in secrets)
-        if (!secret.hasConnection() && (adding || secret.id != _chosen)) secret,
+        if (_givable(secret) && (adding || secret.id != _chosen)) secret,
     ];
     final variables = [
       for (final variable in request.newSecret.variables) variable.name,
@@ -3541,7 +3958,7 @@ class _SecretRequestCardState extends State<SecretRequestCard>
       // In focus mode, the secrets to give instead are a list in place,
       // numbered for its keys (FS5, #514); elsewhere Other ways…, in the
       // card above its field, never in the thumb row (Lucy's §5.2).
-      if (inDock && secrets.any((secret) => !secret.hasConnection())) ...[
+      if (inDock && secrets.any(_givable)) ...[
         _SecretChoices(
           choices: answerNow()?.choices ?? const [],
           adding: adding,
@@ -3670,6 +4087,33 @@ class _SecretRequestCardState extends State<SecretRequestCard>
   /// Its settings are open to change (Edit), on a new secret, a key to
   /// make or files to import.
   var _editing = false;
+
+  /// On a login request one of the person's logins fits: they chose to sign
+  /// in with another instead.
+  var _otherLogin = false;
+
+  /// One of the person's logins fits, and they haven't chosen another.
+  bool get _fits => request.fittingSecretId.isNotEmpty && !_otherLogin;
+
+  /// Signs in with another login than the one that fits, saved under a
+  /// name of its own ("X login 2"), since that one's is taken.
+  void _useOtherLogin() {
+    final taken = {
+      for (final secret in AppScope.of(
+        context,
+      ).workspace.workspace.vault.secrets)
+        secret.name,
+    };
+    final base = _name.text.trim();
+    if (taken.contains(base)) {
+      var n = 2;
+      while (taken.contains('$base $n')) {
+        n++;
+      }
+      _name.text = '$base $n';
+    }
+    setState(() => _otherLogin = true);
+  }
 
   /// "Saved as Resend · For Mista · Asks each time · Edit": the secret's
   /// name and its settings, folded into one line (N15, Lucy's §3.5).

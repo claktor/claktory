@@ -1,14 +1,14 @@
-//! A liaison's daily model spend (pipes-automation §7, H4; Fugo's ruling: in
-//! dollars). An agent quarantined by a pipe talks with someone outside the
-//! person's Claktory, who decides how often it's woken: so what it spends a
-//! day is capped. The spend is estimated from what its model calls used
-//! today (`agent_usage`, since local midnight) at its models' prices; calls
-//! on a model with no price count in tokens instead, against a cap of their
-//! own. Past either cap its pipes' messages wait, untold, rather than wake
-//! it; at local midnight, or when the person raises its cap, they're
-//! delivered as usual. The person's own messages always reach it. The app
-//! shows the spend, the caps and how many messages wait (Agent.spend):
-//! a quiet count, never a card.
+//! A liaison's daily model spend (pipes-automation §7, H4; in dollars). An
+//! agent quarantined by a pipe talks with someone outside the person's
+//! Claktory, who decides how often it's woken: so what it spends a day is
+//! capped. The spend is estimated from what its model calls used today
+//! (`agent_usage`, since local midnight) at its models' prices; calls on a
+//! model with no price count in tokens instead, against a cap of their own.
+//! Past either cap its pipes' messages wait, untold, rather than wake it; at
+//! local midnight, or when the person raises its cap, they're delivered as
+//! usual. The person's own messages always reach it. The app shows the
+//! spend, the caps and how many messages wait (Agent.spend): a quiet count,
+//! never a card.
 //!
 //! The caps are the person's (SetSpendCap), kept in factory.db, not
 //! config.json, beside the pipes they're about.

@@ -81,7 +81,7 @@ async fn an_admin_agent_sees_the_machine_and_factorys_processes() {
     let history = call(&mut client, &mut view, "rivet", "resources", r#"{"detail": "history"}"#).await;
     assert!(history.lines().count() >= 2, "{history}");
     let disk = call(&mut client, &mut view, "rivet", "resources", r#"{"detail": "disk"}"#).await;
-    assert!(disk.contains("Volume /") && disk.contains("Claktory's data"), "{disk}");
+    assert!(disk.contains(if cfg!(windows) { "Volume C:\\" } else { "Volume /" }) && disk.contains("Claktory's data"), "{disk}");
 
     // The panel.
     let open = v1::OpenPanel { extension_id: "resources".into(), agent_id: "rivet".into() };
@@ -147,7 +147,8 @@ async fn admin_agents_are_told_once_when_memory_or_disk_runs_low() {
     let disk =
         v1::UpdateSettings { ram_percent: Some(100), disk_free_gb: Some(100_000), disk_free_percent: Some(100), ..Default::default() };
     apply_request(&mut client, &mut view, settings(disk)).await;
-    view.follow(&mut client, |view| told(view, "The volume /") >= 1).await;
+    let volume = if cfg!(windows) { "The volume C:\\" } else { "The volume /" };
+    view.follow(&mut client, |view| told(view, volume) >= 1).await;
     // Scout doesn't have it.
     apply_request(&mut client, &mut view, select("scout")).await;
     assert_eq!(told(&view, low_memory) + told(&view, "The volume"), 0);
@@ -276,8 +277,10 @@ async fn a_low_disk_is_told_once_across_restarts_and_again_after_it_recovers() {
 }
 
 /// Kills a process when the test ends, however it ends.
+#[cfg(unix)]
 struct Killed(String);
 
+#[cfg(unix)]
 impl Drop for Killed {
     fn drop(&mut self) {
         let _ = std::process::Command::new("kill").arg(&self.0).status();
@@ -287,6 +290,8 @@ impl Drop for Killed {
 /// Part 2 #4 (#454): a process that uses a full core for an hour, owned by
 /// no agent's task (a leftover `cat /dev/zero` did for 37 hours), is told
 /// to the admin agents once, a restart included; an agent's task isn't.
+// Its leftover is a Unix process group's; on Windows commands are in jobs.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_stray_process_on_a_full_core_is_told_once_and_an_agents_task_never() {
     let (dir, factory, mut client, mut view) = setup().await;

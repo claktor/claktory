@@ -1,4 +1,5 @@
 pub mod bash;
+pub mod confine;
 pub mod task_logs;
 pub mod checks;
 pub mod asking;
@@ -70,7 +71,7 @@ pub struct Tool {
     read_only: Vec<PathBuf>,
     /// Absolute directories no file tool may address at all, inside `cwd`
     /// or not, by any path or link (see `denied`).
-    denied: Vec<PathBuf>,
+    denied: Vec<Denied>,
     handler: Option<Handler>,
     background: Option<bash::Background>,
 }
@@ -166,8 +167,12 @@ impl Tool {
         let file = matches!(self.kind, ToolKind::ReadFile | ToolKind::ReadImage | ToolKind::WriteFile | ToolKind::EditFile);
         if file && !self.denied.is_empty() {
             let address: FilePath = serde_json::from_value(args.clone())?;
-            if is_denied(&fs::resolve(&self.cwd, &address.path), &self.denied).await {
-                return Err(AgentError::new(AgentFailure::Private { path: address.path }).into());
+            if let Some(denied) = is_denied(&fs::resolve(&self.cwd, &address.path), &self.denied).await {
+                let failure = match &denied.why {
+                    Some(why) => AgentFailure::Kept { path: address.path, why: why.clone() },
+                    None => AgentFailure::Private { path: address.path },
+                };
+                return Err(AgentError::new(failure).into());
             }
         }
         if file && !(self.extra_dirs.is_empty() && self.read_only.is_empty()) {
@@ -359,35 +364,46 @@ pub fn read_only(tools: &mut [Tool], dirs: &[PathBuf]) {
     }
 }
 
+/// A folder every file tool refuses, and what the refusal says of it after
+/// the path; None says it's Claktory's private storage.
+#[derive(Clone, Debug)]
+pub struct Denied {
+    pub dir: PathBuf,
+    pub why: Option<String>,
+}
+
+impl From<PathBuf> for Denied {
+    fn from(dir: PathBuf) -> Self {
+        Denied { dir, why: None }
+    }
+}
+
 /// Keeps every file tool out of `dirs`, wherever the agent works: a path in
 /// one is refused as written, and so is one whose real place (through links,
 /// or its nearest existing parent's) is in one. Bash isn't held to it.
-pub fn denied(tools: &mut [Tool], dirs: &[PathBuf]) {
+pub fn denied(tools: &mut [Tool], dirs: &[Denied]) {
     for tool in tools {
         tool.denied = dirs.to_vec();
     }
 }
 
-/// Whether `target` is in one of `dirs`, as written or really.
-async fn is_denied(target: &Path, dirs: &[PathBuf]) -> bool {
-    if dirs.iter().any(|dir| target.starts_with(dir)) {
-        return true;
+/// The folder of `dirs` that `target` is in, as written or really.
+async fn is_denied<'a>(target: &Path, dirs: &'a [Denied]) -> Option<&'a Denied> {
+    if let Some(denied) = dirs.iter().find(|denied| target.starts_with(&denied.dir)) {
+        return Some(denied);
     }
     let mut existing = target.to_path_buf();
     let real = loop {
         match tokio::fs::canonicalize(&existing).await {
             Ok(real) => break real,
-            Err(_) => match existing.parent() {
-                Some(parent) => existing = parent.to_path_buf(),
-                None => return false,
-            },
+            Err(_) => existing = existing.parent()?.to_path_buf(),
         }
     };
-    for dir in dirs {
-        let dir_real = tokio::fs::canonicalize(dir).await.unwrap_or_else(|_| dir.clone());
+    for denied in dirs {
+        let dir_real = tokio::fs::canonicalize(&denied.dir).await.unwrap_or_else(|_| denied.dir.clone());
         if real.starts_with(&dir_real) {
-            return true;
+            return Some(denied);
         }
     }
-    false
+    None
 }

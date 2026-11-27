@@ -1,4 +1,4 @@
-// Settings → Advanced diagnostics (#214): off unless the person turns it
+// Settings → Advanced diagnostics: off unless the person turns it
 // on; while on, what each source kept (this Claktory and each device), by
 // area when it has several, Delete for one source, Delete all after
 // asking; turning it off deletes it all, after asking when anything is

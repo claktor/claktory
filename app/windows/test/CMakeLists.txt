@@ -12,6 +12,7 @@ add_executable(core_test
   "${RUNNER}/core/connection_store.cpp"
   "${RUNNER}/core/json.cpp"
   "${RUNNER}/core/window_geometry.cpp"
+  "${RUNNER}/core/launcher_plan.cpp"
 )
 target_compile_features(core_test PRIVATE cxx_std_17)
 target_include_directories(core_test PRIVATE "${RUNNER}")

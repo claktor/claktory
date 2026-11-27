@@ -1,4 +1,4 @@
-// Area 2 (Lucy's devices-signin.md §3, §4) drawn as it looks, for her to
+// Area 2 drawn as it looks, for her to
 // check against her mock-ups 01 and 02: Add a Claktory's states on a Mac,
 // the iPad's code state, and the problem pages on a Mac and an iPhone.
 // With SHOTS set, each is drawn to a PNG there:

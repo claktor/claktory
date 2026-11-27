@@ -1,5 +1,5 @@
 //! What the person can do in the app and Rivet now can too, when they ask
-//! (#423, items 8 to 12): stop an agent (agents_stop), start or stop an app
+//! (items 8 to 12): stop an agent (agents_stop), start or stop an app
 //! (apps_set_running), check for updates (updates_check), refresh a
 //! provider's models (models_refresh) and have an agent waiting on usage try
 //! now (models_try_now). Deleting a conversation's version is in fork.rs.
@@ -87,7 +87,7 @@ async fn rivet_stops_an_agent_checks_for_updates_and_refreshes_models_when_asked
     let said = call(&mut client, &mut view, "rivet", "apps_set_running", r#"{"app":"nothing","running":true}"#).await;
     assert!(said.ends_with("Nothing was changed."), "{said}");
 
-    // Never after reading a web page (Fugo, Abbacchio's row 1047): Mike
+    // Never after reading a web page: Mike
     // keeps working, and no app is touched.
     factoryd::pipes::taint_for_test(&factory, "rivet", "browser:https://example.com");
     apply_request(&mut client, &mut view, select("mike")).await;

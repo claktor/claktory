@@ -1,9 +1,9 @@
-//! What API keys have to spend, as their provider says (#343 U8 and U14,
-//! Account.credit): OpenRouter's GET /key, read at sign-in, then every few
-//! minutes while agents work on the provider and every half hour while
-//! they don't, and when the person looks at the accounts (ProvidersShown)
-//! if it's more than a minute old. Only numbers are kept, never what the
-//! provider wrote.
+//! What API keys have to spend, as their provider says (Account.credit):
+//! OpenRouter's GET /key, read at sign-in, then every few minutes while
+//! agents work on the provider and every half hour while they don't, and
+//! when the person looks at the accounts (ProvidersShown) if it's more
+//! than a minute old. Only numbers are kept, never what the provider
+//! wrote.
 
 use std::collections::HashSet;
 use std::sync::Weak;
@@ -95,7 +95,7 @@ impl Factory {
             .collect()
     }
 
-    /// ProvidersShown (friend bug #41): the person looks at the accounts, so
+    /// ProvidersShown: the person looks at the accounts, so
     /// each one's credit read more than `SHOWN` ago is read again now.
     pub(crate) async fn read_shown_credit(&self) {
         let now = now_ms();
@@ -108,9 +108,8 @@ impl Factory {
         }
     }
 
-    /// Reads every account's credit of `provider` now (a sign-in, #343 U14:
-    /// before the sign-in shows as done, so the step can say a new key has
-    /// none).
+    /// Reads every account's credit of `provider` now (a sign-in, before
+    /// the sign-in shows as done, so the step can say a new key has none).
     pub(crate) async fn read_provider_credit(&self, provider: &str) {
         if !self.models.reads_credit(provider) {
             return;

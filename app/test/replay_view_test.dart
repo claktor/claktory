@@ -18,7 +18,7 @@ import 'map_fixture.dart';
 import 'phone_sizes_test.dart' show loadGeist;
 import 'replay_fixture.dart';
 
-/// History replay (#458): the Map's History mode plays what the backend
+/// History replay: the Map's History mode plays what the backend
 /// recorded.
 void main() {
   Future<Harness> showHistory(
@@ -81,7 +81,7 @@ void main() {
     expect(opacityOf(tester, 'Kai'), 1);
     expect(find.textContaining('App started'), findsWidgets);
     // Before recording began: said first, so a narrow line never cuts it
-    // (Zucchero's row 502).
+    // .
     expect(
       find.textContaining('Pieced together · ', findRichText: true),
       findsOneWidget,
@@ -161,7 +161,7 @@ void main() {
     expect(repainted, greaterThanOrEqualTo(2));
   });
 
-  // Polpo 49940: a call for each dot was the frame's biggest cost at a
+  // A call for each dot was the frame's biggest cost at a
   // year or more; they're drawn as round points, a call a color and size.
   testWidgets('pulses in flight are drawn as points, a call per color and '
       'size, not one per dot', (tester) async {

@@ -1,4 +1,4 @@
-// Usage, the Marketplace and What's new on a phone (#198, phase 3A): each a
+// Usage, the Marketplace and What's new on a phone: each a
 // page with Back in a phone header, its tabs a finger's height in a row,
 // and nothing cut off at the largest text sizes.
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';

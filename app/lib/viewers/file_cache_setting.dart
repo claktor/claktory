@@ -1,4 +1,4 @@
-// Settings → Storage (#446): how much of a Claktory's files this device
+// Settings → Storage: how much of a Claktory's files this device
 // keeps for its viewers, set on that Claktory for this device
 // (Settings.file_cache), how much is kept now, and Clear. Only for a
 // Claktory on another machine: this machine's own reads its files

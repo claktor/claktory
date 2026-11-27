@@ -54,7 +54,7 @@ void main() {
     expect(e2ee.setup, DmSetup.unavailable);
   });
 
-  // Melone F3: someone who learned a new device's code (a photo of it)
+  // Someone who learned a new device's code (a photo of it)
   // can't plant their identity on it; only the identity the person's
   // account publishes is taken, and the code is spent.
   test("a hand-off with an identity the account doesn't publish is "
@@ -110,7 +110,7 @@ void main() {
     },
   );
 
-  // Melone's F4.2: a last resort near the end of its thirty days is
+  // A last resort near the end of its thirty days is
   // replaced, and the device's own packages past their lifetime go, whenever
   // it makes some; one well in date is left alone.
   test('a last resort a week from its end is replaced, and old packages '
@@ -150,8 +150,8 @@ void main() {
 
   test('opened again over keys it kept: ready, its chat goes on', () async {
     // The key store hands keys over as views nothing may change, as the
-    // platform channels do (Abbacchio: zeroing one threw at every launch
-    // after the first, and messages never started).
+    // platform channels do (zeroing one threw at every launch after the
+    // first, and messages never started).
     final worker = FakeWorker();
     final matt = await _ready(worker, 'matt', 'phone');
     final ana = await _ready(worker, 'ana', 'pixel');
@@ -174,7 +174,7 @@ void main() {
 
   test('an unreadable key fails set-up instead of making a new one', () async {
     final endpoint = FakeEndpoint(FakeWorker(), 'matt', 'phone');
-    // Its store is here: the key was this install's own (row 202).
+    // Its store is here: the key was this install's own.
     endpoint.storeKept = true;
     endpoint.keys.unreadable.add(DmKeyName.leaf);
     await endpoint.e2ee.start();
@@ -455,7 +455,7 @@ void main() {
       ]);
       expect(worker.packages['matt/mac'], hasLength(dmKeyPackages));
       // The phone's old leaf is out of the self group, in a commit of its
-      // own, and listed apart; never signed out (Fugo).
+      // own, and listed apart; never signed out.
       final mine = mac.e2ee.groups.values
           .singleWhere((each) => each.kind == 'self')
           .groupId;
@@ -544,7 +544,7 @@ void main() {
         worker.staleSignIn.clear();
         expect(await mac.e2ee.startNewKey(), isNull);
         expect(mac.e2ee.setup, DmSetup.ready);
-        // What stopped the first try isn't left standing (row 640).
+        // What stopped the first try isn't left standing.
         expect(mac.e2ee.problem, isEmpty);
       },
     );
@@ -618,7 +618,7 @@ void main() {
     expect(worker.keys['matt']!['version'], 3);
     expect((await phone.e2ee.devices()).map((each) => each.leafId), ['phone']);
     // Out of every group by a commit, not only failing the checks once
-    // off the list (Abbacchio's R5): no leaf of it is left.
+    // off the list: no leaf of it is left.
     for (final group in phone.e2ee.groups.values) {
       expect(await _leafIds(phone, group.groupId), isNot(contains('ipad')));
     }
@@ -836,8 +836,8 @@ void main() {
         worker,
         route: (call) => (method, path, [body]) async {
           if (race && method == 'POST' && path.endsWith('/commits')) {
-            // C sees the new group listed and joins it first (Abbacchio's
-            // row 676): the add comes back 409 epoch.
+            // C sees the new group listed and joins it first: the add
+            // comes back 409 epoch.
             race = false;
             await other!.e2ee.sync();
           }
@@ -1119,7 +1119,7 @@ void main() {
       expect(await _leaves(phone, chat.groupId), ['phone', 'pixel']);
     });
 
-    // Row 606 (Zucchero, Bruno 42425): a friend first met after the
+    // A friend first met after the
     // person's Claktory was enrolled is pinned there too, so its home can
     // take that friend's new home; and once a launch, every pin.
     test('a friend met after the Claktory was enrolled: their pin goes to '
@@ -1160,7 +1160,7 @@ void main() {
       expect(pinsSaid(), hasLength(before + 2));
     });
 
-    // Melone F2.2: a device that joins a conversation again takes the
+    // A device that joins a conversation again takes the
     // members its GroupInfo gives, which may hold a Claktory whose grant
     // was taken back; it's taken out against the grants as they are now
     // before anything is sent there, not only at the next read of them.
@@ -1238,7 +1238,7 @@ void main() {
       expect(phone.e2ee.sending['m2']!.state, isNot(DmSendState.refused));
     });
 
-    // Fugo 40934: a group not known here can't be checked, so nothing goes;
+    // A group not known here can't be checked, so nothing goes;
     // and the check is kept only in memory, so after a relaunch a rejoined
     // conversation is sent to only once its grants are read.
     test('a conversation the device has but this list of groups no longer '
@@ -1565,7 +1565,7 @@ void main() {
           return other;
         }
         // The setup screen asks for a new code while the hand-off is
-        // taken: as it starts, and once it's under way (Abbacchio's R5).
+        // taken: as it starts, and once it's under way.
         final take = other.e2ee.takeHandoff();
         final first = other.e2ee.offerThisDevice(platform: leaf);
         for (var i = 0; i < 3; i++) {
@@ -1604,7 +1604,7 @@ void main() {
     }
 
     // A sync of [endpoint] started while each commit waits on the worker,
-    // as the outbox starts one (Abbacchio's R5b): it reads the groups again
+    // as the outbox starts one: it reads the groups again
     // meanwhile.
     SignedCall Function(SignedCall) racing(FakeEndpoint? Function() endpoint) =>
         (call) => (method, path, [body]) async {
@@ -1646,7 +1646,7 @@ void main() {
       },
     );
 
-    // Abbacchio's R5 rows 570–575: a kept device that missed the rotation
+    // A kept device that missed the rotation
     // had its move refused as behind at every pass of a sync, about 50
     // requests a second, until the service said Too many tries.
     test('a kept device whose move is refused as behind waits longer each '
@@ -1698,7 +1698,7 @@ void main() {
       expect(await _leaves(w.ipad, w.chat), contains('ipad'));
     });
 
-    // Abbacchio's row 590: after waiting out a refusal, the kept device
+    // After waiting out a refusal, the kept device
     // never tried again by itself in a quiet account. Following the
     // account, it syncs once a wait is over, with nothing new.
     test('once a wait after a refusal is over, following syncs anyway, '
@@ -1729,7 +1729,7 @@ void main() {
       expect(w.ipad.e2ee.waitOver, isFalse, reason: 'once, not every answer');
     });
 
-    // Abbacchio's row 601: a sync that stopped on the worker's brief 503
+    // A sync that stopped on the worker's brief 503
     // wasn't tried again until something else happened in the account.
     test('a sync stopped by an error is tried again once its wait is over, '
         'and the kept device takes the new key', () async {
@@ -1801,7 +1801,7 @@ void main() {
         await w.phone.e2ee.changeKey(remove: ['mac'], keep: ['ipad']),
         isNull,
       );
-      // Fugo: the lost device is signed out of the account before the
+      // The lost device is signed out of the account before the
       // worker is given the new key.
       final signOut = w.worker.log.indexOf('POST /v1/devices/remove');
       final rotate = w.worker.log.indexOf('POST me/keys/rotate');
@@ -1959,7 +1959,7 @@ void main() {
       },
     );
 
-    // E11-9 (Abbacchio's row 1453, Fugo 43016): over at the home, the
+    // E11-9: over at the home, the
     // rotation message the home stored and whose answer was lost was
     // encrypted again at each Try again, under the same id, which the home
     // refuses as a conflict: the Lock out never finished.
@@ -2034,7 +2034,7 @@ void main() {
         w.phone.e2ee.dispose();
       });
 
-      // Fugo 43016's point 3: the kept device read only its home, which
+      // The kept device read only its home, which
       // hadn't brought the rotation message yet, and said the person's key
       // was replaced by someone else.
       test(
@@ -2091,7 +2091,7 @@ void main() {
       });
     });
 
-    // Abbacchio's rows 1461 and 1462: Lock out B went through at the worker
+    // Lock out B went through at the worker
     // with its answer lost (and the check after), so the new key K1 stays
     // under way here, handed to the iPad. Then Lock out of the iPad: its
     // list change was signed under the old key and refused as stale at
@@ -2174,7 +2174,7 @@ void main() {
         await lockedOut((worker: w.worker, phone: w.phone, k1: w.k1));
       });
 
-      // Abbacchio's row 1463 (Fugo 43221): "Still on your old security
+      // "Still on your old security
       // key" kept a device locked out (signed out) since, and offered
       // Remove… for one listed under the key now: the device itself.
       test('Still on your old security key leaves out a device listed now '
@@ -2199,14 +2199,14 @@ void main() {
         expect(await w.phone.e2ee.replacedDevices(), isEmpty);
         // Signed out but still in a group here (kept by a removal another
         // device of the person's made, say): shown, with its Remove, since
-        // that's what the row is for (Fugo 43752); in none, not.
+        // that's what the row is for; in none, not.
         w.phone.device.replaced.add(member('mac'));
         expect(await w.phone.e2ee.replacedDevices(), isEmpty);
         w.phone.device.holdLeaf(w.chat, 'matt/mac');
         expect(await w.phone.e2ee.replacedDevices(), {'mac': 'mac'});
       });
 
-      // Fugo 43752: finishing the key the worker had costs a rotation, so
+      // Finishing the key the worker had costs a rotation, so
       // the one without the locked-out device may meet the worker's 3 a
       // day. Never the generic failure: said, kept under way, and carried
       // on by itself once the worker's day is over.
@@ -2444,7 +2444,7 @@ void main() {
         'reads nothing after', () async {
       final w = await world();
       // The list without the Mac, at the worker too; its leaf still in
-      // every group, and nothing kept to carry on (Abbacchio's rig).
+      // every group, and nothing kept to carry on.
       w.worker.refuse = (route) => route.endsWith('/commits')
           ? const AccountServiceUnreachable('x')
           : null;
@@ -2468,7 +2468,7 @@ void main() {
         expect(await _leafIds(w.phone, group), isNot(contains('mac')));
       }
       expect(await phone.notFullyRemoved(), isEmpty);
-      // And signed out of the account on the same start (Fugo): it can do
+      // And signed out of the account on the same start: it can do
       // nothing there either, such as lock the person's own Mac out.
       expect(w.worker.signedOut['matt'], {'mac'});
       expect(w.phone.device.removalRow, isNull);
@@ -2535,7 +2535,7 @@ void main() {
       expect(await _leafIds(w.phone, self(w.phone)), isNot(contains('mac')));
       expect(await _leafIds(w.phone, w.chat), contains('mac'));
       // The next takes it out of the chat: nothing left under way
-      // (Abbacchio's row 613: "isn't fully removed yet" stayed).
+      // ("isn't fully removed yet" stayed).
       w.worker.refuse = null;
       w.phone.now += const Duration(hours: 1).inMilliseconds;
       await w.phone.e2ee.sync();
@@ -2595,7 +2595,7 @@ void main() {
       expect(w.worker.keys['matt']!['identity_key'], isNot(old));
     });
 
-    // E11-6 (Fugo 41048): with a Lock out under way and waiting for a
+    // E11-6: with a Lock out under way and waiting for a
     // fresh sign-in, locking out another device takes it off the list and
     // out of every group at once; the new key, which it was handed, is made
     // again without it once signed in.
@@ -2633,7 +2633,7 @@ void main() {
       expect(w.phone.e2ee.removalStop, isNull);
     });
 
-    // Fugo 41322: the key under way already went to the worker, and a
+    // The key under way already went to the worker, and a
     // device it was handed is locked out now: finished, then changed again
     // at once, so the device locked out never holds the key that stays.
     test('a key the worker already has, handed to a device locked out now: '

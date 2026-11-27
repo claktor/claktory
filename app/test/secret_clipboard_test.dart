@@ -1,4 +1,4 @@
-// The secret clipboard's sweeps and late clears (Zucchero's row 181, Fugo):
+// The secret clipboard's sweeps and late clears:
 // a copied code is taken off the clipboard once dead, even when the app was
 // away at that moment or stopped since.
 import 'package:factory_app/people/secret_clipboard.dart';

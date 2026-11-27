@@ -309,7 +309,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  // Bruno 42883: on a phone, the strip's app opened as a page of its own,
+  // On a phone, the strip's app opened as a page of its own,
   // never as a pane in the agent's layout, which the person's Mac and
   // iPad share. An iPad's narrow window takes the phone's routes.
   for (final (name, size, ipad) in [

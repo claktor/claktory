@@ -1,6 +1,5 @@
-// Sorbet's iPad sweep (G5, S5): Needs you's title bar and its Waiting and
-// History tabs fit a window 640 wide at the largest text (AX5). (The
-// extension bar it also checked went with agent-view.md §3.)
+// Needs you's title bar and its Waiting and
+// History tabs fit a window 640 wide at the largest text (AX5).
 import 'package:factory_app/scope.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';

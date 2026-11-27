@@ -514,8 +514,38 @@ fn a_database_from_before_devices_gains_their_tables_and_columns() {
     // this one came again: the columns it has already aren't added twice.
     rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", 3).unwrap();
     let conn = db::open(&path).expect("opens after a rollback");
-    assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), 4);
+    assert_eq!(conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(), 5);
     assert_eq!(db::claktory(&conn, "claktory-0123456789").unwrap().expect("kept").display_name.as_deref(), Some("Studio"));
+}
+
+/// Names kept before the service left out what they hide are cleaned once
+/// the database opens: a direction override or a zero width space can't
+/// reorder or hide what's around a Claktory's name on any device, an emoji
+/// joined by a joiner stays one. Again after an older service went back to
+/// it.
+#[test]
+fn names_kept_with_what_they_hide_are_cleaned() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("account.db");
+    drop(db::open(&path).unwrap());
+    let keep = |name: &str, display_name: &str| {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO claktories (id, account_id, name, backend_key, token_hash, epoch, created, last_seen, version, platform, display_name)
+             VALUES ('claktory-0123456789', 'a', ?1, 'k', 'h', 1, 0, 0, 'v0.1.0', 'macos-arm64', ?2)",
+            [name, display_name],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 4).unwrap();
+    };
+    let names = || {
+        let claktory = db::claktory(&db::open(&path).unwrap(), "claktory-0123456789").unwrap().expect("kept");
+        (claktory.name, claktory.display_name.unwrap_or_default())
+    };
+    keep("Mac\u{202E}mini", "\u{200B}\u{1F469}\u{200D}\u{1F4BB} Studio\u{2066}");
+    assert_eq!(names(), ("Macmini".to_owned(), "\u{1F469}\u{200D}\u{1F4BB} Studio".to_owned()));
+    keep("\u{2067}Lab", "Lab\u{200D}x");
+    assert_eq!(names(), ("Lab".to_owned(), "Labx".to_owned()), "again after a rollback");
 }
 
 /// Row 630: devices signed in before the service kept when (no

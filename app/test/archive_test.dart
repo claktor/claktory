@@ -54,8 +54,10 @@ void main() {
     final harness = Harness(workspace());
     await harness.show(tester);
     await settle(tester);
-    // A right click opens its settings.
+    // A right click opens its menu, and Project settings… its settings.
     await tester.tap(find.text('Site'), buttons: 2);
+    await settle(tester);
+    await tester.tap(find.text('Project settings…'));
     await settle(tester);
     expect(find.byType(ProjectSettingsForm), findsOneWidget);
     expect(
@@ -83,7 +85,7 @@ void main() {
     // slides in.
     await tester.longPress(find.text('Site'));
     await pumpFrames(tester);
-    await tester.tap(find.text('Project settings'));
+    await tester.tap(find.text('Project settings…'));
     await settle(tester);
     expect(find.byType(ProjectSettingsForm), findsOneWidget);
     expect(find.text('Archive project'), findsOneWidget);

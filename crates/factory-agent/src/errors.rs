@@ -8,6 +8,9 @@ pub enum AgentFailure {
     ReadOnly { path: String },
     /// Inside a folder Claktory keeps from every agent's file tools.
     Private { path: String },
+    /// Inside a folder that isn't Claktory's own but that every file tool
+    /// refuses all the same; `why` says what it holds.
+    Kept { path: String, why: String },
     InvalidEdit { path: String, reason: String },
     BashWrappedInvocation { command: String },
     BashLongSleep { seconds: String },
@@ -21,6 +24,7 @@ impl AgentFailure {
             AgentFailure::WorkspaceEscape { .. } => "workspace-escape",
             AgentFailure::ReadOnly { .. } => "read-only",
             AgentFailure::Private { .. } => "private",
+            AgentFailure::Kept { .. } => "kept",
             AgentFailure::InvalidEdit { .. } => "invalid-edit",
             AgentFailure::BashWrappedInvocation { .. } => "bash-wrapped-invocation",
             AgentFailure::BashLongSleep { .. } => "bash-long-sleep",
@@ -34,6 +38,7 @@ impl AgentFailure {
             AgentFailure::WorkspaceEscape { path } => format!("Path escapes the workspace: {path}"),
             AgentFailure::ReadOnly { path } => format!("Path is read only: {path}. Change files only in your own folder."),
             AgentFailure::Private { path } => format!("{path} is in Claktory's private storage, which no agent's tools read or change."),
+            AgentFailure::Kept { path, why } => format!("{path} {why}"),
             AgentFailure::InvalidEdit { path, reason } => format!("Cannot edit {path}: {reason}"),
             AgentFailure::BashWrappedInvocation { command } => {
                 format!("command is \"{command}\", not a script. Put the script text itself in command.")

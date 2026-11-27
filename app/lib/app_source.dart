@@ -1,4 +1,4 @@
-// Where this app was installed from (settings.md §3, ST1): the version rows
+// Where this app was installed from: the version rows
 // of a phone, an iPad or Android offer the store that updates it, and none
 // on a dev build. The native side answers `appSource` on factory/device:
 // iOS from StoreKit 2's AppTransaction (AppDelegate.swift), Android from
@@ -35,7 +35,7 @@ enum AppSource {
 }
 
 /// Claktory's page in the App Store and its TestFlight invitation
-/// (Pericolo 48906).
+/// .
 const appStoreUrl = 'https://apps.apple.com/app/id6837053917';
 const testFlightUrl = 'https://testflight.apple.com/join/kSYkdayX';
 const googlePlayUrl =

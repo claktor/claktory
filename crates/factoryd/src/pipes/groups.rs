@@ -1,4 +1,4 @@
-//! Pipe groups (#359): a project's pipes gathered under a named row in the
+//! Pipe groups: a project's pipes gathered under a named row in the
 //! sidebar, which folds away the same on every device. Arrangement only: a
 //! pipe in a group works exactly as one outside any. Kept in factory.db,
 //! never in config.json. The person arranges them from the app; an admin
@@ -213,6 +213,16 @@ pub(crate) fn delete(factory: &Factory, id: &str) -> Result<(Group, usize), Requ
     tracing::info!(group = %id, pipes, "a pipe group was deleted; its pipes stay");
     changed(factory);
     Ok((group, pipes))
+}
+
+/// A project is deleted: its groups go, so one made later with its id
+/// starts with none.
+pub(crate) fn project_gone(factory: &Factory, project: &str) {
+    for group in all(factory).into_iter().filter(|group| group.project == project) {
+        if let Err(error) = delete(factory, &group.id) {
+            tracing::error!(group = %group.id, %error, "could not delete a deleted project's pipe group");
+        }
+    }
 }
 
 /// The pipe exists, in `project`.

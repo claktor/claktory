@@ -2,7 +2,6 @@
 //! agent; no agent's file tools reach where they're kept, admins' included;
 //! and nothing refers to a blob yet, so none can be read back.
 
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
 use crate::common::{Client, OTHER_MODEL, View, apply_request, create_agent, create_project, send_message, start, temp_dir};
@@ -85,8 +84,8 @@ async fn ink_blobs_upload_privately_by_their_hash_and_are_kept_once() {
     assert_eq!(upload(&mut client, "u4", &drawing, "application/x-pencilkit", &sha.to_uppercase()).await, Ok(sha.clone()));
     let blob = home.join(format!("annotations/blobs/{sha}"));
     assert_eq!(std::fs::read(&blob).expect("kept"), drawing);
-    assert_eq!(std::fs::metadata(&blob).unwrap().permissions().mode() & 0o777, 0o600);
-    assert_eq!(std::fs::metadata(home.join("annotations")).unwrap().permissions().mode() & 0o777, 0o700);
+    assert_eq!(crate::common::mode(&blob), 0o600);
+    assert_eq!(crate::common::mode(&home.join("annotations")), 0o700);
     assert_eq!(upload(&mut client, "u5", &drawing, "application/x-pencilkit", &sha).await, Ok(sha.clone()));
     assert_eq!(staged(&home), 0);
     assert!(!home.join("agents/ops/uploads").exists(), "nothing reaches an agent's uploads");
@@ -153,12 +152,12 @@ async fn no_agents_file_tools_reach_ink_wherever_it_works_admins_included() {
     assert!(view.agent("ada").extensions[at].options["admin"].on);
     let work = dir.join("work");
     std::fs::create_dir_all(&work).expect("mkdir");
-    std::os::unix::fs::symlink(home.join("annotations"), work.join("link")).expect("link");
+    crate::common::symlink(&home.join("annotations"), &work.join("link")).expect("link");
     apply_request(&mut client, &mut view, create_project("Work", &work)).await;
     apply_request(&mut client, &mut view, create_agent("work", "Bo", "")).await;
 
     let blob = format!("annotations/blobs/{sha}");
-    let absolute = home.join(&blob).display().to_string();
+    let absolute = crate::common::json_text(home.join(&blob).display());
     let cases = [
         ("ada", "read_file", format!(r#"{{"path":"{blob}"}}"#)),
         ("ada", "read_file", format!(r#"{{"path":"{absolute}"}}"#)),

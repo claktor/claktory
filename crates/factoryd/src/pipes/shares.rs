@@ -439,7 +439,14 @@ fn executable(pid: u32) -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from(String::from_utf8(buffer).ok()?))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+/// Its image's full path, while it runs.
+#[cfg(windows)]
+fn executable(pid: u32) -> Option<std::path::PathBuf> {
+    use factory_agent::windows::system::{image_path, open_process};
+    Some(image_path(&open_process(pid).ok()?)).filter(|path| !path.is_empty()).map(std::path::PathBuf::from)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn executable(_pid: u32) -> Option<std::path::PathBuf> {
     None
 }
@@ -1870,9 +1877,15 @@ mod backend_tests {
         assert!(is_backend(&listener(0, "/Users/x/.factory-dev/bin/factoryd")));
         // Another program, by its executable: not a backend; this test's
         // own binary (factoryd-…) is one.
-        let mut other = std::process::Command::new("/bin/sleep").arg("5").spawn().expect("sleep");
-        assert!(executable(other.id()).is_some_and(|exe| exe.ends_with("sleep")));
-        assert!(!is_backend(&listener(other.id(), "sleep")));
+        #[cfg(unix)]
+        let (mut other, name) = (std::process::Command::new("/bin/sleep").arg("5").spawn().expect("sleep"), "sleep");
+        #[cfg(windows)]
+        let (mut other, name) = (
+            std::process::Command::new("waitfor.exe").args(["/T", "5", &format!("claktory-shares-{}", std::process::id())]).spawn().expect("waitfor"),
+            "waitfor.exe",
+        );
+        assert!(executable(other.id()).is_some_and(|exe| exe.ends_with(name)));
+        assert!(!is_backend(&listener(other.id(), name.trim_end_matches(".exe"))));
         let _ = other.kill();
         let _ = other.wait();
         assert!(is_backend(&listener(std::process::id(), "a-test")));

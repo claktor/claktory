@@ -1,4 +1,4 @@
-//! Review cards follow their file (Bruno 46189): when the file a waiting
+//! Review cards follow their file: when the file a waiting
 //! review card shows changes, Claktory marks the card updated by itself, as
 //! an ask_update would (`crate::extensions::ask::file_changed`), so the
 //! person sees that it changed and Approve means the file as it reads now.

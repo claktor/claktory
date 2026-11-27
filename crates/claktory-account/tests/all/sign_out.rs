@@ -1,4 +1,4 @@
-//! `POST /v1/claktories/sign-out` (#524): a Claktory signing itself out
+//! `POST /v1/claktories/sign-out`: a Claktory signing itself out
 //! ends its registration at the service, so a copy of its token and key
 //! is worth nothing afterwards.
 

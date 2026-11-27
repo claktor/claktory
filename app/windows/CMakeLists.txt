@@ -85,6 +85,9 @@ add_subdirectory(${FLUTTER_MANAGED_DIR})
 
 # Application build; see runner/CMakeLists.txt.
 add_subdirectory("runner")
+# The Start menu's Claktory, which starts the version app\current names;
+# see launcher/CMakeLists.txt.
+add_subdirectory("launcher")
 
 
 # Generated plugin build rules, which manage building the plugins and adding
@@ -108,6 +111,11 @@ set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}")
 
 install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
   COMPONENT Runtime)
+
+# The launcher, for the installer and a release to put beside app\<version>\
+# (windows-updates.md section 5); the app itself never runs it.
+install(TARGETS claktory_launcher RUNTIME
+  DESTINATION "${CMAKE_INSTALL_PREFIX}/launcher" COMPONENT Runtime)
 
 install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   COMPONENT Runtime)

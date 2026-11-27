@@ -62,7 +62,7 @@ import 'settings_shell.dart';
 import 'voice.dart' show KeptRecordings, VoiceSettings, voiceKnown;
 import 'zoom.dart' show ZoomSetting, zoomsHere;
 
-/// Settings (Lucy's Settings spec, area 3): the Claktory's sections under
+/// Settings: the Claktory's sections under
 /// its name, then this device's own, with search always on screen. Wide
 /// enough ([settingsWide]), an index on the left and one section beside
 /// it; narrower (a phone, or a pane beside a conversation), the sections
@@ -94,8 +94,8 @@ class SettingsView extends StatelessWidget {
   }
 }
 
-/// Whether Settings, [width] wide, shows the index beside one section
-/// (§4.1): room for the index (220px × the text factor, up to 1.6×) and
+/// Whether Settings, [width] wide, shows the index beside one section:
+/// room for the index (220px × the text factor, up to 1.6×) and
 /// 420px × the text factor for the section; 640px at the standard size.
 bool settingsWide(BuildContext context, double width) {
   final scale = _textScale(context);
@@ -103,12 +103,12 @@ bool settingsWide(BuildContext context, double width) {
 }
 
 /// How many Claktories this device has saved: their pages name theirs
-/// (§4.2) when there's more than one.
+/// when there's more than one.
 int _claktoriesSaved(BuildContext context) =>
     ClaktoriesScope.of(context)?.all.length ?? 1;
 
 /// The section each Claktory's Settings last showed in this session, which
-/// it opens on again (§4.1): nothing kept once the app quits.
+/// it opens on again: nothing kept once the app quits.
 final _settingsShown = Expando<String>('settings shown');
 
 /// The device's own kind, as Settings names its row: "This Mac".
@@ -246,7 +246,7 @@ class _SettingsFrameState extends State<_SettingsFrame> {
       child: FocusScope(
         autofocus: !widget.inPane,
         // On an iPad, the system's menu's Search Settings (hold ⌘; ⌘F)
-        // while Settings is shown (ipad/settings_keys.dart, Sorbet's).
+        // while Settings is shown (ipad/settings_keys.dart).
         child: Actions(
           actions: {
             FocusSettingsSearchIntent:
@@ -259,7 +259,7 @@ class _SettingsFrameState extends State<_SettingsFrame> {
           },
           child: WorkbenchSettings(
             // Find (⌘F, the iPad header's magnifier) goes to the search field,
-            // what's in it selected (§4.3, ST14).
+            // what's in it selected.
             child: FindScope.field(
               field: _searchFocus,
               words: _query,
@@ -381,7 +381,7 @@ class _SettingsFrameState extends State<_SettingsFrame> {
           ),
         _row(section, list: list),
       ],
-      // This device's row, a hairline apart from the Claktory's (§3).
+      // This device's row, a hairline apart from the Claktory's.
       for (final section in sections.where((section) => section.device)) ...[
         Padding(
           padding: const EdgeInsets.fromLTRB(
@@ -407,7 +407,7 @@ class _SettingsFrameState extends State<_SettingsFrame> {
         list: list,
         onTap: () {
           // A row tapped in the index gives the index the keys, so ↑/↓
-          // step on from there (§4.1; an iPad's keyboard, line 128).
+          // step on from there (an iPad's keyboard, line 128).
           if (!list) _indexFocus.requestFocus();
           _open(section.id);
         },
@@ -578,7 +578,7 @@ class _SectionBodyState extends State<_SectionBody> {
     final section = widget.section;
     final backend = AppScope.of(context);
     // Each in one column at most 640px wide, from the top, its title and
-    // labels on one left edge (§4.1).
+    // labels on one left edge.
     Widget centered(Widget child) => Align(
       alignment: Alignment.topCenter,
       child: ConstrainedBox(
@@ -668,11 +668,11 @@ class SettingsSection {
   /// As show_screen and links name it ("devices").
   final String id;
 
-  /// What it's set to, at the end of its row in the narrow list ("Matt").
+  /// What it's set to, at the end of its row in the narrow list.
   final String summary;
 
   /// The Claktory's sections sit in groups, a hairline apart in the list
-  /// (§3).
+  /// .
   final int group;
 
   /// This device's own section, after the Claktory's, under no heading.
@@ -685,7 +685,7 @@ class SettingsSection {
   /// type names): each leads to its top.
   final List<String> items;
 
-  /// Words that find it, besides its title (Trish's §10).
+  /// Words that find it, besides its title.
   final List<String> words;
 
   SearchableSection get searchable => SearchableSection(
@@ -697,7 +697,7 @@ class SettingsSection {
   );
 }
 
-/// The sections Settings shows now, in order (§3): the Claktory's, in
+/// The sections Settings shows now, in order: the Claktory's, in
 /// four groups (who you are and this Claktory; models; what agents can
 /// reach; its machine and the screen), then this device's.
 List<SettingsSection> settingsSectionsOf(
@@ -781,6 +781,11 @@ List<SettingsSection> settingsSectionsOf(
             words: quitWords,
           ),
         const SettingEntry(
+          'Credit Claktory in what agents publish',
+          id: 'attribution',
+          words: ['Made with Claktory', 'pull requests', 'GitHub'],
+        ),
+        const SettingEntry(
           'Move to another computer',
           id: 'move',
           words: ['move', 'migrate', 'new computer'],
@@ -803,12 +808,16 @@ List<SettingsSection> settingsSectionsOf(
             child: _KeepAwake(workspace: workspace),
           ),
         // What quitting the Mac app does, and turning Claktory off now,
-        // where its Mac's background service runs it (friend bug #27).
+        // where its Mac's background service runs it.
         if (workspace.backendService.canStop)
           SettingAnchor(
             id: 'quit',
             child: _Engine(workspace: workspace),
           ),
+        SettingAnchor(
+          id: 'attribution',
+          child: _Attribution(workspace: workspace),
+        ),
         // Moving this Claktory to another computer, from any device.
         SettingAnchor(
           id: 'move',
@@ -968,7 +977,7 @@ List<SettingsSection> settingsSectionsOf(
         entries: const [SettingEntry('Clear log')],
         children: [BrowserLogSettings(workspace: workspace)],
       ),
-    // Claktory's browser (#435), where this Claktory has one.
+    // Claktory's browser, where this Claktory has one.
     if (agentBrowserAvailable(workspace))
       SettingsSection(
         title: "Claktory's browser",
@@ -1023,7 +1032,7 @@ List<SettingsSection> settingsSectionsOf(
   ];
 }
 
-/// This device's own settings, in one section named after it (§3): what
+/// This device's own settings, in one section named after it: what
 /// only this device keeps, never the Claktory.
 SettingsSection _deviceSection(BuildContext context, Workspace workspace) {
   final scope = AppScope.scope(context);
@@ -1051,7 +1060,7 @@ SettingsSection _deviceSection(BuildContext context, Workspace workspace) {
         : ExtensionGlyph(icon: icon, name: '', color: color),
     summary: ownMac ? '' : versionLabel(version),
     entries: [
-      // This device's own sign-in, first (area 2, 8.5; Lucy 49738): on one
+      // This device's own sign-in, first: on one
       // whose Claktory runs elsewhere.
       if (!backend.localBackend)
         const SettingEntry(
@@ -1114,7 +1123,7 @@ SettingsSection _deviceSection(BuildContext context, Workspace workspace) {
   );
 }
 
-/// A version as Settings shows it (Trish): "v0.1.23"; a dev build's, and
+/// A version as Settings shows it: "v0.1.23"; a dev build's, and
 /// a date stamp from before numbered versions ("2026.11.18-1958"), as
 /// they're stamped.
 String versionLabel(String version) =>
@@ -1153,7 +1162,7 @@ class _ThisAppVersion extends StatelessWidget {
 }
 
 /// iOS has no Zoom: text follows Dynamic Type, as the HIG asks, from the
-/// iPhone's or iPad's own Settings (§3).
+/// iPhone's or iPad's own Settings.
 class _TextSize extends StatelessWidget {
   const _TextSize();
 
@@ -1384,7 +1393,7 @@ class _SectionRow extends StatelessWidget {
 }
 
 /// A section of Settings as a page of its own on a phone, with Back to the
-/// list; its Claktory named first when more than one is saved (§4.2).
+/// list; its Claktory named first when more than one is saved.
 class _PhoneSettingsPage extends StatefulWidget {
   const _PhoneSettingsPage({required this.id, this.setting = ''});
 
@@ -1599,8 +1608,7 @@ class _DefaultsState extends State<_Defaults> with SettingRequests {
         SettingRow(
           label: 'Model',
           child: workspace.models.isEmpty
-              // Where models come from, a link there (Lucy's Settings spec
-              // §5, ST4).
+              // Where models come from, a link there.
               ? SettingsLink(
                   before: 'No model available. ',
                   label: 'Sign in to a provider',
@@ -1941,7 +1949,7 @@ class _ChecklistTimesState extends State<ChecklistTimes> with SettingRequests {
 
 /// When the agents that hear Resources alerts are told the machine runs
 /// low (memory used, a volume's free space, the processors' load), and who
-/// they are (friend bug #54).
+/// they are.
 class _ResourceAlerts extends StatefulWidget {
   const _ResourceAlerts({required this.workspace});
 
@@ -2220,7 +2228,7 @@ class _ThresholdState extends State<_Threshold> {
           Text(widget.lead, style: words),
           for (var i = 0; i < _fields.length; i++) ...[
             SizedBox(
-              // Its number whole at any text size (Zucchero's row 133).
+              // Its number whole at any text size.
               width: 56 * _textScale(context),
               child: TextField(
                 controller: _fields[i],
@@ -2341,7 +2349,7 @@ class _YourNameState extends State<_YourName> with SettingRequests {
                 );
               }
               // Wide: Save beside the field while it's changed; else the
-              // help under it, never beside (§4.1).
+              // help under it, never beside.
               return ListenableBuilder(
                 listenable: _name,
                 builder: (context, _) =>
@@ -2493,7 +2501,7 @@ class _AvatarState extends State<_Avatar> with SettingRequests {
                       ),
                     );
               // The words under the avatar and Shuffle colors, at every
-              // width (§4.1: help goes under its control).
+              // width (help goes under its control).
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -2585,7 +2593,7 @@ class _HighlightsState extends State<_Highlights> with SettingRequests {
 }
 
 /// General's quit setting, named after its computer when shown on another
-/// device (§3, ST8): "When you quit Claktory on Mac Studio"; on that Mac,
+/// device: "When you quit Claktory on Mac Studio"; on that Mac,
 /// "When you quit Claktory".
 String quitLabel(Backend backend) {
   final computer = claktoryNameInText(backend);
@@ -2595,7 +2603,7 @@ String quitLabel(Backend backend) {
 }
 
 /// What happens to Claktory on its Mac when the Mac app quits, and the
-/// switch that turns it off now (friend bug #27): where its Mac's
+/// switch that turns it off now: where its Mac's
 /// background service runs it (BackendService.can_stop). The choice from
 /// any device; the switch only in the app on that Mac, since only it can
 /// turn Claktory on again.
@@ -2691,7 +2699,7 @@ class _EngineState extends State<_Engine> with SettingRequests {
   }
 }
 
-/// The choices for what quitting the Mac app does (friend bug #27), in
+/// The choices for what quitting the Mac app does, in
 /// Settings and the first launch's question.
 const keepRunningLabel = 'Keep agents running';
 const stopAgentsLabel = 'Stop agents';
@@ -2768,8 +2776,8 @@ class _KeepAwakeState extends State<_KeepAwake> with SettingRequests {
                   ),
                 ),
               ],
-              // With the lid closed too: its own switch, its own question
-              // (#371), never bundled with this one.
+              // With the lid closed too: its own switch, its own question,
+              // never bundled with this one.
               if (LidClosedSetting.offered(keep)) ...[
                 const SizedBox(height: Space.l),
                 LidClosedSetting(keep: keep),
@@ -2783,12 +2791,73 @@ class _KeepAwakeState extends State<_KeepAwake> with SettingRequests {
   }
 }
 
-/// Keeping a laptop's agents working with its lid closed (#371,
-/// lid_closed.dart): on a laptop that can (KeepAwake.lid_closed_available).
-/// Turning it on asks first and works only on the Mac; off works anywhere.
-/// Its line says where it stands; STUCK (the Mac can't sleep with its lid
-/// closed although Claktory isn't keeping it awake) shows even where the
-/// switch doesn't, with what fixes it.
+/// Whether agents end what they publish on GitHub and similar sites with
+/// "Made with Claktory" (Workspace.attribution). Each agent follows it from
+/// its next conversation, which the row says once it's changed here.
+class _Attribution extends StatefulWidget {
+  const _Attribution({required this.workspace});
+
+  final Workspace workspace;
+
+  @override
+  State<_Attribution> createState() => _AttributionState();
+}
+
+class _AttributionState extends State<_Attribution> with SettingRequests {
+  var _changed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SettingRow(
+          label: 'Made with Claktory',
+          top: true,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _Switch(
+                label: 'Credit Claktory in what agents publish',
+                note:
+                    'Pull requests, issues, comments and release notes your '
+                    'agents write on GitHub and similar sites end with '
+                    '“Made with Claktory”.',
+                value: widget.workspace.attribution,
+                onChanged: (on) {
+                  setState(() => _changed = true);
+                  run(() => AppScope.of(context).setAttribution(on));
+                },
+              ),
+              if (_changed) ...[
+                const SizedBox(height: Space.xs),
+                Padding(
+                  padding: const EdgeInsets.only(left: 28 + Space.m),
+                  child: Text(
+                    'Agents follow this from their next conversation.',
+                    key: const ValueKey('attribution-next'),
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textMuted),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        failureLine(palette),
+      ],
+    );
+  }
+}
+
+/// Keeping a laptop's agents working with its lid closed (lid_closed.dart):
+/// on a laptop that can (KeepAwake.lid_closed_available). Turning it on
+/// asks first and works only on the Mac; off works anywhere. Its line says
+/// where it stands; STUCK (the Mac can't sleep with its lid closed although
+/// Claktory isn't keeping it awake) shows even where the switch doesn't,
+/// with what fixes it.
 class LidClosedSetting extends StatefulWidget {
   const LidClosedSetting({super.key, required this.keep});
 
@@ -3022,7 +3091,7 @@ class SettingRow extends StatelessWidget {
   ) {
     // On a phone, or in a narrow pane beside a conversation, or one that
     // larger text makes narrow: what's narrow grows with the text, so a
-    // word never has to break in the label's column (Sorbet's row 103).
+    // word never has to break in the label's column.
     final scale = _textScale(context);
     if (isPhoneLayout(context) || constraints.maxWidth < 440 * scale) {
       // No room beside it: the label over the control.
@@ -3044,7 +3113,7 @@ class SettingRow extends StatelessWidget {
     }
     // The label on the control's first line: a field's text, a button's
     // word, a paragraph's first line, never the middle of the control and
-    // the help under it (§4.1). Beside a control with no text (a switch),
+    // the help under it. Beside a control with no text (a switch),
     // both start at the top.
     return Padding(
       padding: const EdgeInsets.only(bottom: Space.m),
@@ -3137,9 +3206,9 @@ int? parseTokens(String text) {
 }
 
 /// This Mac's section glyph: a monitor on a Mac Studio, iMac or Mac mini,
-/// a laptop otherwise, as its tile in the rail (area 2, 8.7; Abbacchio's
-/// 8.8). The kind is worked out once and kept, so the glyph doesn't
-/// flicker when the section is drawn again; a laptop until it's known.
+/// a laptop otherwise, as its tile in the rail. The kind is worked out
+/// once and kept, so the glyph doesn't flicker when the section is drawn
+/// again; a laptop until it's known.
 class _ThisMacGlyph extends StatefulWidget {
   const _ThisMacGlyph({required this.color});
 

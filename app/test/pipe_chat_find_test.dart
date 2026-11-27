@@ -1,6 +1,6 @@
-// Find in a pipe with no liaison (Zucchero, via Prosciutto): ⌘F searches
-// the pipe's own messages, all of them, goes to a match far up the chat
-// and marks it.
+// Find in a pipe with no liaison: ⌘F searches the
+// pipe's own messages, all of them, goes to a match far up the chat and
+// marks it.
 import 'package:factory_app/find.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';

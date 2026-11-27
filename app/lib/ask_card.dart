@@ -1,10 +1,13 @@
 import 'dart:async';
 import 'dart:io' show FileSystemException;
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
+import 'package:url_launcher/url_launcher.dart' show LaunchMode, launchUrl;
 
 import 'avatar.dart';
+import 'approve_elsewhere.dart';
 import 'backend.dart';
 import 'card_answer.dart';
 import 'card_files.dart';
@@ -12,6 +15,7 @@ import 'characters/character.dart';
 import 'command_card.dart';
 import 'controls.dart';
 import 'decision.dart';
+import 'devices.dart' show thisDeviceKind;
 import 'dictation.dart';
 import 'explorer.dart' show shortPath;
 import 'extensions.dart' show logTime;
@@ -295,8 +299,62 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
   final _codeFocus = FocusNode();
 
   /// Can't do this… → In my own words: the card asks what's in the way
-  /// in place of the code.
-  var _codeOwnWords = false;
+  /// in place of the code or the payment's buttons.
+  var _ownWords = false;
+
+  var _openedHere = false;
+
+  /// Claktory is told first, so every device shows I've paid, and a
+  /// Claktory that can't take payments refuses before anything opens.
+  Future<void> _openPayment(Uri page, {bool again = false}) async {
+    if (_busy) return;
+    if (!again) {
+      setState(() {
+        _busy = true;
+        _error = null;
+        _waiting = false;
+      });
+      try {
+        await AppScope.of(context).paymentOpened(widget.agentId, widget.seq);
+      } on RequestFailure catch (failure) {
+        if (mounted) setState(() => _error = failure.message);
+        if (_dock) rethrow;
+        return;
+      } finally {
+        if (mounted) setState(() => _busy = false);
+      }
+    }
+    var opened = false;
+    try {
+      opened = await openPaymentPage(page);
+    } on PlatformException {
+      opened = false;
+    }
+    if (!mounted) return;
+    setState(() {
+      _openedHere = opened || _openedHere;
+      _error = opened ? null : "The payment page didn't open here.";
+    });
+  }
+
+  Future<void> _cantPay(BuildContext context) async {
+    const own = '\u0000own';
+    final reason = await showActions<String>(
+      context,
+      actions: const [
+        SheetAction('Not now', 'Not now'),
+        SheetAction("I don't want to pay this", "I don't want to pay this"),
+        SheetAction('In my own words…', own),
+      ],
+    );
+    if (!mounted || reason == null) return;
+    if (reason == own) {
+      setState(() => _ownWords = true);
+      _focus.requestFocus();
+      return;
+    }
+    await _answer(dismiss: true, reason: reason);
+  }
 
   /// Fills the code in (AnswerAsk with it as the text): Claktory types it
   /// into the page, and the agent never sees it.
@@ -334,7 +392,7 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
     );
     if (!mounted || reason == null) return;
     if (reason == own) {
-      setState(() => _codeOwnWords = true);
+      setState(() => _ownWords = true);
       _focus.requestFocus();
       return;
     }
@@ -364,7 +422,8 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
     // Nor does an errand step's Done: words go only with Can't do this,
     // as its line says, so none are kept that its agent never hears
     // (Abbacchio's row 1640).
-    final done = !dismiss && isGenericHandoff(widget.ask);
+    final done =
+        !dismiss && (isGenericHandoff(widget.ask) || isPayment(widget.ask));
     final text = dismiss
         ? noComment(reason, _text.text)
         : confirmed || done
@@ -414,6 +473,8 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
           ? 'Dismiss'
           : confirmed
           ? 'Execute'
+          : done && isPayment(widget.ask)
+          ? "I've paid"
           : done
           ? 'Done'
           : 'Approve',
@@ -657,6 +718,25 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
     // A recovery-codes card has only its own two answers, no no (Fugo
     // 40694).
     if (isRecoveryCodes(ask)) return null;
+    if (isPayment(ask)) {
+      final opened = ask.handoff.openedMs > 0;
+      final page = paymentPage(ask);
+      return CardAnswer(
+        key: key,
+        docked: false,
+        yes: opened ? "I've paid" : 'Open on this $thisDeviceKind',
+        no: "Can't do this…",
+        busy: busy,
+        error: _waiting ? null : _error,
+        status: _waiting ? _error : null,
+        onYes: busy || (!opened && page == null)
+            ? null
+            : opened
+            ? () => _fromDock(() => _answer(dismiss: false))
+            : () => _fromDock(() => _openPayment(page!)),
+        onNo: dismiss,
+      );
+    }
     if (isAgreement(ask) || isTwoStep(ask) || isGenericHandoff(ask)) {
       final name =
           _backend?.workspace.agent(widget.agentId)?.name ?? 'the agent';
@@ -805,35 +885,57 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
                 AgentCharacter(agent: agent, size: 20),
                 const SizedBox(width: Space.xs + 2),
               ],
-              Flexible(
-                child: Text(
-                  // Answered, dismissed or taken back (#407), it needs
-                  // nothing.
-                  ask.code
-                      ? (ask.withdrawn || !pending
-                            ? "$name's errand needed a code"
-                            : "$name's errand needs a code")
-                      // Whether or not two-step was asked for: the site
-                      // showed them (Abbacchio's row 1637).
-                      : isRecoveryCodes(ask)
-                      ? "$name's errand saved recovery codes"
-                      : ask.hasHandoff()
-                      ? (ask.withdrawn || !pending
-                            ? "$name's errand needed your OK"
-                            : "$name's errand needs your OK")
-                      : ask.withdrawn || !pending
-                      ? '$name asked'
-                      : ask.hasCommand()
-                      ? '$name asks to run a command'
-                      : ask.steps.isEmpty
-                      ? '$name needs your answer'
-                      : '$name needs you to do something',
-                  style: type.caption.copyWith(
-                    color: ask.withdrawn ? palette.textMuted : color,
-                    fontWeight: FontWeight.w600,
+              // The site is Claktory's reading of the page, never the
+              // agent's words.
+              if (isPayment(ask))
+                Flexible(
+                  child: Text.rich(
+                    TextSpan(
+                      children: [
+                        TextSpan(text: '$name asks you to pay on '),
+                        TextSpan(
+                          text: paymentSite(ask),
+                          style: const TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                      ],
+                    ),
+                    style: type.emphasis.copyWith(
+                      color: dismissed || ask.withdrawn
+                          ? palette.textMuted
+                          : palette.text,
+                    ),
+                  ),
+                )
+              else
+                Flexible(
+                  child: Text(
+                    // Answered, dismissed or taken back, it needs
+                    // nothing.
+                    ask.code
+                        ? (ask.withdrawn || !pending
+                              ? '$name needed a code'
+                              : '$name needs a code')
+                        // Whether or not two-step was asked for: the site
+                        // showed them.
+                        : isRecoveryCodes(ask)
+                        ? "$name's browser saved recovery codes"
+                        : ask.hasHandoff()
+                        ? (ask.withdrawn || !pending
+                              ? '$name needed your OK'
+                              : '$name needs your OK')
+                        : ask.withdrawn || !pending
+                        ? '$name asked'
+                        : ask.hasCommand()
+                        ? '$name asks to run a command'
+                        : ask.steps.isEmpty
+                        ? '$name needs your answer'
+                        : '$name needs you to do something',
+                    style: type.caption.copyWith(
+                      color: ask.withdrawn ? palette.textMuted : color,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
-              ),
             ],
           ),
           // Where the question may come from, when its agent read a pipe.
@@ -872,6 +974,12 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
                 style: type.body.copyWith(color: palette.textMuted),
               ),
             ],
+          ] else if (isPayment(ask)) ...[
+            if (ask.handoff.what.isNotEmpty)
+              Text(
+                proseCodes('$name: “${ask.handoff.what}”'),
+                style: type.body.copyWith(color: palette.textMuted),
+              ),
           ] else if (ask.hasHandoff()) ...[
             // Claktory's heading for an errand's card ("play.google.com
             // asks you to agree"), the site in bold.
@@ -957,6 +1065,7 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
           ] else if (ask.body.isNotEmpty &&
               !ask.hasCommand() &&
               !ask.code &&
+              !isPayment(ask) &&
               !isRecoveryCodes(ask)) ...[
             const SizedBox(height: Space.xs),
             // Past 8 lines, its middle folds (Lucy's Needs you cards).
@@ -983,7 +1092,12 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
           // screen and waiting (#435 W8b).
           if (isRecoveryCodes(ask) && pending && !ask.withdrawn) ...[
             const SizedBox(height: Space.s),
-            ..._recoveryCodes(palette, type),
+            // Shown and kept only by the person (ShowRecoveryCodes and
+            // KeepRecoveryCodes; Fugo 52432): never on Windows.
+            if (approvesElsewhere)
+              const ApproveElsewhere(text: recoveryCodesElsewhereText)
+            else
+              ..._recoveryCodes(palette, type),
           ],
           // A document it asks the person to review, with Review.
           if (ask.reviewPath.isNotEmpty) ...[
@@ -1060,8 +1174,11 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
             ..._execute(palette, type, name)
           else if (pending && ask.code)
             ..._codeCard(palette, type, name)
+          else if (pending && isPayment(ask))
+            ..._paymentCard(palette, name)
           else if (pending && isRecoveryCodes(ask))
-            ..._recoveryRow(palette)
+            // Nothing to save or keep on Windows, where they never show.
+            ...(approvesElsewhere ? const <Widget>[] : _recoveryRow(palette))
           else if (pending)
             ..._pending(palette, type, name)
           else ...[
@@ -1080,9 +1197,9 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
     // overlay for its menu, which the app always has).
     if (SelectionContainer.maybeOf(context) != null ||
         Overlay.maybeOf(context) == null) {
-      return card;
+      return CardDropArea(child: card);
     }
-    return SelectableArea(child: card);
+    return CardDropArea(child: SelectableArea(child: card));
   }
 
   /// What a recording for this card is kept as until its words come
@@ -1291,45 +1408,7 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
   /// when it's the card waiting there now.
   List<Widget> _codeCard(Palette palette, TypeScale type, String name) {
     final host = handoffHost(widget.ask);
-    if (_codeOwnWords) {
-      return [
-        CardAnswerBlock(
-          focus: _focus,
-          field: (_) => DecisionComment(
-            controller: _text,
-            focusNode: _focus,
-            agent: name,
-            enabled: !_busy,
-            placeholder: "What's in the way? $name sees this.",
-            onSubmit: () => _answer(dismiss: true),
-          ),
-          row: CommentTyped(
-            controller: _text,
-            builder: (context, typed) => CardRow(
-              line: CardLine(
-                _status ?? 'Nothing is filled in. $name gets your words.',
-                color: _statusColor(palette),
-              ),
-              quiet: [
-                Button(
-                  label: 'Back',
-                  onPressed: _busy
-                      ? null
-                      : () => setState(() => _codeOwnWords = false),
-                ),
-              ],
-              primary: Button(
-                label: "Can't do this",
-                primary: true,
-                onPressed: _busy || !typed
-                    ? null
-                    : () => _answer(dismiss: true),
-              ),
-            ),
-          ),
-        ),
-      ];
-    }
+    if (_ownWords) return _ownWordsBlock(palette, name);
     final agent = AppScope.of(context).workspace.agent(widget.agentId);
     final waitingHere =
         _dock ||
@@ -1398,6 +1477,94 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
             ),
           ],
         ),
+      ),
+    ];
+  }
+
+  List<Widget> _ownWordsBlock(Palette palette, String name) => [
+    CardAnswerBlock(
+      focus: _focus,
+      field: (_) => DecisionComment(
+        controller: _text,
+        focusNode: _focus,
+        agent: name,
+        enabled: !_busy,
+        placeholder: "What's in the way? $name sees this.",
+        onSubmit: () => _answer(dismiss: true),
+      ),
+      row: CommentTyped(
+        controller: _text,
+        builder: (context, typed) => CardRow(
+          line: switch (_status ??
+              (isPayment(widget.ask)
+                  ? null
+                  : 'Nothing is filled in. $name gets your words.')) {
+            final line? => CardLine(line, color: _statusColor(palette)),
+            null => null,
+          },
+          quiet: [
+            Button(
+              label: 'Back',
+              onPressed: _busy ? null : () => setState(() => _ownWords = false),
+            ),
+          ],
+          primary: Button(
+            label: "Can't do this",
+            primary: true,
+            onPressed: _busy || !typed ? null : () => _answer(dismiss: true),
+          ),
+        ),
+      ),
+    ),
+  ];
+
+  /// No field: nothing typed on a payment card reaches the agent except
+  /// with Can't do this.
+  List<Widget> _paymentCard(Palette palette, String name) {
+    if (_ownWords) return _ownWordsBlock(palette, name);
+    final opened = widget.ask.handoff.openedMs > 0;
+    final page = paymentPage(widget.ask);
+    final safari = _openedHere && defaultTargetPlatform == TargetPlatform.iOS;
+    return [
+      CardRow(
+        line: CardLine(
+          _status ??
+              (opened
+                  ? safari
+                        ? "Opened in Safari. Come back here once you've paid."
+                        : "Opened in your browser. Come back here once "
+                              "you've paid."
+                  : '$name waits until you pay.'),
+          color: _status == null ? palette.textMuted : _statusColor(palette),
+        ),
+        quiet: [
+          Builder(
+            builder: (context) => Button(
+              label: "Can't do this…",
+              onPressed: _busy ? null : () => unawaited(_cantPay(context)),
+            ),
+          ),
+          if (opened && page != null)
+            Button(
+              label: 'Open again',
+              onPressed: _busy
+                  ? null
+                  : () => unawaited(_openPayment(page, again: true)),
+            ),
+        ],
+        primary: opened
+            ? Button(
+                label: "I've paid",
+                primary: true,
+                onPressed: _busy ? null : () => _answer(dismiss: false),
+              )
+            : page == null
+            ? null
+            : Button(
+                label: 'Open on this $thisDeviceKind',
+                primary: true,
+                onPressed: _busy ? null : () => unawaited(_openPayment(page)),
+              ),
       ),
     ];
   }
@@ -2393,6 +2560,7 @@ String askSummary(AskPerson ask) => switch (currentStep(ask)) {
   // A command to run (#494): Claktory's heading, never the agent's title.
   // And its first line, so cards for one machine can be told apart.
   _ when ask.hasCommand() => commandSummary(ask.command),
+  _ when isPayment(ask) => 'Asks you to pay on ${paymentSite(ask)}',
   final at? => '${ask.title} · Step ${at + 1} of ${ask.steps.length}',
   null => ask.title,
 };
@@ -2423,15 +2591,44 @@ bool isTwoStep(AskPerson ask) =>
     ask.hasHandoff() &&
     ask.handoff.kind == ErrandHandoffKind.ERRAND_HANDOFF_KIND_TWO_STEP;
 
+bool isPayment(AskPerson ask) =>
+    ask.hasHandoff() &&
+    ask.handoff.kind == ErrandHandoffKind.ERRAND_HANDOFF_KIND_PAYMENT;
+
+String paymentSite(AskPerson ask) {
+  if (ask.handoff.domain.isNotEmpty) return ask.handoff.domain;
+  final host = Uri.tryParse(ask.handoff.url)?.host ?? '';
+  return host.isNotEmpty ? host : handoffHost(ask);
+}
+
+Uri? paymentPage(AskPerson ask) {
+  final uri = Uri.tryParse(ask.handoff.url);
+  return uri != null && uri.scheme == 'https' && uri.host.isNotEmpty
+      ? uri
+      : null;
+}
+
+/// In the app on an iPhone or iPad (SFSafariViewController, so Apple Pay
+/// works) and Android (a custom tab); the default browser elsewhere.
+Future<bool> Function(Uri url) openPaymentPage = (url) => launchUrl(
+  url,
+  mode: switch (defaultTargetPlatform) {
+    TargetPlatform.iOS || TargetPlatform.android => LaunchMode.inAppBrowserView,
+    _ => LaunchMode.externalApplication,
+  },
+);
+
 /// An errand's card for any other step only the person can take (#435
-/// W10: a payment, a sign-in, a check that they're a person…): Done and
-/// Can't do this, with the cards' own field and row.
+/// W10: a sign-in, a check that they're a person…): Done and Can't do
+/// this, with the cards' own field and row. Claktory no longer asks for
+/// these; older ones still show this way.
 bool isGenericHandoff(AskPerson ask) =>
     ask.hasHandoff() &&
     !ask.code &&
     !isAgreement(ask) &&
     !isTwoStep(ask) &&
     !isRecoveryCodes(ask) &&
+    !isPayment(ask) &&
     ask.handoff.kind != ErrandHandoffKind.ERRAND_HANDOFF_KIND_CODE;
 
 /// A code card's site (#435 W8): the host of the page's origin as Chrome
@@ -2474,6 +2671,13 @@ String askOutcome(AskPerson ask, {required String agent, bool short = false}) {
     return ask.actionError.isNotEmpty
         ? 'The page changed, so nothing was ticked.'
         : 'Accepted';
+  }
+  if (isPayment(ask) && !ask.replied && !ask.resolved) {
+    return ask.state == AskPersonState.ASK_PERSON_STATE_DISMISSED
+        ? "Couldn't pay"
+        : short
+        ? 'Paid'
+        : 'Paid on ${paymentSite(ask)}';
   }
   // Any other errand step (#435 W10): done, or not.
   if (isGenericHandoff(ask) && !ask.replied && !ask.resolved) {

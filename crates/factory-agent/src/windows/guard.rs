@@ -1,7 +1,7 @@
 //! What agents' commands may not start on Windows, as `tools::asking` says
-//! elsewhere (Bruno 36035, Fugo 36039/36040; windows.md §2, "Elevation
-//! guard"): a program whose job is to run something as an administrator,
-//! which puts up the UAC prompt a habitual click would approve.
+//! elsewhere ("Elevation guard"): a program whose job is to run something
+//! as an administrator, which puts up the UAC prompt a habitual click
+//! would approve.
 //!
 //! Best effort, as the spec says: any program can ask Windows for UAC
 //! (ShellExecute's "runas", PowerShell's `Start-Process -Verb RunAs`), and
@@ -24,7 +24,7 @@ pub fn asking(path: &str) -> Option<&'static str> {
 
 /// A command whose text asks PowerShell to run something as an
 /// administrator (`Start-Process … -Verb RunAs`), refused before it starts
-/// (Fugo 45257 (d)): the program it names, for the agent's message.
+/// the program it names, for the agent's message.
 pub fn asking_in_text(command: &str) -> Option<&'static str> {
     let text = command.to_ascii_lowercase();
     let squeezed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");

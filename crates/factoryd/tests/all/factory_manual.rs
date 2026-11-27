@@ -57,7 +57,7 @@ async fn rivet_reads_the_factory_manual_and_other_agents_get_the_core() {
     let rivet_manual = view.agent("rivet").extensions.iter().find(|extension| extension.id == "memory:factory").cloned();
     assert!(rivet_manual.expect("listed").enabled);
     let opened = call(&mut client, &mut view, "rivet", "memory_read", r#"{"note": "settings-file"}"#).await;
-    let config = dir.join("home/config.json");
+    let config = dir.join("home").join("config.json");
     assert!(opened.starts_with("settings-file: The settings file"), "{opened}");
     assert!(opened.contains(&config.display().to_string()) && !opened.contains("{{"), "with this Factory's paths: {opened}");
     let prompt = system_prompt.lock().expect("lock").clone();
@@ -127,6 +127,8 @@ async fn rivet_reads_the_factory_manual_and_other_agents_get_the_core() {
 /// Bruno 29528, 29755: bash's description names ripgrep and jq when
 /// they're in Claktory's tools, on the agent's PATH (and only when each
 /// resolves there: see factory-agent's tools tests).
+// On Windows the tools are rg.exe and jq.exe: a test of its own to come.
+#[cfg(unix)]
 #[tokio::test]
 async fn bash_names_the_tools_claktory_carries() {
     use std::os::unix::fs::PermissionsExt;

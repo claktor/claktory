@@ -1,4 +1,4 @@
-//! The Images extension (#403): an agent whose model can make images makes
+//! The Images extension: an agent whose model can make images makes
 //! them for the person, with `image_generate`. Claktory runs the tool
 //! itself: it asks the image endpoint of the agent's own sign-in (phase 1:
 //! ChatGPT's subscription, `factory_agent::providers::openai_codex::images`),
@@ -38,7 +38,7 @@ static MANIFEST: Manifest = Manifest {
     options: &[],
 };
 
-const GENERATE: &str = "Make an image from a description, one per call, with your model's image model on your sign-in (on a ChatGPT plan, it counts against the plan's image limit). It takes up to about two minutes. The image is saved in your agent folder, never in a project: the result gives its path, and shows you the image. The person sees it in your conversation; copy the file where it's wanted. prompt: what to draw, in detail (subject, style, composition, colors, any text in it). size: \"1024x1024\", \"1536x1024\" (landscape), \"1024x1536\" (portrait) or \"auto\". quality: \"low\", \"medium\", \"high\" or \"auto\"; low is quicker. transparent: true for a transparent background. If the description is declined for its content, or a limit is reached, the result says so: don't send it again unchanged; tell the person.";
+const GENERATE: &str = "Make an image from a description, one per call, with your model's image model on your sign-in (on a ChatGPT plan, it counts against the plan's image limit). It takes up to about two minutes. The image is saved in your agent folder, never in a project: the result gives its path, and shows you the image. The person sees it in your conversation; copy the file where it's wanted. prompt: what to draw, in detail (subject, style, composition, colors, any text in it). size: \"1024x1024\", \"1536x1024\" (landscape), \"1024x1536\" (portrait) or \"auto\". quality: \"low\", \"medium\", \"high\" or \"auto\"; low is quicker. ChatGPT chooses the final size and quality, which can differ from what you ask: the result gives the size it made. transparent: true for a transparent background. If the description is declined for its content, or a limit is reached, the result says so: don't send it again unchanged; tell the person.";
 
 const SIZES: [&str; 4] = ["1024x1024", "1536x1024", "1024x1536", "auto"];
 const QUALITIES: [&str; 4] = ["low", "medium", "high", "auto"];
@@ -170,9 +170,10 @@ async fn generate(factory: Arc<Factory>, agent: String, args: GenerateArgs) -> R
     let kind = extension.to_uppercase();
     let scaled = shown.map(|(w, h)| format!(" You see it scaled down to {w}×{h}.")).unwrap_or_default();
     let text = format!(
-        "Made {} ({width}×{height} {kind}) with {}. It's in your agent folder, not a project: copy it where it's wanted.{scaled}",
+        "Made {} ({width}×{height} {kind}) with {}.{} It's in your agent folder, not a project: copy it where it's wanted.{scaled}",
         path.display(),
-        made.model
+        made.model,
+        chosen(size.as_deref(), quality.as_deref())
     );
     let details = json!({
         "path": path.display().to_string(),
@@ -186,6 +187,23 @@ async fn generate(factory: Arc<Factory>, agent: String, args: GenerateArgs) -> R
         "prompt": prompt,
     });
     Ok(ToolResult { content: vec![ToolResultPart::Text { text }, part], details, usage: None, terminate: None })
+}
+
+/// What the result says of the size and quality: ChatGPT chooses them, so
+/// what was asked for may not be what was made (#403).
+fn chosen(size: Option<&str>, quality: Option<&str>) -> String {
+    let asked: Vec<String> = [
+        size.filter(|size| *size != "auto").map(|size| size.replace('x', "×")),
+        quality.filter(|quality| *quality != "auto").map(|quality| format!("{quality} quality")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if asked.is_empty() {
+        " ChatGPT chose its size and quality.".to_owned()
+    } else {
+        format!(" You asked for {}; ChatGPT chooses the final size and quality.", asked.join(" at "))
+    }
 }
 
 /// Saves the image in the agent's folder, `images/<today>/`, under a name

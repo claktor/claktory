@@ -1,4 +1,4 @@
-// Recording voice messages on this device (#197): the native recorder
+// Recording voice messages on this device: the native recorder
 // (app/macos/Runner/Recorder.swift, the iPhone's Runner too) over the
 // factory/recorder channel. AAC in .m4a at 16 kHz mono, at most ten
 // minutes; the file is then sent like any attachment, as a voice message.

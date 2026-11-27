@@ -409,7 +409,7 @@ async fn the_relay_forwards_only_to_or_from_a_signed_in_claktory() {
     server.shutdown().await.unwrap();
 }
 
-/// Cioccolata's vector from the account service (the issuer), byte for byte.
+/// A vector from the account service (the issuer), byte for byte.
 #[test]
 fn the_issuers_test_vector_verifies() {
     const TOKEN: &str = "eyJ2IjoxLCJlIjoiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYmFiYWJhYiIsImEiOiIwZjBmMGYwZjBmMGYwZjBmMGYwZjBmMGYwZjBmMGYwZiIsImlhdCI6MTc5NTE4MzMyMCwiZXhwIjoxNzk1Nzg4MTIwfQ.8Nxh_AlyH94f0DFSTGxUGAEBPCUhNMDl9WYu8kboyeC1kXtP5iQnLaUcsVUOAeaYWQAalSVasysxRNU_Jtt0CQ";

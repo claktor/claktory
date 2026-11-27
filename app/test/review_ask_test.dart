@@ -1,4 +1,4 @@
-// #275: an agent asks the person to review a document. Its question card
+// An agent asks the person to review a document. Its question card
 // names the file, with Review, which opens it beside that agent's
 // conversation, expanded, so every comment on it goes to the agent; the
 // person ends it with Approve (a note if they like) or Dismiss.

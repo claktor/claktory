@@ -1,12 +1,12 @@
-//! Following one conversation without selecting it (#514, spec §9.8:
-//! focus mode's Context). A connection watches at most one agent, chat or
-//! pipe (WatchTranscript): its snapshot comes as selecting it sends it,
-//! then its agent's or chat's changes and queue, to that connection alone,
-//! each with ServerMessage.watched. Watching only reads: the selection,
-//! `unseen` and what's read stay as they are, and nothing is tainted.
-//! A pipe's messages already reach every connection (PipeMessageUpdate),
-//! so a watched pipe gets only its snapshot here. It ends when the
-//! connection closes, and when what it watches is deleted.
+//! Following one conversation without selecting it (focus mode's Context).
+//! A connection watches at most one agent, chat or pipe (WatchTranscript):
+//! its snapshot comes as selecting it sends it, then its agent's or chat's
+//! changes and queue, to that connection alone, each with
+//! ServerMessage.watched. Watching only reads: the selection, `unseen` and
+//! what's read stay as they are, and nothing is tainted. A pipe's messages
+//! already reach every connection (PipeMessageUpdate), so a watched pipe
+//! gets only its snapshot here. It ends when the connection closes, and
+//! when what it watches is deleted.
 //!
 //! Changes are sent with the Factory's lock held (`Factory::send_change`),
 //! and a watch starts with it held too, from the frame counted last: what

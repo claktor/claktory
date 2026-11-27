@@ -148,7 +148,8 @@ pub fn refused_in(output: &str, cwd: &Path, root_of: impl Fn(&Path) -> Option<Pa
     in_cwd
 }
 
-#[cfg(test)]
+// A Mac's protected places, by Mac paths.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

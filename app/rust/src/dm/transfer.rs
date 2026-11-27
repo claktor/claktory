@@ -1,7 +1,7 @@
-//! History transfer between the person's own devices (dms-e2ee.md §2, E8;
-//! Fugo's six points): right after a device adds a new one, it sends the new
-//! one what it keeps of every conversation, straight over iroh, sealed with
-//! the key only these two devices got from the add-device hand-off.
+//! History transfer between the person's own devices (E8): right
+//! after a device adds a new one, it sends the new one what
+//! it keeps of every conversation, straight over iroh, sealed with the key
+//! only these two devices got from the add-device hand-off.
 //!
 //! - **The key** is the hand-off's HPKE exporter (claktory-dm-crypto's
 //!   `handoff`): the sender keeps it from `seal_handoff`, by the new leaf
@@ -585,7 +585,7 @@ fn ascii(text: &str, most: usize) -> bool {
 }
 
 /// [messages] as the receiver keeps them, after [from]; refused whole if
-/// any isn't well-formed (Fugo 5).
+/// any isn't well-formed.
 fn checked(messages: Vec<DmMessage>, from: i64) -> anyhow::Result<Vec<DmMessage>> {
     let mut previous = from;
     messages

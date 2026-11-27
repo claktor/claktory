@@ -179,10 +179,29 @@ class LinkActivity : Activity() {
 }
 
 /**
+ * The pairing page's link (factoryd's PAIR_PAGE), claimed as an App Link by
+ * the release build only (src/prod). Exactly that host and path: a link
+ * that merely looks like it (another port, user or subdomain) could carry a
+ * code to the app from anywhere. The code is in the fragment, read in Dart.
+ */
+object PairLinks {
+    const val HOST = "claktory.com"
+    const val PATH = "/pair"
+
+    fun isPairLink(link: String): Boolean {
+        val uri = runCatching { java.net.URI(link) }.getOrNull() ?: return false
+        return uri.scheme.equals("https", ignoreCase = true) &&
+            uri.rawAuthority?.lowercase() == HOST &&
+            uri.rawPath == PATH
+    }
+}
+
+/**
  * factory/links, as on the Mac (app/macos/Runner/AppDelegate.swift's
  * Links): claktory://add?code=… (claktory-dev:// for Claktory Dev,
  * claktory-debug:// for a debug build), or a pairing code itself
- * (factory://?t=…, from a Mac's QR code), opens the app. Links that come
+ * (factory://?t=…, from a Mac's QR code), or the pairing page's link
+ * ([PairLinks], in the release build), opens the app. Links that come
  * before the app's Flutter asks ("listen") wait and are its answer; after
  * that each is sent ("opened") as it comes. A launch from Recents doesn't
  * bring its old link again.
@@ -217,7 +236,7 @@ class LinksChannel(messenger: BinaryMessenger, activity: Activity) :
         if (intent.action != Intent.ACTION_VIEW) return false
         val link = intent.dataString ?: return false
         val linkScheme = WebAuthCore.schemeOf(link)
-        if (linkScheme != scheme && linkScheme != PAIRING_SCHEME) return false
+        if (linkScheme != scheme && linkScheme != PAIRING_SCHEME && !PairLinks.isPairLink(link)) return false
         heard?.invoke(link)
         if (listening) channel.invokeMethod("opened", link) else waiting += link
         return true

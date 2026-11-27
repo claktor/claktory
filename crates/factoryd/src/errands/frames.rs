@@ -33,7 +33,7 @@ const COVERS_BLOCKED: f64 = 0.1;
 /// (its id, and the node of the element that holds it in the page) or the
 /// page itself.
 #[derive(Clone, Debug)]
-pub(super) struct Place {
+pub(in crate::errands) struct Place {
     pub session: Option<String>,
     pub context: i64,
     pub frame: Option<(String, i64)>,
@@ -51,7 +51,7 @@ pub(super) struct FrameRef {
 
 /// Where an element is, for the mouse: its box and the viewport, in the
 /// page's coordinates, and how far its frame is from the page's corner.
-pub(super) struct Spot<'a> {
+pub(in crate::errands) struct Spot<'a> {
     pub place: &'a Place,
     pub rect: Rect,
     pub view: Point,

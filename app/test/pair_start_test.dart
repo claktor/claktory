@@ -1,4 +1,4 @@
-// #363 (Squalo's first hour from the stores): a phone with no Claktory
+// A phone with no Claktory
 // starts with what's needed (Claktory runs on a Mac; Send me the link),
 // then the ways in, signing in with an email first. A phone that has one
 // already, adding another, goes straight to the ways in.
@@ -265,7 +265,7 @@ void main() {
         expect(rect.right, lessThanOrEqualTo(size.width), reason: label);
       }
       // The links grow with their caption, wrapped or not, rather than
-      // cutting it at 44 points (row 256); the next screen's too.
+      // cutting it at 44 points; the next screen's too.
       await _linkWhole(tester, 'Paste code instead');
       await tester.tap(find.text('Paste code instead'));
       await pumpFrames(tester);

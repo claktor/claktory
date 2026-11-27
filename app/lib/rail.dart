@@ -78,8 +78,8 @@ class Claktory {
 
   /// Known not to be on the person's account (its list read, and it isn't
   /// there): marked wherever it shows. Signed out, or the list unreadable,
-  /// nothing is known, so nothing is marked (#529, S2: never a mark the
-  /// person can't act on).
+  /// nothing is known, so nothing is marked (S2: never a mark the person
+  /// can't act on).
   bool get offAccount => account == AccountCheck.notTheirs;
 
   /// Whether its details (its form) say anything of the account: known not
@@ -122,11 +122,13 @@ class Claktories extends ChangeNotifier {
     required this.open,
     required this.drafts,
     this.keepLocal,
+    this.ownCode,
   }) // Mutable, behind a getter: setLocalBackend changes it.
     // ignore: prefer_initializing_formals
     : _localBackend = localBackend {
     connections.addListener(_sync);
     _sync();
+    unawaited(_readOwn());
     // iOS suspends the app in the background, and its connections die
     // without a word: back in front, each reconnects at once.
     final suspends = switch (defaultTargetPlatform) {
@@ -197,6 +199,48 @@ class Claktories extends ChangeNotifier {
       connections.use(null);
     }
     _sync();
+    unawaited(_readOwn());
+  }
+
+  /// Reads this Mac's own Claktory's pairing code ([readLocalPairing]);
+  /// null where none is read (tests that don't give one).
+  final Future<RemoteFactory?> Function()? ownCode;
+
+  /// This Mac's own Claktory's endpoint id, from its pairing code, read
+  /// from the file rather than learnt by connecting: so the account's list
+  /// never offers it, even before it answers (just updated, stopped, or
+  /// still starting), as another Claktory to connect to, which then knocks
+  /// on itself as a newcomer to allow. Empty where this device runs
+  /// none, until it's read, or from a backend before the tunnel.
+  String get ownEndpoint => _localBackend ? _ownEndpoint : '';
+  String _ownEndpoint = '';
+  var _disposed = false;
+
+  /// Reads [ownEndpoint] again (at launch, and each time this Mac's own
+  /// Claktory connects: a new install writes its code then), and drops an
+  /// entry kept for it from the account's list: it's this Mac's own, which
+  /// the rail shows already.
+  Future<void> _readOwn() async {
+    final read = ownCode;
+    if (read == null || !_localBackend) return;
+    RemoteFactory? code;
+    try {
+      code = await read();
+    } catch (error) {
+      developer.log("couldn't read this Mac's code: $error", name: 'factory');
+      return;
+    }
+    if (_disposed) return;
+    final endpoint = code?.endpointId.toLowerCase() ?? '';
+    if (endpoint.isEmpty) return;
+    for (final target in connections.saved) {
+      if (target.fromAccount && target.endpointId.toLowerCase() == endpoint) {
+        connections.forget(target);
+      }
+    }
+    if (endpoint == _ownEndpoint) return;
+    _ownEndpoint = endpoint;
+    notifyListeners();
   }
 
   /// Connects to a Claktory (null: this device's own), live from now on.
@@ -219,7 +263,7 @@ class Claktories extends ChangeNotifier {
 
   /// Shows [claktory] in the window. One turned away until this device
   /// signs in asks once more, quietly: chosen again, it connects if the
-  /// Claktory has let it in meanwhile (Sale's row 189).
+  /// Claktory has let it in meanwhile.
   void select(Claktory claktory) {
     connections.use(claktory.target);
     claktory.backend.probeSignIn();
@@ -239,7 +283,7 @@ class Claktories extends ChangeNotifier {
 
   /// Each Claktory on another machine learns when it last checked in with
   /// the person's account, for what its connection says while it can't
-  /// connect (friend bug #37).
+  /// connect.
   void _feedCheckIns() {
     final match = _accountMatch;
     if (match == null) return;
@@ -256,7 +300,7 @@ class Claktories extends ChangeNotifier {
   static const _relistAfterLoss = Duration(minutes: 5);
 
   /// A Claktory lost its connection: when it last checked in with the
-  /// account says whether it was running since (friend bug #37).
+  /// account says whether it was running since.
   void _lost(Backend backend) {
     if (backend.connected.value) return;
     final match = _accountMatch;
@@ -321,6 +365,10 @@ class Claktories extends ChangeNotifier {
         );
         if (target != null) {
           backend.connected.addListener(() => _lost(backend));
+        } else {
+          backend.connected.addListener(() {
+            if (backend.connected.value) unawaited(_readOwn());
+          });
         }
       }
     }
@@ -331,7 +379,7 @@ class Claktories extends ChangeNotifier {
 
   /// On a phone or an iPad only the Claktory on screen keeps trying every
   /// few seconds while it can't connect; the others back off, and opening
-  /// one tries it again at once (#454). A Mac keeps them all quick.
+  /// one tries it again at once. A Mac keeps them all quick.
   void _markOnScreen() {
     final mobile = switch (defaultTargetPlatform) {
       TargetPlatform.iOS || TargetPlatform.android => true,
@@ -346,6 +394,7 @@ class Claktories extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     _lifecycle.dispose();
     _accountMatch?.dispose();
     connections.removeListener(_sync);
@@ -456,7 +505,7 @@ class _Glance {
     waiting = needsYouCount(workspace);
     connection = Connection(backend);
     // Turned away until something is done here or there: it isn't trying,
-    // so never "Connecting…" (Zucchero's row 720).
+    // so never "Connecting…".
     final words = backend.signInRequired.value;
     stopped = backend.otherAccount.value != null
         ? 'On another account'
@@ -515,9 +564,9 @@ class _Glance {
 }
 
 /// What a Claktory known not to be the person's own is marked with: a
-/// short label and what it means (Trish's words). Nothing for any other
+/// short label and what it means. Nothing for any other
 /// state: signed out or unreadable, nothing is known, so nothing is
-/// marked (#529, S2); only its details say so ([OffAccountMark.details]).
+/// marked; only its details say so ([OffAccountMark.details]).
 ({String label, String meaning})? accountWords(AccountCheck? check) =>
     switch (check) {
       AccountCheck.notTheirs => (
@@ -542,7 +591,7 @@ String claktoryLabel(String name, Claktory claktory) {
 /// shows by name (the rail's card, the phone's drawer and list, its form):
 /// a 12px shield-alert and the label in caption `danger`, and, [explained],
 /// what it means under it in caption `textMuted`. Nothing for one that's
-/// theirs, or that can't be checked (#529, S2), except in its [details].
+/// theirs, or that can't be checked, except in its [details].
 class OffAccountMark extends StatelessWidget {
   const OffAccountMark({
     super.key,
@@ -556,7 +605,7 @@ class OffAccountMark extends StatelessWidget {
 
   /// Its details (the Claktory's form): what's known of the account there
   /// too, in muted words. That it couldn't be checked, or, while this app
-  /// is signed out, a way to sign in (Trish's words).
+  /// is signed out, a way to sign in.
   final bool details;
 
   @override
@@ -632,7 +681,7 @@ class OffAccountMark extends StatelessWidget {
 }
 
 /// Signs this device in to the person's Claktory account, from a
-/// Claktory's details while signed out (#388): it closes once signed in.
+/// Claktory's details while signed out: it closes once signed in.
 Future<void> showAccountSignIn(BuildContext context) => showModal(
   context,
   (context, close) => DeviceSignInDialog(
@@ -644,11 +693,13 @@ Future<void> showAccountSignIn(BuildContext context) => showModal(
 
 /// Up to two letters for [name]: "mac-mini" is "MM", "nixos" "N". The
 /// invisible characters around and in a name (the isolate nameInText puts
-/// a name in, direction marks, zero-width spaces) are no letters: "Bad
-/// Name two" in an isolate is still "BT" (Abbacchio's row 1748).
+/// a name in, direction marks, zero-width spaces), and the codes it shows
+/// them by ("\u{202E}"), are no letters: "Bad Name two" in an isolate is
+/// still "BT".
 String claktoryInitials(String name) {
   final words = name
       .replaceAll(RegExp('[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]'), '')
+      .replaceAll(RegExp(r'\\u\{[0-9A-Fa-f]+\}'), '')
       .split(RegExp(r'[\s\-_.]+'))
       .where((word) => word.isNotEmpty)
       .toList();
@@ -833,7 +884,7 @@ class _RailTile extends StatelessWidget {
                   onLongPress: touch ? openForm : null,
                   // Touch and hold: the form on the hold itself, as a
                   // context menu opens, for a finger with no secondary
-                  // click (an iPad, Zucchero's row 642); a pointer's
+                  // click (an iPad); a pointer's
                   // secondary click as before.
                   child: GestureDetector(
                     onLongPress: touch
@@ -950,7 +1001,7 @@ class _Tile extends StatelessWidget {
                   )
                 // They grow with the text size until they fill the tile,
                 // and no further: the tile keeps its size in the rail, and
-                // its name is read out whole (Sorbet's row 102).
+                // its name is read out whole.
                 : Padding(
                     padding: EdgeInsets.all(3 * size / 28),
                     child: FittedBox(
@@ -970,7 +1021,7 @@ class _Tile extends StatelessWidget {
                     ),
                   ),
           ),
-          // What waits for the person there, counted (#529, MC10), unless
+          // What waits for the person there, counted, unless
           // its connection says more (can't, or connecting).
           if (glance.problem == null &&
               !glance.connecting &&
@@ -1095,9 +1146,9 @@ Future<void> confirmRemoveClaktory(BuildContext context, Claktory claktory) =>
     );
 
 /// "Remove {name}?": what it means, how to connect again, and the
-/// recordings not sent yet that go with it (Sale's row 76). When this is
+/// recordings not sent yet that go with it. When this is
 /// the only device connected there, it says so, and the way back that's
-/// left (#529, MC9, Trish's words).
+/// left.
 class RemoveClaktoryQuestion extends StatefulWidget {
   const RemoveClaktoryQuestion({
     super.key,
@@ -1170,9 +1221,9 @@ class _RemoveClaktoryQuestionState extends State<RemoveClaktoryQuestion> {
           '$name in Settings → Devices.';
     } else {
       // Not connected now, so whether another device is there can't be
-      // known: both ways back, since either may be the one left (Squalo's
-      // V1). Turned away for another account, neither works until that
-      // changes, so it says so.
+      // known: both ways back, since either may be the one left. Turned
+      // away for another account, neither works until that changes, so it
+      // says so.
       final otherAccount = widget.claktory.backend.otherAccount.value != null;
       body =
           'This $thisDeviceKind disconnects from $name. Its agents and work '
@@ -1437,7 +1488,7 @@ class _BackRow extends StatelessWidget {
   final bool news;
 
   /// How much waits for the person's answer there: counted, in place of
-  /// the news dot (#529, MC10).
+  /// the news dot.
   final int waiting;
 
   /// At its end, such as [PhoneConnectionWord].
@@ -1469,8 +1520,8 @@ class _BackRow extends StatelessWidget {
                   // The chevron grows with its words, as iOS's does.
                   final chevron = scaler.scale(16).clamp(16.0, 40.0);
                   // The whole label where it fits, else the chevron alone,
-                  // as iOS's back button: never cut, never wrapped (Lucy
-                  // 50050). Its Semantics says where it goes either way.
+                  // as iOS's back button: never cut, never wrapped. Its
+                  // Semantics says where it goes either way.
                   final words = TextPainter(
                     text: TextSpan(text: label, style: style),
                     textDirection: Directionality.of(context),
@@ -1534,7 +1585,7 @@ class _BackRow extends StatelessWidget {
 /// mark ("Connected", "Reconnecting…"); a tap opens [ConnectionDialog].
 /// Nothing while the Claktory turns this device away: the screen under it
 /// says why, and it won't try again, so "Connecting…" would be untrue
-/// (Sale row 173).
+/// .
 class PhoneConnectionWord extends StatelessWidget {
   const PhoneConnectionWord(this.backend, {super.key});
 
@@ -1543,7 +1594,7 @@ class PhoneConnectionWord extends StatelessWidget {
   @override
   Widget build(BuildContext context) => ListenableBuilder(
     // Follows the connection itself: the drawer's header rebuilds only
-    // with the Workspace (#388).
+    // with the Workspace.
     listenable: Listenable.merge([
       Connection.of(backend),
       backend.signInRequired,
@@ -1565,7 +1616,7 @@ class PhoneConnectionWord extends StatelessWidget {
       hint: reconnectFirst(connection.link) ? reconnectAndShowHint : null,
       child: Pressable(
         onTap: () {
-          // Not connected: it reconnects at once too (#214).
+          // Not connected: it reconnects at once too.
           if (reconnectFirst(connection.link)) backend.reconnectNow();
           showModal(
             context,
@@ -1596,7 +1647,7 @@ class PhoneConnectionWord extends StatelessWidget {
                     Flexible(
                       // On a phone, whole: at the largest text sizes
                       // "Can't connect · last seen 1 min ago" lost its
-                      // time to the ellipsis (Zucchero's row 507).
+                      // time to the ellipsis.
                       child: Text(
                         connection.short,
                         maxLines: isPhoneLayout(context) ? null : 2,
@@ -1642,7 +1693,7 @@ class PhoneClaktories extends StatefulWidget {
   }
 
   /// Add a Claktory, pushed over what shows, at "Use a code instead" when
-  /// [code] (a Claktory's Use a new code: area 2, §4); Back returns to
+  /// [code] (a Claktory's Use a new code: area 2); Back returns to
   /// where it came from.
   /// False when no list of Claktories is up to push it over.
   static bool showAdding({bool code = false}) {
@@ -1821,7 +1872,7 @@ class _PhoneClaktoriesState extends State<PhoneClaktories> {
     }
     // Links (a pairing code from the Camera, claktory://add) are taken
     // over the list and Add a Claktory too, not only in a Claktory's
-    // window, whose own opener isn't there then (Zucchero's row 685).
+    // window, whose own opener isn't there then.
     final screen = _screen == _PhoneScreen.claktory
         ? child
         : LinkOpener(key: child.key, child: child);
@@ -2214,7 +2265,7 @@ class _ListRow extends StatelessWidget {
 
 /// What removing a Claktory says of the [count] recordings kept for it on
 /// this device, not sent yet, which go with it; nothing when there are
-/// none. Trish's words: the sheet already names the device.
+/// none: the sheet already names the device.
 String unsentGoesToo(int count) => switch (count) {
   0 => '',
   1 => " A voice recording you haven't sent yet is deleted too.",

@@ -595,8 +595,8 @@ void main() {
       final piped = at(warp.historyAt(warp.playAt(day1 + 41.5 * hour) + 0.05))
           .pulses;
       final pipe = piped.singleWhere((pulse) => pulse.kind == PulseKind.pipe);
-      // From the ring above it, where the other Claktory is: seen coming in
-      // (Bruno 44370), down to the pad's top over its portal (Lucy).
+      // From the ring above it, where the other Claktory is: seen coming in,
+      // down to the pad's top over its portal.
       final pad = scene.pads.single.rect;
       expect(
         (pipe.route.start - (pipeTop(pad) - const Offset(0, pipeReach)))

@@ -1,11 +1,11 @@
-// Automated pipes in the app (pipes-automation.md §7–§8; H5 and H6, on
-// Cioccolata's contract; Trish's words): where a pipe's finished reports
-// go ("Forward reports to"), a project's default for new pipes, letting an
-// agent read reports (it then keeps only its database, Ask and the report
-// tools), and what was forwarded: the pipe's "Forwarded" strip, a report's
-// own words, and a reader's "Reports". Everything is the backend's; the
-// person reading reports here taints no agent (the backend's guarantee).
-// On screen it's never a hand-off, record, curator, schema or taint.
+// Automated pipes in the app: where
+// a pipe's finished reports go ("Forward reports to"), a project's default
+// for new pipes, letting an agent read reports (it then keeps only its
+// database, Ask and the report tools), and what was forwarded: the pipe's
+// "Forwarded" strip, a report's own words, and a reader's "Reports".
+// Everything is the backend's; the person reading reports here taints no
+// agent (the backend's guarantee). On screen it's never a hand-off,
+// record, curator, schema or taint.
 
 import 'dart:async';
 import 'dart:typed_data';
@@ -13,6 +13,7 @@ import 'dart:typed_data';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/widgets.dart';
 
+import 'approve_elsewhere.dart';
 import 'backend.dart';
 import 'controls.dart';
 import 'forms.dart' show FormFrame;
@@ -52,11 +53,7 @@ List<Agent> reportCandidates(Workspace workspace, String projectId) {
 
 /// Whether [agent] can use extension [id]: any, unless it's limited to a
 /// pipe (then Ask and Reports) or reads reports (then also its database).
-/// Errands are only a contained agent's, and all it keeps besides Ask
-/// (#435: the backend's KEPT_EXTENSIONS).
 bool containedKeeps(Agent agent, String id) {
-  if (agent.contained) return id == 'errands' || id == 'ask';
-  if (id == 'errands') return false;
   if (agent.quarantined) return id == 'ask' || id == 'handoff';
   if (agent.readsReports) {
     return id == 'ask' || id == 'handoff' || id == 'database';
@@ -251,6 +248,7 @@ class _ForwardReportsFieldState extends State<ForwardReportsField> {
   }
 
   Future<void> _set(SetPipeForward ask) async {
+    if (approvesElsewhere) return;
     setState(() {
       _busy = true;
       _error = null;
@@ -301,6 +299,32 @@ class _ForwardReportsFieldState extends State<ForwardReportsField> {
     final types = [for (final id in kinds) ?reportTypeOf(workspace, id)];
     // Kinds to choose from, where Claktory has them.
     final choosing = reportTypesAvailable(workspace);
+    // Where reports go is the person's: on Windows, said.
+    if (approvesElsewhere) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: Space.l),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          spacing: Space.xs,
+          children: [
+            Text(
+              widget.pipe == null
+                  ? 'New pipes forward reports to'
+                  : 'Forward reports to',
+              style: TextStyles.caption.copyWith(
+                color: palette.textMuted,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            Text(
+              to.isEmpty ? 'No one' : recipient,
+              style: type.body.copyWith(color: palette.text),
+            ),
+            const ApproveElsewhere(text: reportsElsewhereText),
+          ],
+        ),
+      );
+    }
     return Padding(
       padding: const EdgeInsets.only(bottom: Space.l),
       child: Column(
@@ -583,8 +607,8 @@ String? forwardApprovalLine(
 }
 
 /// "room for 27 more" while the day's limit is what's left; "room for 4
-/// more this hour" while the hour's is tighter (Abbacchio's row 645:
-/// PipeReportCounts.room_today is the lesser of the two).
+/// more this hour" while the hour's is tighter
+/// (PipeReportCounts.room_today is the lesser of the two).
 String reportRoomText(Pipe pipe) {
   final counts = pipe.reports;
   final perDay = pipe.forward.limits.perDay;
@@ -776,16 +800,21 @@ class _PipeReportsStripState extends State<PipeReportsStrip> {
                       'waiting because where they go changed.',
                       style: type.body.copyWith(color: palette.text),
                     ),
-                    if (recipient.isNotEmpty)
+                    // Sending them on or not is the person's.
+                    if (approvesElsewhere)
+                      const ApproveElsewhere(text: reportsElsewhereText)
+                    else ...[
+                      if (recipient.isNotEmpty)
+                        Button(
+                          label: 'Send to ${_nameOf(workspace, recipient)}',
+                          primary: true,
+                          onPressed: _busy ? null : () => _decide(send: true),
+                        ),
                       Button(
-                        label: 'Send to ${_nameOf(workspace, recipient)}',
-                        primary: true,
-                        onPressed: _busy ? null : () => _decide(send: true),
+                        label: 'Discard',
+                        onPressed: _busy ? null : () => _decide(send: false),
                       ),
-                    Button(
-                      label: 'Discard',
-                      onPressed: _busy ? null : () => _decide(send: false),
-                    ),
+                    ],
                   ],
                 ),
               ),
@@ -1406,7 +1435,7 @@ class _StopReadingReportsFieldState extends State<StopReadingReportsField> {
     final name = widget.agent.name;
     final feeding = pipesFeeding(workspace, widget.agent.id);
     // What still forwards to it, which the backend refuses a stop over:
-    // its pipes, and projects whose new pipes would (Abbacchio's row 645).
+    // its pipes, and projects whose new pipes would.
     final defaults = [
       for (final project in workspace.projects)
         if (project.hasReportForward() &&
@@ -1447,7 +1476,11 @@ class _StopReadingReportsFieldState extends State<StopReadingReportsField> {
               ),
             ],
           ),
-          if (!_confirming) ...[
+          // Unmaking a reader is the person's.
+          if (approvesElsewhere) ...[
+            const SizedBox(height: Space.s),
+            const ApproveElsewhere(text: reportsElsewhereText),
+          ] else if (!_confirming) ...[
             const SizedBox(height: Space.s),
             Align(
               alignment: Alignment.centerLeft,

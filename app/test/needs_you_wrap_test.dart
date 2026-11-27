@@ -1,4 +1,4 @@
-// Needs you at the largest text on a phone (Zucchero's #321 LOW 3): a
+// Needs you at the largest text on a phone: a
 // row's name and what it asks wrap rather than being cut, a procedure's
 // step included ("Rotate the router password · S…"), and an answered
 // row's name beside Answered ("Ri…").
@@ -59,7 +59,7 @@ void main() {
   testWidgets('at the largest text on a phone, a row wraps its name and '
       'what it asks, answered or not', (tester) async {
     // Android's phone, which keeps Needs you's list; an iPhone's shows one
-    // card a screen (#514, mobile_needs_you_test at the largest text).
+    // card a screen (mobile_needs_you_test at the largest text).
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     tester.platformDispatcher.textScaleFactorTestValue = _ax5;

@@ -130,6 +130,13 @@ pub trait Models: Send + Sync {
     ) -> BoxFuture<'a, Result<bool, Error>> {
         Box::pin(async { Ok(false) })
     }
+    /// Takes in what a usage read of one of the provider's accounts showed
+    /// at 100%: each window's id and when it resets (ms since 1970; 0
+    /// unknown). Requests go to the provider's other accounts with room
+    /// first while one holds. True when the account in use may have changed.
+    fn note_full(&self, _provider: &str, _account: &str, _full: Vec<(String, u64)>) -> bool {
+        false
+    }
     /// The file its sign-ins are kept in, `auth.json`; None when they're
     /// kept no other way (a scripted provider).
     fn auth_path(&self) -> Option<PathBuf> {
@@ -442,7 +449,15 @@ impl Models for Registry {
                     window_ids: reset.window_ids,
                 });
             }
-            Ok(Some(v1::ProviderUsage { windows, resets, ..v1::ProviderUsage::default() }))
+            let extra_usage = usage.extra.map(|extra| v1::ExtraUsage {
+                enabled: extra.enabled,
+                used_minor: extra.used_minor,
+                limit_minor: extra.limit_minor,
+                currency: extra.currency,
+                decimal_places: extra.decimal_places,
+                limit_reached: extra.limit_reached,
+            });
+            Ok(Some(v1::ProviderUsage { windows, resets, extra_usage, ..v1::ProviderUsage::default() }))
         })
     }
 
@@ -490,6 +505,10 @@ impl Models for Registry {
 
     fn forget_spent_with_room<'a>(&'a self, provider: &'a str, account: &'a str, full: &'a [String]) -> BoxFuture<'a, Result<bool, Error>> {
         Box::pin(Registry::forget_spent_with_room(self, provider, account_arg(account), full))
+    }
+
+    fn note_full(&self, provider: &str, account: &str, full: Vec<(String, u64)>) -> bool {
+        Registry::note_full(self, provider, account, full)
     }
 
     fn auth_path(&self) -> Option<PathBuf> {

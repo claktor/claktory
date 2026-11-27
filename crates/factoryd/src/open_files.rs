@@ -10,6 +10,7 @@
 pub const MOST: u64 = 65_536;
 
 /// What macOS took for the most before it said otherwise (OPEN_MAX).
+#[cfg(unix)]
 const OPEN_MAX: u64 = 10_240;
 
 /// The kernel's own most per process, where it says (macOS).
@@ -24,18 +25,20 @@ fn kernel_most() -> Option<u64> {
     (read == 0 && most > 0).then(|| most.unsigned_abs().into())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn kernel_most() -> Option<u64> {
     None
 }
 
 /// This process's soft and hard limits on open files.
+#[cfg(unix)]
 pub fn limits() -> Option<(u64, u64)> {
     let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     // SAFETY: getrlimit only writes `limit`.
     (unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } == 0).then_some((limit.rlim_cur, limit.rlim_max))
 }
 
+#[cfg(unix)]
 fn set(soft: u64, hard: u64) -> bool {
     let limit = libc::rlimit { rlim_cur: soft, rlim_max: hard };
     // SAFETY: setrlimit only reads `limit`.
@@ -46,6 +49,7 @@ fn set(soft: u64, hard: u64) -> bool {
 /// most `MOST` (and the kernel's most, where it says); never lowers it.
 /// Says what it was and what it is now, once, in the log. The limits
 /// before and after; None when they can't be read.
+#[cfg(unix)]
 pub fn raise() -> Option<(u64, u64)> {
     let Some((before, hard)) = limits() else {
         tracing::warn!(error = %std::io::Error::last_os_error(), "could not read the open-files limit");
@@ -64,4 +68,18 @@ pub fn raise() -> Option<(u64, u64)> {
         tracing::info!(open_files = after, was = before, hard, "raised the open-files limit");
     }
     Some((before, after))
+}
+
+/// Windows has no such limit: a process may hold millions of handles. None,
+/// as there's nothing to read.
+#[cfg(windows)]
+pub fn limits() -> Option<(u64, u64)> {
+    None
+}
+
+/// Nothing to raise on Windows (`limits`); None, said once in the log.
+#[cfg(windows)]
+pub fn raise() -> Option<(u64, u64)> {
+    tracing::info!("no open-files limit to raise on Windows");
+    None
 }

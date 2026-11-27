@@ -174,10 +174,13 @@ fn snapshot(db: &Path) -> Result<Snapshot, String> {
     }
     let failed = |error: rusqlite::Error| format!("The vault can't be read: {error}.");
     let scratch = std::env::temp_dir().join(format!("claktory-vault-backup-{}", crypto::hex(&crypto::random::<8>())));
+    #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new().mode(0o700).create(&scratch).map_err(|error| format!("{}: {error}", scratch.display()))?;
     }
+    #[cfg(windows)]
+    factory_agent::windows::private::create_dir(&scratch).map_err(|error| format!("{}: {error}", scratch.display()))?;
     let copy = scratch.join(VAULT_DB);
     let result = (|| {
         let source = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(failed)?;
@@ -216,7 +219,12 @@ pub fn backup(home: &Path, recipients: &[Box<dyn age::Recipient + Send>], out: i
     // vault.db's own files (its journal) are in the copy already.
     let mut files: Vec<(String, Zeroizing<Vec<u8>>)> = vec![(format!("vault/{VAULT_DB}"), db)];
     let others = files_in(&dir, |name| name == VAULT_DB || name.starts_with("vault.db-"))?;
-    files.extend(others.into_iter().map(|(name, bytes)| (format!("vault/{name}"), bytes)));
+    // The key on disk goes as it opens anywhere (unsealed on Windows: the
+    // backup itself is encrypted), and is sealed again where it's restored.
+    files.extend(others.into_iter().map(|(name, bytes)| {
+        let bytes = if name == "auto.key" { super::portable_auto_key(bytes, &vault_id) } else { bytes };
+        (format!("vault/{name}"), bytes)
+    }));
     if opens == Opens::Account {
         let account = files_in(&home.join("account"), |_| false)?;
         if !account.iter().any(|(name, _)| name == "share.key") {
@@ -339,6 +347,12 @@ fn read_backup(file: impl Read, identities: &[Box<dyn age::Identity>]) -> Result
     Ok((manifest, files))
 }
 
+#[cfg(windows)]
+fn private_dir(dir: &Path) -> Result<(), String> {
+    factory_agent::windows::private::create_dir_all(dir).map_err(|error| format!("{} can't be made: {error}", dir.display()))
+}
+
+#[cfg(unix)]
 fn private_dir(dir: &Path) -> Result<(), String> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     let failed = |error: io::Error| format!("{} can't be made: {error}", dir.display());
@@ -379,6 +393,15 @@ pub fn restore(file: impl Read, identities: &[Box<dyn age::Identity>], home: &Pa
         }
         for (path, bytes) in &files {
             let target = staging.join(path);
+            let sealed;
+            let bytes: &[u8] = if path == "vault/auto.key" {
+                sealed = super::local_auto_key(bytes, &manifest.vault_id)
+                    .map_err(|error| format!("The vault's key can't be kept here: {error}."))?;
+                &sealed
+            } else {
+                bytes
+            };
+            #[cfg(unix)]
             let mut out = {
                 use std::os::unix::fs::OpenOptionsExt;
                 std::fs::OpenOptions::new()
@@ -388,6 +411,9 @@ pub fn restore(file: impl Read, identities: &[Box<dyn age::Identity>], home: &Pa
                     .open(&target)
                     .map_err(|error| format!("{} can't be written: {error}", target.display()))?
             };
+            #[cfg(windows)]
+            let mut out =
+                factory_agent::windows::private::create_new(&target).map_err(|error| format!("{} can't be written: {error}", target.display()))?;
             out.write_all(bytes)
                 .and_then(|()| out.sync_all())
                 .map_err(|error| format!("{} can't be written: {error}", target.display()))?;
@@ -583,10 +609,19 @@ mod tests {
         let restored = restore(file.as_slice(), &the(identity), &fresh).expect("restored");
         assert!(restored.opened && restored.opens == Opens::Key && restored.secrets == 1);
         assert_eq!(revealed(&fresh), "s3cr3t-value-0123");
-        use std::os::unix::fs::PermissionsExt;
-        for path in ["vault", "vault/vault.db", "vault/auto.key"] {
-            let mode = std::fs::metadata(fresh.join(path)).expect(path).permissions().mode() & 0o777;
-            assert_eq!(mode, if path == "vault" { 0o700 } else { 0o600 }, "{path}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for path in ["vault", "vault/vault.db", "vault/auto.key"] {
+                let mode = std::fs::metadata(fresh.join(path)).expect(path).permissions().mode() & 0o777;
+                assert_eq!(mode, if path == "vault" { 0o700 } else { 0o600 }, "{path}");
+            }
+        }
+        #[cfg(windows)]
+        {
+            for path in ["vault", "vault/vault.db", "vault/auto.key"] {
+                assert!(factory_agent::windows::system::is_private_path(&fresh.join(path)).expect(path), "{path} is private");
+            }
         }
     }
 

@@ -88,7 +88,7 @@ class ProposalCard extends StatelessWidget {
             ..._name(context, proposal.agentName),
             TextSpan(text: ' wants to send this to ${_to(to.name)}'),
             // Their tag, which they can't choose, as the chat's header:
-            // a name alone could be anyone's (Fugo).
+            // a name alone could be anyone's.
             if (to.tag.isNotEmpty)
               TextSpan(
                 text: ' · ${to.tag}',

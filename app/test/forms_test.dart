@@ -100,7 +100,7 @@ void main() {
     await pumpFrames(tester);
     await tester.tap(find.bySemanticsLabel('Factory options'));
     await pumpFrames(tester);
-    await tester.tap(find.text('Project settings'));
+    await tester.tap(find.text('Project settings…'));
     await pumpFrames(tester);
 
     await tester.ensureVisible(find.text('Delete project…'));
@@ -119,6 +119,8 @@ void main() {
     await harness.show(tester);
     await pumpFrames(tester);
     await tester.tap(find.text('Factory').first);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Project settings…'));
     await pumpFrames(tester);
     final delete = tester.getRect(find.text('Delete project…'));
     final cancel = tester.getRect(find.text('Cancel'));

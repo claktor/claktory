@@ -415,10 +415,9 @@ impl CredentialBacking for FileBacking {
 }
 
 /// The error for sign-ins that are locked away until the person opens
-/// their secrets.
-/// Providers whose sign-ins are kept only in the vault, sealed: never in
-/// `auth.json`, not as a copy for an older backend, nor while the vault is
-/// locked (Grok, #493: Fugo's condition).
+/// their secrets. Providers whose sign-ins are kept only in the vault,
+/// sealed: never in `auth.json`, not as a copy for an older backend, nor
+/// while the vault is locked (Grok).
 pub const VAULT_ONLY: [&str; 1] = ["grok"];
 
 /// The first provider in `all` whose sign-ins may only be kept in the vault.

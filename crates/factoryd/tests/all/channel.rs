@@ -12,9 +12,32 @@ fn run(command: &mut Command) {
     assert!(status.success(), "{command:?}");
 }
 
-/// tar, wherever this machine has it.
+/// tar, wherever this machine has it: Windows's own (bsdtar), as the
+/// channel runs it, never another on PATH.
 fn tar() -> Command {
-    Command::new(if cfg!(target_os = "macos") { "/usr/bin/tar" } else { "tar" })
+    Command::new(if cfg!(target_os = "macos") {
+        "/usr/bin/tar"
+    } else if cfg!(windows) {
+        r"C:\Windows\System32\tar.exe"
+    } else {
+        "tar"
+    })
+}
+
+/// The backend's file name in a release: `factoryd.exe` on Windows.
+fn backend() -> String {
+    factoryd::home::program("factoryd")
+}
+
+/// A file's address, as curl reads it here (`file:///C:/…` on Windows).
+fn file_url(path: &Path) -> String {
+    if cfg!(windows) { format!("file:///{}", path.display().to_string().replace('\\', "/")) } else { format!("file://{}", path.display()) }
+}
+
+/// The file a `file_url` names.
+fn url_path(url: &str) -> PathBuf {
+    let path = url.trim_start_matches("file://");
+    PathBuf::from(if cfg!(windows) { path.trim_start_matches('/') } else { path })
 }
 
 /// A release as `scripts/publish.sh` packs it: a signed app (on a Mac; a
@@ -34,9 +57,11 @@ enum Host {
 fn tarball_with(dir: &Path, version: &str, host: Option<Host>) -> PathBuf {
     let content = dir.join(format!("content-{version}"));
     std::fs::create_dir_all(&content).expect("content");
-    let mut files = vec!["factoryd", "backend-version"];
+    let factoryd = backend();
+    let apps_host = factoryd::home::program("claktory-apps");
+    let mut files = vec![factoryd.as_str(), "backend-version"];
     if let Some(host) = host {
-        let path = content.join("claktory-apps");
+        let path = content.join(&apps_host);
         match host {
             // A real Mach-O, signed (ad hoc) as releases sign theirs.
             Host::Signed if cfg!(target_os = "macos") => {
@@ -45,9 +70,9 @@ fn tarball_with(dir: &Path, version: &str, host: Option<Host>) -> PathBuf {
             }
             _ => std::fs::write(&path, "not signed").expect("host"),
         }
-        files.push("claktory-apps");
+        files.push(&apps_host);
     }
-    std::fs::write(content.join("factoryd"), format!("backend {version}")).expect("factoryd");
+    std::fs::write(content.join(&factoryd), format!("backend {version}")).expect("factoryd");
     std::fs::write(content.join("backend-version"), format!("{version}\n")).expect("backend-version");
     let tarball = dir.join(format!("factory-{version}.tar.gz"));
     if !cfg!(target_os = "macos") {
@@ -77,7 +102,7 @@ fn publish(dir: &Path, version: &str, tarball: &Path, sha256: Option<&str>) -> S
     let bytes = std::fs::read(tarball).expect("tarball");
     let hash: String = Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect();
     let here = serde_json::json!({
-        "url": format!("file://{}", tarball.display()),
+        "url": file_url(tarball),
         "sha256": sha256.unwrap_or(&hash),
         "size": bytes.len(),
     });
@@ -86,13 +111,14 @@ fn publish(dir: &Path, version: &str, tarball: &Path, sha256: Option<&str>) -> S
     manifest["min_macos"] = "12.0".into();
     manifest["archs"] = serde_json::json!(["arm64", "x86_64"]);
     manifest["linux"] = serde_json::json!({ std::env::consts::ARCH: here });
+    manifest["windows"] = serde_json::json!({ std::env::consts::ARCH: here });
     write_manifest(dir, &manifest)
 }
 
 fn write_manifest(dir: &Path, manifest: &serde_json::Value) -> String {
     let path = dir.join("latest.json");
     std::fs::write(&path, manifest.to_string()).expect("manifest");
-    format!("file://{}", path.display())
+    file_url(&path)
 }
 
 fn latest(dir: &Path) -> String {
@@ -118,7 +144,7 @@ async fn a_newer_published_release_is_downloaded_and_offered() {
     let mut channel = Channel::new(home(&dir), url);
     assert_eq!(channel.check().await.expect("check"), Checked::Downloaded("2026.11.20-1012".into()));
     let release = home(&dir).releases().join("2026.11.20-1012");
-    assert_eq!(std::fs::read_to_string(release.join("factoryd")).expect("factoryd"), "backend 2026.11.20-1012");
+    assert_eq!(std::fs::read_to_string(release.join(backend())).expect("factoryd"), "backend 2026.11.20-1012");
     assert_eq!(release.join("Factory.app/Contents/Info.plist").is_file(), cfg!(target_os = "macos"));
     assert_eq!(latest(&dir), "2026.11.20-1012");
     assert_eq!(release_files(&dir), ["2026.11.20-1012", "latest"]);
@@ -163,7 +189,7 @@ async fn a_release_carries_its_apps_host_and_on_a_mac_only_a_signed_one() {
     let dir = temp_dir();
     let url = publish(&dir, "v0.1.10", &tarball_with(&dir, "v0.1.10", Some(Host::Signed)), None);
     assert_eq!(Channel::new(home(&dir), url).check().await.expect("check"), Checked::Downloaded("v0.1.10".into()));
-    assert!(home(&dir).releases().join("v0.1.10/claktory-apps").is_file());
+    assert!(home(&dir).releases().join("v0.1.10").join(factoryd::home::program("claktory-apps")).is_file());
 
     let dir = temp_dir();
     let url = publish(&dir, "v0.1.10", &tarball_with(&dir, "v0.1.10", Some(Host::Unsigned)), None);
@@ -190,6 +216,42 @@ async fn a_release_without_a_backend_is_refused() {
     assert_eq!(latest(&dir), "");
 }
 
+/// A Windows release's backend is `factoryd.exe`: one with only a bare
+/// `factoryd` (a Mac or Linux backend's name) has none.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_windows_release_without_factoryd_exe_is_refused() {
+    let dir = temp_dir();
+    let content = dir.join("bare");
+    std::fs::create_dir_all(&content).expect("content");
+    std::fs::write(content.join("factoryd"), "backend").expect("factoryd");
+    let tarball = dir.join("bare.tar.gz");
+    run(tar().arg("-czf").arg(&tarball).arg("-C").arg(&content).arg("factoryd"));
+    let url = publish(&dir, "v0.1.10", &tarball, None);
+    let error = Channel::new(home(&dir), url).check().await.expect_err("no factoryd.exe");
+    assert!(error.to_string().contains("it has no factoryd.exe"), "{error}");
+    assert_eq!(release_files(&dir), Vec::<String>::new());
+}
+
+/// A Windows release carries no links: one whose tarball holds a hard
+/// link (a file with a second name) is refused, and nothing of it is kept.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_windows_release_holding_a_link_is_refused() {
+    let dir = temp_dir();
+    let content = dir.join("linked");
+    std::fs::create_dir_all(&content).expect("content");
+    std::fs::write(content.join("factoryd.exe"), "backend").expect("factoryd");
+    std::fs::write(content.join("backend-version"), "v0.1.10\n").expect("backend-version");
+    std::fs::hard_link(content.join("factoryd.exe"), content.join("claktory-apps.exe")).expect("link");
+    let tarball = dir.join("linked.tar.gz");
+    run(tar().arg("-czf").arg(&tarball).arg("-C").arg(&content).args(["factoryd.exe", "backend-version", "claktory-apps.exe"]));
+    let url = publish(&dir, "v0.1.10", &tarball, None);
+    let error = Channel::new(home(&dir), url).check().await.expect_err("a link");
+    assert!(error.to_string().contains("it holds a link"), "{error}");
+    assert_eq!(release_files(&dir), Vec::<String>::new());
+}
+
 /// A Factory on a date-stamped release (as every one was before v0.1.0) gets
 /// the first numbered one, and numbered releases keep their order past 9.
 #[tokio::test]
@@ -198,7 +260,7 @@ async fn numbered_releases_are_newer_than_date_stamps_and_ordered_by_number() {
     let releases = home(&dir).releases();
     for old in ["2026.11.19-1958", "v0.1.8", "v0.1.9"] {
         std::fs::create_dir_all(releases.join(old)).expect("release");
-        std::fs::write(releases.join(old).join("factoryd"), "old").expect("factoryd");
+        std::fs::write(releases.join(old).join(backend()), "old").expect("factoryd");
     }
     std::fs::write(releases.join("latest"), "v0.1.9\n").expect("latest");
     let url = publish(&dir, "v0.1.10", &tarball(&dir, "v0.1.10"), None);
@@ -209,7 +271,7 @@ async fn numbered_releases_are_newer_than_date_stamps_and_ordered_by_number() {
     let dir = temp_dir();
     let releases = home(&dir).releases();
     std::fs::create_dir_all(releases.join("2026.11.19-1958")).expect("release");
-    std::fs::write(releases.join("2026.11.19-1958/factoryd"), "old").expect("factoryd");
+    std::fs::write(releases.join("2026.11.19-1958").join(backend()), "old").expect("factoryd");
     std::fs::write(releases.join("latest"), "2026.11.19-1958\n").expect("latest");
     let url = publish(&dir, "v0.1.0", &tarball(&dir, "v0.1.0"), None);
     assert_eq!(Channel::new(home(&dir), url).check().await.expect("check"), Checked::Downloaded("v0.1.0".into()));
@@ -222,7 +284,7 @@ async fn only_the_newest_three_releases_are_kept() {
     let releases = home(&dir).releases();
     for old in ["2026.11.17-0900", "2026.11.18-0900", "2026.11.19-0900"] {
         std::fs::create_dir_all(releases.join(old)).expect("release");
-        std::fs::write(releases.join(old).join("factoryd"), "old").expect("factoryd");
+        std::fs::write(releases.join(old).join(backend()), "old").expect("factoryd");
     }
     std::fs::write(releases.join("latest"), "2026.11.19-0900\n").expect("latest");
     let url = publish(&dir, "2026.11.20-1012", &tarball(&dir, "2026.11.20-1012"), None);
@@ -235,7 +297,7 @@ async fn only_the_newest_three_releases_are_kept() {
 fn built_here(dir: &Path, version: &str) {
     let release = home(dir).releases().join(version);
     std::fs::create_dir_all(&release).expect("release");
-    std::fs::write(release.join("factoryd"), format!("backend {version}")).expect("factoryd");
+    std::fs::write(release.join(backend()), format!("backend {version}")).expect("factoryd");
     std::fs::write(release.join("source"), "0123abcd\n").expect("source");
 }
 
@@ -286,7 +348,7 @@ async fn a_release_the_channel_pulled_is_deleted_and_no_longer_offered() {
     // (no mark, but not built here either).
     built_here(&dir, "v0.1.11");
     std::fs::create_dir_all(releases.join("v0.1.12")).expect("release");
-    std::fs::write(releases.join("v0.1.12/factoryd"), "backend v0.1.12").expect("factoryd");
+    std::fs::write(releases.join("v0.1.12").join(backend()), "backend v0.1.12").expect("factoryd");
     std::fs::write(releases.join("latest"), "v0.1.12\n").expect("latest");
 
     // The channel moves back to v0.1.9, in a newer manifest: what it gave
@@ -446,6 +508,7 @@ async fn a_pulled_release_stops_being_offered() {
     manifest["version"] = "v0.1.9".into();
     manifest["archs"] = serde_json::json!(["riscv64"]);
     manifest["linux"] = serde_json::json!({});
+    manifest["windows"] = serde_json::json!({});
     manifest["issued_ms"] = 2000.into();
     write_manifest(&channel, &manifest);
     factory.check_on_schedule().await;
@@ -467,6 +530,7 @@ async fn a_release_with_nothing_for_this_machine_is_skipped() {
     // Built for another architecture, and with no Linux build for this one.
     manifest["archs"] = serde_json::json!(["riscv64"]);
     manifest["linux"] = serde_json::json!({});
+    manifest["windows"] = serde_json::json!({});
     write_manifest(&dir, &manifest);
     assert_eq!(Channel::new(home(&dir), url).check().await.expect("check"), Checked::Skipped("2026.11.20-1012".into()));
     assert_eq!(latest(&dir), "");
@@ -600,7 +664,7 @@ async fn check_for_updates_downloads_a_newer_release_and_says_so() {
 async fn check_for_updates_says_why_it_couldnt() {
     let dir = temp_dir();
     let (addr, factory) = start(&dir).await;
-    factory.use_channel(&format!("file://{}", dir.join("nothing-here.json").display()));
+    factory.use_channel(&file_url(&dir.join("nothing-here.json")));
     let (mut client, _, _) = Client::connect(addr).await;
     client.ok(check()).await;
     let (_, done) = check_until(&mut client, |check| matches!(check.state(), UpdateCheckState::Failed | UpdateCheckState::UpToDate)).await;
@@ -612,7 +676,7 @@ async fn check_for_updates_says_why_it_couldnt() {
     factory.check_on_schedule().await;
     let channel = temp_dir();
     let url = publish(&channel, "v0.1.10", &tarball(&channel, "v0.1.10"), None);
-    std::fs::rename(url.trim_start_matches("file://"), dir.join("nothing-here.json")).expect("move the manifest");
+    std::fs::rename(url_path(&url), dir.join("nothing-here.json")).expect("move the manifest");
     factory.check_on_schedule().await;
     let (seen, done) = check_until(&mut client, |check| check.state() == UpdateCheckState::Ready).await;
     assert!(!seen.contains(&UpdateCheckState::UpToDate), "{seen:?}");

@@ -1,4 +1,4 @@
-// Selecting in the file viewer (Matt): a drag selects what's under the
+// Selecting in the file viewer: a drag selects what's under the
 // pointer, from top to bottom of a long Markdown file with tables,
 // formatted and plain, commenting or not.
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -111,7 +111,7 @@ Future<String> _drag(
     await tester.pump();
   }
   // Held still a moment, as a hand does before letting go: inside the
-  // view, nothing scrolls (Abbacchio: at 125% the conversation ran off).
+  // view, nothing scrolls (at 125% the conversation ran off).
   if (hold && scrolled.isNotEmpty) {
     for (var i = 0; i < 30; i++) {
       await tester.pump(const Duration(milliseconds: 16));
@@ -130,7 +130,7 @@ Future<String> _drag(
 }
 
 void main() {
-  // Zucchero's row 105: a selection survived the Formatted/Plain toggle at
+  // A selection survived the Formatted/Plain toggle at
   // the same character offset, landing on other words.
   testWidgets('switching to Plain and back drops what was selected', (
     tester,

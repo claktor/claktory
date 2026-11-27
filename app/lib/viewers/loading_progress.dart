@@ -1,4 +1,4 @@
-// A big file on its way (#375): how much of it has come, with a bar, so a
+// A big file on its way: how much of it has come, with a bar, so a
 // slow link shows it's moving; and while the connection is away, that it
 // carries on from there once it's back.
 import 'package:fixnum/fixnum.dart';
@@ -25,12 +25,12 @@ class LoadingProgress extends StatelessWidget {
   /// The bar's length.
   static const barWidth = 200.0;
 
-  /// What's coming, on top: "river.mp4" (#417), so what's on its way is
+  /// What's coming, on top: "river.mp4", so what's on its way is
   /// never only a bar.
   final String? name;
 
   /// A line under it: "Full size: this Claktory can't make a smaller
-  /// copy." (#379).
+  /// copy.".
   final String? note;
 
   /// What's loading: "Loading video…".
@@ -87,7 +87,7 @@ class LoadingProgress extends StatelessWidget {
                         child: ColoredBox(color: palette.selected),
                       ),
                       // Its own height: as a loose child of the stack the
-                      // fill had none, and the bar never moved (#417).
+                      // fill had none, and the bar never moved.
                       PositionedDirectional(
                         key: const ValueKey('loading-fill'),
                         start: 0,

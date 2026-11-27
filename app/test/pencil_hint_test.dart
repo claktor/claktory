@@ -1,4 +1,4 @@
-// Apple Pencil on an image pane (#362 I2): drawing is only on PDFs for
+// Apple Pencil on an image pane: drawing is only on PDFs for
 // now, so a Pencil's touch on an image says so at the pane's foot, and how
 // to comment instead. A finger, a mouse and anywhere but an iPad: nothing.
 import 'package:factory_app/ipad/pencil_hint.dart';

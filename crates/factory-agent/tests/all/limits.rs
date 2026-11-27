@@ -1,6 +1,7 @@
 use factory_agent::clock::parse_iso_ms;
 use factory_agent::limits::{
-    UsageLimit, UsageReset, chatgpt_plan, parse_anthropic, parse_anthropic_plan, parse_anthropic_resets, parse_codex, parse_codex_resets,
+    ExtraUsage, UsageLimit, UsageReset, chatgpt_plan, parse_anthropic, parse_anthropic_extra, parse_anthropic_plan, parse_anthropic_resets,
+    parse_codex, parse_codex_resets,
 };
 use serde_json::json;
 
@@ -41,6 +42,26 @@ fn anthropic_reports_the_weekly_limit_and_each_model_scoped_one() {
         parse_anthropic(&usage),
         [limit("weekly", "Weekly", 15.0, 1_795_554_000_573), limit("weekly_fable", "Weekly (Fable)", 15.0, 1_795_554_000_574)]
     );
+}
+
+/// Anthropic's extra usage: whether requests go on past the
+/// plan's limits, billed, and what they spent, in cents (`used_credits`
+/// 1372 is 13.72, github.com/pulse-null/pulse-limits/issues/27).
+#[test]
+fn anthropic_extra_usage_is_read_in_minor_units() {
+    let usage = json!({"extra_usage": {
+        "is_enabled": true, "monthly_limit": 5000, "used_credits": 1372.0, "utilization": null,
+        "currency": "EUR", "decimal_places": 2, "spend_limit_reached": false
+    }});
+    let extra =
+        ExtraUsage { enabled: true, used_minor: 1372, limit_minor: 5000, currency: "EUR".into(), decimal_places: 2, limit_reached: false };
+    assert_eq!(parse_anthropic_extra(&usage), Some(extra));
+    // Off, no cap and nothing said of the rest: off, no cap, none spent.
+    let off = parse_anthropic_extra(&json!({"extra_usage": {"is_enabled": false, "monthly_limit": null}})).expect("read");
+    assert_eq!((off.enabled, off.used_minor, off.limit_minor, off.decimal_places), (false, 0, 0, 2));
+    // A usage without the block, or with it null: nothing known.
+    assert_eq!(parse_anthropic_extra(&json!({"five_hour": null})), None);
+    assert_eq!(parse_anthropic_extra(&json!({"extra_usage": null})), None);
 }
 
 #[test]

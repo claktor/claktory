@@ -31,9 +31,13 @@ fn text(result: &ToolResult) -> String {
 
 /// A copy of `program` named `name` in `dir`. macOS kills a copy of a
 /// system binary that keeps Apple's signature, so it's signed again, ad hoc.
+/// cp makes it, never this process: on Linux a file still open for writing
+/// can't run ("Text file busy"), and a command another test starts while
+/// this one writes would keep it open.
 fn copy_named(dir: &Path, program: &str, name: &str) -> PathBuf {
     let path = dir.join(name);
-    std::fs::copy(program, &path).expect("copy");
+    let copied = std::process::Command::new("cp").arg(program).arg(&path).status().expect("cp");
+    assert!(copied.success(), "cp {program}");
     if cfg!(target_os = "macos") {
         // codesign fails now and then on a busy Mac: tried 3 times.
         let mut signed = None;
@@ -77,6 +81,8 @@ fn what_asks_who_you_are_is_known_by_its_name_or_its_file() {
     assert_eq!(asking(&process("run0", "/usr/bin/run0")), Some("run0"));
     assert_eq!(asking(&process("sudoku", "/usr/local/bin/sudoku")), None);
     assert_eq!(asking(&process("bash", "/bin/bash")), None);
+    // container without arguments to read (pid 0) is left alone.
+    assert_eq!(asking(&process("container", "/opt/homebrew/bin/container")), None);
     assert_eq!(told("sudo"), "sudo isn't for agents: it was stopped. Ask the person to run it themselves.");
 }
 
@@ -85,20 +91,22 @@ async fn sudo_and_the_like_are_stopped_in_agents_commands_and_the_agent_is_told(
     let dir = tempfile::tempdir().expect("tempdir");
     let bin = dir.path().join("bin");
     std::fs::create_dir_all(&bin).expect("bin");
+    // Stand-ins, which only the guard under test stops (`like`).
     for name in ["sudo", "doas", "su", "pkexec", "run0", "authopen"] {
-        copy_named(&bin, "/bin/sleep", name);
+        copy_named(&bin, "/bin/sleep", &like(name));
     }
-    copy_named(&bin, "/bin/bash", "osascript");
+    copy_named(&bin, "/bin/bash", &like("osascript"));
+    copy_named(&bin, "/bin/bash", &like("container"));
 
     // In the foreground, through pipes.
     let bash = tool(dir.path(), None);
     for name in ["sudo", "doas", "su", "pkexec", "run0", "authopen"] {
-        let (said, took) = run(&bash, &format!("'{}' 30", bin.join(name).display())).await;
+        let (said, took) = run(&bash, &format!("'{}' 30", bin.join(like(name)).display())).await;
         assert!(said.contains(&told(name)), "{name}: {said}");
         assert!(took < Duration::from_secs(25), "{name} was stopped, not waited for: {took:?}");
     }
     // osascript only with administrator privileges.
-    let osascript = bin.join("osascript");
+    let osascript = bin.join(like("osascript"));
     let (said, _) = run(&bash, &format!("'{}' -c 'sleep 1; echo plain; true' x 'display dialog'", osascript.display())).await;
     assert!(said.contains("plain") && !said.contains("isn't for agents"), "{said}");
     let (said, _) =
@@ -129,6 +137,23 @@ async fn sudo_and_the_like_are_stopped_in_agents_commands_and_the_agent_is_told(
     let (said, _) = run(&bash, &format!("'{}' '{}'", osascript.display(), scripts.join("plain.applescript").display())).await;
     assert!(said.contains("plain") && !said.contains("isn't for agents"), "{said}");
 
+    // container only when it names Claktory's browser: a VM or
+    // volume called claktory-browser…, in any subcommand or option. The copy
+    // of bash runs a script, the rest its arguments.
+    let container = bin.join(like("container"));
+    for words in [
+        "exec claktory-browser-1a2b cat /profile/Cookies",
+        "run -v claktory-browser-1a2b:/p alpine ls /p",
+        "run --mount source=Claktory-Browser-1a2b,target=/p alpine",
+        "volume rm claktory-browser-1a2b",
+        "cp claktory-browser-1a2b:/profile/Cookies .",
+    ] {
+        let (said, _) = run(&bash, &format!("'{}' -c 'sleep 2; echo reached' x {words}", container.display())).await;
+        assert!(said.contains(&told("container on Claktory's browser")) && !said.contains("reached"), "{words}: {said}");
+    }
+    let (said, _) = run(&bash, &format!("'{}' -c 'sleep 1; echo listed' x list --all", container.display())).await;
+    assert!(said.contains("listed") && !said.contains("isn't for agents"), "{said}");
+
     // Through a log, in the foreground and in the background.
     let (sender, mut finished) = tokio::sync::mpsc::unbounded_channel();
     let started: Arc<Mutex<Vec<factory_agent::Task>>> = Arc::default();
@@ -144,10 +169,10 @@ async fn sudo_and_the_like_are_stopped_in_agents_commands_and_the_agent_is_told(
         }),
     };
     let bash = tool(dir.path(), Some(background));
-    let (said, took) = run(&bash, &format!("echo before; '{}' 30; echo after", bin.join("sudo").display())).await;
+    let (said, took) = run(&bash, &format!("echo before; '{}' 30; echo after", bin.join(like("sudo")).display())).await;
     assert!(said.starts_with("before\n") && said.contains(&told("sudo")), "{said}");
     assert!(took < Duration::from_secs(25), "{took:?}");
-    let args = json!({"command": format!("'{}' 30", bin.join("doas").display()), "run_in_background": true});
+    let args = json!({"command": format!("'{}' 30", bin.join(like("doas")).display()), "run_in_background": true});
     bash.execute(&args, &CancellationToken::new(), &|_| {}).await.expect("started");
     let done = tokio::time::timeout(HANG, finished.recv()).await.expect("finished in time").expect("finished");
     assert!(done.tail.contains(&told("doas")), "{}", done.tail);
@@ -192,12 +217,20 @@ fn running(path: &Path) -> Vec<i32> {
     }
 }
 
+/// The name `program`'s fakes run under: Claktory's own guard stops sudo
+/// and the rest in the agent's command that runs these tests, so the guard
+/// under test knows "asks-like-sudo" as sudo (`stand_ins_for_test`).
+fn like(program: &str) -> String {
+    factory_agent::tools::asking::stand_ins_for_test();
+    format!("{}{program}", factory_agent::tools::asking::STAND_IN)
+}
+
 /// A fake sudo (a copy of sleep) in a folder of its own, so each case
 /// finds only its own.
 fn fake_sudo(dir: &Path, case: &str) -> PathBuf {
     let bin = dir.join(case);
     std::fs::create_dir_all(&bin).expect("bin");
-    copy_named(&bin, "/bin/sleep", "sudo")
+    copy_named(&bin, "/bin/sleep", &like("sudo"))
 }
 
 /// Runs `script` with sh in a group of its own, with `$S` the fake sudo,
@@ -269,6 +302,35 @@ fn sudo_is_stopped_within_250_ms_however_a_command_starts_it() {
         let _ = child.kill();
         let _ = child.wait();
     }
+}
+
+/// On Linux, what a stopped program started is stopped with it, while it's
+/// still this user's: sudo started the runner, say.
+#[cfg(target_os = "linux")]
+#[test]
+fn what_a_stopped_program_started_is_stopped_too() {
+    use std::os::unix::process::CommandExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("bin");
+    let sudo = copy_named(&bin, "/bin/bash", &like("sudo"));
+    let started = copy_named(&bin, "/bin/sleep", "runner");
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "\"$S\" -c '\"$R\" 30 & wait'"])
+        .env("S", &sudo)
+        .env("R", &started)
+        .process_group(0)
+        .spawn()
+        .expect("spawn");
+    let guard = Guard::watch(child.id(), "lea", None);
+    let began = Instant::now();
+    while guard.said().is_empty() || !running(&started).is_empty() || !running(&sudo).is_empty() {
+        assert!(began.elapsed() < Duration::from_secs(5), "still running: {:?} {:?}", running(&sudo), running(&started));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(guard.said(), told("sudo"));
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// One of 16 commands running at once is stopped as fast, and the other 15

@@ -1,10 +1,10 @@
-//! Continue on another provider (#341): an agent or a chat waiting out its
+//! Continue on another provider: an agent or a chat waiting out its
 //! provider's usage limit (or credit) can switch, at the person's tap, to
 //! the same model on another signed-in provider with room, or the closest
 //! one (OpenRouter carries Anthropic's and OpenAI's models). Never by
 //! itself: another provider may cost the person money. Each switch is kept
 //! in factory.db, and once the first provider has room again it goes back
-//! by itself (friend bug #8 A1), which only saves money, or with one tap
+//! by itself, which only saves money, or with one tap
 //! sooner; the person's own model change forgets it.
 
 use std::collections::{HashMap, HashSet};
@@ -29,11 +29,11 @@ CREATE TABLE usage_switches (
 ";
 
 /// A switch doesn't go back by itself before `hold_until` (ms since 1970):
-/// it went back once and reached the limit again (friend bug #8 A1).
+/// it went back once and reached the limit again.
 pub(crate) const HOLD: &str = "ALTER TABLE usage_switches ADD COLUMN hold_until INTEGER NOT NULL DEFAULT 0;";
 
 /// Whether waits on a usage limit continue on another provider by
-/// themselves (friend bug #8 A2): off unless the person turns it on.
+/// themselves: off unless the person turns it on.
 pub(crate) const AUTO: &str = "
 CREATE TABLE usage_settings (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
 ";
@@ -369,8 +369,8 @@ fn model_and_effort(factory: &Factory, inner: &Inner, id: &str) -> Option<(Strin
 }
 
 /// How many agents and chats draw on each pool now, by provider: (provider
-/// id, Fable's own pool). An account is shown in use only for these (U1,
-/// #343): a provider no agent or chat runs on isn't, whatever has room.
+/// id, Fable's own pool). An account is shown in use only for these: a
+/// provider no agent or chat runs on isn't, whatever has room.
 pub(crate) fn pools_in_use(factory: &Factory, inner: &Inner) -> HashMap<(String, bool), u32> {
     let agents = inner.config.agents.iter().map(|agent| agent.model.clone());
     let chats = factory.chats.ids().into_iter().filter_map(|id| factory.chats.model_and_effort(&id).map(|(model, _)| model));
@@ -475,8 +475,8 @@ async fn run_on(factory: &Arc<Factory>, id: &str, model: &str, effort: &str, why
     }
 }
 
-/// What the person did from the device `from`, as an agent hears it (friend
-/// bug #43): "Matt changed it on Matt's Mac". `person`: `Config::person`.
+/// What the person did from the device `from`, as an agent hears it: "Matt
+/// changed it on Matt's Mac". `person`: `Config::person`.
 pub(crate) fn by_person(person: &str, from: &factory_agent::SentFrom, did: &str) -> String {
     match from.device.trim() {
         "" => format!("{person} {did} in the app"),
@@ -627,7 +627,7 @@ impl Factory {
     }
 }
 
-/// U19 (#343): what a new agent or chat on `model` (the default one)
+/// U19: what a new agent or chat on `model` (the default one)
 /// starts on while others are switched away from its provider and it still
 /// has no room: their provider's alternative, as a switch of its own that
 /// goes back with them. None when it starts on `model` as it is.
@@ -661,7 +661,7 @@ pub(crate) fn set_auto_continue(factory: &Arc<Factory>, on: bool) -> Result<(), 
     Ok(())
 }
 
-/// Friend bug #8 A2: with Continue automatically on, an agent or chat
+/// With Continue automatically on, an agent or chat
 /// waiting on a usage limit continues on its alternative by itself, if it
 /// has one, and its conversation says so. True when it switched.
 pub(crate) async fn continue_by_itself(factory: &Arc<Factory>, id: &str) -> bool {
@@ -692,7 +692,7 @@ pub(crate) async fn continue_by_itself(factory: &Arc<Factory>, id: &str) -> bool
     true
 }
 
-/// Friend bug #8 A1: every switch whose provider has room again goes back
+/// Every switch whose provider has room again goes back
 /// by itself, unless it's held (`HOLD`). The model changes from the agent's
 /// next step, as the person's change would; its conversation says so. Run
 /// on every usage check, which follows usage reads and resets.
@@ -856,7 +856,7 @@ mod tests {
     /// U11: a model's own weekly limit at 100% leaves the provider without
     /// room for that model's pool only. The read is kept apart from the
     /// listing, whose account has only an empty placeholder (models.rs), as
-    /// in a running Claktory (row 780).
+    /// in a running Claktory.
     #[test]
     fn a_full_opus_limit_leaves_room_for_the_other_models() {
         let window = |id: &str, used_percent: f64| v1::UsageWindow { id: id.into(), used_percent, ..Default::default() };

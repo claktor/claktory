@@ -18,7 +18,7 @@ import 'device_confirm_test.dart' show FakeAccountApi, signIn;
 import 'dm_fakes.dart';
 import 'harness.dart';
 
-// People's messages on this device (E5, Trish's words): setting up the
+// People's messages on this device: setting up the
 // first device, a new one's code, adding it by scanning, and removing one.
 
 Future<Harness> _show(
@@ -121,7 +121,7 @@ void main() {
       await ipad.e2ee.start();
       await ipad.e2ee.startNewKey();
       await ipad.e2ee.sync();
-      // Taken out of the chats, never signed out on its own (Fugo).
+      // Taken out of the chats, never signed out on its own.
       expect(worker.signedOut['matt'] ?? const <String>{}, isEmpty);
       await _show(tester, ipad.e2ee);
       expect(find.text('Still on your old security key'), findsOneWidget);
@@ -174,7 +174,7 @@ void main() {
         find.text('For your security, sign in again to start over.'),
         findsOneWidget,
       );
-      // Again with the account it's signed in to, never another (row 644).
+      // Again with the account it's signed in to, never another.
       await tester.tap(find.text('Sign in again…'));
       await _settle(tester);
       expect(find.text('matt@example.com'), findsOneWidget);
@@ -257,7 +257,7 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
   });
 
-  // Zucchero's row 548: the Claktory answers the first routes before it
+  // The Claktory answers the first routes before it
   // placed itself from the list that now names it; the list is the
   // person's choice, so it reads as this Claktory at once, with no Keep.
   testWidgets('set up on the Claktory the app shows: this Claktory, even '
@@ -379,7 +379,7 @@ void main() {
     expect(find.text('Paste code instead'), findsOneWidget);
   });
 
-  // Row 564: the new device's app closed before the other added it; its
+  // The new device's app closed before the other added it; its
   // code's keys went with it.
   testWidgets('a code its app closed on: the new code says the earlier '
       "one no longer works, and the device it listed says it never set "
@@ -429,7 +429,7 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
-  // Fugo 39894: a Claktory the person's account doesn't list says so, and
+  // A Claktory the person's account doesn't list says so, and
   // offers nothing to keep messages on it.
   testWidgets('a Claktory on another account says so, with no Keep', (
     tester,
@@ -670,7 +670,7 @@ void main() {
       await tester.tap(find.text('Lock out'));
       await _settle(tester);
       expect(find.text('Lock out ipad?'), findsNothing);
-      // Fugo: signed out before the new key went to the worker.
+      // Signed out before the new key went to the worker.
       expect(
         worker.log.indexOf('POST /v1/devices/remove'),
         lessThan(worker.log.indexOf('POST me/keys/rotate')),
@@ -727,7 +727,7 @@ void main() {
       expect(mac.device.identity, old);
 
       // Kept as under way: Your devices says so too (R5b), and what's
-      // still true (Fugo 41048).
+      // still true.
       expect(
         find.text(
           "ipad and phone can't read new messages, but Claktory couldn't "
@@ -750,7 +750,7 @@ void main() {
       ]);
     });
 
-    // Fugo 43752: the worker's 3 new keys a day, met: said plainly, with
+    // The worker's 3 new keys a day, met: said plainly, with
     // when it carries on by itself, and no Try again in Your devices.
     testWidgets("the worker refusing a new key for today says it isn't "
         'finished and when it carries on', (tester) async {
@@ -774,7 +774,7 @@ void main() {
       expect(find.text('Try again'), findsOneWidget);
     });
 
-    // E11-6 (Fugo 41048, Abbacchio's row 12): the sign-in a new key wants,
+    // E11-6: the sign-in a new key wants,
     // cancelled, never stalls it silently: Your devices says what's still
     // true and asks to sign in again, after a relaunch too.
     testWidgets('the sign-in cancelled: said, with Sign in again…, which '
@@ -822,7 +822,7 @@ void main() {
     tester,
   ) async {
     final phone = FakeEndpoint(FakeWorker(), 'matt', 'phone');
-    // Its store is here: the key was this install's own (row 202).
+    // Its store is here: the key was this install's own.
     phone.storeKept = true;
     phone.keys.unreadable.add(DmKeyName.leaf);
     await phone.e2ee.start();

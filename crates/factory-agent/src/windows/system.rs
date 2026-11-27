@@ -14,7 +14,8 @@ use windows_sys::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG
 use windows_sys::Win32::Security::{GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows_sys::Win32::System::SystemInformation::{GetSystemDirectoryW, GetSystemTimeAsFileTime, GetTickCount64};
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentThread, GetProcessTimes, GetThreadTimes, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    GetCurrentProcess, GetCurrentThread, GetProcessTimes, GetThreadTimes, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    QueryFullProcessImageNameW,
 };
 
 use super::wide::{check, from_wide_ptr, owned, wide};
@@ -47,7 +48,7 @@ pub fn boot_time_ms() -> Option<u64> {
 /// A process, opened only to ask about it.
 pub fn open_process(pid: u32) -> std::io::Result<OwnedHandle> {
     // SAFETY: plain call; the handle is checked and owned.
-    owned(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) })
+    unsafe { owned(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)) }
 }
 
 /// When a process started, in FILETIME units: with its pid, what tells it
@@ -89,13 +90,19 @@ pub fn image_path(process: &OwnedHandle) -> String {
 /// last process by a moment, so it never counts as the command running.
 pub fn is_console_host(image: &str) -> bool {
     static HOST: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    let host = HOST.get_or_init(|| {
-        let mut buffer = vec![0u16; 1024];
-        // SAFETY: `buffer.len()` units to write; it returns how many were.
-        let size = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
-        (size > 0 && size < buffer.len()).then(|| format!("{}\\conhost.exe", String::from_utf16_lossy(&buffer[..size])))
-    });
+    let host = HOST.get_or_init(|| system_folder().map(|folder| folder.join("conhost.exe").to_string_lossy().into_owned()));
     host.as_deref().is_some_and(|host| host.eq_ignore_ascii_case(image))
+}
+
+/// Windows' system folder (`C:\Windows\System32`), as the system itself
+/// says (GetSystemDirectoryW), never from an environment variable a command
+/// could have set.
+pub fn system_folder() -> Option<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt as _;
+    let mut buffer = vec![0u16; 1024];
+    // SAFETY: `buffer.len()` units to write; it returns how many were.
+    let size = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) } as usize;
+    (size > 0 && size < buffer.len()).then(|| std::path::PathBuf::from(std::ffi::OsString::from_wide(&buffer[..size])))
 }
 
 /// The exit code a command gets when Claktory stops its job: an
@@ -119,8 +126,50 @@ pub fn ended_by(status: &ExitStatus) -> Option<&'static str> {
         0xC000_0374 => "heap corruption",
         0xC000_0135 => "a DLL wasn't found",
         0xC000_0142 => "a DLL failed to start",
+        // Git Bash's programs (Cygwin's) end by a signal with its number
+        // shifted into the second byte: `kill -TERM $$` gives 0x0F00.
+        code if code & 0xFF == 0 && (0x100..0x2000).contains(&code) => return signal_name((code >> 8) as i32),
         _ => return None,
     })
+}
+
+/// A signal's name by its number in Git Bash (Cygwin's numbering, which
+/// isn't Linux's past SIGSEGV); None for a number it doesn't have.
+pub fn signal_name(signal: i32) -> Option<&'static str> {
+    const NAMES: [&str; 31] = [
+        "SIGHUP",
+        "SIGINT",
+        "SIGQUIT",
+        "SIGILL",
+        "SIGTRAP",
+        "SIGABRT",
+        "SIGEMT",
+        "SIGFPE",
+        "SIGKILL",
+        "SIGBUS",
+        "SIGSEGV",
+        "SIGSYS",
+        "SIGPIPE",
+        "SIGALRM",
+        "SIGTERM",
+        "SIGURG",
+        "SIGSTOP",
+        "SIGTSTP",
+        "SIGCONT",
+        "SIGCHLD",
+        "SIGTTIN",
+        "SIGTTOU",
+        "SIGIO",
+        "SIGXCPU",
+        "SIGXFSZ",
+        "SIGVTALRM",
+        "SIGPROF",
+        "SIGWINCH",
+        "SIGLOST",
+        "SIGUSR1",
+        "SIGUSR2",
+    ];
+    usize::try_from(signal).ok().and_then(|signal| signal.checked_sub(1)).and_then(|index| NAMES.get(index)).copied()
 }
 
 /// An ExitStatus from the code Windows gave.
@@ -146,10 +195,23 @@ pub fn user_sid() -> std::io::Result<String> {
 }
 
 fn read_user_sid() -> std::io::Result<String> {
+    // SAFETY: the current process's pseudo-handle, valid while it runs.
+    process_user_sid(unsafe { GetCurrentProcess() })
+}
+
+/// The user a process runs as, as a SID string, from a handle to it open
+/// with PROCESS_QUERY_LIMITED_INFORMATION (`open_process`), held for the
+/// read so its pid can't name another process meanwhile.
+pub fn user_sid_of(process: &OwnedHandle) -> std::io::Result<String> {
+    process_user_sid(process.as_raw_handle())
+}
+
+fn process_user_sid(process: windows_sys::Win32::Foundation::HANDLE) -> std::io::Result<String> {
     let mut token = std::ptr::null_mut();
-    // SAFETY: the current process's pseudo-handle; the token is checked and owned.
-    check(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) })?;
-    let token = owned(token)?;
+    // SAFETY: an open process handle; the token is checked and owned.
+    check(unsafe { OpenProcessToken(process, TOKEN_QUERY, &raw mut token) })?;
+    // SAFETY: the fresh token handle, ours alone.
+    let token = unsafe { owned(token) }?;
     let mut size = 0u32;
     // SAFETY: asks only for the size.
     unsafe { GetTokenInformation(token.as_raw_handle(), TokenUser, std::ptr::null_mut(), 0, &raw mut size) };
@@ -171,7 +233,7 @@ fn read_user_sid() -> std::io::Result<String> {
 
 /// A security descriptor owned by this user whose DACL is protected
 /// (inherits nothing) and gives full access to this user and SYSTEM only:
-/// what Claktory's job objects get (Fugo 44974), and its private files and
+/// what Claktory's job objects get, and its private files and
 /// folders. Kept alive while something is created with it.
 pub struct Protected {
     descriptor: PSECURITY_DESCRIPTOR,
@@ -195,7 +257,7 @@ impl Protected {
 
     /// For a folder: the same, inherited by everything made inside it
     /// (OICI), so a file a library creates there with no DACL of its own
-    /// (SQLite's, a log) is private too (Fugo 45257, LOW 2).
+    /// (SQLite's, a log) is private too.
     pub fn for_folder() -> std::io::Result<Protected> {
         let sid = user_sid()?;
         Protected::from_sddl(&format!("O:{sid}D:P(A;OICI;GA;;;{sid})(A;OICI;GA;;;SY)"))
@@ -265,7 +327,7 @@ pub fn kernel_release() -> String {
 pub fn terminate_process(pid: u32) -> bool {
     use windows_sys::Win32::System::Threading::{PROCESS_TERMINATE, TerminateProcess};
     // SAFETY: plain call; the handle is checked and owned.
-    let Ok(process) = owned(unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) }) else { return false };
+    let Ok(process) = (unsafe { owned(OpenProcess(PROCESS_TERMINATE, 0, pid)) }) else { return false };
     // SAFETY: an open handle with PROCESS_TERMINATE.
     unsafe { TerminateProcess(process.as_raw_handle(), STOPPED_CODE) != 0 }
 }
@@ -362,7 +424,7 @@ const OWNER_AND_DACL: u32 =
 
 /// Whether a kernel object (a job) is owned by this user with the private
 /// DACL `Protected` gives: how a job found again by its name is told from
-/// one another account made under it (Fugo 45257 (a)).
+/// one another account made under it.
 pub fn is_private_object(handle: &OwnedHandle) -> std::io::Result<bool> {
     use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
     let (mut owner, mut dacl, mut descriptor) = (std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
@@ -440,6 +502,17 @@ pub fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_bash_signals_are_named_by_cygwin_numbers() {
+        assert_eq!(signal_name(15), Some("SIGTERM"));
+        assert_eq!(signal_name(9), Some("SIGKILL"));
+        assert_eq!(signal_name(30), Some("SIGUSR1"));
+        assert_eq!((signal_name(0), signal_name(32), signal_name(-1)), (None, None, None));
+        assert_eq!(ended_by(&exit_status(0x0F00)), Some("SIGTERM"));
+        assert_eq!(ended_by(&exit_status(STOPPED_CODE)), Some("stopped"));
+        assert_eq!((ended_by(&exit_status(3)), ended_by(&exit_status(0x0F01)), ended_by(&exit_status(0x2000))), (None, None, None));
+    }
 
     #[test]
     fn the_computer_started_in_the_past() {

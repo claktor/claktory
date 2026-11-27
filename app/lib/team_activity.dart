@@ -3,6 +3,8 @@ import 'package:flutter/widgets.dart';
 import 'characters/character.dart';
 import 'controls.dart';
 import 'identity.dart';
+import 'mobile/metrics.dart' show Touch;
+import 'mobile/platform_policy.dart' show PhonePlatformPolicy;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'usage_wait.dart' show atWork;
@@ -39,29 +41,32 @@ class TeamActivity extends StatelessWidget {
     final palette = Palette.of(context);
     final (:working, :total) = teamActivity(workspace);
     final count = working.length;
+    final touch = touchFirst(context);
+    // Android's 48dp where it asks for more than 44.
+    final target = PhonePlatformPolicy.least(context, Touch.target);
+    void open() => isPhoneLayout(context)
+        ? AppScope.openPage(context, AppPage.map)
+        : AppScope.togglePage(context, AppPage.map);
     return Semantics(
       button: true,
       label: '$count of $total agents working. Open the Map',
-      // Pointer only for now: its 24pt is short of a finger's target, which
-      // a tap of its own would claim for VoiceOver on a phone (until it
-      // grows, VoiceOver's touch there reaches it as a tap).
-      onTap: touchFirst(context)
-          ? null
-          : () => AppScope.togglePage(context, AppPage.map),
+      onTap: open,
       excludeSemantics: true,
       child: HoverCard(
         holdToShow: true,
         card: (context) => _TeamCard(working: working, total: total),
         child: Pressable(
-          onTap: () => isPhoneLayout(context)
-              ? AppScope.openPage(context, AppPage.map)
-              : AppScope.togglePage(context, AppPage.map),
+          onTap: open,
           builder: (context, hovered) => ConstrainedBox(
             // The usage circles' cell; taller with larger text, so the
-            // count is never cut (an iPad at the largest text).
-            constraints: const BoxConstraints(minHeight: 24),
+            // count is never cut (an iPad at the largest text). With touch,
+            // a finger's target around the same badge.
+            constraints: touch
+                ? BoxConstraints(minWidth: target, minHeight: target)
+                : const BoxConstraints(minHeight: 24),
             // As wide as the badge, in the footer's wrapping row too.
-            child: Center(
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
               widthFactor: 1,
               child: AnimatedContainer(
                 duration: Motion.fast,

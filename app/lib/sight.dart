@@ -56,7 +56,7 @@ class Sight {
   /// The person's pointer is over the window, so it's on screen, whatever
   /// the Mac last said: its report goes stale (flutter#155977), and a
   /// window uncovered while another app is in front can stay "unseen"
-  /// until it's clicked (friend bugs #31 and #40). The Mac is told, so it
+  /// until it's clicked. The Mac is told, so it
   /// says so again once the window really is covered.
   static void pointed() {
     if (shown.value) return;

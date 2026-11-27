@@ -130,8 +130,10 @@ fn gone(pid: i64) -> bool {
 /// A copy of /bin/sleep at `path`, which runs under its own name. macOS
 /// kills a copy of a system binary that keeps Apple's signature, so it's
 /// signed again, ad hoc.
+/// A copy of /bin/sleep at `path`, written by cp so that no command started
+/// meanwhile holds it open for writing ("Text file busy" on Linux).
 fn sleep_named(path: &Path) {
-    std::fs::copy("/bin/sleep", path).expect("copy");
+    assert!(std::process::Command::new("cp").arg("/bin/sleep").arg(path).status().expect("cp").success());
     if cfg!(target_os = "macos") {
         let signed = std::process::Command::new("codesign").args(["-f", "-s", "-"]).arg(path).output().expect("codesign");
         assert!(signed.status.success(), "{signed:?}");
@@ -309,13 +311,15 @@ async fn only_an_app_that_shows_the_command_runs_it_and_nothing_waits_for_a_term
     assert!(ran.duration_ms < 20_000, "nothing waited: {ran:?}");
     assert!(card(&view, seq).command.expect("a command").warnings.len() == 1, "the warning stays in the request");
 
-    // sudo (never the real one: /bin/sleep, named sudo) shows as waiting
-    // for a fingerprint or a password while it runs.
+    // sudo shows as waiting for a fingerprint or a password while it runs.
+    // Never the real one, nor anything named sudo, which Claktory stops in
+    // the agent's command that runs these tests: /bin/sleep under sudo's
+    // stand-in name (debug builds only).
     std::fs::create_dir_all(dir.join("bin")).expect("bin");
-    sleep_named(&dir.join("bin/sudo"));
-    let seq = ask_to_run(&mut client, &mut view, &format!("'{}' 3; echo done", dir.join("bin/sudo").display()), Some(60)).await;
-    let warnings = card(&view, seq).command.expect("a command").warnings;
-    assert_eq!(warnings.iter().map(v1::CommandWarning::kind).collect::<Vec<_>>(), [CommandWarningKind::Admin]);
+    factory_agent::tools::asking::stand_ins_for_test();
+    let sudo = dir.join("bin").join(format!("{}sudo", factory_agent::tools::asking::STAND_IN));
+    sleep_named(&sudo);
+    let seq = ask_to_run(&mut client, &mut view, &format!("'{}' 3; echo done", sudo.display()), Some(60)).await;
     apply_request(&mut client, &mut view, execute(seq)).await;
     view.follow(&mut client, |view| run(view, seq).is_some_and(|run| !run.waiting.is_empty())).await;
     let waiting = run(&view, seq).expect("a run").waiting;

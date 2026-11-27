@@ -1,4 +1,4 @@
-// The message box's recording strip (#497): the waveform centered on the
+// The message box's recording strip: the waveform centered on the
 // whole box however wide it is, newest in the middle.
 import 'dart:async';
 import 'dart:io';

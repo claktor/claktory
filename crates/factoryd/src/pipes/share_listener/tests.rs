@@ -120,7 +120,7 @@ async fn open(share: &Share, host: &str) -> String {
     set.split_once(':').unwrap().1.trim().split(';').next().unwrap().to_owned()
 }
 
-/// #505 (Sale rows 174–176, Fugo 46986): Android's Custom Tab opens the
+/// Android's Custom Tab opens the
 /// Open link as another site's navigation. Taken only as a GET of a
 /// document to the Open path with no Origin, checked before the code is
 /// spent; answered with Claktory's own page, which sets the key and moves to
@@ -148,7 +148,7 @@ async fn an_app_opened_link_opens_only_as_a_document_navigation_with_its_code() 
         let (status, head, body) = send(share.port, method, &own, &path, None, headers).await;
         assert_eq!(status, 403, "{method} {headers:?}: {head}");
         assert!(body.contains("opens only from Claktory"), "{body}");
-        // Readable on a phone (#505 row 655).
+        // Readable on a phone.
         assert!(body.contains("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"), "{body}");
     }
 
@@ -313,7 +313,7 @@ async fn upgrades_pass_the_same_checks_and_end_with_the_share() {
     assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, share.port)).await.is_err(), "still listening");
 }
 
-/// Fugo, #154: every 127.0.0.1 port is the same site to a browser, so
+/// Every 127.0.0.1 port is the same site to a browser, so
 /// another share's page there would send this one's key along. Only the
 /// share's own pages, and the person, get through.
 #[tokio::test]
@@ -361,7 +361,7 @@ async fn a_devices_forwarded_port_opens_the_same_share_with_the_same_checks() {
     let key = open(&share, &fallback).await;
     let (_, _, body) = get(share.port, &fallback, "/", Some(&format!("{key}; session=the-devices-own"))).await;
     assert_eq!(body, format!("host={fallback}\ncookie=\npath=/"));
-    // A phone's fallback is this address (Fugo 38931): every other port
+    // A phone's fallback is this address: every other port
     // of its 127.0.0.1 is another site, refused with the key, and its own
     // pages get through. The forward passes Host and Origin on untouched.
     let streams = share.streams.load(Ordering::SeqCst);

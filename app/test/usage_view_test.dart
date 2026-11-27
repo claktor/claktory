@@ -221,12 +221,40 @@ void main() {
     await settle(tester);
   });
 
+  testWidgets("unreachable, it says so in the app's words with Reconnect, "
+      "never the connection's, and asks again once it's back (Zucchero, "
+      'Bruno 52171)', (tester) async {
+    final harness = Harness(_workspace());
+    await harness.show(tester);
+    harness.backend.refuse = "Can't reach your Claktory right now.";
+    harness.page.value = AppPage.usage;
+    await settle(tester);
+    await tester.pump();
+    expect(find.text("Can't reach your Claktory right now."), findsNothing);
+    expect(find.textContaining("Can't reach"), findsOneWidget);
+    expect(find.textContaining('right now.'), findsOneWidget);
+    await tester.tap(find.text('Reconnect'));
+    expect(harness.backend.reconnectsAsked, 1);
+    harness.backend
+      ..refuse = null
+      ..usageReport = _report()
+      ..connected.value = false;
+    await tester.pump();
+    harness.backend.connected.value = true;
+    await settle(tester);
+    await tester.pump();
+    expect(find.textContaining("Can't reach"), findsNothing);
+    expect(find.text('June'), findsWidgets);
+    harness.page.value = AppPage.agent;
+    await settle(tester);
+  });
+
   testWidgets("the sidebar's Usage button opens it beside the conversation", (
     tester,
   ) async {
     final harness = Harness(_workspace());
     await harness.show(tester);
-    await tester.tap(find.bySemanticsLabel('Usage'));
+    await openFromMore(tester, 'Usage');
     await settle(tester);
     final layout = harness.backend.sent.lastWhere((m) => m.hasSetLayout());
     expect(layout.setLayout.toString(), contains('usage'));

@@ -1,7 +1,7 @@
 // The sidebar over the window in the real Shell (the simulator pass found
 // Esc and a tap beside it leaving it open).
+import 'package:factory_app/ipad/focus.dart' show IPadFocus;
 import 'package:factory_app/ipad/workbench.dart';
-import 'package:factory_app/layout.dart' show chatKind, layoutOf, leaves;
 import 'package:factory_app/shell.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart';
@@ -66,9 +66,8 @@ void main() {
     expect(focus.overlayOpen, isFalse);
   });
 
-  testWidgets('Needs you tapped in it shows its pane, and the sidebar goes', (
-    tester,
-  ) async {
+  testWidgets('Needs you tapped in it opens focus mode, and the sidebar '
+      'goes', (tester) async {
     final waiting = workspace();
     waiting.agents.last.waitingSeqs.add(Int64(3));
     final harness = Harness(waiting)..backend.appliesLayouts = true;
@@ -76,11 +75,6 @@ void main() {
     await tester.tap(find.byKey(const ValueKey('needs-you')));
     await pumpFrames(tester);
     expect(focus.overlayOpen, isFalse);
-    final agent = harness.backend.workspace.workspace.agents.firstWhere(
-      (agent) => agent.id == 'rivet',
-    );
-    final root = layoutOf(agent);
-    final shown = leaves(root).firstWhere((leaf) => leaf.leaf.kind != chatKind);
-    expect(focus.focusedIn('rivet', root), shown.id);
+    expect(find.byType(IPadFocus), findsOneWidget);
   });
 }

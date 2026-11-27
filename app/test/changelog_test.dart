@@ -1,5 +1,4 @@
 import 'package:factory_app/changelog.dart';
-import 'package:factory_app/controls.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:fixnum/fixnum.dart';
@@ -71,12 +70,8 @@ void main() {
 
   testWidgets("What's new shows every version on a timeline", (tester) async {
     final harness = await show(tester, offering(unreleased: true));
-    // The sidebar's button (the banner has one too).
-    await tester.tap(
-      find.byWidgetPredicate(
-        (widget) => widget is GlyphButton && widget.label == "What's new",
-      ),
-    );
+    // From the sidebar's More (the banner has a button too).
+    await openFromMore(tester, "What's new");
     await settle(tester);
     expect(harness.page.value, AppPage.changelog);
 

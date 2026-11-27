@@ -1,4 +1,4 @@
-// Where chats live (#213): "Chats" under the projects in the Mac's sidebar
+// Where chats live: "Chats" under the projects in the Mac's sidebar
 // and the phone's drawer, the newest 20 then Show all, each a session (a
 // bubble and its title, no character, no color); a tap opens it in place of
 // a conversation, a right click or a touch and hold offers Rename…, Change
@@ -169,7 +169,7 @@ void main() {
     await _reveal(tester, row);
     await tester.longPress(row);
     await pumpFrames(tester);
-    // As the chat's own "…" (Abbacchio's row 725): Change model… too.
+    // As the chat's own "…": Change model… too.
     expect(find.text('Rename…'), findsOneWidget);
     expect(find.text('Change model…'), findsOneWidget);
     expect(find.text('Delete…'), findsOneWidget);

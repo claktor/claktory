@@ -303,9 +303,9 @@ pub(crate) fn stop(factory: &Factory, agent: &str, task: &str, by: &str) -> Resu
 
 /// Tells admin agents of tasks that have run long, once each, for as long
 /// as Factory runs. An open Tasks panel follows its tasks' output every
-/// second while an app shows it; otherwise it sleeps until the next check
-/// (#454), woken when that changes.
-/// Logs of tasks that finished over a week ago go (#525): at start, then
+/// second while an app shows it; otherwise it sleeps until the next check,
+/// woken when that changes.
+/// Logs of tasks that finished over a week ago go: at start, then
 /// every day, off the async threads.
 async fn prune_logs(factory: Weak<Factory>) {
     use factory_agent::tools::task_logs::{self, Ended};
@@ -314,7 +314,7 @@ async fn prune_logs(factory: Weak<Factory>) {
         let pruned = tokio::task::spawn_blocking(move || {
             let agents = strong.home.root().join("agents");
             // When each task ended, by agent and task: the newest row of
-            // each, never a running one's log (Bruno 39663).
+            // each, never a running one's log.
             let rows = match strong.store.tasks(None, 0) {
                 Ok(rows) => rows,
                 Err(error) => {

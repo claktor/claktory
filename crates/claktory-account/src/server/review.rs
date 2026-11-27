@@ -10,7 +10,7 @@
 //! line: `<email> <salt> <sha256(salt || code), hex>`, the salt taken as the
 //! text it is (`printf '%s%s' "$salt" "$code" | sha256sum`).
 //!
-//! Up to two such accounts (#319), one per store (App Store and Google
+//! Up to two such accounts, one per store (App Store and Google
 //! Play), each its own file and email, rotated on its own: the option may
 //! be given twice. Play may re-review at any time, so its pair mustn't
 //! change when Apple's is rotated for a submission. A review email signs in

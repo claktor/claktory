@@ -1,12 +1,12 @@
 // On a phone, a conversation's message box steps aside while a field in the
 // conversation itself has the keyboard: a Needs you card's answer, say.
-// Otherwise a second text field sits idle between the card's field and
-// the keyboard, which costs most on a small iPhone at large text sizes,
-// for no gain (Lucy, needs-you-cards.md §5.2). The box comes back exactly as
-// it was as soon as that field lets go, or the keyboard goes while it keeps
-// the focus (an iPad's keyboard shrunk to its shortcut bar, a hardware
-// keyboard: no keyboard, no reason to make room; Bruno 45806), with its
-// draft, attachments and mic, since it's only hidden, never rebuilt.
+// Otherwise a second text field sits idle between the card's field and the
+// keyboard, which costs most on a small iPhone at large text sizes, for no
+// gain. The box comes back exactly as it was as soon as that field lets go,
+// or the keyboard goes while it keeps the focus (an iPad's keyboard shrunk
+// to its shortcut bar, a hardware keyboard: no keyboard, no reason to make
+// room), with its draft, attachments and mic, since it's only hidden, never
+// rebuilt.
 import 'package:flutter/widgets.dart';
 
 /// How tall, in points, the bottom inset must be to count as a keyboard.

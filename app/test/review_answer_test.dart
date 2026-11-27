@@ -1,6 +1,6 @@
-// Answering a review where the file is (Matt's ask, after #275): while an
-// agent's review ask waits on the file a pane shows, the pane's foot has
-// the question and the answer's field. Return sends what's typed (an empty
+// Answering a review where the file is (Matt's ask): while an agent's
+// review ask waits on the file a pane shows, the pane's foot has the
+// question and the answer's field. Return sends what's typed (an empty
 // field never approves by itself), Approve or Send and Dismiss beside it;
 // answered, the pane closes and the person is back where they pressed
 // Review. On media nothing else is offered meanwhile; on text, line
@@ -116,7 +116,7 @@ Finder get _field => find.descendant(
   matching: find.byType(EditableText),
 );
 
-/// What a held bar says (row 1325).
+/// What a held bar says.
 Finder get _held => find.descendant(
   of: find.byType(ReviewBar),
   matching: find.text('You replied. Waiting for Fugo to answer.'),
@@ -280,7 +280,7 @@ void main() {
         .lastWhere((m) => m.hasAnswerAsk())
         .answerAsk;
     expect((answer.text, answer.dismiss), ('', false));
-    // Opened from the file, not its card: no talk seen (#492).
+    // Opened from the file, not its card: no talk seen.
     expect(answer.hasTalkSeen(), isTrue);
     expect(answer.talkSeen, 0);
   });
@@ -648,7 +648,7 @@ void main() {
     );
     await tester.pump();
     await _type(tester, 'Fine by me');
-    // Replied from the Mac: it waits on Fugo, the bar held (row 1325).
+    // Replied from the Mac: it waits on Fugo, the bar held.
     harness.backend.transcript.update(
       EntryUpdate(
         agentId: 'fugo',
@@ -820,7 +820,7 @@ void main() {
       expect(_held, findsOneWidget);
       expect(_button('Submit').onPressed, isNull);
       // The reply, as the person's, in the talk until the agent answers
-      // (Abbacchio's row 1376).
+      // .
       expect(
         find.descendant(
           of: find.byType(ReviewTalk),
@@ -857,7 +857,7 @@ void main() {
         "saying so, its field empty: the closed card's words stay with it "
         "(Zucchero's row 513)", (tester) async {
       final harness = await pressed(tester);
-      // Fugo closes it, settled in the talk (#496).
+      // Fugo closes it, settled in the talk.
       harness.backend.entriesById['fugo/8'] = card8(
         state: AskPersonState.ASK_PERSON_STATE_ANSWERED,
         replied: true,

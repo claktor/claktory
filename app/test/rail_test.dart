@@ -24,6 +24,7 @@ import 'package:factory_app/sidebar.dart';
 import 'package:factory_app/tunnel_client.dart';
 import 'package:factory_app/voice_keep.dart';
 import 'package:factory_app/mobile/local_network.dart' show localNetwork;
+import 'package:factory_app/visible_codes.dart' show nameInText;
 import 'package:flutter/foundation.dart'
     show debugDefaultTargetPlatformOverride;
 import 'package:flutter/gestures.dart';
@@ -76,7 +77,15 @@ Finder _labeled(String label) => find.byWidgetPredicate(
 /// The app with a recording backend for each Claktory, by its pairing code
 /// ('' for this Mac's), each showing [snapshots] for it.
 class _App {
-  _App({this.snapshots = const {}, this.localBackend = true, this.account});
+  _App({
+    this.snapshots = const {},
+    this.localBackend = true,
+    this.account,
+    this.ownCode,
+  });
+
+  /// This Mac's own Claktory's code, as its file holds it.
+  final String? ownCode;
 
   /// A Mac, which runs a Claktory of its own; a phone doesn't.
   final bool localBackend;
@@ -124,6 +133,9 @@ class _App {
         connections: connections,
         open: open,
         localBackend: localBackend,
+        ownCode: ownCode == null
+            ? null
+            : () async => parsePairingCode(ownCode!),
       ),
     );
     await pumpFrames(tester);
@@ -190,6 +202,80 @@ void main() {
       expect(claktories.selected.target, nixos);
       expect(claktories.selected.backend, same(app.backends[_nixos]));
       expect(app.connections.deviceKey(nixos), isNotEmpty);
+    });
+
+    // Kept, it would knock on itself as a newcomer to allow.
+    test("an entry from the account's list for this Mac's own Claktory goes "
+        'at launch; a code\'s and a phone\'s stay', () async {
+      final app = _App();
+      final own = RemoteFactory.fromAccount(
+        const AccountClaktory(id: 'n', name: 'nixos', endpointId: _nixosKey),
+      );
+      final mini = parsePairingCode(_mini)!;
+      app.connections
+        ..use(mini)
+        ..use(own);
+      // A new install writes its code once it runs.
+      String? file;
+      final claktories = Claktories(
+        connections: app.connections,
+        localBackend: true,
+        open: app.open,
+        drafts: app.drafts,
+        ownCode: () async => file == null ? null : parsePairingCode(file),
+      );
+      addTearDown(claktories.dispose);
+      await pumpEventQueue();
+      expect(claktories.ownEndpoint, isEmpty, reason: 'none yet');
+      expect(app.connections.saved, [mini, own]);
+      file = _nixos;
+      // Its connection comes back (the test's backend starts connected).
+      app.backends['']!.connected
+        ..value = false
+        ..value = true;
+      await pumpEventQueue();
+      expect(claktories.ownEndpoint, _nixosKey);
+      expect(app.connections.saved, [mini]);
+      expect(claktories.all.map((c) => c.key), ['', _mini]);
+      expect(claktories.selected.target, isNull, reason: "this Mac's instead");
+
+      // Given up here, nothing of it is known; chosen again, it's read.
+      claktories.setLocalBackend(false);
+      expect(claktories.ownEndpoint, isEmpty, reason: 'none here now');
+      app.connections.use(own);
+      await pumpEventQueue();
+      expect(app.connections.saved, [mini, own]);
+      claktories.setLocalBackend(true);
+      await pumpEventQueue();
+      expect(app.connections.saved, [mini]);
+
+      // A code for it is a pairing of its own, as before.
+      final paired = parsePairingCode(_nixos)!;
+      app.connections.use(paired);
+      app.backends['']!.connected
+        ..value = false
+        ..value = true;
+      await pumpEventQueue();
+      expect(app.connections.saved, [mini, paired]);
+
+      // A phone runs none: nothing is read, nothing goes.
+      final phone = _App(localBackend: false);
+      phone.connections.use(own);
+      var read = 0;
+      final its = Claktories(
+        connections: phone.connections,
+        localBackend: false,
+        open: phone.open,
+        drafts: phone.drafts,
+        ownCode: () async {
+          read++;
+          return parsePairingCode(_nixos);
+        },
+      );
+      addTearDown(its.dispose);
+      await pumpEventQueue();
+      expect(read, 0);
+      expect(phone.connections.saved, [own]);
     });
 
     test('a phone shows another paired one when the one showing goes', () {
@@ -265,9 +351,11 @@ void main() {
       expect(claktoryInitials('home server box'), 'HS');
       expect(claktoryInitials(''), '?');
       // A name as nameInText shows it, in an isolate with a zero-width
-      // space kept: its letters only (Abbacchio's row 1748).
+      // space kept: its letters only.
       expect(claktoryInitials('\u2068Bad\\u{202E}Name\u200B two\u2069'), 'BT');
       expect(claktoryInitials('\u2068\u2069'), '?');
+      // Its hidden characters shown by their codes are no letters either.
+      expect(claktoryInitials(nameInText('Ana’s \u202EMac\u202C שלום')), 'AM');
     });
   });
 
@@ -550,6 +638,18 @@ void main() {
     expect(find.text('Use a code instead'), findsOneWidget);
   });
 
+  testWidgets("Add a Claktory never offers this Mac's own, known by its code "
+      'before it answers', (tester) async {
+    final app = _App(ownCode: _nixos);
+    await app.show(tester);
+    await tester.runAsync(pumpEventQueue);
+    await pumpFrames(tester);
+    await tester.tap(_labeled('Add a Claktory'));
+    await pumpFrames(tester);
+    expect(find.text('mac-mini'), findsOneWidget);
+    expect(find.text('nixos'), findsNothing);
+  });
+
   testWidgets('a touch-only iPad at full width: touch and hold a tile opens '
       'its form (Zucchero row 642)', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
@@ -645,7 +745,7 @@ void main() {
     app.connections.use(null);
     await app.show(tester);
 
-    // Counted, not a dot (#529, MC10).
+    // Counted, not a dot.
     expect(_labeled('nixos, 2 in Needs you'), findsOneWidget);
     expect(
       find.descendant(of: find.byType(NeedsYouMark), matching: find.text('2')),
@@ -730,7 +830,7 @@ void main() {
     });
   }
 
-  // Abbacchio's row 1675: Remove… on a Claktory from the account that wants
+  // Remove… on a Claktory from the account that wants
   // this device signed in forgot it at once, with no question.
   testWidgets('a Claktory from the account that wants a sign-in: Remove… '
       'asks first, as the rail does', (tester) async {
@@ -1171,7 +1271,7 @@ void main() {
     );
   }
 
-  // Sorbet's row 102: at the largest text the initials grew past their
+  // At the largest text the initials grew past their
   // 28 pt tile; they fill it at most.
   testWidgets('at the largest text the initials stay inside their tile', (
     tester,
@@ -1313,7 +1413,7 @@ void main() {
       expect(match.check(null), AccountCheck.theirs);
 
       // Signed in again, but never read since: nothing can be checked,
-      // once reads have failed for [AccountMatch.unsureFor] (#388).
+      // once reads have failed for [AccountMatch.unsureFor].
       signedOut = false;
       account.notifyListeners();
       await pumpEventQueue();
@@ -1332,7 +1432,7 @@ void main() {
       expect(AccountCheck.unreadable.alarming, isTrue);
 
       // Signed in as someone else, whose list can't be read: the first
-      // one's never stands in for it (Fugo).
+      // one's never stands in for it.
       who = 'b@example.com';
       failure = const AccountServiceUnreachable('offline');
       account.notifyListeners();

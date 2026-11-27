@@ -1,4 +1,4 @@
-//! Review items (#209 phase 3, docs/ipad-phase3-contract.md §5): threads on
+//! Review items (docs/ipad-phase3-contract.md §5): threads on
 //! a PDF's page region, sending only some threads, and a send made once
 //! however often it's repeated.
 

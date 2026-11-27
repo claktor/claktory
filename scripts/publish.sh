@@ -16,7 +16,7 @@
 #   install.sh    the online installer (scripts/install-online.sh), for
 #                 curl -fsSL https://github.com/claktory/claktory/releases/latest/download/install.sh | bash
 #
-#   scripts/publish.sh [--repo OWNER/NAME] [--notes TEXT] [--no-linux]
+#   scripts/publish.sh [--repo OWNER/NAME] [--notes TEXT] [--no-linux | --no-x86_64]
 #       to GitHub Releases, claktory/claktory unless --repo names another.
 #       Before building it checks that main is checked out and clean, and
 #       that no secret is anywhere in its history (scripts/check-secrets.sh,
@@ -38,6 +38,9 @@
 #       back is refused as a replay, and the pulled one stays offered.
 #   --no-linux  without the Linux builds (Linux backends then keep the release
 #               they have)
+#   --no-x86_64 with the aarch64 Linux build only, made on this Mac: x86_64
+#               Linux backends keep the release they have, and a new
+#               x86_64 Linux install is refused until a release has one
 #   --built     publishes the release already built (the newest in
 #               ~/.factory/releases, or ~/.factory-dev's with --dev) instead
 #               of building one: so a release can be built and signed first,
@@ -116,7 +119,7 @@ sign_manifest() {
 REPO="" LOCAL="" DEV=() NOTES="" LINUX=(x86_64 aarch64) BUILT=false ADHOC=false REPOINT=""
 DEFAULT_REPO="claktory/claktory"
 usage() {
-  echo "usage: scripts/publish.sh [--repo OWNER/NAME] [--notes TEXT] [--no-linux] [--built] [--adhoc] | --local DIR [--dev] [--no-linux] [--built]" >&2
+  echo "usage: scripts/publish.sh [--repo OWNER/NAME] [--notes TEXT] [--no-linux | --no-x86_64] [--built] [--adhoc] | --local DIR [--dev] [--no-linux | --no-x86_64] [--built]" >&2
   echo "       scripts/publish.sh [--repo OWNER/NAME | --local DIR] --repoint VERSION" >&2
   exit 2
 }
@@ -127,6 +130,7 @@ while (($#)); do
     --notes) NOTES="${2:-}"; shift 2 || usage ;;
     --dev) DEV=(--dev); shift ;;
     --no-linux) LINUX=(); shift ;;
+    --no-x86_64) LINUX=(aarch64); shift ;;
     --built) BUILT=true; shift ;;
     --adhoc) ADHOC=true; shift ;;
     --repoint) REPOINT="${2:-}"; shift 2 || usage ;;
@@ -464,9 +468,19 @@ for arch in ${LINUX[@]+"${LINUX[@]}"}; do
   # ~/.factory/bin, so an install updated from before it has it there.
   cp "$SRC/scripts/claktory-wsl.sh" "$build/claktory-wsl"
   chmod 755 "$build/claktory-wsl"
+  # The browser's one administrator step, where factoryd's setup card looks
+  # for it (the release's scripts/), with its firewall and the Safe Browsing
+  # lists the release's image fetched, which it installs.
+  BROWSER_SETUP=()
+  if [[ -f "$SRC/scripts/browser-setup-linux.sh" ]]; then
+    mkdir -p "$build/scripts"
+    cp "$SRC/scripts/browser-setup-linux.sh" "$SRC/scripts/claktory-browser.nft" "$SRC/scripts/claktory-browser-nft.sh" "$build/scripts/"
+    [[ ! -f "$RELEASE/safe-browsing-seed.tar" ]] || cp "$RELEASE/safe-browsing-seed.tar" "$build/scripts/"
+    BROWSER_SETUP=(scripts)
+  fi
   linux_name="factory-$VERSION-linux-$arch.tar.gz"
   COPYFILE_DISABLE=1 tar --no-xattrs --uid 0 --gid 0 --uname "" --gname "" -czf "$STAGE/$linux_name" \
-    -C "$build" factoryd claktory-apps claktory-speech claktory-wsl backend-version CHANGELOG.md ${APPS_DIR[@]+"${APPS_DIR[@]}"} ${TOOLS_DIR[@]+"${TOOLS_DIR[@]}"} \
+    -C "$build" factoryd claktory-apps claktory-speech claktory-wsl backend-version CHANGELOG.md ${APPS_DIR[@]+"${APPS_DIR[@]}"} ${TOOLS_DIR[@]+"${TOOLS_DIR[@]}"} ${BROWSER_SETUP[@]+"${BROWSER_SETUP[@]}"} \
     -C "$SRC" LICENSE.md \
     -C "$SRC/scripts" install-linux.sh claktory-wsl.sh
   FILES+=("$STAGE/$linux_name")

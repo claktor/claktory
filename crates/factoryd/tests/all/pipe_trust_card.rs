@@ -1,8 +1,7 @@
-//! Rivet's card to accept a change in who's at a pipe's other end (#471
-//! G7; Fugo 34521): it never holds who that is, only the person's
-//! AcceptPipeIdentity from it accepts the change, its comment goes to the
-//! pipe's lead, and it's void once the change is accepted in the pipe or
-//! becomes another.
+//! Rivet's card to accept a change in who's at a pipe's other end: it
+//! never holds who that is, only the person's AcceptPipeIdentity from it
+//! accepts the change, its comment goes to the pipe's lead, and it's void
+//! once the change is accepted in the pipe or becomes another.
 
 use serde_json::json;
 
@@ -143,7 +142,7 @@ async fn a_trust_card_is_void_once_the_change_moves_on_and_its_comment_goes_to_t
         ..Default::default()
     });
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
-    // Files can't follow the comment to the lead, so none go (#511, Fugo 37176).
+    // Files can't follow the comment to the lead, so none go.
     let Request::AnswerAsk(with) = &dismiss else { unreachable!() };
     let filed = v1::AnswerAsk { attachments: vec![v1::Attachment { path: "/x/a.png".into(), name: "a.png".into(), ..Default::default() }], ..with.clone() };
     match apply_request(&mut client, &mut view, Request::AnswerAsk(filed)).await {
@@ -161,7 +160,7 @@ async fn a_trust_card_is_void_once_the_change_moves_on_and_its_comment_goes_to_t
 
     // Signed out there (or signing in again): void, saying so; then back
     // to the account accepted (Cy's) with a card waiting: void, saying that
-    // (rows 1355 and 1356).
+    // .
     call(&mut client, &mut view, "rivet", "pipes_trust", &args).await;
     pipes::identity::heard_for_test(&factory, &pipe, "peer-endpoint", "");
     view.follow(&mut client, |view| cards(view).iter().filter(|(_, card)| card.withdrawn).count() == 3).await;

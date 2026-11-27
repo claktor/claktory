@@ -1,4 +1,4 @@
-// Goals on a checklist (#270): the person's outcomes above the items, each
+// Goals on a checklist: the person's outcomes above the items, each
 // with how far its items have come, added, edited, finished, dropped and
 // removed in the app; an item says which goal it serves. And an extension
 // option that's one of a few (the checklist's check-in), in agent settings.

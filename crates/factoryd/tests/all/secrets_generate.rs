@@ -1,7 +1,7 @@
-//! Keys the vault generates (#252): an agent asks, the person approves, and
+//! Keys the vault generates: an agent asks, the person approves, and
 //! the private half is made and sealed in the vault, never shown to anyone;
 //! the agent hears only the public half. And notes on a decision, each as
-//! its writer's (#253).
+//! its writer's.
 
 use crate::common::{Client, View, apply_request, create_agent, create_project, start, temp_dir};
 use crate::pipes::{call, idle};
@@ -196,7 +196,7 @@ async fn the_vault_generates_a_password_that_no_one_sees() {
     let not_a_key = r#"{"name":"K","generate":"ssh-ed25519","password":{"length":20},"reason":"x"}"#;
     assert!(call(&mut client, &mut view, "bo", "secrets_request", not_a_key).await.contains("goes with generate"));
 
-    // Pericolo's: letters and digits, 32, no look-alikes.
+    // Letters and digits, 32, no look-alikes.
     let ask = r#"{"name":"Review page","description":"Basic auth for the review page.","generate":"password","password":{"length":32,"lowercase":true,"uppercase":true,"digits":true,"avoid_similar":true},"reason":"For App Review."}"#;
     let asked = call(&mut client, &mut view, "bo", "secrets_request", ask).await;
     assert!(asked.starts_with("Asked the vault to generate Review page, a 32-character password (letters and digits, 185 bits);"), "{asked}");
@@ -243,7 +243,7 @@ fn decide_body(id: &str) -> v1::DecideSecretRequest {
     v1::DecideSecretRequest { agent_id: "bo".into(), request_id: id.into(), approve: true, ask_each_time: Some(false), ..Default::default() }
 }
 
-/// Abbacchio's 1580: in a Claktory with Rivet, every request names the
+/// In a Claktory with Rivet, every request names the
 /// admin agent an approval would pass it to; the person generating it on
 /// the card is still History's GENERATED, given to no one when asked so,
 /// never ADMIN.

@@ -1,12 +1,12 @@
-//! The App grants extension (U2): Rivet proposes giving an agent access to
-//! an app kept at the person's account, such as their direct messages, and
-//! the person decides on the card it opens (`crate::user_apps`); and Rivet
-//! sets up the apps installed in this Claktory (`crate::apps::access`,
-//! #339), with a card only where Fugo's rules need the person. Only Rivet
-//! (`proposals::rivet`, the settings' admin agent, never a tool argument)
-//! can propose, never while it has read a web page, and only for agents of this
-//! Claktory: never a chat. Nothing is ever given without the person's
-//! approval, and the account service enforces what was.
+//! The App grants extension (U2): Rivet proposes giving an agent access to an
+//! app kept at the person's account, such as their direct messages, and the
+//! person decides on the card it opens (`crate::user_apps`); and Rivet sets up
+//! the apps installed in this Claktory (`crate::apps::access`), with a card
+//! only where the access rules need the person. Only Rivet (`proposals::rivet`, the
+//! settings' admin agent, never a tool argument) can propose, never while it
+//! has read a web page, and only for agents of this Claktory: never a chat.
+//! Nothing is ever given without the person's approval, and the account service
+//! enforces what was.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -203,7 +203,7 @@ fn propose(factory: &Arc<Factory>, agent: &str, args: ProposeArgs) -> Result<Too
     };
     let (grantee, name) = named(factory, &args.agent)?;
     // A liaison, limited to a pipe, would bridge the other Claktory to the
-    // person's app (Fugo's review).
+    // person's app.
     if factory.pipes.contained(&grantee) {
         return Err(format!("{name} is limited to a pipe, so it can't be given access to {person}'s apps. Nothing was proposed."));
     }
@@ -318,7 +318,7 @@ struct RunningArgs {
 async fn set_running(factory: Arc<Factory>, agent: String, args: RunningArgs) -> Result<ToolResult, String> {
     only_rivet_sets(&factory, &agent)?;
     // A page or a pipe it read mustn't turn the person's apps on or off
-    // (Fugo, Abbacchio's row 1047).
+    // .
     super::untainted(&factory, &agent, "start or stop apps", "start or stop one with its switch in Marketplace → Apps. Nothing was changed.")?;
     let wanted = args.app.trim().to_owned();
     if !factory.apps.available() {
@@ -357,7 +357,7 @@ struct UninstallArgs {
     proposal: Option<String>,
 }
 
-/// apps_uninstall (#423): asks the person, on a card, to uninstall an app;
+/// apps_uninstall: asks the person, on a card, to uninstall an app;
 /// only their approval does.
 async fn uninstall_app(factory: Arc<Factory>, agent: String, args: UninstallArgs) -> Result<ToolResult, String> {
     let (factory, agent) = (&factory, agent.as_str());

@@ -580,6 +580,8 @@ async fn the_notifications_offer_dismissed_on_a_device_is_cleared_once_they_are_
 /// every device, from what was saved while it worked: a push to each
 /// registered device, with a counter saved ahead (none used twice, after a
 /// restart or by an older version), and the connected apps.
+// A folder made read-only by its mode; on Windows a DACL would be needed.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_disk_that_cant_be_written_is_told_to_every_device_without_saving_anything() {
     use std::os::unix::fs::PermissionsExt;
@@ -651,6 +653,10 @@ fn read_alerts(ids: &[&str]) -> client_message::Body {
 async fn an_alert_waits_in_needs_you_until_the_person_reads_it() {
     let (dir, factory, mut client, mut view) = setup(v1::DeviceKind::Desktop).await;
     let mut notes = Vec::new();
+    // Builder leads Helper, so its urgent alerts go as urgent (Bruno 52699).
+    apply_request(&mut client, &mut view, create_agent("site", "Helper", "")).await;
+    let lead = v1::UpdateAgent { agent_id: "helper".into(), lead_id: Some("builder".into()), ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(lead)).await;
     let mut urgent = alert("The site is down");
     urgent["urgent"] = true.into();
     let said = call(&mut client, &mut view, &mut notes, "builder", "notify_person", urgent).await;

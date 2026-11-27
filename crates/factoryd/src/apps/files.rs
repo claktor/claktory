@@ -21,10 +21,14 @@
 //!   10 MB, read from the descriptor that was checked.
 
 use std::collections::HashSet;
+#[cfg(unix)]
 use std::ffi::CString;
 use std::io::Read as _;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -151,7 +155,9 @@ pub(crate) fn holds(config: &Config, id: &str) -> String {
     let Ok(file) = parse(id) else { return String::new() };
     match found(config, &file.place) {
         Ok((Some(folder), _)) => {
-            format!("Whatever is in the file {}, which you or any of your agents may have written.", folder.join(&file.path).display())
+            // Each name joined on its own, so the path reads as the system writes it.
+            let path = file.path.split('/').fold(folder, |path, name| path.join(name));
+            format!("Whatever is in the file {}, which you or any of your agents may have written.", path.display())
         }
         Ok((None, words)) => {
             format!("Whatever is in the file {} in {words}, which you or any of your agents may have written.", file.path)
@@ -180,11 +186,7 @@ pub(crate) fn choices(config: &Config, home: &Home, query: &str) -> (Vec<factory
         }
     }
     let roots: HashSet<PathBuf> = places.iter().map(|(_, path)| path.clone()).collect();
-    let homes: HashSet<Key> = crate::vault::import::homes(home.root())
-        .iter()
-        .filter_map(|path| std::fs::metadata(path).ok())
-        .map(|meta| (meta.dev(), meta.ino()))
-        .collect();
+    let homes = homes_of(home);
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     let mut found = Vec::new();
     let mut looked = 0;
@@ -209,7 +211,7 @@ pub(crate) fn choices(config: &Config, home: &Home, query: &str) -> (Vec<factory
                 let path = if rel.is_empty() { name.to_owned() } else { format!("{rel}/{name}") };
                 if meta.is_dir() {
                     let full = entry.path();
-                    if depth + 1 < MOST_LIST_DEPTH && !roots.contains(&full) && !homes.contains(&(meta.dev(), meta.ino())) {
+                    if depth + 1 < MOST_LIST_DEPTH && !roots.contains(&full) && key_of_path(&full, &meta).is_none_or(|key| !homes.contains(&key)) {
                         stack.push((full, path, depth + 1));
                     }
                     continue;
@@ -228,7 +230,7 @@ pub(crate) fn choices(config: &Config, home: &Home, query: &str) -> (Vec<factory
                 }
                 let why = if meta.len() > MOST_BYTES {
                     format!("It's over {} MB, more than an app can read.", MOST_BYTES >> 20)
-                } else if meta.nlink() != 1 {
+                } else if links(&entry.path(), &meta) != 1 {
                     "It has more than one name on this computer, so apps can't read it.".to_owned()
                 } else {
                     String::new()
@@ -237,7 +239,7 @@ pub(crate) fn choices(config: &Config, home: &Home, query: &str) -> (Vec<factory
                     id,
                     label,
                     size_bytes: meta.len() as i64,
-                    modified_ms: meta.mtime() * 1000 + meta.mtime_nsec() / 1_000_000,
+                    modified_ms: modified_ms(&meta),
                     why,
                 });
             }
@@ -282,6 +284,46 @@ enum Zone {
 
 type Key = (u64, u64);
 
+/// Claktory's own folders (`vault::import::homes`), by device and inode.
+fn homes_of(home: &Home) -> HashSet<Key> {
+    let homes = crate::vault::import::homes(home.root());
+    homes.iter().filter_map(|path| key_of_path(path, &std::fs::metadata(path).ok()?)).collect()
+}
+
+/// A path's device and inode (on Windows its volume and index).
+#[cfg(unix)]
+#[allow(clippy::unnecessary_wraps, reason = "Windows reads it from the file, which may fail")]
+fn key_of_path(_path: &Path, meta: &std::fs::Metadata) -> Option<Key> {
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(windows)]
+fn key_of_path(path: &Path, _meta: &std::fs::Metadata) -> Option<Key> {
+    crate::windows::fs::identity(path).ok().map(|identity| (identity.volume, identity.index))
+}
+
+/// How many names a file has; one that can't be read counts as many.
+#[cfg(unix)]
+fn links(_path: &Path, meta: &std::fs::Metadata) -> u64 {
+    meta.nlink()
+}
+
+#[cfg(windows)]
+fn links(path: &Path, _meta: &std::fs::Metadata) -> u64 {
+    crate::windows::fs::identity(path).map_or(u64::MAX, |identity| identity.links)
+}
+
+#[cfg(unix)]
+fn modified_ms(meta: &std::fs::Metadata) -> i64 {
+    meta.mtime() * 1000 + meta.mtime_nsec() / 1_000_000
+}
+
+#[cfg(windows)]
+fn modified_ms(meta: &std::fs::Metadata) -> i64 {
+    meta.modified().ok().and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |since| since.as_millis() as i64)
+}
+
+#[cfg(unix)]
 fn key_of(fd: &OwnedFd) -> std::io::Result<Key> {
     // SAFETY: an open descriptor and a zeroed stat to fill.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
@@ -292,6 +334,7 @@ fn key_of(fd: &OwnedFd) -> std::io::Result<Key> {
     Ok((stat.st_dev as u64, stat.st_ino as u64))
 }
 
+#[cfg(unix)]
 fn openat(dir: Option<&OwnedFd>, name: &[u8], flags: libc::c_int) -> std::io::Result<OwnedFd> {
     let name = CString::new(name).map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "a NUL in the path"))?;
     // SAFETY: a valid C string and, when given, an open folder; the
@@ -306,6 +349,7 @@ fn openat(dir: Option<&OwnedFd>, name: &[u8], flags: libc::c_int) -> std::io::Re
 }
 
 /// Whether `name` in `dir` is a symbolic link itself (never followed).
+#[cfg(unix)]
 fn is_link(dir: &OwnedFd, name: &str) -> bool {
     let Ok(name) = CString::new(name.as_bytes()) else { return false };
     // SAFETY: an open folder, a valid C string and a zeroed stat to fill.
@@ -314,9 +358,11 @@ fn is_link(dir: &OwnedFd, name: &str) -> bool {
     found == 0 && (stat.st_mode & libc::S_IFMT) == libc::S_IFLNK
 }
 
+#[cfg(unix)]
 const FOLDER: libc::c_int = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
 /// Why a place's folder couldn't be placed.
+#[cfg(unix)]
 #[derive(Debug)]
 enum Ancestry {
     /// More than the most folders above it, never reaching the root.
@@ -329,6 +375,7 @@ enum Ancestry {
 /// itself (only its workspace may come next), None inside one but not its
 /// workspace. Fails closed: past `most` folders up without an answer,
 /// TooDeep.
+#[cfg(unix)]
 fn ancestry(start: &OwnedFd, homes: &HashSet<Key>, workspace: Option<Key>, most: usize) -> Result<Option<Zone>, Ancestry> {
     let mut here = openat(Some(start), b".", FOLDER).map_err(Ancestry::Io)?;
     for depth in 0..most {
@@ -349,7 +396,110 @@ fn ancestry(start: &OwnedFd, homes: &HashSet<Key>, workspace: Option<Key>, most:
     Err(Ancestry::TooDeep)
 }
 
+/// On Windows, as on a Mac (see the module's comment), each folder held
+/// open while the next is opened, so none can be renamed or swapped for a
+/// link meanwhile (`windows::fs`), and Claktory's own folders told by
+/// their volume and index.
+#[cfg(windows)]
+fn open(home: &Home, folder: &Path, file: &FileId, words: &str) -> Result<(std::fs::File, std::fs::Metadata), String> {
+    use crate::windows::fs::{final_path, identity, identity_of, is_link, open_file, open_folder};
+    let shown = format!("{} in {words}", file.path);
+    let homes = homes_of(home);
+    let workspace = identity(&home.workspace()).ok().map(|identity| (identity.volume, identity.index));
+    let inside = || format!("{shown} is in Claktory's own folder, which apps can't read.");
+    let failed = |error: std::io::Error, at: &str| {
+        if is_link(&error) {
+            format!("{shown} is reached through a link ({at}), so apps can't read it. Choose the file itself.")
+        } else if error.kind() == std::io::ErrorKind::NotFound {
+            format!("There's no file {shown}.")
+        } else {
+            format!("{shown} can't be opened: {error}")
+        }
+    };
+    let key = |file: &std::fs::File| identity_of(file).map(|identity| (identity.volume, identity.index));
+    // The place's own folder, as the settings say (the person's choice);
+    // then whether it's in Claktory's own folder, looking up from it.
+    let start = open_folder(folder, true).map_err(|error| format!("{words}'s folder can't be opened: {error}"))?;
+    let start_path = final_path(&start).map_err(|error| format!("{words}'s folder can't be read: {error}"))?;
+    // Every folder from the drive's root down to it, each opened as itself
+    // (a link refused) and held without FILE_SHARE_DELETE until the file is
+    // open, so none can be renamed, moved or swapped meanwhile; each known
+    // by its held handle. Then the start's own path read again:
+    // the same, the folders held are the ones it's in.
+    let chain: Vec<&Path> = start_path.ancestors().collect();
+    if chain.len() > MOST_DEPTH {
+        return Err(format!("{words}'s folder is too deep to check, so apps can't read files in it."));
+    }
+    let mut above = Vec::with_capacity(chain.len());
+    let mut keys = Vec::with_capacity(chain.len());
+    for up in chain.iter().rev() {
+        let held = open_folder(up, false).map_err(|error| format!("{words}'s folder can't be read: {error}"))?;
+        keys.push(key(&held).map_err(|error| format!("{words}'s folder can't be read: {error}"))?);
+        above.push(held);
+    }
+    if final_path(&start).ok().as_ref() != Some(&start_path) {
+        return Err(format!("{words}'s folder moved while it was checked, so apps can't read files in it now. Try again."));
+    }
+    // Looking up from the place's folder: the first of Claktory's own that
+    // it's in says (its workspace is free); outside all of them, free.
+    let mut zone = Zone::Free;
+    for (depth, here) in keys.iter().rev().enumerate() {
+        if Some(*here) == workspace {
+            break;
+        }
+        if homes.contains(here) {
+            if depth != 0 {
+                return Err(inside());
+            }
+            zone = Zone::Home;
+            break;
+        }
+    }
+    let names = file.names();
+    let Some((last, folders)) = names.split_last() else { return Err(format!("There's no file {shown}.")) };
+    let mut held = vec![start];
+    let mut path = start_path;
+    for (index, name) in folders.iter().enumerate() {
+        if zone == Zone::Home && *name != WORKSPACE {
+            return Err(inside());
+        }
+        let at = folders[..=index].join("/");
+        path.push(name);
+        let next = open_folder(&path, false).map_err(|error| failed(error, &at))?;
+        let here = key(&next).map_err(|error| failed(error, &at))?;
+        held.push(next);
+        zone = if Some(here) == workspace {
+            Zone::Free
+        } else if homes.contains(&here) {
+            Zone::Home
+        } else if zone == Zone::Home {
+            // Another Claktory's workspace, under its own home.
+            return Err(inside());
+        } else {
+            Zone::Free
+        };
+    }
+    if zone == Zone::Home {
+        return Err(inside());
+    }
+    path.push(last);
+    let opened = open_file(&path).map_err(|error| failed(error, &file.path))?;
+    drop((held, above));
+    let meta = opened.metadata().map_err(|error| format!("{shown} can't be read: {error}"))?;
+    if !meta.file_type().is_file() {
+        return Err(format!("{shown} isn't a file apps can read."));
+    }
+    if identity_of(&opened).map_or(true, |identity| identity.links != 1) {
+        return Err(format!("{shown} has more than one name on this computer, so apps can't read it."));
+    }
+    if meta.len() > MOST_BYTES {
+        return Err(format!("{shown} is over {} MB, more than an app can read.", MOST_BYTES >> 20));
+    }
+    Ok((opened, meta))
+}
+
 /// Opens `file` in `folder`: see the module's comment. Its metadata too.
+#[cfg(unix)]
 fn open(home: &Home, folder: &Path, file: &FileId, words: &str) -> Result<(std::fs::File, std::fs::Metadata), String> {
     let shown = format!("{} in {words}", file.path);
     let homes: HashSet<Key> = crate::vault::import::homes(home.root())
@@ -605,6 +755,7 @@ pub(crate) fn table(bytes: &[u8], file: &FileId, shown: &str) -> Result<rusqlite
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn a_folder_too_deep_to_place_is_refused_not_taken_as_outside() {
         let root = std::env::temp_dir().join(format!("files-ancestry-{}", std::process::id()));
@@ -622,6 +773,50 @@ mod tests {
         assert!(matches!(ancestry(&open(&deep), &home, None, 1000), Ok(None)));
         assert!(matches!(ancestry(&open(&root.join("a")), &home, None, 1000), Ok(Some(Zone::Home))));
         assert!(matches!(ancestry(&open(&deep), &home, Some(key(&root.join("a/b"))), 1000), Ok(Some(Zone::Free))));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Windows' `open`: a place's file, never one in Claktory's own folder
+    /// but its workspace, never through a junction or a symbolic link (made
+    /// by this user with Developer Mode), never one with two names.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_is_read_only_outside_claktory_and_through_no_link() {
+        let root = std::env::temp_dir().join(format!("files-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = Home::new(root.join("home"));
+        let outside = root.join("outside");
+        for folder in [home.workspace(), home.root().join("agents"), outside.clone()] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        std::fs::write(home.workspace().join("data.csv"), "a\n1\n").unwrap();
+        std::fs::write(home.root().join("agents").join("x.csv"), "secret\n").unwrap();
+        std::fs::write(outside.join("data.csv"), "a\n2\n").unwrap();
+        let id = |path: &str| FileId { place: "site".to_owned(), path: path.to_owned() };
+        let read = |folder: &Path, path: &str| open(&home, folder, &id(path), "site");
+        assert!(read(&outside, "data.csv").is_ok());
+        assert!(read(&home.workspace(), "data.csv").is_ok(), "the workspace is the place's own");
+        assert!(read(home.root(), "workspace/data.csv").is_ok(), "through the home to its workspace");
+        assert!(read(home.root(), "agents/x.csv").unwrap_err().contains("Claktory's own folder"));
+        assert!(read(&home.root().join("agents"), "x.csv").unwrap_err().contains("Claktory's own folder"));
+        // A junction into the home: refused on the way, and as the place's
+        // own folder it's where it leads that counts.
+        let junction = outside.join("j");
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&junction).arg(home.root().join("agents")).output();
+        assert!(made.unwrap().status.success());
+        assert!(read(&outside, "j/x.csv").unwrap_err().contains("through a link"));
+        assert!(read(&junction, "x.csv").unwrap_err().contains("Claktory's own folder"));
+        // A junction above the place's folder: what counts is where it is.
+        let above = outside.join("above");
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&above).arg(home.root()).output();
+        assert!(made.unwrap().status.success());
+        assert!(read(&above.join("agents"), "x.csv").unwrap_err().contains("Claktory's own folder"));
+        assert!(read(&above.join("workspace"), "data.csv").is_ok(), "its workspace is free, by any path");
+        std::os::windows::fs::symlink_file(home.root().join("agents").join("x.csv"), outside.join("link.csv")).unwrap();
+        assert!(read(&outside, "link.csv").unwrap_err().contains("through a link"));
+        std::fs::hard_link(outside.join("data.csv"), outside.join("again.csv")).unwrap();
+        assert!(read(&outside, "data.csv").unwrap_err().contains("more than one name"));
+        assert!(read(&outside, "missing.csv").unwrap_err().contains("There's no file"));
         std::fs::remove_dir_all(&root).unwrap();
     }
 

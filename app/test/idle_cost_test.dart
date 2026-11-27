@@ -98,7 +98,7 @@ void main() {
     final (frames, _) = await _watch(tester, 4);
     // 25 a second from the waves and dots, with the working face moving
     // in the same frames; 60 if they ran on vsync, and about 29 when the
-    // faces had a timer of their own (#384).
+    // faces had a timer of their own.
     expect(frames / 4, lessThanOrEqualTo(LiveClock.waveFps + 0.5));
   });
 

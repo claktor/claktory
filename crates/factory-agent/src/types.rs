@@ -65,7 +65,7 @@ pub fn naming_stored_images<T>(write: impl FnOnce() -> T) -> T {
     write()
 }
 
-/// An image's data, shared by every copy of the message it's in (#454). A
+/// An image's data, shared by every copy of the message it's in. A
 /// conversation is copied for each model call (the run's context, the
 /// request's), and its images can be most of its bytes; a copy shares them
 /// instead. Once saved as a file (`store`), every copy holds only where the
@@ -427,7 +427,7 @@ pub struct Voice {
     /// The language heard, such as "pl", when the model said.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub language: String,
-    /// What the person typed with it (#425), which the message's text
+    /// What the person typed with it, which the message's text
     /// starts with, before the words heard; empty for a voice message alone.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub typed: String,
@@ -686,7 +686,7 @@ pub struct Event {
     /// Pipe: the pipe's messages it brings, by their number in the pipe.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pipe_seqs: Vec<u64>,
-    /// Agent: where the message stands among the others (#285); None for
+    /// Agent: where the message stands among the others; None for
     /// other sources and messages from before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<Provenance>,
@@ -846,7 +846,7 @@ pub enum ToolResultPart {
         #[serde(deserialize_with = "image_data")]
         data: ImageData,
         mime_type: String,
-        /// The SHA-256 of its bytes (hex), on images read since #382: such
+        /// The SHA-256 of its bytes (hex), on images read with a hash: such
         /// an image goes to Anthropic once, as a file, and later requests
         /// name it (`providers::anthropic::files`). Without one (read
         /// before), it always goes inline, as it went then.

@@ -4,7 +4,7 @@
 // notification; and an agent's "Notify me". Each change sends the settings
 // with only that change made.
 
-import 'package:factory_app/forms.dart' show AgentSettingsForm;
+import 'package:factory_app/forms.dart' show AgentListField, AgentSettingsForm;
 import 'package:factory_app/notification_settings.dart';
 import 'package:factory_app/controls.dart' show Button, showModal;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -18,6 +18,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'app_test.dart' show workspace;
 import 'harness.dart';
 import 'idle_compaction_test.dart' show reveal;
+import 'rivet_test.dart' show admin;
 
 NotificationSettings _settings() => NotificationSettings(
   needsYou: true,
@@ -75,12 +76,13 @@ Future<Harness> _show(
   bool noDevice = false,
   RemoteAccess? remote,
   Size size = const Size(1200, 2000),
+  List<Agent>? agents,
 }) async {
   DeviceNotifications.debugOverride = noDevice
       ? null
       : device ?? _FakeDevice('allowed');
   addTearDown(() => DeviceNotifications.debugOverride = null);
-  final snapshot = workspace();
+  final snapshot = workspace(agents: agents);
   if (has) snapshot.settings.notifications = settings ?? _settings();
   if (remote != null) snapshot.remote = remote;
   final harness = Harness(snapshot);
@@ -105,7 +107,115 @@ UpdateSettings? _lastUpdate(Harness harness) => [
     if (message.hasUpdateSettings()) message.updateSettings,
 ].lastOrNull;
 
+/// Rivet (admin), Bruno who leads June, June, and Omar.
+List<Agent> _team() => [
+  admin(),
+  Agent(id: 'bruno', name: 'Bruno', projectId: 'p1', modelAvailable: true),
+  Agent(
+    id: 'a1',
+    name: 'June',
+    projectId: 'p1',
+    leadId: 'bruno',
+    modelAvailable: true,
+  ),
+  Agent(id: 'omar', name: 'Omar', projectId: 'p1', modelAvailable: true),
+];
+
 void main() {
+  test('who may send urgent alerts, named', () {
+    expect(urgentNames(['Rivet']), 'Rivet');
+    expect(urgentNames(['Rivet', 'Bruno']), 'Rivet and Bruno');
+    expect(urgentNames(['Rivet', 'Bruno', 'June']), 'Rivet, Bruno and June');
+    expect(
+      urgentNames(['Rivet', 'Bruno', 'June', 'Omar', 'Bo', 'Mia']),
+      'Rivet, Bruno, June, Omar and 2 more',
+    );
+  });
+
+  testWidgets('Urgent alerts from: the default names who it is now; '
+      'choosing starts from them', (tester) async {
+    final harness = await _show(
+      tester,
+      agents: _team(),
+      settings: _settings()..urgentFrom.addAll(['rivet', 'bruno']),
+    );
+    await reveal(tester, find.text('Urgent alerts from'));
+    expect(find.text('Rivet and agents that lead others'), findsOneWidget);
+    expect(find.text('Right now: Rivet and Bruno.'), findsOneWidget);
+    expect(
+      find.text("Other agents' urgent alerts arrive as normal alerts."),
+      findsOneWidget,
+    );
+    await _tap(tester, find.text('Rivet and agents that lead others'));
+    await _tap(tester, find.text('Agents you choose').last);
+    expect(
+      _lastUpdate(harness),
+      UpdateSettings(
+        notificationChange: NotificationSettingsChange(
+          urgentFrom: UrgentSenders(agentIds: ['rivet', 'bruno']),
+        ),
+      ),
+    );
+  });
+
+  testWidgets("Urgent alerts from: the person's own list, Rivet always in, "
+      'and back to the default', (tester) async {
+    final harness = await _show(
+      tester,
+      agents: _team(),
+      settings: _settings()
+        ..urgentFrom.addAll(['rivet', 'bruno'])
+        ..urgentFromCustom = true,
+    );
+    await reveal(tester, find.text('Agents you choose'));
+    expect(find.textContaining('Right now'), findsNothing);
+    // The chosen as chips; the menu adds Omar, in the sidebar's order.
+    final field = find.byType(AgentListField);
+    expect(
+      find.descendant(of: field, matching: find.text('Bruno')),
+      findsOneWidget,
+    );
+    await _tap(
+      tester,
+      find.descendant(of: field, matching: find.text('Rivet')),
+    );
+    await _tap(tester, find.text('Omar').last);
+    expect(
+      _lastUpdate(harness),
+      UpdateSettings(
+        notificationChange: NotificationSettingsChange(
+          urgentFrom: UrgentSenders(agentIds: ['rivet', 'bruno', 'omar']),
+        ),
+      ),
+    );
+    // Rivet, an admin agent, can't be taken out.
+    final sent = harness.backend.sent.length;
+    await tester.tap(find.text('Rivet').last);
+    await settle(tester);
+    expect(harness.backend.sent.length, sent);
+    // A tap beside it closes the menu.
+    await tester.tap(find.text('Urgent alerts from').first);
+    await settle(tester);
+
+    await _tap(tester, find.text('Agents you choose'));
+    await _tap(tester, find.text('Rivet and agents that lead others').last);
+    expect(
+      _lastUpdate(harness),
+      UpdateSettings(
+        notificationChange: NotificationSettingsChange(
+          urgentFrom: UrgentSenders(useDefault: true),
+        ),
+      ),
+    );
+  });
+
+  testWidgets('an older Claktory, with no list, shows no Urgent alerts from', (
+    tester,
+  ) async {
+    await _show(tester, agents: _team());
+    expect(find.text('Urgent alerts from'), findsNothing);
+  });
+
   test('quiet hours on either clock', () {
     expect(minutesOfDay(22 * 60), '22:00');
     expect(minutesOfDay(7 * 60 + 30), '07:30');

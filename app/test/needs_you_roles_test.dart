@@ -1,15 +1,16 @@
-// The role beside the agent's name in Needs you (Matt via Bruno 46581;
-// Lucy's needs-you-cards.md §3.10): "June · Project Manager", quietly, on a
-// request's row, an alert's ("Urgent · Omar · Backend · 14:32"), a fold's
-// ("June · Project Manager · 3 alerts") and focus mode's header; cut first,
-// gone before the name is cut; none for a liaison, Claktory's own or an
-// agent without one. With SHOTS set, drawn to PNGs there:
+// The role beside the agent's name in Needs you:
+// "June · Project Manager", quietly, on a request's row, an alert's
+// ("Urgent · Omar · Backend · 14:32"), a fold's ("June · Project Manager ·
+// 3 alerts") and focus mode's header; cut first, gone before the name is
+// cut; none for a liaison, Claktory's own or an agent without one. With
+// SHOTS set, drawn to PNGs there:
 //   SHOTS=/tmp/roles flutter test test/needs_you_roles_test.dart
 // test-bundle: alone (loads the app's fonts)
 import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:factory_app/inbox.dart';
+import 'package:factory_app/mobile/needs_you_phone.dart' show PhoneNeedsYou;
 import 'package:factory_app/name_role_line.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
@@ -21,6 +22,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
+import 'ipad/as_ipad.dart';
 import 'ipad/window_fixtures.dart' show TextFactor;
 import 'phone_sizes_test.dart' show loadGeist;
 
@@ -300,21 +302,26 @@ void main() {
     await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
     await settle(tester);
     expect(tester.takeException(), isNull);
-    // The header, and the queue's row beside the stage (Lucy 46817).
+    // The header, and the queue's row beside the stage.
     expect(_role('Project Manager'), findsNWidgets(2));
     await _shot(tester, 'roles-mac-focus');
   });
 
   for (final large in [false, true]) {
     testWidgets('on an iPhone at 390pt${large ? ', the largest text' : ''}: '
-        "the list says it, and focus mode's stage", (tester) async {
+        "the list says it, and a narrow iPad's focus mode stage (a phone "
+        'has none, #606)', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
       if (large) {
         tester.platformDispatcher.textScaleFactorTestValue = TextFactor.ax5;
         addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
       }
-      await _open(tester, _workspace(), size: const Size(390, 844));
+      final harness = await _open(
+        tester,
+        _workspace(),
+        size: const Size(390, 844),
+      );
       expect(tester.takeException(), isNull);
       expect(
         find.textContaining('Project Manager', findRichText: true),
@@ -322,11 +329,18 @@ void main() {
       );
       await _shot(tester, 'roles-iphone${large ? '-ax5' : ''}');
       if (large) return;
-      // Focus mode's stage says it, and its "1 of 5" list (Lucy 46817).
-      await tester.tap(find.bySemanticsLabel('Focus on Needs you'));
-      await pumpFrames(tester);
+      // Focus mode's stage says it, and its "1 of 5" list: the
+      // phone's one-card screen, as a narrow iPad's focus mode shows it.
+      asIPad();
+      await harness.show(
+        tester,
+        size: const Size(390, 844),
+        home: const PhoneNeedsYou(),
+      );
+      await settle(tester);
+      // The urgent alert first: Omar's.
       expect(
-        find.textContaining('Project Manager', findRichText: true),
+        find.textContaining('Backend', findRichText: true),
         findsWidgets,
       );
       await tester.tap(find.text('1 of 5'));

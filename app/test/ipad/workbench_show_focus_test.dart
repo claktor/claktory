@@ -1,4 +1,4 @@
-// What an agent shows comes into sight on an iPad (Zucchero's row 111): in
+// What an agent shows comes into sight on an iPad: in
 // a window that shows fewer panes than the layout has, a pane the agent's
 // show adds, or puts in another's place, becomes the one in front, so it
 // never lands among the hidden ones ("Not shown") while the agent is told

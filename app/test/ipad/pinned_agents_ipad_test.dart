@@ -1,10 +1,9 @@
-// Pinned agents on an iPad (Lucy's ux/pinned-agents.md; Bruno 48346):
-// touch and hold a pin in the workbench's sidebar and let go, and its menu
-// is a popover beside the row, as iPadOS shows a sidebar row's (Sorbet's
-// review point); touch, hold and move, and the pins reorder by finger. At
-// 13" landscape (the sidebar docked), 11" portrait and a Stage Manager
-// window (the sidebar over the window), and at the largest text. With
-// SHOTS set, drawn to PNGs there:
+// Pinned agents on an iPad: touch and hold a pin in the workbench's
+// sidebar and let go, and its menu is a popover beside the row, as iPadOS
+// shows a sidebar row's; touch, hold and move, and the pins reorder by
+// finger. At 13" landscape (the sidebar docked), 11" portrait and a Stage
+// Manager window (the sidebar over the window), and at the largest text.
+// With SHOTS set, drawn to PNGs there:
 //   SHOTS=/tmp/pins flutter test test/ipad/pinned_agents_ipad_test.dart
 // test-bundle: alone (loads the app's fonts)
 import 'dart:io';

@@ -1,4 +1,4 @@
-// Keeping a laptop's agents working with its lid closed (#371, the backend
+// Keeping a laptop's agents working with its lid closed (the backend
 // keeping the Mac awake itself, nothing installed): Settings → General →
 // Sleep's second switch, only on a laptop that can; its own question before
 // it's turned on, only on the Mac; where it stands under it; turning it off

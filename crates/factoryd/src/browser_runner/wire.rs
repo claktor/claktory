@@ -15,10 +15,11 @@
 //! - 3 input, in: one JSON [`InputEvent`].
 //! - 4 clipboard: UTF-8 text, both ways: in, pasted; out, what was copied,
 //!   only while watched ([`Control::Clipboard`]).
-//! - 5 files, out only: a download's bytes, read with
+//! - 5 files: out, a download's bytes, read with
 //!   [`Control::DownloadRead`]: its 16-byte GUID, then at most
-//!   [`MAX_FILE_CHUNK`] of the file; a frame with the GUID alone ends it
-//!   (agent-browser.md R9, Fugo 36914).
+//!   [`MAX_FILE_CHUNK`] of the file; a frame with the GUID alone ends it.
+//!   In, an upload's, after [`Control::Upload`]: its id (8 bytes), then at
+//!   most [`MAX_FILE_CHUNK`]; the id alone ends it.
 
 use std::io::{self, Read, Write};
 
@@ -26,9 +27,11 @@ use serde::{Deserialize, Serialize};
 
 /// This wire's version, in [`Report::Ready`]: a runner of another (an
 /// older Mac image, say) is stopped rather than half understood.
-/// 2: input leases ([`Control::LeaseInput`], R11): a runner that gates
+/// 2: input leases ([`Control::LeaseInput`]): a runner that gates
 /// `Input.*` on them, so a host never drives one that doesn't.
-pub const VERSION: u32 = 2;
+/// 3: uploads ([`Control::Upload`]): a runner that lets only the files it
+/// staged reach `DOM.setFileInputFiles`.
+pub const VERSION: u32 = 3;
 
 /// The bytes before each payload: the channel, then its length.
 pub const HEADER: usize = 5;
@@ -91,7 +94,7 @@ impl Channel {
             (Channel::Input, Way::In) => Some(MAX_INPUT),
             (Channel::Input, Way::Out) => None,
             (Channel::Clipboard, _) => Some(MAX_CLIPBOARD),
-            (Channel::Files, Way::In) => None,
+            (Channel::Files, Way::In) => Some(8 + MAX_FILE_CHUNK),
             (Channel::Files, Way::Out) => Some(16 + MAX_FILE_CHUNK),
         }
     }
@@ -179,7 +182,7 @@ pub enum Mode {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Control {
     /// Start the screen and Chrome on the kept profile `profile` (a short
-    /// name, `[a-z0-9-]`, 1 to 32; the runner keeps it under the uid of
+    /// name, `[a-z0-9-]`, 1 to 48; the runner keeps it under the uid of
     /// the person who ran it, so one person's never opens another's), at
     /// `url` or where it left off.
     Start {
@@ -231,6 +234,10 @@ pub enum Control {
     LeaseInput { id: u64, for_ms: u32 },
     /// The lease `id` is over: `Input.*` is refused again.
     EndLease { id: u64 },
+    /// Upload `id`, a file called `name` of `bytes`, comes next on channel
+    /// 5, for a driven errand to give a page. Answered with
+    /// [`Report::Uploaded`] or [`Report::UploadFailed`].
+    Upload { id: u64, name: String, bytes: u64 },
 }
 
 /// Control, the runner to factoryd. Hostile input once read (a page that
@@ -248,7 +255,13 @@ pub enum Report {
         mode: Mode,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         download_dir: Option<String>,
+        /// Whether the profile has Safe Browsing's lists (seeded, or its
+        /// own); absent from a runner that doesn't say.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        safe_browsing: Option<bool>,
     },
+    /// The profile that had no Safe Browsing lists at Ready has them now.
+    SafeBrowsingReady,
     /// Chrome started again in `mode` after [`Control::Mode`].
     ModeChanged { mode: Mode },
     /// The screen's size now, after [`Control::Resize`].
@@ -282,6 +295,11 @@ pub enum Report {
     /// A lease ended before its [`Control::EndLease`]: it ran out, another
     /// replaced it, or Chrome stopped, changed mode or started again.
     LeaseEnded { id: u64, why: String },
+    /// Upload `id` is staged at `path`, which `DOM.setFileInputFiles` may
+    /// now take.
+    Uploaded { id: u64, path: String },
+    /// Upload `id` was refused or didn't arrive whole, and is deleted.
+    UploadFailed { id: u64, why: String },
 }
 
 /// A frame's header (channel 2 out), 12 bytes, big-endian: its seq, the
@@ -476,9 +494,20 @@ pub fn language_ok(tag: &str) -> bool {
         && rest.iter().all(|part| (1..=8).contains(&part.len()) && part.bytes().all(|byte| byte.is_ascii_alphanumeric()))
 }
 
+/// The most an upload may be.
+pub const MAX_UPLOAD: u64 = 100 * 1000 * 1000;
+/// How many staged uploads the runner keeps, the oldest going first.
+pub const MAX_STAGED: usize = 16;
+
+/// Whether `name` may name an uploaded file: one plain name, 1 to 200
+/// bytes, never `.` or `..`, with no `/`, NUL or other control character.
+pub fn upload_name_ok(name: &str) -> bool {
+    (1..=200).contains(&name.len()) && name != "." && name != ".." && !name.chars().any(|c| c == '/' || c.is_control())
+}
+
 /// Whether `name` may name a kept profile.
 pub fn profile_name_ok(name: &str) -> bool {
-    (1..=32).contains(&name.len()) && name.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    (1..=48).contains(&name.len()) && name.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
 #[cfg(test)]
@@ -567,10 +596,21 @@ mod tests {
                 chrome: "158.0.8127.88".into(),
                 landlock_abi: 4,
                 mode: Mode::Undriven,
-                download_dir: None
+                download_dir: None,
+                safe_browsing: None
             }))
             .unwrap(),
-            r#"{"op":"ready","wire":2,"chrome":"158.0.8127.88","landlock_abi":4,"mode":"undriven"}"#
+            r#"{"op":"ready","wire":3,"chrome":"158.0.8127.88","landlock_abi":4,"mode":"undriven"}"#
+        );
+        // Uploads (wire 3).
+        assert_eq!(
+            decode::<Control>(br#"{"op":"upload","id":2,"name":"cv.pdf","bytes":13}"#),
+            Some(Control::Upload { id: 2, name: "cv.pdf".into(), bytes: 13 })
+        );
+        assert_eq!(String::from_utf8(encode(&Report::Uploaded { id: 2, path: "/tmp/u/cv.pdf".into() })).unwrap(), r#"{"op":"uploaded","id":2,"path":"/tmp/u/cv.pdf"}"#);
+        assert_eq!(
+            String::from_utf8(encode(&Report::UploadFailed { id: 2, why: "it's over the 100 MB cap".into() })).unwrap(),
+            r#"{"op":"upload_failed","id":2,"why":"it's over the 100 MB cap"}"#
         );
         // Input leases (R11, wire 2).
         assert_eq!(decode::<Control>(br#"{"op":"lease_input","id":7,"for_ms":4000}"#), Some(Control::LeaseInput { id: 7, for_ms: 4000 }));
@@ -598,9 +638,13 @@ mod tests {
         assert_eq!(InputEvent::parse(long.as_bytes()), None);
         assert_eq!(InputEvent::parse(br#"{"t":"exec"}"#), None);
 
-        // Downloads (R9): channel 5 only goes out, a GUID and 1 MiB at most.
-        assert!(matches!(parse_header([Channel::Files as u8, 0, 0, 0, 16], Way::In), Err(WireError::WrongWay(Channel::Files))));
+        // Channel 5: out a GUID and 1 MiB at most, in an id and 1 MiB.
         assert!(header(Channel::Files, 16 + MAX_FILE_CHUNK, Way::Out).is_ok() && header(Channel::Files, 17 + MAX_FILE_CHUNK, Way::Out).is_err());
+        assert!(header(Channel::Files, 8 + MAX_FILE_CHUNK, Way::In).is_ok() && header(Channel::Files, 9 + MAX_FILE_CHUNK, Way::In).is_err());
+        assert!(upload_name_ok("CV 2026 (final).pdf") && upload_name_ok("café.jpg"));
+        for bad in ["", ".", "..", "a/b", "a\0b", "a\nb", "a".repeat(201).as_str()] {
+            assert!(!upload_name_ok(bad), "{bad:?}");
+        }
         assert_eq!(
             decode::<Control>(br#"{"op":"download_read","guid":"3f1c9a2e-0b6d-4e8f-9a1b-2c3d4e5f6a7b"}"#),
             Some(Control::DownloadRead { guid: "3f1c9a2e-0b6d-4e8f-9a1b-2c3d4e5f6a7b".into() })
@@ -610,6 +654,6 @@ mod tests {
             assert!(!guid_ok(bad) && guid_bytes(bad).is_none(), "{bad}");
         }
         assert!(profile_name_ok("claktory") && profile_name_ok("dev-2"));
-        assert!(!profile_name_ok("") && !profile_name_ok("../x") && !profile_name_ok("Claktory") && !profile_name_ok(&"a".repeat(33)));
+        assert!(!profile_name_ok("") && !profile_name_ok("../x") && !profile_name_ok("Claktory") && !profile_name_ok(&"a".repeat(49)));
     }
 }

@@ -12,6 +12,8 @@
 //! `lsof -nP -i -a -p <factoryd>` and `container`'s processes meanwhile:
 //! neither should reach a registry or download anything.
 
+#![cfg(target_os = "macos")]
+
 use std::time::{Duration, Instant};
 
 use factory_protocol::PROTOCOL_VERSION;
@@ -36,7 +38,6 @@ async fn connect(addr: std::net::SocketAddr, home: &str) -> (Client, View) {
     (client, View { workspace, ..View::default() })
 }
 
-#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
 async fn a_release_starts_its_browser_from_the_image_it_ships() {
@@ -86,6 +87,6 @@ async fn a_release_starts_its_browser_from_the_image_it_ships() {
     let path = std::env::temp_dir().join("claktory-browser-gate.jpg");
     std::fs::write(&path, &frame.jpeg).expect("frame");
     eprintln!("frame {}x{}: {}", frame.width, frame.height, path.display());
-    client.ok(client_message::Body::StopAgentBrowser(v1::StopAgentBrowser {})).await;
+    client.ok(client_message::Body::StopAgentBrowser(v1::StopAgentBrowser::default())).await;
     tokio::time::sleep(Duration::from_secs(5)).await;
 }

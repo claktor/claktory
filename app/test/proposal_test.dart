@@ -129,7 +129,7 @@ void main() {
   });
 
   testWidgets('decided, it shows how, when and the comment', (tester) async {
-    // On a 24-hour device; a 12-hour one says "2:02 PM" (row 1052's nit).
+    // On a 24-hour device; a 12-hour one says "2:02 PM".
     tester.platformDispatcher.alwaysUse24HourFormatTestValue = true;
     addTearDown(tester.platformDispatcher.clearAlwaysUse24HourTestValue);
     final harness = proposing();

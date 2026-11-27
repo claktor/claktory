@@ -487,7 +487,7 @@ async fn friends_reach_each_other_and_messages_go_through_their_homes() {
     )
     .expect("a channel");
 
-    // Messages go through the person's home now (#451): claktory.com takes
+    // Messages go through the person's home now: claktory.com takes
     // none, through the service as from the worker, and keeps no history.
     let messages = format!("/v1/apps/dms/conversations/{conversation}/messages");
     let send = json!({"client_message_id": "ana-message-000000000001", "contact_generation": generation,
@@ -530,7 +530,7 @@ async fn friends_reach_each_other_and_messages_go_through_their_homes() {
     let _ = &channel;
 }
 
-/// #448, #451: while the disk is nearly full the worker keeps nothing new
+/// While the disk is nearly full the worker keeps nothing new
 /// (a KeyPackage, a hand-off, an agent's proposal), and says so, but
 /// pickups go on, and the service's own writes (signing in, checking in,
 /// the vault's share) never wait on it.
@@ -562,7 +562,8 @@ async fn a_nearly_full_disk_holds_up_new_dms_and_nothing_of_the_account() {
     let refused = instance.device_signed(&ana, "POST", "/v1/apps/dms/key-packages", Some(&upload), None).await;
     assert_eq!(refused.status, 507, "{}", refused.text());
     assert_eq!(refused.value()["message"], "Messages can't be sent right now. Try again later.");
-    // What was kept before #451 is still picked up.
+    // What the worker kept before it stopped keeping messages is still
+    // picked up.
     let page = instance.device_signed(&matt, "GET", &format!("{messages}?after=0&limit=10&request_nonce=2"), None, None).await;
     assert_eq!((page.status, &page.value()["messages"]), (200, &json!([])), "{}", page.text());
     assert_eq!(instance.device_signed(&matt, "GET", "/v1/apps/dms/sync", None, None).await.status, 200);
@@ -624,7 +625,7 @@ async fn an_account_deleted_while_the_worker_is_down_is_purged_once_it_answers()
     assert_eq!(instance.service.retry_app_purges().await, 0, "nothing left to ask");
 }
 
-/// Hostile test 24 (dms-e2ee.md §9, L0): a device another of the person's
+/// Hostile test 24: a device another of the person's
 /// devices removed (lost or stolen) still holds their identity key, but
 /// every call it makes to the worker is answered 401 before the worker
 /// hears it, so a device list it signs is never accepted, and its relay
@@ -685,7 +686,7 @@ async fn test_24_a_removed_device_reaches_the_worker_no_more() {
     let keys = instance.device_signed(&phone, "GET", &format!("/v1/apps/dms/keys/{account}"), None, None).await.value();
     assert_eq!((keys["version"].as_i64(), keys["device_list"].as_str()), (Some(1), first["device_list"].as_str()), "{keys}");
 
-    // Row 612: the worker hears which keys were removed, so the phone
+    // The worker hears which keys were removed, so the phone
     // itself can't put the stolen one back on the list (a used add code),
     // nor hand anything off to it.
     let whoami = instance.device_signed(&phone, "GET", "/v1/apps/whoami", None, None).await.value();
@@ -698,8 +699,8 @@ async fn test_24_a_removed_device_reaches_the_worker_no_more() {
     assert_eq!((answer.status, answer.error().as_str()), (409, "removed_device"), "{}", answer.text());
 }
 
-/// Row 630 (Fugo): the worker hears when a device last signed in with an
-/// emailed code, and makes no new security key on a sign-in older than 15
+/// The worker hears when a device last signed in with an emailed
+/// code, and makes no new security key on a sign-in older than 15
 /// minutes. Signing in again on the same device (same key: not a new
 /// device, nothing removed) makes it recent.
 #[tokio::test]
@@ -753,7 +754,7 @@ async fn test_25_a_new_security_key_needs_a_recent_sign_in() {
     assert_eq!(answer.status, 200, "{}", answer.text());
 }
 
-/// Row 671: Matt's Mac signs out. The worker hears it from the service and
+/// Matt's Mac signs out. The worker hears it from the service and
 /// drops its KeyPackages at once, and his phone sees it signed out in his
 /// DM keys (with the normal Remove…); signed back in, it isn't. Removed by
 /// the phone or at the account page, the same.
@@ -827,7 +828,7 @@ async fn test_26_a_signed_out_device_s_key_packages_go_and_its_account_sees_it()
     assert_eq!(held(&tablet), 0);
 }
 
-/// Row 671 (Fugo's follow-up): the Mac signs out while the worker is down.
+/// The Mac signs out while the worker is down.
 /// The sign-out goes ahead and the notice waits; asked again once it's up,
 /// its KeyPackages from before go, and any it put up after signing back in
 /// meanwhile stay. Removed while it's down, the same.
@@ -928,7 +929,7 @@ async fn remove_at_account_page(instance: &Instance, claktory: &Claktory) {
     assert_eq!(done.status, 303, "{}", done.text());
 }
 
-/// E11-4 (Fugo 40857): a Claktory removed at claktory.com/account loses its
+/// E11-4: a Claktory removed at claktory.com/account loses its
 /// agents' grants at the worker at once, not only as the account's callers
 /// see them, and the account's feed says its groups changed, so the
 /// person's devices take it out of the conversations it reached. Another

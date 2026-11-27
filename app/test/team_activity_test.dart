@@ -1,11 +1,14 @@
-// The team's activity in the sidebar's footer (#254): how many agents work
+// The team's activity in the sidebar's footer: how many agents work
 // out of all of them, across projects, live; who on hover; the Map on a
 // click.
 import 'package:factory_app/controls.dart' show LiveDot;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart' show AppPage;
 import 'package:factory_app/team_activity.dart';
+import 'package:factory_app/usage.dart' show AddProviderButton;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -107,5 +110,62 @@ void main() {
       tester.getSemantics(find.byType(TeamActivity)).label,
       contains('1 of 2 agents working'),
     );
+  });
+
+  testWidgets("with touch, the badge and + are each a finger's target, the "
+      'same size to see, and VoiceOver presses them (Bruno 51717)', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final semantics = tester.ensureSemantics();
+    final team = _team([_agent('a', working: true), _agent('b')]);
+    var added = 0;
+    final harness = Harness(team);
+    await harness.show(
+      tester,
+      home: Center(
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TeamActivity(workspace: team),
+            AddProviderButton(onTap: () => added++),
+          ],
+        ),
+      ),
+    );
+    final badge = find.byType(TeamActivity);
+    final add = find.byType(AddProviderButton);
+    for (final control in [badge, add]) {
+      final size = tester.getSize(control);
+      expect(size.width, greaterThanOrEqualTo(44));
+      expect(size.height, greaterThanOrEqualTo(44));
+      expect(
+        tester
+            .getSemantics(control)
+            .getSemanticsData()
+            .hasAction(SemanticsAction.tap),
+        isTrue,
+      );
+    }
+    // The + is the same 20pt circle, at the end of its target (it ends the
+    // row).
+    final circle = find.descendant(
+      of: add,
+      matching: find.byWidgetPredicate(
+        (widget) => widget is SizedBox && widget.width == 24,
+      ),
+    );
+    expect(tester.getSize(circle), const Size(24, 24));
+    expect(tester.getTopRight(circle).dx, tester.getTopRight(add).dx);
+    // A finger before the circle still adds.
+    await tester.tapAt(tester.getBottomLeft(add) + const Offset(4, -4));
+    await tester.pump();
+    expect(added, 1);
+    // VoiceOver's press opens the Map.
+    tester.semantics.tap(find.semantics.byLabel(RegExp('agents working')));
+    await tester.pump();
+    expect(harness.page.value, AppPage.map);
+    semantics.dispose();
   });
 }

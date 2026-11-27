@@ -1,6 +1,6 @@
-// What Settings' search finds (Lucy's Settings spec §4.3, Trish's words in
-// §10), and where a link into Settings goes (§5): kept apart from the
-// widgets, so it reads the same on every platform and is tested alone.
+// What Settings' search finds, and where a
+// link into Settings goes: kept apart from the widgets, so it reads the
+// same on every platform and is tested alone.
 
 /// Where in Settings a link or a search result goes: [section]'s id, and
 /// within it a setting's id, or empty for the section's top.
@@ -167,8 +167,8 @@ List<SettingsResult> searchSettings(
   ];
 }
 
-/// An answer to what Settings has no setting for, by what people type
-/// (Squalo, Trish): "dark mode" → light and dark follow the device.
+/// An answer to what Settings has no setting for, by what people type:
+/// "dark mode" → light and dark follow the device.
 String? settingsAnswer(String query, {required String device}) {
   final text = _normal(query).join(' ');
   // A few letters aren't a question yet ("d" isn't "dark mode").

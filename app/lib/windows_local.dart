@@ -1,10 +1,10 @@
-// This PC's own Claktory, as the Windows app reaches it (windows.md section
-// 3, authority B; Giorno 48383, Fugo 48393): on its loopback port, with the
-// app-token its backend writes at every start into <home>\app-token, sent in
-// Hello.token. The token goes only to a backend running as this same Windows
-// account: before Hello, the app checks who holds the server end of its own
-// connection (Rust's loopback_peer_same_user), and sends nothing to anyone
-// else, since another account on the PC could take the port first.
+// This PC's own Claktory, as the Windows app reaches it (authority B): on
+// its loopback port, with the app-token its backend writes at every start
+// into <home>\app-token, sent in Hello.token. The token goes only to a
+// backend running as this same Windows account: before Hello, the app checks
+// who holds the server end of its own connection (Rust's
+// loopback_peer_same_user), and sends nothing to anyone else, since another
+// account on the PC could take the port first.
 import 'dart:async';
 import 'dart:io';
 
@@ -82,7 +82,7 @@ Future<String?> readAppToken({required bool dev}) async {
 /// own end has on this PC: what the server end's owner is looked up by.
 Future<(WebSocket, int)> connectLoopback(String endpoint) async {
   // 127.0.0.1 itself, never a name: "localhost" can resolve to [::1], where
-  // any account can listen beside the backend (Fugo 51162).
+  // any account can listen beside the backend.
   if (Uri.parse(endpoint).host != '127.0.0.1') {
     throw ArgumentError.value(endpoint, 'endpoint', 'not 127.0.0.1');
   }

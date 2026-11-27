@@ -1,4 +1,4 @@
-//! Images sent to Anthropic once (#382, Polpo's model-uploads.md). Every
+//! Images sent to Anthropic once. Every
 //! model call sends the whole conversation, so a screenshot read once went
 //! up again with every later call: most of what Claktory uploaded. An image
 //! read since (one with a `digest`) is uploaded to Anthropic's Files API the
@@ -268,8 +268,8 @@ impl ImageFiles {
     /// hasn't some of them (a 404 whose `text` names their ids: another
     /// conversation let go of the same image, say). Forgets those, so the
     /// next `refs` uploads them again, keeps the others as they are, and
-    /// gives the digests it forgot: none when `text` names none (#490: one
-    /// lost file sent every image inline, 147 KB a request became 47.7 MB).
+    /// gives the digests it forgot: none when `text` names none (one lost
+    /// file sent every image inline, 147 KB a request became 47.7 MB).
     pub fn lost(&self, account: &str, refs: &HashMap<String, String>, text: &str) -> Vec<String> {
         let digests: Vec<String> = refs.iter().filter(|(_, id)| names(text, id)).map(|(digest, _)| digest.clone()).collect();
         let lines: Vec<String> = {

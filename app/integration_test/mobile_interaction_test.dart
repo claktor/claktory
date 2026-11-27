@@ -1,14 +1,12 @@
-// The iPhone's chat and viewer, end to end in the Simulator (#198 phase 3B;
-// research mobile.md §6, "Chat/viewer suite", and the §7 matrix items a
-// Simulator can show): the message box and the real keyboard (#4), a
-// conversation streaming while you read earlier messages (#5), touch and
-// hold versus selecting text (#6), comments from selection to resolved
-// (#7), and, on every screen it passes, 44pt targets with labels, text
-// contrast (4.5:1, or 3:1 for large text; a state's deliberate fade, such
-// as a queued message, is listed as exempted)
-// and no overflow (#1), at whatever text size and appearance the
-// Simulator is set to. Haptics, recording, VoiceOver on hardware and the
-// paste permission stay with a real iPhone.
+// The iPhone's chat and viewer, end to end in the Simulator (research mobile.md §6,
+// "Chat/viewer suite", and the §7 matrix items a Simulator can show): the message
+// box and the real keyboard, a conversation streaming while you read earlier
+// messages, touch and hold versus selecting text, comments from selection to
+// resolved, and, on every screen it passes, 44pt targets with labels, text contrast
+// (4.5:1, or 3:1 for large text; a state's deliberate fade, such as a queued
+// message, is listed as exempted) and no overflow, at whatever text size and
+// appearance the Simulator is set to. Haptics, recording, VoiceOver on hardware and
+// the paste permission stay with a real iPhone.
 //
 // It runs against the dev Claktory the Simulator is already paired with
 // (pair it first with phone_test.dart), never the person's. Set the
@@ -440,7 +438,7 @@ void main() {
         await guidelines('the conversation');
       });
 
-      // 1. The message box and the keyboard (§7 #4).
+      // 1. The message box and the keyboard.
       await step('the message box and the keyboard', () async {
         final field = composerField();
         check(field.evaluate().isNotEmpty, 'no message box');
@@ -647,7 +645,7 @@ void main() {
         await settle();
       });
 
-      // 2. Streaming while reading earlier messages (§7 #5).
+      // 2. Streaming while reading earlier messages.
       await step('streaming while you read', () async {
         final scroll = transcriptScroll();
         final position = tester.state<ScrollableState>(scroll).position;
@@ -776,7 +774,7 @@ void main() {
         await shot('c2-following');
       });
 
-      // 3. Touch and hold versus selecting (§7 #6).
+      // 3. Touch and hold versus selecting.
       await step('touch and hold, and selecting', () async {
         const held = 'A message to touch and hold, from $_mark.';
         play(say(held));
@@ -938,7 +936,7 @@ void main() {
         }
       });
 
-      // 4. Comments, from selection to resolved (§7 #7).
+      // 4. Comments, from selection to resolved.
       if (_file.isEmpty) {
         note('no VIEW_FILE: comments skipped');
       } else {

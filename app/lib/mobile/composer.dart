@@ -31,7 +31,7 @@ class PhoneComposerRow extends StatelessWidget {
   });
 
   /// Beside Send while there's something to send and nothing records: the
-  /// mic, for a voice note to go with what's written (#425).
+  /// mic, for a voice note to go with what's written.
   final Widget? beside;
 
   /// Send's color, the target's ([SendButton.accent]).

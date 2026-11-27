@@ -15,13 +15,13 @@ const decisionCommentLimit = 2000;
 
 /// Whether something is typed in a card's [comment] (trimmed): its own
 /// buttons then give way to one Submit, and what's typed goes as a reply,
-/// never with a verdict (#370, Matt's).
+/// never with a verdict.
 bool commentTyped(TextEditingController comment) =>
     comment.text.trim().isNotEmpty;
 
 /// Builds [builder] again whenever [controller]'s comment becomes typed or
 /// empty ([commentTyped]), not at every key: a card's buttons, or one
-/// Submit (#370).
+/// Submit.
 class CommentTyped extends StatefulWidget {
   const CommentTyped({
     super.key,
@@ -70,7 +70,7 @@ class _CommentTypedState extends State<CommentTyped> {
   Widget build(BuildContext context) => widget.builder(context, _typed);
 }
 
-/// The one button a card shows once a comment is typed (#370): it sends
+/// The one button a card shows once a comment is typed: it sends
 /// the comment as a reply and carries out nothing.
 class SubmitButton extends StatelessWidget {
   const SubmitButton({super.key, required this.onPressed});
@@ -83,9 +83,9 @@ class SubmitButton extends StatelessWidget {
       Button(label: 'Submit', primary: true, onPressed: onPressed);
 }
 
-/// The field on a card an agent waits on (Lucy's Needs you cards, rule 4):
+/// The field on a card an agent waits on:
 /// open from the start, one line growing to six, above the card's row
-/// ([CardRow]), with the mic (and #511's paperclip). Its placeholder says
+/// ([CardRow]), with the mic (and the paperclip). Its placeholder says
 /// where the words go before anything's typed: "Reply to June". It never
 /// takes focus by itself: in focus mode bare keys would type into it, and a
 /// stray letter would turn Approve into Submit. The card owns [controller]
@@ -139,10 +139,10 @@ class DecisionComment extends StatefulWidget {
   /// A caption over the field (N4b: the card changed while typing).
   final String? above;
 
-  /// What a recording for it is kept as until its words come (#401).
+  /// What a recording for it is kept as until its words come.
   final DictationFor? keep;
 
-  /// Files with the comment (#511): the paperclip, beside the mic, and the
+  /// Files with the comment: the paperclip, beside the mic, and the
   /// files waiting, under the field; none on cards that take no files.
   final Widget? attach;
   final Widget? files;
@@ -255,7 +255,7 @@ class _DecisionCommentState extends State<DecisionComment> {
   }
 }
 
-/// A card's action row (Lucy's Needs you cards, rule 2), the same on every
+/// A card's action row, the same on every
 /// card: [line], saying what pressing does, at the left; then [quiet] (the
 /// no, then any second action); then [primary], filled, last, the one
 /// filled button on the card. With no [line] (a plain card waiting, whose
@@ -278,7 +278,7 @@ class CardRow extends StatelessWidget {
   final List<Widget> quiet;
   final Widget? primary;
 
-  // On a phone, the thumb row (Prosciutto's CardActions, §5.2).
+  // On a phone, the thumb row.
   @override
   Widget build(BuildContext context) => CardActions(
     line: line,
@@ -290,7 +290,7 @@ class CardRow extends StatelessWidget {
 
 /// A card's field ([field], given the focus it's to use) and its [row],
 /// one block: on a phone, kept in sight together above the keyboard while
-/// the field has it (§5.2). [focus]: the field's, where the card moves it
+/// the field has it. [focus]: the field's, where the card moves it
 /// itself; else the block's own.
 class CardAnswerBlock extends StatefulWidget {
   const CardAnswerBlock({
@@ -327,7 +327,7 @@ class _CardAnswerBlockState extends State<CardAnswerBlock> {
         mainAxisSize: MainAxisSize.min,
         children: [
           // Shrinks, to one line at least, where the buttons wouldn't
-          // otherwise fit above the keyboard (Lucy, §5.2).
+          // otherwise fit above the keyboard.
           CardFieldRoom(child: widget.field(focus)),
           const SizedBox(height: Space.s),
           widget.row,
@@ -412,7 +412,7 @@ class QuietLink extends StatelessWidget {
 
 /// Keeps the card around [child] while [controller] has something typed in
 /// it, so what the person wrote is still there when the card scrolls out
-/// of view and back (Zucchero's rows 189 and 193): a conversation or Needs
+/// of view and back: a conversation or Needs
 /// you otherwise builds it afresh. Nothing is kept anywhere else; it goes
 /// with the conversation, and once the field is empty or gone (the card
 /// answered) the card scrolls away like any entry.
@@ -473,8 +473,8 @@ class _KeepWhileTypedState extends State<KeepWhileTyped>
   }
 }
 
-/// The most lines a card's body shows before it folds its middle (Lucy's
-/// Needs you cards): its first lines, Show all, then its last paragraph,
+/// The most lines a card's body shows before it folds its middle: its
+/// first lines, Show all, then its last paragraph,
 /// which stays in sight because agents usually put the question last.
 const cardBodyFoldLines = 8;
 

@@ -1,4 +1,4 @@
-// The sidebar's nesting is who reports to whom (#234): reports sit under
+// The sidebar's nesting is who reports to whom: reports sit under
 // their lead, a drop onto an agent makes the dragged one its report, a drop
 // between rows at its own level only reorders, and the drag says which as
 // it goes. VoiceOver hears "reports to", an admin lead included; a refusal

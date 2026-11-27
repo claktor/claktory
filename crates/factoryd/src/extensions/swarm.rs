@@ -1,10 +1,9 @@
 //! Team health (`swarm`): how the agents work together, from Claktory's
-//! records. `swarm_report` runs the playbook's measures (Melone's
-//! optimize-swarm-playbook.md, shipped as the Claktory manual's note
-//! "swarm-playbook") over a window and says which warning signs are red; the
-//! agent reads the playbook and proposes changes the person approves on one
-//! card. It reads counts, times, states and token totals only, never what
-//! anyone wrote, and changes nothing.
+//! records. `swarm_report` runs the playbook's measures (shipped as the
+//! Claktory manual's note "swarm-playbook") over a window and says which
+//! warning signs are red; the agent reads the playbook and proposes changes
+//! the person approves on one card. It reads counts, times, states and token
+//! totals only, never what anyone wrote, and changes nothing.
 //!
 //! Its option "watch" (on unless turned off) checks every hour, with no
 //! model: when a sign turns red (it holds in the last 6 hours and in the 6

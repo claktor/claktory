@@ -1,4 +1,4 @@
-// Playing voice messages back (#197): the recording a voice message
+// Playing voice messages back: the recording a voice message
 // carries, fetched from its Claktory into a temporary file and played
 // natively (AudioPlayer.swift, on the factory/audio channel). One plays at
 // a time, app-wide.

@@ -1,14 +1,14 @@
-//! The signed device list (dms-e2ee.md §2): a person's current leaves, their
+//! The signed device list: a person's current leaves, their
 //! devices and Claktories, with a version that only goes up, signed by
 //! their identity key. Members accept a leaf only if its certificate chains
 //! to the pinned identity and the latest list they've seen names it, so the
 //! service can't slip in a leaf, and a removed one never comes back.
 //!
-//! The version is scoped to the identity key that signs it (Fugo L1): it
+//! The version is scoped to the identity key that signs it: it
 //! starts again at 1 when the key rotates, and versions are only ever
 //! compared under one key (`validation::Pins`).
 //!
-//! A list can also name the person's home Claktory (#451): the iroh endpoint
+//! A list can also name the person's home Claktory: the iroh endpoint
 //! id of the Claktory that keeps their direct messages, signed with the
 //! rest, so friends' homes deliver only where the person's own devices said.
 //! A list with a home is format 2; one without is format 1, byte for byte

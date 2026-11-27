@@ -1,5 +1,4 @@
-//! The app's token on Windows (windows.md Part I, B items 1–2; Fugo 44945;
-//! the wire, Giorno 48384): how the person's own Claktory app on this PC
+//! The app's token on Windows: how the person's own Claktory app on this PC
 //! reaches its backend, in place of the Mac's local socket. Under authority
 //! B it's never local person authority: the token alone gives the app
 //! LocalUncontained, in Hello.token on the loopback port.
@@ -47,6 +46,19 @@ pub fn rotate(home: &Path) -> std::io::Result<Zeroizing<String>> {
     }
 }
 
+/// At a clean stop: the token file goes, while it still holds `token`
+/// (this start's), so an app that reads it while no backend runs waits for
+/// the next start's instead of trying a dead one first. A
+/// crash leaves it; the next start writes over it all the same. Nothing
+/// ever accepts an old token.
+pub fn forget(home: &Path, token: &str) {
+    let file = path(home);
+    let ours = std::fs::read_to_string(&file).is_ok_and(|text| text.trim_end() == token);
+    if ours && let Err(error) = std::fs::remove_file(&file) {
+        tracing::warn!(%error, "could not remove the app's token");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,6 +84,11 @@ mod tests {
         assert_eq!(std::fs::read_to_string(path(&home)).unwrap().trim(), second.as_str());
         let leftovers = std::fs::read_dir(&home).unwrap().filter(|entry| entry.as_ref().unwrap().file_name() != "app-token").count();
         assert_eq!(leftovers, 0, "no temporary file stays behind");
+        // A clean stop takes only its own token away.
+        forget(&home, &first);
+        assert!(path(&home).exists(), "another start's token stays");
+        forget(&home, &second);
+        assert!(!path(&home).exists());
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

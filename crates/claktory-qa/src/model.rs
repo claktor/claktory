@@ -11,7 +11,7 @@
 //! - anything else is answered "OK: <its first line>" (or the script's
 //!   `default`).
 //!
-//! It also serves OpenRouter's model list (`GET /api/v1/models`, #185 U4),
+//! It also serves OpenRouter's model list (`GET /api/v1/models`),
 //! which a QA build of factoryd fetches from here
 //! (`FACTORY_QA_OPENROUTER_MODELS_URL`): `openrouter-models.json` beside
 //! the script, as OpenRouter's answer (`{"data": [...]}`), read again for
@@ -470,9 +470,9 @@ async fn chat_completions(model: &Model, stream: &mut TcpStream, body: &[u8]) ->
 
 /// A request's input tokens as its provider counts them, so a sandbox's
 /// context fills as a real one's: its text at four bytes a token, and each
-/// image by its size under `rule`, never its base64 (#490: three
-/// screenshots read as a million tokens and forced a compaction). `file`
-/// gives the bytes of an image a request names by id (Anthropic's files).
+/// image by its size under `rule`, never its base64 (three screenshots
+/// read as a million tokens and forced a compaction). `file` gives the
+/// bytes of an image a request names by id (Anthropic's files).
 pub(crate) fn input_tokens(body_len: usize, request: &Value, rule: ImageRule, file: &dyn Fn(&str) -> Option<Vec<u8>>) -> usize {
     use base64::Engine as _;
     fn cost(rule: ImageRule, bytes: Option<Vec<u8>>) -> usize {
@@ -560,7 +560,7 @@ mod tests {
         bytes
     }
 
-    /// #490: three screenshots cost what the provider charges for them, by
+    /// Three screenshots cost what the provider charges for them, by
     /// their size, never their base64 (which read as a million tokens and
     /// forced a compaction after a restart).
     #[test]

@@ -94,7 +94,7 @@ impl Factory {
         crate::vault::requests::forget_admin(self, id);
         // Its browser sessions were the old conversation's.
         self.browser_forget(id, "agent_changed");
-        // The files its images went as (#382) go with it.
+        // The files its images went as go with it.
         let forgotten: Vec<String> = {
             let inner = self.lock();
             let runtime = inner.agents.get(id).and_then(|runtime| runtime.transcript.as_ref());

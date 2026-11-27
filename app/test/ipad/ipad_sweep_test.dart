@@ -1,4 +1,4 @@
-// The iPad sweep (Prosciutto's S5 for the store): every screen of the app,
+// The iPad sweep: every screen of the app,
 // as an iPad shows it, at every window the iPad gives it (Slide Over,
 // Split View's thirds and halves, Stage Manager and windowed widths, full
 // screen upright and on its side) and at the standard and the largest

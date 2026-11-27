@@ -1,4 +1,4 @@
-// A card's answer as data (#514): one draft per card while the app runs,
+// A card's answer as data: one draft per card while the app runs,
 // and a dock that takes what a card publishes after the frame, only when it
 // changed.
 import 'package:factory_app/app_grant_card.dart';
@@ -311,6 +311,11 @@ void main() {
               name: 'GITHUB',
               variables: [SecretVariable(name: 'GITHUB_TOKEN')],
             ),
+            SecretInfo(
+              id: 'shop',
+              name: 'Shop login',
+              sites: ['https://shop.example.com'],
+            ),
           ],
         ),
       ),
@@ -333,6 +338,7 @@ void main() {
       ),
     );
     expect(answer.value?.yes, 'Give CF_DNS to June');
+    // A website login is given only in Settings → Secrets: not here.
     expect(
       [for (final c in answer.value!.choices) (c.label, c.chosen)],
       [('CF_DNS', true), ('GITHUB', false)],

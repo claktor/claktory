@@ -582,9 +582,23 @@ pub(crate) fn new_export_id() -> String {
     crate::encoding::hex(&crate::vault::crypto::random::<16>())
 }
 
+#[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o777));
+}
+
+/// On Windows a staged copy keeps the private DACL of the folder it's made
+/// in; only read-only carries over.
+#[cfg(windows)]
+fn set_mode(path: &Path, mode: u32) {
+    if mode & 0o200 == 0
+        && let Ok(meta) = std::fs::metadata(path)
+    {
+        let mut permissions = meta.permissions();
+        permissions.set_readonly(true);
+        let _ = std::fs::set_permissions(path, permissions);
+    }
 }
 
 /// Everything into `writer`, the manifest first. Returns the manifest and
@@ -639,9 +653,21 @@ fn snapshot(database: &Path, copy: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn permissions(meta: &std::fs::Metadata) -> u32 {
     use std::os::unix::fs::PermissionsExt;
     meta.permissions().mode() & 0o777
+}
+
+/// The mode a file of a Claktory on Windows carries to another computer:
+/// its owner's alone (the DACL Claktory gives its home), read-only kept.
+#[cfg(windows)]
+pub(crate) fn permissions(meta: &std::fs::Metadata) -> u32 {
+    match (meta.is_dir(), meta.permissions().readonly()) {
+        (true, _) => 0o700,
+        (false, true) => 0o400,
+        (false, false) => 0o600,
+    }
 }
 
 fn mode_of(path: &Path) -> Option<u32> {

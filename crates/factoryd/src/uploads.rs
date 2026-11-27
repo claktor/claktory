@@ -149,6 +149,7 @@ pub(crate) fn free_path(folder: &Path, name: &str) -> PathBuf {
 }
 
 /// Bytes free for this user on the volume holding `path`.
+#[cfg(unix)]
 pub(crate) fn available(path: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
@@ -162,7 +163,20 @@ pub(crate) fn available(path: &Path) -> Option<u64> {
     Some(available * block)
 }
 
+/// Bytes free for this user on the volume holding `path`.
+#[cfg(windows)]
+pub(crate) fn available(path: &Path) -> Option<u64> {
+    crate::windows::fs::space(path).ok().map(|space| space.available)
+}
+
 /// "2026-11-20": today, here.
+#[cfg(windows)]
+pub(crate) fn today() -> String {
+    crate::windows::machine::today()
+}
+
+/// "2026-11-20": today, here.
+#[cfg(unix)]
 pub(crate) fn today() -> String {
     // SAFETY: time and localtime_r only write the values they're given.
     let now = unsafe { libc::time(std::ptr::null_mut()) };

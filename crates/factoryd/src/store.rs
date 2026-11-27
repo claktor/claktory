@@ -88,7 +88,7 @@ CREATE TABLE show_all (project TEXT PRIMARY KEY);
 /// Changes to the schema since `SCHEMA`, in order: database version n+1 has
 /// the first n+1 of them. Older backends (after a rollback) ignore tables they
 /// don't know.
-const MIGRATIONS: [&str; 130] = [
+const MIGRATIONS: [&str; 134] = [
     "
 -- Agents with a run that finished or failed since the person last opened them.
 CREATE TABLE unseen (agent TEXT PRIMARY KEY);
@@ -300,6 +300,10 @@ ALTER TABLE tasks ADD COLUMN folder TEXT;
     crate::vault::saved::SCHEMA,
     crate::errands::OUTSIDE_READ,
     crate::errands::CACHE_OWED,
+    crate::notify::alerts::ALSO_FROM,
+    crate::extensions::checklist::STALE,
+    crate::browser_switches::SCHEMA,
+    crate::errands::RETIRED,
 ];
 
 /// Migrations from this one on add no index to a table that grows with
@@ -312,11 +316,10 @@ const FIRST_WITHOUT_BIG_INDEXES: usize = 121;
 /// warm-up), never in a migration: building one reads the whole table,
 /// which with years of history can take long enough that a new version
 /// misses the update's trial (update.rs `TRIAL`) and is rolled back, on
-/// every try (Polpo's efficiency/startup-db.md). What reads with them is
+/// every try. What reads with them is
 /// as right without them, only slower.
 pub(crate) const LATE_INDEXES: [(&str, &str); 3] = [
-    // History reads every message from it, never their texts (Polpo's
-    // history-scale.md item 5).
+    // History reads every message from it, never their texts.
     ("messages_history", "CREATE INDEX IF NOT EXISTS messages_history ON messages (id, created, agent, source, sender_id, send_id, quiet, reply_to, intent)"),
     // The few messages not delivered yet, read at every start (`waiting`).
     ("messages_waiting", "CREATE INDEX IF NOT EXISTS messages_waiting ON messages (id) WHERE delivered IS NULL AND dropped IS NULL"),

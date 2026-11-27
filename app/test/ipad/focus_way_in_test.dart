@@ -82,10 +82,25 @@ Future<void> _goesIn(WidgetTester tester) async {
 }
 
 void main() {
-  testWidgets('Needs you as the page: Focus mode opens the iPad\'s focus '
-      'mode', (tester) async {
+  testWidgets("a full-width iPad's sidebar Needs you opens focus mode at "
+      'once, its queue with Done', (tester) async {
     await _show(tester, const Size(1366, 1024));
     await tester.tap(find.text('Needs you').first);
+    await settle(tester);
+    expect(find.byType(IPadFocus), findsOneWidget);
+    expect(find.byType(InboxView), findsNothing);
+    final done = find.bySemanticsLabel('Leave focus mode');
+    expect(done, findsOneWidget);
+    expect(tester.getSize(done).height, greaterThanOrEqualTo(44));
+    await tester.tap(done);
+    await settle(tester);
+    expect(find.byType(IPadFocus), findsNothing);
+  });
+
+  testWidgets('Needs you as the page (a layout that has it): Focus mode '
+      "opens the iPad's focus mode", (tester) async {
+    await _show(tester, const Size(1366, 1024));
+    AppScope.openPage(tester.element(find.byType(Shell)), AppPage.inbox);
     await settle(tester);
     await _goesIn(tester);
   });
@@ -131,7 +146,7 @@ void main() {
   testWidgets('narrowed from a wide window on the list: still the list, '
       'not one card', (tester) async {
     await _show(tester, const Size(1366, 1024));
-    await tester.tap(find.text('Needs you').first);
+    AppScope.openPage(tester.element(find.byType(Shell)), AppPage.inbox);
     await settle(tester);
     expect(find.byType(InboxView), findsOneWidget);
     for (final width in [504.0, 375.0, 320.0]) {

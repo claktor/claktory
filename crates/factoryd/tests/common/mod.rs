@@ -51,6 +51,62 @@ pub fn raise_open_files() {
     });
 }
 
+/// A symbolic link at `at` to `target`. On Windows (where Developer Mode
+/// lets the test account make one) a folder's or a file's, as `target` is.
+pub fn symlink(target: &Path, at: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, at)
+    }
+    #[cfg(windows)]
+    {
+        if target.is_dir() { std::os::windows::fs::symlink_dir(target, at) } else { std::os::windows::fs::symlink_file(target, at) }
+    }
+}
+
+/// `path`'s permission bits. On Windows, which has none, what they'd be for
+/// what its DACL allows: 0o700 for a folder and 0o600 for a file only this
+/// user and SYSTEM can open (Claktory's private DACL), 0o777 otherwise; so
+/// a test that a file is 0o600 holds on both.
+pub fn mode(path: &Path) -> u32 {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(path).expect("metadata").permissions()) & 0o777
+    }
+    #[cfg(windows)]
+    {
+        let private = !factory_agent::windows::system::open_to_others(path).expect("its security");
+        match (private, path.is_dir()) {
+            (true, true) => 0o700,
+            (true, false) => 0o600,
+            (false, _) => 0o777,
+        }
+    }
+}
+
+/// `path` as a command line in an agent's shell names it: as it is, or on
+/// Windows with forward slashes and no `\\?\` (Git Bash reads C:/…).
+pub fn shell_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    if cfg!(windows) { text.strip_prefix(r"\\?\").unwrap_or(&text).replace('\\', "/") } else { text }
+}
+
+/// Opens a file or folder to set its times, as each system allows: Windows
+/// wants write-attributes access, which `File::open` doesn't ask.
+pub fn open_to_date(path: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    return std::fs::File::open(path);
+    #[cfg(windows)]
+    return factoryd::windows::fs::open_to_date(path);
+}
+
+/// `text` as it goes inside a JSON string: a Windows path's backslashes
+/// escaped, as the tests write tool arguments by hand.
+pub fn json_text(text: impl std::fmt::Display) -> String {
+    let quoted = serde_json::to_string(&text.to_string()).expect("a string");
+    quoted[1..quoted.len() - 1].to_owned()
+}
+
 /// A fresh directory for one test: `$TMPDIR/factoryd-test-<pid>-<n>`.
 /// Removed when the thread that made it ends, which for a test is when the
 /// test does (libtest runs each in a thread of its own), and anything left
@@ -60,7 +116,13 @@ pub fn raise_open_files() {
 pub fn temp_dir() -> PathBuf {
     raise_open_files();
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let dir = std::env::temp_dir().join(format!("{TEST_DIRS}{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    // On Windows TEMP may be in 8.3 short names (C:\Users\CLAKTO~3\…),
+    // which the backend spells out wherever it resolves a path.
+    #[cfg(windows)]
+    let base = factoryd::windows::fs::long_path(&std::env::temp_dir());
+    #[cfg(unix)]
+    let base = std::env::temp_dir();
+    let dir = base.join(format!("{TEST_DIRS}{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
     if std::env::var_os("FACTORYD_TEST_KEEP").is_none() {
@@ -179,6 +241,7 @@ mod cleanup {
     /// (Bruno: a test's bash loop outlived it by 28 hours). A task's shell
     /// leads its group and names its status file, under the test's home
     /// (factory-agent's bash `factory-task`); never this process's group.
+    #[cfg(unix)]
     pub(crate) fn end_tasks(dirs: &[PathBuf]) {
         if dirs.is_empty() {
             return;
@@ -204,6 +267,43 @@ mod cleanup {
                 // SAFETY: signals only that task's own process group.
                 unsafe { libc::kill(-group, libc::SIGKILL) };
             }
+        }
+    }
+
+    /// On Windows: the jobs of the background tasks started under `dirs`,
+    /// as each home under them recorded them (`windows/jobs.json`), stopped
+    /// as the person's Stop would (only a job that's this user's own with
+    /// Claktory's DACL).
+    #[cfg(windows)]
+    pub(crate) fn end_tasks(dirs: &[PathBuf]) {
+        fn recorded(dir: &Path, depth: usize, pids: &mut Vec<u32>) {
+            if let Some(saved) = std::fs::read(dir.join("windows").join("jobs.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            {
+                pids.extend(
+                    saved["jobs"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|job| job["pid"].as_u64())
+                        .filter_map(|pid| u32::try_from(pid).ok()),
+                );
+            }
+            if depth < 4
+                && let Ok(entries) = std::fs::read_dir(dir)
+            {
+                for entry in entries.flatten().filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir())) {
+                    recorded(&entry.path(), depth + 1, pids);
+                }
+            }
+        }
+        let mut pids = Vec::new();
+        for dir in dirs {
+            recorded(dir, 0, &mut pids);
+        }
+        for pid in pids {
+            factory_agent::windows::job::stop(pid);
         }
     }
 
@@ -754,12 +854,17 @@ pub struct Reply {
 impl Client {
     pub async fn open(addr: SocketAddr) -> Client {
         let stream = TcpStream::connect(addr).await.expect("connect");
-        Client::over(Box::new(stream), None).await
+        // Named as the app names the loopback port: Windows checks the Host.
+        Client::over_as(Box::new(stream), None, &format!("ws://{addr}/")).await
     }
 
     /// A client over `stream`, keeping `keep` while it lives.
     pub async fn over(stream: Box<dyn Io>, keep: Option<Box<dyn std::any::Any + Send>>) -> Client {
-        let (socket, _) = client_async("ws://factory/", stream).await.expect("websocket handshake");
+        Client::over_as(stream, keep, "ws://factory/").await
+    }
+
+    async fn over_as(stream: Box<dyn Io>, keep: Option<Box<dyn std::any::Any + Send>>, url: &str) -> Client {
+        let (socket, _) = client_async(url, stream).await.expect("websocket handshake");
         Client { socket, next_id: 1, _keep: keep }
     }
 

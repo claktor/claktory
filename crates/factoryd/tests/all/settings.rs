@@ -61,24 +61,25 @@ async fn an_admin_agent_reads_and_changes_the_settings_kept_in_the_database_as_t
     }
     assert!(!read.starts_with("Changed"), "{read}");
 
-    // Several at once, each as the app would change it.
-    let changed = call(
-        &mut client,
-        &mut view,
-        "rivet",
-        "settings",
-        serde_json::json!({
-            "notifications": {"quiet_hours": true, "quiet_start": "21:30", "preview": "who"},
-            "agent_notify": {"Lea": "never"},
-            "checklist": {"reask": 60},
-            "max_open_panes": 6,
-            "keep_awake": false,
-            "voice_model": "remove",
-        }),
-    )
-    .await;
+    // Several at once, each as the app would change it. Windows can't be
+    // kept awake yet, so there that one's left out.
+    let mut several = serde_json::json!({
+        "notifications": {"quiet_hours": true, "quiet_start": "21:30", "preview": "who"},
+        "agent_notify": {"Lea": "never"},
+        "checklist": {"reask": 60},
+        "max_open_panes": 6,
+        "keep_awake": false,
+        "voice_model": "remove",
+    });
+    let awake = if cfg!(windows) { "" } else { "keep this Mac awake off; " };
+    if cfg!(windows) {
+        several.as_object_mut().expect("object").remove("keep_awake");
+    }
+    let changed = call(&mut client, &mut view, "rivet", "settings", several).await;
     assert!(
-        changed.starts_with("Changed: keep this Mac awake off; notifications; Lea's Notify me; the checklist's intervals; the pane limit; the voice model removed."),
+        changed.starts_with(&format!(
+            "Changed: {awake}notifications; Lea's Notify me; the checklist's intervals; the pane limit; the voice model removed."
+        )),
         "{changed}"
     );
     assert!(changed.contains("preview who; quiet_hours on (21:30 to 07:00"), "{changed}");

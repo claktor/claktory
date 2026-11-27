@@ -1,4 +1,4 @@
-// A page pane across the seam (Sorbet's S5 find): an iPad window narrowed
+// A page pane across the seam: an iPad window narrowed
 // with a page in front (Needs you beside the conversation) opens on that
 // page, not on a viewer that can't show it; Back goes to the conversation
 // and leaves the pane in the agent's layout. A phone asked to show a page
@@ -56,7 +56,7 @@ void main() {
     await harness.show(tester, size: _narrow, home: _window(focus));
     await pumpFrames(tester);
     expect(find.byType(PhoneShell), findsOneWidget);
-    // The phone's Needs you: the list first (#599).
+    // The phone's Needs you: the list first.
     expect(find.byType(InboxView), findsOneWidget);
     expect(_viewers, findsNothing);
     expect(find.text(_cantShow), findsNothing);

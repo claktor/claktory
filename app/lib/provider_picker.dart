@@ -94,7 +94,7 @@ class _ProviderSettingsState extends State<ProviderSettings> {
         for (final provider in added) ...[
           // By provider: a card's own state (a Refresh models failure)
           // stays with its provider as others sort in above it
-          // (Abbacchio's row 1707).
+          // .
           ProviderCard(
             key: ValueKey('provider-card:${provider.id}'),
             provider: provider,

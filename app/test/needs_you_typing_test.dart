@@ -1,4 +1,4 @@
-// #274: what the person types in a Needs you card, and where they type it,
+// What the person types in a Needs you card, and where they type it,
 // survive the list changing around it: a new question coming in above it,
 // one answered elsewhere going, the list reordering.
 import 'package:factory_app/ask_card.dart';

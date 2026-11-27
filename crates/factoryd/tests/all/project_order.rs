@@ -1,4 +1,4 @@
-//! Friend bug #12: projects are dragged into the order the person wants in
+//! Projects are dragged into the order the person wants in
 //! the sidebar, kept as config.json's list of projects, the same on every
 //! device and after a restart; archived ones keep their place.
 

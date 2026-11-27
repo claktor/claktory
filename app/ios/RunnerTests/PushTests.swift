@@ -128,6 +128,21 @@ struct PushTests {
     #expect(older.target.map(claktory: "e1")["deviceId"] as? String == "")
   }
 
+  /// An alert's push: a tap opens Needs you at it, as the app reads
+  /// "alertId" (Risotto 51582: Android's did, an iPhone's didn't).
+  @Test func anAlertsPushNamesItsAlert() throws {
+    var json = Self.notice(ctr: 1, sentAt: 0)
+    json["kind"] = "alert"
+    json["target"] = ["agent": "devops", "pipe": "", "chat": "", "seq": 0, "alert": "a7"]
+    let notice = try #require(PushOpener.notice(json))
+    #expect(notice.target.alert == "a7")
+    let map = notice.target.map(claktory: "e1")
+    #expect(map["alertId"] as? String == "a7")
+    #expect(map["agentId"] as? String == "devops")
+    let older = try #require(PushOpener.notice(Self.notice(ctr: 1, sentAt: 0)))
+    #expect(older.target.map(claktory: "e1")["alertId"] as? String == "")
+  }
+
   /// What waited out quiet hours (#364 O3): a Needs-you push about no one
   /// thing; the app opens Needs you, as it reads "kind".
   @Test func aNeedsYouPushAboutNoOneThingSaysItsKind() throws {
@@ -313,5 +328,52 @@ struct PushTests {
     local.userInfo = ["target": ["claktory": "e1", "agentId": "devops"]]
     let posted = UNNotificationRequest(identifier: "n1", content: local, trigger: nil)
     #expect(Notifications.target(of: posted, keys: keys)?["agentId"] as? String == "devops")
+  }
+}
+
+/// Which push service a build's tokens are for (Notifications.platform):
+/// from the profile it was signed with, the 11-26 board's Debug builds
+/// included.
+struct ApsEnvironmentTests {
+  /// A provisioning profile as Apple signs one: its plist inside binary.
+  static func profile(_ environment: String) -> Data {
+    let plist = """
+      <?xml version="1.0" encoding="UTF-8"?>
+      <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+      <plist version="1.0"><dict><key>Entitlements</key><dict>\
+      <key>aps-environment</key><string>\(environment)</string>\
+      </dict></dict></plist>
+      """
+    return Data([0x30, 0x82, 0x01, 0x00]) + Data(plist.utf8) + Data([0xA0, 0x82, 0x00])
+  }
+
+  @Test func aDevelopmentProfileIsTheSandbox() {
+    #expect(
+      ApsEnvironment.platform(profile: Self.profile("development"), bundleId: "com.claktory.app.dev")
+        == "apns_sandbox")
+    // Debug: its own bundle id, a development profile.
+    #expect(
+      ApsEnvironment.platform(
+        profile: Self.profile("development"), bundleId: "com.claktory.app.debug") == "apns_sandbox")
+  }
+
+  @Test func aProductionProfileIsProduction() {
+    #expect(
+      ApsEnvironment.platform(profile: Self.profile("production"), bundleId: "com.claktory.app")
+        == "apns")
+  }
+
+  @Test func noProfileGoesByWhereItRuns() {
+    // The App Store's builds carry no profile; the Simulator's neither.
+    #if targetEnvironment(simulator)
+      #expect(ApsEnvironment.platform(profile: nil, bundleId: "com.claktory.app") == "apns_sandbox")
+    #else
+      #expect(ApsEnvironment.platform(profile: nil, bundleId: "com.claktory.app") == "apns")
+      #expect(ApsEnvironment.platform(profile: nil, bundleId: "com.claktory.app.dev") == "apns_sandbox")
+    #endif
+  }
+
+  @Test func aProfileWithoutPushSaysNothing() {
+    #expect(ApsEnvironment.apsEnvironment(Data("not a profile".utf8)) == nil)
   }
 }

@@ -1,5 +1,5 @@
 // A voice message or spoken answer keeps recording while the person moves
-// around the app (#409): away from its box or field, a floating bar says
+// around the app: away from its box or field, a floating bar says
 // what it's for, how long, with Cancel and Send (Done); Send sends it where
 // it was started, through the outbox, and says so; its name goes back
 // there; Cancel asks first only for a long one.
@@ -209,7 +209,7 @@ void main() {
       ),
       findsOneWidget,
     );
-    // Nothing went wrong: no Ask Rivet to fix (Zucchero's row 346).
+    // Nothing went wrong: no Ask Rivet to fix.
     expect(find.textContaining('to fix'), findsNothing);
     expect(_inBar(find.text('Builder')), findsOneWidget);
   });
@@ -590,7 +590,7 @@ void main() {
       expect(kept.listSync().whereType<Directory>(), isEmpty);
     });
 
-    // Focus mode's hold-to-say (#514): a held key records into the card's
+    // Focus mode's hold-to-say: a held key records into the card's
     // field and letting go puts the words in, to read before sending.
     for (final early in [false, true]) {
       testWidgets(

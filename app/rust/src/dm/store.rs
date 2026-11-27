@@ -1,4 +1,4 @@
-//! The device's sealed store for direct messages (dms-e2ee.md §5.3, E4):
+//! The device's sealed store for direct messages:
 //! one SQLite file in the app's support folder holding OpenMLS's state
 //! (claktory-dm-crypto's `mls_values`, every value sealed) and the app's own
 //! tables (dm.rs's: history, positions, the retry cache, pins). Every table
@@ -9,7 +9,7 @@
 //!   and what the app keeps of the message commit together or not at all, so
 //!   a crash never leaves them apart, and a message whose transaction rolled
 //!   back decrypts again next time.
-//! - **Deleted secrets are gone** (Fugo, E1): `secure_delete` on and a
+//! - **Deleted secrets are gone**: `secure_delete` on and a
 //!   rollback journal (TRUNCATE), never WAL; claktory-dm-crypto refuses any
 //!   other connection.
 //! - **The seal key** comes from the platform key store (dm_keys.dart's
@@ -29,8 +29,8 @@ use zeroize::Zeroizing;
 
 /// The store's tables, in order: the store at version N has run the first
 /// N. Only ever append; never change one that shipped.
-// FLOOR_SCHEMA: each group's epoch floor, kept by the crate as it merges
-// (Melone's F2): a rejoin never goes back past it.
+// FLOOR_SCHEMA: each group's epoch floor, kept by the crate as it merges:
+// a rejoin never goes back past it.
 const MIGRATIONS: &[&str] = &[SCHEMA, APP, SIDE, TRANSFERRED, FLOOR_SCHEMA];
 
 /// The app's own tables (dm.rs). Values are sealed ([`Store::seal`]) except

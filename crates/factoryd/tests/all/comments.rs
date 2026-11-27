@@ -661,9 +661,13 @@ async fn a_picture_a_shown_markdown_file_shows_is_watched_with_it() {
     std::fs::create_dir_all(dir.join("site/img")).expect("folder");
     std::fs::write(dir.join("site/img/shot.png"), png(b"one")).expect("write");
     std::fs::write(dir.join("site/notes.md"), "# Notes\n\nSee ![shot](img/shot.png) here.\n").expect("write");
-    let site = std::fs::canonicalize(dir.join("site")).expect("path").display().to_string();
-    let notes = format!("{site}/notes.md");
-    let picture = format!("{site}/img/shot.png");
+    // As the app names them: on Windows with `\`, and without canonicalize's `\\?\`.
+    #[cfg(unix)]
+    let site = std::fs::canonicalize(dir.join("site")).expect("path");
+    #[cfg(windows)]
+    let site = factoryd::windows::fs::canonical(&dir.join("site")).expect("path");
+    let notes = site.join("notes.md").display().to_string();
+    let picture = site.join("img").join("shot.png").display().to_string();
     let leaf = |id: &str, kind: &str, path: &str| v1::ViewNode {
         id: id.into(),
         node: Some(v1::view_node::Node::Leaf(v1::ViewLeaf { kind: kind.into(), path: path.into(), ..Default::default() })),

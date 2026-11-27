@@ -192,7 +192,7 @@ class _AppViewState extends State<AppView> with WidgetsBindingObserver {
 /// What an app draws, always framed as the app's: "From Charts" over it,
 /// inside a hairline, so nothing in it passes for Claktory's own cards. On
 /// a phone the caption alone frames it: its panels sit on the page, 16pt
-/// from the edge, as a dashboard's do in Grafana (Bruno's P5), not inset
+/// from the edge, as a dashboard's do in Grafana, not inset
 /// again in a card.
 class _Framed extends StatelessWidget {
   const _Framed({required this.appName, required this.child});
@@ -265,7 +265,7 @@ class _Page extends StatelessWidget {
 /// A page's side margins [inset] wide: a tap there within half a finger's
 /// target of the content that hits nothing goes to the content's nearest
 /// edge, kept only where an [EdgeTapTarget] takes it (a bar's ••• at the
-/// line's end: Zucchero row 444). Nothing else gains the margin's taps.
+/// line's end). Nothing else gains the margin's taps.
 class _EdgeTaps extends SingleChildRenderObjectWidget {
   const _EdgeTaps({required this.inset, required super.child});
 

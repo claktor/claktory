@@ -1,4 +1,4 @@
-// #375: a big file on its way says how much has come, with a bar, and
+// A big file on its way says how much has come, with a bar, and
 // while the connection is away that it carries on from there.
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/viewers/loading_progress.dart';
@@ -56,8 +56,8 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await _show(tester, received: 2100000, size: 9400000);
     expect(find.text('Loading video… 2.1 MB of 9.4 MB'), findsOneWidget);
-    // Drawn that far, the bar's own height (#417: it was drawn with
-    // none, and never seemed to move).
+    // Drawn that far, the bar's own height (it was drawn with none,
+    // and never seemed to move).
     final fill = tester.getSize(find.byKey(const ValueKey('loading-fill')));
     expect(
       fill.width,

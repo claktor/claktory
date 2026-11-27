@@ -5,12 +5,9 @@
 //! would otherwise reach the phone's decoder, Fugo 36598), and input is
 //! clamped and capped before it's scaled to the screen (Fugo 36686).
 
-use std::sync::Arc;
-
 use factory_protocol::v1::{self, AgentBrowserPointerKind as PointerKind, agent_browser_event::Event, server_message::Body};
 
 use crate::browser_runner::wire::{self, Button, Channel, FrameHeader, InputEvent, Modifier};
-use crate::factory::Factory;
 
 /// The most input events taken a second from the person.
 pub(crate) const EVENTS_PER_SECOND: u32 = 240;
@@ -32,10 +29,9 @@ pub(crate) fn cleaned(text: &str, max: usize) -> String {
 }
 
 /// A frame from the runner: to the viewer, when it's the size it says.
-pub(crate) fn frame(factory: &Arc<Factory>, payload: &[u8]) {
+pub(crate) fn frame(one: &super::One, payload: &[u8]) {
     let Some((header, jpeg)) = FrameHeader::split(payload) else { return };
-    let host = &factory.agent_browser;
-    let mut inner = host.inner();
+    let mut inner = one.inner();
     let ack = |inner: &super::Inner| {
         if let Some(runner) = &inner.runner {
             let _ = runner.try_send((Channel::Frames, wire::ack(header.seq).to_vec()));
@@ -64,10 +60,6 @@ pub(crate) fn frame(factory: &Arc<Factory>, payload: &[u8]) {
         ack(&inner);
         return;
     }
-    let Some(slot) = inner.ports.get(&viewer.port) else {
-        ack(&inner);
-        return;
-    };
     let frame = v1::AgentBrowserFrame {
         seq: u64::from(header.seq),
         jpeg: jpeg.to_vec(),
@@ -79,7 +71,7 @@ pub(crate) fn frame(factory: &Arc<Factory>, payload: &[u8]) {
         screen_width: u32::from(header.screen_width),
         screen_height: u32::from(header.screen_height),
     };
-    if slot.sender.try_send(Body::AgentBrowserFrame(frame)).is_ok() {
+    if viewer.sender.try_send(Body::AgentBrowserFrame(frame)).is_ok() {
         inner.in_flight = Some(header.seq);
         inner.screen = (header.screen_width, header.screen_height);
         // The page's origin and title for the frames to come.
@@ -90,14 +82,14 @@ pub(crate) fn frame(factory: &Arc<Factory>, payload: &[u8]) {
 }
 
 /// What was copied in the browser: to the viewer, only in its turn.
-pub(crate) fn clipboard(factory: &Arc<Factory>, payload: Vec<u8>) {
-    let inner = factory.agent_browser.inner();
+pub(crate) fn clipboard(one: &super::One, payload: Vec<u8>) {
+    let inner = one.inner();
     if !super::persons_turn(inner.state) {
         return;
     }
-    let Some(slot) = inner.viewer.as_ref().and_then(|viewer| inner.ports.get(&viewer.port)) else { return };
+    let Some(viewer) = inner.viewer.as_ref() else { return };
     let text = String::from_utf8_lossy(&payload).into_owned();
-    let _ = slot.sender.try_send(Body::AgentBrowserClipboard(v1::AgentBrowserClipboard { text }));
+    let _ = viewer.sender.try_send(Body::AgentBrowserClipboard(v1::AgentBrowserClipboard { text }));
 }
 
 /// A JPEG's size, from its frame header (SOF), without decoding it.

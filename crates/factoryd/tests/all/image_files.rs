@@ -1,4 +1,4 @@
-//! #382: the images a conversation lets go of, at /clear or compaction,
+//! The images a conversation lets go of, at /clear or compaction,
 //! have their files deleted at the provider (Anthropic keeps each image an
 //! agent read as a file, so later requests don't send it again).
 

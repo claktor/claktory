@@ -16,10 +16,19 @@
 //! Only processes Claktory starts this way get the fd: the backend makes it
 //! close-on-exec at once, so agents' commands never inherit it. A key that
 //! arrives is checked against the vault before it's used (`Vault::take`).
+//!
+//! On Windows the same messages go through two pipes whose backend's ends
+//! only the backend the supervisor starts inherits (`windows::handoff`).
+//! Windows has no `exec`, so a backend with no
+//! supervisor hands nothing over: the vault opens again by itself, or asks.
 
+#[cfg(unix)]
 use std::io::{Read, Write};
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::sync::Mutex;
 
 use zeroize::Zeroizing;
@@ -30,6 +39,7 @@ use super::memory::Locked;
 pub const FD_ENV: &str = "FACTORY_VAULT_FD";
 
 /// The backend's end, once taken at start.
+#[cfg(unix)]
 static CHANNEL: Mutex<Option<UnixStream>> = Mutex::new(None);
 
 /// A key handed over: the vault it opens, and the key.
@@ -80,6 +90,7 @@ fn parse(bytes: &[u8], held: &mut Option<Handed>) -> usize {
     }
 }
 
+#[cfg(unix)]
 fn set_cloexec(fd: RawFd, on: bool) {
     // SAFETY: fcntl on an fd this process holds.
     unsafe {
@@ -94,6 +105,7 @@ fn set_cloexec(fd: RawFd, on: bool) {
 /// At the backend's start, before it starts anything: takes its end of the
 /// pair, keeps it from every process it starts, and returns the key handed
 /// to it, if any.
+#[cfg(unix)]
 pub fn receive() -> Option<Handed> {
     let fd: RawFd = std::env::var(FD_ENV).ok()?.parse().ok()?;
     // SAFETY: only a socket counts; anything else the variable names is left alone.
@@ -124,15 +136,33 @@ pub fn receive() -> Option<Handed> {
     held
 }
 
+/// On Windows: the key the supervisor wrote before starting this backend,
+/// through the end `windows::handoff::seal` took first thing in `main`.
+#[cfg(windows)]
+pub fn receive() -> Option<Handed> {
+    let bytes = crate::windows::handoff::take_waiting();
+    let mut held = None;
+    parse(&bytes, &mut held);
+    held
+}
+
 /// Before exiting for an update: hands the key to whoever starts the next
 /// backend. Whether there was someone to hand it to.
+#[cfg(unix)]
 pub(crate) fn keep(vault_id: &str, vmk: &[u8; 32]) -> bool {
     let Some(message) = keep_message(vault_id, vmk) else { return false };
     let mut channel = CHANNEL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     channel.as_mut().is_some_and(|stream| stream.write_all(&message).is_ok())
 }
 
+/// On Windows, through the backend's pipe up to the supervisor.
+#[cfg(windows)]
+pub(crate) fn keep(vault_id: &str, vmk: &[u8; 32]) -> bool {
+    keep_message(vault_id, vmk).is_some_and(|message| crate::windows::handoff::write(&message))
+}
+
 /// The update passed its trial: the supervisor forgets the key.
+#[cfg(unix)]
 pub(crate) fn release() {
     let mut channel = CHANNEL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(stream) = channel.as_mut() {
@@ -143,6 +173,7 @@ pub(crate) fn release() {
 /// For a backend that becomes the new one in place: the end to leave open
 /// across exec (its fd for `FD_ENV`), already holding the key. The other
 /// end closes with the exec.
+#[cfg(unix)]
 pub(crate) fn for_exec(vault_id: &str, vmk: &[u8; 32]) -> std::io::Result<OwnedFd> {
     let (mut ours, theirs) = UnixStream::pair()?;
     let message = keep_message(vault_id, vmk).ok_or_else(|| std::io::Error::other("the vault's id is too long"))?;
@@ -151,6 +182,12 @@ pub(crate) fn for_exec(vault_id: &str, vmk: &[u8; 32]) -> std::io::Result<OwnedF
     std::mem::forget(ours);
     set_cloexec(theirs.as_raw_fd(), false);
     Ok(theirs.into())
+}
+
+/// On Windows, the same through the backend's pipe.
+#[cfg(windows)]
+pub(crate) fn release() {
+    let _ = crate::windows::handoff::write(b"D");
 }
 
 /// The supervisor's side: the key a backend kept, until the next takes it.
@@ -165,6 +202,7 @@ impl Holder {
     /// (to leave open in it, its fd in `FD_ENV`), already holding the key if
     /// there is one. `trial`: the backend is an update on trial, or the one
     /// before it coming back, so the key is kept for a rollback.
+    #[cfg(unix)]
     pub fn channel(&mut self, trial: bool) -> std::io::Result<(UnixStream, OwnedFd)> {
         let (mut ours, theirs) = UnixStream::pair()?;
         if let Some(handed) = &self.held
@@ -178,6 +216,19 @@ impl Holder {
         set_cloexec(theirs.as_raw_fd(), false);
         self.unread.clear();
         Ok((ours, theirs.into()))
+    }
+
+    /// On Windows: what to write into the next backend's pipe before it
+    /// starts (`windows::handoff::spawn`), the key if there is one; `trial`
+    /// as for `channel`.
+    #[cfg(windows)]
+    pub fn for_next(&mut self, trial: bool) -> Option<Zeroizing<Vec<u8>>> {
+        let message = self.held.as_ref().and_then(|handed| keep_message(&handed.vault_id, &handed.vmk));
+        if !trial {
+            self.held = None;
+        }
+        self.unread.clear();
+        message
     }
 
     /// What the backend wrote.
@@ -211,6 +262,20 @@ mod tests {
         assert!(!holder.holds());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn the_next_backend_gets_the_key_once_unless_on_trial() {
+        let mut holder = Holder::default();
+        assert!(holder.for_next(false).is_none());
+        let message = keep_message("v1", &[3; 32]).expect("message");
+        holder.read(&message);
+        assert_eq!(holder.for_next(true).as_deref(), Some(&*message));
+        assert!(holder.holds(), "kept for a rollback");
+        assert_eq!(holder.for_next(false).as_deref(), Some(&*message));
+        assert!(!holder.holds() && holder.for_next(false).is_none());
+    }
+
+    #[cfg(unix)]
     #[test]
     fn the_next_backend_reads_the_key_at_once() {
         let mut holder = Holder::default();

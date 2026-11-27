@@ -16,6 +16,7 @@ import '../people/people_view.dart' show contactsApi;
 import '../people/problems.dart';
 import '../protocol/factory/v1/factory.pb.dart';
 import '../scope.dart';
+import '../visible_codes.dart' show nameInText;
 import 'grants.dart';
 import 'session.dart';
 
@@ -184,7 +185,7 @@ class _AgentsAccessViewState extends State<AgentsAccessView> {
     try {
       await _grants.revoke(grant.id);
       // Its Claktory comes out of those conversations' groups now, from
-      // this device when it's set up for messages (Fugo L6).
+      // this device when it's set up for messages.
       if (grant.app == 'dms' && mounted) {
         unawaited(e2eeOf(context).grantsChanged());
       }
@@ -277,7 +278,7 @@ class _GrantRow extends StatelessWidget {
         : null;
     final name = agent?.name ?? grant.agentId;
     final where = claktory != null
-        ? 'On ${claktory.name.isEmpty ? claktory.machine : claktory.name}'
+        ? 'On ${nameInText(claktory.name.isEmpty ? claktory.machine : claktory.name)}'
         : access.claktories == null
         ? 'On one of your Claktories'
         : "On a Claktory that's no longer on your account";

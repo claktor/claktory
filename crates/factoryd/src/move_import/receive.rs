@@ -19,11 +19,15 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
+#[cfg(unix)]
 use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
+
+#[cfg(windows)]
+use crate::windows::fs::FileExt;
 
 use iroh::endpoint::{Connection, RecvStream, SendStream, presets};
 use iroh::{Endpoint, RelayMode, SecretKey};
@@ -888,12 +892,11 @@ fn open_in(root: &Path, path: &str) -> Result<std::fs::File, String> {
     }
     let file = root.join(path);
     writable(&file).map_err(|error| format!("Can't write {path} on this computer: {error}"))?;
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(file)
-        .map_err(|error| format!("Can't write {path} on this computer: {error}"))
+    #[cfg(unix)]
+    let opened = std::fs::OpenOptions::new().read(true).write(true).custom_flags(libc::O_NOFOLLOW).open(file);
+    #[cfg(windows)]
+    let opened = crate::windows::fs::open_no_follow(std::fs::OpenOptions::new().read(true).write(true), &file);
+    opened.map_err(|error| format!("Can't write {path} on this computer: {error}"))
 }
 
 /// A staged file given the source's mode when a round finished, read-only
@@ -906,9 +909,21 @@ fn writable(file: &Path) -> std::io::Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
-    let mode = meta.permissions().mode() & 0o777;
-    if meta.is_file() && mode & 0o600 != 0o600 {
-        std::fs::set_permissions(file, std::fs::Permissions::from_mode(mode | 0o600))?;
+    #[cfg(unix)]
+    {
+        let mode = meta.permissions().mode() & 0o777;
+        if meta.is_file() && mode & 0o600 != 0o600 {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(mode | 0o600))?;
+        }
+    }
+    // Windows keeps only read-only of a mode (the owner's rights are the
+    // home's private DACL).
+    #[cfg(windows)]
+    if meta.is_file() && meta.permissions().readonly() {
+        let mut permissions = meta.permissions();
+        #[allow(clippy::permissions_set_readonly_false, reason = "only the owner can reach a file in the private home")]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(file, permissions)?;
     }
     Ok(())
 }
@@ -1018,6 +1033,8 @@ impl Staging {
                 Err(_) => {}
             }
             std::fs::create_dir(&at).map_err(|error| self.cant(path, &error))?;
+            // On Windows it takes the private home's DACL.
+            #[cfg(unix)]
             let _ = std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o700));
         }
         Ok(self.root.join(path))
@@ -1060,7 +1077,10 @@ impl Staging {
                 if !same {
                     remove_any(&target).map_err(|error| self.cant(&entry.path, &error))?;
                     self.index.remove(&entry.path);
+                    #[cfg(unix)]
                     std::os::unix::fs::symlink(&entry.target, &target).map_err(|error| self.cant(&entry.path, &error))?;
+                    #[cfg(windows)]
+                    return Err(format!("The move holds a link ({}), which Windows can't make here.", entry.path));
                 }
             }
             Kind::File => {
@@ -1076,15 +1096,22 @@ impl Staging {
                     self.index.remove(&entry.path);
                 }
                 writable(&target).map_err(|error| self.cant(&entry.path, &error))?;
-                let file = std::fs::OpenOptions::new()
+                #[cfg(unix)]
+                let opened = std::fs::OpenOptions::new()
                     .write(true)
                     .read(true)
                     .create(true)
                     .truncate(false)
                     .mode(0o600)
                     .custom_flags(libc::O_NOFOLLOW)
-                    .open(&target)
-                    .map_err(|error| self.cant(&entry.path, &error))?;
+                    .open(&target);
+                // Made with the private home's DACL, inherited.
+                #[cfg(windows)]
+                let opened = crate::windows::fs::open_no_follow(
+                    std::fs::OpenOptions::new().write(true).read(true).create(true).truncate(false),
+                    &target,
+                );
+                let file = opened.map_err(|error| self.cant(&entry.path, &error))?;
                 let mut staged = self.index.remove(&entry.path).filter(|staged| staged.block == block).unwrap_or_default();
                 staged.block = block;
                 staged.hashes.resize(entry.hashes.len(), String::new());
@@ -1170,7 +1197,16 @@ impl Staging {
                         have += entry.size;
                         // Never setuid, setgid or sticky: a Claktory moves no such file.
                         let mode = if entry.mode == 0 { 0o600 } else { entry.mode & 0o777 };
+                        #[cfg(unix)]
                         let _ = file.set_permissions(std::fs::Permissions::from_mode(mode));
+                        #[cfg(windows)]
+                        if mode & 0o200 == 0
+                            && let Ok(meta) = file.metadata()
+                        {
+                            let mut permissions = meta.permissions();
+                            permissions.set_readonly(true);
+                            let _ = file.set_permissions(permissions);
+                        }
                         let at = UNIX_EPOCH + Duration::from_millis(u64::try_from(entry.mtime_ms).unwrap_or(0));
                         let _ = file.set_modified(at.max(UNIX_EPOCH));
                     } else {
@@ -1190,9 +1226,13 @@ impl Staging {
                     }
                 }
                 Kind::Dir => {
-                    let mode = if entry.mode == 0 { 0o700 } else { (entry.mode & 0o777) | 0o700 };
-                    if std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_dir()) {
-                        let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode));
+                    // On Windows a folder keeps the private home's DACL.
+                    #[cfg(unix)]
+                    {
+                        let mode = if entry.mode == 0 { 0o700 } else { (entry.mode & 0o777) | 0o700 };
+                        if std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_dir()) {
+                            let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode));
+                        }
                     }
                 }
                 Kind::Symlink => {}

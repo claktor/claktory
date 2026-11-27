@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 #[cfg(unix)]
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::time::{Instant, Sleep, sleep};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -452,10 +452,11 @@ fn signal_name(signal: i32) -> String {
     {
         SIGNALS.iter().find(|entry| entry.0 == signal).map_or_else(|| format!("SIG{signal}"), |entry| entry.1.to_owned())
     }
-    // Git Bash reports a signal from its own `kill` as 128+n too.
+    // Git Bash reports a signal from its own `kill` as 128+n too, by
+    // Cygwin's numbering.
     #[cfg(windows)]
     {
-        format!("SIG{signal}")
+        crate::windows::system::signal_name(signal).map_or_else(|| format!("SIG{signal}"), str::to_owned)
     }
 }
 
@@ -954,6 +955,16 @@ async fn watch(mut child: Child, task: Task, limit: f64, finished: Arc<dyn Fn(Fi
         },
         Err(error) => format!("failed: {error}"),
     };
+    // Its shell ended, but the rest of its group may take a moment more (on
+    // Windows, the wrapper that wrote its status; anywhere, a child on its
+    // way out): up to a second for it to go, so `finished` can cut a log
+    // written past its cap (Jotaro 53341). Something left running stays so.
+    for _ in 0..20 {
+        if !group_alive(pid) {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
     let mut done = task.finished(otherwise, &redactor);
     if timed_out {
         done.status = format!("{TIME_LIMIT} ({})", took(limit));
@@ -1248,7 +1259,7 @@ fn spawn_wrapped(
     };
     #[cfg(unix)]
     let (child, pid) = {
-        let mut command = Command::new("bash");
+        let mut command = super::confine::command("bash");
         let wrapper = if filter.is_some() { FILTERED_TASK_WRAPPER } else { TASK_WRAPPER };
         command
             .args(["--noprofile", "--norc", "-c", wrapper, "factory-task", script])
@@ -1298,7 +1309,7 @@ fn spawn(cwd: &Path, script: &str, environment: &[(String, Zeroizing<String>)]) 
 
 #[cfg(unix)]
 fn spawn(cwd: &Path, script: &str, environment: &[(String, Zeroizing<String>)]) -> Result<(Child, u32), Error> {
-    let mut command = Command::new("bash");
+    let mut command = super::confine::command("bash");
     command
         .args(["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script])
         .envs(environment.iter().map(|(name, value)| (name, value.as_str())))

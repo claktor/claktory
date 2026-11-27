@@ -1,4 +1,4 @@
-// A move of this Claktory an agent started (#243 S1) waits for the
+// A move of this Claktory an agent started waits for the
 // person's own Confirm: besides floating over the window, it's in Needs
 // you, opening to the same card.
 import 'package:factory_app/highlights.dart' show HighlightStore;

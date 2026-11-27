@@ -1,4 +1,4 @@
-// The conversation on an iPhone (research mobile.md, phase 1B; #198): the
+// The conversation on an iPhone (research mobile.md, phase 1B): the
 // header's finger-sized Back or Menu, name and "…"; a message box laid out
 // as iOS's Messages, Return starting a new line; 17pt reading text in a
 // 16pt gutter; code that scrolls sideways without the drawer taking it;
@@ -778,7 +778,7 @@ void main() {
       timestampMs: Int64(500),
       proposal: Proposal(id: 'prop5', text: 'Add a designer agent'),
     );
-    // No chip floating over the conversation (#321).
+    // No chip floating over the conversation.
     expect(find.byType(NeedsYouChip), findsNothing);
     final chip = find.byType(PhoneNeedsYouButton);
     // The count on its glyph, and the chip's words for VoiceOver.
@@ -807,7 +807,7 @@ void main() {
     // (Review) comes over it, and Back returns to it.
     expect(find.byType(PhoneSheet), findsNothing);
     expect(harness.page.value, AppPage.inbox);
-    // The list of what waits first (#599).
+    // The list of what waits first.
     expect(find.byType(InboxView), findsOneWidget);
     expect(find.textContaining('Add a designer agent'), findsWidgets);
 

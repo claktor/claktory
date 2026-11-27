@@ -1,4 +1,4 @@
-//! Pipes (#196) end to end: two Claktories pair through an invite, both
+//! Pipes end to end: two Claktories pair through an invite, both
 //! people approve, and their agents talk through the store and Sam's
 //! transport together. A file of its own: the transport's store is
 //! process-wide, and the transport's own tests register a test store.
@@ -131,7 +131,7 @@ async fn two_claktories_pair_approve_and_their_agents_talk() {
     assert_eq!(knocked.digits, joined.digits);
     assert_eq!(knocked.digits.len(), 4);
     assert_eq!(knocked.peer.expect("peer").purpose, "copy");
-    // A new pipe reviews neither way until its person turns it on (#247).
+    // A new pipe reviews neither way until its person turns it on.
     assert!(!knocked.review_outgoing && !knocked.review_incoming && !joined.review_outgoing && !joined.review_incoming);
     assert_eq!(b.view.workspace.selected_pipe_id, joined.id);
     let approve = |pipe: &str, agent: &str, quarantined: bool| {
@@ -202,7 +202,7 @@ async fn two_claktories_pair_approve_and_their_agents_talk() {
     assert!(matches!(a.request(action(&knocked.id, v1::PipeAction::Resume)).await, Body::Ack(_)));
     b.until(|pipe| pipe.state() == v1::PipeState::Open).await;
 
-    // A's Rivet pauses it at once when asked (#423), and resumes it only
+    // A's Rivet pauses it at once when asked, and resumes it only
     // once the person approves its card; B sees each.
     a.rivet().await;
     let said = a.call("rivet", "pipes_settings", r#"{"pipe": "Launch", "reason": "Matt is away.", "pause": true}"#).await;
@@ -222,7 +222,7 @@ async fn two_claktories_pair_approve_and_their_agents_talk() {
     assert!(matches!(a.request(Request::AnswerAsk(approve)).await, Body::Ack(_)));
     b.until(|pipe| pipe.state() == v1::PipeState::Open).await;
 
-    // A's lead waits on a usage limit (#343 U18): B's pipe says it's waiting
+    // A's lead waits on a usage limit: B's pipe says it's waiting
     // until a quarter of an hour, in B's own words, and B's lead isn't told;
     // once A's is awake again, B's pipe says so.
     factoryd::pipe_link::set_liaison_every(Duration::from_millis(300));
@@ -298,9 +298,9 @@ impl Side {
     }
 }
 
-/// #244: Rivet starts both ends of a pipe with cards the people use
+/// Rivet starts both ends of a pipe with cards the people use
 /// themselves: it never sees the code, and nothing the other side wrote
-/// about itself reaches it (Fugo's condition).
+/// about itself reaches it.
 async fn rivet_starts_both_ends_and_never_sees_the_code_or_their_words() {
     let (dir_a, dir_b) = (temp_dir(), temp_dir());
     let mut a = claktory(&dir_a, "Site", "Lea").await;
@@ -450,8 +450,8 @@ impl Side {
     }
 }
 
-/// #289: the person's comment on each pipe decision, both ways, reaches only
-/// this side's agent, as theirs, and nothing the other side gets (Fugo).
+/// The person's comment on each pipe decision, both ways, reaches only
+/// this side's agent, as theirs, and nothing the other side gets.
 async fn the_persons_comments_reach_their_own_agents_and_never_the_other_side() {
     const MARKER: &str = "MARKER-282";
     let (dir_a, dir_b) = (temp_dir(), temp_dir());
@@ -504,7 +504,7 @@ async fn the_persons_comments_reach_their_own_agents_and_never_the_other_side() 
     assert!(matches!(a.request(decide(&knocked.id, held.seq, false, &format!("{MARKER} discard"))).await, Body::Ack(_)));
     let told = a.told("lea", "discarded your message").await;
     assert!(told.contains(&format!("\n\nThe person's note: {MARKER} discard")), "{told}");
-    // Submit (#370): one sent back to Lea with a reply, never sent; the
+    // Submit: one sent back to Lea with a reply, never sent; the
     // reply is kept apart from the pipe tables, and the card shows it.
     a.call("lea", "pipe_send", r#"{"text": "Launch moved to Monday."}"#).await;
     let held = a.message(&knocked.id, "Launch moved to Monday.").await;
@@ -528,7 +528,7 @@ async fn the_persons_comments_reach_their_own_agents_and_never_the_other_side() 
         (returned.state(), returned.replied, returned.note.as_str()),
         (v1::PipeMessageState::Discarded, true, format!("{MARKER} back").as_str())
     );
-    // Its history says Replied, never Denied (Abbacchio's #370 row).
+    // Its history says Replied, never Denied.
     let list = v1::ListNeedsYouHistory { query: String::new(), before_ms: 0, limit: 0 };
     let Body::NeedsYouHistory(history) = a.request(Request::ListNeedsYouHistory(list)).await else { panic!("history") };
     let record = history.records.iter().find(|record| record.pipe_id == knocked.id && record.seq == held.seq).expect("its record");
@@ -558,7 +558,7 @@ async fn the_persons_comments_reach_their_own_agents_and_never_the_other_side() 
         view.workspace.pipes.iter().any(|pipe| pipe.id == second.pipe_id && pipe.state() == v1::PipeState::Approval)
     });
     tokio::time::timeout(Duration::from_secs(20), wait).await.expect("knocked");
-    // Submit (#370) first: a reply leaves it waiting, and tells that agent,
+    // Submit first: a reply leaves it waiting, and tells that agent,
     // whom the pipe names for the card.
     let waiting = a.view.workspace.pipes.iter().find(|pipe| pipe.id == second.pipe_id).expect("the pipe").clone();
     assert_eq!(waiting.reply_agent_id, "rivet");
@@ -630,7 +630,7 @@ async fn open_pair() -> (Side, Side, v1::Pipe, v1::Pipe) {
     (a, b, knocked, joined)
 }
 
-/// Friend bug #32 (Fugo 33421): Rivet continues a pipe the loop breaker
+/// Rivet continues a pipe the loop breaker
 /// paused only on a card that says, in Claktory's words, why it paused and
 /// what continuing does; the card continues only that pause.
 async fn rivet_continues_a_looped_pipe_only_for_the_pause_it_showed() {
@@ -695,7 +695,7 @@ async fn rivet_continues_a_looped_pipe_only_for_the_pause_it_showed() {
     b.until(|pipe| pipe.state() == v1::PipeState::Open).await;
 }
 
-/// Friend bug #33 (Fugo 33515): a member that only sends marks its posts on
+/// A member that only sends marks its posts on
 /// the wire, so the other side's loop breaker leaves them out too: the same
 /// long post three times, then fifty in a row, pause neither side. They
 /// still meet the other side's limits and its Review incoming.
@@ -750,7 +750,7 @@ async fn a_senders_posts_never_pause_the_other_side_but_meet_its_limits() {
     assert!(open(&b), "still open");
 }
 
-/// Friend bug #32 (Fugo 33421): Rivet asks to share a website with a pipe on
+/// Rivet asks to share a website with a pipe on
 /// a card; a port that can't be shared makes none, and nothing reaches the
 /// other side until the person approves; then exactly what it showed: that
 /// port, that name, that one pipe.
@@ -800,7 +800,7 @@ async fn rivet_shares_a_website_only_once_the_person_approves_its_card() {
     drop(website);
 }
 
-/// Abbacchio's row 1177 nits: the post that trips the loop breaker is told
+/// The post that trips the loop breaker is told
 /// it waits behind the pause, not that it was sent; and the other side's
 /// pipe says its Claktory paused it for the agents' looping, not its person.
 async fn a_loop_pause_says_what_paused_it_on_both_sides() {
@@ -823,7 +823,7 @@ async fn a_loop_pause_says_what_paused_it_on_both_sides() {
     assert!(pipes::messages_for_test(&a.factory, &knocked.id).iter().any(|line| line.text.contains("repeated the same message")));
 
     // Continued: the post that waited behind the pause goes, and it doesn't
-    // trip the other side's loop breaker at once (Abbacchio rows 1193-1195):
+    // trip the other side's loop breaker at once:
     // both sides start their count over.
     let resume = v1::SetPipeState { pipe_id: knocked.id.clone(), action: v1::PipeAction::Resume.into() };
     assert!(matches!(a.request(Request::SetPipeState(resume)).await, Body::Ack(_)));

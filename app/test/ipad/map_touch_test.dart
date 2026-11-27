@@ -1,8 +1,8 @@
-// The Map on an iPad, where a finger comes first (Zucchero's row 517,
-// Formaggio's OK): a tap on an agent shows its card with Close and Open
-// conversation, as on a phone, rather than leaving for its conversation;
-// a tap on the empty board lets it go; a drag pans without letting go; the
-// key says "Tap". The Mac's click still opens the conversation (map_test).
+// The Map on an iPad, where a finger comes first: a tap
+// on an agent shows its card with Close and Open conversation, as on a
+// phone, rather than leaving for its conversation; a tap on the empty
+// board lets it go; a drag pans without letting go; the key says "Tap".
+// The Mac's click still opens the conversation (map_test).
 import 'package:factory_app/map.dart';
 import 'package:factory_app/map_card.dart';
 import 'package:factory_app/scope.dart';

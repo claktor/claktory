@@ -1,4 +1,4 @@
-//! Members that only send (#414): an admin agent such as Rivet lets an
+//! Members that only send: an admin agent such as Rivet lets an
 //! agent send to a pipe the person approved without reading it, or stops it,
 //! with pipes_sender (`extensions::pipes`). The person chooses the same in
 //! the pipe's settings (UpdatePipe.send_only); an admin agent only adds an
@@ -101,7 +101,7 @@ pub(crate) fn set(factory: &Arc<Factory>, by: &str, pipe: &str, agent: &str, sen
     if send {
         // Any agent but a curator, in the pipe's project or not.
         checked_members_sending(factory, &record, &[agent.to_owned()], &[agent.to_owned()]).map_err(|error| refused(&error))?;
-        // One that reads another pipe uses no other (#414's boundary).
+        // One that reads another pipe uses no other.
         let members = [agent.to_owned()];
         let roles = super::sealed::Roles { members: &members, lead: "", bound: "" };
         super::sealed::check(factory, pipe, &roles).map_err(|error| refused(&error))?;

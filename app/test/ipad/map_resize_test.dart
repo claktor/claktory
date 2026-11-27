@@ -1,8 +1,8 @@
 // The Map on an iPad keeps what it shows when the window is resized across
-// the phone's layout (Sale's row 149): History, and where it is in it,
+// the phone's layout: History, and where it is in it,
 // come back as they were, whether the Map is a page or a pane beside a
-// conversation, as a phone's rotation keeps them (Zucchero's row 525), and
-// whether the window widens or narrows (Sale's row 151).
+// conversation, as a phone's rotation keeps them, and
+// whether the window widens or narrows.
 import 'package:factory_app/history/view.dart' show HistoryView, MapModeSwitch;
 import 'package:factory_app/ipad/workbench.dart'
     show WorkbenchFocus, WorkbenchScope;

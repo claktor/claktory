@@ -333,7 +333,7 @@ void main() {
       expect(opacityOf(tester, 'message 100'), 1);
     });
 
-    // Friend bug #31: with the window reported unseen, a glide waiting on
+    // With the window reported unseen, a glide waiting on
     // the stopped clock kept the new message below the fold.
     testWidgets('while nothing moves, a new entry is at the bottom at once', (
       tester,
@@ -687,7 +687,7 @@ void main() {
       final times = find.byType(TimeFoot).evaluate().length;
 
       // The first frame after the tap: its words, its time and this
-      // device together, bright, as its entry will show (#453).
+      // device together, bright, as its entry will show.
       box.send('a', 'ship it');
       await tester.pump();
       void whole({bool easing = false}) {
@@ -761,7 +761,7 @@ void main() {
       final times = find.byType(TimeFoot).evaluate().length;
       box.send('a', 'and then');
       await tester.pump();
-      // Queued from the tap, with its device: it will wait (#453).
+      // Queued from the tap, with its device: it will wait.
       expect(find.text('Queued'), findsOneWidget);
       expect(find.text('Sending…'), findsNothing);
       expect(find.byType(DeviceMark), findsOneWidget);
@@ -974,7 +974,7 @@ void main() {
       box.send('a', 'ship it');
       await tester.pump();
       answers.single.completeError(
-        const RequestFailure('Not connected to the backend.'),
+        const RequestFailure("Can't reach your Claktory right now."),
       );
       await tester.pump();
       await tester.pump(const Duration(seconds: 3));

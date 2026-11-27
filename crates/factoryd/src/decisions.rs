@@ -1,7 +1,7 @@
-//! The person's comment on a decision (#289): every card where they approve
+//! The person's comment on a decision: every card where they approve
 //! or dismiss something an agent hears the outcome of takes one optional
 //! comment, with either answer. It reaches that agent with the decision,
-//! as the person's own words ("Matt's note: …"), never mixed into what an
+//! as the person's own words, never mixed into what an
 //! agent or the other side of a pipe wrote.
 
 use crate::factory::RequestError;

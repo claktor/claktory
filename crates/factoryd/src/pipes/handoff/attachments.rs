@@ -1,4 +1,4 @@
-//! A report's files (pipes-automation.md §2, H3; Fugo's L2.5): a liaison
+//! A report's files: a liaison
 //! names up to 3 files in its pipe's inbox, and they're copied into the
 //! pipe's report store, `<home>/pipes/reports/<pipe>/`, outside every project
 //! and agent folder, under names Claktory makes (their SHA-256), so no

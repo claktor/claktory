@@ -1,4 +1,4 @@
-// Row 569: this device's messages engine starts as soon as the Claktory the
+// This device's messages engine starts as soon as the Claktory the
 // app shows offers People (its `dm` extension), not only once People opens,
 // and never where it doesn't.
 
@@ -42,7 +42,7 @@ void main() {
     expect(asked, greaterThan(0));
   });
 
-  // Fugo 40182: which Claktory the engine checks against the account is
+  // Which Claktory the engine checks against the account is
   // the rail's entry whose connection it links, never another's; one
   // paired with a direct code (no tunnel) can't be confirmed.
   testWidgets("each connection is its own rail entry's", (tester) async {

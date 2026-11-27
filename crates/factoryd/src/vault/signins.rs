@@ -1,4 +1,4 @@
-//! Provider sign-ins kept in the vault (rivet-move.md §3, P2): the
+//! Provider sign-ins kept in the vault: the
 //! credentials document (`factory_agent::credentials`) sealed with the
 //! vault's key in `kept`, bound to the vault, instead of in plaintext in
 //! `auth.json`. Never a secret: no agent can resolve or be granted it.
@@ -19,7 +19,7 @@
 //!   among those that ran with this, `sign-ins-backends`); then it's
 //!   emptied, and stays so.
 //! - Some providers' sign-ins are kept only in the vault
-//!   (`credentials::VAULT_ONLY`: Grok, #493): never in `auth.json`, not in
+//!   (`credentials::VAULT_ONLY`: Grok): never in `auth.json`, not in
 //!   its copy for an older backend (which doesn't know them), and signing
 //!   in to them while the vault is locked is refused.
 

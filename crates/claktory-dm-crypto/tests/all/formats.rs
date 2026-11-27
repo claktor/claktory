@@ -1,4 +1,4 @@
-//! Golden vectors for Ghiaccio's formats: a leaf certificate, a signed
+//! Golden vectors for the formats: a leaf certificate, a signed
 //! device list and a safety number, from fixed keys. Every endpoint (the
 //! app, factoryd, the worker) reads these bytes, so a change to any of them
 //! is a format change and must be deliberate: this fails until the vectors

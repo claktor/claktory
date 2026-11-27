@@ -36,7 +36,14 @@ ALTER TABLE checklist_items ADD COLUMN blocked_since INTEGER;
 CREATE TABLE checklist_nudges (agent TEXT PRIMARY KEY, last INTEGER NOT NULL);
 ";
 
-/// The migration that added goals (#270): outcomes the person wants, per
+/// The migration that added when each agent was last told of its stale
+/// work (`nudge::check_stale`), apart from `checklist_nudges`, whose
+/// agent '' marks the blocked-items sweep.
+pub(crate) const STALE: &str = "
+CREATE TABLE checklist_stale_nudges (agent TEXT PRIMARY KEY, last INTEGER NOT NULL);
+";
+
+/// The migration that added goals: outcomes the person wants, per
 /// agent (G1, G2…, apart from items' ids), each with its own history; and
 /// the goal an item serves (0 for none).
 pub(crate) const GOALS: &str = "
@@ -65,7 +72,7 @@ CREATE INDEX checklist_goal_events_by_goal ON checklist_goal_events (agent, goal
 ALTER TABLE checklist_items ADD COLUMN goal INTEGER NOT NULL DEFAULT 0;
 ";
 
-/// The migration that typed blocks (#279, #282): what a blocked item waits
+/// The migration that typed blocks: what a blocked item waits
 /// on (`blocked_kind`: person_decision, person_action, item, agent or
 /// external; '' for untyped, as before), whom or what (`blocked_ref`: an
 /// agent id, or "agent#12" for an item), when an outside wait is checked
@@ -90,7 +97,7 @@ CREATE TABLE checklist_settings (name TEXT PRIMARY KEY, minutes INTEGER NOT NULL
 UPDATE checklist_items SET blocked_kind = 'person_decision' WHERE status = 'blocked' AND blocked_on = 'person';
 ";
 
-/// Settings → Checklist (#282): how Claktory follows up on blocked items,
+/// Settings → Checklist: how Claktory follows up on blocked items,
 /// in minutes. Kept in factory.db, not config.json, which an older backend
 /// would refuse whole after a rollback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,6 +203,13 @@ pub(crate) const EVERY: [(&str, &str, i64); 6] = [
     ("1d", "Once a day", 24 * 60),
 ];
 
+/// How long an open or in-progress item goes untouched before the daily
+/// list of stale work names it (`stale_after`): each choice's value, label
+/// and minutes; a parked item with no resume time, three times as long,
+/// which is also when the agent's lead hears of an item.
+pub(crate) const STALE_AFTER: [(&str, &str, i64); 4] =
+    [("1d", "After a day", 24 * 60), ("3d", "After 3 days", 3 * 24 * 60), ("1w", "After a week", 7 * 24 * 60), ("off", "Off", 0)];
+
 static MANIFEST: Manifest = Manifest {
     id: ID,
     name: "Checklist",
@@ -229,6 +243,22 @@ static MANIFEST: Manifest = Manifest {
             default_on: false,
             includes_project: false,
         },
+        OptionSpec {
+            id: "stale_after",
+            label: "Remind it of untouched items",
+            description: "Once a day, Claktory lists its items left unchanged this long, oldest first, so it starts, hands off, dates or closes them. Items left three times as long also go to its lead.",
+            kind: OptionKind::Choice {
+                choices: &[
+                    (STALE_AFTER[0].0, STALE_AFTER[0].1),
+                    (STALE_AFTER[1].0, STALE_AFTER[1].1),
+                    (STALE_AFTER[2].0, STALE_AFTER[2].1),
+                    (STALE_AFTER[3].0, STALE_AFTER[3].1),
+                ],
+                default: "1d",
+            },
+            default_on: false,
+            includes_project: false,
+        },
     ],
 };
 
@@ -241,7 +271,8 @@ You keep a checklist of everything the person asks you for, so nothing they said
 - blocked means nothing can move until something comes; say what with waits_on: person_decision (a decision only the person can make), person_action (something only they can do), item (another item, ref 12 or Ana#12: it opens again by itself when that one is done or dropped), agent (ref, its id or name: it's told you're waiting) or external (something outside; you're told to check again at retry_at, such as 2h or \"2026-11-23 14:00\", or after a while if you give none, then less and less often). blocked_on adds a few words if useful; say more in a note.
 - An item waiting on the person shows in their Needs you only as your question about it: blocked on a decision of theirs or something only they can do, file ask_person then and there with item naming it, one request per decision or action (steps for a procedure), never several on one request. A question without item covers no item. An item that waits on them is one concern: if it bundles several, split it into separate items first, each with its own request. Never asked, dismissed, or waiting to be asked again, it shows only on your checklist, not to them. When they answer, clear the block. If they dismiss it, decide yourself if you can and note what you chose; if you truly can't move without them, leave it blocked with a note why, and Claktory has you ask again later.
 - Now and then Claktory asks whether a blocked item is still blocked: try it again, since it may not be. A block that lasts too long (a day, unless the person changed it) is told to your lead.
-- parked means set aside for later (after a release, say) or ongoing, with nothing to wait on: never mark that blocked. Parked items aren't nudged; retry_at sets when one resumes, if you know.
+- parked means set aside for later (after a release, say) or ongoing, with nothing to wait on: never mark that blocked. retry_at sets when one resumes, if you know.
+- Work waiting on something (after a release, after another item) gets a date or a structured wait, not just words in its text: parked with retry_at, or blocked with waits_on item. Once a day Claktory lists items that haven't changed in a while, oldest first: for each, start it, hand it to someone, give it a date or a wait, mark it done if it shipped, or drop it with a reason.
 - Goals are the person's: outcomes they want (\"a link to the Android app I can share\"). Record one with checklist_goals only when the person states it, in their words, never your own plans; the person also adds and changes goals in the app, and you're told when they do. Link the items that serve a goal with `goal` on checklist_add or checklist_update. Mark a goal done only when the person's outcome is reached, or dropped when they say so.
 - checklist_list shows open goals, then open items; filter by status, day, owner or text. checklist_item shows one item's history. Both take `agent` to read another agent's checklist.
 - The person can reply on an item from the app: it comes as their message, its `<sent>` tag naming the item (about=\"checklist item #12: …\", or Ana#12 on another agent's checklist), and the item's history keeps it. It changes nothing by itself: act on it, then update the item.
@@ -275,7 +306,7 @@ const OUTSTANDING: [Status; 4] = [Status::Open, Status::InProgress, Status::Bloc
 impl Status {
     const ALL: [Status; 6] = [Status::Open, Status::InProgress, Status::Done, Status::Dropped, Status::Blocked, Status::Parked];
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Status::Open => "open",
             Status::InProgress => "in_progress",
@@ -324,7 +355,7 @@ impl Status {
     }
 }
 
-/// What a blocked item waits on (#279).
+/// What a blocked item waits on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Wait {
     /// Untyped: a blocked item from before, or one given only blocked_on words.
@@ -440,6 +471,8 @@ pub(crate) struct Query<'a> {
     pub text: Option<&'a str>,
     pub limit: Option<usize>,
     pub with_log: bool,
+    /// Least recently changed first, rather than by id.
+    pub oldest_untouched: bool,
 }
 
 /// Whether the agent's checklist has item `id`.
@@ -479,10 +512,11 @@ pub(crate) fn query(store: &Store, query: &Query) -> rusqlite::Result<(Vec<Item>
         db.query_row(&format!("SELECT COUNT(*) FROM checklist_items WHERE {filter}"), params_from_iter(&values), |row| row.get(0))?;
     let total = usize::try_from(total).unwrap_or(0);
     let limit = query.limit.map_or(-1, |limit| limit as i64);
+    let order = if query.oldest_untouched { "updated, id" } else { "id" };
     let mut statement = db.prepare(&format!(
         "SELECT id, text, status, owner, created, updated, strftime('%m-%d', created / 1000, 'unixepoch', 'localtime'), blocked_on, blocked_since, goal,
                 blocked_kind, blocked_ref, retry_at, reask_at, dismissed_at
-         FROM checklist_items WHERE {filter} ORDER BY id LIMIT {limit}"
+         FROM checklist_items WHERE {filter} ORDER BY {order} LIMIT {limit}"
     ))?;
     let mut rows = statement.query(params_from_iter(&values))?;
     let mut items = Vec::new();
@@ -621,7 +655,7 @@ pub(crate) struct Update {
     pub blocked_on: Option<String>,
     /// The goal it serves; 0 for none.
     pub goal: Option<u32>,
-    /// What it waits on, typed (#279): its kind, and whom or what (an
+    /// What it waits on, typed: its kind, and whom or what (an
     /// agent id, or "agent#12"; already checked). Only on an item that is
     /// (or becomes) blocked.
     pub wait: Option<(Wait, String)>,
@@ -1258,7 +1292,7 @@ impl Due {
     }
 }
 
-/// Typed waits and parked items coming due (#279, #282), checked now and
+/// Typed waits and parked items coming due, checked now and
 /// then by the nudge loop, each interval from Settings → Checklist:
 /// - a parked item's resume time opens it again, its owner told;
 /// - an outside wait's retry time tells its owner to check again, and sets
@@ -1458,6 +1492,16 @@ pub(crate) fn open_counts(store: &Store) -> rusqlite::Result<std::collections::H
     rows.collect()
 }
 
+/// How many open or in-progress items each agent's checklist has, by
+/// agent; one with none isn't there.
+pub(crate) fn working_counts(store: &Store) -> rusqlite::Result<std::collections::HashMap<String, u32>> {
+    let db = store.db();
+    let mut statement =
+        db.prepare("SELECT agent, COUNT(*) FROM checklist_items WHERE status IN ('open', 'in_progress') GROUP BY agent")?;
+    let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)))?;
+    rows.collect()
+}
+
 /// An agent is deleted, and its checklist with it.
 pub(crate) fn forget(store: &Store, agent: &str) -> rusqlite::Result<()> {
     let db = store.db();
@@ -1465,6 +1509,7 @@ pub(crate) fn forget(store: &Store, agent: &str) -> rusqlite::Result<()> {
     db.execute("DELETE FROM checklist_events WHERE agent = ?1", [agent])?;
     db.execute("DELETE FROM checklist_goals WHERE agent = ?1", [agent])?;
     db.execute("DELETE FROM checklist_goal_events WHERE agent = ?1", [agent])?;
+    db.execute("DELETE FROM checklist_stale_nudges WHERE agent = ?1", [agent])?;
     Ok(())
 }
 
@@ -2189,7 +2234,7 @@ fn run_update(factory: &Arc<Factory>, agent: &str, args: serde_json::Value) -> R
     }
     // Done or dropped while cards about it still wait for the person: they
     // may no longer apply, which only the agent can tell, so it's told
-    // which, and nothing is closed for it (friend bug #19).
+    // which, and nothing is closed for it.
     for update in &updates {
         let Some(status @ (Status::Done | Status::Dropped)) = update.status else { continue };
         let Some(item) = now.iter().find(|item| item.id == update.id && item.status == status) else { continue };
@@ -2301,6 +2346,7 @@ fn run_list(factory: &Factory, agent: &str, args: serde_json::Value) -> Result<T
         text: args.q.as_deref().map(str::trim).filter(|q| !q.is_empty()),
         limit: Some(limit),
         with_log: false,
+        oldest_untouched: false,
     };
     let every_status = request.statuses.is_none();
     let filtered = request.day.is_some() || request.owner.is_some() || request.text.is_some();

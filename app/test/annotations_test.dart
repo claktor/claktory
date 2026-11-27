@@ -605,7 +605,7 @@ void main() {
       await settle(tester);
       expect(harness.backend.sent.last.decideSuggestion.accept, isFalse);
 
-      // A comment is a reply (#370): one Submit, which neither accepts
+      // A comment is a reply: one Submit, which neither accepts
       // nor rejects; the change stays open.
       final field = find.descendant(
         of: find.byType(DecisionComment),

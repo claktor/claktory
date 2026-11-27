@@ -1,10 +1,10 @@
-// Sending from an iPad's on-screen keyboard (Zucchero's row 169): its
+// Sending from an iPad's on-screen keyboard: its
 // Return arrives as text and adds a line, so with no hardware keyboard the
 // message box has Send, as on an iPhone. A hardware keyboard sends with
 // Return, as in Messages, and Send steps aside; the draft and the focus
 // stay through the keyboard coming and going. At every width: a narrow
 // Split View lays the box out as a phone's, and Return still sends from a
-// hardware keyboard (#362 I1).
+// hardware keyboard.
 import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/ipad/workbench.dart';
 import 'package:factory_app/mobile/device.dart' show hardwareKeyboard;

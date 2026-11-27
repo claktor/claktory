@@ -1,6 +1,6 @@
 // Places macOS keeps private until the person lets Claktory Agents in
-// (Files and Folders: Documents, Desktop, Downloads, iCloud Drive, volumes;
-// Lucy's permissions.md P2, Cioccolata's item 12). macOS has no way to ask
+// (Files and Folders: Documents, Desktop, Downloads, iCloud Drive,
+// volumes). macOS has no way to ask
 // whether an app may use one, so the backend keeps the last check's result
 // (Workspace.protected_places); the app only says it and asks for checks.
 //
@@ -76,7 +76,7 @@ Future<bool> _open(Uri url) async {
 /// Files and Folders for [names] (as the person knows them: "Documents"),
 /// where [usedBy] (projects and folders, by name) work. [check] has the
 /// backend read them, macOS asking for any it hasn't decided on, and
-/// answers what it found; null where nothing can be checked (Polnareff's
+/// answers what it found; null where nothing can be checked (the
 /// Permissions rows, which only open Settings, with [read] saying denied).
 class ProtectedPlacePermission extends Permission {
   const ProtectedPlacePermission({
@@ -247,7 +247,7 @@ String _placeInWords(ProtectedRoot place) {
   return 'your ${place.name} folder';
 }
 
-/// The caption under a folder's path typed into [place] (Lucy's P2):
+/// The caption under a folder's path typed into [place]:
 /// macOS asks first while it's never been checked, and says how to turn it
 /// on once it was refused. Null once Claktory Agents is let in.
 String? protectedPathCaption(Workspace workspace, ProtectedRoot place) =>
@@ -342,8 +342,8 @@ class _ProtectedPlacesAtLaunchState extends State<ProtectedPlacesAtLaunch> {
   Backend? _backend;
 
   /// Back at the front: the refused places read again, so one let in from
-  /// System Settings meanwhile shows On, and its Needs you item ends
-  /// (Polnareff's half of item 12). Reading a place macOS has decided on
+  /// System Settings meanwhile shows On, and its Needs you item ends.
+  /// Reading a place macOS has decided on
   /// asks nothing.
   late final _resumed = AppLifecycleListener(onResume: _recheck);
 

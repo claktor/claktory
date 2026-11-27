@@ -13,7 +13,7 @@ import '../scope.dart';
 import '../visible_codes.dart' show nameInText;
 import 'e2ee.dart';
 
-// E5, Verify (dms-e2ee §2, Trish's words): the security code two friends
+// E5, Verify (dms-e2ee §2): the security code two friends
 // compare, in person or on a call, or by one scanning the other's QR
 // code; matching, the person marks the friend verified, until their
 // security key changes.
@@ -63,7 +63,7 @@ class _VerifyViewState extends State<VerifyView> with WidgetsBindingObserver {
   var _undone = false;
 
   // Their name inside a sentence: shown so it can't reorder the words
-  // around it (nameInText; Fugo 51059).
+  // around it (nameInText).
   String get _name => nameInText(widget.name);
   String get _them => widget.name.isEmpty ? 'them' : _name;
   String get _their => widget.name.isEmpty ? 'their' : "$_name's";
@@ -81,7 +81,7 @@ class _VerifyViewState extends State<VerifyView> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  // Back from Settings, the camera may be allowed now (friend bug #2).
+  // Back from Settings, the camera may be allowed now.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) unawaited(_ask());

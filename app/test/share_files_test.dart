@@ -1,4 +1,4 @@
-// Sharing a file from the device (#418, Matt): Share… fetches the whole
+// Sharing a file from the device: Share… fetches the whole
 // original from the Claktory, a piece at a time with how much has come and
 // Cancel, then opens the system's share sheet for it, and what was fetched
 // is deleted once the sheet closes. From the viewer (More on a phone, the
@@ -348,7 +348,7 @@ void main() {
     );
     harness.backend.holdRead = (request) async {
       if (!harness.backend.connected.value) {
-        throw const RequestFailure('Not connected to the backend.');
+        throw const RequestFailure("Can't reach your Claktory right now.");
       }
     };
     await tester.longPress(find.text('clip.mp4'));

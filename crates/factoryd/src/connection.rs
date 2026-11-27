@@ -244,10 +244,14 @@ pub(crate) async fn serve_stream<S: Stream>(
                 // token: an app build or test made without FACTORY_PORT, say.
                 tracing::info!(client_version = %hello.client_version, kind = ?kind, token = !hello.token.is_empty(), "refused a client on the loopback port without this machine's token");
                 crate::diagnostics::turned_away(&factory, via, if hello.token.is_empty() { "no_token" } else { "wrong_token" });
-                let reason = format!(
-                    "This port wants a token: connect with the pairing code in {}.",
-                    factory.home.root().join("remote/local-pairing").display()
-                );
+                // Any account of this computer reaches this port: the answer
+                // names nothing of the home's path, and on Windows, where the app connects with its
+                // token rather than a pairing code, no pairing hint either.
+                let reason = if cfg!(windows) {
+                    "This port needs this account's own Claktory app.".to_owned()
+                } else {
+                    "This port wants a token: connect with this computer's local pairing code (remote/local-pairing in Claktory's folder).".to_owned()
+                };
                 return reject(socket, message.id, ErrorCode::Unauthorized, reason).await;
             };
             tracing::info!(client_version = %hello.client_version, kind = ?kind, "client connected with this machine's token");
@@ -599,6 +603,16 @@ async fn handle(
         Some(Request::CreateProject(request)) => factory.create_project(&request.name, &request.path).await,
         Some(Request::CreateAgent(request)) => factory.create_agent(&request).await,
         Some(Request::UpdateAgent(request)) => {
+            // Refuses turning the browser on from a connection that says it's
+            // factoryd's own command line, which any agent's shell runs. It
+            // can't stop a program that connects with this machine's own
+            // pairing token under another name: that token is the person's
+            // app, with the person's authority, until devices on this machine
+            // get keys of their own. The settings file is the same: anything
+            // running as the person can edit it.
+            if connection.tool && crate::errands::turns_browser_on(&request) {
+                return error(ErrorCode::InvalidRequest, "Only the person, in Agent settings, or an admin agent such as Rivet turns on the browser.");
+            }
             // `folder` (an absolute path) is deprecated and ignored.
             let v1::UpdateAgent {
                 agent_id,
@@ -731,9 +745,28 @@ async fn handle(
         Some(Request::ShowAllFiles(request)) => factory.show_all_files(&request.project_id, request.show_all).await,
         Some(Request::OpenPanel(request)) => factory.open_panel(&request.agent_id, &request.extension_id).await,
         Some(Request::ArrangeAgent(request)) => {
-            let v1::ArrangeAgent { agent_id, parent_id, before_id, project_id, folder_id } = request;
+            let v1::ArrangeAgent { agent_id, parent_id, before_id, project_id, folder_id, undoable } = request;
+            if undoable {
+                // Answered with what Undo puts back (`crate::arrange_undo`);
+                // without it, Ack, which an older app waits for.
+                let some = |text: &str| (!text.is_empty()).then(|| text.to_owned());
+                let (parent, before) = (some(&parent_id), some(&before_id));
+                let arranged = crate::arrange_undo::arrange(
+                    factory,
+                    &connection.binding,
+                    &agent_id,
+                    parent.as_deref(),
+                    before.as_deref(),
+                    project_id.as_deref(),
+                    folder_id.as_deref(),
+                )
+                .await;
+                return answer(arranged, Body::Arranged);
+            }
             factory.arrange_agent(&agent_id, &parent_id, &before_id, project_id.as_deref(), folder_id.as_deref()).await
         }
+        Some(Request::RestoreArrangement(request)) => crate::arrange_undo::restore(factory, &connection.binding, &request.token).await,
+        Some(Request::PreviewArrange(request)) => return answer(crate::arrange_undo::preview(factory, &request), Body::ArrangePreview),
         Some(Request::SetAgentCollapsed(request)) => factory.set_agent_collapsed(&request.agent_id, request.collapsed),
         Some(Request::CreateFolder(request)) => factory.create_folder(&request.project_id, &request.name, &request.path).await,
         Some(Request::UpdateFolder(request)) => {
@@ -742,6 +775,7 @@ async fn handle(
         }
         Some(Request::DeleteFolder(request)) => factory.delete_folder(&request.project_id, &request.folder_id).await,
         Some(Request::SetHighlights(request)) => factory.set_highlights(request.on).await,
+        Some(Request::SetAttribution(request)) => factory.set_attribution(request.on).await,
         Some(Request::StopTask(request)) => factory.stop_task(&request.agent_id, &request.task_id),
         Some(Request::ChangeMonitor(request)) => factory.change_monitor(&request.agent_id, request.monitor_id, request.action()),
         Some(Request::SetFolderCollapsed(request)) => {
@@ -1081,15 +1115,9 @@ async fn handle(
         Some(Request::AgentBrowserInput(request)) => connection.agent_browser.input(&request),
         Some(Request::TakeOverAgentBrowser(_)) => connection.agent_browser.take_over(),
         Some(Request::HandBackAgentBrowser(_)) => connection.agent_browser.hand_back(),
-        Some(Request::StopAgentBrowser(_)) => connection.agent_browser.stop(),
+        Some(Request::StopAgentBrowser(request)) => connection.agent_browser.stop(&request.agent_id),
         Some(Request::OpenAgentBrowser(request)) => connection.agent_browser.open(&request),
-        Some(Request::DeleteAgentBrowserData(_)) => connection.agent_browser.delete_data().inspect(|()| {
-            // Signed out everywhere: no identity provider's account is the
-            // browser's any more (#435 W6).
-            if let Err(error) = factory.vault.forget_browser_accounts(None) {
-                tracing::error!(%error, "the browser's identity provider accounts weren't forgotten");
-            }
-        }),
+        Some(Request::DeleteAgentBrowserData(request)) => connection.agent_browser.delete_data(&request.agent_id),
         Some(Request::SetAgentBrowserLocale(request)) => crate::browser_host::locale::set(factory, &request).await,
         Some(Request::SignOutAgentBrowserAccount(request)) => crate::errands::code::sign_out_request(factory, &request).await,
         Some(Request::ListTimeZones(_)) => return Body::TimeZones(crate::browser_host::locale::time_zones()),
@@ -1102,11 +1130,18 @@ async fn handle(
             return answer(crate::extensions::ask::show_recovery_codes(factory, &request).await, Body::RecoveryCodes);
         }
         Some(Request::KeepRecoveryCodes(request)) => crate::extensions::ask::keep_recovery_codes(factory, &request).await,
-        // Errands (#435 P3, `crate::errands`): the person's (rivet_reach),
-        // refused while Claktory has no browser.
-        Some(Request::OpenErrand(request)) => crate::errands::open_request(factory, &request),
+        // Claktory's browser (`crate::errands`): the person's (rivet_reach).
+        // Agents open their browser themselves since browser-simple, and
+        // none is contained for it: an older app's requests are refused.
+        Some(Request::OpenErrand(_)) => {
+            return error(ErrorCode::InvalidRequest, "Agents open Claktory's browser themselves now: turn on Browser in the agent's settings.");
+        }
         Some(Request::ListErrandLog(request)) => return answer(crate::errands::log_request(factory, &request), Body::ErrandLog),
-        Some(Request::SetAgentContained(request)) => crate::errands::contain_request(factory, &request).await,
+        // The person opened a payment request's page on this device.
+        Some(Request::PaymentOpened(request)) => crate::errands::handoff::opened(factory, &request),
+        Some(Request::SetAgentContained(_)) => {
+            return error(ErrorCode::InvalidRequest, "Agents aren't kept apart for the browser any more: turn on Browser in the agent's settings.");
+        }
         // Direct messages through the home (#451): `crate::dm_device`.
         Some(Request::DmSend(request)) => return crate::dm_device::send(factory, request),
         Some(Request::DmFollow(request)) => return crate::dm_device::follow(factory, request, &connection.dms),

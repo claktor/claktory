@@ -62,7 +62,7 @@ async fn edits_to_config_json_apply_live_and_broken_edits_keep_the_last_good_set
   "projects": [{{ "id": "docs", "name": "Docs", "path": "{}" }}],
   "agents": [{{ "id": "editor", "project": "docs", "name": "Editor", "purpose": "Edit the docs.", "model": "{MODEL}", "effort": "off" }}]
 }}"#,
-        dir.join("docs").display()
+        crate::common::json_text(dir.join("docs").display())
     );
     std::fs::write(&config_path, &edited).expect("write");
     let mut view = View::default();
@@ -106,7 +106,7 @@ async fn projects_need_only_a_name_and_agents_move_between_projects_and_the_work
     let mut view = View::default();
 
     apply_request(&mut client, &mut view, create_project("Web Site", Path::new(""))).await;
-    let folder = dir.join("home/workspace/web-site");
+    let folder = dir.join("home").join("workspace").join("web-site");
     assert!(folder.is_dir(), "the folder is named after the project");
     assert_eq!(view.workspace.projects[0].path, folder.display().to_string());
 
@@ -250,6 +250,7 @@ async fn colors_belong_to_agents_not_to_their_place() {
         before_id: "builder".into(),
         project_id: None,
         folder_id: None,
+        ..Default::default()
     });
     apply_request(&mut client, &mut view, arrange).await;
     let reordered = pairs(&[("rivet", "blue"), ("tester", "pink"), ("builder", "violet"), ("writer", "green")]);
@@ -293,6 +294,7 @@ async fn agents_are_arranged_and_nested_in_the_sidebar_and_folded_for_every_devi
             before_id: before.into(),
             project_id: project.map(str::to_owned),
             folder_id: None,
+            ..Default::default()
         })
     };
     let tree = |view: &View| -> Vec<String> {
@@ -554,7 +556,7 @@ async fn a_file_with_relative_paths_keeps_that_form_and_old_absolute_settings_st
     let text = std::fs::read_to_string(dir.join("home/config.json")).expect("config.json");
     assert!(text.contains(r#""path": "workspace/docs""#), "{text}");
     assert!(text.contains(r#""path": "workspace/site""#), "{text}");
-    assert!(text.contains(&format!(r#""path": "{}""#, dir.join("repo").display())), "{text}");
+    assert!(text.contains(&format!(r#""path": "{}""#, crate::common::json_text(dir.join("repo").display()))), "{text}");
     let config = read_config(&dir);
     assert_eq!(config.project("site").expect("site").path, dir.join("home/workspace/site"));
     assert_eq!(config.project("code").expect("code").path, dir.join("repo"));
@@ -563,14 +565,14 @@ async fn a_file_with_relative_paths_keeps_that_form_and_old_absolute_settings_st
     // everything, this machine's included) reads as it always did, and
     // stays so: the supervisor may go back to a backend from before, which
     // reads only that, after any write.
-    let old = format!(r#"{{"projects":[{{"id":"docs","name":"Docs","path":"{}"}}]}}"#, dir.join("home/workspace/docs").display());
+    let old = format!(r#"{{"projects":[{{"id":"docs","name":"Docs","path":"{}"}}]}}"#, crate::common::json_text(dir.join("home/workspace/docs").display()));
     std::fs::write(dir.join("home/config.json"), &old).expect("write");
     view.follow(&mut client, |view| view.workspace.projects.len() == 1 && view.workspace.projects[0].id == "docs").await;
     assert_eq!(read_config(&dir).project("docs").expect("docs").path, dir.join("home/workspace/docs"));
     apply_request(&mut client, &mut view, create_project("More", &dir.join("home/workspace/more"))).await;
     let text = std::fs::read_to_string(dir.join("home/config.json")).expect("config.json");
-    assert!(text.contains(&format!(r#""path": "{}""#, dir.join("home/workspace/docs").display())), "{text}");
-    assert!(text.contains(&format!(r#""path": "{}""#, dir.join("home/workspace/more").display())), "{text}");
+    assert!(text.contains(&format!(r#""path": "{}""#, crate::common::json_text(dir.join("home/workspace/docs").display()))), "{text}");
+    assert!(text.contains(&format!(r#""path": "{}""#, crate::common::json_text(dir.join("home/workspace/more").display()))), "{text}");
 }
 
 #[tokio::test]
@@ -590,8 +592,9 @@ async fn claktorys_own_writes_after_an_update_keep_old_settings_readable_by_the_
             "agents":[{{"id":"ana","name":"Ana","model":"{MODEL}","effort":"off","prompt":"","project":"site"}},
                       {{"id":"liaison","name":"Liaison","color":"green","model":"{MODEL}","effort":"off",
                         "prompt":"You are the liaison for the pipe \"Launch\": you read what comes through it.","project":"site"}}]}}"#,
-        site.display(),
-        site.join("notes").display()
+        // As JSON strings: a Windows path's backslashes escaped.
+        crate::common::json_text(site.display()),
+        crate::common::json_text(site.join("notes").display())
     );
     std::fs::write(dir.join("home/config.json"), &old).expect("write");
     let trial = r#"{"from":"v0.1.15","to":"v0.1.16","started":true}"#;
@@ -610,8 +613,8 @@ async fn claktorys_own_writes_after_an_update_keep_old_settings_readable_by_the_
     };
     assert!(text.contains(r#""color""#), "Ana's color was filled in: {text}");
     let absolute = |text: &str| {
-        text.contains(&format!(r#""path": "{}""#, site.display()))
-            && text.contains(&format!(r#""path": "{}""#, site.join("notes").display()))
+        text.contains(&format!(r#""path": "{}""#, crate::common::json_text(site.display())))
+            && text.contains(&format!(r#""path": "{}""#, crate::common::json_text(site.join("notes").display())))
     };
     assert!(absolute(&text), "the paths kept their absolute form: {text}");
 
@@ -622,7 +625,7 @@ async fn claktorys_own_writes_after_an_update_keep_old_settings_readable_by_the_
     apply_request(&mut client, &mut view, create_project("More", &dir.join("home/workspace/more"))).await;
     let text = std::fs::read_to_string(dir.join("home/config.json")).expect("config.json");
     assert!(absolute(&text), "{text}");
-    assert!(text.contains(&format!(r#""path": "{}""#, dir.join("home/workspace/more").display())), "{text}");
+    assert!(text.contains(&format!(r#""path": "{}""#, crate::common::json_text(dir.join("home/workspace/more").display()))), "{text}");
 }
 
 #[tokio::test]
@@ -635,7 +638,7 @@ async fn a_newer_claktorys_settings_still_read_and_survive_changes() {
         r#"{{"projects":[{{"id":"site","name":"Site","path":"{}","pinned":true}}],
             "display":{{"max_open_panes":3}},"notifications":{{"agents":{{"ed":"always"}}}},
             "agents":[{{"id":"ed","name":"Ed","model":"{MODEL}","effort":"off","prompt":"","project":"site","notify":"always"}}]}}"#,
-        dir.join("home/workspace/site").display()
+        crate::common::json_text(dir.join("home/workspace/site").display())
     );
     std::fs::write(dir.join("home/config.json"), &config).expect("write");
     let (addr, _factory) = start(&dir).await;

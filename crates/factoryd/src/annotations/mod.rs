@@ -115,7 +115,7 @@ type Pictures = (Option<(SystemTime, u64)>, Vec<String>);
 #[derive(Default)]
 pub(crate) struct State {
     seen: Mutex<HashMap<String, Seen>>,
-    /// The pictures each Markdown file in a pane shows in place (#540), as
+    /// The pictures each Markdown file in a pane shows in place, as
     /// of its stamp then: watched with it.
     pictures: Mutex<HashMap<String, Pictures>>,
     work: Mutex<()>,
@@ -832,7 +832,7 @@ impl Factory {
     /// The person's comment reaches the agent told, as theirs.
     pub(crate) fn decide_suggestion(self: &Arc<Self>, request: &v1::DecideSuggestion) -> Result<(), RequestError> {
         let comment = crate::decisions::comment(&request.comment)?;
-        // A reply (#370 Submit): a reply on the thread, sent now; the
+        // A reply: a reply on the thread, sent now; the
         // suggestion stays open, neither accepted nor rejected.
         if request.reply {
             if comment.is_empty() {
@@ -1383,7 +1383,7 @@ pub(crate) fn written(factory: &Factory, agent: &str, folder: &Path, path: &str)
 
 /// Checks the files shown in panes every second, and tells clients of the
 /// ones that changed, with their threads placed again. While no app is
-/// connected, or no pane shows a file, it waits for one (#454); a file
+/// connected, or no pane shows a file, it waits for one; a file
 /// that changed meanwhile is told of at the first look after.
 pub(crate) async fn monitor(factory: Weak<Factory>) {
     let Some(mut woken) = factory.upgrade().map(|factory| factory.loops_woken()) else { return };
@@ -1411,7 +1411,7 @@ fn shows_files(factory: &Factory) -> bool {
 /// The most pictures of one Markdown file watched with it.
 const PICTURES_WATCHED: usize = 64;
 
-/// The pictures the Markdown files among `shown` show in place (#540),
+/// The pictures the Markdown files among `shown` show in place,
 /// each as the app names it: read again only when the file changed.
 fn pictures_of(factory: &Factory, shown: &std::collections::HashSet<String>) -> Vec<String> {
     let mut pictures = guard(&factory.annotations.pictures);

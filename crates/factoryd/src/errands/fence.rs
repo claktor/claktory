@@ -1,10 +1,9 @@
-//! The errand's navigation fence (agent-browser.md §5.5): the agent goes
-//! only to the sites its errand was opened for, fixed by its lead or the
-//! person, never by the agent. Never file:, chrome:, data:, javascript: or
-//! any other scheme than https, never an address on this computer or its
-//! network, by name, by literal address, or by where the name resolves
-//! (Fugo 36539). The fence is on where the agent goes, not on what a page
-//! loads.
+//! The browser's navigation fence: an agent's browser goes to any site on
+//! the internet over https, never file:, chrome:, data:, javascript: or any other scheme,
+//! never an address on this computer or its network, by name, by literal
+//! address, or by where the name resolves. The fence is on
+//! where the agent goes, not on what a page loads; the runner's network
+//! rules keep the rest of the page off this computer and its network.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -20,29 +19,43 @@ use super::reader::Page;
 use crate::browser::origin;
 use crate::browser::schema::{self, Answer, Op};
 
-/// Where `address` may go for an errand on `sites` (canonical origins):
-/// the address as Chrome should open it, or why not, in a line the agent
-/// reads. Checks the name only; [`resolved`] checks where it points.
-pub(crate) fn check(sites: &[String], address: &str) -> Result<url::Url, String> {
+/// Where `address` may go: the address as Chrome should open it, or why
+/// not, in a line the agent reads. Checks the name only; [`resolved`]
+/// checks where it points.
+pub(crate) fn check(address: &str) -> Result<url::Url, String> {
     let address = address.trim();
     let url = url::Url::parse(address).map_err(|_| format!("\"{}\" isn't a web address.", short(address)))?;
     if url.scheme() != "https" {
-        return Err(format!("{}: addresses aren't for errands: only https:// pages of the errand's sites.", url.scheme()));
+        return Err(format!("{}: addresses aren't for Claktory's browser: only https:// pages of sites on the internet.", url.scheme()));
     }
     if !url.username().is_empty() || url.password().is_some() {
-        return Err("An address with a user name or password in it isn't for errands.".to_owned());
+        return Err("An address with a user name or password in it isn't for Claktory's browser.".to_owned());
     }
-    let site = url.origin().ascii_serialization();
-    // The same spelling rules as the sites themselves: no IP literal, no
-    // local name.
-    origin::canonical(&site)?;
-    if !sites.contains(&site) {
-        return Err(format!(
-            "{site} isn't one of this errand's sites ({}). Only its lead or the person can add one: ask them with errand_handoff, kind \"other\".",
-            sites.join(", ")
-        ));
+    // No IP literal, no local name.
+    origin::canonical(&url.origin().ascii_serialization())?;
+    if password_manager(&url) {
+        return Err(PASSWORD_MANAGERS.to_owned());
     }
     Ok(url)
+}
+
+/// Why a password manager's pages are refused.
+pub(crate) const PASSWORD_MANAGERS: &str = "Claktory's browser doesn't open password managers.";
+
+/// Whether `url` is a web password manager's vault:
+/// a signed-in session there would show the person's saved passwords as
+/// page text. A fixed list, so depth, not completeness.
+pub(crate) fn password_manager(url: &url::Url) -> bool {
+    let host = url.host_str().unwrap_or_default().trim_end_matches('.').to_ascii_lowercase();
+    // LastPass and Keeper serve their vaults under paths a prefix can't
+    // hold (/%76ault, /Vault, /vault;x, ?ac=1): their whole sites (Fugo
+    // 54568).
+    let whole = ["lastpass.com", "lastpass.eu", "keepersecurity.com", "keepersecurity.eu"];
+    matches!(
+        host.as_str(),
+        "passwords.google.com" | "vault.bitwarden.com" | "vault.bitwarden.eu" | "app.dashlane.com" | "pass.proton.me" | "app.nordpass.com"
+    ) || [".1password.com", ".1password.ca", ".1password.eu"].iter().any(|domain| host.ends_with(domain))
+        || whole.iter().any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
 }
 
 /// Whether where `url`'s host resolves is on the internet: every address it
@@ -52,21 +65,22 @@ pub(crate) async fn resolved(url: &url::Url) -> Result<(), String> {
         return Err("That address has no site in it.".to_owned());
     };
     let port = url.port_or_known_default().unwrap_or(443);
-    let addresses: Vec<IpAddr> = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        tokio::net::lookup_host((host, port)),
-    )
-    .await
-    .map_err(|_| format!("{host} didn't resolve in time."))?
-    .map_err(|_| format!("{host} doesn't resolve to an address."))?
-    .map(|address| address.ip())
-    .collect();
+    let addresses: Vec<IpAddr> = if let Some(address) = resolves_for_test(host) {
+        vec![address]
+    } else {
+        tokio::time::timeout(std::time::Duration::from_secs(10), tokio::net::lookup_host((host, port)))
+            .await
+            .map_err(|_| format!("{host} didn't resolve in time."))?
+            .map_err(|_| format!("{host} doesn't resolve to an address."))?
+            .map(|address| address.ip())
+            .collect()
+    };
     if addresses.is_empty() {
         return Err(format!("{host} doesn't resolve to an address."));
     }
     match addresses.iter().find(|address| !public(**address)) {
         Some(address) => Err(format!(
-            "{host} points to {address}, an address on this computer or its network: errands only go to sites on the internet."
+            "{host} points to {address}, an address on this computer or its network: Claktory's browser only goes to sites on the internet."
         )),
         None => Ok(()),
     }
@@ -129,15 +143,12 @@ pub(crate) fn public(address: IpAddr) -> bool {
 /// site for the agent. Frames inside the page load as the page asks. Runs
 /// until the page's connection ends.
 ///
-/// While `hops` is on (the agent asked for a file, R9), a redirect may lead
-/// off the sites to any https address on the internet, since files often
-/// come from elsewhere (a CDN); what comes back from off the sites is let
-/// through only if it's a file, never a page to show. While `fetching` is
-/// on (browser_download itself), a PDF counts as a file and comes as one,
-/// saved rather than shown in Chrome's viewer (Ghiaccio 40395).
+/// While `hops` is on (the agent asked for a file, R9), what the top frame
+/// gets back may be a file. While `fetching` is on (browser_download
+/// itself), a PDF counts as a file and comes as one, saved rather than
+/// shown in Chrome's viewer.
 pub(crate) async fn guard(
     page: Arc<Page>,
-    sites: Vec<String>,
     blocked: Arc<Mutex<Option<Blocked>>>,
     hops: Arc<AtomicBool>,
     fetching: Arc<AtomicBool>,
@@ -169,7 +180,7 @@ pub(crate) async fn guard(
             let url = event.params["request"]["url"].as_str().unwrap_or_default().to_owned();
             let frame = event.params["frameId"].as_str().unwrap_or_default().to_owned();
             let page = page.clone();
-            let (sites, blocked) = (sites.clone(), blocked.clone());
+            let blocked = blocked.clone();
             let params = event.params.clone();
             let paused = Paused {
                 top: frame == top,
@@ -183,13 +194,24 @@ pub(crate) async fn guard(
             };
             // Each on its own, so a slow lookup holds no other request.
             tokio::spawn(async move {
-                let verdict = decide(&page, &sites, &url, paused).await;
-                let (fine, signed_in) = (verdict.is_ok(), verdict.err().unwrap_or(false));
-                if fine {
+                let allowed = decide(&url, paused).await;
+                // A form sent with a body (a file, say): where it went, never what.
+                if paused.top && !paused.answered && params["request"]["hasPostData"] == true {
+                    let entries = params["request"]["postDataEntries"].as_array().map_or(0, Vec::len);
+                    let origin = url::Url::parse(&url).map(|url| url.origin().ascii_serialization()).unwrap_or_default();
+                    let method = params["request"]["method"].as_str().unwrap_or_default();
+                    tracing::info!(%origin, %method, entries, allowed, "the fence weighed a form the page sent");
+                }
+                if allowed {
+                    if !paused.answered && served(&page, &request, &url).await {
+                        return;
+                    }
                     let_through(&page, &request, &params, paused.saves_pdf()).await;
                 } else {
-                    let site = url::Url::parse(&url).map(|url| url.origin().ascii_serialization()).unwrap_or_else(|_| short(&url));
-                    *crate::locking::lock(&blocked) = Some(Blocked { site, signed_in });
+                    let parsed = url::Url::parse(&url);
+                    let manager = parsed.as_ref().is_ok_and(password_manager);
+                    let site = parsed.map(|url| url.origin().ascii_serialization()).unwrap_or_else(|_| short(&url));
+                    *crate::locking::lock(&blocked) = Some(Blocked { site, manager });
                     let _ = page.call("Fetch.failRequest", json!({"requestId": request, "errorReason": "BlockedByClient"})).await;
                 }
             });
@@ -237,7 +259,9 @@ pub(crate) async fn let_through(page: &Page, request: &str, params: &serde_json:
             return;
         }
     }
-    let _ = page.call("Fetch.continueRequest", json!({"requestId": request})).await;
+    if let Err(error) = page.call("Fetch.continueRequest", json!({"requestId": request})).await {
+        tracing::warn!(%error, "Chrome didn't let a request the fence allowed go on");
+    }
 }
 
 /// Response `headers` (CDP's [{name, value}]) with the file made an
@@ -255,27 +279,70 @@ fn attached(headers: &serde_json::Value) -> Vec<serde_json::Value> {
     kept
 }
 
-/// Whether the fence lets `url` through: Ok, or Err(signed in) when it
-/// stops it, true when it's for the person's cookies there.
-pub(crate) async fn decide(page: &Page, sites: &[String], url: &str, paused: Paused) -> Result<(), bool> {
-    let fine = if !paused.top {
+/// Tests: what a page at an address shows instead of the network's (tests
+/// have none), and where a host resolves. Nothing else fills them.
+static SERVED: Mutex<Vec<(String, Option<String>)>> = Mutex::new(Vec::new());
+static RESOLVES: Mutex<Vec<(String, IpAddr)>> = Mutex::new(Vec::new());
+
+/// Tests: the browser shows `html` at `address`, or Chrome's error page
+/// with None (blocked, as when Chrome warns a site is unsafe);
+/// its host resolves to an address on the internet.
+#[doc(hidden)]
+pub fn serve_for_test(address: &str, html: Option<&str>) {
+    let url = url::Url::parse(address).expect("an address");
+    let host = url.host_str().expect("a host").to_owned();
+    resolve_for_test(&host, IpAddr::from([93, 184, 215, 14]));
+    let mut served = crate::locking::lock(&SERVED);
+    served.retain(|(served, _)| served != url.as_str());
+    served.push((url.to_string(), html.map(str::to_owned)));
+}
+
+/// Tests: `host` resolves to `address`.
+#[doc(hidden)]
+pub fn resolve_for_test(host: &str, address: IpAddr) {
+    let host = host.to_ascii_lowercase();
+    let mut resolves = crate::locking::lock(&RESOLVES);
+    resolves.retain(|(name, _)| *name != host);
+    resolves.push((host, address));
+}
+
+fn resolves_for_test(host: &str) -> Option<IpAddr> {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    crate::locking::lock(&RESOLVES).iter().find(|(name, _)| *name == host).map(|(_, address)| *address)
+}
+
+/// Answers a paused request a test serves (`serve_for_test`): whether it
+/// was one.
+async fn served(page: &Page, request: &str, url: &str) -> bool {
+    let served = crate::locking::lock(&SERVED).iter().find(|(served, _)| served == url).map(|(_, html)| html.clone());
+    match served {
+        None => false,
+        Some(None) => {
+            let _ = page.call("Fetch.failRequest", json!({"requestId": request, "errorReason": "BlockedByClient"})).await;
+            true
+        }
+        Some(Some(html)) => {
+            let body = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, html.as_bytes());
+            let headers = [json!({"name": "Content-Type", "value": "text/html; charset=utf-8"})];
+            let fulfilled = json!({"requestId": request, "responseCode": 200, "responseHeaders": headers, "body": body});
+            let _ = page.call("Fetch.fulfillRequest", fulfilled).await;
+            true
+        }
+    }
+}
+
+/// Whether the fence lets `url` through.
+pub(crate) async fn decide(url: &str, paused: Paused) -> bool {
+    if !paused.top {
         true
     } else if paused.answered {
-        // Only a hop off the sites gets here off them: a redirect goes on
-        // (its next address is checked), a file comes, a page doesn't.
-        (300..400).contains(&paused.status) || check(sites, url).is_ok() || ((paused.file || (paused.pdf && paused.fetching)) && paused.hopping)
-    } else if paused.hopping && paused.redirect && check(sites, url).is_err() {
-        // Never with the person's cookies for a site the errand wasn't
-        // opened for: what it fetched as them would leave with the agent
-        // (Fugo 38000).
-        if signed_in_at(page, url).await {
-            return Err(true);
-        }
-        off_sites(url).await.is_ok()
+        // A redirect goes on (its next address is checked), a page comes
+        // from a site the fence lets the browser go to, and a file the
+        // agent asked for comes as it does.
+        (300..400).contains(&paused.status) || check(url).is_ok() || ((paused.file || (paused.pdf && paused.fetching)) && paused.hopping)
     } else {
-        allowed(sites, url).await.is_ok()
-    };
-    if fine { Ok(()) } else { Err(false) }
+        allowed(url).await.is_ok()
+    }
 }
 
 /// Where the fence stopped the page, to tell the agent once.
@@ -283,42 +350,19 @@ pub(crate) async fn decide(page: &Page, sites: &[String], url: &str, paused: Pau
 pub(crate) struct Blocked {
     /// The site's origin.
     pub site: String,
-    /// It was a redirect to a site the browser has cookies for.
-    pub signed_in: bool,
+    /// A web password manager's: a site on the internet all the same, so
+    /// the line says why that one isn't.
+    pub manager: bool,
 }
 
 impl Blocked {
     /// The line the agent reads.
     pub(crate) fn said(&self) -> String {
-        let site = &self.site;
-        if self.signed_in {
-            format!(
-                "Claktory kept the page from going to {site}: the file is on a site you're signed in to in Claktory's browser, so only the errand's own sites may give it. Ask your lead to add {site} to the errand's sites."
-            )
-        } else {
-            format!("Claktory kept the page from going to {site}: it isn't one of this errand's sites.")
+        if self.manager {
+            return format!("Claktory kept the page from going to {}: {PASSWORD_MANAGERS}", self.site);
         }
+        format!("Claktory kept the page from going to {}: it isn't a site on the internet over https.", self.site)
     }
-}
-
-/// Whether Chrome would send cookies with a request to `address`: the
-/// browser is signed in there, or was. Unknown counts as yes.
-pub(crate) async fn signed_in_at(page: &Page, address: &str) -> bool {
-    match page.call("Network.getCookies", json!({"urls": [address]})).await {
-        Ok(cookies) => cookies["cookies"].as_array().is_none_or(|cookies| !cookies.is_empty()),
-        Err(_) => true,
-    }
-}
-
-/// Where a redirect may hop while the agent asks for a file: any https
-/// address on the internet, with no user name or password in it.
-async fn off_sites(address: &str) -> Result<(), String> {
-    let url = url::Url::parse(address).map_err(|_| "not a web address".to_owned())?;
-    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
-        return Err("not an https address".to_owned());
-    }
-    origin::canonical(&url.origin().ascii_serialization())?;
-    resolved(&url).await
 }
 
 /// A response header's value, lowercase; empty when it has none.
@@ -354,10 +398,10 @@ fn is_pdf(headers: &serde_json::Value) -> bool {
     matches!(kind_of(headers).as_str(), "application/pdf" | "application/x-pdf")
 }
 
-/// browser_download: Chrome fetches `address`, on the errand's sites, as
-/// a download (R9); whether one began is the tracker's to say.
-pub(crate) async fn fetch(page: &Page, sites: &[String], address: &str) -> Result<(), (String, String)> {
-    let url = allowed(sites, address).await.map_err(|why| ("sensitive_action".to_owned(), why))?;
+/// browser_download: Chrome fetches `address` as a download (R9);
+/// whether one began is the tracker's to say.
+pub(crate) async fn fetch(page: &Page, address: &str) -> Result<(), (String, String)> {
+    let url = allowed(address).await.map_err(|why| ("sensitive_action".to_owned(), why))?;
     let interrupted = |error: Error| ("interrupted".to_owned(), schema::one_line(&error.to_string(), 200));
     let went = page.call("Page.navigate", json!({"url": url.as_str()})).await.map_err(interrupted)?;
     page.forget();
@@ -366,15 +410,24 @@ pub(crate) async fn fetch(page: &Page, sites: &[String], address: &str) -> Resul
         None => Ok(()),
         Some(error) if error.contains("ERR_ABORTED") => Ok(()),
         Some(error) if error.contains("BLOCKED_BY_CLIENT") => {
-            Err(("outcome_unknown".to_owned(), "it led to a page off this errand's sites, so Claktory stopped it".to_owned()))
+            Err((BLOCKED.to_owned(), "it led to an address Claktory's browser doesn't go to, so Claktory stopped it".to_owned()))
         }
         Some(error) => Err(("outcome_unknown".to_owned(), format!("the file didn't come ({})", schema::one_line(error, 100)))),
     }
 }
 
+/// What `go` and `fetch` answer when Chrome blocked the page: the fence,
+/// whose words they give, or Safe Browsing, which the step tells apart
+/// by whether the fence stopped anything.
+pub(crate) const BLOCKED: &str = "blocked";
+
+/// Why a page Safe Browsing flags doesn't open.
+pub(crate) const DANGEROUS: &str =
+    "Chrome warns that this site is dangerous, so Claktory's browser won't open it. Don't look for another way to it.";
+
 /// [`check`], then [`resolved`].
-pub(crate) async fn allowed(sites: &[String], address: &str) -> Result<url::Url, String> {
-    let url = check(sites, address)?;
+pub(crate) async fn allowed(address: &str) -> Result<url::Url, String> {
+    let url = check(address)?;
     resolved(&url).await?;
     Ok(url)
 }
@@ -384,20 +437,18 @@ const LOAD: Duration = Duration::from_secs(30);
 
 /// Takes the page to `address`, if the fence lets it, and waits for it to
 /// load: where it is then, and its document, for the agent to read next.
-pub(crate) async fn go(page: &Page, sites: &[String], address: &str) -> Result<Answer, (String, String)> {
-    let url = allowed(sites, address).await.map_err(|why| ("sensitive_action".to_owned(), why))?;
+pub(crate) async fn go(page: &Page, address: &str) -> Result<Answer, (String, String)> {
+    let url = allowed(address).await.map_err(|why| ("sensitive_action".to_owned(), why))?;
     let mut events = page.cdp().events();
     let interrupted = |error: Error| ("interrupted".to_owned(), schema::one_line(&error.to_string(), 200));
     page.call("Page.enable", json!({})).await.map_err(interrupted)?;
     let went = page.call("Page.navigate", json!({"url": url.as_str()})).await.map_err(interrupted)?;
     page.forget();
     if let Some(error) = went["errorText"].as_str().filter(|error| !error.is_empty()) {
-        let why = if error.contains("BLOCKED_BY_CLIENT") {
-            "it went to a site this errand isn't for, so Claktory stopped it".to_owned()
-        } else {
-            format!("the page didn't load ({})", schema::one_line(error, 100))
-        };
-        return Err(("outcome_unknown".to_owned(), why));
+        if error.contains("BLOCKED_BY_CLIENT") {
+            return Err((BLOCKED.to_owned(), "it went to an address Claktory's browser doesn't go to, so Claktory stopped it".to_owned()));
+        }
+        return Err(("outcome_unknown".to_owned(), format!("the page didn't load ({})", schema::one_line(error, 100))));
     }
     // Its load, or the time it had for it: the page is read as it is then.
     let session = page.session().to_owned();
@@ -438,19 +489,40 @@ fn short(address: &str) -> String {
 mod tests {
     use super::*;
 
-    fn sites() -> Vec<String> {
-        vec!["https://play.google.com".to_owned(), "https://accounts.google.com".to_owned()]
+    /// A password manager's vault is never a page the browser
+    /// opens, wherever the agent or a page sends it.
+    #[test]
+    fn password_managers_are_never_opened() {
+        for refused in [
+            "https://passwords.google.com/",
+            "https://my.1password.com/signin",
+            "https://team.1password.eu/",
+            "https://vault.bitwarden.com/#/vault",
+            "https://lastpass.com/vault/",
+            "https://www.lastpass.com/vault",
+            "https://lastpass.com/%76ault",
+            "https://lastpass.com/pricing",
+            "https://lastpass.com/?ac=1",
+            "https://keepersecurity.eu/vault/#",
+            "https://app.dashlane.com/",
+            "https://pass.proton.me/u/0",
+            "https://app.nordpass.com/",
+            "https://PASSWORDS.google.com./",
+        ] {
+            assert_eq!(check(refused).unwrap_err(), PASSWORD_MANAGERS, "{refused}");
+        }
+        for allowed in ["https://www.google.com/", "https://bitwarden.com/", "https://proton.me/pass", "https://1password.com/"] {
+            assert!(check(allowed).is_ok(), "{allowed}");
+        }
     }
 
     #[test]
-    fn only_https_pages_of_the_errands_sites() {
-        let fine = check(&sites(), "https://play.google.com/console/signup?x=1#top").unwrap();
+    fn only_https_pages_of_sites_on_the_internet() {
+        let fine = check("https://play.google.com/console/signup?x=1#top").unwrap();
         assert_eq!(fine.path(), "/console/signup");
-        assert!(check(&sites(), "https://PLAY.google.com:443/").is_ok());
+        assert!(check("https://PLAY.google.com:443/").is_ok());
+        assert!(check("https://evil.example/").is_ok(), "any site: no list of them");
         for refused in [
-            "https://evil.example/",
-            "https://play.google.com.evil.example/",
-            "https://play.google.com:8443/",
             "http://play.google.com/",
             "https://user@play.google.com/",
             "file:///etc/passwd",
@@ -466,10 +538,8 @@ mod tests {
             "https://localhost/",
             "play.google.com",
         ] {
-            assert!(check(&sites(), refused).is_err(), "{refused}");
+            assert!(check(refused).is_err(), "{refused}");
         }
-        let said = check(&sites(), "https://evil.example/").unwrap_err();
-        assert!(said.contains("https://play.google.com, https://accounts.google.com"), "{said}");
     }
 
     #[test]
@@ -487,42 +557,32 @@ mod tests {
         }
     }
 
-    /// While the agent asks for a file, a redirect may hop off the sites,
-    /// never to one the browser has cookies for (Fugo 38000), and what
-    /// comes back from off them passes only as a file.
+    /// The top frame's responses: a redirect goes on, a page comes from a
+    /// site the browser may go to, and a file or a PDF the agent asked for
+    /// comes as one.
     #[tokio::test]
-    async fn a_hop_for_a_file_never_goes_where_the_browser_is_signed_in() {
-        let Some((_local, page, _)) = crate::errands::reader::tests::page_with("<p>Assets</p>").await else { return };
-        let cookie = json!({"name": "SID", "value": "1", "domain": "drive.example", "path": "/", "secure": true});
-        page.call("Network.setCookie", cookie).await.unwrap();
-        let hop = Paused { top: true, redirect: true, hopping: true, ..Paused::default() };
-        assert_eq!(decide(&page, &sites(), "https://drive.example/uc?id=1", hop).await, Err(true));
-        // Not signed in there: weighed as any hop (this one doesn't resolve).
-        assert_eq!(decide(&page, &sites(), "https://cdn.example/f.zip", hop).await, Err(false));
-        // Not asking for a file: a page like any other.
-        assert_eq!(decide(&page, &sites(), "https://drive.example/uc?id=1", Paused { hopping: false, ..hop }).await, Err(false));
-        // The response, off the sites: a file, only while asked; a redirect goes on.
+    async fn what_comes_back_to_the_top_frame() {
         let file = Paused { top: true, answered: true, status: 200, file: true, hopping: true, ..Paused::default() };
-        assert_eq!(decide(&page, &sites(), "https://cdn.example/f.zip", file).await, Ok(()));
-        assert_eq!(decide(&page, &sites(), "https://cdn.example/f.html", Paused { file: false, ..file }).await, Err(false));
-        assert_eq!(decide(&page, &sites(), "https://cdn.example/f.zip", Paused { hopping: false, ..file }).await, Err(false));
-        assert_eq!(decide(&page, &sites(), "https://cdn.example/next", Paused { status: 302, file: false, ..file }).await, Ok(()));
-        // A PDF from off the sites: a file only when the agent asked for it
-        // with browser_download.
+        assert!(decide("https://cdn.example/f.zip", file).await);
+        assert!(decide("https://cdn.example/f.html", Paused { file: false, ..file }).await);
+        assert!(decide("https://cdn.example/next", Paused { status: 302, file: false, ..file }).await);
+        assert!(!decide("http://cdn.example/f.html", Paused { file: false, ..file }).await, "never a page over http");
+        assert!(decide("http://cdn.example/f.zip", file).await, "a file asked for, wherever it ends");
+        assert!(!decide("http://cdn.example/f.zip", Paused { hopping: false, ..file }).await);
         let pdf = Paused { file: false, pdf: true, ..file };
-        assert_eq!(decide(&page, &sites(), "https://cdn.example/f.pdf", pdf).await, Err(false));
-        assert_eq!(decide(&page, &sites(), "https://cdn.example/f.pdf", Paused { fetching: true, ..pdf }).await, Ok(()));
+        assert!(!decide("http://cdn.example/f.pdf", pdf).await);
+        assert!(decide("http://cdn.example/f.pdf", Paused { fetching: true, ..pdf }).await);
         assert!(Paused { fetching: true, ..pdf }.saves_pdf() && !pdf.saves_pdf());
         // Frames inside the page load as it asks.
-        assert_eq!(decide(&page, &sites(), "https://drive.example/", Paused::default()).await, Ok(()));
+        assert!(decide("http://drive.example/", Paused::default()).await);
     }
 
     #[tokio::test]
-    async fn a_page_that_leads_off_the_errands_sites_is_stopped_whoever_moves_it() {
-        let html = r#"<a href="https://evil.example/steal">Continue</a>"#;
+    async fn a_page_that_leads_to_this_computer_is_stopped_whoever_moves_it() {
+        let html = r#"<a href="https://localhost/steal">Continue</a>"#;
         let Some((_local, page, profile)) = crate::errands::reader::tests::page_with(html).await else { return };
         let blocked = Arc::new(Mutex::new(None));
-        guard(page.clone(), sites(), blocked.clone(), Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false))).await.unwrap();
+        guard(page.clone(), blocked.clone(), Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false))).await.unwrap();
         let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
         let link = read.elements.iter().find(|element| element.name == "Continue").unwrap().reference.clone();
         // The reader says the link leaves; the browser's own click is stopped all the same.
@@ -540,16 +600,16 @@ mod tests {
                 false
             }
         };
-        assert!(stopped("https://evil.example").await, "{:?}", crate::locking::lock(&blocked));
+        assert!(stopped("https://localhost").await, "{:?}", crate::locking::lock(&blocked));
         // The page's own script, the same.
-        let went = page.call("Runtime.evaluate", json!({"expression": "location.href = 'https://other.example/x'"})).await.unwrap();
+        let went = page.call("Runtime.evaluate", json!({"expression": "location.href = 'http://other.example/x'"})).await.unwrap();
         assert!(went.get("exceptionDetails").is_none(), "{went}");
-        assert!(stopped("https://other.example").await, "{:?}", crate::locking::lock(&blocked));
+        assert!(stopped("http://other.example").await, "{:?}", crate::locking::lock(&blocked));
         let frame = page.frame().await.unwrap();
-        assert!(!frame.url.contains("evil") && !frame.url.contains("other"), "{}", frame.url);
+        assert!(!frame.url.contains("localhost") && !frame.url.contains("other"), "{}", frame.url);
         // And the agent's own navigation is refused before it starts.
-        let refused = go(&page, &sites(), "https://evil.example/").await.unwrap_err();
-        assert!(refused.1.contains("isn't one of this errand's sites"), "{refused:?}");
+        let refused = go(&page, "https://10.0.0.1/").await.unwrap_err();
+        assert_eq!(refused.0, "sensitive_action", "{refused:?}");
         let _ = std::fs::remove_dir_all(&profile);
     }
 

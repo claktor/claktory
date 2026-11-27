@@ -207,7 +207,8 @@ async fn an_agent_carries_on_with_the_next_account_and_every_account_shows_its_o
     let (mut client, workspace, _) = Client::connect(addr).await;
     let mut view = View { workspace, ..View::default() };
 
-    // Both accounts, the first in use, each read for its own usage, plan and name.
+    // Both accounts, each read for its own usage, plan and name. The first
+    // reads 100%, so the second, with room, is in use.
     view.follow(&mut client, |view| {
         claude(view)
             .accounts
@@ -219,7 +220,7 @@ async fn an_agent_carries_on_with_the_next_account_and_every_account_shows_its_o
     let accounts = claude(&view).accounts;
     let shown: Vec<_> =
         accounts.iter().map(|account| (account.id.as_str(), account.label.as_str(), account.plan.as_str(), account.in_use)).collect();
-    assert_eq!(shown, [("a", "a@x.com", "Claude Max 20x", true), ("b", "b@x.com", "Claude Max 5x", false)]);
+    assert_eq!(shown, [("a", "a@x.com", "Claude Max 20x", false), ("b", "b@x.com", "Claude Max 5x", true)]);
     let used: Vec<f64> = accounts.iter().map(|account| account.usage.as_ref().expect("usage").windows[0].used_percent).collect();
     assert_eq!(used, [100.0, 12.0]);
     assert!(accounts.iter().all(|account| account.can_sign_out && account.exhausted_until == 0));
@@ -243,13 +244,11 @@ async fn an_agent_carries_on_with_the_next_account_and_every_account_shows_its_o
     assert!(matches!(apply_request(&mut client, &mut view, create).await, Body::Ack(_)));
     apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
     view.follow(&mut client, |view| describe(&view.entries).iter().any(|entry| entry == "assistant: hi")).await;
-    assert_eq!(
-        describe(&view.entries),
-        ["user: hello", "notice: Claude account a@x.com reached its limit; continuing on b@x.com.", "assistant: hi"]
-    );
+    // Straight to the one with room: nothing to switch from, nothing said.
+    assert_eq!(describe(&view.entries), ["user: hello", "assistant: hi"]);
     let requests: Vec<String> =
         seen.lock().expect("lock").iter().filter(|(path, _)| path.ends_with("/v1/messages")).map(|(_, account)| account.clone()).collect();
-    assert_eq!(requests, ["a", "b"]);
+    assert_eq!(requests, ["b"]);
     // The Usage pane counts the answer as the account's that gave it.
     let load = Request::LoadUsage(v1::LoadUsage::default());
     let Body::UsageReport(report) = apply_request(&mut client, &mut view, load).await else { panic!("expected a usage report") };
@@ -257,10 +256,10 @@ async fn an_agent_carries_on_with_the_next_account_and_every_account_shows_its_o
         report.rows.iter().map(|row| (row.agent_id.as_str(), row.account_id.as_str(), row.account_label.as_str(), row.requests)).collect();
     assert_eq!(rows, [("builder", "b", "b@x.com", 1)]);
 
-    // The first is skipped until its reset; requests go to the second.
-    view.follow(&mut client, |view| claude(view).accounts[1].in_use).await;
+    // The first comes after the second while it reads full, with no limit
+    // marked on it: it never refused a request.
     let accounts = claude(&view).accounts;
-    assert_eq!((accounts[0].in_use, accounts[0].exhausted_until), (false, i64::try_from(resets * 1000).expect("ms")));
+    assert_eq!((accounts[0].in_use, accounts[0].exhausted_until, accounts[1].in_use), (false, 0, true));
 
     // Reordered: b first.
     let move_b = Request::MoveAccount(v1::MoveAccount { provider_id: "anthropic".into(), account_id: "b".into(), position: 0 });

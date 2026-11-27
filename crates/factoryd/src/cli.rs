@@ -784,6 +784,7 @@ fn has_devices(workspace: &v1::Workspace) -> bool {
 mod review_box {
     // Off the Linux box only the tests use the check.
     #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg(unix)]
     use std::path::Path;
 
     /// Root's switch, on the review box alone. Never from the environment,
@@ -809,6 +810,7 @@ mod review_box {
     }
 
     /// lstat: a link is a link, not what it points to. None when it isn't there.
+    #[cfg(unix)]
     pub(super) fn stat(path: &Path) -> Option<Stat> {
         use std::os::unix::fs::MetadataExt;
         let meta = std::fs::symlink_metadata(path).ok()?;
@@ -912,6 +914,7 @@ mod review_box {
 
         /// What a test (or anyone but root) can make: a marker of its own,
         /// in a folder of its own, plain or a link to a root's file. Off.
+        #[cfg(unix)]
         #[test]
         fn a_marker_anyone_but_root_can_make_is_off() {
             let dir = std::env::temp_dir().join(format!("claktory-review-box-{}", std::process::id()));

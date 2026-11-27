@@ -1,8 +1,8 @@
-// A video's preview coming on a slow link when the connection drops (Sale's
-// row 87, Android, 512:2048): back, it carried on from 0, a minute lost on
-// that link, since the preview came in one read of up to 8 MB and nothing
-// of a read given up is kept. It comes a megabyte at a time now, each
-// written as it comes, and back it carries on from the last one.
+// A video's preview coming on a slow link when the connection drops
+// (Android, 512:2048): back, it carried on from 0, a minute lost on that
+// link, since the preview came in one read of up to 8 MB and nothing of a
+// read given up is kept. It comes a megabyte at a time now, each written as
+// it comes, and back it carries on from the last one.
 import 'package:factory_app/backend.dart' show RequestFailure;
 import 'package:factory_app/paced.dart' show lostWhileReading;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';

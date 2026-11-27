@@ -1,4 +1,4 @@
-//! Whether Claktory's disk still takes what it writes (friend bug #36): a
+//! Whether Claktory's disk still takes what it writes: a
 //! disk that turns read-only (ext4 does after an error) or keeps failing
 //! stops everything Claktory keeps, while the backend runs on and its
 //! devices hear nothing. Every `EVERY` the backend writes a small file in

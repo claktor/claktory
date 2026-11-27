@@ -83,7 +83,7 @@ class DmProposal {
     expiresMs: expiresMs,
     envelope: envelope,
     epoch: epoch,
-    // The service's (Mista 32744): what the home knows it by; the sealed
+    // The service's: what the home knows it by; the sealed
     // one's before the service listed it.
     clientMessageId: this.clientMessageId.isEmpty
         ? clientMessageId
@@ -124,7 +124,7 @@ class DmProposal {
   /// approving it sends goes by it.
   final String clientMessageId;
 
-  /// The service's word for which channel message it is (#451): SHA-256,
+  /// The service's word for which channel message it is: SHA-256,
   /// lowercase hex, of its MLS bytes. Opened only from the message this
   /// device took from its channel under that digest, from that Claktory's
   /// leaf, so the word is checked by what it opens.
@@ -215,7 +215,7 @@ class DmAgentDraft {
   /// Sealed in the Claktory's channel: an envelope's JSON.
   final String envelope;
 
-  /// Through the home (#451), no [envelope]: which channel message it is,
+  /// Through the home, no [envelope]: which channel message it is,
   /// SHA-256 lowercase hex of its MLS bytes.
   final String draftDigest;
 }

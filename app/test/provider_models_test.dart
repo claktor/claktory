@@ -1,4 +1,4 @@
-// Friend bug #14: each provider signed in to says where its models come
+// Each provider signed in to says where its models come
 // from and when they were last read from the provider, with Refresh models.
 import 'package:factory_app/login.dart' show ProviderCard;
 import 'package:factory_app/provider_models.dart';

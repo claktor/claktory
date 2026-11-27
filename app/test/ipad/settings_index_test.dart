@@ -1,4 +1,4 @@
-// Settings on an iPad (Lucy's settings.md §4.1, line 128; Bruno 49525):
+// Settings on an iPad (line 128):
 // wide, its index rows are a finger tall (44 pt) with the pointer's hover;
 // ⌘F is "Search Settings" in the system's menu (hold ⌘) and puts the keys
 // in its search field; ↑/↓ in the index step through the sections, after a

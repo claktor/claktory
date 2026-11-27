@@ -9,6 +9,7 @@ import 'package:factory_app/backend.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/state.dart';
 import 'package:factory_app/tunnel_client.dart';
+import 'package:factory_app/update.dart' show windowsInstallRoot;
 import 'package:factory_app/windows_local.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -73,6 +74,35 @@ Future<void> _until(bool Function() done) async {
 }
 
 void main() {
+  test("Windows' install root is the launcher's folder, two above the app", () {
+    bool launcher(String path) =>
+        path == r'C:\Users\ann\AppData\Local\Programs\Claktory\Claktory.exe';
+    expect(
+      windowsInstallRoot(
+        r'C:\Users\ann\AppData\Local\Programs\Claktory\app\0.1.27\Claktory.exe',
+        launcher,
+      ),
+      r'C:\Users\ann\AppData\Local\Programs\Claktory',
+    );
+    for (final executable in [
+      r'C:\build\app\build\windows\x64\runner\Release\Claktory.exe',
+      r'C:\Users\ann\AppData\Local\Programs\Claktory\app\v0.1.27\Claktory.exe',
+      r'C:\Users\ann\AppData\Local\Programs\Claktory\app\0.1.27.partial\Claktory.exe',
+      r'C:\Users\ann\AppData\Local\Programs\Claktory\apps\0.1.27\Claktory.exe',
+      r'C:\Claktory.exe',
+    ]) {
+      expect(
+        windowsInstallRoot(executable, (_) => true),
+        '',
+        reason: executable,
+      );
+    }
+    expect(
+      windowsInstallRoot(r'D:\Claktory\app\0.1.27\Claktory.exe', (_) => false),
+      '',
+    );
+  });
+
   test('the token goes in Hello once the server end of its own connection '
       'is this account', () async {
     final server = await _Server.start();
@@ -149,7 +179,7 @@ void main() {
     await server.server.close(force: true);
   });
 
-  test('with no app-token yet it never connects, and reads it again on the '
+  test('with no app-token yet it sends nothing, and reads it again on the '
       'next try', () async {
     final server = await _Server.start();
     var reads = 0;
@@ -166,7 +196,7 @@ void main() {
     unawaited(backend.run());
     await _until(() => server.frames.any((frame) => frame.hasHello()));
     expect(reads, greaterThanOrEqualTo(3));
-    expect(server.clientPorts, hasLength(1));
+    expect(server.frames.where((frame) => frame.hasHello()), hasLength(1));
     expect(
       server.frames.firstWhere((frame) => frame.hasHello()).hello.token,
       _token,
@@ -174,6 +204,59 @@ void main() {
     await backend.close();
     await server.server.close(force: true);
   });
+
+  test('the token is read once the port answers, so a restarted Claktory '
+      "is never sent the one before's (Hermes 53335)", () async {
+    final server = await _Server.start();
+    final fresh = 'cd' * 32;
+    final backend = _backend(
+      server,
+      WindowsLocal(
+        // The file a stopped backend left, until this start's backend has
+        // answered (and so written its own).
+        readToken: ({required dev}) async =>
+            server.clientPorts.isEmpty ? _token : fresh,
+        sameUser: (serverPort, clientPort) async => true,
+      ),
+    );
+    unawaited(backend.run());
+    await _until(() => server.frames.any((frame) => frame.hasHello()));
+    expect(
+      server.frames.firstWhere((frame) => frame.hasHello()).hello.token,
+      fresh,
+    );
+    expect(server.clientPorts, hasLength(1));
+    await backend.close();
+    await server.server.close(force: true);
+  });
+
+  test(
+    "another account's port is never told the token: it isn't even read",
+    () async {
+      final server = await _Server.start();
+      var reads = 0;
+      var checks = 0;
+      final backend = _backend(
+        server,
+        WindowsLocal(
+          readToken: ({required dev}) async {
+            reads++;
+            return _token;
+          },
+          sameUser: (serverPort, clientPort) async {
+            checks++;
+            return false;
+          },
+        ),
+      );
+      unawaited(backend.run());
+      await _until(() => checks >= 2);
+      expect(reads, 0);
+      expect(server.frames, isEmpty);
+      await backend.close();
+      await server.server.close(force: true);
+    },
+  );
 
   test(
     'the app dials 127.0.0.1 itself, never a name that could be [::1]',

@@ -1,4 +1,4 @@
-// Android: a new version of this app (#355 D2). The phone's drawer and
+// Android: a new version of this app. The phone's drawer and
 // Settings → General say so while a newer build that works with the
 // Claktory is out, with Download, which opens its download page in the
 // browser; a page that doesn't open says so, and Download tries again.

@@ -1278,36 +1278,46 @@ class _PipeSpendNoticeState extends State<PipeSpendNotice> {
               'midnight. Raise the limit to have $name answer now.',
               style: type.body.copyWith(color: palette.textMuted),
             ),
+            // Its limit is the person's (Fugo 52432).
+            if (approvesElsewhere)
+              const ApproveElsewhere(text: pipeChangeElsewhereText),
             if (_error case final error?)
               Text(error, style: type.caption.copyWith(color: palette.danger)),
           ],
         ),
-        action: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(r'$', style: type.body.copyWith(color: palette.textMuted)),
-            const SizedBox(width: Space.xs),
-            SizedBox(
-              width: 72,
-              child: TextField(
-                controller: _cap,
-                placeholder: _capText(spend).isEmpty ? '10' : _capText(spend),
-                kind: InputKind.number,
-                semanticsLabel: 'Daily spending limit in dollars',
-                onSubmitted: (_) {
-                  if (!_busy && raised != null) _raise(lead, raised);
-                },
+        action: approvesElsewhere
+            ? const SizedBox.shrink()
+            : Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    r'$',
+                    style: type.body.copyWith(color: palette.textMuted),
+                  ),
+                  const SizedBox(width: Space.xs),
+                  SizedBox(
+                    width: 72,
+                    child: TextField(
+                      controller: _cap,
+                      placeholder: _capText(spend).isEmpty
+                          ? '10'
+                          : _capText(spend),
+                      kind: InputKind.number,
+                      semanticsLabel: 'Daily spending limit in dollars',
+                      onSubmitted: (_) {
+                        if (!_busy && raised != null) _raise(lead, raised);
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: Space.s),
+                  Button(
+                    label: 'Raise limit',
+                    onPressed: _busy || raised == null
+                        ? null
+                        : () => _raise(lead, raised),
+                  ),
+                ],
               ),
-            ),
-            const SizedBox(width: Space.s),
-            Button(
-              label: 'Raise limit',
-              onPressed: _busy || raised == null
-                  ? null
-                  : () => _raise(lead, raised),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -1415,16 +1425,20 @@ class _Waiting extends StatelessWidget {
                 PairingDigits(pipe.digits),
               ],
               const SizedBox(height: Space.xl),
-              Align(
-                alignment: Alignment.centerRight,
-                child: _StateButton(
-                  pipe: pipe,
-                  action: PipeAction.PIPE_ACTION_CLOSE,
-                  label: pipe.state == PipeState.PIPE_STATE_INVITED
-                      ? 'Cancel invite'
-                      : 'Cancel',
+              // Closing it is the person's (Fugo 52432).
+              if (approvesElsewhere)
+                const ApproveElsewhere(text: pipeChangeElsewhereText)
+              else
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: _StateButton(
+                    pipe: pipe,
+                    action: PipeAction.PIPE_ACTION_CLOSE,
+                    label: pipe.state == PipeState.PIPE_STATE_INVITED
+                        ? 'Cancel invite'
+                        : 'Cancel',
+                  ),
                 ),
-              ),
             ],
           ),
         ),
@@ -1480,7 +1494,7 @@ class _StateButtonState extends State<_StateButton> with PublishesAnswer {
   @override
   CardAnswer? answerNow() {
     final key = widget.answers;
-    if (key == null) return null;
+    if (key == null || approvesElsewhere) return null;
     return CardAnswer(
       key: key,
       docked: false,
@@ -1495,6 +1509,8 @@ class _StateButtonState extends State<_StateButton> with PublishesAnswer {
   @override
   Widget build(BuildContext context) {
     publishAnswer();
+    // A pipe's state is the person's: never from Windows (Fugo 52432).
+    if (approvesElsewhere) return const SizedBox.shrink();
     final palette = Palette.of(context);
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -3457,9 +3473,12 @@ class _PipeFoot extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final foot = pipe.state == PipeState.PIPE_STATE_OPEN
-        ? _PipeComposer(pipe: pipe)
-        : pipeStateBar(context, pipe) ?? const SizedBox.shrink();
+    final foot = pipe.state != PipeState.PIPE_STATE_OPEN
+        ? pipeStateBar(context, pipe) ?? const SizedBox.shrink()
+        // What the person writes in it is theirs (Fugo 52432).
+        : approvesElsewhere
+        ? _ReadOnlyFoot()
+        : _PipeComposer(pipe: pipe);
     // On a phone, while its find bar is open, the bar takes the foot: the
     // composer steps aside, keeping what's typed, as a message box does.
     final finding = PhonePageFind.finding(context);
@@ -3473,12 +3492,26 @@ class _PipeFoot extends StatelessWidget {
   }
 }
 
+/// An open pipe's foot on Windows, where the composer would be.
+class _ReadOnlyFoot extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.fromLTRB(Space.xl, Space.m, Space.xl, Space.m),
+    decoration: BoxDecoration(
+      border: Border(top: BorderSide(color: Palette.of(context).hairline)),
+    ),
+    child: const ApproveElsewhere(text: pipeChangeElsewhereText),
+  );
+}
+
 /// Why nothing goes through [pipe] and what the person can do (Continue,
 /// Resume, Delete…), as a bar behind a top hairline; null while it's open
 /// or before it is.
 Widget? pipeStateBar(BuildContext context, Pipe pipe) {
   final palette = Palette.of(context);
   final who = pipePeerName(pipe, start: true);
+  // On Windows its Continue, Resume and Delete… are the person's (Fugo
+  // 52432): the bar says where they're done instead.
   Widget bar(String text, List<Widget> actions) => Container(
     padding: const EdgeInsets.fromLTRB(Space.xl, Space.m, Space.xl, Space.m),
     decoration: BoxDecoration(
@@ -3487,15 +3520,24 @@ Widget? pipeStateBar(BuildContext context, Pipe pipe) {
     child: Row(
       children: [
         Expanded(
-          child: Text(
-            text,
-            style: TextStyles.body.copyWith(color: palette.textMuted),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            spacing: Space.xs,
+            children: [
+              Text(
+                text,
+                style: TextStyles.body.copyWith(color: palette.textMuted),
+              ),
+              if (approvesElsewhere && actions.isNotEmpty)
+                const ApproveElsewhere(text: pipeChangeElsewhereText),
+            ],
           ),
         ),
-        for (final action in actions) ...[
-          const SizedBox(width: Space.s),
-          action,
-        ],
+        if (!approvesElsewhere)
+          for (final action in actions) ...[
+            const SizedBox(width: Space.s),
+            action,
+          ],
       ],
     ),
   );
@@ -3556,16 +3598,19 @@ class PipeLoopCard extends StatelessWidget {
           style: TextStyles.body.copyWith(color: palette.textMuted),
         ),
         const SizedBox(height: Space.s),
-        Align(
-          alignment: Alignment.centerRight,
-          child: _StateButton(
-            pipe: pipe,
-            action: PipeAction.PIPE_ACTION_RESUME,
-            label: 'Continue',
-            primary: true,
-            answers: 'pipe:${pipe.id}/loop',
+        if (approvesElsewhere)
+          const ApproveElsewhere(text: pipeChangeElsewhereText)
+        else
+          Align(
+            alignment: Alignment.centerRight,
+            child: _StateButton(
+              pipe: pipe,
+              action: PipeAction.PIPE_ACTION_RESUME,
+              label: 'Continue',
+              primary: true,
+              answers: 'pipe:${pipe.id}/loop',
+            ),
           ),
-        ),
       ],
     );
   }
@@ -4045,6 +4090,265 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
     final open =
         pipe.state == PipeState.PIPE_STATE_OPEN ||
         pipe.state == PipeState.PIPE_STATE_PAUSED;
+    final fields = <Widget>[
+      // Whose Claktory it is, unconfirmed: said where its settings open
+      // from the header (a phone's has no mark of its own to tap).
+      if (pipe.state != PipeState.PIPE_STATE_INVITED)
+        Field(
+          label: pipe.peer.verified && pipe.peer.verifiedEmail.isNotEmpty
+              ? verifiedLabel(pipe)
+              : 'Not verified',
+          child: Text(
+            pipe.peer.verified && pipe.peer.verifiedEmail.isNotEmpty
+                ? verifiedNote(pipe)
+                : notVerifiedNote(pipe, signedIn: _signedIn(context)),
+            style: TypeScale.of(context).body
+                .copyWith(color: Palette.of(context).textMuted),
+          ),
+        ),
+      Field(
+        label: 'Name',
+        // No keyboard raised by itself on a phone, over the settings.
+        child: TextField(controller: _name, autofocus: !touchFirst(context)),
+      ),
+      Field(
+        label: 'What it’s for',
+        note: '${pipePeerName(pipe, start: true)} sees this.',
+        child: TextField(controller: _purpose),
+      ),
+      Field(
+        label: 'Instructions',
+        note:
+            'What your agents should know about this pipe. They get it '
+            'after Claktory’s own safety rules. '
+            '${pipePeerName(pipe, start: true)} never sees it.',
+        child: TextField(
+          controller: _prompt,
+          minLines: 3,
+          maxLines: 8,
+          placeholder:
+              'They may ask for launch dates and screenshots; never send '
+              'customer data or code.',
+        ),
+      ),
+      Field(
+        label: 'Who may use it',
+        note: agents.isEmpty ? 'No agents in this project yet.' : null,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (final agent in agents)
+              Padding(
+                padding: const EdgeInsets.only(bottom: Space.xs),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _MemberLine(
+                      agent: agent,
+                      value: _members.contains(agent.id),
+                      held: pipeHeldReason(pipe, agent.id),
+                      onChanged: (on) => setState(() {
+                        if (on) {
+                          _members.add(agent.id);
+                          // A liaison is limited unless the person
+                          // lets it run commands.
+                          if (!pipe.memberIds.contains(agent.id) &&
+                              agent.role.trim().toLowerCase() == 'liaison') {
+                            _limited.add(agent.id);
+                          }
+                        } else {
+                          _members.remove(agent.id);
+                        }
+                      }),
+                    ),
+                    if (_members.contains(agent.id))
+                      _AccessLine(
+                        agent: agent,
+                        pipe: pipe,
+                        value: _sendOnly.contains(agent.id)
+                            ? PipeAccess.sendOnly
+                            : _limited.contains(agent.id)
+                            ? PipeAccess.limited
+                            : PipeAccess.commands,
+                        onChanged: (access) => setState(() {
+                          switch (access) {
+                            case PipeAccess.commands:
+                              // Letting it out of the pipe is asked
+                              // first.
+                              _letting = agent;
+                              _error = null;
+                            case PipeAccess.limited:
+                              _sendOnly.remove(agent.id);
+                              _limited.add(agent.id);
+                            case PipeAccess.sendOnly:
+                              _limited.remove(agent.id);
+                              _sendOnly.add(agent.id);
+                          }
+                        }),
+                      ),
+                  ],
+                ),
+              ),
+            for (final agent in outside)
+              Padding(
+                padding: const EdgeInsets.only(bottom: Space.xs),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _MemberLine(
+                      agent: agent,
+                      value: _members.contains(agent.id),
+                      held: pipeHeldReason(pipe, agent.id),
+                      onChanged: (on) => setState(() {
+                        if (on) {
+                          _members.add(agent.id);
+                          _sendOnly.add(agent.id);
+                        } else {
+                          _members.remove(agent.id);
+                          _sendOnly.remove(agent.id);
+                        }
+                      }),
+                    ),
+                    if (_members.contains(agent.id))
+                      _AccessLine(
+                        agent: agent,
+                        pipe: pipe,
+                        value: PipeAccess.sendOnly,
+                        onChanged: null,
+                      ),
+                  ],
+                ),
+              ),
+            if (open && !approvesElsewhere)
+              Button(
+                label: 'Add a liaison agent…',
+                onPressed: () => setState(() {
+                  _addingLiaison = true;
+                  _error = null;
+                }),
+              ),
+          ],
+        ),
+      ),
+      Field(
+        label: 'Lead',
+        note: lead.isEmpty && _members.isNotEmpty
+            ? pipeNoLeadNote
+            : 'Told of each message that comes in.',
+        child: Select<String>(
+          value: lead,
+          options: [
+            // Only while none leads it: never chosen on purpose.
+            if (lead.isEmpty) const SelectOption('', 'No lead'),
+            for (final agent in agents)
+              if (_members.contains(agent.id) && !_sendOnly.contains(agent.id))
+                SelectOption(agent.id, agent.name),
+          ],
+          onChanged: (lead) => setState(() => _lead = lead),
+        ),
+      ),
+      // Sent as it's chosen, apart from Save.
+      ForwardReportsField(pipe: pipe),
+      // So are its shared websites' Stop, Hide and Share a website….
+      PipeSharesField(pipe: pipe),
+      _ReviewIncomingField(
+        value: _reviewIncoming,
+        onChanged: (on) => setState(() => _reviewIncoming = on),
+      ),
+      _ReviewOutgoingField(
+        value: _review,
+        onChanged: (on) => setState(() => _review = on),
+      ),
+      Field(
+        label: 'Limits',
+        note:
+            '${pipe.limits.messagesLeft} messages and '
+            '${pipe.limits.fileMbLeft} MB of files left now. Beyond them, '
+            'messages wait for you.',
+        child: Row(
+          children: [
+            Expanded(
+              child: _NumberField(label: 'An hour', controller: _perHour),
+            ),
+            const SizedBox(width: Space.s),
+            Expanded(
+              child: _NumberField(label: 'In a row', controller: _burst),
+            ),
+            const SizedBox(width: Space.s),
+            Expanded(
+              child: _NumberField(label: 'MB a day', controller: _fileMb),
+            ),
+          ],
+        ),
+      ),
+      if (_spendOf(pipe) case final spend?)
+        Field(
+          label: 'Daily spending limit',
+          note: spendLimitNote(
+            pipeLiaison(AppScope.of(context).workspace.workspace, pipe)!,
+            spend,
+          ),
+          child: Row(
+            children: [
+              Text(
+                r'$',
+                style: TextStyles.body.copyWith(
+                  color: Palette.of(context).textMuted,
+                ),
+              ),
+              const SizedBox(width: Space.xs),
+              SizedBox(
+                width: 120,
+                child: TextField(controller: _cap, placeholder: '10'),
+              ),
+            ],
+          ),
+        ),
+      if (!approvesElsewhere &&
+          (pipe.state == PipeState.PIPE_STATE_OPEN ||
+              (pipe.state == PipeState.PIPE_STATE_PAUSED &&
+                  pipe.paused == PipePause.PIPE_PAUSE_BY_ME)))
+        Field(
+          label: 'Pause',
+          note: 'Nothing goes through either way while it’s paused.',
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Button(
+              label: pipe.state == PipeState.PIPE_STATE_OPEN
+                  ? 'Pause pipe'
+                  : 'Resume pipe',
+              onPressed: _busy
+                  ? null
+                  : () => _run(
+                      (backend) => backend.setPipeState(
+                        pipe.id,
+                        pipe.state == PipeState.PIPE_STATE_OPEN
+                            ? PipeAction.PIPE_ACTION_PAUSE
+                            : PipeAction.PIPE_ACTION_RESUME,
+                      ),
+                    ),
+            ),
+          ),
+        ),
+    ];
+    // On Windows a pipe's settings are the person's (Fugo 52432): shown as
+    // they are, for reading, with nothing to change, save, pause or close.
+    if (approvesElsewhere) {
+      return FormFrame(
+        title: 'Pipe settings',
+        body: pipeChangeElsewhereText,
+        error: null,
+        // As every read-only form (Polnareff 52638): Close would read as
+        // Close pipe…, the very act it can't do.
+        submitLabel: 'Done',
+        onSubmit: widget.close,
+        onCancel: widget.close,
+        fields: [
+          for (final field in fields)
+            ExcludeFocus(child: IgnorePointer(child: field)),
+        ],
+      );
+    }
     return FormFrame(
       title: 'Pipe settings',
       error: _error,
@@ -4060,247 +4364,7 @@ class _PipeSettingsFormState extends State<PipeSettingsForm> {
                 _error = null;
               }),
             ),
-      fields: [
-        // Whose Claktory it is, unconfirmed: said where its settings open
-        // from the header (a phone's has no mark of its own to tap).
-        if (pipe.state != PipeState.PIPE_STATE_INVITED)
-          Field(
-            label: pipe.peer.verified && pipe.peer.verifiedEmail.isNotEmpty
-                ? verifiedLabel(pipe)
-                : 'Not verified',
-            child: Text(
-              pipe.peer.verified && pipe.peer.verifiedEmail.isNotEmpty
-                  ? verifiedNote(pipe)
-                  : notVerifiedNote(pipe, signedIn: _signedIn(context)),
-              style: TypeScale.of(context).body
-                  .copyWith(color: Palette.of(context).textMuted),
-            ),
-          ),
-        Field(
-          label: 'Name',
-          // No keyboard raised by itself on a phone, over the settings.
-          child: TextField(controller: _name, autofocus: !touchFirst(context)),
-        ),
-        Field(
-          label: 'What it’s for',
-          note: '${pipePeerName(pipe, start: true)} sees this.',
-          child: TextField(controller: _purpose),
-        ),
-        Field(
-          label: 'Instructions',
-          note:
-              'What your agents should know about this pipe. They get it '
-              'after Claktory’s own safety rules. '
-              '${pipePeerName(pipe, start: true)} never sees it.',
-          child: TextField(
-            controller: _prompt,
-            minLines: 3,
-            maxLines: 8,
-            placeholder:
-                'They may ask for launch dates and screenshots; never send '
-                'customer data or code.',
-          ),
-        ),
-        Field(
-          label: 'Who may use it',
-          note: agents.isEmpty ? 'No agents in this project yet.' : null,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              for (final agent in agents)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: Space.xs),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      _MemberLine(
-                        agent: agent,
-                        value: _members.contains(agent.id),
-                        held: pipeHeldReason(pipe, agent.id),
-                        onChanged: (on) => setState(() {
-                          if (on) {
-                            _members.add(agent.id);
-                            // A liaison is limited unless the person
-                            // lets it run commands.
-                            if (!pipe.memberIds.contains(agent.id) &&
-                                agent.role.trim().toLowerCase() == 'liaison') {
-                              _limited.add(agent.id);
-                            }
-                          } else {
-                            _members.remove(agent.id);
-                          }
-                        }),
-                      ),
-                      if (_members.contains(agent.id))
-                        _AccessLine(
-                          agent: agent,
-                          pipe: pipe,
-                          value: _sendOnly.contains(agent.id)
-                              ? PipeAccess.sendOnly
-                              : _limited.contains(agent.id)
-                              ? PipeAccess.limited
-                              : PipeAccess.commands,
-                          onChanged: (access) => setState(() {
-                            switch (access) {
-                              case PipeAccess.commands:
-                                // Letting it out of the pipe is asked
-                                // first.
-                                _letting = agent;
-                                _error = null;
-                              case PipeAccess.limited:
-                                _sendOnly.remove(agent.id);
-                                _limited.add(agent.id);
-                              case PipeAccess.sendOnly:
-                                _limited.remove(agent.id);
-                                _sendOnly.add(agent.id);
-                            }
-                          }),
-                        ),
-                    ],
-                  ),
-                ),
-              for (final agent in outside)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: Space.xs),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      _MemberLine(
-                        agent: agent,
-                        value: _members.contains(agent.id),
-                        held: pipeHeldReason(pipe, agent.id),
-                        onChanged: (on) => setState(() {
-                          if (on) {
-                            _members.add(agent.id);
-                            _sendOnly.add(agent.id);
-                          } else {
-                            _members.remove(agent.id);
-                            _sendOnly.remove(agent.id);
-                          }
-                        }),
-                      ),
-                      if (_members.contains(agent.id))
-                        _AccessLine(
-                          agent: agent,
-                          pipe: pipe,
-                          value: PipeAccess.sendOnly,
-                          onChanged: null,
-                        ),
-                    ],
-                  ),
-                ),
-              if (open)
-                Button(
-                  label: 'Add a liaison agent…',
-                  onPressed: () => setState(() {
-                    _addingLiaison = true;
-                    _error = null;
-                  }),
-                ),
-            ],
-          ),
-        ),
-        Field(
-          label: 'Lead',
-          note: lead.isEmpty && _members.isNotEmpty
-              ? pipeNoLeadNote
-              : 'Told of each message that comes in.',
-          child: Select<String>(
-            value: lead,
-            options: [
-              // Only while none leads it: never chosen on purpose.
-              if (lead.isEmpty) const SelectOption('', 'No lead'),
-              for (final agent in agents)
-                if (_members.contains(agent.id) &&
-                    !_sendOnly.contains(agent.id))
-                  SelectOption(agent.id, agent.name),
-            ],
-            onChanged: (lead) => setState(() => _lead = lead),
-          ),
-        ),
-        // Sent as it's chosen, apart from Save.
-        ForwardReportsField(pipe: pipe),
-        // So are its shared websites' Stop, Hide and Share a website….
-        PipeSharesField(pipe: pipe),
-        _ReviewIncomingField(
-          value: _reviewIncoming,
-          onChanged: (on) => setState(() => _reviewIncoming = on),
-        ),
-        _ReviewOutgoingField(
-          value: _review,
-          onChanged: (on) => setState(() => _review = on),
-        ),
-        Field(
-          label: 'Limits',
-          note:
-              '${pipe.limits.messagesLeft} messages and '
-              '${pipe.limits.fileMbLeft} MB of files left now. Beyond them, '
-              'messages wait for you.',
-          child: Row(
-            children: [
-              Expanded(
-                child: _NumberField(label: 'An hour', controller: _perHour),
-              ),
-              const SizedBox(width: Space.s),
-              Expanded(
-                child: _NumberField(label: 'In a row', controller: _burst),
-              ),
-              const SizedBox(width: Space.s),
-              Expanded(
-                child: _NumberField(label: 'MB a day', controller: _fileMb),
-              ),
-            ],
-          ),
-        ),
-        if (_spendOf(pipe) case final spend?)
-          Field(
-            label: 'Daily spending limit',
-            note: spendLimitNote(
-              pipeLiaison(AppScope.of(context).workspace.workspace, pipe)!,
-              spend,
-            ),
-            child: Row(
-              children: [
-                Text(
-                  r'$',
-                  style: TextStyles.body.copyWith(
-                    color: Palette.of(context).textMuted,
-                  ),
-                ),
-                const SizedBox(width: Space.xs),
-                SizedBox(
-                  width: 120,
-                  child: TextField(controller: _cap, placeholder: '10'),
-                ),
-              ],
-            ),
-          ),
-        if (pipe.state == PipeState.PIPE_STATE_OPEN ||
-            (pipe.state == PipeState.PIPE_STATE_PAUSED &&
-                pipe.paused == PipePause.PIPE_PAUSE_BY_ME))
-          Field(
-            label: 'Pause',
-            note: 'Nothing goes through either way while it’s paused.',
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Button(
-                label: pipe.state == PipeState.PIPE_STATE_OPEN
-                    ? 'Pause pipe'
-                    : 'Resume pipe',
-                onPressed: _busy
-                    ? null
-                    : () => _run(
-                        (backend) => backend.setPipeState(
-                          pipe.id,
-                          pipe.state == PipeState.PIPE_STATE_OPEN
-                              ? PipeAction.PIPE_ACTION_PAUSE
-                              : PipeAction.PIPE_ACTION_RESUME,
-                        ),
-                      ),
-              ),
-            ),
-          ),
-      ],
+      fields: fields,
     );
   }
 }

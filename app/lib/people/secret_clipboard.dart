@@ -1,9 +1,8 @@
-// The clipboard for a code that unlocks something (dms-e2ee §2, H3 as
-// Fugo amended it): a new device's code for adding it by pasting, and a
-// pipe invite's code (row 166). Copied marked sensitive, so clipboard
-// managers and clipboard history skip it, and cleared when it's done with,
-// unless the person copied something since. The platform's half, on the
-// channel `factory/secret-clipboard`:
+// The clipboard for a code that unlocks something: a new device's code for
+// adding it by pasting, and a pipe invite's code. Copied marked sensitive, so
+// clipboard managers and clipboard history skip it, and cleared when it's
+// done with, unless the person copied something since. The platform's half,
+// on the channel `factory/secret-clipboard`:
 //
 // - `copy` {text: String, seconds: int} → int token: writes [text] as
 //   plain text, marked sensitive. On iOS, expiring after [seconds]
@@ -79,7 +78,7 @@ class SecretClipboard {
 }
 
 /// From launch, for the app's life: clears any of this app's codes the
-/// clipboard still holds past their time (Fugo's row 181), at launch and on
+/// clipboard still holds past their time, at launch and on
 /// each return to the app. The platform's `sweep` reads only what's on the
 /// clipboard (its label and the expiry it carries), never its text, and
 /// clears it only when it's this app's and expired: a code copied before
@@ -111,7 +110,7 @@ VoidCallback startClipboardSweeps({
 /// Clears [token]'s copy on [clipboard] once [lasts] is over, if it's
 /// still there. Android lets an app check its clipboard only while it's in
 /// front, so a clear due while it isn't (the person in their messenger)
-/// waits for it to come back, and is tried again then (Zucchero's row 181).
+/// waits for it to come back, and is tried again then.
 void clearWhenDue(SecretClipboard clipboard, int token, Duration lasts) {
   final clear = _DueClear(clipboard, token);
   _clears.add(clear);

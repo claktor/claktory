@@ -1,8 +1,8 @@
-//! The playbook's ten measures (Melone's optimize-swarm-playbook.md §2,
-//! Q1–Q10), over Claktory's records, read only. Each is its SQL as the
-//! playbook has it, but with the window given as times (so a fixed clock
-//! gives fixed numbers) and every row scoped to the team's agents. They
-//! read counts, times, states and token totals: never what anyone wrote.
+//! The playbook's ten measures, over Claktory's records, read only. Each
+//! is its SQL as the playbook has it, but with the window given as times
+//! (so a fixed clock gives fixed numbers) and every row scoped to the
+//! team's agents. They read counts, times, states and token totals:
+//! never what anyone wrote.
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
@@ -134,7 +134,7 @@ pub(crate) struct Answers {
 
 /// A quiet message (an FYI, a copy) waits by design for its recipient's
 /// next wake, hours sometimes: its clock starts when it's delivered, not
-/// sent, and one never delivered isn't counted (Rivet's finding, #280).
+/// sent, and one never delivered isn't counted.
 const Q2: &str = "
 WITH m AS (SELECT agent AS receiver, sender_id AS sender, created, CASE WHEN quiet IS NULL THEN created ELSE delivered END AS asked,
   MIN(agent, sender_id) || '|' || MAX(agent, sender_id) AS pair
@@ -172,7 +172,7 @@ pub(crate) struct Traffic {
     pub via_hub: f64,
     pub via_leads: f64,
     pub between_peers: f64,
-    /// Where messages stand (#285), for those recorded with it; None when
+    /// Where messages stand, for those recorded with it; None when
     /// the records have no such columns.
     pub provenance: Option<Provenance>,
 }

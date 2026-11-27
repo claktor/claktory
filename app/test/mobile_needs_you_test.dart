@@ -1,9 +1,9 @@
-// Needs you on an iPhone: the list of what waits first (#599,
-// needs-you-cards.md §4.5), a request tapped there alone on its own screen,
-// back to the list once answered; and focus mode, which the person starts
-// from the list (#514 §7): one card a screen, "3 of 7" opening the queue,
-// ˄ ˅ between cards, who asks opening their conversation, and the answer
-// pinned under the thumb.
+// Needs you on an iPhone: the list of what waits (#599, needs-you-cards.md
+// §4.5), a request tapped there alone on its own screen, who asks opening
+// their conversation, back to the list once answered, and no focus mode
+// (#606). The same one-card screen is a narrow iPad's focus mode (#514
+// §7): one card a screen, "3 of 7" opening the queue, ˄ ˅ between cards,
+// and the answer pinned under the thumb.
 import 'package:factory_app/card_answer.dart' show AnswerDock, CardAnswer;
 import 'package:factory_app/card_files.dart' show CardAttachButton;
 import 'package:factory_app/inbox.dart' show NeedsYouCard, NeedsYouList;
@@ -19,6 +19,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
+import 'ipad/as_ipad.dart';
 
 final _base = DateTime.now();
 
@@ -62,8 +63,8 @@ Future<Harness> _open(
   addTearDown(() => debugDefaultTargetPlatformOverride = null);
   final harness = Harness(workspace ?? _workspace());
   harness.backend.entriesById
-    ..['june/1'] = _ask(1, 5, 'Ship the migration tonight?')
-    ..['mista/7'] = _ask(7, 60, 'Turn on the relay rule?');
+    ..['june/1'] = _ask(1, 60, 'Ship the migration tonight?')
+    ..['mista/7'] = _ask(7, 5, 'Turn on the relay rule?');
   await harness.show(tester, size: size);
   harness.page.value = AppPage.inbox;
   await pumpFrames(tester);
@@ -72,14 +73,25 @@ Future<Harness> _open(
   return harness;
 }
 
-/// Needs you as [_open] shows it, then focus mode from its button.
+/// Focus mode's sitting: the phone's one-card screen, as a narrow iPad's
+/// focus mode shows it (ipad/focus.dart; Slide Over, ⅓ Split View). An
+/// iPhone has none (#606). [onClose]: what its Back and Done do.
 Future<Harness> _focus(
   WidgetTester tester, {
   Workspace? workspace,
   Size size = const Size(393, 852),
+  VoidCallback? onClose,
 }) async {
-  final harness = await _open(tester, workspace: workspace, size: size);
-  await tester.tap(find.bySemanticsLabel('Focus on Needs you'));
+  asIPad();
+  final harness = Harness(workspace ?? _workspace());
+  harness.backend.entriesById
+    ..['june/1'] = _ask(1, 60, 'Ship the migration tonight?')
+    ..['mista/7'] = _ask(7, 5, 'Turn on the relay rule?');
+  await harness.show(
+    tester,
+    size: size,
+    home: PhoneNeedsYou(onClose: onClose),
+  );
   await pumpFrames(tester);
   await tester.pump();
   await pumpFrames(tester);
@@ -138,17 +150,17 @@ Finder _inDock(String text) => find.descendant(
 
 void main() {
   group('the list first (#599)', () {
-    testWidgets('Needs you opens on the list: every request, who asks; '
-        'Focus mode at the end of the tabs, a finger tall', (tester) async {
+    // A narrow iPad keeps its button (ipad/focus_way_in_test.dart).
+    testWidgets('Needs you is the list: every request, who asks; no focus '
+        'mode on a phone (#606)', (tester) async {
       final harness = await _open(tester);
       expect(_row('Turn on the relay rule?'), findsOneWidget);
       expect(_row('Ship the migration tonight?'), findsOneWidget);
       expect(find.text('Waiting'), findsOneWidget);
       expect(find.text('1 of 2'), findsNothing);
       expect(find.byKey(phoneThumbDockKey), findsNothing);
-      final focus = find.bySemanticsLabel('Focus on Needs you');
-      expect(focus, findsOneWidget);
-      expect(tester.getSize(focus).height, greaterThanOrEqualTo(44));
+      expect(find.bySemanticsLabel('Focus on Needs you'), findsNothing);
+      expect(find.byType(FocusGlyph), findsNothing);
       expect(harness.page.value, AppPage.inbox);
     });
 
@@ -284,21 +296,6 @@ void main() {
       expect(find.byKey(phoneThumbDockKey), findsOneWidget);
     });
 
-    testWidgets("Focus mode is a screen over the list, never kept as the "
-        "device's focus mode; Back, the list (Squalo L1)", (tester) async {
-      final harness = await _focus(tester);
-      expect(find.text('1 of 2'), findsOneWidget);
-      expect(
-        harness.backend.sent.where((message) => message.hasSetFocusMode()),
-        isEmpty,
-      );
-      await tester.tap(find.bySemanticsLabel('Back').first);
-      await pumpFrames(tester);
-      expect(find.text('1 of 2'), findsNothing);
-      expect(_row('Turn on the relay rule?'), findsOneWidget);
-      expect(harness.page.value, AppPage.inbox);
-    });
-
     testWidgets('Back keeps what was typed for when it opens again '
         '(Squalo L6)', (tester) async {
       await _open(tester);
@@ -324,7 +321,7 @@ void main() {
     });
   });
 
-  testWidgets('one card a screen, the oldest first; ˄ ˅ go between them', (
+  testWidgets('one card a screen, the newest first; ˄ ˅ go between them', (
     tester,
   ) async {
     await _focus(tester);
@@ -366,7 +363,9 @@ void main() {
   testWidgets("who asks opens their conversation; Back, the card again", (
     tester,
   ) async {
-    await _focus(tester);
+    await _open(tester);
+    await tester.tap(_row('Turn on the relay rule?'));
+    await pumpFrames(tester);
     await tester.tap(
       find.byWidgetPredicate(
         (widget) =>
@@ -375,10 +374,10 @@ void main() {
       ),
     );
     await pumpFrames(tester);
-    expect(find.text('1 of 2'), findsNothing);
+    expect(find.byKey(phoneThumbDockKey), findsNothing);
     await tester.tap(find.bySemanticsLabel('Back').last);
     await pumpFrames(tester);
-    expect(find.text('1 of 2'), findsOneWidget);
+    expect(find.byKey(phoneThumbDockKey), findsOneWidget);
     expect(find.text('Turn on the relay rule?'), findsOneWidget);
   });
 
@@ -388,8 +387,8 @@ void main() {
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final harness = Harness(_workspace());
     harness.backend.entriesById
-      ..['june/1'] = _ask(1, 5, 'Ship the migration tonight?')
-      ..['mista/7'] = _ask(7, 60, 'Turn on the relay rule?');
+      ..['june/1'] = _ask(1, 60, 'Ship the migration tonight?')
+      ..['mista/7'] = _ask(7, 5, 'Turn on the relay rule?');
     await harness.show(tester, size: const Size(393, 852));
     await pumpFrames(tester);
     // As a tapped notification does (notifications.dart).
@@ -417,8 +416,8 @@ void main() {
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final harness = Harness(_workspace());
     harness.backend.entriesById
-      ..['june/1'] = _ask(1, 5, 'Ship the migration tonight?')
-      ..['mista/7'] = _ask(7, 60, 'Turn on the relay rule?');
+      ..['june/1'] = _ask(1, 60, 'Ship the migration tonight?')
+      ..['mista/7'] = _ask(7, 5, 'Turn on the relay rule?');
     await harness.show(tester, size: const Size(393, 852));
     await pumpFrames(tester);
     harness.backend.needsYouCard.value = 'agent:june/9';
@@ -577,7 +576,12 @@ void main() {
 
   testWidgets('the last card answered on another device while it shows: '
       'it stays, saying so, with Done back to the list (F3)', (tester) async {
-    final harness = await _focus(tester, workspace: _workspace(mista: []));
+    var left = 0;
+    final harness = await _focus(
+      tester,
+      workspace: _workspace(mista: []),
+      onClose: () => left++,
+    );
     expect(find.text('Ship the migration tonight?'), findsOneWidget);
     await harness.apply(tester, _workspace(june: [], mista: []));
     await pumpFrames(tester);
@@ -588,8 +592,7 @@ void main() {
     expect(tester.widget<Button>(done).primary, isTrue);
     await tester.tap(done);
     await pumpFrames(tester);
-    expect(find.text('Nothing is waiting for your answer.'), findsOneWidget);
-    expect(harness.page.value, AppPage.inbox);
+    expect(left, 1, reason: 'back to the list');
   });
 
   for (final (scale, glyph) in const [(1.0, 16.0), (3.1, 32.0)]) {
@@ -597,6 +600,8 @@ void main() {
         'where the label stops', (tester) async {
       tester.platformDispatcher.textScaleFactorTestValue = scale;
       addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      // A narrow iPad's: a phone has none.
+      asIPad();
       await _open(tester);
       final box = find.ancestor(
         of: find.byType(FocusGlyph),
@@ -743,11 +748,13 @@ void main() {
       await pumpFrames(tester);
       expect(tester.takeException(), isNull);
       expect(find.byKey(phoneThumbDockKey), findsOneWidget);
-      await tester.tap(find.bySemanticsLabel('Back').last);
-      await pumpFrames(tester);
-      // …and focus mode.
-      await tester.tap(find.bySemanticsLabel('Focus on Needs you'));
-      await pumpFrames(tester);
+    });
+
+    testWidgets("at the largest text, a narrow iPad's focus mode on a "
+        '${size.width.toInt()}pt window: nothing is cut off', (tester) async {
+      tester.platformDispatcher.textScaleFactorTestValue = 3.1;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      await _focus(tester, size: size);
       expect(tester.takeException(), isNull);
       expect(find.text('1/2'), findsOneWidget);
     });

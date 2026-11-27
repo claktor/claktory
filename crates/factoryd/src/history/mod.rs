@@ -133,6 +133,11 @@ impl Membership {
         Membership { of }
     }
 
+    /// Whether History has `node`'s projects.
+    fn knows(&self, node: &str) -> bool {
+        self.of.get(node).is_some_and(|labels| !labels.is_empty())
+    }
+
     /// `node`'s project at `at` ("": none); before its first label, that
     /// label's.
     fn project(&self, node: &str, at: i64) -> &str {
@@ -662,6 +667,7 @@ fn build_overview(factory: &Factory, now: i64, project: &str) -> rusqlite::Resul
     // One project's: only its nodes, at the time (Bruno 47544).
     let project_node = format!("project:{project}");
     let ours = |id: &str, at: i64| project.is_empty() || id == project_node || membership.project(id, at) == project;
+    let tokens = tokens(factory, &db, &membership, project, first_hour, hours, now)?;
     let chapters = chapters(&db, &nodes, &ours, &releases, since, first_hour, &histogram)?;
     let max_seq: i64 = db.query_row("SELECT coalesce(max(seq), 0) FROM map_history", [], |row| row.get(0))?;
     Ok(v1::HistoryOverview {
@@ -678,7 +684,61 @@ fn build_overview(factory: &Factory, now: i64, project: &str) -> rusqlite::Resul
         message_count: tally.count,
         history_version: version(max_seq, index.next),
         cursors: tally.cursors,
+        tokens,
     })
+}
+
+/// The tokens agents' model calls used in each of `hours` hours from
+/// `first_hour` (hours since 1970, UTC), as the Usage pane totals them
+/// (input, output, and the cache read and written), from its records
+/// (`agent_usage`; none before they began). One project's (`project`):
+/// its agents' in each hour, by the project History has each in at the
+/// hour's end (or now, for the hour in progress); an agent History has no
+/// node of, by its project now. Chats, and calls from before agents were
+/// counted, are no project's.
+fn tokens(
+    factory: &Factory,
+    db: &Connection,
+    membership: &Membership,
+    project: &str,
+    first_hour: i64,
+    hours: usize,
+    now: i64,
+) -> rusqlite::Result<Vec<u64>> {
+    let mut tokens = vec![0u64; hours];
+    let rows = crate::store::query(
+        db,
+        "SELECT hour, agent, SUM(input) + SUM(output) + SUM(cache_read) + SUM(cache_write) FROM agent_usage
+         WHERE hour >= ?1 GROUP BY hour, agent",
+        [first_hour * (HOUR / 1000)],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)),
+    )?;
+    let projects_now: HashMap<String, String> = if project.is_empty() {
+        HashMap::new()
+    } else {
+        factory.lock().config.agents.iter().map(|agent| (agent.id.clone(), agent.project.clone().unwrap_or_default())).collect()
+    };
+    for (hour, agent, used) in rows {
+        let start = hour * 1000;
+        if !project.is_empty() {
+            if agent.is_empty() || crate::chats::is_chat(&agent) {
+                continue;
+            }
+            let node = format!("agent:{agent}");
+            let theirs = if membership.knows(&node) {
+                membership.project(&node, (start + HOUR - 1).min(now))
+            } else {
+                projects_now.get(&agent).map_or("", String::as_str)
+            };
+            if theirs != project {
+                continue;
+            }
+        }
+        if let Some(sum) = usize::try_from(start.div_euclid(HOUR) - first_hour).ok().and_then(|at| tokens.get_mut(at)) {
+            *sum += u64::try_from(used).unwrap_or(0);
+        }
+    }
+    Ok(tokens)
 }
 
 /// A chat's node id ("agent:chat:1"), never one of History's (#473).

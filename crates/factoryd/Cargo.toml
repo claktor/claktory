@@ -41,6 +41,8 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 ignore = "0.4.34"
+# A login's lookalike sites (vault/logins.rs): punycode read as the letters it shows.
+idna = "1.1"
 # The private tunnel (remote.rs): pinned, the same as the app's (app/rust); ring, as the
 # process default, and no portmapper, so Factory never asks the router to open a port.
 iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
@@ -120,7 +122,29 @@ landlock = "0.4.8"
 # factoryd on Windows (src/windows): Known Folders for its homes, and its
 # loopback listener bound exclusively (SO_EXCLUSIVEADDRUSE). Already in the
 # tree through tokio and factory-agent.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_System_Com", "Win32_UI_Shell"] }
+windows-sys = { version = "0.61", features = [
+    "Wdk_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Security_WinTrust",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ErrorReporting",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+] }
 
 [build-dependencies]
 # The lid-closed helper's XPC client (native/lid_xpc.c, #371), on macOS.
@@ -134,19 +158,12 @@ qa-provider = ["factory-agent/qa-provider"]
 # QA only (E11 row 6): a Claktory that claims another's account when told
 # to (src/qa_lies.rs); a release build refuses it (scripts/check-qa-lies.sh).
 qa-lies = []
-# QA only (#435 W6, Fugo 41161): the vault fills on Google's, Apple's and
-# Microsoft's sign-in before its ship gate opens, for the early Google
-# sign-in test (src/errands/fill.rs); a release build refuses it
-# (scripts/check-qa-lies.sh).
-qa-idp-fill = []
 
 [dev-dependencies]
 # A local account service to sign in at (tests/all/account.rs).
 claktory-account = { path = "../claktory-account" }
 # The push relay, with FCM, for Android pushes end to end (tests/all/push_fcm.rs).
 claktory-push = { path = "../claktory-push" }
-# Its user-apps worker, for app grants (tests/all/app_grants.rs).
-claktory-user-apps = { path = "../claktory-user-apps" }
 # tests/tls.rs: a TLS server with a certificate of its own, and the other
 # crypto provider beside ring.
 rcgen = "0.14"
@@ -156,3 +173,8 @@ tokio-rustls = "0.26"
 iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring", "fast-apple-datapath", "test-utils"] }
 # tests/all/remote.rs: a relay that notes the token each client shows (#450).
 iroh-relay = { version = "=1.5.0", default-features = false, features = ["server"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+# Its user-apps worker, for app grants (tests/all/app_grants.rs) and the DM
+# tests: a server's, over a Unix socket, so not on Windows.
+claktory-user-apps = { path = "../claktory-user-apps" }

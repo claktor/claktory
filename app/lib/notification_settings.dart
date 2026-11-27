@@ -13,6 +13,7 @@ import 'backend.dart' show Backend;
 import 'controls.dart';
 import 'devices.dart' show thisDeviceKind;
 import 'diagnostics_record.dart' show PushStep;
+import 'forms.dart' show AgentListField;
 import 'identity.dart';
 import 'mobile/lines.dart' show ActionLine;
 import 'mobile/metrics.dart';
@@ -20,6 +21,7 @@ import 'mobile/push.dart' show PushRegistrar, openNotificationSettings;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'settings_view.dart' show SettingRequests, SettingRow, controlWidth;
+import 'state.dart' show isAdminAgent;
 
 /// What Settings' list says of Notifications on a phone: "Off" when no kind
 /// notifies, "Quiet hours" while they're on, else nothing.
@@ -136,6 +138,14 @@ class _NotificationSettingsViewState extends State<NotificationSettingsView>
             ],
           ),
         ),
+        // An older Claktory sends no list: it lets every agent's urgent
+        // alerts through, so the row would say what isn't so.
+        if (settings.urgentFrom.isNotEmpty || settings.urgentFromCustom)
+          UrgentFromRow(
+            settings: settings,
+            onChanged: (senders) =>
+                _save(NotificationSettingsChange(urgentFrom: senders)),
+          ),
         SettingRow(
           label: 'Show in notifications',
           child: Column(
@@ -217,6 +227,99 @@ class _NotificationSettingsViewState extends State<NotificationSettingsView>
     );
   }
 }
+
+/// Urgent alerts from: the agents whose
+/// urgent alerts arrive as urgent, by default Rivet and the agents that
+/// lead others, or the agents the person chooses. Admin agents always may.
+/// Another agent's urgent alert arrives as a normal one. The list shown is
+/// the backend's, resolved (urgent_from).
+class UrgentFromRow extends StatelessWidget {
+  const UrgentFromRow({
+    super.key,
+    required this.settings,
+    required this.onChanged,
+  });
+
+  final NotificationSettings settings;
+
+  /// The whole new choice: the default, or the full list.
+  final ValueChanged<UrgentSenders> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final caption = TypeScale.of(context).caption
+        .copyWith(color: palette.textMuted);
+    final workspace = AppScope.of(context).workspace.workspace;
+    final custom = settings.urgentFromCustom;
+    final names = [
+      for (final id in settings.urgentFrom)
+        ?workspace.agents.where((agent) => agent.id == id).firstOrNull?.name,
+    ];
+    return SettingRow(
+      label: 'Urgent alerts from',
+      top: true,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: SizedBox(
+              width: controlWidth(context, 280),
+              child: Select(
+                title: 'Urgent alerts from',
+                value: custom,
+                options: const [
+                  SelectOption(false, 'Rivet and agents that lead others'),
+                  SelectOption(true, 'Agents you choose'),
+                ],
+                onChanged: (choose) {
+                  if (choose == custom) return;
+                  // Choosing starts from whoever may now.
+                  onChanged(
+                    choose
+                        ? UrgentSenders(agentIds: settings.urgentFrom)
+                        : UrgentSenders(useDefault: true),
+                  );
+                },
+              ),
+            ),
+          ),
+          const SizedBox(height: Space.xs),
+          if (custom) ...[
+            AgentListField(
+              label: '',
+              workspace: workspace,
+              always: {
+                for (final agent in workspace.agents)
+                  if (isAdminAgent(agent)) agent.id,
+              },
+              chosen: settings.urgentFrom,
+              onChanged: (ids) => onChanged(UrgentSenders(agentIds: ids)),
+            ),
+            const SizedBox(height: Space.xs),
+          ] else if (names.isNotEmpty)
+            Text('Right now: ${urgentNames(names)}.', style: caption),
+          Text(
+            "Other agents' urgent alerts arrive as normal alerts.",
+            style: caption,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// "Rivet", "Rivet and Bruno", "Rivet, Bruno and June", or past four
+/// "Rivet, Bruno, June, Omar and 3 more".
+String urgentNames(List<String> names) => switch (names) {
+  [] => '',
+  [final one] => one,
+  _ when names.length > 4 =>
+    '${names.take(4).join(', ')} and ${names.length - 4} more',
+  [...final rest, final last] => '${rest.join(', ')} and $last',
+};
 
 /// Quiet hours' From and To, each a choice of half hours on this device's
 /// clock (the time it's set to added when it isn't a half hour).

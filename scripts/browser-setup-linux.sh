@@ -4,22 +4,30 @@
 # C4); Claktory's setup check looks for exactly those. Running it again
 # changes nothing that's already right.
 #
-#   sudo bash browser-setup-linux.sh [--user NAME]
+#   sudo bash browser-setup-linux.sh [--user NAME] [--gate FACTORYD] [--runner-key KEY]
 #
-# NAME is the user Claktory runs as (default: whoever ran sudo). Debian and
-# Ubuntu only (apt); NixOS takes the lines in browser-setup-linux.md instead.
+# NAME is the user Claktory runs as (default: whoever ran sudo). FACTORYD is
+# Claktory's backend, copied as the browser's gate; KEY the public half of the
+# gate's key, 64 hex digits, from Claktory's vault. The setup card's command
+# gives both. Debian and Ubuntu only (apt); NixOS takes the lines in
+# browser-setup-linux.md instead.
 set -euo pipefail
 
 say() { echo "$*" >&2; }
 die() { say "browser-setup-linux.sh: $*"; exit 1; }
 
 person="${SUDO_USER:-}"
+gate_from=""
+runner_key=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --user) person="${2:-}"; shift 2 ;;
-    *) die "doesn't know $1 (usage: sudo bash browser-setup-linux.sh [--user NAME])" ;;
+    --gate) gate_from="${2:-}"; shift 2 ;;
+    --runner-key) runner_key="${2:-}"; shift 2 ;;
+    *) die "doesn't know $1 (usage: sudo bash browser-setup-linux.sh [--user NAME] [--gate FACTORYD] [--runner-key KEY])" ;;
   esac
 done
+[[ -z "$runner_key" || "$runner_key" =~ ^[0-9a-f]{64}$ ]] || die "--runner-key takes 64 hex digits, as Claktory's setup card gives it"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
@@ -95,41 +103,131 @@ if [[ -e /opt/claktory-browser/runner ]]; then
   chown -h "$person:$(id -gn "$person")" /opt/claktory-browser/runner
 fi
 
-# Ubuntu 23.10 and later refuse user namespaces to unprivileged programs
-# unless AppArmor allows them. The runner needs one for its own /proc and PID 1
-# (Ghiaccio's finding), and refuses to start without it, so allow exactly that
-# path, the way Ubuntu's own chrome profile does.
-if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns && -f /etc/apparmor.d/abi/4.0 ]]; then
-  no_link /etc/apparmor.d/claktory-browser-runner
-  cat >"$tmp" <<'EOF'
-abi <abi/4.0>,
-include <tunables/global>
-
-# Claktory's browser (#435): its runner may make user namespaces, nothing else.
-profile claktory-browser-runner /opt/claktory-browser/runner flags=(unconfined) {
-  userns,
-
-  include if exists <local/claktory-browser-runner>
+# The browser's gate: a copy of Claktory's backend, root's, in folders only
+# root can write, none a link. It's the one program the person may run as the
+# browser's user, and it runs the person's runner only once Claktory has signed
+# its hash, with the key whose public half goes beside it.
+gate=/usr/local/libexec/claktory-browser/gate
+roots_alone() {
+  local f
+  for f; do
+    [[ ! -L "$f" ]] || die "$f is a symbolic link; the browser's gate needs folders only root can change"
+    [[ "$(stat -c %u "$f")" == 0 ]] || die "$f isn't root's; the browser's gate needs folders only root can change"
+    (( ($(stat -c '%#a' "$f") & 8#022) == 0 )) || die "$f can be changed by others than root; the browser's gate needs folders only root can change"
+  done
 }
-EOF
-  if ! cmp -s "$tmp" /etc/apparmor.d/claktory-browser-runner; then
-    install -o root -g root -m 0644 "$tmp" /etc/apparmor.d/claktory-browser-runner
+for dir in / /usr /usr/local /usr/local/libexec /usr/local/libexec/claktory-browser; do
+  [[ -e "$dir" ]] || install -d -o root -g root -m 0755 "$dir"
+  roots_alone "$dir"
+done
+if [[ -n "$gate_from" ]]; then
+  [[ -f "$gate_from" && ! -L "$gate_from" ]] || die "--gate $gate_from isn't Claktory's backend"
+  no_link "$gate" "$gate.new"
+  if ! cmp -s "$gate_from" "$gate"; then
+    rm -f "$gate.new"
+    install -o root -g root -m 0755 "$gate_from" "$gate.new"
+    mv -f "$gate.new" "$gate"
   fi
-  if [[ -d /sys/kernel/security/apparmor ]] && command -v apparmor_parser >/dev/null; then
-    apparmor_parser -r /etc/apparmor.d/claktory-browser-runner || die "AppArmor refuses /etc/apparmor.d/claktory-browser-runner"
-    if command -v aa-status >/dev/null; then
-      aa-status 2>/dev/null | grep -qw claktory-browser-runner || die "AppArmor didn't load claktory-browser-runner (aa-status)"
-    else
-      grep -q '^claktory-browser-runner ' /sys/kernel/security/apparmor/profiles || die "AppArmor didn't load claktory-browser-runner"
-    fi
-  else
-    say "note: AppArmor isn't running here, so /etc/apparmor.d/claktory-browser-runner isn't loaded"
+fi
+if [[ -f "$gate" ]]; then
+  roots_alone "$gate"
+else
+  say "note: the browser's gate isn't in place yet: run the command Claktory's setup card shows, which names it"
+fi
+if [[ -n "$runner_key" ]]; then
+  [[ -e /etc/claktory-browser ]] || install -d -o root -g root -m 0755 /etc/claktory-browser
+  roots_alone / /etc /etc/claktory-browser
+  no_link /etc/claktory-browser/runner.pub
+  printf '%s\n' "$runner_key" >"$tmp"
+  if ! cmp -s "$tmp" /etc/claktory-browser/runner.pub; then
+    install -o root -g root -m 0644 "$tmp" /etc/claktory-browser/runner.pub
   fi
 fi
 
-# Sudo for exactly the runner, as the browser's user. sudo closes inherited
-# descriptors above 2 (closefrom) and nothing here overrides that.
-line="$person ALL=(claktory-browser) NOPASSWD: /opt/claktory-browser/runner browser-runner *"
+# Safe Browsing's lists as Chrome fetched them when this release was built,
+# root's: a new profile starts from them instead of from none. Taken only as
+# regular files with the lists' own names, through a folder of its own, so a
+# half-written seed never counts.
+seed=/usr/local/share/claktory-browser/safe-browsing
+seed_tar="$here/safe-browsing-seed.tar"
+for dir in /usr/local/share /usr/local/share/claktory-browser; do
+  [[ -e "$dir" ]] || install -d -o root -g root -m 0755 "$dir"
+  roots_alone "$dir"
+done
+if [[ -f "$seed_tar" && ! -L "$seed_tar" ]]; then
+  bad="$(tar -tvf "$seed_tar" | awk '{ t = substr($1, 1, 1); n = $NF }
+    !((t == "d" && n ~ /^safe-browsing\/?$/) || (t == "-" && n ~ /^safe-browsing\/[A-Za-z]+\.store(\.[0-9]+_[0-9]+)?$/)) { print n }')"
+  [[ -z "$bad" ]] || die "$seed_tar holds more than Safe Browsing's lists: $bad"
+  no_link "$seed" "$seed.old"
+  stage="$(mktemp -d /usr/local/share/claktory-browser/.seed.XXXXXX)"
+  tar -xf "$seed_tar" -C "$stage" --no-same-owner --no-same-permissions
+  stray="$(find "$stage" -mindepth 1 ! \( -path "$stage/safe-browsing" -type d \) \
+    ! \( -type f -regextype posix-extended -regex "$stage/safe-browsing/[A-Za-z]+\.store(\.[0-9]+_[0-9]+)?" \) -print -quit)"
+  [[ -z "$stray" ]] || { rm -rf "$stage"; die "$seed_tar holds more than Safe Browsing's lists: ${stray#"$stage"/}"; }
+  for list in UrlSoceng UrlMalware; do
+    [[ -s "$stage/safe-browsing/$list.store" ]] && compgen -G "$stage/safe-browsing/$list.store.*_*" >/dev/null ||
+      { rm -rf "$stage"; die "$seed_tar has no $list list"; }
+  done
+  chown -R root:root "$stage/safe-browsing"
+  chmod 0755 "$stage/safe-browsing"
+  find "$stage/safe-browsing" -type f -exec chmod 0644 {} +
+  if ! diff -rq "$stage/safe-browsing" "$seed" >/dev/null 2>&1; then
+    rm -rf "$seed.old"
+    [[ ! -e "$seed" ]] || mv "$seed" "$seed.old"
+    mv "$stage/safe-browsing" "$seed"
+    rm -rf "$seed.old"
+  fi
+  rm -rf "$stage"
+elif [[ ! -d "$seed" ]]; then
+  die "safe-browsing-seed.tar must be beside this script: it comes with Claktory's release"
+fi
+roots_alone "$seed"
+
+# Ubuntu 23.10 and later refuse user namespaces to unprivileged programs
+# unless AppArmor allows them. The gate makes the runner's, for its own /proc
+# and PID 1, and refuses to run it without them, so allow exactly the gate's
+# path, root's, the way Ubuntu's own chrome profile does. Never a path the
+# person can write: an older setup's profile for the runner's goes.
+if [[ -e /etc/apparmor.d/claktory-browser-runner || -L /etc/apparmor.d/claktory-browser-runner ]]; then
+  if [[ -f /etc/apparmor.d/claktory-browser-runner && ! -L /etc/apparmor.d/claktory-browser-runner ]] &&
+    [[ -d /sys/kernel/security/apparmor ]] && command -v apparmor_parser >/dev/null; then
+    apparmor_parser -R /etc/apparmor.d/claktory-browser-runner 2>/dev/null || true
+  fi
+  rm -f /etc/apparmor.d/claktory-browser-runner
+fi
+if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns && -f /etc/apparmor.d/abi/4.0 ]]; then
+  name=claktory-browser-gate
+  no_link "/etc/apparmor.d/$name"
+  cat >"$tmp" <<EOF
+abi <abi/4.0>,
+include <tunables/global>
+
+# Claktory's browser (#435): its gate may make user namespaces, nothing else.
+profile $name $gate flags=(unconfined) {
+  userns,
+
+  include if exists <local/$name>
+}
+EOF
+  if ! cmp -s "$tmp" "/etc/apparmor.d/$name"; then
+    install -o root -g root -m 0644 "$tmp" "/etc/apparmor.d/$name"
+  fi
+  if [[ -d /sys/kernel/security/apparmor ]] && command -v apparmor_parser >/dev/null; then
+    apparmor_parser -r "/etc/apparmor.d/$name" || die "AppArmor refuses /etc/apparmor.d/$name"
+    if command -v aa-status >/dev/null; then
+      aa-status 2>/dev/null | grep -qw "$name" || die "AppArmor didn't load $name (aa-status)"
+    else
+      grep -q "^$name " /sys/kernel/security/apparmor/profiles || die "AppArmor didn't load $name"
+    fi
+  else
+    say "note: AppArmor isn't running here, so /etc/apparmor.d/$name isn't loaded"
+  fi
+fi
+
+# Sudo for exactly the gate, as the browser's user: the whole file is this one
+# line, so an older setup's line for the runner itself is gone. sudo closes
+# inherited descriptors above 2 (closefrom) and nothing here overrides that.
+line="$person ALL=(claktory-browser) NOPASSWD: $gate browser-gate run"
 echo "$line" >"$tmp"
 visudo -cqf "$tmp" || die "sudo refuses the line: $line"
 if ! cmp -s "$tmp" /etc/sudoers.d/claktory-browser; then

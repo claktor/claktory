@@ -1,4 +1,4 @@
-// Needs you beyond cards: how long each item has waited (#255), a sign-in
+// Needs you beyond cards: how long each item has waited, a sign-in
 // a provider stopped accepting (P2), and locked secrets agents wait for
 // (P2, VaultState.agents_waiting).
 import 'package:factory_app/identity.dart';

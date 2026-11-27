@@ -3,7 +3,7 @@
 // does in the conversation: on the Mac's page, in the chip's drop-down and
 // on a phone, without closing and opening it again.
 import 'package:factory_app/ask_card.dart';
-import 'package:factory_app/inbox.dart';
+import 'package:factory_app/needs_you_focus.dart' show FocusStage;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:fixnum/fixnum.dart';
@@ -187,8 +187,8 @@ void main() {
     expect(find.textContaining('All 7 steps done'), findsOneWidget);
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
-  testWidgets("in the chip's drop-down over another conversation, Done shows "
-      'the next step', (tester) async {
+  testWidgets("from the chip over another conversation, focus mode's stage "
+      'shows the next step once Done is pressed', (tester) async {
     final harness = Harness(_workspace(selected: 'june'));
     harness.backend.transcript.load(Transcript(agentId: 'june'));
     harness.backend.entriesById['kai/9'] = _procedure(5);
@@ -197,12 +197,10 @@ void main() {
     await tester.tap(find.text('1 needs you'));
     await settle(tester);
     await settle(tester);
-    await tester.tap(find.text('Allow the helper · Step 6 of 7').first);
-    await settle(tester);
     await tester.pump(const Duration(seconds: 1));
     expect(
       find.descendant(
-        of: find.byType(NeedsYouChip),
+        of: find.byType(FocusStage),
         matching: find.byType(AskPersonCard),
       ),
       findsOneWidget,

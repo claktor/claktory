@@ -9,6 +9,8 @@ import 'package:flutter/widgets.dart';
 
 import 'controls.dart';
 import 'identity.dart';
+import 'card_files.dart' show CardDropAreaState;
+import 'mobile/device.dart' show deviceCapabilities;
 import 'mobile/device_permissions.dart' show CameraPermission;
 import 'mobile/metrics.dart';
 import 'mobile/permission.dart' show PermissionAccess, askPermission;
@@ -201,12 +203,21 @@ class FileDrop {
   static const _channel = MethodChannel('factory/window');
 
   /// Whether this platform's window takes files dropped on it: the Mac's
-  /// (MainFlutterWindow.swift) and Windows' (app/windows/runner/
-  /// drop_target.cpp). Elsewhere (an iPhone, an iPad, Android at any width)
-  /// nothing here touches the window's channel, and no overlay shows.
+  /// (MainFlutterWindow.swift), Windows' (app/windows/runner/
+  /// drop_target.cpp) and an iPad's (app/ios/Runner/Drop.swift:
+  /// from Files, Photos and other apps). Elsewhere (an iPhone, Android at
+  /// any width) nothing here touches the window's channel, and no overlay
+  /// shows.
   static bool get windowDrops =>
       defaultTargetPlatform == TargetPlatform.macOS ||
-      defaultTargetPlatform == TargetPlatform.windows;
+      defaultTargetPlatform == TargetPlatform.windows ||
+      iPadDrops;
+
+  /// An iPad's window: its drops come staged ([staged]), and its overlay
+  /// shows at every width, the phone's layout's too.
+  static bool get iPadDrops =>
+      defaultTargetPlatform == TargetPlatform.iOS &&
+      deviceCapabilities.idiom == Idiom.pad;
 
   /// Files are being dragged over the window.
   static final over = ValueNotifier<bool>(false);
@@ -266,15 +277,41 @@ class FileDrop {
             true => 1,
             _ => 0,
           }, point: _point(files));
+        case 'textDropped':
+          // An iPad's: {text, x, y}.
+          final arguments = call.arguments;
+          if (arguments case {'text': final String text} when text.isNotEmpty) {
+            _texts.add(text);
+          }
+        case 'filesDropping':
+          // An iPad's drop, still being copied for the app: {kinds,
+          // ticket, x, y}; its paths follow in filesDropped's ticket.
+          final arguments = call.arguments;
+          if (arguments is! Map) return;
+          dragged(0);
+          stage(
+            [
+              for (final kind in arguments['kinds'] as List<Object?>? ?? [])
+                if (kind is String) kind,
+            ],
+            arguments['ticket'] as int? ?? -1,
+            at: _point(arguments),
+          );
         case 'filesDropped':
-          // Dropped: {paths, x, y}; pasted: the paths alone.
+          // Dropped: {paths, x, y}, with an iPad's ticket when it was
+          // staged; pasted: the paths alone.
           final arguments = call.arguments;
           final paths = arguments is Map ? arguments['paths'] : arguments;
           dragged(0);
-          deliver([
+          final list = [
             for (final path in paths as List<Object?>)
               if (path is String) path,
-          ], at: _point(arguments));
+          ];
+          if (arguments case {'ticket': final int ticket}) {
+            finish(ticket, list, at: _point(arguments));
+          } else {
+            deliver(list, at: _point(arguments));
+          }
       }
     });
   }
@@ -301,6 +338,9 @@ class FileDrop {
   /// the box in focus mode's Context, not the agent selected under it
   /// (Abbacchio's row 1607).
   static String? claimedKey;
+
+  /// Whether [owner] is the box drops go to now: the last to [claim].
+  static bool owns(Object owner) => identical(_owner, owner);
 
   /// [owner] is gone; if it was the one showing, no box is.
   static void release(Object owner) {
@@ -335,6 +375,63 @@ class FileDrop {
     }
   }
 
+  static final _staged = StreamController<StagedDrop>.broadcast();
+
+  /// An iPad's drops for the message box, as soon as they're dropped:
+  /// what's on its way, and its paths once copied for the app.
+  static Stream<StagedDrop> get staged {
+    _listen();
+    return _staged.stream;
+  }
+
+  /// The staged drops whose paths haven't come yet, by ticket.
+  static final _waiting = <int, ({Completer<List<String>> done, Timer give})>{};
+
+  /// How long a staged drop's "Adding…" waits for its paths before it
+  /// says they weren't added: copying a long video from another app can
+  /// take a while, but never this long.
+  static const stagedWait = Duration(minutes: 2);
+
+  /// An iPad's drop of [kinds] (one each: 'photo', 'video', 'file') [at]
+  /// a point, still being copied: it goes where [deliver] would send it,
+  /// decided now, as the person let go; the box shows "Adding photo…"
+  /// until [finish] brings the paths, or [stagedWait] passes.
+  @visibleForTesting
+  static void stage(List<String> kinds, int ticket, {Offset? at}) {
+    final done = Completer<List<String>>();
+    _waiting.remove(ticket)?.give.cancel();
+    _waiting[ticket] = (
+      done: done,
+      give: Timer(stagedWait, () {
+        if (_waiting[ticket]?.done != done) return;
+        _waiting.remove(ticket);
+        done.complete(const []);
+      }),
+    );
+    void then(void Function(List<String>) onFiles) => unawaited(
+      done.future.then((paths) {
+        if (paths.isNotEmpty) onFiles(paths);
+      }),
+    );
+    if ((at == null ? null : cardAt(at)) case final card?) {
+      then(card.onFiles);
+    } else if (_diverted case final diverted?) {
+      then(diverted.onFiles);
+    } else {
+      _staged.add(StagedDrop(kinds, done.future));
+    }
+  }
+
+  /// The paths of the drop staged as [ticket]; one that waited too long,
+  /// or was never staged, goes where a drop [at] its point goes now.
+  @visibleForTesting
+  static void finish(int ticket, List<String> paths, {Offset? at}) {
+    final waiting = _waiting.remove(ticket);
+    if (waiting == null) return deliver(paths, at: at);
+    waiting.give.cancel();
+    waiting.done.complete(paths);
+  }
+
   /// The cards showing that take files dropped on them ([addCard]).
   static final _cards = <CardDropTarget>{};
 
@@ -349,7 +446,8 @@ class FileDrop {
   }
 
   /// The card that takes files dropped at [point], in the window's points:
-  /// the one under it there, nothing covering it (a sheet, a dialog).
+  /// the one under it there, its field or anywhere on its request
+  /// ([CardDropArea]), nothing covering it (a sheet, a dialog).
   static CardDropTarget? cardAt(Offset point) {
     if (_cards.isEmpty) return null;
     final binding = WidgetsBinding.instance;
@@ -358,9 +456,13 @@ class FileDrop {
     final result = HitTestResult();
     binding.hitTestInView(result, point, view.viewId);
     for (final entry in result.path) {
-      if (entry.target case RenderMetaData(metaData: final CardDropTarget card)
-          when _cards.contains(card)) {
-        return card;
+      if (entry.target case RenderMetaData(:final metaData)) {
+        final card = switch (metaData) {
+          final CardDropTarget card => card,
+          final CardDropAreaState area => area.target,
+          _ => null,
+        };
+        if (card != null && _cards.contains(card)) return card;
       }
     }
     return null;
@@ -396,16 +498,41 @@ class FileDrop {
     _sync();
   }
 
-  /// Whether the window takes files dropped on it now.
+  /// Whether the window takes files dropped on it now; on an iPad, also
+  /// whether it takes text ([texts]): while a message box shows.
   static Future<void> _accept(bool on) async {
     if (!windowDrops) return;
     _listen();
     try {
       await _channel.invokeMethod<void>('takeFiles', on);
+      if (iPadDrops) {
+        await _channel.invokeMethod<void>('takeText', _owner != null);
+      }
     } on Exception {
       // No native window (a test without one).
     }
   }
+
+  static final _texts = StreamController<String>.broadcast();
+
+  /// Text dragged onto an iPad's window from another app (a selection, a
+  /// link), for the message box showing: Flutter's own fields take no
+  /// drops there.
+  static Stream<String> get texts {
+    _listen();
+    return _texts.stream;
+  }
+}
+
+/// An iPad's drop on the message box, as the person let go ([FileDrop.staged]):
+/// one kind for each file on its way ('photo', 'video', 'file'), and their
+/// paths once copied for the app (fewer when some couldn't be; none when
+/// none could, or they took too long).
+class StagedDrop {
+  const StagedDrop(this.kinds, this.paths);
+
+  final List<String> kinds;
+  final Future<List<String>> paths;
 }
 
 /// On a Mac: asks the person for files to send in the system's open
@@ -586,16 +713,46 @@ class AttachmentChip extends StatelessWidget {
   /// The widest a chip gets; its name is cut short to fit.
   static const maxWidth = 240.0;
 
+  /// The text factor from which a chip's size goes under its name.
+  static const stackFromTextFactor = 1.35;
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final progress = this.progress;
-    // On a phone, a finger's size, its × too (research mobile.md §4).
     final phone = isPhoneLayout(context);
+    // A finger's target for the chip and its ×, wherever a finger is
+    // what touches it.
+    final finger = touchFirst(context);
     final type = TypeScale.of(context);
+    // From large text sizes the size goes under the name, so neither is
+    // cut to nothing and the × stays put.
+    final stacked =
+        MediaQuery.textScalerOf(context).scale(17) / 17 >= stackFromTextFactor;
+    final nameText = Text(
+      shownName(name),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: (phone ? type.secondary : TextStyles.label).copyWith(
+        color: palette.text,
+      ),
+    );
+    final sizeText = Text(
+      progress == null
+          ? formatBytes(Int64(size))
+          : '${(progress * 100).floor()}%',
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: type.caption.copyWith(
+        color: palette.textFaint,
+        fontFeatures: const [FontFeature.tabularFigures()],
+      ),
+    );
     final chip = Container(
-      height: phone ? Touch.target : 28,
-      constraints: const BoxConstraints(maxWidth: maxWidth),
+      constraints: BoxConstraints(
+        minHeight: finger ? Touch.target : 28,
+        maxWidth: maxWidth,
+      ),
       decoration: BoxDecoration(
         color: palette.canvas,
         borderRadius: BorderRadius.circular(Radii.control),
@@ -624,44 +781,40 @@ class AttachmentChip extends StatelessWidget {
                       : FileGlyph(color: palette.textMuted),
                 ),
                 const SizedBox(width: Space.xs + 2),
-                Flexible(
-                  child: Text(
-                    shownName(name),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: (phone ? type.secondary : TextStyles.label).copyWith(
-                      color: palette.text,
+                if (stacked)
+                  Flexible(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: Space.xs),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [nameText, sizeText],
+                      ),
                     ),
-                  ),
-                ),
-                const SizedBox(width: Space.xs + 2),
-                Text(
-                  progress == null
-                      ? formatBytes(Int64(size))
-                      : '${(progress * 100).floor()}%',
-                  style: type.caption.copyWith(
-                    color: palette.textFaint,
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                  ),
-                ),
+                  )
+                else ...[
+                  Flexible(child: nameText),
+                  const SizedBox(width: Space.xs + 2),
+                  sizeText,
+                ],
                 if (onRemove != null)
                   Pressable(
                     onTap: onRemove,
                     builder: (context, hovered) => Semantics(
-                      // On a phone its own element, or the chip's others
-                      // merge into it.
-                      container: phone,
+                      // Under a finger its own element, or the chip's
+                      // others merge into it.
+                      container: finger,
                       button: true,
                       label: 'Remove $name',
-                      onTap: phone ? onRemove : null,
+                      onTap: finger ? onRemove : null,
                       child: SizedBox.square(
-                        dimension: phone ? Touch.target : 24,
+                        dimension: finger ? Touch.target : 24,
                         child: Center(
                           child: ExtensionGlyph(
                             icon: 'x',
                             name: 'Remove',
                             color: hovered ? palette.text : palette.textFaint,
-                            size: phone ? 16 : 12,
+                            size: finger ? 16 : 12,
                           ),
                         ),
                       ),
@@ -720,8 +873,10 @@ class AddingChip extends StatelessWidget {
       label: label(kind),
       child: ExcludeSemantics(
         child: Container(
-          height: phone ? Touch.target : 28,
-          constraints: const BoxConstraints(maxWidth: AttachmentChip.maxWidth),
+          constraints: BoxConstraints(
+            minHeight: touchFirst(context) ? Touch.target : 28,
+            maxWidth: AttachmentChip.maxWidth,
+          ),
           padding: const EdgeInsets.symmetric(horizontal: Space.s),
           decoration: BoxDecoration(
             color: palette.canvas,

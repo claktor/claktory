@@ -1,7 +1,7 @@
-//! Agents waiting on a provider's usage limit, grouped by provider (#343
-//! U6): one Needs you item (Workspace.provider_waits) and one notification,
-//! not one per agent, and not again when they wake for a moment and wait
-//! again, nor after a restart.
+//! Agents waiting on a provider's usage limit, grouped by provider: one
+//! Needs you item (Workspace.provider_waits) and one notification, not one
+//! per agent, and not again when they wake for a moment and wait again, nor
+//! after a restart.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -125,7 +125,7 @@ async fn agents_waiting_on_a_limit_make_one_item_and_one_notification() {
     .await;
 
     // Moved to another provider's model while it waits, Builder waits on
-    // nothing there: no OpenRouter item, no notification (Abbacchio's row 720).
+    // nothing there: no OpenRouter item, no notification.
     limited.store(true, Ordering::SeqCst);
     apply_request(&mut client, &mut view, send_message("builder", "once more")).await;
     follow(&mut client, &mut view, &mut notes, "builder waiting again", |view| {

@@ -1,7 +1,7 @@
 // An iPad's camera kept from the app while it shares the screen (Split
 // View, Slide Over, Stage Manager beside another app) or while another app
-// has it (Lucy's permissions §3 P7, Sorbet): the scanner's square says so
-// over the black picture, and the words go when the camera comes back.
+// has it: the scanner's square says so over the
+// black picture, and the words go when the camera comes back.
 import 'package:factory_app/scanner.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:flutter/services.dart';

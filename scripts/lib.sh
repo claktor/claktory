@@ -706,11 +706,24 @@ x86_ssh() { # ARGS... (the remote command, already quoted)
 #       X86_CPUS to CPUS. It checks every minute for FACTORY_X86_WAIT seconds
 #       (1800 unless set) and then refuses, saying why.
 #
+# Before that, the host's own services must be out of the build user's reach:
+# a connect from it to 127.0.0.1:22, and to each HOST:PORT in
+# FACTORY_X86_FENCE (the host's own addresses), has to fail within 3
+# seconds. One that connects means the host's firewall for the build user is
+# gone, and nothing starts there (Fugo 53803).
+#
 # engine run on the host passes x86_room (FACTORY_X86_MEM_GB, 16 unless set;
 # FACTORY_X86_CPUS, 8; FACTORY_X86_DISK_GB, 20) and caps the container at
 # that memory, with no swap, and those cores.
 x86_room() { # MEM_GB CPUS DISK_GB
-  local mem="$1" cpus="$2" disk="$3" waited=0 wait="${FACTORY_X86_WAIT:-1800}" probe why
+  local mem="$1" cpus="$2" disk="$3" waited=0 wait="${FACTORY_X86_WAIT:-1800}" probe why fence
+  for fence in 127.0.0.1:22 ${FACTORY_X86_FENCE:-}; do
+    [[ "$fence" =~ ^[0-9.]+:[0-9]+$ ]] || { echo "FACTORY_X86_FENCE: $fence isn't an IPv4 HOST:PORT" >&2; return 1; }
+    if x86_ssh "timeout 3 bash -c '</dev/tcp/${fence%:*}/${fence#*:}' 2>/dev/null" </dev/null; then
+      echo "the build user on $X86_REMOTE can reach $fence, the host's own: its firewall for the build user is gone, so nothing starts there. Tell Bruno." >&2
+      return 1
+    fi
+  done
   while :; do
     # One line: MemAvailable (kB), cores, load 1 and 5 min, free kB in $HOME
     # (podman's storage) and /tmp (a run's mounts), our containers and builds.

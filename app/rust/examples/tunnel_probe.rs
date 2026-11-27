@@ -1,8 +1,7 @@
-//! Opens the app's tunnel to a backend, as the app does, with a fresh key,
-//! asks it for a socket and prints how its status goes until the backend
-//! answers (#392: a direct path that stalls should fall back to the relay
-//! within a few seconds). The backend turns the unknown key away, so
-//! "refused" means it was reached; nothing is paired or left pending.
+//! Opens the app's tunnel to a backend, as the app does, with a fresh key, asks it for a socket and prints how
+//! its status goes until the backend answers (a direct path that stalls should fall back to the relay within a
+//! few seconds). The backend turns the unknown key away, so "refused" means it was reached; nothing is paired
+//! or left pending.
 //!
 //!   cargo run --release --example tunnel_probe -- ENDPOINT_ID [--relay URL]... [--addr IP:PORT]... [--tries N]
 

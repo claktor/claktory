@@ -116,7 +116,7 @@ class _RenderFittedLine extends RenderBox
       width.isInfinite || _actionWidth + _gap + _leastLead <= width;
 
   /// The lead's first line, so a label beside the line (a Settings row's)
-  /// sits on it (Lucy 50427).
+  /// sits on it.
   @override
   double? computeDistanceToActualBaseline(TextBaseline baseline) =>
       defaultComputeDistanceToFirstActualBaseline(baseline);
@@ -418,7 +418,7 @@ class _RenderStackingLine extends RenderBox
       defaultPaint(context, offset);
 }
 
-/// A Needs you card's action row (needs-you-cards.md §2 rule 2, §5): what
+/// A Needs you card's action row: what
 /// pressing does ([line]), then the quiet ones ([quiet]: the no, then any
 /// second action) and the one filled [primary], last.
 ///
@@ -445,7 +445,7 @@ class CardActions extends StatelessWidget {
   /// [line] is only a hint, words that don't change what pressing does
   /// ("June gets your answer and carries on."): on a phone at large text
   /// it steps aside while the card's field has the keyboard, so the
-  /// buttons fit above it (Lucy, needs-you-cards.md §5.2). Never for a
+  /// buttons fit above it. Never for a
   /// status, an error, or a line that says what typing changes.
   final bool quietLine;
 
@@ -465,7 +465,7 @@ class CardActions extends StatelessWidget {
         (quietLine && (inSight?.typingLarge ?? false)) || cramped >= 2;
     // No room for it whole as well as the buttons and a line of the
     // field: one line, cut, read whole by VoiceOver; still none, it steps
-    // aside until the keyboard goes (Zucchero row 706).
+    // aside until the keyboard goes.
     final line = hidden
         ? null
         : cramped == 1 && this.line != null
@@ -485,7 +485,7 @@ class CardActions extends StatelessWidget {
     const gap = Space.s;
     // Two to a row, a label never wrapping: each takes at least its
     // label's width, the second (the primary) the rest; when both can't
-    // fit, one a row, the second at the bottom (Lucy's check of §5.2).
+    // fit, one a row, the second at the bottom.
     Widget pair(List<Widget> children, List<int> flex) => _ThumbPair(
       gap: gap,
       firstShare: flex[0] / (flex[0] + flex[1]),
@@ -692,7 +692,7 @@ class _RenderThumbPair extends RenderBox
 
 /// How many lines a card's field grows to before it scrolls: six, but
 /// three on a phone at the largest text sizes, so the card's title stays
-/// in sight above the keyboard on a small iPhone (needs-you-cards.md §5.2).
+/// in sight above the keyboard on a small iPhone.
 int cardFieldMaxLines(BuildContext context) =>
     isPhoneLayout(context) && largeText(context) ? 3 : 6;
 
@@ -700,14 +700,14 @@ int cardFieldMaxLines(BuildContext context) =>
 /// on a phone while [focus] has the keyboard: when the field takes it, and
 /// again as the keyboard comes up, the scroll it's in moves just enough for
 /// the last button to sit above the keyboard (and the composer), so it's
-/// pressed without putting the keyboard away (Squalo's B10). Elsewhere
+/// pressed without putting the keyboard away. Elsewhere
 /// [child] as it is.
 ///
 /// When the field, the line and the buttons can't all fit (a small iPhone
 /// at large text), the buttons come first, then the line, then the field:
 /// a hint line ([CardActions.quietLine]) steps aside at large text, and the
 /// field in a [CardFieldRoom] shrinks, to as little as one line, scrolling
-/// inside with its caret in view (Lucy, needs-you-cards.md §5.2).
+/// inside with its caret in view.
 class KeepInSight extends StatefulWidget {
   const KeepInSight({super.key, required this.focus, required this.child});
 
@@ -854,7 +854,7 @@ class _KeepInSightState extends State<KeepInSight> with WidgetsBindingObserver {
           2 * 10 +
           2;
       // The room in sight: the conversation's, above the keyboard where
-      // the conversation runs on under it (Zucchero's row 706).
+      // the conversation runs on under it.
       final screen = MediaQueryData.fromView(View.of(context));
       final top = room.localToGlobal(Offset.zero).dy;
       final bottom = math.min(

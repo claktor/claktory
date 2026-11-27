@@ -63,6 +63,7 @@ async fn every_extra_dir_can_be_written_edited_and_read_without_entering_the_pro
     assert_eq!(std::fs::read_to_string(workspace.path().join("source.py")).unwrap(), "pass");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn extra_dirs_are_opt_in_and_cannot_be_escaped_through_paths_or_symlinks() {
     let root = tempfile::tempdir().unwrap();
@@ -132,4 +133,36 @@ async fn read_only_dirs_can_be_read_but_not_changed_even_inside_the_working_fold
     assert!(execute(&in_mine, "write_file", Write { path: &top, content: "bad" }).await.is_err());
     assert!(execute(&in_mine, "read_file", Read { path: &top }).await.is_ok());
     assert_eq!(std::fs::read_to_string(project.join("top.md")).unwrap(), "new");
+}
+
+#[tokio::test]
+async fn a_denied_folder_is_refused_in_its_own_words_through_a_link_too() {
+    use factory_agent::errors::AgentFailure;
+    use factory_agent::tools::Denied;
+    let root = tempfile::tempdir().unwrap();
+    let work = root.path().join("work");
+    let kept = root.path().join("kept");
+    let private = root.path().join("private");
+    for path in [&work, &kept, &private] {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::write(path.join("notes.md"), "secret").unwrap();
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&kept, work.join("link")).unwrap();
+    let mut tools = tools(&work, &[]);
+    let why = "holds something no agent's tools can read or change.";
+    factory_agent::tools::denied(&mut tools, &[private.clone().into(), Denied { dir: kept.clone(), why: Some(why.into()) }]);
+    let path = kept.join("notes.md").display().to_string();
+    let error = execute(&tools, "read_file", Read { path: &path }).await.unwrap_err();
+    assert_eq!(error.failure(), Some(&AgentFailure::Kept { path: path.clone(), why: why.into() }));
+    assert_eq!(error.failure().unwrap().message(), format!("{path} {why}"));
+    #[cfg(unix)]
+    {
+        let error = execute(&tools, "read_file", Read { path: "link/notes.md" }).await.unwrap_err();
+        assert_eq!(error.failure(), Some(&AgentFailure::Kept { path: "link/notes.md".into(), why: why.into() }));
+    }
+    let path = private.join("notes.md").display().to_string();
+    let error = execute(&tools, "write_file", Write { path: &path, content: "bad" }).await.unwrap_err();
+    assert_eq!(error.failure(), Some(&AgentFailure::Private { path }));
+    assert!(execute(&tools, "read_file", Read { path: "notes.md" }).await.is_ok());
 }

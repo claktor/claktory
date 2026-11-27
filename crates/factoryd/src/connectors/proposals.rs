@@ -229,9 +229,8 @@ fn show(factory: &Factory, proposal: &v1::ConnectProposal) {
     }
 }
 
-/// The person dismissed a proposal, or replied to it with a comment (#370
-/// Submit), which connects nothing either: its card shows it, and its agent
-/// is told.
+/// The person dismissed a proposal, or replied to it with a comment, which connects
+/// nothing either: its card shows it, and its agent is told.
 pub(crate) fn dismiss(factory: &Arc<Factory>, request: &v1::DismissConnectProposal) -> Result<(), RequestError> {
     let comment = crate::decisions::comment(&request.comment)?;
     if request.reply && comment.is_empty() {

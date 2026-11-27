@@ -25,7 +25,7 @@ import 'workbench.dart';
 /// Tomás). A key UIKit runs as a menu command never reaches Flutter, and
 /// one that reaches Flutter isn't run again by the menu ([CommandMenu]),
 /// so no key is handled twice, whether or not the menu's keys fire (in the
-/// Simulator they don't: Zucchero's row 701).
+/// Simulator they don't).
 class WorkbenchCommand {
   const WorkbenchCommand({
     required this.id,
@@ -59,6 +59,8 @@ List<WorkbenchCommand> workbenchCommands({
   List<Agent> pins = const [],
   void Function(Agent agent)? openPin,
   VoidCallback? openSettings,
+  MoveUndo moveUndo = MoveUndo.none,
+  VoidCallback? undoMove,
 }) {
   final pinned = tier == WorkbenchTier.full && !focus.sidebarHidden;
   final sidebarShown = pinned || focus.overlayOpen;
@@ -84,8 +86,8 @@ List<WorkbenchCommand> workbenchCommands({
   final document = focused != null && focused.leaf.kind == documentKind
       ? focused
       : null;
-  // The conversation, when it's the pane being read: ⌘F finds in it (Lucy's
-  // agent view §4), its find bar the one ⌘F opens on a Mac.
+  // The conversation, when it's the pane being read: ⌘F finds in it, its find
+  // bar the one ⌘F opens on a Mac.
   final conversation = agent != null && focused?.leaf.kind == chatKind;
   // Settings, when it's the page shown or the pane being read: ⌘F searches
   // it (settings_keys.dart).
@@ -136,7 +138,7 @@ List<WorkbenchCommand> workbenchCommands({
     ),
     WorkbenchCommand(
       id: 'find',
-      // One word, whatever's read: the list names keys (Trish 43450).
+      // One word, whatever's read: the list names keys.
       title: searchSettings ? 'Search Settings' : 'Find',
       keys: const SingleActivator(LogicalKeyboardKey.keyF, meta: true),
       run: searchSettings
@@ -150,8 +152,8 @@ List<WorkbenchCommand> workbenchCommands({
                 .of(agent.id, document)
                 .openPanel(DocumentPanel.search),
     ),
-    // ⌘, opens Settings at its last section, the platform's own key
-    // (projects-sidebar.md §9): native puts it in the app menu's Settings
+    // ⌘, opens Settings at its last section, the platform's own key:
+    // native puts it in the app menu's Settings
     // place, over iPadOS's own (which opens the system's Settings app).
     WorkbenchCommand(
       id: 'settings',
@@ -159,7 +161,7 @@ List<WorkbenchCommand> workbenchCommands({
       keys: const SingleActivator(LogicalKeyboardKey.comma, meta: true),
       run: openSettings,
     ),
-    // The person's pinned agents (pinned-agents.md §7b): ⌘1 to ⌘9 open the
+    // The person's pinned agents: ⌘1 to ⌘9 open the
     // first nine, named, as clicking a pin does. Only the pins there are:
     // they end the list, so nothing after them shifts.
     for (final (i, pin) in pins.take(9).indexed)
@@ -169,7 +171,29 @@ List<WorkbenchCommand> workbenchCommands({
         keys: SingleActivator(_digits[i], meta: true),
         run: openPin == null ? null : () => openPin(pin),
       ),
+    // Only while a move in the sidebar can be put back, last so nothing
+    // shifts; disabled while a text field has the keys, whose own undo
+    // ⌘Z is then.
+    if (moveUndo != MoveUndo.none)
+      WorkbenchCommand(
+        id: 'undo-move',
+        title: 'Undo Move',
+        keys: const SingleActivator(LogicalKeyboardKey.keyZ, meta: true),
+        run: moveUndo == MoveUndo.offered ? undoMove : null,
+      ),
   ];
+}
+
+/// Whether the sidebar's last move can be put back from the keyboard.
+enum MoveUndo {
+  /// No move's Undo is offered.
+  none,
+
+  /// One is, and ⌘Z puts it back.
+  offered,
+
+  /// One is, but a text field has the keys: ⌘Z is its own undo.
+  inField,
 }
 
 const _digits = [

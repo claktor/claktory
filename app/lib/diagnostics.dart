@@ -1,4 +1,4 @@
-// Settings → Advanced diagnostics (#214, Secco's Workspace.diagnostics):
+// Settings → Advanced diagnostics (Workspace.diagnostics):
 // whether this Claktory and its devices record how they work (connections
 // first; other areas join as problems need them), off unless the person
 // turns it on; while on, what each source kept, by area, with Delete for

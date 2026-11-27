@@ -1,4 +1,4 @@
-// The site's phone beat (Kakyoin's demo): a real Needs you card on a
+// The site's phone demo: a real Needs you card on a
 // Claktory, answered on the phone at a pace for a recording. Pairs with
 // PAIRING_CODE when the app isn't paired yet (whoever runs it allows the
 // device on the Claktory while it waits), opens Needs you from the menu,

@@ -1,4 +1,4 @@
-// The first run on a phone (#198, phase 2A): signing in, the name and the
+// The first run on a phone: signing in, the name and the
 // other steps are pages of their own, not a card over the window; the email
 // brings the email keyboard and the code one numeric field that takes the
 // code Mail or Messages offers; the action is the page's width, first under
@@ -298,7 +298,7 @@ void main() {
       await harness.show(tester, size: size);
       await pumpFrames(tester);
       expect(find.byType(PairScreen), findsOneWidget);
-      // The first screen's own way in (#363).
+      // The first screen's own way in.
       await pastPairStart(tester, email: true);
       await pumpFrames(tester);
       return harness;

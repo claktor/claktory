@@ -1,4 +1,4 @@
-// A conversation's timeline with more than its entries (#250): extras (a
+// A conversation's timeline with more than its entries: extras (a
 // pipe's messages) interleaved by time, entries hidden where an extra
 // shows them, and going to an extra however far back.
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';

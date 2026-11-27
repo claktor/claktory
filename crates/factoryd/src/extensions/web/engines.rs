@@ -108,8 +108,8 @@ impl Engine {
         let (gap_ms, jitter_ms, per_hour, limited_max_ms) = match self {
             Engine::DuckDuckGo | Engine::DuckDuckGoLite => (3_000, 2_000, 60, HOUR),
             Engine::Bing => (4_000, 3_000, 60, 6 * HOUR),
-            // Took 60 an hour from one IP without a challenge (live run,
-            // #257); raised a step at a time while it keeps answering.
+            // Took 60 an hour from one IP without a challenge (live
+            // run); raised a step at a time while it keeps answering.
             Engine::Yahoo => (4_000, 3_000, 90, 6 * HOUR),
             Engine::Ecosia => (5_000, 3_000, 40, 6 * HOUR),
             Engine::Brave => (20_000, 5_000, 15, 6 * HOUR),

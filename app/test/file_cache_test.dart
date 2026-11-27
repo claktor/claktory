@@ -1,5 +1,5 @@
-// Files kept on a device connected to a Claktory on another machine
-// (#446): opened again, a file shows from the copy kept here after a
+// Files kept on a device connected to a Claktory on another machine:
+// opened again, a file shows from the copy kept here after a
 // one-byte check that it's still that version, with nothing brought over
 // the link again; a changed one is read again; offline, the copy shows,
 // saying it may be out of date; past the size set for this device, the

@@ -1,4 +1,4 @@
-//! Chats (#213): the person's one-off conversations beside their agents,
+//! Chats: the person's one-off conversations beside their agents,
 //! with web search and a way to propose to Rivet, and nothing else.
 
 use crate::common::{Client, MODEL, OTHER_MODEL, Scripted, start, start_with, temp_dir};

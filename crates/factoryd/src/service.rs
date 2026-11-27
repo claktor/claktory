@@ -422,7 +422,12 @@ pub(crate) async fn restore(factory: &Arc<Factory>) -> Result<(), RequestError> 
     tokio::spawn(async {
         tokio::time::sleep(Duration::from_secs(1)).await;
         // SAFETY: sends SIGTERM to this process, whose handler stops it.
-        unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
+        #[cfg(unix)]
+        unsafe {
+            libc::kill(libc::getpid(), libc::SIGTERM)
+        };
+        #[cfg(windows)]
+        crate::windows::stop::request();
     });
     Ok(())
 }

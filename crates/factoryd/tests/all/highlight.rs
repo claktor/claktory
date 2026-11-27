@@ -88,7 +88,7 @@ async fn agents_highlight_parts_of_the_app_and_messages_light_up_both_agents() {
     assert!(said.starts_with("tool highlight: Highlights are off"), "{said}");
 }
 
-/// #189: an agent opens a screen in the app the person is using. Every app
+/// An agent opens a screen in the app the person is using. Every app
 /// is asked; each says whether it opened it (only the one in use does).
 #[tokio::test]
 async fn agents_open_a_screen_in_the_app_the_person_is_using() {
@@ -170,7 +170,7 @@ async fn agents_open_a_screen_in_the_app_the_person_is_using() {
     assert!(asked.lock().expect("asked").is_empty());
 }
 
-/// #471 G9: an agent opens a pipe, or its settings, named only as this side
+/// An agent opens a pipe, or its settings, named only as this side
 /// named it; another project's pipe only for an admin agent.
 #[tokio::test]
 async fn agents_open_a_pipe_of_their_project() {

@@ -493,7 +493,7 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
       ),
     );
     // Android's check for a new version of its app, for the drawer and
-    // Settings to say (#355 D2); nothing elsewhere.
+    // Settings to say; nothing elsewhere.
     return AndroidAppUpdateHost(
       child: _HostScope(
         host: this,
@@ -868,7 +868,7 @@ class _DrawerPanelState extends State<_DrawerPanel> {
                               ),
                               // At the largest text sizes the top scrolls, and
                               // how it's connected went under its fold, cut
-                              // short ("last seen 1 min", Zucchero's row 510):
+                              // short ("last seen 1 min"):
                               // it stays in sight at the top's foot instead,
                               // whole, as the name scrolls above it.
                               if (large)

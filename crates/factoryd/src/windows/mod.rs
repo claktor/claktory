@@ -1,12 +1,25 @@
-//! The backend on Windows (windows.md Part I, §§1–2): where Claktory lives
+//! The backend on Windows: where Claktory lives
 //! (`dirs`), what the backend sets up there before agents' commands run,
 //! and the token the person's app reaches it with (`app_token`). The
 //! commands themselves, their jobs and the private files are
 //! `factory_agent::windows`.
 
+pub mod app_install;
 pub mod app_token;
+pub mod authenticode;
 pub mod dirs;
+pub mod dpapi;
+pub mod fs;
+pub mod handoff;
+pub mod helpers;
 pub mod listener;
+pub mod log;
+pub mod machine;
+pub mod memory;
+pub mod ports;
+pub mod stop;
+pub mod supervisor_copy;
+pub mod tools;
 
 use std::path::Path;
 
@@ -18,7 +31,7 @@ pub fn jobs_file(home: &Path) -> std::path::PathBuf {
 }
 
 /// The home itself, private before anything is written into it, as it's
-/// 0700 on a Mac (Fugo 45257, condition 1): only this user and SYSTEM, and
+/// 0700 on a Mac: only this user and SYSTEM, and
 /// everything made inside inherits that, so a LocalAppData moved somewhere
 /// others can read (another drive, a share) doesn't expose the vault,
 /// factory.db or the app's token. A home that's a link elsewhere, or

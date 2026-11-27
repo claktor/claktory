@@ -1,4 +1,4 @@
-//! What an app reads and who uses it, as it changed (#339): every change,
+//! What an app reads and who uses it, as it changed: every change,
 //! whoever made it (Rivet with apps_set_access, the person in their apps or
 //! by approving Rivet's card, or undoing another), is kept here, never
 //! changed afterwards but for being marked undone. Needs you's History,

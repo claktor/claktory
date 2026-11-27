@@ -453,7 +453,7 @@ fn sent_thinking(body: &Value) -> Vec<String> {
 
 #[tokio::test]
 async fn thinking_made_under_another_system_prompt_is_left_out_and_the_rest_kept() {
-    // Kakyoin's repro (Bruno 29608): Fable 5.2 refuses thinking made before
+    // Fable 5.2 refuses thinking made before
     // the agent's prompt changed. It's left out once the system prompt or
     // tools change, and kept while they don't.
     use factory_agent::types::{Message, UserMessage};

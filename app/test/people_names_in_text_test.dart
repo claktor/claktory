@@ -1,4 +1,4 @@
-// A friend's name inside People's sentences (Fugo 51059, row 1730): what
+// A friend's name inside People's sentences: what
 // reorders text shows by its code and the name sits in an isolate, so a
 // friend named with a right-to-left override can't turn the words around
 // it backwards. Those names come from other people.
@@ -33,7 +33,7 @@ void main() {
       departedLine(mine: false, friend: _hebrew),
       'From a device $_isolated has since removed',
     );
-    // Messages it joined again past a friend's key change (Fugo 51760).
+    // Messages it joined again past a friend's key change.
     expect(
       memberLines(
         const DmMembers(

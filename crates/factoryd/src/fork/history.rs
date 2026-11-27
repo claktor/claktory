@@ -26,8 +26,8 @@ CREATE TABLE IF NOT EXISTS conversation_changes (
 CREATE INDEX IF NOT EXISTS conversation_changes_at ON conversation_changes (at);
 ";
 
-/// What happened to a conversation: its `kind` in the table, which since
-/// #423 can also be "deleted" (a version set aside, deleted).
+/// What happened to a conversation: its `kind` in the table, which can also
+/// be "deleted" (a version set aside, deleted).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
     Back,

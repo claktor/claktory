@@ -40,8 +40,8 @@ void main() {
   });
 
   test('the emitter allows only these keys, and only numbers, yes or no, '
-      'and lowercase words from fixed lists as values (Fugo)', () {
-    // A new key changes this list: a change Fugo reviews.
+      'and lowercase words from fixed lists as values', () {
+    // A new key changes this list: a change for a security review.
     expect(ConnectionKey.values.map((key) => key.wire), [
       'app',
       'away_s',
@@ -53,9 +53,9 @@ void main() {
       'up',
       'attempt',
       'welcomed',
-      // #388: why the relay can't be reached, a word from RelayTrouble.
+      // Why the relay can't be reached, a word from RelayTrouble.
       'err',
-      // Polpo's efficiency study §4: what a direct path crosses, a word
+      // What a direct path crosses, a word
       // from PathReach (never the address), and a count of bytes.
       'reach',
       'bytes',

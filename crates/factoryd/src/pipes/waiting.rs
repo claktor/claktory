@@ -1,6 +1,6 @@
-//! A pipe's liaison waits (#343 U18, Fugo's ruling): while this side's lead
+//! A pipe's liaison waits: while this side's lead
 //! waits out a usage limit (or credit, or a sign-in), or its daily spending
-//! cap holds its pipes' messages until midnight (#357 L2), the other side is
+//! cap holds its pipes' messages until midnight, the other side is
 //! told it's waiting, and until when when that's known, and told again
 //! when it's awake; what the other side says of its own shows on this
 //! side's pipe, and as a line in it, for the person only.
@@ -57,9 +57,9 @@ pub(crate) fn rounded(until_ms: i64) -> i64 {
 
 /// What the other side should hear of this pipe's liaison now: waiting
 /// while its lead waits out a usage limit (or credit, or a sign-in), or is
-/// past its daily spending cap (#357 L2: its pipes' messages wait until
-/// midnight); else awake. Both at once, the later end: none when either has
-/// no known end.
+/// past its daily spending cap (its pipes' messages wait until midnight);
+/// else awake. Both at once, the later end: none when either has no known
+/// end.
 fn wanted(factory: &Factory, record: &Record) -> Liaison {
     let (lead, usage) = {
         let inner = factory.lock();

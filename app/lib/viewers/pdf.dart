@@ -12,7 +12,7 @@
 // policy none): a finger scrolls, zooms and selects. Search is in More,
 // and opens the same find, whose bar the phone's page shows at its foot.
 //
-// On both, ink saved on an iPad shows over its page, only read (#368): each
+// On both, ink saved on an iPad shows over its page, only read: each
 // page's latest layer of the version shown, loaded into the native view as
 // the iPad loads it ([_PdfInk]), and again as it's saved anywhere.
 import 'dart:async';
@@ -35,6 +35,7 @@ import '../ipad/ink_sync.dart' show InkBlobs;
 import '../pane_chrome.dart';
 import '../protocol/factory/v1/factory.pb.dart';
 import '../mobile/metrics.dart' show TypeScale;
+import '../mobile/viewer_chrome.dart' show ChromeTap, ChromeTapState;
 import '../paced.dart' show FilePreviews;
 import '../resources.dart' show formatBytes;
 import '../scope.dart';
@@ -48,7 +49,7 @@ import 'registry.dart';
 var pdfChunk = 8 * 1024 * 1024;
 
 /// Over this, a PDF on a phone (or on a slow link) shows its pages as
-/// images made for the screen while it comes (#379 step 3).
+/// images made for the screen while it comes.
 const pdfPagesFrom = 5 * 1000 * 1000;
 
 /// Opens a link from a PDF (tests replace it).
@@ -83,6 +84,12 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
   InkParams? _params;
   Key? _surfaceKey;
 
+  /// A phone's tap on the page, which a link tapped takes back.
+  final _tap = GlobalKey<ChromeTapState>();
+
+  /// Text on the page is selected: a tap ends that, nothing more.
+  var _selected = false;
+
   String? _problem;
   ({int received, int size})? _progress;
   ({int page, int count})? _page;
@@ -91,7 +98,7 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
   /// Brings the file again whenever asked to reload.
   var _generation = 0;
 
-  /// A big PDF's pages as images while the PDF itself comes (#379); null
+  /// A big PDF's pages as images while the PDF itself comes; null
   /// once it's shown, or when it isn't big.
   _PagePreviews? _pages;
 
@@ -203,8 +210,8 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
       }
     }
 
-    // From a Claktory on another machine, the copies this device keeps
-    // (#446); else the render cache.
+    // From a Claktory on another machine, the copies this device keeps;
+    // else the render cache.
     final cache = FileCache.of(backend);
     _fetched = null;
     // What it is first (its size and version), so one already in the
@@ -358,7 +365,7 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
     return _paramsFor(claktory, first, cached);
   }
 
-  /// The copy this device keeps that [_fetch] found or made (#446): held
+  /// The copy this device keeps that [_fetch] found or made: held
   /// while the surface shows it.
   ({FileCache cache, File file})? _fetched;
   ({FileCache cache, File file})? _held;
@@ -451,7 +458,10 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
             _ => _cantOpen,
           },
         );
+      case InkSelectionChanged():
+        _selected = true;
       case InkLinkTapped(:final url):
+        _tap.currentState?.cancel();
         final uri = Uri.tryParse(url);
         if (uri != null &&
             const {'http', 'https', 'mailto'}.contains(uri.scheme)) {
@@ -492,7 +502,7 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
       body = problem;
     } else if ((params == null || controller == null) &&
         _pages?.count != null) {
-      // A big PDF's pages as images while it comes (#379).
+      // A big PDF's pages as images while it comes.
       body = _PagesWhileLoading(
         pages: _pages!,
         page: page?.page ?? 1,
@@ -504,7 +514,7 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
       );
     } else if (params == null || controller == null) {
       final progress = _progress;
-      // Coming over the link, a piece at a time (#375); then opening it.
+      // Coming over the link, a piece at a time; then opening it.
       body = progress != null
           ? LoadingProgress(
               label: 'Loading PDF…',
@@ -541,10 +551,20 @@ class _PdfViewerState extends State<PdfViewer> with FileLoading<PdfViewer> {
             // The bar floats over the page, under a link's line.
             child: FindScope(
               target: _find,
-              child: InkSurface(
-                key: _surfaceKey!,
-                params: params,
-                controller: controller,
+              // On a phone, a tap that's nothing else's shows or hides the
+              // page's header; a double tap zooms, as PDFKit has it.
+              child: ChromeTap(
+                key: _tap,
+                taken: (_) {
+                  final selected = _selected;
+                  _selected = false;
+                  return selected;
+                },
+                child: InkSurface(
+                  key: _surfaceKey!,
+                  params: params,
+                  controller: controller,
+                ),
               ),
             ),
           ),
@@ -945,7 +965,7 @@ class _Problem implements Exception {
   final String text;
 }
 
-/// A big PDF's pages as images made for this screen (#379 step 3), each
+/// A big PDF's pages as images made for this screen, each
 /// asked for when it's first wanted. [changed] when one comes, or when
 /// it's clear none will.
 class _PagePreviews {

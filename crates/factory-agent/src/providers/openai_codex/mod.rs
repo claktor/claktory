@@ -392,7 +392,7 @@ async fn sse_request(
 }
 
 /// How many bytes `value` is as JSON, without writing it out: a request's
-/// body can be hundreds of MB of images (#454).
+/// body can be hundreds of MB of images.
 fn json_len(value: &Value) -> usize {
     struct Counting(usize);
     impl std::io::Write for Counting {

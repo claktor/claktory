@@ -1,4 +1,4 @@
-//! What a conversation's images keep in memory (#454 Part 1 #9): once
+//! What a conversation's images keep in memory: once
 //! saved, an image is only where its file is, in every copy, and a
 //! conversation read back finds its images' files without reading them.
 //! Measured with a counting allocator, so a file of its own (the allocator

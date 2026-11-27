@@ -66,7 +66,7 @@ void main() {
     expect(find.text('Dismiss'), findsOneWidget);
     await tester.enterText(_field, 'Looks right');
     await tester.pump();
-    // A comment is a reply (#370): Submit alone, saying so.
+    // A comment is a reply: Submit alone, saying so.
     expect(find.text('Approve'), findsNothing);
     expect(find.text('Dismiss'), findsNothing);
     expect(
@@ -606,7 +606,7 @@ void main() {
       await settle(tester);
       final answer = sentOf(harness, (m) => m.hasAnswerAsk()).single.answerAsk;
       expect(answer.text, 'I like the second one better');
-      // A reply, never a yes (#370).
+      // A reply, never a yes.
       expect(answer.reply, isTrue);
       // The paper's pane is gone: only the conversation is left.
       final layout = closed(harness)!;
@@ -637,7 +637,7 @@ void main() {
       expect(answer.text, isEmpty);
       expect(answer.dismiss, isFalse);
       expect(answer.reply, isFalse);
-      // Opened from the file, not its card: no talk seen (#492).
+      // Opened from the file, not its card: no talk seen.
       expect(answer.hasTalkSeen(), isTrue);
       expect(answer.talkSeen, 0);
     });
@@ -674,7 +674,7 @@ void main() {
       asIPad();
       DocumentNative();
       final harness = await showDocument(tester);
-      harness.backend.refuse = 'Not connected to the backend.';
+      harness.backend.refuse = "Can't reach your Claktory right now.";
       await tester.enterText(_field, 'The second');
       await tester.pump();
       await tester.tap(find.text('Submit'));

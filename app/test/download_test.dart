@@ -1,4 +1,4 @@
-// Download on the Mac (Matt, Bruno 41308): a viewer pane had Share… but no
+// Download on the Mac: a viewer pane had Share… but no
 // way to just download its file. Download, beside Share…, fetches it as
 // Share… does (in pieces, with how much has come and Cancel) into the
 // Mac's Downloads folder, beside what's there under a name of its own, and

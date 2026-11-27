@@ -221,7 +221,7 @@ class LoopbackForwards extends ChangeNotifier {
     _shareProblems.clear();
   }
 
-  // Websites a pipe's peer shares, opened on this device (#503). Each is
+  // Websites a pipe's peer shares, opened on this device. Each is
   // forwarded from a port of this device's own to the share's port on the
   // Claktory's machine, for as long as the share lasts there (not for
   // [lifetime]): a page left open keeps working, and so does a bookmark,
@@ -238,7 +238,7 @@ class LoopbackForwards extends ChangeNotifier {
   /// What went wrong with [shareId]'s last connection here (the sentence
   /// of the Claktory it's from, or why the tunnel couldn't carry it); empty
   /// while all's well or while it isn't forwarded. Said on an iPhone or
-  /// iPad once its page didn't load (W6, #505).
+  /// iPad once its page didn't load.
   String shareLastError(String shareId) =>
       _shares[shareId]?.forward.lastError ?? '';
 

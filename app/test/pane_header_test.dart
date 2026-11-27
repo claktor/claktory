@@ -1,6 +1,6 @@
 // A pane's header fits its pane at any width: on touch, where Expand and
 // × are a finger's target each, the viewer's controls give way to them
-// rather than the header overflowing (Sorbet's iPad sweep).
+// rather than the header overflowing.
 import 'package:factory_app/controls.dart';
 import 'package:factory_app/panes.dart';
 import 'package:flutter/widgets.dart';
@@ -60,14 +60,14 @@ void main() {
         expect(tester.getRect(button).right, lessThanOrEqualTo(width + 0.5));
       }
       // The controls give way before the title does: its start stays in
-      // sight (Abbacchio's rows 521 and 545).
+      // sight.
       expect(
         tester.getSize(find.text('needs-you-waiting-rows.md')).width,
         greaterThanOrEqualTo(60),
       );
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
   }
-  // A Mac's pane of about 255 px (Abbacchio's row 521).
+  // A Mac's pane of about 255 px.
   for (final width in [200.0, 255.0]) {
     testWidgets('a narrow pane keeps its title before its controls ($width)', (
       tester,

@@ -1,5 +1,5 @@
 //! How long a device takes to reach a backend through a relay when no
-//! direct path can work (#388): a cold device endpoint (as the app makes at
+//! direct path can work: a cold device endpoint (as the app makes at
 //! launch, or after a network change), with no IP transport of its own, so
 //! everything goes through a relay. A backend on this machine homes on n0's
 //! relays or on Claktory's own; the device homes on either; the device

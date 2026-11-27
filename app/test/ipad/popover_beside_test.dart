@@ -1,10 +1,10 @@
-// A popover beside what it's about (presentPopover's `beside`, Gelato for
-// pinned agents, Sorbet's review point): on an iPad's wide window a
-// sidebar row's touch-and-hold menu opens to the row's right, its arrow on
-// the popover's left edge at the row's middle, as iPadOS shows a sidebar
-// row's menu. Where the right hasn't a whole popover's width, it's under
-// or over as before; in a right-to-left window too (not mirrored yet, so
-// the arrow never points the wrong way: Prosciutto 48386).
+// A popover beside what it's about (presentPopover's `beside`, for
+// pinned agents): on an iPad's wide window a sidebar row's touch-and-hold
+// menu opens to the row's right, its arrow on the popover's left edge at
+// the row's middle, as iPadOS shows a sidebar row's menu. Where the right
+// hasn't a whole popover's width, it's under or over as before; in a
+// right-to-left window too (not mirrored yet, so the arrow never points
+// the wrong way).
 //
 // SHOTS=dir draws the 13" landscape case as a PNG there, to look at.
 import 'dart:io';

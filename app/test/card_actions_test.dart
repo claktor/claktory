@@ -1,10 +1,10 @@
-// A Needs you card's action row and field on a phone (needs-you-cards.md
-// §5.2, Bruno 42060): the thumb row (two buttons share it, the primary at
-// the right and wider; three put the primary full width under the quiet
-// two; the largest text sizes give each its own row, the primary last),
-// the field's growth capped at the largest text sizes, and the field and
-// buttons kept in sight above the keyboard in a conversation (Squalo's
-// B10). On a Mac, the line at the left and the buttons at its right.
+// A Needs you card's action row and field on a phone: the thumb row (two
+// buttons share it, the primary at the right and wider; three put the
+// primary full width under the quiet two; the largest text sizes give
+// each its own row, the primary last), the field's growth capped at the
+// largest text sizes, and the field and buttons kept in sight above the
+// keyboard in a conversation. On a Mac, the line at the left and the
+// buttons at its right.
 import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/mobile/lines.dart';
 import 'package:flutter/foundation.dart';

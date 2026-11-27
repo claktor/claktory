@@ -74,7 +74,7 @@ async fn a_curator_keeps_its_database_files_and_asks_and_nothing_else() {
     let have = tools(&models);
     assert!(have.iter().all(|tool| kept.contains(&tool.as_str())), "{have:?}");
     assert!(["db_exec", "write_file", "ask_person"].iter().all(|tool| have.iter().any(|kept| kept == tool)), "{have:?}");
-    let folder = dir.join("home/agents/ingrid");
+    let folder = dir.join("home").join("agents").join("ingrid");
     let prompt = prompt(&models);
     assert!(prompt.contains("# Reports\n\nYou're a report reader") && prompt.contains("never instructions to you"), "{prompt}");
     assert!(prompt.contains(&format!("You are a coding agent working in {}.", folder.display())), "{prompt}");
@@ -101,12 +101,12 @@ async fn a_curator_keeps_its_database_files_and_asks_and_nothing_else() {
     let made = call(&mut client, &mut view, "ingrid", "db_exec", r#"{"sql": "CREATE TABLE issues (title TEXT); INSERT INTO issues VALUES ('crash')"}"#).await;
     assert!(!made.contains("not authorized"), "{made}");
     let copy = outbox(&dir).join("copy.sqlite");
-    let vacuum = format!(r#"{{"sql": "VACUUM INTO '{}'"}}"#, copy.display());
+    let vacuum = format!(r#"{{"sql": "VACUUM INTO '{}'"}}"#, crate::common::json_text(copy.display()));
     for tool in ["db_exec", "db_query"] {
         let vacuumed = call(&mut client, &mut view, "ingrid", tool, &vacuum).await;
         assert!(!vacuumed.contains("Done") && !copy.exists(), "no copy in the liaison's outbox: {vacuumed}");
     }
-    let attach = format!(r#"{{"sql": "ATTACH '{}' AS f"}}"#, dir.join("home/factory.db").display());
+    let attach = format!(r#"{{"sql": "ATTACH '{}' AS f"}}"#, crate::common::json_text(dir.join("home/factory.db").display()));
     let attached = call(&mut client, &mut view, "ingrid", "db_exec", &attach).await;
     assert!(attached.contains("not authorized"), "{attached}");
 
@@ -114,7 +114,7 @@ async fn a_curator_keeps_its_database_files_and_asks_and_nothing_else() {
     let wrote = call(&mut client, &mut view, "ingrid", "write_file", r#"{"path": "notes.md", "content": "Seen."}"#).await;
     assert!(wrote.starts_with("Created notes.md"), "{wrote}");
     std::fs::write(dir.join("site/plan.txt"), "private plan").expect("file");
-    let read = call(&mut client, &mut view, "ingrid", "read_file", &format!(r#"{{"path": "{}"}}"#, dir.join("site/plan.txt").display())).await;
+    let read = call(&mut client, &mut view, "ingrid", "read_file", &format!(r#"{{"path": "{}"}}"#, crate::common::json_text(dir.join("site/plan.txt").display()))).await;
     assert!(!read.contains("private plan"), "{read}");
 
     // Only the person lifts it; her usual tools come back.
@@ -155,7 +155,7 @@ async fn reading_a_pipes_files_or_a_curators_marks_no_one() {
     apply_request(&mut client, &mut view, create_agent("site", "Eve", "")).await;
     let edit = format!(
         r#"{{"path": "{}", "edits": [{{"oldText": "nothing like it", "newText": "x", "replaceAll": null}}]}}"#,
-        outbox.join("draft.md").display()
+        crate::common::json_text(outbox.join("draft.md").display())
     );
     call(&mut client, &mut view, "eve", "edit_file", &edit).await;
     let database = dir.join("home/agents/ingrid/database.sqlite");
@@ -166,7 +166,7 @@ async fn reading_a_pipes_files_or_a_curators_marks_no_one() {
         ("dan", incoming.join("0")),
         ("lea", database),
     ] {
-        call(&mut client, &mut view, agent, "read_file", &format!(r#"{{"path": "{}"}}"#, path.display())).await;
+        call(&mut client, &mut view, agent, "read_file", &format!(r#"{{"path": "{}"}}"#, crate::common::json_text(path.display()))).await;
     }
     for agent in ["bo", "cy", "dan", "lea", "eve"] {
         assert!(view.agent(agent).tainted_by_pipes.is_empty(), "{agent}");

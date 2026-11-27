@@ -1,6 +1,6 @@
 // A Select's menu opens below its field, and above it when there's no room
-// below (a bar at the window's foot, such as History's: Abbacchio's row
-// 1564), always inside the window.
+// below (a bar at the window's foot, such as History's),
+// always inside the window.
 import 'package:factory_app/controls.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';

@@ -1,4 +1,4 @@
-//! Sends the app makes again (#401): on a weak connection it can't tell a
+//! Sends the app makes again: on a weak connection it can't tell a
 //! message that never arrived from one whose answer was lost, so it sends
 //! again with the same `client_id` until it hears back. Whatever the person
 //! sent arrives once: a repeat answers as a success and delivers nothing

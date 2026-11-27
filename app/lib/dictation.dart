@@ -1,13 +1,13 @@
-// Answering by voice (Matt's: wherever he answers Claktory, he can speak
-// it): a mic beside a text field records what's said, the Claktory
-// transcribes it (TranscribeAudio: nothing kept, nothing sent to an agent),
-// and the words go into the field where the caret is, to check and send
-// as ordinary text. It never sends by itself. The speech model is asked
-// for, and greyed out, as in the message box (voice.dart). The recording
-// is kept on the device until its words come back (#401, voice_keep.dart):
-// on a weak connection it waits, "Not sent yet", and goes again once the
-// connection is back, picking up what the Claktory already has; after a
-// relaunch it comes back to its field.
+// Answering by voice (wherever he answers Claktory, he can speak it): a mic
+// beside a text field records what's said, the Claktory transcribes it
+// (TranscribeAudio: nothing kept, nothing sent to an agent), and the words
+// go into the field where the caret is, to check and send as ordinary text.
+// It never sends by itself. The speech model is asked for, and greyed out,
+// as in the message box (voice.dart). The recording is kept on the device
+// until its words come back (voice_keep.dart): on a weak connection it
+// waits, "Not sent yet", and goes again once the connection is back,
+// picking up what the Claktory already has; after a relaunch it comes back
+// to its field.
 import 'dart:async';
 import 'dart:io' show File, FileSystemException;
 import 'dart:math' show min;
@@ -162,7 +162,7 @@ const dictationWaiting =
     'is back.';
 
 /// A recording shorter than this with no words in it was most likely a tap
-/// by mistake: it goes without a word (Matt's). A longer one says so.
+/// by mistake: it goes without a word. A longer one says so.
 const quietlyUnder = Duration(seconds: 5);
 
 /// The least room the waveform is drawn in, beside the dot and the time.
@@ -176,7 +176,7 @@ const _leastLine = 220.0;
 enum DictationState { idle, recording, transcribing, unsent }
 
 /// What a field's dictation is for, so a recording kept on the device
-/// comes back to that field after a relaunch (#401).
+/// comes back to that field after a relaunch.
 class DictationFor {
   const DictationFor(this.key, this.label, {this.select});
 
@@ -189,7 +189,7 @@ class DictationFor {
   final String label;
 
   /// Shows the conversation the field is in, for the floating bar's name
-  /// to go back to it (#409); none where there's no going back.
+  /// to go back to it; none where there's no going back.
   final Future<void> Function(Backend backend)? select;
 }
 
@@ -217,7 +217,7 @@ class Dictation extends StatefulWidget {
   /// card's field over a phone's keyboard, CardFieldRoom): its line is
   /// flexible in the column it shares with a recording's notes, so the
   /// parent must bound the height. Else that column gave it all it wanted,
-  /// and it grew over the card's buttons (Zucchero's row 726).
+  /// and it grew over the card's buttons.
   final bool shrinks;
 
   /// What it's for: a recording not sent yet comes back to the field with
@@ -239,7 +239,7 @@ class Dictation extends StatefulWidget {
   State<Dictation> createState() => DictationFieldState();
 }
 
-/// Hold-to-say (#514): a field's mic started by holding a key or a button
+/// Hold-to-say: a field's mic started by holding a key or a button
 /// instead of a tap, and finished when it's let go; the words land in the
 /// field to read before sending. Get it from a [Dictation]'s GlobalKey.
 abstract interface class DictationHold {
@@ -254,7 +254,7 @@ abstract interface class DictationHold {
 @visibleForTesting
 class DictationFieldState extends State<Dictation> implements DictationHold {
   /// The answer being said into this field, or one said into it before it
-  /// was built again (#409): it goes on when the field goes, the floating
+  /// was built again: it goes on when the field goes, the floating
   /// bar finishing it.
   late _FieldVoice _session;
 
@@ -767,10 +767,10 @@ class _Unsent extends StatelessWidget {
 
 /// In the field's place while recording: a live dot, the waveform as it's
 /// heard, the time, Cancel and Done. Esc cancels, Return is Done.
-/// An answer said into a [Dictation]'s field (#409): it goes on when the
+/// An answer said into a [Dictation]'s field: it goes on when the
 /// field goes (another conversation, a page over it), the floating bar
 /// ([VoiceBar]) saying so, and Done and Cancel work without it. Done with
-/// the field gone keeps the recording on the device for it (#401) and
+/// the field gone keeps the recording on the device for it and
 /// asks for its words at once: they go in when the field is back.
 class _FieldVoice extends VoiceSession {
   _FieldVoice(String key, this.title)
@@ -811,7 +811,7 @@ class _FieldVoice extends VoiceSession {
   Future<bool> send() async {
     if (_here case final field?) {
       // Its field is there but out of sight (behind a phone's drawer, say):
-      // the bar says where the words go (Zucchero's row 348).
+      // the bar says where the words go.
       sayAway(wordsGoIn(title));
       await field._done();
       return true;

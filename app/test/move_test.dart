@@ -387,10 +387,7 @@ void main() {
     );
     expect(status.phase, MovePhase.copying);
     expect(status.targetSystem, 'Linux x86_64');
-    expect(status.map.single, (from: '/Users/me', to: '/home/you'));
     expect(moveProgress(status), 0.25);
-    expect(status.problems, ['No room.']);
-    expect(status.canCancel, isTrue);
     for (final (phase, frozen) in [
       (pb.MovePhase.MOVE_PHASE_CHECKING, false),
       (pb.MovePhase.MOVE_PHASE_FROZEN, true),

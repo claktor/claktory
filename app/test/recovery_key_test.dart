@@ -6,6 +6,7 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/recovery_key.dart';
 import 'package:factory_app/scope.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -37,10 +38,9 @@ Future<Harness> _open(
 
 void main() {
   test('Needs you has it exactly while the key is unconfirmed', () {
-    expect(
-      needsYouItems(_workspace()).map((item) => item.kind),
-      [NeedsYouKind.recoveryKey],
-    );
+    expect(needsYouItems(_workspace()).map((item) => item.kind), [
+      NeedsYouKind.recoveryKey,
+    ]);
     expect(needsYouCount(_workspace(unconfirmed: false)), 0);
   });
 
@@ -69,7 +69,10 @@ void main() {
     expect(harness.last.hasCheckRecoveryKey(), isTrue);
     // Checking what they saved, not reading it off the screen.
     expect(find.text(backend.recoveryKey), findsNothing);
-    expect(find.textContaining('Type block 3 from the key you saved'), findsOneWidget);
+    expect(
+      find.textContaining('Type block 3 from the key you saved'),
+      findsOneWidget,
+    );
 
     await tester.enterText(find.byType(EditableText), 'jklm');
     await tester.tap(find.text('Confirm'));
@@ -116,7 +119,7 @@ void main() {
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
     try {
       await _open(tester, size: const Size(375, 667));
-      // Needs you on an iPhone lists it first (#599): its row saves it.
+      // Needs you on an iPhone lists it first: its row saves it.
       await tester.tap(find.text('Save the recovery key for nixos'));
       await settle(tester);
       await tester.ensureVisible(find.text('Show recovery key'));
@@ -138,5 +141,135 @@ void main() {
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }
+  });
+
+  test("the key's file: named for its Claktory, holding whose it is, the "
+      'day and the key', () {
+    expect(
+      recoveryKeyFileName('\u2068nix/os: lab\u2069'),
+      'Claktory recovery key (nixos lab).txt',
+    );
+    expect(recoveryKeyFileName('\u202E'), 'Claktory recovery key.txt');
+    expect(
+      recoveryKeyFileText(
+        '\u2068nixos\u2069',
+        'ABCD-EFGH',
+        DateTime(2026, 11, 27),
+      ),
+      'Recovery key for the Claktory nixos, saved 27 November 2026.\n\n'
+      'ABCD-EFGH\n',
+    );
+  });
+
+  group('Download', () {
+    const device = MethodChannel('factory/device');
+    late List<MethodCall> calls;
+    late Future<Object?> Function(MethodCall call) answer;
+
+    setUp(() {
+      calls = [];
+      answer = (_) async => '/Users/me/Downloads/key.txt';
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(device, (call) async {
+            if (call.method != 'saveText' && call.method != 'shareFiles') {
+              return null;
+            }
+            calls.add(call);
+            return answer(call);
+          });
+    });
+    tearDown(() {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(device, null);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    Future<Harness> shown(WidgetTester tester) async {
+      final harness = await _open(tester);
+      await tester.tap(find.text('Save the recovery key for nixos'));
+      await settle(tester);
+      await tester.tap(find.text('Show recovery key'));
+      await settle(tester);
+      return harness;
+    }
+
+    testWidgets("on a Mac it saves where the person chooses, and they still "
+        'type a block back', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      try {
+        final harness = await shown(tester);
+        answer = (_) async => null;
+        await tester.tap(find.text('Download'));
+        await settle(tester);
+        expect(find.text('Download'), findsOneWidget, reason: 'cancelled');
+
+        answer = (_) async => '/Users/me/Downloads/key.txt';
+        await tester.tap(find.text('Download'));
+        await settle(tester);
+        expect(find.text('Downloaded'), findsOneWidget);
+        final args = calls.last.arguments as Map;
+        expect(calls.last.method, 'saveText');
+        expect(args['name'], 'Claktory recovery key (nixos).txt');
+        expect(args['text'], contains(harness.backend.recoveryKey));
+        expect(
+          args['text'],
+          startsWith('Recovery key for the Claktory nixos, '),
+        );
+        // Saved is no confirmation: that's still the block typed back.
+        expect(
+          harness.backend.sent.where((m) => m.hasConfirmRecoveryKey()),
+          isEmpty,
+        );
+        expect(find.byType(SaveRecoveryKeyForm), findsOneWidget);
+
+        answer = (_) async => throw PlatformException(
+          code: 'failed',
+          message: '/Volumes/USB can\'t be written to',
+        );
+        await tester.tap(find.text('Downloaded'));
+        await settle(tester);
+        expect(
+          find.text("Couldn't save the key: /Volumes/USB can't be written to"),
+          findsOneWidget,
+        );
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('on an iPhone it goes to Files, never the share sheet', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        final harness = await shown(tester);
+        answer = (_) async => true;
+        await tester.ensureVisible(find.text('Download'));
+        await tester.tap(find.text('Download'));
+        await settle(tester);
+        expect(calls.map((call) => call.method), ['saveText']);
+        final args = calls.single.arguments as Map;
+        expect(args['name'], 'Claktory recovery key (nixos).txt');
+        expect(args['text'], contains(harness.backend.recoveryKey));
+        expect(find.text('Downloaded'), findsOneWidget);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+
+    testWidgets('on Windows the key never shows, so nor does Download', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        await _open(tester);
+        await tester.tap(find.text('Save the recovery key for nixos'));
+        await settle(tester);
+        expect(find.text('Show recovery key'), findsNothing);
+        expect(find.text('Download'), findsNothing);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
   });
 }

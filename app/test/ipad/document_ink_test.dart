@@ -1,7 +1,7 @@
 // Keeping what's drawn on a PDF on an iPad (ipad/document_host.dart with
-// Gelato's InkLayerSync): every change saved as its page's ink layer, what's
+// InkLayerSync): every change saved as its page's ink layer, what's
 // kept loaded when the PDF opens, and the line under the page saying where
-// the drawing is, in Trish's words, with "Keep both" when another device
+// the drawing is, with "Keep both" when another device
 // saved the page first.
 import 'dart:async';
 
@@ -207,7 +207,7 @@ void main() {
     );
 
     native.ink
-      ..failNextSave = const RequestFailure('Not connected to the backend.')
+      ..failNextSave = const RequestFailure("Can't reach your Claktory right now.")
       ..connected.value = false;
     await native.drew(1, 3);
     await settle(tester);
@@ -310,7 +310,7 @@ void main() {
     final journal = native.journal! as MemoryJournal;
     final name = claktoryName(harness.backend);
     native.ink
-      ..failNextSave = const RequestFailure('Not connected to the backend.')
+      ..failNextSave = const RequestFailure("Can't reach your Claktory right now.")
       ..connected.value = false;
     await native.drew(3, 2);
     await settle(tester);

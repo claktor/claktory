@@ -1,4 +1,4 @@
-//! A conversation on a card (#430). The person answers a card with words
+//! A conversation on a card. The person answers a card with words
 //! (a reply, or a comment on approving or dismissing it); the agent is told
 //! where they answered from and to answer on the card (ask_reply), which
 //! keeps the talk on it (`thread`) and opens it again in Needs you as a new
@@ -212,7 +212,7 @@ fn talk_steps(dir: &std::path::Path, id: &str) -> Vec<(bool, String, Option<u64>
         .collect()
 }
 
-/// #533: words sent on a step leave it waiting, with nothing marked done;
+/// Words sent on a step leave it waiting, with nothing marked done;
 /// the card waits on its agent, which fixes the step or answers, and it
 /// opens again at that step. Can't do this is fixed on the same card too.
 #[tokio::test]
@@ -312,7 +312,7 @@ async fn words_on_a_step_leave_it_waiting_for_the_agent_to_fix_or_answer() {
     assert_eq!(states, [AskStepState::Done, AskStepState::Done, AskStepState::Cant]);
     assert_eq!(talk_steps(&dir, &id).last().cloned(), Some((true, "I'll do it from the server instead.".to_owned(), Some(3))));
     // Over: neither stopped nor opened again a second time, and it was the
-    // agent that stopped it (Abbacchio's NIT 1580).
+    // agent that stopped it.
     let again = call(&mut client, &mut view, "ask_reply", stop).await;
     assert!(again.starts_with(&format!("You closed question {id}: it's over")), "{again}");
     let reopen = serde_json::json!({"id": id, "text": "Try again.", "steps": ["Open Keychain.", "Delete the old key from the sidebar.", "Add it."]});
@@ -399,7 +399,7 @@ async fn approving_after_the_agents_reply_agrees_with_where_the_talk_ended() {
         ..Default::default()
     };
 
-    // Lisa's card 182 (Bruno 35010): the person turns down the paid plan in
+    // The person turns down the paid plan in
     // a reply, and the agent answers with a free one, leaving the card as it was.
     let paid = serde_json::json!({"title": "OK to spend up to $20 on Pangram?", "body": "A paid detector."});
     let id = id_in(&call(&mut client, &mut view, "ask_person", paid).await);
@@ -415,7 +415,7 @@ async fn approving_after_the_agents_reply_agrees_with_where_the_talk_ended() {
 
     // An approval made without seeing the reply is refused; dismissing never is.
     // From the version before the reply too, which the reply replaced: it's
-    // the reply they're told about (row 1268); an app that doesn't count
+    // the reply they're told about; an app that doesn't count
     // the talk is told the card changed.
     assert_eq!(
         answered(&mut client, &mut view, answer(seq, 1, Some(0))).await,
@@ -479,7 +479,7 @@ async fn the_agent_closes_a_card_the_talk_settled_with_its_last_words() {
         ..Default::default()
     };
 
-    // Their reply settles it (Bruno's card 186): the agent closes it with its
+    // Their reply settles it: the agent closes it with its
     // words, and it leaves Needs you instead of waiting again.
     let id = id_in(&call(&mut client, &mut view, "ask_person", serde_json::json!({"title": "Deploy to production?", "body": "Ready."})).await);
     let (seq, _) = card(&view, &id);
@@ -551,7 +551,7 @@ async fn files_go_with_every_answer_on_a_card_and_stay_on_its_talk() {
     let shot = upload(&dir, "error.png", "image/png");
     let log = upload(&dir, "build.log", "text/plain");
 
-    // A reply needs words or a file; a file alone will do (#511).
+    // A reply needs words or a file; a file alone will do.
     let id = id_in(&call(&mut client, &mut view, "ask_person", serde_json::json!({"title": "Why does the build fail?", "body": "B"})).await);
     let (seq, _) = card(&view, &id);
     let reply = |attachments: Vec<v1::Attachment>, revision: u32| v1::AnswerAsk {
@@ -632,7 +632,7 @@ async fn files_go_with_every_answer_on_a_card_and_stay_on_its_talk() {
     assert_eq!((open.thread[0].attachments.len(), open.steps[0].comment_attachments.len()), (1, 1));
 
     // A written-answer card with a talk: a reply can be files alone, an
-    // answer still needs words (Abbacchio 45289).
+    // answer still needs words.
     let id = id_in(&call(&mut client, &mut view, "ask_person", serde_json::json!({"title": "Which branch?", "body": "B", "wants_text": true})).await);
     let (seq, _) = card(&view, &id);
     let answer = v1::AnswerAsk { agent_id: "builder".into(), seq, text: "The one in this log?".into(), revision: Some(1), ..Default::default() };

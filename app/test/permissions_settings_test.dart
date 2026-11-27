@@ -1,4 +1,4 @@
-// This device's permissions in Settings (Lucy's permissions spec §2.1):
+// This device's permissions in Settings:
 // in its own section, a row per permission it can ask for, each with its
 // state as the system says it now and at most one button; read again when
 // the app comes back to the front.
@@ -124,7 +124,7 @@ void main() {
     await tester.tap(turnOn);
     await pumpFrames(tester);
     // The camera's own sheet, before the system asks, in Settings' words:
-    // scanning codes and taking photos (Trish 49821).
+    // scanning codes and taking photos.
     expect(find.text('Use the camera'), findsOneWidget);
     expect(find.text('Scan the code'), findsNothing);
     await tester.tap(_button('Continue'));

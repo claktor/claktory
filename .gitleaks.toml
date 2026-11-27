@@ -68,6 +68,14 @@ regexTarget = "match"
 regexes = ['''^/Users/matt$''']
 
 [[rules.allowlists]]
+description = "The recovery key's Download as first committed (a0fd4e35): a made-up /Users/matt/Downloads/key.txt as the save panel's answer in app/test/account_test.dart and app/test/recovery_key_test.dart, not this machine's home, nothing real behind it. That commit only: fixed to /Users/me before v0.1.27"
+condition = "AND"
+commits = ["a0fd4e35613f1dc4302dff663660480d667e9708"]
+paths = ['''^app/test/(account|recovery_key)_test\.dart$''']
+regexTarget = "match"
+regexes = ['''^/Users/matt$''']
+
+[[rules.allowlists]]
 description = "9c271e18's commit message names the made-up home its fix replaced (the protocol's example path and the settings shots): that one subject line, exactly"
 regexTarget = "line"
 regexes = ['''Secret scan \(Bruno 52986\): no real person's home folder in examples\. The PreviewProjectFolder example path and two ProtectedPlace roots in settings_shots_test say /Users/me, not /Users/matt; factory\.pb\.dart regenerated''']

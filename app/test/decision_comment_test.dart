@@ -1,6 +1,6 @@
-// A card's field (Lucy's Needs you cards, rule 4): open from the start,
+// A card's field: open from the start,
 // "Reply to June", never taking the focus by itself; Return sends only
-// where words alone answer (rule 6).
+// where words alone answer.
 import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/decision.dart';
 import 'package:factory_app/dictation.dart';

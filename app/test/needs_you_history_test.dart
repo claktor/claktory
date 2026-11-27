@@ -206,20 +206,21 @@ void main() {
     await _openHistory(tester, [
       _record('june', 'Order the banners?'),
       _record(
-        'omar',
-        'Run this command on Matt’s Mac',
-        kind: NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_COMMAND,
-        outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_APPROVED,
-        ago: const Duration(days: 1),
-      )..command = AskCommand(
-        command: 'npm test\nnpm run lint',
-        machine: 'Matt’s Mac',
-        run: CommandRun(
-          state: CommandRunState.COMMAND_RUN_STATE_EXITED,
-          exitCode: 1,
-          durationMs: Int64(3400),
+          'omar',
+          'Run this command on Matt’s Mac',
+          kind: NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_COMMAND,
+          outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_APPROVED,
+          ago: const Duration(days: 1),
+        )
+        ..command = AskCommand(
+          command: 'npm test\nnpm run lint',
+          machine: 'Matt’s Mac',
+          run: CommandRun(
+            state: CommandRunState.COMMAND_RUN_STATE_EXITED,
+            exitCode: 1,
+            durationMs: Int64(3400),
+          ),
         ),
-      ),
     ]);
     expect(find.text('Approved', findRichText: true), findsOneWidget);
     expect(find.textContaining('npm test'), findsOneWidget);
@@ -228,6 +229,80 @@ void main() {
       find.textContaining('Ran · Exited with code 1', findRichText: true),
       findsOneWidget,
     );
+  });
+
+  // Abbacchio's row 1645 (Ghiaccio's d43343d6d): an errand's cards in
+  // History read as their cards ended, under Claktory's heading, never
+  // "Answered" or the page's words.
+  testWidgets("an errand's cards read as their cards ended", (tester) async {
+    final day = const Duration(days: 1);
+    await _openHistory(tester, [
+      _record('june', 'Your turn: a payment')
+        ..handoff = ErrandHandoff(
+          kind: ErrandHandoffKind.ERRAND_HANDOFF_KIND_PAYMENT,
+          origin: 'https://shop.example',
+          title: 'Backup codes',
+        ),
+      _record('june', 'A code', ago: day)
+        ..handoff = ErrandHandoff(
+          kind: ErrandHandoffKind.ERRAND_HANDOFF_KIND_CODE,
+          origin: 'https://bank.example',
+        ),
+      _record('june', 'Your turn on forms.example', ago: day * 2)
+        ..handoff = ErrandHandoff(
+          kind: ErrandHandoffKind.ERRAND_HANDOFF_KIND_OTHER,
+          origin: 'https://forms.example',
+          title: 'Backup codes',
+        )
+        ..actionError = "It wasn't filled in: the page changed.",
+      _record('june', 'shown.test recovery codes', ago: day * 3)
+        ..handoff = ErrandHandoff(
+          kind: ErrandHandoffKind.ERRAND_HANDOFF_KIND_RECOVERY_CODES,
+          origin: 'https://shown.test',
+          title: 'Backup codes',
+        )
+        ..codesKeptAs = 'shown.test recovery codes',
+      _record(
+          'june',
+          'Your turn: sign in',
+          outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_DISMISSED,
+          ago: day * 4,
+        )
+        ..handoff = ErrandHandoff(
+          kind: ErrandHandoffKind.ERRAND_HANDOFF_KIND_SIGN_IN,
+          origin: 'https://login.example',
+          title: 'Backup codes',
+        ),
+    ]);
+    expect(find.text('Asks you to pay on shop.example'), findsOneWidget);
+    // The cards' headings, never the pages' titles.
+    expect(find.text('Your turn on forms.example'), findsOneWidget);
+    expect(find.text('shown.test recovery codes'), findsOneWidget);
+    expect(find.text('Your turn: sign in'), findsOneWidget);
+    expect(find.text('Backup codes'), findsNothing);
+    // The payment, and the step whose action couldn't be carried out.
+    Finder outcome(String words) => find.byWidgetPredicate(
+      (widget) => widget is RichText && widget.text.toPlainText() == words,
+    );
+    expect(outcome('Paid on shop.example'), findsOneWidget);
+    // With the Needs you tab's own Done.
+    expect(outcome('Done'), findsNWidgets(2));
+    expect(find.text('bank.example asks for a code'), findsOneWidget);
+    expect(
+      find.text('Filled in on bank.example', findRichText: true),
+      findsOneWidget,
+    );
+    expect(find.text("It wasn't filled in: the page changed."), findsOneWidget);
+    expect(
+      find.text(
+        'Kept in Secrets as shown.test recovery codes',
+        findRichText: true,
+      ),
+      findsOneWidget,
+    );
+    expect(find.text("Couldn't do this", findRichText: true), findsOneWidget);
+    expect(find.text('Answered', findRichText: true), findsNothing);
+    expect(find.text('Approved', findRichText: true), findsNothing);
   });
 
   testWidgets("a search finds the agent you talked to about emails", (
@@ -302,13 +377,13 @@ void main() {
     final harness = await _openHistory(tester, []);
     expect(find.text('Nothing in the last 30 days.'), findsOneWidget);
 
-    harness.backend.refuseHistory = 'Not connected to the backend.';
+    harness.backend.refuseHistory = "Can't reach your Claktory right now.";
     await tester.tap(find.text('Waiting'));
     await settle(tester);
     await tester.tap(find.text('History'));
     await settle(tester);
     await settle(tester);
-    expect(find.text('Not connected to the backend.'), findsOneWidget);
+    expect(find.text("Can't reach your Claktory right now."), findsOneWidget);
     harness.backend.refuseHistory = null;
     harness.backend.needsYouHistory = [_record('june', 'Back again?')];
     await tester.tap(find.text('Try again'));

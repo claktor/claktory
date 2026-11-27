@@ -127,8 +127,8 @@ class _App {
     addTearDown(tester.view.reset);
     addTearDown(roots.dispose);
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
-    // This is main's placement, not a replacement set of screens. Polnareff
-    // wires the same root above the real window Overlay in main.dart.
+    // This is main's placement, not a replacement set of screens: main.dart
+    // wires the same root above the real window Overlay.
     final entry = OverlayEntry(
       builder: (context) {
         final selected = ClaktoriesScope.of(context)!.selected;

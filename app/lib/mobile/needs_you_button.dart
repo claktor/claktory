@@ -12,7 +12,7 @@ import 'platform_policy.dart';
 /// conversation's header beside "…": the drawer's Needs you glyph with
 /// their count on its corner, a 44pt button that opens them in a sheet
 /// ([onOpen]). Where a Mac floats its chip over the conversation's top
-/// right, a phone keeps the conversation clear (#321). Nothing while
+/// right, a phone keeps the conversation clear. Nothing while
 /// nothing needs the person.
 class PhoneNeedsYouButton extends StatelessWidget {
   const PhoneNeedsYouButton({super.key, required this.onOpen});

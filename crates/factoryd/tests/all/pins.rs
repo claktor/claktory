@@ -1,4 +1,4 @@
-//! Pinned agents (Lucy's ux/pinned-agents.md; Bruno 46945): an ordered
+//! Pinned agents: an ordered
 //! list in config.json, shown in Settings, set with PinAgent and
 //! UnpinAgent, and pruned of agents that can't be pinned.
 

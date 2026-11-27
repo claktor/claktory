@@ -165,7 +165,7 @@
   // Recovery codes a site shows once (#435 W8b, Fugo 40691): a block whose
   // words are mostly code-shaped (4 or more), on a page about recovery or
   // backup codes, is withheld whole: no text of it is read, and it's offered
-  // only as a ref, for errand_handoff kind recovery_codes, which Claktory
+  // only as a ref, for browser_handoff kind recovery_codes, which Claktory
   // reads itself. An authenticator's setup key (Fugo 42966) is withheld the
   // same way, and never offered: an otpauth:// address anywhere, or a
   // base32 run of 16 characters or more on a page about a setup key. Both
@@ -174,7 +174,7 @@
   // off-limits and not offered.
   const CODE_WORD = /^(?=\S*\d)[A-Za-z0-9]{3,12}(?:-[A-Za-z0-9]{3,12})?$/;
   const CODES_ABOUT = /recovery|backup|codes\b/i;
-  const CODES_WHY = "recovery codes: the person's (errand_handoff, kind recovery_codes)";
+  const CODES_WHY = "recovery codes: the person's (browser_handoff, kind recovery_codes)";
   // A base32 key: 16 characters or more, one case, in groups (spaces or
   // hyphens between them allowed), standing alone. Anywhere, with at least
   // two of the digits 2-7, as no word has. On a page about a setup key
@@ -451,7 +451,7 @@
   function coveredBy(top) {
     if (!errand() || !top) return 'covered';
     const over = overlayOf(top, overlays());
-    if (over) return 'covered by a ' + over.kind + ': clear it with errand_act op dismiss, then read the page again';
+    if (over) return 'covered by a ' + over.kind + ': clear it with browser_act op dismiss, then read the page again';
     if (top.tagName === 'IFRAME' || top.tagName === 'FRAME') return 'covered by a frame: read the page again to see it';
     return 'covered by something else on the page: read it again';
   }
@@ -711,7 +711,7 @@
       if (errand() && choice(el) === 'accept') {
         const over = overlayOf(el, overlays());
         if (over && over.kind === 'cookie notice' && pressables(over.root).some((b) => ['private', 'settings'].includes(choice(b)))) {
-          return {error: 'sensitive_action', why: 'a cookie notice with a more private choice: clear it with errand_act op dismiss, which picks it'};
+          return {error: 'sensitive_action', why: 'a cookie notice with a more private choice: clear it with browser_act op dismiss, which picks it'};
         }
       }
     } else {

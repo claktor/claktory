@@ -1,24 +1,44 @@
-// Position B on Windows (windows.md section 1; Fugo 51697, 51723): every
+// Position B on Windows: every
 // surface that would show, take or approve a code to let something into a
 // Claktory shows none on Windows, and says where it's done instead. Each is
 // pumped as Windows, and the same surface as a Mac shows what Windows
 // mustn't, so the check can't pass by finding nothing anywhere.
 import 'package:factory_app/account.dart' show AccountSettings;
 import 'package:factory_app/approve_elsewhere.dart';
+import 'package:factory_app/ask_card.dart' show AskPersonCard;
 import 'package:factory_app/claktory_problem.dart';
 import 'package:factory_app/connect_step.dart' show ConnectStep;
-import 'package:factory_app/controls.dart' show Button;
+import 'package:factory_app/connection.dart' show Connection;
+import 'package:factory_app/connections.dart' show thisMacName;
+import 'package:factory_app/controls.dart' show Button, Toggle;
+import 'package:factory_app/errands/browser_agent.dart' show browserExtension;
+import 'package:factory_app/forms.dart' show AgentSettingsForm;
 import 'package:factory_app/devices.dart';
 import 'package:factory_app/links.dart';
 import 'package:factory_app/move.dart';
 import 'package:factory_app/pairing.dart';
 import 'package:factory_app/pairing_card.dart';
 import 'package:factory_app/people/people_view.dart' show peopleAvailable;
+import 'package:factory_app/pipe_reports.dart'
+    show ForwardReportsField, StopReadingReportsField;
+import 'package:factory_app/pipe_shares.dart'
+    show PipeSharesField, ReceivedShare;
 import 'package:factory_app/pipe_start.dart';
+import 'package:factory_app/pipe_timeline.dart' show PipeTargetChooser;
 import 'package:factory_app/pipes.dart'
-    show ConnectPipeForm, PipeApprovalCard, PipeIdentityNotice, PipeMessageView;
+    show
+        ConnectPipeForm,
+        PipeApprovalCard,
+        PipeIdentityNotice,
+        PipeLoopCard,
+        PipeMessageView,
+        PipeSettingsForm,
+        PipeSpendNotice,
+        PipeView;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart' hide MovePhase;
 import 'package:factory_app/recovery_key.dart';
+import 'package:factory_app/scope.dart' show AppPage;
+import 'package:factory_app/report_types.dart' show ReportTypesSettings;
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
@@ -33,6 +53,8 @@ final _now = DateTime.now().millisecondsSinceEpoch;
 Workspace _workspace({
   List<Pipe> pipes = const [],
   List<PendingDevice> pending = const [],
+  List<Agent> agents = const [],
+  List<PipeShare> shares = const [],
 }) => Workspace(
   projects: [Project(id: 'p2', name: 'Website', path: '/Users/me/site')],
   agents: [
@@ -42,8 +64,10 @@ Workspace _workspace({
       modelAvailable: true,
       status: AgentStatus.AGENT_STATUS_IDLE,
     ),
+    ...agents,
   ],
   pipes: pipes,
+  pipeShares: shares,
   remote: RemoteAccess(pendingDevices: pending),
   extensions: [Extension(id: 'dm')],
   selectedAgentId: 'a1',
@@ -83,6 +107,45 @@ Future<Harness> _pump(
   await harness.show(tester, home: home);
   await pumpFrames(tester);
   return harness;
+}
+
+Pipe _pipe(
+  PipeState state, {
+  PipePause paused = PipePause.PIPE_PAUSE_UNSPECIFIED,
+  String leadId = '',
+}) => Pipe(
+  id: 'pp',
+  name: 'Acme',
+  projectId: 'p2',
+  state: state,
+  paused: paused,
+  leadId: leadId,
+  online: true,
+  memberIds: const ['a1'],
+);
+
+/// No message the backend keeps to the person went (authority::class's
+/// Person).
+void _nothingPersonOnly(Harness harness) {
+  for (final message in harness.backend.sent) {
+    expect(
+      message.hasSetPipeState() ||
+          message.hasUpdatePipe() ||
+          message.hasSetSpendCap() ||
+          message.hasSendPipeMessage() ||
+          message.hasAddPipeLiaison() ||
+          message.hasSetPipeForward() ||
+          message.hasSharePipeWebsite() ||
+          message.hasOpenPipeShare() ||
+          message.hasSetAgentContained() ||
+          (message.updateAgent.extension_8.id == browserExtension &&
+              message.updateAgent.extension_8.enabled) ||
+          message.hasShowRecoveryCodes() ||
+          message.hasKeepRecoveryCodes(),
+      isFalse,
+      reason: '$message',
+    );
+  }
 }
 
 /// Every button's label showing.
@@ -138,6 +201,31 @@ void main() {
     }
     debugDefaultTargetPlatformOverride = null;
   });
+
+  test("the footer says this PC on Windows, this Mac elsewhere", () {
+    final harness = Harness(Workspace());
+    harness.backend.connectedSince.value = DateTime(2026, 11, 20, 14, 2);
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    expect(Connection(harness.backend).line, 'Running on this PC');
+    expect(
+      Connection(harness.backend).details,
+      startsWith('Claktory is running on this PC.'),
+    );
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    expect(Connection(harness.backend).line, 'Running on this Mac');
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  test(
+    "this computer's own Claktory is This PC on Windows until it's named",
+    () {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      expect(thisMacName, 'This PC');
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      expect(thisMacName, 'This Mac');
+      debugDefaultTargetPlatformOverride = null;
+    },
+  );
 
   _windows("an agent's device card: no code fetched, shown or copied, and "
       'no number or Allow', (tester) async {
@@ -445,6 +533,8 @@ void main() {
     );
     expect(_buttons(tester), isNot(contains('Switch account…')));
     expect(_buttons(tester), isNot(contains('Sign out…')));
+    // Nor another account service (SetAccountService).
+    expect(_buttons(tester), isNot(contains('Change…')));
     expect(_buttons(tester), isNot(contains('Show recovery key…')));
     // Removed at the account: not signed in again from here.
     await settings(
@@ -481,5 +571,404 @@ void main() {
     expect(peopleAvailable(_workspace()), isFalse);
     debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
     expect(peopleAvailable(_workspace()), isTrue);
+  });
+
+  _windows('an open pipe takes no message from the person here, and a paused '
+      'or closed one is neither resumed nor deleted', (tester) async {
+    final open = _pipe(PipeState.PIPE_STATE_OPEN);
+    // On a Mac: the composer Windows mustn't have.
+    await _pump(
+      tester,
+      TargetPlatform.macOS,
+      PipeView(pipe: open),
+      workspace: _workspace(pipes: [open]),
+    );
+    expect(find.byType(EditableText), findsOneWidget);
+
+    var harness = await _pump(
+      tester,
+      TargetPlatform.windows,
+      PipeView(pipe: open),
+      workspace: _workspace(pipes: [open]),
+    );
+    expect(find.byType(EditableText), findsNothing);
+    expect(find.text(pipeChangeElsewhereText), findsOneWidget);
+
+    for (final (pipe, label) in [
+      (
+        _pipe(PipeState.PIPE_STATE_PAUSED, paused: PipePause.PIPE_PAUSE_BY_ME),
+        'Resume',
+      ),
+      (
+        _pipe(PipeState.PIPE_STATE_PAUSED, paused: PipePause.PIPE_PAUSE_LOOP),
+        'Continue',
+      ),
+      (_pipe(PipeState.PIPE_STATE_CLOSED), 'Delete…'),
+    ]) {
+      await _pump(
+        tester,
+        TargetPlatform.macOS,
+        PipeView(pipe: pipe),
+        workspace: _workspace(pipes: [pipe]),
+      );
+      expect(_buttons(tester), contains(label), reason: 'Mac: $label');
+      harness = await _pump(
+        tester,
+        TargetPlatform.windows,
+        PipeView(pipe: pipe),
+        workspace: _workspace(pipes: [pipe]),
+      );
+      expect(_buttons(tester), isNot(contains(label)), reason: label);
+      expect(find.text(pipeChangeElsewhereText), findsOneWidget);
+    }
+
+    final loop = _pipe(
+      PipeState.PIPE_STATE_PAUSED,
+      paused: PipePause.PIPE_PAUSE_LOOP,
+    );
+    harness = await _pump(
+      tester,
+      TargetPlatform.windows,
+      PipeLoopCard(pipe: loop),
+      workspace: _workspace(pipes: [loop]),
+    );
+    expect(_buttons(tester), isNot(contains('Continue')));
+    expect(find.text(pipeChangeElsewhereText), findsOneWidget);
+    _nothingPersonOnly(harness);
+  });
+
+  _windows("a pipe with a liaison: the box writes only to it", (tester) async {
+    final open = _pipe(PipeState.PIPE_STATE_OPEN, leadId: 'kai');
+    final liaison = Agent(
+      id: 'kai',
+      name: 'Kai',
+      role: 'Liaison',
+      projectId: 'p2',
+      pipeId: 'pp',
+      modelAvailable: true,
+      status: AgentStatus.AGENT_STATUS_IDLE,
+    );
+    await _pump(
+      tester,
+      TargetPlatform.macOS,
+      PipeView(pipe: open),
+      workspace: _workspace(pipes: [open], agents: [liaison]),
+    );
+    expect(find.byType(PipeTargetChooser), findsOneWidget);
+
+    final harness = await _pump(
+      tester,
+      TargetPlatform.windows,
+      PipeView(pipe: open),
+      workspace: _workspace(pipes: [open], agents: [liaison]),
+    );
+    expect(find.byType(PipeTargetChooser), findsNothing);
+    expect(find.text(pipeChangeElsewhereText), findsOneWidget);
+    _nothingPersonOnly(harness);
+  });
+
+  _windows("a pipe's settings show as they are, and change nothing", (
+    tester,
+  ) async {
+    final open = _pipe(PipeState.PIPE_STATE_OPEN);
+    await _pump(
+      tester,
+      TargetPlatform.macOS,
+      PipeSettingsForm(pipeId: 'pp', close: () {}),
+      workspace: _workspace(pipes: [open]),
+    );
+    for (final label in ['Save', 'Close pipe…', 'Pause pipe']) {
+      expect(_buttons(tester), contains(label), reason: 'Mac: $label');
+    }
+
+    var closed = 0;
+    final harness = await _pump(
+      tester,
+      TargetPlatform.windows,
+      PipeSettingsForm(pipeId: 'pp', close: () => closed++),
+      workspace: _workspace(pipes: [open]),
+    );
+    for (final label in [
+      'Save',
+      'Close pipe…',
+      'Pause pipe',
+      'Add a liaison agent…',
+      'Share a website…',
+    ]) {
+      expect(_buttons(tester), isNot(contains(label)), reason: label);
+    }
+    expect(find.text(pipeChangeElsewhereText), findsOneWidget);
+    // Its name shows, and can't be typed into.
+    expect(find.text('Acme'), findsWidgets);
+    await tester.tap(find.byType(EditableText).first, warnIfMissed: false);
+    await tester.pump();
+    expect(
+      tester.testTextInput.isVisible || tester.testTextInput.hasAnyClients,
+      isFalse,
+    );
+    await tester.tap(find.widgetWithText(Button, 'Done'));
+    await tester.pump();
+    expect(closed, 1);
+    _nothingPersonOnly(harness);
+  });
+
+  _windows("a pipe's lead over its spending limit: no Raise limit here", (
+    tester,
+  ) async {
+    final open = _pipe(PipeState.PIPE_STATE_OPEN, leadId: 'kai');
+    final lead = Agent(
+      id: 'kai',
+      name: 'Kai',
+      projectId: 'p2',
+      modelAvailable: true,
+      status: AgentStatus.AGENT_STATUS_IDLE,
+      spend: ContainedSpend(capUsd: 10, spentUsd: 11, over: true),
+    );
+    await _pump(
+      tester,
+      TargetPlatform.macOS,
+      PipeSpendNotice(pipe: open),
+      workspace: _workspace(pipes: [open], agents: [lead]),
+    );
+    expect(_buttons(tester), contains('Raise limit'));
+    final harness = await _pump(
+      tester,
+      TargetPlatform.windows,
+      PipeSpendNotice(pipe: open),
+      workspace: _workspace(pipes: [open], agents: [lead]),
+    );
+    expect(_buttons(tester), isNot(contains('Raise limit')));
+    expect(find.byType(EditableText), findsNothing);
+    expect(find.text(pipeChangeElsewhereText), findsOneWidget);
+    _nothingPersonOnly(harness);
+  });
+
+  _windows("reports: where they go is shown, never changed; no report types "
+      'made, and no reader unmade', (tester) async {
+    final open = _pipe(PipeState.PIPE_STATE_OPEN);
+    final reader = Agent(
+      id: 'ingrid',
+      name: 'Ingrid',
+      projectId: 'p2',
+      readsReports: true,
+      modelAvailable: true,
+      status: AgentStatus.AGENT_STATUS_IDLE,
+    );
+    final forwarding = open.deepCopy()
+      ..forward = PipeForward(recipientId: 'ingrid');
+    final workspace = _workspace(pipes: [forwarding], agents: [reader]);
+    final harness = await _pump(
+      tester,
+      TargetPlatform.windows,
+      ForwardReportsField(pipe: forwarding),
+      workspace: workspace,
+    );
+    expect(find.text('Ingrid'), findsOneWidget);
+    expect(find.text('Another agent…'), findsNothing);
+    expect(find.text(reportsElsewhereText), findsOneWidget);
+
+    await _pump(
+      tester,
+      TargetPlatform.windows,
+      StopReadingReportsField(agent: reader),
+      workspace: workspace,
+    );
+    expect(_buttons(tester), isNot(contains('Stop reading reports…')));
+    expect(find.text(reportsElsewhereText), findsOneWidget);
+
+    await _pump(
+      tester,
+      TargetPlatform.macOS,
+      const SingleChildScrollView(child: ReportTypesSettings()),
+    );
+    expect(_buttons(tester), contains('New report type…'));
+    await _pump(
+      tester,
+      TargetPlatform.windows,
+      const SingleChildScrollView(child: ReportTypesSettings()),
+    );
+    expect(_buttons(tester), isNot(contains('New report type…')));
+    expect(find.text(reportTypesElsewhereText), findsOneWidget);
+    _nothingPersonOnly(harness);
+  });
+
+  _windows('websites through pipes: none shared or stopped from here, and '
+      "the other side's open elsewhere", (tester) async {
+    final open = _pipe(PipeState.PIPE_STATE_OPEN);
+    final mine = PipeShare(
+      id: 's1',
+      name: 'Dashboard',
+      port: 3000,
+      mine: true,
+      live: true,
+      pipeIds: const ['pp'],
+    );
+    final theirs = PipeShare(
+      id: 's2',
+      name: 'Staging',
+      live: true,
+      pipeIds: const ['pp'],
+      address: 'http://staging.localhost:7421',
+    );
+    final workspace = _workspace(pipes: [open], shares: [mine, theirs]);
+    await _pump(
+      tester,
+      TargetPlatform.macOS,
+      PipeSharesField(pipe: open),
+      workspace: workspace,
+    );
+    for (final label in ['Share a website…', 'Stop', 'Change end…']) {
+      expect(_buttons(tester), contains(label), reason: 'Mac: $label');
+    }
+    final harness = await _pump(
+      tester,
+      TargetPlatform.windows,
+      PipeSharesField(pipe: open),
+      workspace: workspace,
+    );
+    for (final label in ['Share a website…', 'Stop', 'Change end…']) {
+      expect(_buttons(tester), isNot(contains(label)), reason: label);
+    }
+
+    await _pump(
+      tester,
+      TargetPlatform.windows,
+      ReceivedShare(pipe: open, share: theirs),
+      workspace: workspace,
+    );
+    expect(_buttons(tester), isNot(contains('Open')));
+    expect(_buttons(tester), isNot(contains('Copy address')));
+    expect(find.text(openShareElsewhereText), findsOneWidget);
+    _nothingPersonOnly(harness);
+  });
+
+  _windows('an agent is given the browser only elsewhere, and it can be '
+      'taken away here', (tester) async {
+    Agent june({required bool browser}) => Agent(
+      id: 'june',
+      name: 'June',
+      projectId: 'p2',
+      modelAvailable: true,
+      status: AgentStatus.AGENT_STATUS_IDLE,
+      extensions: [AgentExtension(id: browserExtension, enabled: browser)],
+    );
+    Workspace workspace({required bool browser}) =>
+        _workspace(agents: [june(browser: browser)])
+          ..extensions.add(Extension(id: browserExtension, name: 'Browser'));
+    Future<Harness> open(TargetPlatform platform, {required bool browser}) =>
+        _pump(
+          tester,
+          platform,
+          AgentSettingsForm(
+            agent: june(browser: browser),
+            close: () {},
+            showExtensions: true,
+          ),
+          workspace: workspace(browser: browser),
+        );
+    Finder toggle() => find.descendant(
+      of: find.ancestor(
+        of: find.text('Browser'),
+        matching: find.byWidgetPredicate(
+          (widget) => widget.runtimeType.toString() == '_ExtensionSettings',
+        ),
+      ),
+      matching: find.byType(Toggle),
+    );
+
+    await open(TargetPlatform.macOS, browser: false);
+    expect(find.text(browserElsewhereText('June')), findsNothing);
+    expect(tester.widget<Toggle>(toggle()).onChanged, isNotNull);
+
+    var harness = await open(TargetPlatform.windows, browser: false);
+    expect(find.text(browserElsewhereText('June')), findsOneWidget);
+    expect(tester.widget<Toggle>(toggle()).onChanged, isNull);
+    _nothingPersonOnly(harness);
+
+    harness = await open(TargetPlatform.windows, browser: true);
+    expect(find.text(browserElsewhereText('June')), findsNothing);
+    await tester.ensureVisible(toggle());
+    await tester.tap(toggle());
+    await pumpFrames(tester);
+    await tester.tap(find.widgetWithText(Button, 'Save'));
+    await pumpFrames(tester);
+    await tester.tap(find.text('Turn off').last);
+    await pumpFrames(tester);
+    final off = harness.backend.sent.lastWhere((m) => m.hasUpdateAgent());
+    expect(off.updateAgent.extension_8.enabled, isFalse);
+    _nothingPersonOnly(harness);
+  });
+
+  _windows("an errand's recovery codes are never asked for or kept here", (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    final harness = Harness(
+      _workspace()..agents.first.waitingSeqs.add(Int64(4)),
+    );
+    harness.backend.recoveryCodes = ['a8f2-91kd'];
+    harness.backend.transcript.load(
+      Transcript(
+        agentId: 'a1',
+        entries: [
+          Entry(
+            seq: Int64(4),
+            timestampMs: Int64(1004),
+            askPerson: AskPerson(
+              id: 'ask4',
+              title: 'github.com recovery codes',
+              body:
+                  'Claktory keeps them, sealed in its vault, until you '
+                  'choose.',
+              state: AskPersonState.ASK_PERSON_STATE_PENDING,
+              revision: 1,
+              handoff: ErrandHandoff(
+                errandId: 'e1',
+                kind: ErrandHandoffKind.ERRAND_HANDOFF_KIND_RECOVERY_CODES,
+                origin: 'https://github.com',
+                seq: Int64(4),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    await harness.show(tester, size: const Size(1200, 900));
+    await settle(tester);
+    await settle(tester);
+    expect(find.byType(AskPersonCard), findsOneWidget);
+    expect(find.text('a8f2-91kd'), findsNothing);
+    for (final label in ['Keep in Secrets', 'I saved them', 'Copy', 'Show']) {
+      expect(_buttons(tester), isNot(contains(label)), reason: label);
+    }
+    expect(find.text(recoveryCodesElsewhereText), findsOneWidget);
+    _nothingPersonOnly(harness);
+  });
+
+  _windows("Needs you's recovery key row says where it's saved", (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    final harness = Harness(
+      Workspace(
+        settings: Settings(name: 'nixos'),
+        vault: VaultState(
+          exists: true,
+          unlocked: true,
+          recoveryKeyUnconfirmed: true,
+        ),
+      ),
+    );
+    await harness.show(tester, size: const Size(1200, 900));
+    await settle(tester);
+    harness.page.value = AppPage.inbox;
+    await settle(tester);
+    await settle(tester);
+    expect(find.text('Save the recovery key for nixos'), findsOneWidget);
+    expect(
+      find.textContaining('To save it, use your phone, tablet or Mac.'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('password manager'), findsNothing);
   });
 }

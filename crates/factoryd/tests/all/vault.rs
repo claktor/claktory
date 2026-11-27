@@ -165,9 +165,7 @@ async fn a_key_the_person_holds_can_open_the_vault_after_a_restart() {
         let (mut client, _, _) = Client::connect(addr).await;
         id = add(&mut client, "AWS", "AWS_SECRET_ACCESS_KEY", TOKEN).await;
         assert_eq!(
-            std::fs::metadata(dir.join("home/vault/auto.key"))
-                .map(|meta| std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777)
-                .ok(),
+            dir.join("home/vault/auto.key").exists().then(|| crate::common::mode(&dir.join("home/vault/auto.key"))),
             Some(0o600)
         );
         // With only the key on disk, locked mode would lock it for good.

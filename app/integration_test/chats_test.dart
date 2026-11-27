@@ -1,4 +1,4 @@
-// Chats (#213) from the Mac app against a real Claktory (the dev one): the
+// Chats from the Mac app against a real Claktory (the dev one): the
 // sidebar's New chat opens an empty chat, a question sent in it gets a
 // reply and a title, Rename names it, and Delete (asked first) removes it.
 // The dev Claktory needs a model that can run. Screenshots go to SHOTS_DIR

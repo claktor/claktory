@@ -147,16 +147,17 @@ void main() {
       ]),
     );
 
-    // A collapsed agent speaks for those under it, a folded folder for its
-    // agents.
+    // A collapsed agent speaks for those under it. A folder folds nothing
+    // away any more: its agents show, with their own (§3).
     expect(
       _labeled('Lead has something waiting for your answer'),
       findsOneWidget,
     );
     expect(
-      _labeled('Docs has 2 things waiting for your answer'),
+      _labeled('Writer has 2 things waiting for your answer'),
       findsOneWidget,
     );
+    expect(_labeled('Docs has 2 things waiting for your answer'), findsNothing);
   });
 
   testWidgets('in a focused project, All projects shows what waits in the '

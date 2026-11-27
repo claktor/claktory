@@ -1,8 +1,10 @@
 import 'package:factory_app/mobile/drawer.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/sidebar.dart' show Sidebar;
 import 'package:factory_app/usage.dart';
 import 'package:factory_app/usage_resets.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -230,6 +232,75 @@ void main() {
     await tester.tapAt(const Offset(200, 300));
     await settle(tester);
     expect(find.text('Usage resets'), findsNothing);
+  });
+
+  testWidgets('at the largest text on a small phone, the card stays on the '
+      'screen, each reset under its limit, and scrolls to its end', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.platformDispatcher.textScaleFactorTestValue = 3.1;
+    final was = FlutterError.onError;
+    FlutterError.onError = (d) {
+      debugPrint('DBG ${d.toString()}');
+      was!(d);
+    };
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    final claude = _claude(96, [_fiveHour()]);
+    claude.accounts.single.usage.extraUsage = ExtraUsage(
+      enabled: true,
+      usedMinor: Int64(1250),
+      limitMinor: Int64(5000),
+      currency: 'USD',
+      decimalPlaces: 2,
+    );
+    final harness = Harness(focusedOn('')..providers.add(claude));
+    await harness.show(tester, size: const Size(375, 667));
+    await settle(tester);
+    tester
+        .state<PhoneDrawerHostState>(find.byType(PhoneDrawerHost))
+        .openDrawer();
+    await pumpFrames(tester);
+    final usage = find.byWidgetPredicate(
+      (widget) =>
+          widget is Semantics &&
+          widget.properties.label == 'Anthropic usage, matt@example.com',
+    );
+    await tester.scrollUntilVisible(
+      usage,
+      300,
+      scrollable: find
+          .descendant(
+            of: find.byType(Sidebar),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    await pumpFrames(tester);
+    await tester.longPress(usage.first);
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(tester.takeException(), isNull);
+
+    final card = find.ancestor(
+      of: find.text('matt@example.com').last,
+      matching: find.byType(SingleChildScrollView),
+    );
+    final screen = Offset.zero & const Size(375, 667);
+    final weekly = tester.getRect(find.text('Weekly').last);
+    final reset = tester.getRect(find.textContaining('resets in 2 days').last);
+    expect(screen.contains(tester.getRect(card).topLeft), isTrue);
+    expect(screen.contains(tester.getRect(card).bottomRight), isTrue);
+    expect(reset.top, greaterThanOrEqualTo(weekly.bottom));
+    expect(reset.right, lessThanOrEqualTo(tester.getRect(card).right));
+
+    final extra = find.text('Extra usage on · used \$12.50 of \$50 this month');
+    await tester.dragUntilVisible(extra, card, const Offset(0, -200));
+    expect(
+      tester.getRect(extra).bottom,
+      lessThanOrEqualTo(tester.getRect(card).bottom),
+    );
+    expect(tester.takeException(), isNull);
   });
 
   test('counts and expiry read plainly', () {

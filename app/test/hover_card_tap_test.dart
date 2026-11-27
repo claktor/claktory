@@ -1,5 +1,5 @@
-// A hover card a finger can open (HoverCard.tapToShow; Lucy's agent view
-// §3, the context meter on an iPad): a tap shows it, a tap on it again or
+// A hover card a finger can open (HoverCard.tapToShow; the context meter
+// on an iPad): a tap shows it, a tap on it again or
 // anywhere else hides it, and a mouse still opens it by resting on it,
 // its click leaving the card to hover.
 import 'package:factory_app/controls.dart' show HoverCard;

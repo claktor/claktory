@@ -116,6 +116,10 @@ pub struct Config {
     /// only Claktory a review email signs in (#319), so the reviewers'
     /// details are no relay credential. Without it, none does.
     pub review_claktory_key: Option<String>,
+    /// A service for the store reviewers alone (`--review-only`): every
+    /// email but a review account's is refused at sign-in, so it's no
+    /// account service anyone can use, and it sends no email.
+    pub review_only: bool,
 }
 
 impl Default for Config {
@@ -134,6 +138,7 @@ impl Default for Config {
             vouched_claktory_emails: Vec::new(),
             review_accounts: Vec::new(),
             review_claktory_key: None,
+            review_only: false,
         }
     }
 }

@@ -1,4 +1,4 @@
-//! Reports (pipes-automation.md §2, H1 and H5's backend): a pipe's liaison
+//! Reports (H1 and H5's backend): a pipe's liaison
 //! forwards finished reports, in a schema's fields, to the agent the person
 //! chose to read them; what the reader reads marks it, what the app reads
 //! marks no one; nothing the liaison sent comes back in a refusal; a change
@@ -148,7 +148,7 @@ async fn a_liaison_forwards_a_report_and_only_its_reader_reads_its_words() {
     assert_eq!(pipes::taint_of_for_test(&factory, "ingrid"), "{}");
 
     // Its words, fenced as untrusted; reading them marks her with nothing
-    // (#346).
+    // .
     let words = call(&mut client, &mut view, "ingrid", "handoff_read", "{}").await;
     assert!(words.contains(&format!("{MARKER}-words")) && words.contains("2. Tap Settings") && words.contains("untrusted"), "{words}");
     assert_eq!(pipes::taint_of_for_test(&factory, "ingrid"), "{}");
@@ -336,13 +336,13 @@ async fn only_an_untainted_admin_agent_forwards_reports_and_never_away_from_cont
 
     // Only the person lets a reader go, and not while reports go to it.
     let said = refused(&mut client, &mut view, Request::SetReportReader(v1::SetReportReader { agent_id: "ingrid".into(), reads: false, fresh: true })).await;
-    // It says where, in the app's words (Abbacchio's row 645, A).
+    // It says where, in the app's words.
     assert_eq!(said, "Ingrid still gets reports from Docs, Website ⇄ Marketing and Site's new pipes. Choose who reads them there first.");
 }
 
 /// A closed pipe forwards nothing, so it doesn't keep its reader from being
 /// let go; and a reader let go with a fresh start isn't told that what it
-/// read is still in its conversation (Abbacchio's row 645, B).
+/// read is still in its conversation.
 #[tokio::test]
 async fn a_closed_pipe_doesnt_hold_its_reader_and_a_fresh_start_says_so() {
     let (_dir, _factory, mut client, mut view, pipe) = setup().await;
@@ -420,7 +420,7 @@ async fn a_reports_files_are_copied_out_of_the_inbox_and_open_only_for_its_reade
     assert!(!lea.contains(MARKER), "{lea}");
 }
 
-/// #471 G6 (Fugo 33607): Rivet asks on cards to send or discard a pipe's
+/// Rivet asks on cards to send or discard a pipe's
 /// waiting reports, bound to those reports and their reader, and to let a
 /// reader go, fresh unless asked, refused while reports still go to it.
 #[tokio::test]

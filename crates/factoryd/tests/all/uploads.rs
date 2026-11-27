@@ -102,7 +102,7 @@ async fn files_upload_in_chunks_resume_after_a_reconnect_and_never_overwrite() {
     assert_eq!(partials(&dir, "ops"), 0, "nothing left half done");
     // It's done: more of it is refused.
     assert!(progress(&mut client, chunk("u1", 0, b"x")).await.is_err());
-    // Its answer lost on a weak connection (#401): started again, it's all
+    // Its answer lost on a weak connection: started again, it's all
     // there, and finishing it again answers as it did, storing nothing twice.
     assert_eq!(progress(&mut client, start("u1", "ops", "../../report.bin", size, "")).await, Ok(size));
     assert_eq!(finished(&mut client, finish("u1", "")).await, Ok(stored.clone()));

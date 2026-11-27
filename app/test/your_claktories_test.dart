@@ -7,12 +7,16 @@ import 'package:factory_app/loopback_forward.dart' show linkLauncher;
 import 'package:factory_app/connections.dart'
     show RemoteFactory, parsePairingCode;
 import 'package:factory_app/devices.dart' show FactoryChooser, thisDeviceKind;
+import 'package:factory_app/drafts.dart' show MemoryDraftStorage;
 import 'package:factory_app/people/e2ee.dart' show e2eeFor;
 import 'package:factory_app/pairing.dart' show DeviceNumberField;
 import 'package:factory_app/phone.dart' show PairScreen;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/rail.dart'
+    show Claktories, ClaktoriesScope, DeviceDrafts;
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/sidebar.dart' show Sidebar;
+import 'package:factory_app/visible_codes.dart' show nameInText;
 import 'package:factory_app/your_claktories.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
@@ -25,6 +29,9 @@ import 'harness.dart';
 import 'pair_start.dart';
 
 Future<bool> launchUrlForTests(Uri url) async => true;
+
+/// A name that reorders the words around it and isn't all ASCII.
+const _oddName = 'Ana’s \u202EMac\u202C שלום';
 
 void main() {
   _addClaktoryTests();
@@ -217,7 +224,8 @@ void main() {
     harness.connections
       ..use(
         RemoteFactory.fromAccount(
-          AccountClaktory(id: 'n', name: 'nixos', endpointId: 'c' * 64),
+          // Its name as the account keeps it, whoever chose it.
+          AccountClaktory(id: 'n', name: 'nix\u202Eos', endpointId: 'c' * 64),
         ),
       )
       // One paired with a code lets this device in signed out too.
@@ -236,8 +244,8 @@ void main() {
     expect(find.text('Sign out of your Claktory account?'), findsOneWidget);
     expect(
       find.text(
-        'nixos stops connecting on this $thisDeviceKind until you sign in '
-        'again.',
+        '${nameInText('nix\u202Eos')} stops connecting on this '
+        '$thisDeviceKind until you sign in again.',
       ),
       findsOneWidget,
     );
@@ -245,6 +253,49 @@ void main() {
     await tester.tap(find.text('Sign out').last);
     await pumpFrames(tester);
     expect(account.signedIn, isFalse);
+  });
+
+  testWidgets('a Claktory in the rail named with hidden characters reads as '
+      'one name in what signing out says, its codes shown once', (
+    tester,
+  ) async {
+    final api = FakeAccountApi();
+    final account = DeviceAccount(key: 'k' * 64, open: (_, _) => api);
+    await signIn(account);
+    final harness = Harness(Workspace(), localBackend: false, account: account);
+    harness.connections.use(
+      RemoteFactory.fromAccount(
+        AccountClaktory(id: 'n', name: _oddName, endpointId: 'c' * 64),
+      ),
+    );
+    final claktories = Claktories(
+      connections: harness.connections,
+      localBackend: false,
+      open: (target) => RecordingBackend()..connectTo(target),
+      drafts: DeviceDrafts(MemoryDraftStorage()),
+    );
+    addTearDown(claktories.dispose);
+    await harness.show(
+      tester,
+      home: ClaktoriesScope(
+        claktories: claktories,
+        child: Builder(
+          builder: (context) => Button(
+            label: 'Go',
+            onPressed: () => unawaited(signOutOfAccount(context, account)),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Go'));
+    await pumpFrames(tester);
+    expect(
+      find.text(
+        '${nameInText(_oddName)} stops connecting on this '
+        '$thisDeviceKind until you sign in again.',
+      ),
+      findsOneWidget,
+    );
   });
 
   group('signing out with messages here (row 671)', () {
@@ -457,8 +508,8 @@ void main() {
     expect(find.text('Home was signed out'), findsOneWidget);
     expect(find.text('Sign in to connect to Home'), findsNothing);
     // Where to sign it in, in the app: on its screen, or with no screen,
-    // connected again by factoryd pair's code (#529, MC4; the account
-    // commands are the person's alone, Fugo 46047).
+    // connected again by factoryd pair's code (MC4; the account commands
+    // are the person's alone).
     expect(
       find.text(
         'Sign Home in to your Claktory account again, in Settings → Account '
@@ -494,8 +545,7 @@ void main() {
     await pumpFrames(tester);
     expect(find.text('Sign in to connect to Home'), findsOneWidget);
     expect(find.text('Confirm this device is yours: sign in.'), findsOneWidget);
-    // Still being added by its code: Cancel, nothing kept (§4; Lucy
-    // 50050).
+    // Still being added by its code: Cancel, nothing kept.
     expect(find.text('Cancel'), findsOneWidget);
     await tester.enterText(
       find.byKey(const ValueKey('device-email')),
@@ -658,6 +708,96 @@ void main() {
     await tester.tap(find.text('Send code'));
     await pumpFrames(tester);
     expect(opened.last, defaultAccountService);
+    expect(find.byKey(const ValueKey('device-sign-in-at')), findsNothing);
+  });
+
+  testWidgets("a store build's own sign-in goes to claktory.com, whatever "
+      'service a Claktory in the rail names (Fugo 53274)', (tester) async {
+    final api = FakeAccountApi();
+    final opened = <String>[];
+    final account = DeviceAccount(
+      key: 'k' * 64,
+      open: (_, service) {
+        opened.add(service);
+        return api;
+      },
+    );
+    // Someone else's Claktory, first in the rail, naming its own server.
+    final harness = Harness(
+      Workspace(account: ClaktoryAccount(service: 'https://evil.example')),
+      account: account,
+    );
+    final claktories = Claktories(
+      connections: harness.connections,
+      localBackend: true,
+      open: (_) => harness.backend,
+      drafts: DeviceDrafts(MemoryDraftStorage()),
+    );
+    addTearDown(claktories.dispose);
+    // Claktory Dev and debug builds take it, for QA on the dev service.
+    expect(accountServiceFor(claktories), 'https://evil.example');
+    debugServiceFromClaktories = false;
+    addTearDown(() => debugServiceFromClaktories = null);
+    expect(accountServiceFor(claktories), defaultAccountService);
+    await harness.show(
+      tester,
+      home: ClaktoriesScope(
+        claktories: claktories,
+        child: const DeviceSignInForm(intro: 'Sign in.'),
+      ),
+    );
+    await pumpFrames(tester);
+    expect(find.byKey(const ValueKey('device-sign-in-at')), findsNothing);
+    await tester.enterText(
+      find.byKey(const ValueKey('device-email')),
+      'matt@example.com',
+    );
+    await pumpFrames(tester);
+    await tester.tap(find.text('Send code'));
+    await pumpFrames(tester);
+    expect(opened, [defaultAccountService]);
+  });
+
+  testWidgets('turned away by a Claktory on a server of its own, a store '
+      'build signs in there and says so (Fugo 53274)', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    debugServiceFromClaktories = false;
+    addTearDown(() => debugServiceFromClaktories = null);
+    final api = FakeAccountApi();
+    final opened = <String>[];
+    final account = DeviceAccount(
+      key: 'k' * 64,
+      open: (_, service) {
+        opened.add(service);
+        return api;
+      },
+    );
+    final harness = Harness(Workspace(), localBackend: false, account: account);
+    await harness.show(tester, size: const Size(393, 852));
+    await pumpFrames(tester);
+    harness.connections.use(
+      parsePairingCode('factory://?t=${'c' * 64}&e=${'a' * 64}&name=Home'),
+    );
+    harness.backend.workspace.apply(
+      Workspace(account: ClaktoryAccount(service: 'https://evil.example')),
+    );
+    harness.backend.signInRequired.value =
+        'Confirm this device is yours: sign in.';
+    await pumpFrames(tester);
+    expect(find.text('Sign in to connect to Home'), findsOneWidget);
+    expect(
+      find.text("You'll sign in at evil.example, not claktory.com."),
+      findsOneWidget,
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('device-email')),
+      'matt@example.com',
+    );
+    await pumpFrames(tester);
+    await tester.tap(find.text('Send code'));
+    await pumpFrames(tester);
+    expect(opened.last, 'https://evil.example');
   });
 
   testWidgets('with a week to confirm, a banner asks this device to sign in', (
@@ -683,6 +823,35 @@ void main() {
     );
     await pumpFrames(tester);
     expect(find.text('Sign in to keep using Home'), findsOneWidget);
+    expect(find.byKey(const ValueKey('device-sign-in-at')), findsNothing);
+  });
+
+  testWidgets('a Claktory on a server of its own asks to confirm: a store '
+      'build signs in there and says so (Fugo 53274)', (tester) async {
+    debugServiceFromClaktories = false;
+    addTearDown(() => debugServiceFromClaktories = null);
+    final (harness, _) = await phone(tester);
+    harness.connections.use(
+      parsePairingCode('factory://?t=${'c' * 64}&e=${'a' * 64}&name=Home'),
+    );
+    harness.backend.workspace.apply(
+      Workspace(account: ClaktoryAccount(service: 'https://own.example')),
+    );
+    harness.backend.confirmBy.value = DateTime.now().add(
+      const Duration(days: 30),
+    );
+    await pumpFrames(tester);
+    await tester.tap(
+      find.descendant(
+        of: find.byType(ConfirmDeviceBanner),
+        matching: find.text('Sign in…'),
+      ),
+    );
+    await pumpFrames(tester);
+    expect(
+      find.text("You'll sign in at own.example, not claktory.com."),
+      findsOneWidget,
+    );
   });
 
   testWidgets("at the largest text the banner's words grow only to 2×", (
@@ -841,8 +1010,8 @@ void main() {
         ),
         findsOneWidget,
       );
-      // Typed off its screen, never shown here (#352 P4), with what to
-      // do if it isn't the person's (Fugo's rule 3).
+      // Typed off its screen, never shown here, with what to
+      // do if it isn't the person's.
       expect(find.textContaining('0427'), findsNothing);
       expect(
         find.textContaining("If you didn't just set up a new device"),
@@ -900,7 +1069,7 @@ void main() {
   });
 }
 
-/// Add a Claktory (devices-signin.md §3) on a Mac with its own Claktory,
+/// Add a Claktory on a Mac with its own Claktory,
 /// signed in: [listed] on the account, [shown] already here.
 Future<(Harness, FakeAccountApi)> _addClaktory(
   WidgetTester tester, {
@@ -966,6 +1135,31 @@ void _addClaktoryTests() {
     expect(find.text('Connect to Server?'), findsNothing);
     expect(find.text('Server'), findsOneWidget);
     expect(find.text('Cancel'), findsOneWidget, reason: "the dialog's again");
+  });
+
+  testWidgets("a name from the account service reads as a name: what "
+      "reorders it shows by its code, set apart (Abbacchio's row 1784)", (
+    tester,
+  ) async {
+    const evil = 'Evil\u202EMac\u200B of someone';
+    final shown = nameInText(evil);
+    expect(shown, contains('Evil\\u{202E}Mac'));
+    final odd = const AccountClaktory(
+      id: 'c3',
+      name: evil,
+      machine: 'nas\u202Eexe',
+      endpointId: 'e3e3e3e3e3e3e3e3',
+      relays: ['https://relay.example.com'],
+    );
+    await _addClaktory(tester, listed: [odd]);
+    expect(find.text(shown), findsOneWidget);
+    expect(find.textContaining('\u202E'), findsNothing);
+    expect(find.textContaining('nas\\u{202E}exe'), findsOneWidget);
+    await tester.tap(find.text(shown));
+    await pumpFrames(tester);
+    expect(find.text('Connect to $shown?'), findsOneWidget);
+    expect(find.textContaining('If you already use $shown on'), findsOneWidget);
+    expect(find.textContaining('\u202E'), findsNothing);
   });
 
   testWidgets('Add a Claktory with every one already here says so, with Use '

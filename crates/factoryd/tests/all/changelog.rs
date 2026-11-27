@@ -82,7 +82,7 @@ async fn the_workspace_carries_the_newest_releases_changelog() {
 
     let release = dir.join("home/releases/2099.01.01-0000");
     std::fs::create_dir_all(&release).expect("mkdir");
-    std::fs::write(release.join("factoryd"), "binary").expect("write");
+    std::fs::write(release.join(factoryd::home::program("factoryd")), "binary").expect("write");
     let text = "# Changelog\n\n## Unreleased\n- Added monitors.\n\n## 2026.11.20-1012\n- Fixed: no web pages.\n";
     std::fs::write(release.join("CHANGELOG.md"), text).expect("write");
     std::fs::write(dir.join("home/releases/latest"), "2099.01.01-0000").expect("write");

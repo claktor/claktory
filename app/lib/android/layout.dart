@@ -1,6 +1,6 @@
 import 'package:flutter/widgets.dart';
 
-/// The Android wide shell starts at 800 dp. In Sale's 635 dp tablet split,
+/// The Android wide shell starts at 800 dp. In a 635 dp tablet split,
 /// Settings overflowed the composer by 105 px: it needs the phone's pages.
 /// This is window width, not the tablet's physical display size.
 const androidWideLayoutWidth = 800.0;

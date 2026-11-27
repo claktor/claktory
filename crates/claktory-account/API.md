@@ -93,8 +93,11 @@ never change what a field means.
 
 - `claktory_id`: made by the Claktory, random, 16–64 of `A-Z a-z 0-9 _ -`.
 - `name`: the Claktory's name, shown on claktory.com/account and in emails;
-  control characters and anything that looks like a link are removed, then
-  it's cut to 40 characters.
+  control characters, what could reorder or hide text (direction marks,
+  zero width and other invisible characters; a zero width joiner or a
+  variation selector only inside an emoji is kept) and anything that looks
+  like a link are removed, then it's cut to 40 characters. Names kept from
+  before are cleaned the same way.
 - `version`, `platform`: up to 40 characters; platform like `macos-arm64`,
   `linux-x86_64`.
 - Endpoint ids: iroh endpoint ids, 64 hex characters.
@@ -208,6 +211,16 @@ Neither is a relay credential (Fugo 34608):
   so. Delete account works as for any account (Apple's review needs it):
   the account comes back at the next sign-in, and only the review box
   signs a Claktory in to it.
+
+A service for the store reviewers alone (`--review-only`, such as
+review-account.claktory.com) signs in no one else: every sign-in start
+(`POST /v1/sign-in/start`, `POST /v1/devices/sign-in/start` and the web
+page's) with an email that isn't a review account's is `403 review_only`,
+and nothing is sent or made. A Claktory binds a device (`POST
+/v1/devices/vouch`) only when it's the review box (any other key is `403
+review_account`, an account that isn't a review one's `403 review_only`).
+It vouches for no pipe identity (`--vouch-claktory-email` is refused with
+it).
 
 It's an ordinary account otherwise. Every other email is unchanged, and the
 fixed code opens no other email's sign-in.

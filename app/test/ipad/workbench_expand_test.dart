@@ -1,4 +1,4 @@
-// Polnareff's Expand (#272) in the iPad's workbench: a pane fills the
+// Expand in the iPad's workbench: a pane fills the
 // window and Back puts it back, in each tier.
 import 'package:factory_app/ipad/workbench.dart';
 import 'package:factory_app/panes.dart';

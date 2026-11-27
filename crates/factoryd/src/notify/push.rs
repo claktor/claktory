@@ -1,5 +1,5 @@
 //! Pushing notifications to devices that aren't connected, through the push
-//! relay (`claktory-push`, notifications.md §3).
+//! relay (`claktory-push`).
 //!
 //! A device registers with the relay, which gives it a handle, makes a
 //! 32-byte key, and hands both to this Claktory (RegisterNotifications). They
@@ -10,7 +10,7 @@
 //! Each push is sealed with the device's key (AES-256-GCM, a random 96-bit
 //! nonce): JSON padded to 512, 1024 or 2048 bytes, so its size says little,
 //! holding a per-device counter and the send time, so the phone can tell a
-//! replayed push (Fugo's change C). The relay, Apple and Google see only
+//! replayed push. The relay, Apple and Google see only
 //! ciphertext, and opaque collapse and thread ids (HMACs under a key derived
 //! from the device's).
 
@@ -40,7 +40,7 @@ const MAX_TITLE: usize = 100;
 const ATTEMPTS: u32 = 3;
 /// How long a push to the relay may take.
 const TIMEOUT: Duration = Duration::from_secs(15);
-/// How many counters a device's push counter is saved ahead by (#36): the
+/// How many counters a device's push counter is saved ahead by: the
 /// file holds the highest it may reach, saved before any of them is used,
 /// so pushes go on from memory once the disk can't be written (an alert
 /// that it can't), and a restart, or a version from before, starts past
@@ -383,7 +383,7 @@ fn reserve(registration: &mut Registration) -> bool {
 }
 
 /// Counters saved ahead for every registered device, read now: what an
-/// alert pushes with once nothing can be saved (#36). At start.
+/// alert pushes with once nothing can be saved. At start.
 pub(crate) fn prepare(factory: &Factory) {
     let mut registry = registry(factory);
     let registrations = registry.get_or_insert_default();
@@ -408,7 +408,7 @@ pub(crate) fn prepare(factory: &Factory) {
 }
 
 /// Pushes `notify` to every registered device, whoever is using what,
-/// with counters already saved, writing nothing (#36: the disk can't be
+/// with counters already saved, writing nothing (the disk can't be
 /// written). Devices without one left get nothing. How many it was queued
 /// for.
 pub(crate) fn emergency(factory: &Factory, settings: &super::NotificationsConfig, claktory: &str, notify: &v1::Notify, now: i64) -> usize {
@@ -511,7 +511,7 @@ pub(crate) fn seal_push(key: &[u8], ctr: u64, now: i64, claktory: &str, badge: u
         if !notify.share_id.is_empty() {
             payload["target"]["share"] = serde_json::Value::from(notify.share_id.clone());
         }
-        // The alert kept in Needs you, which a tap opens (Bruno 44235).
+        // The alert kept in Needs you, which a tap opens.
         if !notify.alert_id.is_empty() {
             payload["target"]["alert"] = serde_json::Value::from(notify.alert_id.clone());
         }

@@ -1,4 +1,4 @@
-//! A Claktory vouching for the app on its own computer (#529): the app
+//! A Claktory vouching for the app on its own computer: the app
 //! signs in as a device with the code its Claktory gets, no email sent,
 //! and is signed out whenever that Claktory's sign-in ends.
 
@@ -155,7 +155,7 @@ async fn only_a_signed_in_claktory_vouches_and_never_for_a_removed_or_foreign_ke
     assert_eq!((answer.status, answer.error().as_str()), (403, "revoked"));
 }
 
-/// Fugo's condition 6: the keys a Claktory vouched for are signed out when
+/// The keys a Claktory vouched for are signed out when
 /// it signs out, signs in again or to another account, moves or is
 /// removed; one that signed in by email itself since is no longer its.
 #[tokio::test]

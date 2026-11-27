@@ -15,6 +15,7 @@ import '../pane_chrome.dart';
 import '../protocol/factory/v1/factory.pb.dart';
 import '../resources.dart' show formatBytes;
 import '../selection.dart';
+import '../mobile/viewer_chrome.dart' show ChromeTap, ViewerScreen;
 import 'markdown_media.dart';
 import 'registry.dart';
 
@@ -39,6 +40,12 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
   String _text = '';
   bool _binary = false;
 
+  /// Some of the text is selected: a tap ends that, nothing more.
+  var _selected = false;
+
+  /// A comment was open as the finger came down: a tap closes it.
+  var _hadComment = false;
+
   /// Find in the file (⌘F): what's shown, formatted or plain, searched
   /// here; the view shown answers for it ([_FindHook]).
   final _hook = _FindHook();
@@ -49,9 +56,8 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
   );
 
   /// Counts up each time the file is read again (Reload, or it changed):
-  /// its pictures and videos (#540) are checked again with it, since a
-  /// picture rewritten beside it is no file of a pane (Abbacchio's row
-  /// 1447).
+  /// its pictures and videos are checked again with it, since a picture
+  /// rewritten beside it is no file of a pane.
   final _mediaReloads = ValueNotifier(0);
 
   @override
@@ -71,7 +77,7 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
   /// once it's built.
   /// Shows the file as it's written ([raw]) or formatted. What was
   /// selected goes: the other view's text is laid out differently, so the
-  /// same place in it would be other words (Zucchero's row 105).
+  /// same place in it would be other words.
   void _showRaw(bool raw) {
     if (raw == _raw) return;
     comments?.selection.value = null;
@@ -83,7 +89,7 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
   void _shownChanged({bool reveal = false}) {
     // After the frame's other callbacks: a view built anew records what
     // it shows in its own, so found before it would find nothing
-    // (Abbacchio's row 655, Plain to Formatted).
+    // (Plain to Formatted).
     WidgetsBinding.instance.addPostFrameCallback((_) {
       scheduleMicrotask(() {
         if (mounted) _find.refresh(reveal: reveal);
@@ -170,6 +176,8 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
         // A region of its own for each view, so a selection never carries
         // over to the other's text.
         key: ValueKey(formatted),
+        onSelectionChanged: (content) =>
+            _selected = content != null && content.plainText.isNotEmpty,
         // On an iPhone, Comment and Suggest join the text's own menu, after
         // Copy: the comment's written in a sheet above the keyboard.
         extra: commenting == null
@@ -205,9 +213,22 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
                 hook: _hook,
               ),
       );
+      // On a phone, a tap that's nothing else's shows or hides the
+      // page's header.
+      final tappable = ChromeTap(
+        taken: (at) => _selected || _hadComment || _linkAt(context, at),
+        child: Listener(
+          onPointerDown: (_) => _hadComment = comments?.focused != null,
+          child: text,
+        ),
+      );
       body = commenting == null
-          ? text
-          : Commented(controller: commenting, insetInside: true, child: text);
+          ? tappable
+          : Commented(
+              controller: commenting,
+              insetInside: true,
+              child: tappable,
+            );
     }
     return PaneScaffold(
       share: sharePath,
@@ -227,6 +248,26 @@ class _TextViewerState extends State<TextViewer> with FileLoading<TextViewer> {
   }
 }
 
+/// What a phone's whole-screen page leaves at its foot for the home
+/// indicator, for the text to scroll clear of; nothing elsewhere.
+double _footInset(BuildContext context) =>
+    ViewerScreen.wholeOf(context) ? MediaQuery.paddingOf(context).bottom : 0;
+
+/// Whether a link's words are at [global]: a tap there opens it.
+bool _linkAt(BuildContext context, Offset global) {
+  final result = HitTestResult();
+  WidgetsBinding.instance.hitTestInView(
+    result,
+    global,
+    View.of(context).viewId,
+  );
+  return result.path.any(
+    (entry) =>
+        entry.target is TextSpan &&
+        (entry.target as TextSpan).recognizer != null,
+  );
+}
+
 /// Comment (or Suggest) from the iPhone's menu over a selection: the
 /// passage is the selection's, as the controller last heard it; the menu
 /// and the selection's handles go, the passage stays lit while it's
@@ -243,7 +284,7 @@ void _commentFrom(
 
 /// The text under a selection changed (an agent rewrote the file): the
 /// selection goes, rather than staying where it was over other words, or
-/// over some blocks of it and not those between (Abbacchio's row 1012).
+/// over some blocks of it and not those between.
 void _clearSelection(BuildContext context) {
   final region = context.findAncestorStateOfType<SelectableRegionState>();
   region?.hideToolbar();
@@ -401,7 +442,7 @@ mixin _Blocks<T extends StatefulWidget> on State<T> {
   /// The text changed: its blocks are made afresh. A block reused would
   /// land somewhere else in the new text (a paragraph now in a quote), its
   /// notifier going to the listener there while the one it left still
-  /// holds it (Bruno 26751: the pane's debug red box), and that one, gone,
+  /// holds it (the pane's debug red box), and that one, gone,
   /// then unregistering it from the new one. The old ones are disposed
   /// after the frame, once their listeners are gone.
   void renewBlocks() {
@@ -598,7 +639,7 @@ class _FormattedText extends StatefulWidget {
     required this.hook,
   });
 
-  /// The file's path, where its pictures and videos are found (#540).
+  /// The file's path, where its pictures and videos are found.
   final String path;
 
   /// Ticks when the file is read again, for its pictures and videos.
@@ -675,7 +716,7 @@ class _FormattedTextState extends State<_FormattedText>
       _scrollBy(box.top - (top + height * 0.25));
     }
     // In a block that scrolls sideways (a wide table, a code block), across
-    // too, where it's past the edge (Abbacchio's row 652).
+    // too, where it's past the edge.
     final context = block.key.currentContext;
     final across = context == null ? null : Scrollable.maybeOf(context);
     final band = across?.context.findRenderObject();
@@ -724,6 +765,59 @@ class _FormattedTextState extends State<_FormattedText>
   }
 
   void _moved() => widget.comments?.relayout();
+
+  /// The screen's width as last built: turned, the text flows anew.
+  double? _width;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final width = MediaQuery.sizeOf(context).width;
+    if (_width != null && width != _width) _keepPlace();
+    _width = width;
+  }
+
+  /// The text is about to flow to another width (a phone turned): the
+  /// block at the view's top, and how far into it, stays there once it
+  /// has, rather than the same distance from the start, which is other
+  /// words now.
+  void _keepPlace() {
+    if (!_scroll.hasClients || _scroll.position.pixels <= 0) return;
+    RenderBox? viewBox() {
+      final view = _scroll.position.context.notificationContext
+          ?.findRenderObject();
+      return view is RenderBox && view.attached && view.hasSize ? view : null;
+    }
+
+    RenderBox? boxOf(GlobalKey key) {
+      final box = key.currentContext?.findRenderObject();
+      return box is RenderBox && box.attached && box.hasSize ? box : null;
+    }
+
+    final view = viewBox();
+    if (view == null) return;
+    final top = view.localToGlobal(Offset.zero).dy;
+    for (var i = 0; i < inUse && i < blocks.length; i++) {
+      final key = blocks[i].key;
+      final box = boxOf(key);
+      if (box == null) continue;
+      final y = box.localToGlobal(Offset.zero).dy;
+      final height = box.size.height;
+      if (y + height <= top) continue;
+      final into = height <= 0 ? 0.0 : ((top - y) / height).clamp(0.0, 1.0);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        final view = viewBox();
+        final box = boxOf(key);
+        if (!mounted || !_scroll.hasClients || view == null || box == null) {
+          return;
+        }
+        final now = box.localToGlobal(Offset.zero).dy;
+        final top = view.localToGlobal(Offset.zero).dy;
+        _scrollBy(now - top + into * box.size.height);
+      });
+      return;
+    }
+  }
 
   void _scrollBy(double dy) {
     if (!_scroll.hasClients) return;
@@ -808,8 +902,14 @@ class _FormattedTextState extends State<_FormattedText>
     final inset = CommentsInset.of(context);
     Widget content() => SingleChildScrollView(
       controller: _scroll,
-      padding: EdgeInsets.fromLTRB(Space.l, Space.l, Space.l + inset, Space.l),
-      // Selected where the pointer is at any zoom (Matt).
+      // Its end clear of the home indicator on a phone's whole screen.
+      padding: EdgeInsets.fromLTRB(
+        Space.l,
+        Space.l,
+        Space.l + inset,
+        Space.l + _footInset(context),
+      ),
+      // Selected where the pointer is at any zoom.
       child: ScrolledSelection(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1158,12 +1258,15 @@ class _NumberedTextState extends State<_NumberedText>
             scrollDirection: Axis.horizontal,
             child: SizedBox(
               width: gutter + Space.m + textWidth,
-              // Selected where the pointer is at any zoom (Matt), sideways
+              // Selected where the pointer is at any zoom, sideways
               // here and down each line.
               child: ScrolledSelection(
                 child: ListView.builder(
                   controller: _down,
-                  padding: const EdgeInsets.symmetric(vertical: _padding),
+                  padding: EdgeInsets.only(
+                    top: _padding,
+                    bottom: _padding + _footInset(context),
+                  ),
                   itemExtent: _lineHeight,
                   itemCount: _lines.length + (note == null ? 0 : 1),
                   itemBuilder: (context, index) {

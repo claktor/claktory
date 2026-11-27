@@ -125,7 +125,7 @@ final class CommandMenu {
   /// Adds the commands to the end of the View menu, set apart inline;
   /// Settings (⌘,) instead takes the app menu's Settings place, over
   /// iPadOS 26's own, which opens the system's Settings app on the same
-  /// keys (projects-sidebar.md §9). Where the menu has no such place, it
+  /// keys. Where the menu has no such place, it
   /// joins the others in View.
   func build(_ builder: UIMenuBuilder, action: Selector) {
     guard builder.system == .main, !commands.isEmpty else { return }

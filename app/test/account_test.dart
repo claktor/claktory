@@ -309,6 +309,26 @@ void main() {
     expect(harness.backend.sent.where((m) => m.hasSelectAgent()), isEmpty);
   });
 
+  testWidgets('on a phone, a dropped connection keeps the sign-in and '
+      'what was typed, never the app behind it (row 748)', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final harness = await showAccount(
+      tester,
+      signedOut,
+      size: const Size(320, 568),
+    );
+    await tester.enterText(field, 'matt@exa');
+    harness.backend.connected.value = false;
+    await pumpFrames(tester);
+    expect(find.text('Sign in to Claktory'), findsOneWidget);
+    expect(tester.widget<EditableText>(field).controller.text, 'matt@exa');
+    // Back, it goes on where it was.
+    harness.backend.connected.value = true;
+    await pumpFrames(tester);
+    expect(tester.widget<EditableText>(field).controller.text, 'matt@exa');
+  });
+
   testWidgets('Delete account… opens the deletion step on the account site', (
     tester,
   ) async {
@@ -436,6 +456,29 @@ void main() {
     expect(harness.last.hasShowRecoveryKey(), isTrue);
     expect(find.text('Recovery key for this Mac'), findsOneWidget);
     expect(find.text('ABCD-EFGH-IJKL-MNOP'), findsOneWidget);
+    // Download beside Copy, as when Needs you asks to save it.
+    final saved = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      const MethodChannel('factory/device'),
+      (call) async {
+        if (call.method != 'saveText') return null;
+        saved.add(call);
+        return '/Users/me/Downloads/key.txt';
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('factory/device'),
+        null,
+      ),
+    );
+    await tester.tap(find.text('Download'));
+    await pumpFrames(tester);
+    expect(find.text('Downloaded'), findsOneWidget);
+    expect(
+      (saved.single.arguments as Map)['text'],
+      contains('ABCD-EFGH-IJKL-MNOP'),
+    );
     await tester.tap(find.text('Done').last);
     await pumpFrames(tester);
 

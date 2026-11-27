@@ -20,7 +20,7 @@ final _letter = RegExp(r'[A-Za-z]');
 
 /// Every place in Settings' laid-out text where a line ends inside a word:
 /// "Clakto|ry name".
-/// As Sorbet's iPad sweep counts them: with the app's font, leaving out a
+/// Counted with the app's font, leaving out a
 /// paragraph as wide as most of the window (nothing could hold its word)
 /// and a word longer than "conversations" (a long name).
 Set<String> _midWord(WidgetTester tester) {
@@ -70,7 +70,7 @@ Set<String> _midWord(WidgetTester tester) {
 void main() {
   setUpAll(loadGeist);
 
-  // Sorbet's row 103: at the largest text, Settings' label column and the
+  // At the largest text, Settings' label column and the
   // lines beside it kept their standard widths, so words broke in the middle
   // ("Clakto|ry name", "Versio|n"), and a line of controls overflowed.
   for (final window in const [
@@ -92,7 +92,7 @@ void main() {
       final snapshot = workspace()
         ..providers.clear()
         ..providers.add(claude())
-        // Zucchero's row 133: two devices, one not confirmed yet; durations
+        // Two devices, one not confirmed yet; durations
         // and numbers that aren't the shortest.
         ..remote = RemoteAccess(
           on: true,
@@ -156,8 +156,7 @@ void main() {
       final clipped = <String>{};
       for (var i = 0; i < 400; i++) {
         broken.addAll(_midWord(tester));
-        // A field's value whole in its box (Zucchero's row 133: "9" for
-        // 90, "40" for 400k).
+        // A field's value whole in its box.
         for (final field
             in tester.allRenderObjects.whereType<RenderEditable>()) {
           final text = field.text?.toPlainText() ?? '';

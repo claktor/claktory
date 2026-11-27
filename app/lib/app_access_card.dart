@@ -53,7 +53,7 @@ String _andList(List<String> items) => items.length < 2
 
 /// Where what [app] would read could go: nowhere off this computer, or the
 /// [hosts] it reaches, which a warning names when it would read [private]
-/// data (Fugo's point 8).
+/// data.
 String appAccessReach(String app, List<String> hosts, List<String> private) {
   if (hosts.isEmpty) {
     return "$app can't reach the internet, so what it reads stays on this "
@@ -107,11 +107,11 @@ class _AppAccessCardState extends State<AppAccessCard>
     super.dispose();
   }
 
-  /// [reply]: Submit (#370), the comment going to Rivet as the person's
+  /// [reply]: Submit, the comment going to Rivet as the person's
   /// reply, and nothing allowed; Rivet can suggest it again. Sent with
   /// approve off, so a backend that doesn't know replies declines it.
   /// [reason]: the no's, from focus mode's dock, with the comment.
-  /// [rethrowing] for focus mode's keys (#514): refused, it throws too.
+  /// [rethrowing] for focus mode's keys: refused, it throws too.
   Future<void> _decide({
     required bool approve,
     bool reply = false,
@@ -143,7 +143,7 @@ class _AppAccessCardState extends State<AppAccessCard>
 
   void _submit() => unawaited(_decide(approve: false, reply: true));
 
-  /// Approve and Decline for focus mode's keys (#514), and Submit once a
+  /// Approve and Decline for focus mode's keys, and Submit once a
   /// comment's typed, as the card's buttons.
   @override
   CardAnswer? answerNow() {
@@ -245,7 +245,7 @@ class _AppAccessCardState extends State<AppAccessCard>
           ),
           // Why it's a card at all, in Claktory's words, before anything
           // Rivet wrote: a steered Rivet's reason has this to answer to
-          // (Fugo, rows 674/675). In the backend's order, which puts
+          // . In the backend's order, which puts
           // Rivet having read another Claktory first.
           if (access.cardRules.isNotEmpty) ...[
             const SizedBox(height: Space.m),
@@ -270,7 +270,7 @@ class _AppAccessCardState extends State<AppAccessCard>
             _Reason(
               rivetName: rivetName,
               // Rivet's words, to decide on: what reorders text shows by
-              // its code (proseCodes, Fugo).
+              // its code (proseCodes).
               reason: proseCodes(access.reason.trim()),
               color: color,
             ),
@@ -354,9 +354,8 @@ class _AppAccessCardState extends State<AppAccessCard>
   List<Widget> _pending(Palette palette, TypeScale type, String rivetName) {
     final busy = _deciding != null;
     return [
-      // The field, open from the start, above the row (Lucy's rules 2 and
-      // 4). Once something's typed, one Submit: a reply, allowing nothing;
-      // Return too.
+      // The field, open from the start, above the row. Once something's
+      // typed, one Submit: a reply, allowing nothing; Return too.
       CardAnswerBlock(
         field: (focus) => DecisionComment(
           controller: _comment,
@@ -407,7 +406,7 @@ class _AppAccessCardState extends State<AppAccessCard>
         "Approved, but it couldn't be done",
         palette.danger,
       ),
-      // Answered with a comment (#370): nothing allowed.
+      // Answered with a comment: nothing allowed.
       _ when access.replied => ('Replied', palette.textMuted),
       _ => ('Declined', palette.textMuted),
     };
@@ -653,7 +652,7 @@ class _ReadNote extends StatelessWidget {
 
 /// Rivet's reason, set apart as its words, never as Claktory's: under
 /// "Rivet's reason", plain text beside a bar in Rivet's color, four lines
-/// and then Show more (Fugo's rule, as the app grant card has it).
+/// and then Show more (as the app grant card has it).
 class _Reason extends StatelessWidget {
   const _Reason({
     required this.rivetName,

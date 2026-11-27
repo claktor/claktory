@@ -98,10 +98,10 @@ pub(crate) fn grantee(app: &str) -> String {
     format!("app:{app}")
 }
 
-/// Apps are offered in every Claktory: Claktory's own (Charts, shipped with
-/// each release: `bundled`) install by themselves and run and update from
-/// the Marketplace's Apps tab (#201, Zucchero's gate passed; #333). Off, only the dev Claktory (`factoryd
-/// --dev`) would have them. Telegram isn't shipped until it's proven.
+/// Apps are offered in every Claktory: Claktory's own (Charts, shipped with each release: `bundled`)
+/// install by themselves and run and update from the Marketplace's Apps tab.
+/// Off, only the dev Claktory (`factoryd --dev`) would have them. Telegram isn't shipped until it's
+/// proven.
 const SHIPPED: bool = true;
 
 /// Apps' state while Claktory runs (what's installed is in config.json).
@@ -437,7 +437,7 @@ pub(crate) fn tools(factory: &Arc<Factory>, agent: &str) -> Vec<Tool> {
             tools.push(app_tool(factory, agent, &manifest, tool));
         }
     }
-    // Giving an app up (#236), for an agent that has any.
+    // Giving an app up, for an agent that has any.
     if !tools.is_empty() {
         tools.push(crate::given_up::apps_tool(factory, agent));
     }
@@ -458,7 +458,7 @@ fn app_tool(factory: &Arc<Factory>, agent: &str, manifest: &Manifest, spec: &bun
         Box::pin(async move {
             let Some(factory) = weak.upgrade() else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
             // An app that reaches the web hands its words on: no errand_open
-            // for the agent until its conversation starts afresh (Fugo 50226).
+            // for the agent until its conversation starts afresh.
             if factory.apps.manifest(&app).is_some_and(|manifest| !manifest.hosts.is_empty()) {
                 crate::errands::read_outside(&factory, &agent, "what an app read from the web");
             }

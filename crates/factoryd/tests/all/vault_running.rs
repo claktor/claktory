@@ -1,4 +1,4 @@
-//! The vault's running-task counts (#402, Polpo's factoryd-cpu.md): each
+//! The vault's running-task counts: each
 //! grant shows how many of the background tasks that got its secret lately
 //! still run. Claktory reads which tasks run once per Workspace, not once
 //! per task; the counts are the same as the per-task lookup gave.

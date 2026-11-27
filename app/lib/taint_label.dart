@@ -8,9 +8,9 @@ import 'protocol/factory/v1/factory.pb.dart';
 /// read through browser control (a card's `taint`), in one line after a
 /// small globe: "from Ada, which read a page on https://docs.example.com",
 /// or "from Ada, which read 3 pages" (the sites in its semantics). A pipe
-/// or direct messages read, on cards and records from before #346, show
-/// nothing: reading them no longer means anything (Matt). Nothing when no
-/// page was read. [agent] is the name of the agent whose card it is.
+/// or direct messages read, on cards and records from older versions, show
+/// nothing: reading them no longer means anything. Nothing when no page
+/// was read. [agent] is the name of the agent whose card it is.
 class TaintLabel extends StatelessWidget {
   const TaintLabel({super.key, required this.taint, required this.agent});
 
@@ -56,7 +56,7 @@ class TaintLabel extends StatelessWidget {
   }
 }
 
-/// The web pages in [taint], each site once: what still counts (#346).
+/// The web pages in [taint], each site once: what still counts.
 List<PipeTaint> taintPages(List<PipeTaint> taint) {
   final seen = <String>{};
   return [

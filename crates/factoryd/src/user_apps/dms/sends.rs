@@ -1,9 +1,9 @@
 //! An agent's message to one of the person's friends, sent only once the
-//! person approves exactly it (D4b; dms.md §7, "Rivet path and
-//! exact-content review"; end to end, dms-e2ee.md §6). The account service
-//! keeps the proposal and its review (`claktory-user-apps`' `dms::review`),
-//! but never its text; this side proposes it for the agent, follows what
-//! becomes of it, and lists what waits in Needs you.
+//! person approves exactly it (D4b, "Rivet path and exact-content review";
+//! end to end). The account service keeps the proposal and its review
+//! (`claktory-user-apps`' `dms::review`), but never its text; this side
+//! proposes it for the agent, follows what becomes of it, and lists what
+//! waits in Needs you.
 //!
 //! - **Never a send from here.** dm_send encrypts the proposal into this
 //!   Claktory's channel with the person's own devices (`leaf`), as content
@@ -48,7 +48,7 @@ use crate::account::apps::{Actor, Problem};
 use crate::factory::{Factory, host_event};
 use crate::transcript::now_ms;
 
-/// `state` is also `approved` since #451: the person's device sends it
+/// `state` is also `approved`: the person's device sends it
 /// through their home, and claktory.com never says `sent`.
 pub(crate) const SCHEMA: &str = "
 -- Agents' messages proposed to the person's friends (dm_send), waiting for
@@ -71,7 +71,7 @@ CREATE TABLE dm_sends (
 CREATE INDEX dm_sends_by_state ON dm_sends (state, agent);
 ";
 
-/// End to end (dms-e2ee.md §6): the `sequence` of the proposal's latest
+/// End to end: the `sequence` of the proposal's latest
 /// text as encrypted here, counting up from 1, so the person's device can
 /// refuse an older one served as the latest. NULL in rows from before.
 pub(crate) const SEQUENCES: &str = "
@@ -267,7 +267,7 @@ struct Proposal<'a> {
 }
 
 impl Proposal<'_> {
-    /// What the person's device decrypts (dms-e2ee.md §6): the text, and
+    /// What the person's device decrypts: the text, and
     /// what it's bound to, which the device checks against the route it
     /// came under and hashes with the text. Which Claktory sent it the
     /// device reads from the channel's certified leaf, never from here.
@@ -324,7 +324,7 @@ pub(super) enum AtHome {
 }
 
 /// Sends an application message of this Claktory's channel through the
-/// person's home (#451: claktory.com keeps none): this Claktory's home.db
+/// person's home (claktory.com keeps none): this Claktory's home.db
 /// takes it into the log, or passes it on to the home. Under its digest:
 /// each revision of a proposal or draft is a message of its own there (the
 /// home refuses other bytes under an id it has), and the person's device
@@ -374,7 +374,7 @@ async fn propose(factory: &Arc<Factory>, proposal: &Proposal<'_>, generation: i6
     let mut bounced = 0;
     let answer = loop {
         // The service keeps the review and the text's digest; the text goes
-        // into the channel through the person's home (#451).
+        // into the channel through the person's home.
         let (envelope, leaf_id) = encrypt(factory, proposal, generation)?;
         let body = json!({
             "client_message_id": proposal.client_id,
@@ -786,7 +786,7 @@ async fn look(
     }
 }
 
-/// Ends a proposal the agent may no longer see, saying so in Bruno's words.
+/// Ends a proposal the agent may no longer see, saying so.
 fn end_for_access(factory: &Arc<Factory>, row: &Row) {
     let changed = factory
         .store

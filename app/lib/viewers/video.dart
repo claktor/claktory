@@ -32,7 +32,7 @@ const videoChunk = 8 * 1024 * 1024;
 /// How much each read after the original's start brings: it comes in
 /// pieces sized to the link, but a read given up on (the connection gone
 /// over a minute) keeps none of it, so each is written as it comes and a
-/// drop costs at most this (Sale's row 87: a preview carried on from 0).
+/// drop costs at most this (a preview carried on from 0).
 const videoPiece = 1024 * 1024;
 
 /// What the player is doing, as the viewer shows it.
@@ -207,14 +207,14 @@ class _VideoViewerState extends State<VideoViewer>
   VideoPlayback? _playback;
 
   /// The copy on this device being played, deleted when the pane closes
-  /// unless it's one this device keeps (#446)…
+  /// unless it's one this device keeps…
   File? _copy;
 
   /// …in this, which keeps it until let go.
   FileCache? _copyKeptIn;
 
   /// The copy of the version that stopped part way, carried on from when
-  /// it's read again (#375), and whether it's the preview's (#379);
+  /// it's read again, and whether it's the preview's;
   /// deleted with the pane.
   ({String sha256, File copy, bool preview})? _partial;
 
@@ -222,7 +222,7 @@ class _VideoViewerState extends State<VideoViewer>
   /// show of the same file plays on with.
   ({String sha256, bool preview})? _playing;
 
-  /// A preview was due, but this Claktory can't make one (#379).
+  /// A preview was due, but this Claktory can't make one.
   var _noPreview = false;
 
   /// How much of it has come, while it comes.
@@ -329,11 +329,11 @@ class _VideoViewerState extends State<VideoViewer>
     final generation = ++_generation;
     final backend = AppScope.of(context);
     // A player that failed goes, so the read shows how far it's got rather
-    // than the failure until it's all here again (Abbacchio's 30132).
+    // than the failure until it's all here again.
     if (_playback?.state.value.error != null) _close();
     // Shown again (an agent's show, or Reload) while it plays: when the file
     // is still the version playing, it plays on from its copy, and only a
-    // changed file is read again (Abbacchio's row 1117).
+    // changed file is read again.
     final playing = _playing;
     if (playing != null &&
         _playback != null &&
@@ -357,7 +357,7 @@ class _VideoViewerState extends State<VideoViewer>
         return;
       }
     }
-    // Kept on this device and still the file (#446): played from there,
+    // Kept on this device and still the file: played from there,
     // the original if it's here, else the preview made for this screen.
     final cache = FileCache.of(backend);
     if (cache != null) {
@@ -385,7 +385,7 @@ class _VideoViewerState extends State<VideoViewer>
       if (_partial == null) _received = 0;
     });
     try {
-      // Progress as each piece comes, not each range (#375): its size
+      // Progress as each piece comes, not each range: its size
       // only once the first piece says it.
       void progress(int through, int size) {
         if (!mounted || generation != _generation) return;
@@ -405,7 +405,7 @@ class _VideoViewerState extends State<VideoViewer>
       var resumeAt = 0;
       FileContent? head;
       // A preview made for this screen, on a link too slow for the
-      // original (#379); the original once it's asked for.
+      // original; the original once it's asked for.
       PreviewBox? preview;
       // (A preview's, unless it's the original that's wanted now.)
       if (partial != null &&
@@ -430,7 +430,7 @@ class _VideoViewerState extends State<VideoViewer>
         preview = null;
       }
       // The original's start, stopping once it's clear the rest would be
-      // slow to come: a preview comes instead, from the start (#379).
+      // slow to come: a preview comes instead, from the start.
       var first =
           head ??
           await backend.readFile(
@@ -551,7 +551,7 @@ class _VideoViewerState extends State<VideoViewer>
         ..data = const []
         ..clearOffset()
         ..clearTruncated();
-      // Kept on this device for next time (#446), unless it's more than
+      // Kept on this device for next time, unless it's more than
       // this Claktory keeps: then it's this pane's, as before.
       final kept = cache == null
           ? null
@@ -630,7 +630,7 @@ class _VideoViewerState extends State<VideoViewer>
     if (mounted) setState(() => _problem = problem);
   }
 
-  /// The original is coming in place of the preview playing (#379).
+  /// The original is coming in place of the preview playing.
   bool get _replacing =>
       originalLoad is OriginalLoading && _playback != null && mounted;
 
@@ -723,7 +723,7 @@ class _VideoViewerState extends State<VideoViewer>
   }
 
   /// The video's size for its header: the original's, also while its
-  /// preview plays (#379, Zucchero), as an image's; none while a preview
+  /// preview plays, as an image's; none while a preview
   /// plays from a Claktory that doesn't say the original's, rather than
   /// the preview's as if it were the original's.
   static Size? _shownSize(FileContent? file, PlaybackState state) {
@@ -776,12 +776,12 @@ class _VideoViewerState extends State<VideoViewer>
             : ViewerProblem("Claktory can't play this video.", path: path)) ??
         (file != null && file.error.isNotEmpty ? waiting() : null) ??
         // The read failed (the connection didn't come back in time): it
-        // says so, and Try again reads it again (#375).
+        // says so, and Try again reads it again.
         // Lost with the connection, it's read again once that's back
         // (FileLoading): till then it waits, rather than saying it failed.
         // Given up on after the drop, it says so offline too; lost a
         // moment before the connection says it's down, it waits all the
-        // same (Zucchero's row 588).
+        // same.
         (failure != null &&
                 (failure == lostWhileReading ||
                     AppScope.of(context).connected.value &&
@@ -831,7 +831,7 @@ class _VideoViewerState extends State<VideoViewer>
             child: Stack(
               children: [
                 Positioned.fill(child: _frame(palette, state, comments)),
-                // A preview says so (#379), clear of Comment at the top.
+                // A preview says so, clear of Comment at the top.
                 if (previewBadge() case final badge?)
                   Positioned(
                     left: Space.m,
@@ -841,7 +841,7 @@ class _VideoViewerState extends State<VideoViewer>
                   ),
                 // Comment at the pane's corner, not the frame's: a tall
                 // video in a short pane is a sliver its words can't fit in
-                // (row 375). A phone has it in the bar under the video.
+                // . A phone has it in the bar under the video.
                 if (comments != null)
                   Positioned(
                     top: Space.m,
@@ -951,7 +951,7 @@ class _VideoViewerState extends State<VideoViewer>
                 onAction: picked is Moment ? comments.comment : null,
               ),
             ),
-      // Not while a comment or an answer is being typed (Matt).
+      // Not while a comment or an answer is being typed.
       body: ViewerKeys(
         bindings: {
           const SingleActivator(LogicalKeyboardKey.space): _togglePlaying,

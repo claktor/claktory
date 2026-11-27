@@ -1,4 +1,4 @@
-// Files with what the person writes on a card (#511, Matt's): the
+// Files with what the person writes on a card: the
 // paperclip (and on a Mac files dropped or pasted on the window while the
 // card's field has the keys) adds them under the field; they go up to the
 // card's agent as the answer is sent, each once, and are named in it
@@ -231,7 +231,7 @@ void main() {
   macWidgets("files dropped or pasted while the card's field has the keys "
       'go to the card, and the overlay says so', (tester) async {
     final harness = await _show(tester, _card());
-    // The field never takes the keys by itself (Lucy's rule 4).
+    // The field never takes the keys by itself.
     expect(FileDrop.divertedTo.value, isNull);
     await tester.showKeyboard(
       find.descendant(
@@ -310,6 +310,45 @@ void main() {
     });
     await _io(tester);
     expect(harness.backend.attachments.of('june').single.name, 'logo.png');
+    await tester.pump(const Duration(milliseconds: 200));
+  });
+
+  macWidgets('files dropped anywhere on a request go to it, not only on '
+      'its field', (tester) async {
+    final harness = Harness(_workspace());
+    harness.backend.transcript.load(
+      Transcript(agentId: 'june', entries: [_card(wantsText: true)]),
+    );
+    await harness.show(
+      tester,
+      size: const Size(1200, 900),
+      home: const Stack(
+        children: [
+          Positioned.fill(child: Shell()),
+          Positioned.fill(child: WindowDropOverlay()),
+        ],
+      ),
+    );
+    await settle(tester);
+    final title = tester.getCenter(find.text('Is the new logo right?').last);
+    await fromWindow(tester, 'filesOver', {
+      'count': 1,
+      'x': title.dx,
+      'y': title.dy,
+    });
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text('Drop to add to your answer to June'), findsOneWidget);
+    await fromWindow(tester, 'filesDropped', {
+      'paths': [notes],
+      'x': title.dx,
+      'y': title.dy,
+    });
+    await _io(tester);
+    expect(
+      harness.backend.attachments.of(cardFilesKey('june', 'ask4')).single.name,
+      'notes.txt',
+    );
+    expect(harness.backend.attachments.of('june'), isEmpty);
     await tester.pump(const Duration(milliseconds: 200));
   });
 

@@ -1,4 +1,4 @@
-// The iPhone's Home Screen quick action, Needs you (#514 §7.2): its
+// The iPhone's Home Screen quick action, Needs you: its
 // subtitle says how many wait, and a tap opens Needs you.
 import 'package:factory_app/mobile/quick_actions.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';

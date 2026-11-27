@@ -1,4 +1,4 @@
-//! Report types (pipes-automation.md §2, §11): what a type is, and the check
+//! Report types: what a type is, and the check
 //! every submitted report passes before it's kept: only the type's fields;
 //! facts exactly one of their choices, or in their range (Claktory's copy
 //! is kept, never the submitted string); text normalised, stripped of
@@ -6,10 +6,10 @@
 //! Refusals name a code and, at most, one of the type's own field names:
 //! never anything submitted.
 //!
-//! The field kinds are a closed set, and whether a field is the other
-//! side's words or a fact follows its kind, never a flag (Fugo's invariants
-//! 1 and 2). Types are data, kept in factory.db (`types`); the built-in
-//! ones are made here and kept there at version 1.
+//! The field kinds are a closed set, and whether a field is the other side's
+//! words or a fact follows its kind, never a flag. Types are data, kept in
+//! factory.db (`types`); the built-in ones are made here and kept there at
+//! version 1.
 
 use std::sync::OnceLock;
 
@@ -35,7 +35,7 @@ pub(crate) const NUMBER_ABS: i64 = 1_000_000_000;
 /// A Number's range when its author gives none.
 pub(crate) const NUMBER_DEFAULT: (i64, i64) = (0, 1_000_000);
 /// Number and Date fields in a type: facts reach the reader without marking
-/// it, so how much they can carry stays small (Fugo).
+/// it, so how much they can carry stays small.
 pub(crate) const NUMBERS: usize = 4;
 pub(crate) const DATES: usize = 2;
 pub(crate) const NAME_CHARS: usize = 60;
@@ -46,7 +46,7 @@ pub(crate) const TYPES: usize = 50;
 pub(crate) const PER_PIPE: usize = 10;
 /// The longest id, a type's, a field's or a choice's.
 pub(crate) const ID_CHARS: usize = 40;
-/// Field ids that would read as routing (Fugo's invariant 5).
+/// Field ids that would read as routing.
 pub(crate) const RESERVED: &[&str] = &["to", "recipient", "agent", "cc", "forward", "path", "url", "bcc", "reply_to", "send", "pipe", "project"];
 /// Words that make any id read as routing, between its _s ("forward_note"),
 /// or with an s ("urls"). Common words that only sometimes do (notify,
@@ -315,8 +315,8 @@ fn builtin(id: &str, name: &str, fields: Vec<Field>, outcomes: &[Outcome]) -> Sc
     }
 }
 
-/// The built-in types, at version 1: "Bug report" and Fugo's five starters
-/// (§11.5), in the order they're listed.
+/// The built-in types, at version 1: "Bug report" and five starters,
+/// in the order they're listed.
 pub(crate) fn builtins() -> Vec<Schema> {
     use Outcome::*;
     vec![

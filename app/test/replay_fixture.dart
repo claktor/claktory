@@ -1,4 +1,4 @@
-// A small history to play in tests (#458): a project with three agents, a
+// A small history to play in tests: a project with three agents, a
 // secret, an agent that moved to another folder, a pipe, and a page of
 // events.
 import 'package:fixnum/fixnum.dart';

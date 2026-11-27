@@ -1,11 +1,10 @@
-//! Websites shared over a pipe, seen and controlled by agents (#502, friend
-//! bug #32; Fugo 35667, 35687): what's shared both ways, metadata only, for
-//! admin agents (pipes_shares, with the program's name) and the pipe's own
-//! agents (pipe_status, never a command line); stopping ours, hiding theirs
-//! (unreachable here until the person shows it again, on a card) and
-//! offering ours again, at once; events to the pipe's lead, and to admin
-//! agents that turned them on; why a share ended there, and sharing it again
-//! on the person's card.
+//! Websites shared over a pipe, seen and controlled by agents: what's shared
+//! both ways, metadata only, for admin agents (pipes_shares, with the
+//! program's name) and the pipe's own agents (pipe_status, never a command
+//! line); stopping ours, hiding theirs (unreachable here until the person
+//! shows it again, on a card) and offering ours again, at once; events to
+//! the pipe's lead, and to admin agents that turned them on; why a share
+//! ended there, and sharing it again on the person's card.
 
 use serde_json::json;
 use std::time::Duration;
@@ -145,7 +144,7 @@ async fn a_website_the_person_shares_is_listed_stopped_and_shared_again_only_on_
     let id = view.workspace.pipe_shares[0].id.clone();
 
     // Admin agents see the program by its name and process; the pipe's
-    // agents only whether something answers (Fugo 35667).
+    // agents only whether something answers.
     let listed = call(&mut client, &mut view, "rivet", "pipes_shares", "{}").await;
     assert!(listed.contains(&format!("Shared by Matt: \"Dashboard\" (id {id}), port {port}")), "{listed}");
     assert!(listed.contains("; active; the other side hasn't opened it yet; program: "), "{listed}");
@@ -200,7 +199,7 @@ async fn a_website_the_person_shares_is_listed_stopped_and_shared_again_only_on_
     assert!(lines(&factory, &pipe).contains(&"Rivet stopped sharing Metrics.".to_owned()));
     view.follow(&mut client, |view| view.workspace.pipe_shares.is_empty()).await;
 
-    // A card shares for the hours it said (#46): what the person approved.
+    // A card shares for the hours it said: what the person approved.
     let args = json!({"pipe": "Website", "port": port, "name": "Board", "hours": 48, "reason": "Ana needs it for two days."});
     let asked = call(&mut client, &mut view, "rivet", "pipes_share", &args.to_string()).await;
     assert!(asked.starts_with("Asked "), "{asked}");
@@ -219,7 +218,7 @@ async fn a_website_the_person_shares_is_listed_stopped_and_shared_again_only_on_
 }
 
 /// The other side sharing and stopping in a loop wakes the lead once a
-/// window, not each time (row 1341, Fugo 37559): the first change at once,
+/// window, not each time: the first change at once,
 /// the rest of the window together at its end, and a website that started
 /// and stopped within it isn't told.
 #[tokio::test]

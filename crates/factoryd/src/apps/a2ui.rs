@@ -324,8 +324,8 @@ fn depth(value: &Value, at: &str) -> Result<(), Invalid> {
     if walk(value, 0) { Ok(()) } else { Err(invalid(at, format!("it nests deeper than {MAX_DEPTH}"))) }
 }
 
-/// An identifier: letters, digits and _, not starting with a digit (UAX
-/// #31, roughly).
+/// An identifier: letters, digits and _, not starting with a digit (Unicode's
+/// UAX 31, roughly).
 fn identifier(text: &str) -> bool {
     let mut chars = text.chars();
     text.chars().count() <= MAX_ID
@@ -370,10 +370,10 @@ type Props = &'static [(&'static str, Kind, bool)];
 fn catalog(component: &str) -> Option<Props> {
     use Kind::*;
     Some(match component {
-        // title: a panel's title, as a Chart's label draws (#380).
+        // title: a panel's title, as a Chart's label draws.
         "Text" => &[("text", DynString, true), ("variant", Choice(&["heading", "body", "caption", "title"]), false)],
         // A Row stacks its children one under another below stackBelow
-        // points wide (#380), as a phone's dashboard does.
+        // points wide, as a phone's dashboard does.
         "Row" => &[
             ("children", Children, true),
             ("justify", JUSTIFY, false),
@@ -419,7 +419,7 @@ fn catalog(component: &str) -> Option<Props> {
 
 /// Checks a component; its id, and the keys to leave out of it: a plain key
 /// (not "@…") that isn't in the catalog, on a component `charts::lenient`
-/// names, so an app made for a newer catalog still shows here (#380). Every
+/// names, so an app made for a newer catalog still shows here. Every
 /// other unknown key is refused.
 fn component_id(component: &Value, at: &str) -> Result<(String, Vec<String>), Invalid> {
     let Value::Object(fields) = component else { return Err(invalid(at, "a component is an object")) };

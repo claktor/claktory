@@ -67,8 +67,7 @@ ALTER TABLE pipe_identity_own ADD COLUMN registration TEXT NOT NULL DEFAULT '';
 
 /// The signed iat of the latest statement for another account than the
 /// pinned one (unix seconds; 0 in rows kept before it): only a statement
-/// for the pinned account made after it clears the change (`heard`, Fugo
-/// on row 1327).
+/// for the pinned account made after it clears the change (`heard`).
 pub(crate) const CHANGE_IAT: &str = "
 ALTER TABLE pipe_identities ADD COLUMN change_iat INTEGER NOT NULL DEFAULT 0;
 ";
@@ -81,13 +80,12 @@ const PIPE_PEER_LIFETIME: i64 = 7 * 24 * 3600;
 /// always fresh enough for the other side (`FRESH_S`).
 const REFRESH_MS: i64 = 30 * 60 * 1000;
 /// How long after the account service made it a statement vouches for the
-/// other side (Fugo, row 1252), so a Claktory that signed in to another
-/// account, or out, isn't shown as the first one for longer, even if it
-/// kept presenting that one's statement. Seconds. 25 hours for now (#199,
-/// Bruno 35906, Fugo 35908): Claktories before this one ask for a statement
-/// once a day, and an hour would show their pipes as no longer verified
-/// most of the day. A release after this one has been out two weeks, it's
-/// an hour.
+/// other side, so a Claktory that signed in to another account, or out,
+/// isn't shown as the first one for longer, even if it kept presenting that
+/// one's statement. Seconds. 25 hours for now: Claktories before this one
+/// ask for a statement once a day, and an hour would show their pipes as no
+/// longer verified most of the day. A release after this one has been out
+/// two weeks, it's an hour.
 const FRESH_S: i64 = 25 * 3600;
 /// After a failed ask, the next waits this long.
 const RETRY_MS: i64 = 10 * 60 * 1000;
@@ -257,7 +255,7 @@ pub(crate) fn heard(factory: &Arc<Factory>, pipe: &str, endpoint: &str, identity
             return;
         }
         // Nor the account the person accepted, while it's another one, with
-        // a statement made before that one's (Fugo on row 1327): one kept
+        // a statement made before that one's: one kept
         // from before can't clear the change.
         if row.change == ACCOUNT_CHANGED && vouched.account_id == row.pinned_account && vouched.iat <= row.change_iat {
             return;
@@ -275,8 +273,8 @@ pub(crate) fn heard(factory: &Arc<Factory>, pipe: &str, endpoint: &str, identity
         } else if row.account != row.pinned_account {
             (row.change, row.change_iat) = (ACCOUNT_CHANGED, row.iat);
         } else {
-            // The account the person accepted, or back to it (Abbacchio's
-            // row 1327) with a statement made after the other account's.
+            // The account the person accepted, or back to it with a
+            // statement made after the other account's.
             row.change = if row.email == row.pinned_email { 0 } else { EMAIL_CHANGED };
         }
     }
@@ -289,12 +287,12 @@ pub(crate) fn heard(factory: &Arc<Factory>, pipe: &str, endpoint: &str, identity
         let shown = |row: &Row| peer_fields(row, true, 0);
         if shown(&row) != shown(&before) {
             factory.broadcast_workspace(&factory.lock());
-            // A card asking to accept the change before is void (#471 G7).
+            // A card asking to accept the change before is void.
             let why = if back {
                 "the other side signs in with the account you accepted again"
             } else if identity.is_empty() {
                 // Signed out there, or signing in again: it presents nothing
-                // for a moment first, whichever account comes next (row 1355).
+                // for a moment first, whichever account comes next.
                 "the other side's Claktory no longer says which account it's signed in to"
             } else {
                 "who's at the other end of the pipe changed again since it was asked"
@@ -304,8 +302,8 @@ pub(crate) fn heard(factory: &Arc<Factory>, pipe: &str, endpoint: &str, identity
     }
 }
 
-/// The other side signs in with the account the person accepted again
-/// (row 1327): what came while it was another account isn't let in but
+/// The other side signs in with the account the person accepted again:
+/// what came while it was another account isn't let in but
 /// waits for the person's review, agents' messages queued for it go on,
 /// and the pipe says so.
 fn back_to_accepted(factory: &Arc<Factory>, pipe: &str, row: &Row) {
@@ -367,7 +365,7 @@ pub(crate) fn changed_account(factory: &Factory, pipe: &str) -> bool {
 }
 
 /// The note on a message from the other side held because it's another
-/// account now (Trish's words, as the pipe's warning says it); None when
+/// account now (as the pipe's warning says it); None when
 /// it isn't.
 pub(crate) fn held_note(factory: &Factory, record: &Record) -> Option<String> {
     let row = read(factory, &record.id);
@@ -402,8 +400,8 @@ pub(crate) fn presented(factory: &Factory, record: &Record) -> (i32, String) {
     (change, presented)
 }
 
-/// AcceptPipeIdentity, in the pipe or from an agent's card (`card_id`, #471
-/// G7): the card is checked and claimed first, and its agent told.
+/// AcceptPipeIdentity, in the pipe or from an agent's card (`card_id`): the
+/// card is checked and claimed first, and its agent told.
 pub(crate) fn accept_request(factory: &Arc<Factory>, request: &v1::AcceptPipeIdentity) -> Result<(), RequestError> {
     let record = super::known(factory, &request.pipe_id)?;
     unpresented(&read(factory, &request.pipe_id))?;
@@ -449,7 +447,7 @@ fn presents(row: &Row) -> bool {
 
 /// Another account with nothing presented now (signed out there, or its
 /// statement ran out) can't be accepted: the person would let in what came
-/// from an account they never saw (Abbacchio's row 1328, Fugo).
+/// from an account they never saw.
 fn unpresented(row: &Row) -> Result<(), RequestError> {
     if row.change == ACCOUNT_CHANGED && !presents(row) {
         return Err(RequestError::Pipe(
@@ -475,8 +473,8 @@ fn release(factory: &Arc<Factory>, record: &Record) {
 }
 
 /// Every message from the other side held because it was another account
-/// (`held_note`), oldest first, however many came since (Fugo 37600: not
-/// only the latest page).
+/// (`held_note`), oldest first, however many came since (not only the
+/// latest page).
 fn held_for_account(factory: &Factory, pipe: &str) -> Vec<u64> {
     const HELD: &str = "SELECT seq, note FROM pipe_messages WHERE pipe = ?1 AND state = 'held_incoming' ORDER BY seq";
     let db = factory.store.db();
@@ -495,8 +493,8 @@ fn held_for_account(factory: &Factory, pipe: &str) -> Vec<u64> {
 /// signed in, "" when it isn't. Asks for a new one, in the background,
 /// when it's half an hour old or missing, and at once when this Claktory
 /// signed in again, or to another account, since it was asked for
-/// (Abbacchio's row 1252). Then the statement kept is dropped at once, and
-/// none is presented until the new one comes (Fugo): never a statement of a
+/// . Then the statement kept is dropped at once, and
+/// none is presented until the new one comes: never a statement of a
 /// sign-in that's over.
 pub(crate) fn own(factory: &Arc<Factory>) -> Option<String> {
     if let Some(test) = factory.pipes.identity.test() {

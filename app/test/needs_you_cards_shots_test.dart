@@ -1,5 +1,5 @@
-// Lucy's Needs you cards (needs-you-cards.md), drawn as they look, for her
-// to check against the mock-ups: each card alone in June's conversation,
+// Needs you's cards, drawn as they look, to
+// check against the mock-ups: each card alone in June's conversation,
 // on a Mac window and on an iPhone, before and after words are typed. With
 // SHOTS set, each is drawn to a PNG there:
 //   SHOTS=/tmp/cards flutter test test/needs_you_cards_shots_test.dart
@@ -191,7 +191,7 @@ void main() {
     }
 
     // History's words for where a procedure ended and how a secret was
-    // given (§7, N12).
+    // given.
     testWidgets('history on the ${phone ? 'iphone' : 'mac'}', (tester) async {
       if (phone) debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -266,7 +266,7 @@ void main() {
       await settle(tester);
       harness.page.value = AppPage.inbox;
       await pumpFrames(tester);
-      // Needs you opens on its list everywhere (#599), History a tab.
+      // Needs you opens on its list everywhere, History a tab.
       await tester.tap(find.text('History'));
       await settle(tester);
       await settle(tester);
@@ -277,7 +277,7 @@ void main() {
       await _shot(tester, 'history-${phone ? 'iphone' : 'mac'}');
     });
 
-    // The secret's line as its values are pasted (§3.5): one missing, then
+    // The secret's line as its values are pasted: one missing, then
     // all in.
     testWidgets('secret values on the ${phone ? 'iphone' : 'mac'}', (
       tester,

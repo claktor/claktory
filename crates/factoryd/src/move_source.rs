@@ -332,6 +332,7 @@ impl Mover {
 }
 
 fn list(items: &[move_export::Item], hashes: &mut HashMap<PathBuf, Hashed>) -> Result<Vec<Listed>, String> {
+    #[cfg(unix)]
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let now_ms = crate::transcript::now_ms();
     let mut listing = Vec::with_capacity(items.len());
@@ -351,13 +352,22 @@ fn list(items: &[move_export::Item], hashes: &mut HashMap<PathBuf, Hashed>) -> R
                 let size = meta.len();
                 let mtime_ms =
                     meta.modified().ok().and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |at| at.as_millis() as i64);
-                let ctime_ns = meta.ctime().saturating_mul(1_000_000_000).saturating_add(meta.ctime_nsec());
+                #[cfg(unix)]
+                let (ino, ctime_ns, mode) =
+                    (meta.ino(), meta.ctime().saturating_mul(1_000_000_000).saturating_add(meta.ctime_nsec()), meta.permissions().mode() & 0o777);
+                // A name that can't be read again counts as changed: its hashes are made again.
+                #[cfg(windows)]
+                let (ino, ctime_ns, mode) = (
+                    crate::windows::fs::identity(source).map_or(0, |identity| identity.index),
+                    crate::windows::fs::changed_ns(source).unwrap_or(-1),
+                    move_export::permissions(&meta),
+                );
                 let block = move_wire::block_size(size);
                 let kept = hashes.get(source).filter(|kept| {
                     *live
                         && kept.size == size
                         && kept.mtime_ms == mtime_ms
-                        && kept.ino == meta.ino()
+                        && kept.ino == ino
                         && kept.ctime_ns == ctime_ns
                         && kept.block == block
                 });
@@ -372,7 +382,7 @@ fn list(items: &[move_export::Item], hashes: &mut HashMap<PathBuf, Hashed>) -> R
                 // Kept only when it's had time to settle: a change within the
                 // same millisecond and size would otherwise go unseen.
                 if *live && mtime_ms < now_ms - RACY_MS {
-                    hashes.insert(source.clone(), Hashed { size, mtime_ms, ino: meta.ino(), ctime_ns, block, hashes: file_hashes.clone() });
+                    hashes.insert(source.clone(), Hashed { size, mtime_ms, ino, ctime_ns, block, hashes: file_hashes.clone() });
                 } else {
                     hashes.remove(source);
                 }
@@ -380,7 +390,7 @@ fn list(items: &[move_export::Item], hashes: &mut HashMap<PathBuf, Hashed>) -> R
                     entry: Entry {
                         kind: Kind::File,
                         size,
-                        mode: meta.permissions().mode() & 0o777,
+                        mode,
                         mtime_ms,
                         block,
                         hashes: file_hashes,
@@ -1212,7 +1222,8 @@ pub(crate) async fn finish(
     }
 }
 
-#[cfg(test)]
+// Moving isn't on Windows yet (`move_run::NOT_ON_WINDOWS`).
+#[cfg(all(test, unix))]
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::{Arc, Mutex};

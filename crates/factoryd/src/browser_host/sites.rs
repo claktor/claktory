@@ -119,7 +119,7 @@ pub(crate) fn host_id(message: &[u8]) -> bool {
 
 /// A CDP message from the runner: the host's own answer (taken here, and
 /// true), or not (false: it's the errand's).
-pub(crate) fn answer(factory: &Arc<Factory>, payload: &[u8]) -> bool {
+pub(crate) fn answer(factory: &Arc<Factory>, one: &super::One, payload: &[u8]) -> bool {
     if payload.len() > MAX_CDP {
         return true;
     }
@@ -131,9 +131,8 @@ pub(crate) fn answer(factory: &Arc<Factory>, payload: &[u8]) -> bool {
     }
     let Ok(message) = serde_json::from_str::<Value>(text) else { return false };
     let Some(id) = message["id"].as_u64().filter(|id| *id > HOST_IDS) else { return false };
-    let mut providers = Vec::new();
     let changed = {
-        let mut inner = factory.agent_browser.inner();
+        let mut inner = one.inner();
         if let Some(answer) = inner.waiting.remove(&id) {
             drop(inner);
             let _ = answer.send(message);
@@ -143,38 +142,32 @@ pub(crate) fn answer(factory: &Arc<Factory>, payload: &[u8]) -> bool {
         let result = &message["result"];
         match what {
             Call::Sites => {
-                // An identity provider's session cookies: a sign-in that
-                // worked (Fugo 41632), unless it's being signed out of.
-                let leaving: Vec<String> = super::waiting(factory, &mut inner).iter().map(|one| one.provider.clone()).collect();
-                providers =
-                    super::signout::signed_in(result).into_iter().filter(|provider| !leaving.iter().any(|one| one == provider)).collect();
+                inner.providers = super::signout::signed_in(result).iter().map(|provider| (*provider).to_owned()).collect();
                 let sites = signed_in(result);
                 let changed = sites != inner.sites;
                 inner.sites = sites;
-                changed.then(|| inner.sites.clone())
+                changed
             }
             Call::Page => {
                 let (origin, title) = page(result);
                 inner.origin = origin;
                 inner.title = title;
-                None
+                false
             }
         }
     };
-    for provider in providers {
-        factory.browser_signed_in(provider);
-    }
-    if let Some(sites) = changed {
-        // What errand_open tells the agent it's signed in to (Ghiaccio 38597).
-        factory.errands.set_signed_in(sites);
+    if changed {
         super::changed(factory);
     }
     true
 }
 
-/// The origins its cookies are for, sorted, without a name or value.
+/// The origins its cookies are for, sorted, without a name or value. A
+/// name under another listed one is left out: signing out of it alone
+/// would leave the cookies its parent holds for it, while signing out of
+/// the parent takes its own too.
 fn signed_in(result: &Value) -> Vec<String> {
-    let mut sites: Vec<String> = result["cookies"]
+    let mut domains: Vec<String> = result["cookies"]
         .as_array()
         .into_iter()
         .flatten()
@@ -183,10 +176,12 @@ fn signed_in(result: &Value) -> Vec<String> {
         .filter(|domain| {
             !domain.is_empty() && domain.len() <= 253 && domain.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
         })
-        .map(|domain| format!("https://{domain}"))
         .collect();
+    domains.sort();
+    domains.dedup();
+    let under = |domain: &str| domains.iter().any(|parent| domain.strip_suffix(parent.as_str()).is_some_and(|rest| rest.ends_with('.')));
+    let mut sites: Vec<String> = domains.iter().filter(|domain| !under(domain)).map(|domain| format!("https://{domain}")).collect();
     sites.sort();
-    sites.dedup();
     sites.truncate(MOST_SITES);
     sites
 }
@@ -225,22 +220,29 @@ mod tests {
             {"name": "z", "value": "y", "domain": ".google.com"},
             {"name": "bad", "value": "y", "domain": "evil.com/\\u202e"},
         ]});
-        assert_eq!(signed_in(&cookies), ["https://accounts.google.com", "https://google.com"]);
+        assert_eq!(signed_in(&cookies), ["https://google.com"], "accounts.google.com signs out with google.com");
         assert!(!format!("{:?}", signed_in(&cookies)).contains("secret"));
+        let apart = json!({"cookies": [
+            {"name": "a", "domain": "api.x.com"},
+            {"name": "b", "domain": "www.x.com"},
+            {"name": "c", "domain": "notx.com"},
+            {"name": "d", "domain": ".com.x.com"},
+        ]});
+        assert_eq!(signed_in(&apart), ["https://api.x.com", "https://com.x.com", "https://notx.com", "https://www.x.com"]);
     }
 
     #[test]
     fn leaving_driven_lets_go_of_the_errands_sessions_and_its_connection() {
-        use super::super::{Host, State, set_state};
-        let host = Host::default();
-        let mut inner = host.inner();
+        use super::super::{One, State, set_state};
+        let one = One::new("yukako");
+        let mut inner = one.inner();
         let (runner, mut to_runner) = tokio::sync::mpsc::channel(8);
         let (cdp, _from_chrome) = tokio::sync::mpsc::channel(8);
         inner.runner = Some(runner);
         inner.cdp = Some(cdp);
         inner.state = State::Driven;
         inner.release = vec!["S1".to_owned()];
-        set_state(&host, &mut inner, State::TakenOver);
+        set_state(&one, &mut inner, State::TakenOver);
         assert!(inner.cdp.is_none());
         assert!(inner.release.is_empty());
         let (_, deny) = to_runner.try_recv().expect("downloads denied");
@@ -253,8 +255,8 @@ mod tests {
         assert_eq!(message["params"]["sessionId"], "S1");
         assert!(message["id"].as_u64().unwrap() > HOST_IDS && message["id"].as_u64().unwrap() < 1 << 31);
         // Leaving again: downloads denied again, the sessions not detached twice.
-        set_state(&host, &mut inner, State::Driven);
-        set_state(&host, &mut inner, State::PersonsTurn);
+        set_state(&one, &mut inner, State::Driven);
+        set_state(&one, &mut inner, State::PersonsTurn);
         let (_, deny) = to_runner.try_recv().expect("downloads denied");
         assert!(String::from_utf8_lossy(&deny).contains("\"deny\""));
         assert!(to_runner.try_recv().is_err());
@@ -262,8 +264,8 @@ mod tests {
 
     #[test]
     fn the_hosts_ids_stay_below_the_runners() {
-        let host = super::super::Host::default();
-        let mut inner = host.inner();
+        let one = super::super::One::new("");
+        let mut inner = one.inner();
         assert_eq!(next_id(&mut inner), HOST_IDS + 1);
         inner.next_call = RUNNER_IDS - 2;
         assert_eq!(next_id(&mut inner), RUNNER_IDS - 1);

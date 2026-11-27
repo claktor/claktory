@@ -324,6 +324,10 @@ class Backend implements AppViewTransport {
   /// once: Settings scrolls to it and clears it.
   final settingsSection = ValueNotifier<String?>(null);
 
+  /// The project whose Files show as a page of their own
+  /// (`AppPage.files`), by its id: navigation, like which page shows.
+  final filesPage = ValueNotifier<String>('');
+
   /// The Marketplace tab to show next, by its id ("apps"), once: the
   /// Marketplace switches to it and clears it.
   final marketplaceTab = ValueNotifier<String?>(null);
@@ -628,6 +632,19 @@ class Backend implements AppViewTransport {
     return _request(message);
   }
 
+  /// The folder a new project named [name] would get now (Cioccolata's
+  /// PreviewProjectFolder: the backend's rule, never copied here), "" for
+  /// a blank name. The answer echoes [name], so a late one is dropped.
+  Future<ProjectFolderPreview> previewProjectFolder(String name) async {
+    final reply = await _call(
+      ClientMessage(previewProjectFolder: PreviewProjectFolder(name: name)),
+    );
+    if (!reply.hasProjectFolderPreview()) {
+      throw const RequestFailure('Claktory sent no folder.');
+    }
+    return reply.projectFolderPreview;
+  }
+
   /// Every time zone Claktory's browser can use, by IANA name, sorted
   /// (ListTimeZones).
   Future<List<String>> listTimeZones() async {
@@ -638,14 +655,13 @@ class Backend implements AppViewTransport {
     return reply.timeZones.names;
   }
 
-  /// An errand's log, oldest first ([errandId] empty: every errand's), the
-  /// last 7 days (ListErrandLog).
-  Future<ErrandLog> listErrandLog(String errandId) async {
+  /// The browser log, oldest first: [agentId]'s, or everyone's when empty.
+  Future<ErrandLog> listErrandLog({String agentId = ''}) async {
     final reply = await _call(
-      ClientMessage(listErrandLog: ListErrandLog(errandId: errandId)),
+      ClientMessage(listErrandLog: ListErrandLog(agentId: agentId)),
     );
     if (!reply.hasErrandLog()) {
-      throw const RequestFailure('Claktory sent no errand log.');
+      throw const RequestFailure('Claktory sent no browser log.');
     }
     return reply.errandLog;
   }
@@ -727,18 +743,6 @@ class Backend implements AppViewTransport {
   /// A pipe agent's daily spending caps (SetSpendCap); 0 for a default.
   Future<void> setSpendCap(SetSpendCap ask) =>
       _request(ClientMessage(setSpendCap: ask));
-
-  /// Contains an agent for errands, or lets it out (SetAgentContained,
-  /// the person's alone).
-  Future<void> setAgentContained(String agentId, {required bool contained}) =>
-      _request(
-        ClientMessage(
-          setAgentContained: SetAgentContained(
-            agentId: agentId,
-            contained: contained,
-          ),
-        ),
-      );
 
   /// Makes an agent read reports, or lets it go back (SetReportReader).
   Future<void> setReportReader(SetReportReader ask) =>
@@ -1992,10 +1996,6 @@ class Backend implements AppViewTransport {
   /// of that connection runs as this same Windows account. Otherwise the
   /// connection closes with nothing sent, and the next try starts again.
   Future<WebSocket> _windowsLoopback(WindowsLocal local) async {
-    final token = await local.readToken(dev: localPort != '7420');
-    if (token == null) {
-      throw const SocketException("This PC's Claktory has no app-token yet");
-    }
     final connecting = connectLoopback(localEndpoint);
     final (socket, ownPort) = await connecting.timeout(
       _connectWindow(null),
@@ -2019,6 +2019,14 @@ class Backend implements AppViewTransport {
       throw const SocketException(
         "This PC's Claktory port belongs to another account",
       );
+    }
+    // Read once it answers, never before: a backend writes this start's
+    // token before it serves anything, while the one a stopped backend
+    // left would be refused, and every restart cost a try (Hermes 53335).
+    final token = await local.readToken(dev: localPort != '7420');
+    if (token == null) {
+      await _let(socket);
+      throw const SocketException("This PC's Claktory has no app-token yet");
     }
     _localAppToken = token;
     return socket;
@@ -3310,6 +3318,13 @@ class Backend implements AppViewTransport {
     ),
   );
 
+  /// Refused, the reason is in words, and the page shouldn't open.
+  Future<void> paymentOpened(String agentId, int seq) => _request(
+    ClientMessage(
+      paymentOpened: PaymentOpened(agentId: agentId, seq: Int64(seq)),
+    ),
+  );
+
   /// The person read these alerts (Workspace.alerts): they opened one, or
   /// chose Mark as read. Each leaves Needs you for History.
   Future<void> readAlerts(List<String> ids) =>
@@ -4106,8 +4121,36 @@ class Backend implements AppViewTransport {
 
   /// Places an agent in the sidebar: under [ArrangeAgent.parentId], before
   /// [ArrangeAgent.beforeId], and in another project when that's set.
-  Future<void> arrangeAgent(ArrangeAgent arrange) =>
-      _request(ClientMessage(arrangeAgent: arrange));
+  /// Moves an agent in the sidebar, undoably: what moved and the token that
+  /// puts it back ([restoreArrangement]); null from a backend that only
+  /// acknowledges it.
+  Future<Arranged?> arrangeAgent(ArrangeAgent arrange) async {
+    final reply = await _call(
+      ClientMessage(arrangeAgent: arrange.deepCopy()..undoable = true),
+    );
+    return reply.hasArranged() ? reply.arranged : null;
+  }
+
+  /// Puts back what the move answered with [token] did.
+  Future<void> restoreArrangement(String token) => _request(
+    ClientMessage(restoreArrangement: RestoreArrangement(token: token)),
+  );
+
+  /// What moving an agent into another project would do to its old
+  /// project's pipes, for the move's confirm.
+  Future<ArrangePreview> previewArrange(ArrangeAgent arrange) async {
+    final reply = await _call(
+      ClientMessage(
+        previewArrange: PreviewArrange(
+          agentId: arrange.agentId,
+          parentId: arrange.parentId,
+          beforeId: arrange.beforeId,
+          projectId: arrange.hasProjectId() ? arrange.projectId : null,
+        ),
+      ),
+    );
+    return reply.hasArrangePreview() ? reply.arrangePreview : ArrangePreview();
+  }
 
   /// Collapses or expands the agents nested under an agent.
   Future<void> setAgentCollapsed(String agentId, bool collapsed) => _request(
@@ -4139,6 +4182,10 @@ class Backend implements AppViewTransport {
   /// the person's answer, from Settings or Needs you.
   Future<void> setKeepAwake(bool on) =>
       _request(ClientMessage(setKeepAwake: SetKeepAwake(on: on)));
+
+  /// Turns crediting Claktory in what agents publish on or off.
+  Future<void> setAttribution(bool on) =>
+      _request(ClientMessage(setAttribution: SetAttribution(on: on)));
 
   /// Turns keeping agents working with the lid closed on or off (#371);
   /// turning it on works only from the Mac app on that Mac.
@@ -4179,6 +4226,18 @@ class Backend implements AppViewTransport {
   /// This device's key in `Settings.zoom`: its paired id, or "local" for
   /// this machine's own app.
   String get zoomKey => deviceId.isEmpty ? 'local' : deviceId;
+
+  /// Folds a project's pipes and agents away in the sidebar, or shows them
+  /// (`SetProjectCollapsed`).
+  Future<void> setProjectCollapsed(String projectId, bool collapsed) =>
+      _request(
+        ClientMessage(
+          setProjectCollapsed: SetProjectCollapsed(
+            projectId: projectId,
+            collapsed: collapsed,
+          ),
+        ),
+      );
 
   /// Folds a project folder's agents away in the sidebar, or shows them.
   Future<void> setFolderCollapsed(
@@ -5081,7 +5140,7 @@ class Backend implements AppViewTransport {
   Future<ServerMessage> _call(ClientMessage message) {
     if (!connected.value) {
       return Future.error(
-        const RequestFailure('Not connected to the backend.'),
+        const RequestFailure("Can't reach your Claktory right now."),
       );
     }
     final id = _nextId++;
@@ -5444,6 +5503,10 @@ class Backend implements AppViewTransport {
       case ServerMessage_Body.timeZones:
       // PreviewProjectFolder's answer (New project's caption), to the asker.
       case ServerMessage_Body.projectFolderPreview:
+      // An undoable ArrangeAgent's answer (what Undo puts back) and
+      // PreviewArrange's (the move's pipe handovers), to the asker.
+      case ServerMessage_Body.arranged:
+      case ServerMessage_Body.arrangePreview:
       // A recovery-codes card's, to this connection only (#435 W8b): to
       // the card that asked, never kept here.
       case ServerMessage_Body.recoveryCodes:

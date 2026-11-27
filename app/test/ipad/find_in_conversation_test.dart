@@ -1,7 +1,7 @@
-// ⌘F on an iPad finds in what's being read (Lucy's agent view §4): with
+// ⌘F on an iPad finds in what's being read: with
 // the conversation the pane read, the system's menu (hold ⌘) lists ⌘F as
-// "Find" (Trish 43450), and running it opens the conversation's find bar,
-// as ⌘F does on a Mac.
+// "Find", and running it opens the conversation's find bar, as ⌘F does on
+// a Mac.
 import 'package:factory_app/conversation_find.dart' show ConversationFind;
 import 'package:factory_app/find.dart' show FindSessions;
 import 'package:factory_app/ipad/commands.dart' show CommandMenu;

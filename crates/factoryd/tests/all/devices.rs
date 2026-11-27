@@ -150,7 +150,7 @@ async fn a_card_shows_how_adding_a_device_ended_and_the_agent_is_told() {
     assert!(matches!(apply_request(&mut client, &mut view, deny).await, Body::Ack(_)));
     follow_card(&mut client, &mut view, "Tablet", DevicePairingState::Denied).await;
 
-    // Cancelled from the card. Said to be a phone, the card knows (#236)
+    // Cancelled from the card. Said to be a phone, the card knows
     // and keeps it through every later update, which factory.db can't say.
     let said = call(&mut client, &mut view, "devices_add", serde_json::json!({"name": "Phone", "kind": "watch"})).await;
     assert!(said.starts_with("kind is \"phone\", \"tablet\", \"laptop\" or \"desktop\", or left out"), "{said}");

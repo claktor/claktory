@@ -59,6 +59,8 @@ const SHIPPED_RIVET_PROMPTS: &[&str] = &[
     "5db56c606e08b97af5b757b7f6b4ceff0cb31f3e27dfa18e3e6e8d6120ab0080",
     // What an agent asks of the person is a request (#588).
     "99b17df7a53525dc507dcd12c697581a3ebd25ad082ebc77d2caac41a693ed73",
+    // Letting an agent use the browser (browser-simple).
+    "54e3b85ea81f1187fdee1343feba7f65314ff6c2839f108f9556ed4dd72e8311",
 ];
 /// Rivet is interactive, so it gets medium effort, the Opus 5.5 default.
 const RIVET_EFFORT: &str = "medium";
@@ -120,6 +122,11 @@ pub struct Config {
     /// The person wants highlights shown in the app. Only written when off.
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub highlights: bool,
+    /// What agents publish for the person on code hosts credits Claktory
+    /// ("Made with Claktory", a co-author trailer; the manual's section on
+    /// it). Read when an agent's context starts. Only written when off.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub attribution: bool,
     /// Admin agents hear of a background task once it has run this many hours.
     #[serde(default = "default_task_alert_hours", skip_serializing_if = "is_default_task_alert_hours")]
     pub task_alert_hours: u64,
@@ -744,6 +751,7 @@ impl Default for Config {
             projects: Vec::new(),
             agents: vec![rivet],
             highlights: true,
+            attribution: true,
             task_alert_hours: DEFAULT_TASK_ALERT_HOURS,
             remote: None,
             resources: ResourcesConfig::default(),
@@ -812,12 +820,15 @@ pub enum Invalid {
     PromptCacheNotOffered(String),
     #[error("color \"{0}\" must be one of blue, violet, green, pink, teal, amber, red, slate")]
     BadColor(String),
-    #[error("name \"{0}\" can't have line breaks, or characters that hide or reorder text")]
-    BadName(String),
+    #[error("{0} \"{1}\" can't have line breaks or hidden characters")]
+    BadName(&'static str, String),
     #[error("agent \"{agent}\": extensions setting \"{setting}\" must be {expected}")]
     BadExtensionSetting { agent: String, setting: String, expected: String },
     #[error("notifications: {0}")]
     BadNotifications(String),
+    /// Guard 9 (browser-simple.md): Lucy's words, as Settings shows them.
+    #[error("{0}")]
+    BrowserRefused(&'static str),
 }
 
 impl Config {
@@ -828,6 +839,13 @@ impl Config {
     /// folders, and every path a config written before relative forms
     /// holds) are kept as they are, so old files read forever.
     pub fn parse(text: &str, root: &Path) -> Result<Config, ConfigError> {
+        Self::parse_settled(text, root).map(|(config, _)| config)
+    }
+
+    /// `parse`, and the agents it turned the browser off for since they
+    /// can't have it, so the caller saves the file: otherwise the file
+    /// keeps it on, and it comes back once that agent could have it again.
+    pub(crate) fn parse_settled(text: &str, root: &Path) -> Result<(Config, Vec<String>), ConfigError> {
         let mut config: Config = serde_json::from_str(text)?;
         for project in &mut config.projects {
             resolve(&mut project.path, root);
@@ -836,8 +854,47 @@ impl Config {
             }
         }
         config.clean_names();
+        let dropped = config.drop_refused_browsers();
         config.validate()?;
-        Ok(config)
+        Ok((config, dropped))
+    }
+
+    /// Turns the Browser extension off for every agent it's refused for
+    /// (`browser_refused`), so a file edited by hand, or kept from a build
+    /// before admin agents were refused the browser, still reads; the agents it was turned off for.
+    pub(crate) fn drop_refused_browsers(&mut self) -> Vec<String> {
+        let mut dropped = Vec::new();
+        for agent in &mut self.agents {
+            if browser_on(agent) && browser_refused(agent).is_some() {
+                browser_off(agent);
+                tracing::warn!(agent = %agent.id, "turned the browser off for an agent that can't have it");
+                dropped.push(agent.id.clone());
+            }
+        }
+        dropped
+    }
+
+    /// After an edit from `before`: an agent made admin while it had the
+    /// browser has it turned off (its profile goes too, by the
+    /// caller); one given the browser while it can't have it is refused.
+    /// The agents whose browser was turned off.
+    pub(crate) fn settle_browsers(&mut self, before: &Config) -> Result<Vec<String>, Invalid> {
+        let mut off = Vec::new();
+        for agent in &mut self.agents {
+            let Some(why) = browser_refused(agent) else { continue };
+            if !browser_on(agent) {
+                continue;
+            }
+            let had = before.agent(&agent.id).is_some_and(|was| {
+                browser_on(was) && browser_refused(was).is_none()
+            });
+            if !had {
+                return Err(Invalid::BrowserRefused(why));
+            }
+            browser_off(agent);
+            off.push(agent.id.clone());
+        }
+        Ok(off)
     }
 
     /// Takes out of every name the file holds what `validate` refuses in
@@ -1007,27 +1064,27 @@ impl Config {
         }
         let mut ids = HashSet::new();
         for project in &self.projects {
-            check_entry(&project.id, &project.name, &mut ids)?;
+            check_entry("project name", &project.id, &project.name, &mut ids)?;
             if !project.path.is_absolute() {
                 return Err(Invalid::RelativePath(project.id.clone()));
             }
             let mut folder_ids = HashSet::new();
             for folder in &project.folders {
-                check_entry(&folder.id, &folder.name, &mut folder_ids)?;
+                check_entry("folder name", &folder.id, &folder.name, &mut folder_ids)?;
                 if !folder.path.is_absolute() {
                     return Err(Invalid::RelativeFolder { project: project.id.clone(), folder: folder.id.clone() });
                 }
             }
         }
-        check_name(&self.name)?;
-        check_name(&self.user.name)?;
+        check_name("Claktory name", &self.name)?;
+        check_name("your name", &self.user.name)?;
         if !self.color.is_empty() && !AGENT_COLORS.contains(&self.color.as_str()) {
             return Err(Invalid::BadColor(self.color.clone()));
         }
         let mut agent_ids = HashSet::new();
         for agent in &self.agents {
-            check_entry(&agent.id, &agent.name, &mut agent_ids)?;
-            check_name(&agent.role)?;
+            check_entry("name", &agent.id, &agent.name, &mut agent_ids)?;
+            check_name("role", &agent.role)?;
             if let Some(project) = &agent.project
                 && self.project(project).is_none()
             {
@@ -1042,6 +1099,11 @@ impl Config {
                 return Err(Invalid::BadColor(agent.color.clone()));
             }
             crate::extensions::validate(agent)?;
+            if browser_on(agent)
+                && let Some(why) = browser_refused(agent)
+            {
+                return Err(Invalid::BrowserRefused(why));
+            }
         }
         Ok(())
     }
@@ -1173,7 +1235,8 @@ impl Config {
 /// control, or one that shows nothing or reorders the text around it (bidi
 /// controls, zero widths and joiners, the BOM: the set DM certificates'
 /// names are checked against, `certificate::hidden_in`), but for an emoji's
-/// own variation selector, right after it (❤️).
+/// own variation selector, right after it (❤️), and a joiner between two
+/// emoji (👩‍💻, Fugo 53113).
 pub(crate) fn name_hides(name: &str) -> bool {
     claktory_dm_crypto::certificate::hidden_in(name).next().is_some()
 }
@@ -1182,32 +1245,36 @@ pub(crate) fn name_hides(name: &str) -> bool {
 /// the rest left out, trimmed. For names that come from outside
 /// (a pipe's other side, a device's own name, a friend's) and names in a
 /// file.
+/// Why `agent` can't have the Browser extension, as far as its settings
+/// say: an admin agent. Agents limited to a pipe or to reading
+/// reports are refused by `errands::refused`, which knows them.
+pub(crate) fn browser_refused(agent: &AgentConfig) -> Option<&'static str> {
+    crate::proposals::is_admin(agent).then_some("Admin agents can't use the browser.")
+}
+
+/// Whether `agent`'s settings turn its Browser extension on, whether or not
+/// Claktory's browser can run here: a file is held to the same rules on a
+/// computer without it, so it's right when the browser comes.
+pub(crate) fn browser_on(agent: &AgentConfig) -> bool {
+    agent.extensions.get(crate::extensions::browser::ID).and_then(|settings| settings.get("enabled")).and_then(Value::as_bool) == Some(true)
+}
+
+/// Turns `agent`'s Browser extension off.
+pub(crate) fn browser_off(agent: &mut AgentConfig) {
+    agent.extensions.entry(crate::extensions::browser::ID.to_owned()).or_default().insert("enabled".to_owned(), Value::Bool(false));
+}
+
 pub(crate) fn clean_name(name: &str) -> String {
-    let mut after_visible = false;
-    let mut kept = String::with_capacity(name.len());
-    for c in name.chars() {
-        if c.is_whitespace() {
-            kept.push(' ');
-            after_visible = false;
-        } else if ('\u{FE00}'..='\u{FE0F}').contains(&c) {
-            if after_visible {
-                kept.push(c);
-            }
-            after_visible = false;
-        } else if !claktory_dm_crypto::certificate::hidden(c) {
-            kept.push(c);
-            after_visible = true;
-        }
-    }
-    kept.trim().to_owned()
+    claktory_account::protocol::without_hidden(name)
 }
 
-/// Refuses a name `name_hides` finds something in, saying it without it.
-fn check_name(name: &str) -> Result<(), Invalid> {
-    if name_hides(name) { Err(Invalid::BadName(clean_name(name))) } else { Ok(()) }
+/// Refuses a name `name_hides` finds something in, saying which (`what`:
+/// "role", "project name"…) and the name without it.
+fn check_name(what: &'static str, name: &str) -> Result<(), Invalid> {
+    if name_hides(name) { Err(Invalid::BadName(what, clean_name(name))) } else { Ok(()) }
 }
 
-fn check_entry(id: &str, name: &str, seen: &mut HashSet<String>) -> Result<(), Invalid> {
+fn check_entry(what: &'static str, id: &str, name: &str, seen: &mut HashSet<String>) -> Result<(), Invalid> {
     // Ids name folders on disk, so they must not be able to escape them.
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
         return Err(Invalid::BadId(id.to_owned()));
@@ -1218,7 +1285,7 @@ fn check_entry(id: &str, name: &str, seen: &mut HashSet<String>) -> Result<(), I
     if name.trim().is_empty() {
         return Err(Invalid::EmptyName(id.to_owned()));
     }
-    check_name(name)
+    check_name(what, name)
 }
 
 /// Whether `prompt` is a Rivet prompt some version of Claktory shipped.
@@ -1533,6 +1600,19 @@ pub struct FolderView {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_file_giving_an_admin_agent_the_browser_reads_with_it_off_and_asks_to_be_saved() {
+        let root = Path::new("/tmp/claktory-config-test");
+        let mut config = Config::default();
+        let text = config.to_json(root).expect("json");
+        assert!(Config::parse_settled(&text, root).expect("parses").1.is_empty(), "nothing to save");
+        config.agents[0].extensions.entry(crate::extensions::browser::ID.to_owned()).or_default().insert("enabled".to_owned(), Value::Bool(true));
+        let text = config.to_json(root).expect("json");
+        let (read, dropped) = Config::parse_settled(&text, root).expect("parses");
+        assert_eq!(dropped, [read.agents[0].id.clone()], "saved, so the file no longer has it on");
+        assert!(!browser_on(&read.agents[0]));
+    }
+
     /// Row 1730: what a name may not hold, and the same name without it.
     #[test]
     fn a_name_holds_nothing_that_hides_or_reorders_text() {
@@ -1557,16 +1637,49 @@ mod tests {
             "projects": [{"id": "site", "name": "\u200b", "path": "/tmp/site", "folders": [{"id": "app", "name": "App\u2066", "path": "/tmp/app"}]}],
             "agents": [{"id": "ana", "name": "A\u202ana", "role": "Back\u200dend", "project": "site",
                 "prompt": "", "model": "anthropic/claude-haiku-4-5", "effort": "low"}]}"#;
+        // A full path on Windows starts with its drive.
+        #[cfg(windows)]
+        let text = &text.replace("\"/tmp/", "\"C:/tmp/");
         let config = Config::parse(text, Path::new("/tmp")).expect("reads");
         assert_eq!((config.name.as_str(), config.user.name.as_str()), ("Studio", "Matt"));
         assert_eq!((config.projects[0].name.as_str(), config.projects[0].folders[0].name.as_str()), ("site", "App"));
         assert_eq!((config.agents[0].name.as_str(), config.agents[0].role.as_str()), ("Ana", "Backend"));
         let mut renamed = config.clone();
         renamed.agents[0].name = "A\u{202E}na".into();
-        assert!(matches!(renamed.validate(), Err(Invalid::BadName(name)) if name == "Ana"));
+        assert!(matches!(renamed.validate(), Err(Invalid::BadName("name", name)) if name == "Ana"));
         let mut renamed = config;
         renamed.projects[0].folders[0].name = "App\u{FEFF}".into();
-        assert!(matches!(renamed.validate(), Err(Invalid::BadName(_))));
+        assert!(matches!(renamed.validate(), Err(Invalid::BadName("folder name", _))));
+    }
+
+    /// A joiner between two emoji is theirs, kept and allowed; anywhere else
+    /// it's taken out of a name, and refused in one from a device (Fugo
+    /// 53113). The refusal names the field.
+    #[test]
+    fn a_joiner_only_between_emoji() {
+        for kept in ["👩\u{200D}💻", "🏳\u{FE0F}\u{200D}🌈", "❤\u{FE0F}\u{200D}🔥", "🧑🏽\u{200D}💻"] {
+            assert!(!name_hides(kept), "{kept:?}");
+            assert_eq!(clean_name(kept), kept);
+        }
+        for (hides, clean) in [
+            ("A\u{200D}na", "Ana"),
+            ("\u{200D}👍", "👍"),
+            ("👍\u{200D}", "👍"),
+            ("👍\u{200D}\u{200D}💻", "👍💻"),
+            ("a\u{200D}💻", "a💻"),
+        ] {
+            assert!(name_hides(hides), "{hides:?}");
+            assert_eq!(clean_name(hides), clean);
+            assert!(!name_hides(clean));
+        }
+        let text = r#"{"agents": [{"id": "ana", "name": "Ana", "role": "🧑🏽‍💻",
+            "prompt": "", "model": "anthropic/claude-haiku-4-5", "effort": "low"}]}"#;
+        let mut config = Config::parse(text, Path::new("/tmp")).expect("reads");
+        assert_eq!(config.agents[0].role, "🧑🏽\u{200D}💻");
+        config.agents[0].role = "Back\u{200D}end".into();
+        let refused = config.validate().expect_err("refused");
+        assert!(matches!(&refused, Invalid::BadName("role", role) if role == "Backend"));
+        assert_eq!(refused.to_string(), "role \"Backend\" can't have line breaks or hidden characters");
     }
 
     /// How long each model's cache lasts: Anthropic's an hour unless set;
@@ -1617,6 +1730,9 @@ mod tests {
             "agents": [{"id": "ed", "name": "Ed", "model": "anthropic/claude-sonnet-4-5", "effort": "off",
                         "purpose": "Old name for the prompt.", "notify": "always", "avatar": {"shape": "circle", "ring": 2}}]
         }"#;
+        // A full path on Windows starts with its drive.
+        #[cfg(windows)]
+        let text = &text.replace("\"/tmp/", "\"C:/tmp/");
         let config = Config::parse(text, root).expect("a newer Claktory's settings read");
         assert_eq!(config.agents[0].prompt, "Old name for the prompt.", "the old alias still reads");
         assert_eq!(config.display.sidebar_width, 300.0);

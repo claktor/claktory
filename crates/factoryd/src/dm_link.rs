@@ -1,11 +1,11 @@
-//! Direct messages between home Claktories (#451, ALPN `claktory-dm/1`):
+//! Direct messages between home Claktories (ALPN `claktory-dm/1`):
 //! each person's home sends what their devices hand it to each friend's
 //! home, and the person's own other Claktories with a leaf in the group,
 //! and takes what theirs send, for its own person's devices. Only
 //! ciphertext crosses: MLS messages the devices made, which no home opens.
 //!
 //! - **Who gets in.** Only endpoints in the routing table the person's own
-//!   devices gave this home (`DmRoutes`, Fugo's ruling (a)): the gate turns
+//!   devices gave this home (`DmRoutes`): the gate turns
 //!   any other key away before a frame, and each frame is checked again, so
 //!   a route taken away ends that peer's next frame. A peer sends only in
 //!   the groups its route lists.
@@ -110,10 +110,10 @@ pub(crate) struct Outgoing {
     pub group_id: Vec<u8>,
     pub envelope: Vec<u8>,
     /// What this Claktory, no longer the home, hands on to the person's new
-    /// home (Fugo 33778 (a)): the leaf that sent it and its client id.
+    /// home: the leaf that sent it and its client id.
     pub handover: Option<(String, String)>,
     /// What this Claktory, no longer the home, passes on to the person's
-    /// new home that their leaves hadn't all read (Fugo 39876): whose it
+    /// new home that their leaves hadn't all read: whose it
     /// is, a hint.
     pub pass_on: Option<String>,
 }
@@ -163,8 +163,8 @@ pub(crate) struct PeerStatus {
     pub refused: String,
 }
 
-/// `PeerStatus.refused` when the peer doesn't take this home's link at all
-/// (Zucchero's row 567): it isn't the friend's home any more, or isn't
+/// `PeerStatus.refused` when the peer doesn't take this home's link at all:
+/// it isn't the friend's home any more, or isn't
 /// routing this one yet. The person's device reads the friend's list again
 /// and gives its home new routes; until then it isn't "offline".
 pub(crate) const TURNED_AWAY: &str = "turned_away";
@@ -388,7 +388,7 @@ enum Request {
     },
     Knock,
     /// The person's home before hands on what it held for friends when it
-    /// stopped being the home (Fugo 33778 (a)): a device's message, its
+    /// stopped being the home: a device's message, its
     /// leaf and client id.
     HandOver {
         id: String,
@@ -398,9 +398,8 @@ enum Request {
         client_message_id: String,
     },
     /// The person's home before passes on what it had taken that their
-    /// leaves hadn't all read when it stopped being the home (Zucchero's
-    /// row 567, Fugo 39876): an application message, for their leaves
-    /// only; `account` is a hint.
+    /// leaves hadn't all read when it stopped being the home: an
+    /// application message, for their leaves only; `account` is a hint.
     PassOn {
         id: String,
         group_id: String,
@@ -415,7 +414,7 @@ enum Request {
         signature: String,
     },
     /// A friend's home says it's their home now, with their signed device
-    /// list (`dm_hello::HomeList`, row 595): the first request on each new
+    /// list (`dm_hello::HomeList`): the first request on each new
     /// connection to a friend's home. A home that doesn't know it answers
     /// "bad", and the knock goes on.
     HomeList {
@@ -487,7 +486,7 @@ pub(crate) fn reload(factory: &Arc<Factory>) {
         } else if moved {
             // The home now, or no longer: a peer that turned away its knock
             // (no hello, no list yet) is knocked again now, with them, not
-            // after its backoff (row 606).
+            // after its backoff.
             worker.wake.notify_one();
         }
         keep
@@ -649,7 +648,7 @@ async fn flush(
         }
         // To a friend's home from the person's: that it's their home, so a
         // friend's home that still routes to the one before (all of the
-        // friend's devices off since the move) takes it (row 595).
+        // friend's devices off since the move) takes it.
         if let Some(proof) = home_list_for(factory, endpoint) {
             let reply = ask(&proof).await?;
             if reply.code != "ok" {
@@ -662,7 +661,7 @@ async fn flush(
     let mut kept = false;
     for outgoing in queued {
         // A commit goes as a hint: the peer only ever takes commits from
-        // claktory.com (Fugo's condition 4), and one can be 128 KiB.
+        // claktory.com, and one can be 128 KiB.
         let commit = claktory_dm_crypto::envelope::parse(&outgoing.envelope)
             .ok()
             .filter(|parsed| parsed.kind == claktory_dm_crypto::envelope::Kind::Commit)
@@ -825,8 +824,8 @@ async fn serve_routed(connection: &Connection, factory: &Weak<Factory>, peer: &s
 }
 
 /// Whether `peer` is let in without a hello: routed, or one of the
-/// person's own Claktories bound here (Fugo's condition 3: even while the
-/// hello limits are spent, and before its leaf is in any group).
+/// person's own Claktories bound here (even while the hello limits are
+/// spent, and before its leaf is in any group).
 fn known(factory: &Factory, peer: &str) -> bool {
     !factory.dm_link.gate.offline() && (factory.dm_link.admits(peer) || bound(factory, peer))
 }
@@ -911,7 +910,7 @@ fn hear(factory: &Factory, from: &str, hello: &crate::dm_hello::Hello) -> bool {
         }
         Err(why) => {
             // A stranger's string: escaped and cut short, so it can't forge
-            // log lines (Fugo 33386).
+            // log lines.
             let leaf: String = hello.leaf_id.chars().take(64).collect();
             tracing::warn!(leaf = ?leaf, ?why, "turned away a hello");
             false
@@ -1014,7 +1013,7 @@ fn answer(factory: &Arc<Factory>, peer: &str, request: Request, now: i64) -> Rep
     }
 }
 
-/// The person's home before hands on a message (Fugo 33778 (a)): taken
+/// The person's home before hands on a message: taken
 /// as their device's would be, only from one of their Claktories bound
 /// here now and only within the leaf's own rate, shared with its DmSend.
 #[allow(clippy::too_many_arguments)]
@@ -1052,7 +1051,7 @@ fn hand_over(
 
 /// What the person's home before passes on (`Request::PassOn`): only from
 /// one of their Claktories bound here by its hello, within the link's rate
-/// for that peer; the intake checks the rest (Fugo 39876).
+/// for that peer; the intake checks the rest.
 fn pass_on(factory: &Arc<Factory>, peer: &str, id: &str, group_id: &str, envelope: &str, account: &str, now: i64) -> Reply {
     if !bound(factory, peer) {
         return Reply::code("not_routed");

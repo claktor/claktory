@@ -1,4 +1,4 @@
-// Where Android's Back swipe doesn't start (Sale's row 86): the phone's
+// Where Android's Back swipe doesn't start: the phone's
 // hold-to-record mic is taken out of the system's Back gesture while it's
 // on screen, and only the mic: its own box, sent to the host as the
 // window's logical pixels, kept where the mic moves, given back when it

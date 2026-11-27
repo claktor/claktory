@@ -342,17 +342,24 @@ main() {
     local pair=() status=0
     $YES && pair=(--no-pair)
     # Its own words go to the person; the last of them, when it fails, is why.
+    # tee runs as a job of its own, reading a FIFO, so it can be waited for:
+    # a refusal that exits at once still has its words read, and its code
+    # kept (a process substitution can't be waited for in every bash).
+    : >"$work/out/errors"
+    mkfifo "$work/out/stderr"
+    tee "$work/out/errors" <"$work/out/stderr" >&2 &
+    local tee_pid=$!
     if $JSON; then
       CLAKTORY_INSTALL_OUT="$work/out" bash "$releases/$version/install-linux.sh" "$releases/$version" "${pair[@]}" </dev/null \
-        >&2 2> >(tee "$work/out/errors" >&2) || status=$?
+        >&2 2>"$work/out/stderr" || status=$?
     else
       CLAKTORY_INSTALL_OUT="$work/out" bash "$releases/$version/install-linux.sh" "$releases/$version" "${pair[@]}" </dev/null \
-        2> >(tee "$work/out/errors" >&2) || status=$?
+        2>"$work/out/stderr" || status=$?
     fi
-    wait
+    wait "$tee_pid" || true
     if ((status != 0)); then
       local why
-      why="$(grep -v '^$' "$work/out/errors" 2>/dev/null | tail -n 1)"
+      why="$({ grep -v '^$' "$work/out/errors" 2>/dev/null || true; } | tail -n 1)"
       [[ -n "$why" ]] || why="Claktory can't be installed: its installer stopped ($status)."
       case "$status:$why" in
         3:*) stop unsupported 3 "$why" --said ;;

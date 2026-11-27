@@ -10,6 +10,9 @@
 //!
 //! Its VMs and volume are `claktory-browser-test`, never a Claktory's.
 //! A file of its own: it turns Claktory's browser on for the process.
+//!
+//! Claktory's browser isn't on Windows.
+#![cfg(unix)]
 
 #[path = "common/mod.rs"]
 mod common;
@@ -98,7 +101,7 @@ async fn a_runner_that_wont_end_leaves_no_vm() {
 
     // Stopped: off only once its VM has gone, though its runner ignored
     // its stdin's end and SIGTERM, and `container run` was killed.
-    client.ok(Request::StopAgentBrowser(v1::StopAgentBrowser {})).await;
+    client.ok(Request::StopAgentBrowser(v1::StopAgentBrowser::default())).await;
     off(addr).await;
     assert!(vms().is_empty(), "off, and its VM gone: {:?}", vms());
 
@@ -106,7 +109,7 @@ async fn a_runner_that_wont_end_leaves_no_vm() {
     client.ok(open()).await;
     let second = until("the second VM", |now| now.len() == 1).await;
     assert_ne!(second, first);
-    client.ok(Request::StopAgentBrowser(v1::StopAgentBrowser {})).await;
+    client.ok(Request::StopAgentBrowser(v1::StopAgentBrowser::default())).await;
     off(addr).await;
     assert!(vms().is_empty(), "off, and its VM gone: {:?}", vms());
     let _ = std::process::Command::new("container").args(["volume", "delete", "claktory-browser-test"]).output();

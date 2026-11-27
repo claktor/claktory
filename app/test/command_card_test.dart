@@ -8,7 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
 
-/// Execute cards (#494): an agent asks the person to run a command on this
+/// Execute cards: an agent asks the person to run a command on this
 /// Claktory's computer. Claktory's heading and the command above the
 /// agent's reason; Execute runs exactly what's shown, once, confirmed
 /// again when Claktory warns; no reply; the run and its output on the card.
@@ -293,7 +293,7 @@ void main() {
     expect(commandLimit(5400), '1 h 30 min');
     // Needs you names it by Claktory's heading, never the agent's title,
     // with the command's first line under it, so two for one machine can be
-    // told apart (Zucchero's row 487).
+    // told apart.
     expect(
       askSummary(_card(command: '\n  ls -la ~/Downloads\nrm x').askPerson),
       "Run this command on Matt's Mac Studio?\nls -la ~/Downloads",

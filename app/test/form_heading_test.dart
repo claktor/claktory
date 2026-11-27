@@ -1,7 +1,7 @@
-// Zucchero's row 507: the #37 texts at the largest text size on an iPhone
-// SE. The drawer's "Can't connect · last seen 1 min ago" lost its time to
-// an ellipsis, the connection sheet's "Can't connect to mac-mini" lost the
-// name, and "Reconnecting…" broke inside the word.
+// Texts at the largest text size on an iPhone SE. The drawer's
+// "Can't connect · last seen 1 min ago" lost its time to an ellipsis, the
+// connection sheet's "Can't connect to mac-mini" lost the name, and
+// "Reconnecting…" broke inside the word.
 import 'package:factory_app/connection.dart' show ConnectionDialog;
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/forms.dart' show FittedHeading;
@@ -134,7 +134,7 @@ void main() {
     });
   }
 
-  // Row 510: in the drawer, the top (the name and more) scrolls at the
+  // In the drawer, the top (the name and more) scrolls at the
   // largest text, and the line went under its fold.
   testWidgets("in the drawer at the largest text, how it's connected is "
       'whole and in sight', (tester) async {
@@ -186,7 +186,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  // Row 510: Settings' "Notifications" broke as "Notification / s".
+  // Settings' "Notifications" broke as "Notification / s".
   testWidgets("a phone's Settings rows never break a word", (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);

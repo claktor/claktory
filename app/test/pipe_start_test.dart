@@ -133,7 +133,7 @@ void main() {
     await settle(tester);
     expect(find.text('claktory-pipe://?w=x&s=y'), findsOneWidget);
 
-    // Marked sensitive, for as long as it works (Fugo's row 166).
+    // Marked sensitive, for as long as it works.
     final clipboard = FakeSecretClipboard.install();
     // No share sheet on a Mac: Copy code alone.
     expect(find.text('Share'), findsNothing);

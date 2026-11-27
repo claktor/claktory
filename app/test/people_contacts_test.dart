@@ -334,7 +334,7 @@ void main() {
       ]);
     });
 
-    // Row 1441 (Abbacchio): Remove friend…, then Done, then People again:
+    // Remove friend…, then Done, then People again:
     // the friend is gone from the list then and there, and still gone.
     testWidgets('a friend removed is gone at once, and after Done and People '
         'again', (tester) async {
@@ -369,7 +369,7 @@ void main() {
       expect(find.textContaining('No friends yet'), findsOneWidget);
     });
 
-    // Row 1441: a read of the lists from before the Remove that answers
+    // A read of the lists from before the Remove that answers
     // after it never puts the friend back.
     testWidgets('an earlier read answering late never puts a removed friend '
         'back', (tester) async {

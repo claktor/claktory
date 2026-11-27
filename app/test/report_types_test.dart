@@ -3,8 +3,10 @@
 // its caps clamped; a pipe chooses which kinds it forwards; a report is
 // shown against the version it was written in, numbers and dates as read;
 // and History shows a kind's change, with what widened.
-import 'package:factory_app/controls.dart' show Select, showModal;
+import 'package:factory_app/controls.dart' show Button, Select, showModal;
+import 'package:factory_app/devices.dart' show QuietLink;
 import 'package:factory_app/pipe_reports.dart';
+import 'package:factory_app/pipes.dart' show ConnectPipeForm;
 import 'package:factory_app/report_types.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
@@ -195,10 +197,17 @@ void main() {
     await show(tester);
     await open(tester, const ReportTypesSettings());
 
+    // Where pipes are made, and the way there (projects-sidebar.md §4).
     expect(
       find.text(
-        'What a pipe’s agent fills in for each kind of report it passes on. '
-        'Pipes themselves are set up in their project.',
+        'Pipes connect a project to someone else’s Claktory. To make one, '
+        'choose Connect a pipe… in a project’s ⋯ menu.',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.text(
+        'What a pipe’s agent fills in for each kind of report it passes on.',
       ),
       findsOneWidget,
     );
@@ -225,6 +234,40 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('Delete…'), findsOneWidget);
+  });
+
+  testWidgets('one project: a Connect a pipe… button opens its form', (
+    tester,
+  ) async {
+    await show(tester);
+    await open(tester, const ReportTypesSettings());
+    await tester.tap(find.widgetWithText(Button, 'Connect a pipe…'));
+    await settle(tester);
+    expect(find.byType(ConnectPipeForm), findsOneWidget);
+    expect(
+      tester.widget<ConnectPipeForm>(find.byType(ConnectPipeForm)).project.id,
+      'p1',
+    );
+  });
+
+  testWidgets('several projects: each one a link to its own Connect a pipe '
+      '(archived ones left out)', (tester) async {
+    final workspace = _workspace()
+      ..projects.addAll([
+        Project(id: 'p2', name: 'Bakery'),
+        Project(id: 'p3', name: 'Old', archived: true),
+      ]);
+    await show(tester, workspace: workspace);
+    await open(tester, const ReportTypesSettings());
+    expect(find.widgetWithText(Button, 'Connect a pipe…'), findsNothing);
+    expect(find.widgetWithText(QuietLink, 'Factory'), findsOneWidget);
+    expect(find.widgetWithText(QuietLink, 'Old'), findsNothing);
+    await tester.tap(find.widgetWithText(QuietLink, 'Bakery'));
+    await settle(tester);
+    expect(
+      tester.widget<ConnectPipeForm>(find.byType(ConnectPipeForm)).project.id,
+      'p2',
+    );
   });
 
   testWidgets('a built-in kind can be edited, never deleted', (tester) async {

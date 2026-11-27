@@ -1,6 +1,6 @@
 //! Allowing a waiting device takes the four digits it shows, checked by the
 //! backend, and each device that starts waiting notifies in Claktory's own
-//! words, at most 3 an hour (#352 P4, Fugo's rules).
+//! words, at most 3 an hour.
 
 use std::time::Duration;
 
@@ -110,9 +110,9 @@ async fn a_device_is_allowed_only_with_its_number_and_notifies_in_claktorys_word
         other => panic!("expected welcome, got {other:?}"),
     }
 
-    // Restarted, the two still waiting notify nothing again (Abbacchio's
-    // row 710): what was noted is kept in factory.db. (The first Claktory
-    // runs on in this process.)
+    // Restarted, the two still waiting notify nothing again: what was
+    // noted is kept in factory.db. (The first Claktory runs on in this
+    // process.)
     let again = factoryd::factory::Factory::open(crate::common::home(&dir), std::sync::Arc::new(crate::common::Scripted::signed_in()))
         .await
         .expect("open again");

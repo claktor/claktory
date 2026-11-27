@@ -4,6 +4,7 @@
 
 mod driver;
 mod model;
+mod replay;
 mod sandbox;
 
 use std::process::ExitCode;
@@ -21,14 +22,15 @@ Exit 0 done, 1 failed, 2 usage, 3 refused (by the sandbox, or as unsafe), 4 the 
 
 Sandboxes
   up [NAME] [--no-account] [--port PORT] [--model] [--script FILE] [--machine-name NAME] [--speech MODEL] [--claude]
-     [--claim-email EMAIL] [--claim-claktory-id ID]
+     [--claude-accounts 2] [--claim-email EMAIL] [--claim-claktory-id ID]
                                            start one: a fresh Claktory on a free port (7500 up), with its
                                            own account service whose emails land in its mail folder; with
                                            --model (or --script), its agents run on qa-model, a scripted model;
                                            it shows the machine name qa-NAME (or --machine-name's), never this computer's;
                                            with --speech, it recognizes speech: the commit's claktory-speech on
                                            MODEL (a .gguf with its .receipt beside it), copied in; with --claude,
-                                           Claude is signed in, fake, on qa-model, and its agents run on Claude;
+                                           Claude is signed in, fake, on qa-model, and its agents run on Claude
+                                           (--claude-accounts 2: a second fake account after the first);
                                            with --claim-email or --claim-claktory-id, its factoryd lies that it's
                                            that account's (its Workspace email) or that Claktory (its leaf offer)
   down NAME… | --all | --all-agents [--keep]
@@ -56,11 +58,17 @@ Driving one
   sign-in NAME [EMAIL]                     sign in to its account service (qa@example.test), code and all
   code NAME [EMAIL]                        the newest sign-in code it emailed
   requests [REQUEST]                       every request's name, or one's fields
+  replay NAME SCRIPT [--toolbar PX] [--png FILE]
+                                           the person's input on Claktory's browser, from SCRIPT (README), each event
+                                           on time as its own AgentBrowserInput through the live view; --png saves the
+                                           frame shown about a second after the last event
 
 qa-model (README: the script's rules)
   script NAME FILE                         check a script and make it the sandbox's (read for every request)
-  limit NAME --for SECS | --off            put its fake Claude sign-in (up --claude) at its usage limit, resetting
-                                           in SECS, or lift the limit now, as a plan upgrade would
+  limit NAME [--account 2] --for SECS [--reads-full] | --off
+                                           put its fake Claude sign-in (up --claude) at its usage limit, resetting
+                                           in SECS, or lift the limit now, as a plan upgrade would; --reads-full:
+                                           its usage reads weekly 100% but it still answers
   model NAME [--agent A] [--last N] [--system]
                                            what qa-model was asked and answered: each request's last message,
                                            tools, the rule that fit and the answer (--system: the system prompt)
@@ -186,9 +194,15 @@ async fn run(args: &[String]) -> Outcome {
         "up" => {
             let args = Args::parse(
                 args,
-                &["--port", "--script", "--machine-name", "--speech", "--claim-email", "--claim-claktory-id"],
+                &["--port", "--script", "--machine-name", "--speech", "--claim-email", "--claim-claktory-id", "--claude-accounts"],
                 &["--no-account", "--model", "--claude"],
             )?;
+            let claude_second = match args.value("--claude-accounts") {
+                None | Some("1") => false,
+                Some("2") if args.flag("--claude") => true,
+                Some("2") => return Err(Failure::usage("--claude-accounts goes with --claude")),
+                Some(_) => return Err(Failure::usage("--claude-accounts takes 1 or 2")),
+            };
             let port = match args.value("--port") {
                 Some(port) => Some(port.parse().map_err(|_| Failure::usage("--port takes a port number"))?),
                 None => None,
@@ -205,6 +219,7 @@ async fn run(args: &[String]) -> Outcome {
                 machine_name: args.value("--machine-name").map(str::to_owned),
                 speech: args.value("--speech").map(std::path::PathBuf::from),
                 claude: args.flag("--claude"),
+                claude_second,
                 claim_email: args.value("--claim-email").map(str::to_owned),
                 claim_claktory_id: args.value("--claim-claktory-id").map(str::to_owned),
             };
@@ -415,11 +430,22 @@ async fn run(args: &[String]) -> Outcome {
             Ok(json!({ "script": sandbox.model_script() }))
         }
         "limit" => {
-            let args = Args::parse(args, &["--for"], &["--off"])?;
+            let args = Args::parse(args, &["--for", "--account"], &["--off", "--reads-full"])?;
             let sandbox = args.name()?;
             if !sandbox.claude {
                 return Err(Failure::refused(format!("{} has no fake Claude sign-in: start a sandbox with --claude.", sandbox.name)));
             }
+            let account: u8 = match args.value("--account") {
+                None | Some("1") => 1,
+                Some("2") if sandbox.claude_second => 2,
+                Some("2") => {
+                    return Err(Failure::refused(format!(
+                        "{} has one fake Claude account: start a sandbox with --claude --claude-accounts 2.",
+                        sandbox.name
+                    )));
+                }
+                Some(_) => return Err(Failure::usage("--account takes 1 or 2")),
+            };
             let until = match (args.value("--for"), args.flag("--off")) {
                 (Some(secs), false) => {
                     let secs: u64 = secs.parse().map_err(|_| Failure::usage("--for takes a number of seconds"))?;
@@ -427,10 +453,16 @@ async fn run(args: &[String]) -> Outcome {
                     Some(u64::try_from(now).unwrap_or(0) + secs * 1000)
                 }
                 (None, true) => None,
-                _ => return Err(Failure::usage("limit NAME --for SECS, or limit NAME --off")),
+                _ => return Err(Failure::usage("limit NAME --for SECS [--reads-full], or limit NAME --off")),
             };
-            model::claude::set_limit(&sandbox.claude_limit(), until).map_err(|error| Failure::failed(error.to_string()))?;
-            Ok(json!({ "limited_until_ms": until }))
+            let reads_full = args.flag("--reads-full");
+            let file = model::claude::limit_file(&sandbox.claude_limit(), account);
+            model::claude::set_limit(&file, until, reads_full).map_err(|error| Failure::failed(error.to_string()))?;
+            Ok(if reads_full {
+                json!({ "account": account, "reads_full_until_ms": until })
+            } else {
+                json!({ "account": account, "limited_until_ms": until })
+            })
         }
         "model" => {
             let args = Args::parse(args, &["--agent", "--last"], &["--system"])?;
@@ -454,6 +486,18 @@ async fn run(args: &[String]) -> Outcome {
                 requests = requests.split_off(requests.len().saturating_sub(last));
             }
             Ok(json!({ "requests": requests }))
+        }
+        "replay" => {
+            let args = Args::parse(args, &["--toolbar", "--png"], &[])?;
+            let sandbox = args.name()?;
+            let script = args.rest.get(1).ok_or_else(|| Failure::usage("replay NAME SCRIPT [--toolbar PX] [--png FILE]"))?;
+            let steps = replay::read(script)?;
+            let toolbar = match args.value("--toolbar") {
+                None => 0.0,
+                Some(px) => px.parse::<f64>().ok().filter(|px| (0.0..=1000.0).contains(px)).ok_or_else(|| Failure::usage("--toolbar takes pixels, 0 to 1000"))?,
+            };
+            let png = replay::png_path(args.value("--png"))?;
+            replay::run(&sandbox, &steps, toolbar, png.as_deref()).await
         }
         "requests" => match args.first() {
             Some(name) => driver::fields(name),

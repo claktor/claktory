@@ -36,7 +36,12 @@ pub unsafe fn from_wide_ptr(pointer: *const u16) -> OsString {
 
 /// A handle Windows returned, owned; the last error when it's null or
 /// INVALID_HANDLE_VALUE (functions differ in which they return).
-pub fn owned(handle: HANDLE) -> std::io::Result<OwnedHandle> {
+///
+/// # Safety
+///
+/// `handle` is one the call just before returned, open or failed, that
+/// nothing else owns or closes.
+pub unsafe fn owned(handle: HANDLE) -> std::io::Result<OwnedHandle> {
     if handle.is_null() || handle == INVALID_HANDLE_VALUE {
         return Err(std::io::Error::last_os_error());
     }

@@ -352,8 +352,9 @@ async fn an_app_reads_only_what_the_person_granted_and_only_to_read() {
     // An agent's database that's a link (to factory.db, say) isn't read.
     let kept_aside = own.with_extension("kept");
     std::fs::rename(&own, &kept_aside).expect("set aside");
-    for link in [std::os::unix::fs::symlink::<std::path::PathBuf, &std::path::PathBuf>, std::fs::hard_link] {
-        link(home_of(addr).db_path(), &own).expect("linked");
+    for hard in [false, true] {
+        let target = home_of(addr).db_path();
+        if hard { std::fs::hard_link(target, &own) } else { crate::common::symlink(&target, &own) }.expect("linked");
         let linked = stand.query("agent:rivet", "SELECT count(*) FROM runs", "").await;
         assert!(linked.error() == DataError::Failed && linked.message.contains("a link"), "{linked:?}");
         std::fs::remove_file(&own).expect("unlinked");

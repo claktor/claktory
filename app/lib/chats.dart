@@ -226,7 +226,7 @@ class _ChatPainter extends CustomPainter {
   bool shouldRepaint(_ChatPainter old) => old.color != color;
 }
 
-/// A chat's message box: text, or a voice message (#367), its draft kept as
+/// A chat's message box: text, or a voice message, its draft kept as
 /// any agent's, sent through the chat's outbox; no files. Without a model,
 /// why it can't answer.
 class ChatMessageTarget extends MessageTarget {
@@ -285,7 +285,7 @@ class ChatMessageTarget extends MessageTarget {
 
   @override
   void send(String text, {List<LocalFile> files = const [], Duration? voice}) {
-    // A voice message is its recording, with what was typed (#425); a
+    // A voice message is its recording, with what was typed; a
     // chat takes no other file.
     if (voice != null) {
       backend.chatOutbox.send(
@@ -378,7 +378,7 @@ class _ChatViewState extends State<ChatView> {
     final body = LayoutBuilder(
       builder: (context, constraints) {
         final bottom = [
-          // Back to its own provider once it has room (#341).
+          // Back to its own provider once it has room.
           UsageSwitchLine(id: chat.id),
           ReconnectingLine(
             otherwise: _working

@@ -1,4 +1,4 @@
-// #347 (Matt): on a phone, the files an agent has open, under Files in its
+// On a phone, the files an agent has open, under Files in its
 // ⋯, newest first: the one it most recently showed, or the person most
 // recently opened, on top. Panes from before the backend kept the time
 // (0) keep their layout order, after the rest.

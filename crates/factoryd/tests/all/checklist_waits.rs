@@ -1,4 +1,4 @@
-//! Typed blocks (#279, #282): a blocked checklist item says what it waits
+//! Typed blocks: a blocked checklist item says what it waits
 //! on, and Claktory follows up on it. A wait on another item opens again
 //! when that one is done; a wait on an agent tells it; a parked item
 //! resumes at its time; a wait on the person shows in Needs you, and a
@@ -116,7 +116,7 @@ async fn an_item_waiting_on_another_opens_again_when_that_one_is_done() {
     ack(apply_request(&mut client, &mut view, checklist_on("worker")).await);
     call(&mut client, &mut view, "lead", "checklist_add", r#"{"items":["Ship the release","Tidy the docs","Write the notes"]}"#).await;
     call(&mut client, &mut view, "worker", "checklist_add", r#"{"items":["Build the APK","Old task"]}"#).await;
-    // Each header counts what's not done or dropped (area 4 §8.9).
+    // Each header counts what's not done or dropped.
     view.follow(&mut client, |view| view.agent("lead").checklist_open == 3 && view.agent("worker").checklist_open == 2).await;
     call(&mut client, &mut view, "worker", "checklist_update", r#"{"updates":[{"id":2,"status":"done"}]}"#).await;
     view.follow(&mut client, |view| view.agent("worker").checklist_open == 1).await;
@@ -556,7 +556,7 @@ async fn a_request_for_a_secret_or_a_proposal_about_an_item_shows_as_it_in_needs
     );
 }
 
-/// Submit (#370): a reply to a question about an item counts as answered.
+/// Submit: a reply to a question about an item counts as answered.
 /// The agent is told to update the item if it settles it, and nothing has it
 /// asked again.
 #[tokio::test]
@@ -646,7 +646,7 @@ async fn a_reply_to_a_question_about_an_item_counts_as_answered_and_is_never_ask
     assert_eq!((item.dismissed_ms, item.reask_at_ms), (0, 0), "{item:?}");
 }
 
-/// Friend bug #19: an item marked done or dropped while a card about it
+/// An item marked done or dropped while a card about it
 /// still waits for the person says which, so the agent takes it back if it
 /// no longer applies. Nothing is closed for it.
 #[tokio::test]
@@ -691,7 +691,7 @@ async fn an_item_done_or_dropped_names_the_cards_still_waiting_about_it() {
     );
     assert_eq!(view.agent("worker").waiting_seqs.len(), 2, "nothing is closed for it");
 
-    // Two cards about one item: "they" (Abbacchio's row 1037).
+    // Two cards about one item: "they".
     call(&mut client, &mut view, "worker", "checklist_add", r#"{"items":["Ship it"]}"#).await;
     for title in ["Ship today?", "Tell the list?"] {
         call(&mut client, &mut view, "worker", "ask_person", &format!(r#"{{"title":"{title}","body":"Ready.","item":"3"}}"#)).await;

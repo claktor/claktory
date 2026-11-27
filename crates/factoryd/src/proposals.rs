@@ -8,7 +8,7 @@
 //! Proposals live in factory.db. The conversation shows each as an entry
 //! after the propose_to_rivet call that made it (its result names it), so it
 //! reloads where it was; its state comes from here. One that no longer
-//! applies, its agent takes back with proposal_withdraw (#407).
+//! applies, its agent takes back with proposal_withdraw.
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -43,7 +43,7 @@ CREATE TABLE proposals (
 CREATE INDEX proposals_by_agent ON proposals (agent, id);
 ";
 
-/// The migration that added answers (#370 Submit): 1 when the person
+/// The migration that added answers: 1 when the person
 /// answered it with a comment rather than approving it (state 'approved':
 /// Rivet acts on what they said).
 pub(crate) const REPLIED: &str = "
@@ -51,14 +51,14 @@ ALTER TABLE proposals ADD COLUMN replied INTEGER NOT NULL DEFAULT 0;
 ";
 
 /// The migration that let an agent take back its own proposal once it no
-/// longer applies (proposal_withdraw, #407): state 'withdrawn', decided
+/// longer applies (proposal_withdraw): state 'withdrawn', decided
 /// when it was, and this, the agent's reason; '' for every other state.
 pub(crate) const WITHDRAWN: &str = "
 ALTER TABLE proposals ADD COLUMN reason TEXT NOT NULL DEFAULT '';
 ";
 
 /// The migration that let an agent change its own proposal's text while it
-/// waits (proposal_update, #428), as ask::UPDATED does for questions.
+/// waits (proposal_update), as ask::UPDATED does for questions.
 pub(crate) const UPDATED: &str = "
 ALTER TABLE proposals ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE proposals ADD COLUMN updated INTEGER;
@@ -67,9 +67,9 @@ ALTER TABLE proposals ADD COLUMN update_reason TEXT NOT NULL DEFAULT '';
 
 /// The tool, one of the Messaging extension's, for agents that aren't admins.
 pub(crate) const TOOL: &str = "propose_to_rivet";
-/// Takes back one of the agent's own proposals still waiting (#407).
+/// Takes back one of the agent's own proposals still waiting.
 pub(crate) const WITHDRAW_TOOL: &str = "proposal_withdraw";
-/// Changes one of the agent's own proposals still waiting (#428).
+/// Changes one of the agent's own proposals still waiting.
 pub(crate) const UPDATE_TOOL: &str = "proposal_update";
 
 const UPDATE_ABOUT: &str = "Change one of your proposals to Rivet still waiting for the person, in place, when what you propose changes but still needs Rivet: a detail was wrong, or the need moved. id: the proposal's id, which propose_to_rivet's result gave; message: the whole new message, standing alone; reason: optional, why it changed, in a short line they read in the request (at most 300 characters). Their request redraws where it is, marked updated, without counting again or notifying them again; approving the version before is refused, so they look again. At most 10 changes per proposal; take back one that no longer applies with proposal_withdraw instead. You can change only your own proposals.";
@@ -266,12 +266,12 @@ struct Row {
     decided: Option<i64>,
     /// JSON (`pipes::agents::routes_json`); null for none.
     taint: Option<String>,
-    /// Answered with a comment (#370), not approved.
+    /// Answered with a comment, not approved.
     replied: bool,
     /// Withdrawn: the agent's reason.
     reason: String,
     created: i64,
-    /// Which version it is (#428): 1 as proposed, one more each change.
+    /// Which version it is: 1 as proposed, one more each change.
     revision: i64,
     /// When its agent last changed it; None if it never did.
     updated: Option<i64>,
@@ -390,7 +390,7 @@ pub(crate) fn forget(store: &Store, agent: &str) -> rusqlite::Result<()> {
 }
 
 /// The person approves (with `comment`) or dismisses `agent`'s proposal,
-/// or answers it (`reply`, #370 Submit): Rivet gets it with their comment
+/// or answers it (`reply`): Rivet gets it with their comment
 /// as what to do. Approved or answered, Rivet gets it as the person's
 /// message; it stays pending when there's no Rivet, or Rivet has no model.
 /// Either way the agent is told.
@@ -541,13 +541,13 @@ pub(crate) fn decide(
         let text = format!("{summary}{}\n\nYour proposal:\n{}{about}", crate::decisions::note(&person, comment), row.text);
         (summary, text)
     };
-    // Dismissed without a comment, it's told quietly (friend bug #19).
+    // Dismissed without a comment, it's told quietly.
     let event = if approve || !comment.is_empty() { host_event(summary) } else { crate::needs_you::dismissed_event(summary) };
     factory.deliver_event(agent, text, event);
     Ok(())
 }
 
-/// proposal_withdraw (#407): takes back one of the agent's own proposals
+/// proposal_withdraw: takes back one of the agent's own proposals
 /// still waiting, with its reason, or lists them. It leaves Needs you at
 /// once and shows as withdrawn; the item it was for stays as it was, for
 /// the agent to update.
@@ -667,7 +667,7 @@ struct UpdateArgs {
     grants: Option<Vec<crate::proposal_grants::Asked>>,
 }
 
-/// proposal_update (#428): changes the text of one of the agent's own
+/// proposal_update: changes the text of one of the agent's own
 /// proposals still waiting, in place, as ask_update changes a question:
 /// a new version, redrawn where it is, not counted or notified again.
 fn update(factory: &Arc<Factory>, agent: &str, args: UpdateArgs) -> Result<ToolResult, String> {

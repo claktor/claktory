@@ -1,4 +1,4 @@
-// Typed text and a voice note in one message (#425): a recording made while
+// Typed text and a voice note in one message: a recording made while
 // the box has something written waits in it as its voice note (a chip with
 // its length, and × to take it out) instead of going alone; Send sends both
 // as one message. The floating bar's Send, away from the box, takes the
@@ -412,7 +412,7 @@ void main() {
       expect(_chip, findsOneWidget);
 
       // Sent with the connection down: "Not sent yet", Retry and Delete.
-      harness.backend.refuse = 'Not connected to the backend.';
+      harness.backend.refuse = "Can't reach your Claktory right now.";
       harness.backend.connected.value = false;
       await pumpFrames(tester);
       expect(tester.takeException(), isNull);

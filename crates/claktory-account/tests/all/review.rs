@@ -2,7 +2,8 @@
 //! email signs in with its fixed code on every route that takes one, is
 //! sent nothing, and locks for the hour after 5 wrong codes. It signs in no
 //! Claktory but the review box, and its account isn't deleted nor loses its
-//! Claktories on the web pages (#319). Off, it's an email like any.
+//! Claktories on the web pages (#319). Off, it's an email like any. A
+//! service for the reviewers alone (`--review-only`) signs in no one else.
 
 use claktory_account::protocol::*;
 use claktory_account::server::Config;
@@ -484,4 +485,79 @@ async fn the_review_box_signs_in_again_with_its_pinned_key_after_signing_out() {
     // A retired key that isn't the box's, with the review email: refused.
     let answer = instance.start_sign_in(&ordinary, EMAIL, "Mac mini").await;
     assert_eq!((answer.status, answer.error().as_str()), (409, "backend_key_retired"), "{}", answer.text());
+}
+
+/// A service for the store reviewers alone (`--review-only`): the review
+/// accounts sign in as before, and every other email is refused on every
+/// route, with nothing sent, so it's no account service for anyone else.
+#[tokio::test]
+async fn a_review_only_service_signs_in_no_one_but_the_reviewers() {
+    let mut review_box = Claktory::new("198.51.100.70");
+    let review = ReviewAccount::new(EMAIL, "saltsaltsaltsalt", CODE).unwrap();
+    let key = b64(review_box.key.verifying_key().to_bytes());
+    let config =
+        Config { trust_proxy: true, review_accounts: vec![review], review_claktory_key: Some(key), review_only: true, ..Config::default() };
+    let instance = start_with(config).await;
+
+    // The reviewers: the box, a phone and the web pages.
+    let answer = sign_in_box(&instance, &review_box).await;
+    assert_eq!(answer.status, 200, "{}", answer.text());
+    review_box.token = answer.json::<SignedIn>().machine_token;
+    let phone = Device::new("198.51.100.71");
+    let request_id = device_start(&instance, &phone).await;
+    assert_eq!(device_verify(&instance, &phone, &request_id, CODE).await.status, 200);
+    web_sign_in_with(&instance, EMAIL, CODE).await;
+
+    // Anyone else, on each route.
+    let other = Claktory::new("198.51.100.72");
+    let answer = instance.start_sign_in(&other, "ana@example.com", "Ana's Mac").await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "review_only"), "{}", answer.text());
+    let answer = instance.start_device_sign_in(&Device::new("198.51.100.73"), "ana@example.com", "Ana's iPhone").await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "review_only"), "{}", answer.text());
+    let body = b"email=ana%40example.com".to_vec();
+    let page = instance
+        .send("POST", "/account/sign-in", body, &[("content-type", FORM.into()), ("x-forwarded-for", "198.51.100.74".into())])
+        .await;
+    assert_eq!(page.status, 403, "{}", page.text());
+    assert_eq!(instance.mail.sent().len(), 0, "nothing is sent to anyone");
+    let conn = rusqlite::Connection::open(&instance.db).expect("the database");
+    let rows = |table: &str| -> i64 {
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE email = 'ana@example.com'"), [], |row| row.get(0)).unwrap()
+    };
+    assert_eq!((rows("accounts"), rows("requests")), (0, 0), "and nothing is made");
+
+    // A device bound through a Claktory (#529): the box may vouch, a
+    // Claktory of the account under any other key may not.
+    assert_eq!(vouch_for(&instance, &review_box).await.status, 200);
+    instance.advance(1);
+    // The box's registration under a key of its own, as one signed in
+    // before the pin would be.
+    let imposter = Claktory {
+        id: review_box.id.clone(),
+        key: new_signing_key(),
+        token: review_box.token.clone(),
+        epoch: review_box.epoch,
+        ip: review_box.ip.clone(),
+    };
+    conn.execute(
+        "UPDATE claktories SET backend_key = ?1 WHERE id = ?2",
+        [b64(imposter.key.verifying_key().to_bytes()), review_box.id.clone()],
+    )
+    .unwrap();
+    let vouches = || -> i64 { conn.query_row("SELECT COUNT(*) FROM requests WHERE kind = 'vouch'", [], |row| row.get(0)).unwrap() };
+    let before = vouches();
+    let answer = vouch_for(&instance, &imposter).await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "review_account"), "{}", answer.text());
+    assert_eq!(vouches(), before, "no code made");
+}
+
+/// `claktory` vouches for a new device (#529).
+async fn vouch_for(instance: &Instance, claktory: &Claktory) -> Answer {
+    let body = DeviceVouch {
+        account_key: Device::new("198.51.100.75").account_key(),
+        name: "Review Mac".into(),
+        platform: "macos-arm64".into(),
+        version: "v0.1.26".into(),
+    };
+    instance.signed(claktory, "POST", "/v1/devices/vouch", &body, None).await
 }

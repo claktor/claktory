@@ -130,6 +130,19 @@ struct Saved {
     /// claktory.com's key when it's another, not verified: it waits for
     /// the person (`recovery::use_new`).
     recovery_waiting: Option<recovery::Waiting>,
+    /// The account key this Claktory last vouched for, this computer's own
+    /// app's (#529, `vouch`), with the sign-in it vouched under (#619).
+    vouched_app: Option<VouchedApp>,
+}
+
+/// This computer's app, as vouched for: its account key, the account and
+/// the sign-in's epoch then. It counts only while the same sign-in holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+struct VouchedApp {
+    account_id: String,
+    epoch: u64,
+    account_key: String,
 }
 
 /// A sign-out to tell a service of: the sign-in it ends. The backend key
@@ -257,6 +270,10 @@ pub(crate) struct State {
     http: reqwest::Client,
     /// Replies reported lately (`reports`).
     reports: reports::Sent,
+    /// Tests: a Factory a test is done with, whose home another now uses
+    /// in the same process; it neither runs nor writes account.json again
+    /// (`stop_for_tests`).
+    stopped: std::sync::atomic::AtomicBool,
 }
 
 /// Why a call to the service failed.
@@ -487,6 +504,7 @@ impl State {
             wake: Notify::new(),
             http,
             reports: reports::Sent::default(),
+            stopped: std::sync::atomic::AtomicBool::new(false),
         };
         if first {
             state.save();
@@ -499,6 +517,9 @@ impl State {
     }
 
     fn save(&self) {
+        if self.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         let saved = self.lock().saved.clone();
         let result = (|| {
             create_private_dir(&self.dir)?;
@@ -764,6 +785,32 @@ impl State {
 
     /// The account it's signed in with, while signing in is on: its id,
     /// email and service.
+    /// This computer's app vouched for (#619): `account_key` from now on,
+    /// under the sign-in that holds now.
+    pub(crate) fn note_vouched_app(&self, account_key: &str) {
+        {
+            let mut inner = self.lock();
+            let saved = &mut inner.saved;
+            saved.vouched_app =
+                Some(VouchedApp { account_id: saved.account_id.clone(), epoch: saved.epoch, account_key: account_key.to_owned() });
+        }
+        self.save();
+    }
+
+    /// Whether `account_key` is the one this Claktory vouched for its own
+    /// app (#619), under the sign-in that holds now: not after a sign-out,
+    /// another sign-in, another account or a removal.
+    pub(crate) fn is_vouched_app(&self, account_key: &str) -> bool {
+        let inner = self.lock();
+        let saved = &inner.saved;
+        saved.signed_in()
+            && !saved.revoked
+            && !account_key.is_empty()
+            && saved.vouched_app.as_ref().is_some_and(|vouched| {
+                vouched.account_id == saved.account_id && vouched.epoch == saved.epoch && vouched.account_key == account_key
+            })
+    }
+
     pub(crate) fn signed_in_as(&self, config: &AccountConfig) -> Option<(String, String, String)> {
         let inner = self.lock();
         let saved = &inner.saved;
@@ -838,7 +885,8 @@ impl State {
             None if saved.signed_in() => (saved.email.clone(), saved.service.clone()),
             None => (String::new(), configured_service(config)),
         };
-        let name = if saved.name.is_empty() { computer_name() } else { saved.name.clone() };
+        // Cleaned as read: one kept before names were cleaned may hide characters.
+        let name = if saved.name.is_empty() { computer_name() } else { api::clean_name(&saved.name) };
         let switching_to = inner.pending.as_ref().filter(|_| switching).map(|pending| pending.start.email.clone()).unwrap_or_default();
         #[cfg(feature = "qa-lies")]
         let (email, switching_to) =
@@ -961,9 +1009,16 @@ pub(crate) fn check_assertion(
     Ok(said)
 }
 
+#[cfg(unix)]
 fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
+}
+
+/// 0700 on Windows: this user and SYSTEM only (`windows::private`).
+#[cfg(windows)]
+fn create_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    factory_agent::windows::private::create_dir_all(dir)
 }
 
 /// The account settings, if signing in is on.
@@ -1177,6 +1232,8 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<String,
         inner.saved.email = signed_in.email.clone();
         inner.saved.machine_token = signed_in.machine_token.clone();
         inner.saved.epoch = signed_in.epoch;
+        // Signing in again signs out the app vouched for before.
+        inner.saved.vouched_app = None;
         inner.saved.name = pending.start.name.clone();
         inner.saved.revoked = false;
         inner.saved.signed_in_ms = now_ms();
@@ -1288,6 +1345,7 @@ pub(crate) async fn sign_out(factory: &Arc<Factory>) -> Result<(), RequestError>
         saved.revoked = false;
         saved.periods.clear();
         saved.periods_until = 0;
+        saved.vouched_app = None;
     }
     account.save();
     tracing::info!("signed out of the account service");
@@ -1928,7 +1986,12 @@ async fn after_move(factory: &Arc<Factory>) -> bool {
     };
     let adopt = |account: &State| -> std::io::Result<()> {
         crate::remote::write_private(&account.dir.join("claktory.key"), format!("{}\n", hex(new_key.as_bytes())).as_bytes())?;
-        account.lock().saved.machine_token = pair.token.clone();
+        {
+            let mut inner = account.lock();
+            inner.saved.machine_token = pair.token.clone();
+            // The app vouched for on the computer it left is signed out.
+            inner.saved.vouched_app = None;
+        }
         account.save();
         Ok(())
     };
@@ -1964,12 +2027,24 @@ async fn after_move(factory: &Arc<Factory>) -> bool {
     true
 }
 
+/// For tests, which start another Factory on the same home in the same
+/// process (the first one's serving goes on): this one's account no longer
+/// runs, nor writes account.json over the other's.
+#[doc(hidden)]
+pub fn stop_for_tests(factory: &Factory) {
+    factory.account.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+    factory.account.wake.notify_one();
+}
+
 /// Runs the account while Claktory runs: after a restart, opens the vault
 /// with the service's share (trying again while it can't be reached); checks
 /// in at start and every hour.
 pub(crate) async fn monitor(factory: Weak<Factory>) {
     loop {
         let Some(strong) = factory.upgrade() else { return };
+        if strong.account.stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
         let wait = tick(&strong).await;
         let woken = async {
             strong.account.wake.notified().await;

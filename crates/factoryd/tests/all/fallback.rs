@@ -1,4 +1,4 @@
-//! The refusal fallback (#225): a step the agent's model declines is
+//! The refusal fallback: a step the agent's model declines is
 //! retried once on the fallback model named in the agent's settings (or
 //! the Claktory-wide default), the refusal shown as itself, and the agent
 //! told in a note.

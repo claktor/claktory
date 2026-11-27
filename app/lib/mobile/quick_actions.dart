@@ -8,7 +8,7 @@ import '../inbox.dart' show needsYouCount;
 import '../scope.dart';
 
 /// The iPhone's Home Screen quick action, touch and hold the app's icon:
-/// Needs you, with how many wait (#514 §7.2). A tap opens Needs you on the
+/// Needs you, with how many wait. A tap opens Needs you on the
 /// Claktory the phone shows, on its first card.
 const quickActionTitle = 'Needs you';
 

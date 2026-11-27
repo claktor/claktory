@@ -7,7 +7,7 @@
 //! a command outlives the backend that started it, as a process group does
 //! on a Mac: an update or a restart of the backend doesn't end agents' work.
 //!
-//! Fugo's conditions (44974), each held here:
+//! What a job must hold, each held here:
 //! 1. Each job's name is random (128 bits), never made from the task's id,
 //!    and kept only in this Claktory's records (`keep_records`). It's
 //!    created with a protected DACL for this user and SYSTEM only, and a name
@@ -54,7 +54,7 @@ const PREFIX: &str = "Local\\claktory-job-";
 const JOB_OBJECT_ASSIGN_PROCESS: u32 = 0x0001;
 const JOB_OBJECT_QUERY: u32 = 0x0004;
 const JOB_OBJECT_TERMINATE: u32 = 0x0008;
-/// To read its owner and DACL (`find`), which Fugo 45353 caught missing.
+/// To read its owner and DACL (`find`).
 const READ_CONTROL: u32 = 0x0002_0000;
 
 /// A job, open.
@@ -73,7 +73,7 @@ impl Job {
         let attributes = protected.attributes();
         let text = wide(&name)?;
         // SAFETY: attributes and name outlive the call; the handle is checked and owned.
-        let handle = owned(unsafe { CreateJobObjectW(&raw const attributes, text.as_ptr()) })?;
+        let handle = unsafe { owned(CreateJobObjectW(&raw const attributes, text.as_ptr())) }?;
         // SAFETY: plain call, right after the one whose error it reads.
         if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
             // 128 random bits taken already: someone made it on purpose.
@@ -100,9 +100,9 @@ impl Job {
     fn open(name: &str) -> std::io::Result<Job> {
         let text = wide(name)?;
         // SAFETY: a NUL-terminated name; the handle is checked and owned.
-        let handle = owned(unsafe {
-            OpenJobObjectW(JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE | JOB_OBJECT_ASSIGN_PROCESS | READ_CONTROL, 0, text.as_ptr())
-        })?;
+        let handle = unsafe {
+            owned(OpenJobObjectW(JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE | JOB_OBJECT_ASSIGN_PROCESS | READ_CONTROL, 0, text.as_ptr()))
+        }?;
         Ok(Job { handle, name: name.to_owned() })
     }
 
@@ -303,7 +303,7 @@ enum Found {
     Foreign,
 }
 
-/// Finds a recorded job again (Fugo 44974 condition 2, and 45257 (a)): by
+/// Finds a recorded job again: by
 /// its name; then only if this user owns it and its DACL is the private one
 /// (another account in this session, under runas say, shares `Local\`, so
 /// a leaked name alone gives nothing); then, while its shell still runs

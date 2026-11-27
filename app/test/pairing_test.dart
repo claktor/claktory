@@ -2,10 +2,12 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:factory_app/connections.dart';
+import 'package:factory_app/device_account.dart' show AccountClaktory;
 import 'package:factory_app/pairing.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:factory_app/phone.dart' show PairScreen;
+import 'package:factory_app/visible_codes.dart' show nameInText;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -244,6 +246,35 @@ void main() {
     expect(find.text("Waiting for Matt's Mac mini"), findsNothing);
     expect(harness.connections.current, isNotNull);
     debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets("a Claktory's name from the account reads as a name on the "
+      "waiting page: what reorders it shows by its code (row 1784)", (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final harness = Harness(Workspace());
+    await harness.show(tester);
+    harness.connections.use(
+      RemoteFactory.fromAccount(
+        AccountClaktory(
+          id: 'c3',
+          name: 'Evil\u202EMac',
+          endpointId: 'a' * 64,
+          relays: const ['https://relay.example.com'],
+        ),
+      ),
+    );
+    harness.backend.pairing.value = PairingWait(
+      PairingPending(deviceId: 'd9', name: 'Mac', machine: 'studio-host'),
+      '0427',
+    );
+    await pumpFrames(tester);
+    final shown = nameInText('Evil\u202EMac');
+    expect(find.text('Waiting for $shown'), findsOneWidget);
+    expect(find.text('No screen on $shown?'), findsOneWidget);
+    expect(find.textContaining('\u202E'), findsNothing);
   });
 
   testWidgets('a Mac waiting for another Claktory shows the number in its '

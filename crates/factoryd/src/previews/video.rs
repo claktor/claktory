@@ -384,6 +384,7 @@ fn make(data: &Path, path: &Path, sha: &str, size: u64, screen: Screen, maker: &
             command
         }
     };
+    #[cfg(unix)]
     if asker == Asker::Ahead {
         use std::os::unix::process::CommandExt;
         // SAFETY: only setpriority, a system call, between fork and exec.
@@ -394,6 +395,12 @@ fn make(data: &Path, path: &Path, sha: &str, size: u64, screen: Screen, maker: &
                 Ok(())
             });
         }
+    }
+    // Below a person's on Windows too: BELOW_NORMAL_PRIORITY_CLASS.
+    #[cfg(windows)]
+    if asker == Asker::Ahead {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0000_4000);
     }
     let stop = || asker == Asker::Ahead && making().stop_ahead;
     let ran = super::run_unless(&mut command, MAKING_MOST, &stop);
@@ -521,7 +528,8 @@ fn picture_size(path: &Path) -> Option<(u32, u32)> {
     None
 }
 
-#[cfg(test)]
+// Its helpers and ffmpeg are stood in for by shell scripts.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

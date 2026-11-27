@@ -245,6 +245,16 @@ final class VideoPlayer: NSObject, FlutterTexture {
     timeObserver = player.addPeriodicTimeObserver(
       forInterval: CMTime(value: 1, timescale: 10), queue: .main
     ) { [weak self] _ in self?.report() }
+    #if os(iOS)
+      // Once it stops (paused, at its end, a call), its sound lets go.
+      observations.append(
+        player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+          DispatchQueue.main.async {
+            guard let self, player.timeControlStatus == .paused else { return }
+            VideoSound.playing(self, false)
+          }
+        })
+    #endif
     ticker = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.tick() }
     RunLoop.main.add(ticker!, forMode: .common)
     // The first frame, before anything plays.
@@ -257,6 +267,9 @@ final class VideoPlayer: NSObject, FlutterTexture {
     if let duration = seconds(item.duration), seconds(player.currentTime()) ?? 0 >= duration {
       player.seek(to: .zero)
     }
+    #if os(iOS)
+      VideoSound.playing(self, true)
+    #endif
     player.play()
   }
 
@@ -282,6 +295,9 @@ final class VideoPlayer: NSObject, FlutterTexture {
     observations.forEach { $0.invalidate() }
     observations = []
     player.pause()
+    #if os(iOS)
+      VideoSound.playing(self, false)
+    #endif
     player.replaceCurrentItem(with: nil)
     frameAvailable = nil
     changed = nil
@@ -327,3 +343,33 @@ final class VideoPlayer: NSObject, FlutterTexture {
     return value.isFinite ? value : nil
   }
 }
+
+#if os(iOS)
+  /// An iPhone's sound while a video plays: the playback category, so it's
+  /// heard with the ring switch on silent, as in Photos, and stops other
+  /// apps' sound meanwhile; let go once no video plays, so theirs comes
+  /// back. The default category is silent with the switch on.
+  enum VideoSound {
+    private static var playing = Set<ObjectIdentifier>()
+
+    static var active: Bool { !playing.isEmpty }
+
+    static func playing(_ video: AnyObject, _ on: Bool) {
+      let id = ObjectIdentifier(video)
+      if on {
+        if playing.isEmpty {
+          let session = AVAudioSession.sharedInstance()
+          do {
+            try session.setCategory(.playback, mode: .moviePlayback)
+            try session.setActive(true)
+          } catch {
+            NSLog("Claktory video: no sound session (%@)", String(describing: error))
+          }
+        }
+        playing.insert(id)
+      } else if playing.remove(id) != nil, playing.isEmpty {
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+      }
+    }
+  }
+#endif

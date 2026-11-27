@@ -220,7 +220,7 @@ async fn a_reply_stopped_where_it_began_a_tag_ends_its_turn_with_a_note() {
     assert_eq!(agent.state.error_message, None);
 }
 
-/// Gyro 45937: stop sequences never firing inside tool input is measured,
+/// Stop sequences never firing inside tool input is measured,
 /// not promised; a call in a reply stopped at a tag never runs, whole or not.
 #[tokio::test]
 async fn a_reply_stopped_at_a_tag_runs_none_of_its_tool_calls() {

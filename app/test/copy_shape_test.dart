@@ -13,7 +13,7 @@ import 'app_test.dart' show builder, workspace;
 import 'harness.dart';
 import 'selection_test.dart' show copyItem, rightClick, watchClipboard;
 
-/// Copying out of a conversation keeps the text's shape (#229): blank
+/// Copying out of a conversation keeps the text's shape: blank
 /// lines between paragraphs, a line per list item with its marker, nested
 /// items indented under theirs, a table's cells tab-separated.
 void main() {

@@ -485,8 +485,8 @@ impl Vault {
     }
 
     /// Marks a pending proposal connected (the connection: its id and name)
-    /// or dismissed (None), `replied` when dismissed by the person's reply
-    /// (#370); returns it as it is now.
+    /// or dismissed (None), `replied` when dismissed by the person's reply;
+    /// returns it as it is now.
     pub(crate) fn decide_proposal(
         &self,
         id: &str,

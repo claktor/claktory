@@ -1,5 +1,5 @@
-// Projects and Chats are the sidebar's two sections, on the same level
-// (#249): each heading always shows however many projects or chats there
+// Projects and Chats are the sidebar's two sections, on the same level:
+// each heading always shows however many projects or chats there
 // are, a tap on it folds the section or opens it (the backend keeps which,
 // the same on every device), and folded it says how many it holds and
 // whether any waits for the person. On a phone, one list whose section

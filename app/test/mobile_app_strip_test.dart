@@ -1,7 +1,7 @@
 // The app strip on an iPhone (C5): the pinned apps' chips in the menu,
 // under its header. A chip opens its app's view as a page over the
 // agent's conversation, never in its layout, which the person's other
-// devices share (Bruno 42883); so does an app chosen from All apps. Back
+// devices share; so does an app chosen from All apps. Back
 // pops it.
 
 import 'package:factory_app/app_views/app_view.dart';

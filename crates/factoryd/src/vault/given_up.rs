@@ -1,4 +1,4 @@
-//! Secrets agents gave up on their own (#449, `secrets_give_up`), kept for
+//! Secrets agents gave up on their own (`secrets_give_up`), kept for
 //! the person's History (NEEDS_YOU_RECORD_KIND_SECRET_GIVEN_UP): "Mista
 //! gave up Cloudflare", with its reason apart. Giving one up only takes
 //! access away, so it asks no one; getting it back takes a request.

@@ -1,4 +1,4 @@
-//! Resuming the Workspace on reconnect (#378): an app that comes back with
+//! Resuming the Workspace on reconnect: an app that comes back with
 //! the revision it holds gets only what changed while it was away, and ends
 //! up with exactly what a fresh app gets. A restart, or a revision the
 //! backend doesn't have, gets a whole Workspace, as before.
@@ -79,7 +79,7 @@ async fn an_app_back_from_away_gets_only_what_changed_and_sees_what_a_fresh_one_
         };
         let now = fresh(addr).await;
         assert_eq!(held, now, "round {round}");
-        // Real resume patches, for the app's tests (Formaggio).
+        // Real resume patches, for the app's tests.
         if let Some(out) = std::env::var_os("CLAKTORY_RESUME_FIXTURES") {
             use prost::Message as _;
             let out = std::path::Path::new(&out).join(format!("round{round}"));
@@ -124,7 +124,7 @@ async fn after_a_restart_an_app_gets_a_whole_workspace() {
     assert_ne!(first.workspace_revision, revision);
 }
 
-// ---- The conversation shown (#413, #378's second step) ----
+// ---- The conversation shown ----
 
 /// Connects as an app holding `agent`'s conversation at `revision` (both
 /// empty: none), and reads up to its Transcript.

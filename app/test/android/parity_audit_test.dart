@@ -114,6 +114,8 @@ Future<void> _openMove(WidgetTester tester) async {
         .descendant(of: find.byType(Sidebar), matching: find.byType(Scrollable))
         .first,
   );
+  // Clear of the footer's finger-sized row, not cut at the list's edge.
+  await Scrollable.ensureVisible(tester.element(settings), alignment: 0.5);
   await pumpFrames(tester);
   _tap(tester, 'Settings');
   await pumpFrames(tester);
@@ -173,7 +175,7 @@ SecretRequest _secret({bool collect = false}) => SecretRequest(
   ),
   reason: 'Exercise the shared request card.',
   // A connected service makes it: the card's main action is Let Rivet
-  // make it, the admin agent's (#360).
+  // make it, the admin agent's.
   fittingSecretId: collect ? '' : 'audit-connection',
   fittingSecretName: collect ? '' : 'Audit service',
 );

@@ -89,6 +89,8 @@ Workspace _roots({
 Future<void> _addFolder(WidgetTester tester) async {
   await tester.tap(find.text('Site').first);
   await pumpFrames(tester);
+  await tester.tap(find.text('Project settings…'));
+  await pumpFrames(tester);
   await tester.ensureVisible(find.text('Add a folder…'));
   await pumpFrames(tester);
   await tester.tap(find.text('Add a folder…'));
@@ -318,6 +320,8 @@ void main() {
     await harness.show(tester, size: const Size(1200, 800));
     await pumpFrames(tester);
     await tester.tap(find.text('Site').first);
+    await pumpFrames(tester);
+    await tester.tap(find.text('Project settings…'));
     await pumpFrames(tester);
     // Moving a folder into Documents asks the same way.
     await tester.enterText(

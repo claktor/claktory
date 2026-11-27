@@ -9,6 +9,9 @@
 //! $TMPDIR/claktory-browser-mac/ to look at, stops it and deletes its data.
 //! Its VMs and volume are `claktory-browser-test`, never a Claktory's.
 //! A file of its own: it turns Claktory's browser on for the process.
+//!
+//! Claktory's browser isn't on Windows.
+#![cfg(unix)]
 
 #[path = "common/mod.rs"]
 mod common;
@@ -98,7 +101,7 @@ async fn the_browser_runs_in_a_vm_on_a_mac() {
         eprintln!("{name}: {}x{} of {}x{}, {} ({})", frame.width, frame.height, frame.screen_width, frame.screen_height, path.display(), frame.origin);
     }
 
-    client.ok(Request::StopAgentBrowser(v1::StopAgentBrowser {})).await;
+    client.ok(Request::StopAgentBrowser(v1::StopAgentBrowser::default())).await;
     let stopping = std::time::Instant::now();
     off(addr).await;
     while !vms().is_empty() {
@@ -109,7 +112,7 @@ async fn the_browser_runs_in_a_vm_on_a_mac() {
 
     // Its data deleted: started again only to delete the profile, then off.
     let (mut other, _, _) = Client::connect(addr).await;
-    other.ok(Request::DeleteAgentBrowserData(v1::DeleteAgentBrowserData {})).await;
+    other.ok(Request::DeleteAgentBrowserData(v1::DeleteAgentBrowserData::default())).await;
     tokio::time::sleep(Duration::from_secs(2)).await;
     off(addr).await;
     eprintln!("deleted; VMs: {:?}", vms());

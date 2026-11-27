@@ -183,11 +183,15 @@ class _PairingWaitViewState extends State<PairingWaitView> {
         // (Zucchero's row 720); without one, the backend's hostname
         // rather than an address.
         final target = backend.target;
+        // Whoever chose it (the account service's list, say), it reads
+        // as a name: nothing in it turns the sentence around (row 1784).
         final machine = target != null && target.name.isNotEmpty
-            ? target.name
+            ? nameInText(target.name)
             : wait?.pending.machine.isNotEmpty ?? false
-            ? wait!.pending.machine
-            : target?.label ?? 'your Mac';
+            ? nameInText(wait!.pending.machine)
+            : target != null
+            ? nameInText(target.label)
+            : 'your Mac';
         final muted = TextStyles.body.copyWith(color: palette.textMuted);
         if (refused != null) {
           return ClaktoryProblemPage(

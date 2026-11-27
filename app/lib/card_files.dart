@@ -1,4 +1,4 @@
-// Files with what the person writes on a card (#511, Matt's): a written
+// Files with what the person writes on a card: a written
 // answer, Approve's or Dismiss's comment, a reply or Resolve on its talk,
 // and a step's Done or Can't do this. They're added as the message box's
 // are (the paperclip, a phone's picker, and on a Mac dropped or pasted on
@@ -178,7 +178,7 @@ Future<String?> addCardFiles(
 /// The system's picker for files (and photos, on a phone or an iPad), as
 /// the message box's paperclip has it: their paths, empty when cancelled.
 /// Throws [MissingPluginException] where the app has no picker.
-/// On an iPad its menu points at [from], the paperclip (Zucchero row 630);
+/// On an iPad its menu points at [from], the paperclip;
 /// Take Photo comes first where there's a camera ([context] explains it).
 /// With [onChosen], what was chosen is said as soon as the picker closes,
 /// while it's copied for the app ([pickOnDevice]).
@@ -261,7 +261,7 @@ class CardFileChips extends StatelessWidget {
   final String card;
 
   /// Under the files while there are any: who may get them beyond the
-  /// agent (a pipe's other side, Fugo), so it's clear where they go.
+  /// agent (a pipe's other side), so it's clear where they go.
   final Widget? note;
 
   /// The answer is being sent: the files stay as they are.
@@ -311,9 +311,9 @@ class CardFileChips extends StatelessWidget {
 /// While a field in [child] has the keys on a Mac, files dropped on the
 /// window or pasted (Cmd+V with files or a picture copied) go to [card]
 /// rather than the message box ([FileDrop.divert]); files dropped on
-/// [child] itself go to it whether it has the keys or not (#511: dragged
-/// from the Finder, the window isn't the key one); [onNote] says what
-/// didn't go in.
+/// [child] itself go to it whether it has the keys or not (dragged from
+/// the Finder, the window isn't the key one); [onNote] says what didn't
+/// go in.
 class CardFileDrop extends StatefulWidget {
   const CardFileDrop({
     super.key,
@@ -353,10 +353,27 @@ class _CardFileDropState extends State<CardFileDrop> implements CardDropTarget {
     _sync();
   }
 
+  /// The whole request this field is in, which takes files too.
+  CardDropAreaState? _area;
+
+  /// Whether nothing is pushed over this request (a phone layout's
+  /// Settings, say): only then does it take files.
+  var _onTop = true;
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     _backend = AppScope.of(context);
+    final onTop = ModalRoute.isCurrentOf(context) ?? true;
+    if (onTop != _onTop) {
+      _onTop = onTop;
+      _sync();
+    }
+    final area = context.findAncestorStateOfType<CardDropAreaState>();
+    if (area != _area) {
+      _area?._leave(this);
+      _area = area?.._target = this;
+    }
   }
 
   @override
@@ -372,12 +389,13 @@ class _CardFileDropState extends State<CardFileDrop> implements CardDropTarget {
 
   void _sync() {
     if (!FileDrop.windowDrops) return;
-    if (widget.enabled) {
+    final takes = widget.enabled && _onTop;
+    if (takes) {
       FileDrop.addCard(this);
     } else {
       FileDrop.removeCard(this);
     }
-    if (_focused && widget.enabled) {
+    if (_focused && takes) {
       FileDrop.divert(this, _dropped, label: widget.label);
     } else {
       FileDrop.undivert(this);
@@ -393,6 +411,7 @@ class _CardFileDropState extends State<CardFileDrop> implements CardDropTarget {
 
   @override
   void dispose() {
+    _area?._leave(this);
     FileDrop.undivert(this);
     FileDrop.removeCard(this);
     super.dispose();
@@ -410,6 +429,35 @@ class _CardFileDropState extends State<CardFileDrop> implements CardDropTarget {
       onFocusChange: _focusChanged,
       child: widget.child,
     ),
+  );
+}
+
+/// A whole request that takes files: dropped anywhere on [child], not
+/// only on its field, they go to the [CardFileDrop] inside it.
+class CardDropArea extends StatefulWidget {
+  const CardDropArea({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  State<CardDropArea> createState() => CardDropAreaState();
+}
+
+class CardDropAreaState extends State<CardDropArea> {
+  CardDropTarget? _target;
+
+  /// What files dropped on the request go to, if it takes them now.
+  CardDropTarget? get target => _target;
+
+  void _leave(CardDropTarget target) {
+    if (identical(_target, target)) _target = null;
+  }
+
+  @override
+  Widget build(BuildContext context) => MetaData(
+    metaData: this,
+    behavior: HitTestBehavior.translucent,
+    child: widget.child,
   );
 }
 

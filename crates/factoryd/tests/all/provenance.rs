@@ -1,6 +1,6 @@
-//! Message provenance and quiet copies (#285, middleman.md H1 and H3): a
+//! Message provenance and quiet copies: a
 //! message says its number and what it answers; a quiet copy reaches the
-//! sender's lead without waking it, and marks no one (#346), only its
+//! sender's lead without waking it, and marks no one, only its
 //! signature saying its sender read a web page.
 
 use rusqlite::Connection;
@@ -94,7 +94,7 @@ async fn a_message_says_its_number_and_a_reply_what_it_answers() {
     }
     assert_eq!(received(&dir, "bo").len(), before, "nothing was sent");
 
-    // A question never goes quietly (#280), to one or to several: refused,
+    // A question never goes quietly, to one or to several: refused,
     // nothing sent; sent loud, it goes.
     for to in [r#""max""#, r#"["max", "lea"]"#] {
         let args = format!(r#"{{"to": {to}, "text": "Which wording?", "intent": "decision_request", "quiet": true}}"#);
@@ -185,7 +185,7 @@ async fn a_quiet_copy_reaches_the_lead_without_waking_it() {
 }
 
 /// A copy from an agent that read a web page says so in its signature, and
-/// marks no one (#346): what it carries isn't handed on.
+/// marks no one: what it carries isn't handed on.
 #[tokio::test]
 async fn a_copy_from_a_marked_sender_says_so_and_marks_no_one() {
     let (dir, factory, mut client, mut view, _) = setup().await;

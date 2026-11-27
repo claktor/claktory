@@ -128,7 +128,7 @@ async fn rivet_proposes_app_access_and_only_the_persons_approval_gives_it() {
     assert_eq!(refused, "There's no agent \"Nobody\" in this Claktory.");
     assert!(view.entries.iter().all(|entry| !matches!(entry.kind, Some(Kind::AppGrant(_)))), "no request");
 
-    // A liaison, limited to a pipe, is never given access (Fugo's review).
+    // A liaison, limited to a pipe, is never given access.
     apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
     let pipe = factoryd::pipes::open_for_test(&factory, "site", "Website ⇄ Marketing", &[], "", false);
     apply_request(&mut client, &mut view, Request::AddPipeLiaison(v1::AddPipeLiaison { pipe_id: pipe, name: "Liaison".into() })).await;
@@ -169,7 +169,7 @@ async fn rivet_proposes_app_access_and_only_the_persons_approval_gives_it() {
     ));
     assert!(held(&dir).is_empty());
 
-    // Submit (#370): a comment instead of Approve gives nothing; Rivet gets
+    // Submit: a comment instead of Approve gives nothing; Rivet gets
     // the comment, to propose again with it in mind.
     call(&mut client, &mut view, &proposal("mike", &["dm.read", "dm.send"], "c-4")).await;
     let (answered, _) = card(&view);

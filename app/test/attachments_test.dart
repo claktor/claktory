@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:factory_app/attachments.dart';
 import 'package:factory_app/controls.dart' show GlyphButton;
 import 'package:factory_app/drop.dart';
+import 'package:factory_app/mobile/device.dart';
 import 'package:factory_app/scope.dart' show AppPage;
 import 'package:factory_app/shell.dart' show Shell;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -136,6 +137,9 @@ void main() {
   for (final platform in [TargetPlatform.android, TargetPlatform.iOS]) {
     testWidgets("${platform.name}'s window takes no drops: the Mac's channel "
         "is never used, and nothing dims", (tester) async {
+      // An iPhone's: an iPad's takes them (test/ipad/drop_ipad_test.dart).
+      debugDeviceCapabilities = const DeviceCapabilities(idiom: Idiom.phone);
+      addTearDown(() => debugDeviceCapabilities = null);
       final harness = await showWindow(tester, two());
       expect(harness.backend.workspace.selectedAgent, isNotNull);
       expect(calls, isEmpty);

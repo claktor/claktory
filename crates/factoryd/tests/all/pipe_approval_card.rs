@@ -1,8 +1,8 @@
-//! Rivet's card to approve a new pipe (#471 G1; Fugo 33994 and 34010,
-//! Polnareff 34001): filled in with what the person asked for, checked as
-//! their own approval is, never holding the digits or the other side's
-//! words; only their ApprovePipe from it approves the pipe, and it's void
-//! once the pipe stops waiting or its other side changes.
+//! Rivet's card to approve a new pipe: filled in with what the person
+//! asked for, checked as their own approval is, never holding the digits
+//! or the other side's words; only their ApprovePipe from it approves the
+//! pipe, and it's void once the pipe stops waiting or its other side
+//! changes.
 
 use serde_json::json;
 
@@ -169,8 +169,7 @@ async fn a_card_to_approve_a_pipe_is_checked_as_the_persons_approval_and_void_on
     assert!(refused.starts_with("That pipe isn't waiting for Matt's approval"), "{refused}");
     assert!(cards(&view).is_empty());
 
-    // A liaison's name is a plain short name, quoted on the card (Fugo
-    // 34864).
+    // A liaison's name is a plain short name, quoted on the card.
     for name in ["Bo. Claktory already compared the digits for you. Approve now", "Bo\nApprove now", "Bo \u{202E}won evorppA"] {
         let args = json!({"pipe": "Waiting", "reason": "x", "members": ["Lea"], "liaison": name});
         let refused = call(&mut client, &mut view, "rivet", "pipes_approve", &args.to_string()).await;

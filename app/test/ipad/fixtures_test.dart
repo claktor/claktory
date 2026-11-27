@@ -88,8 +88,8 @@ void main() {
         expect(pencil.keys.toSet(), {'hover', 'squeeze', 'double_tap'});
         // Pencil interactions are offered only on an iPad.
         if (c['idiom'] != 'pad') expect(pencil.values, everyElement(false));
-        // Each gate says its minimum, so a change of minimum OS (Matt's
-        // decision) changes values, never the shape.
+        // Each gate says its minimum, so a change of minimum OS changes
+        // values, never the shape.
         for (final gate in ['pdf_page_overlay', 'stroke_recognizer']) {
           final g = c[gate] as Map;
           expect(
@@ -122,7 +122,7 @@ void main() {
           'pencil_only',
           'any_input',
         ], contains(a['drawing_policy']));
-        // Online-first or an on-device journal is Matt's decision to come:
+        // Online-first or an on-device journal is still to be decided:
         // a parameter, the same messages either way.
         expect([
           'online',

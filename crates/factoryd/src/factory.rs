@@ -478,6 +478,8 @@ pub struct Factory {
     pub(crate) moving: crate::move_run::Moving,
     /// Pipes to other Claktories (`crate::pipes`).
     pub(crate) pipes: crate::pipes::Pipes,
+    /// Each device's last undoable drag in the sidebar (`crate::arrange_undo`).
+    pub(crate) arrange_undos: crate::arrange_undo::Undos,
     /// Websites shared over pipes: the streams this side serves, and their
     /// rates (`crate::pipes::shares`).
     pub(crate) pipe_shares: crate::pipes::shares::State,
@@ -819,9 +821,10 @@ impl Factory {
             Err(error) => tracing::error!(%error, "could not write this machine's pairing code"),
         }
         let mut created = false;
+        let mut dropped_browsers = Vec::new();
         let (config, config_error) = match tokio::fs::read_to_string(home.config_path()).await {
-            Ok(text) => match Config::parse(&text, home.root()) {
-                Ok(mut config) => {
+            Ok(text) => match Config::parse_settled(&text, home.root()) {
+                Ok((mut config, dropped)) => {
                     // After going back from an update, most likely: say so at once.
                     for unknown in config.unknown_keys() {
                         tracing::warn!(%unknown, "config.json: keeping a setting this version doesn't know");
@@ -829,11 +832,12 @@ impl Factory {
                     // Agents from before colors were saved keep theirs from now
                     // on, and a default prompt nobody edited becomes this
                     // version's.
-                    if config.keep_colors(None) | config.follow_default_prompts() {
+                    if config.keep_colors(None) | config.follow_default_prompts() | !dropped.is_empty() {
                         // Like every write, in the file's form: a rollback
                         // must find a file the older backend still reads.
                         write_atomic(&home.config_path(), config.to_json_keeping_form(home.root(), &text)?.as_bytes()).await?;
                     }
+                    dropped_browsers = dropped;
                     (config, None)
                 }
                 // Start with defaults but never overwrite the file: it gets fixed or restored, then it reloads.
@@ -851,6 +855,9 @@ impl Factory {
             Err(error) => return Err(error.into()),
         };
         let store = crate::store::Store::open(&home.db_path())?;
+        for agent in &dropped_browsers {
+            crate::browser_switches::record(&store, crate::browser_switches::By::Claktory, agent, false);
+        }
         crate::runs::import_files(&home, &store).await?;
         let chats = crate::chats::Chats::load(&store);
         let usage_switches = crate::usage_switch::Switches::load(&store);
@@ -966,6 +973,7 @@ impl Factory {
             speech: crate::speech::model::Model::new(&home_for_speech),
             moving: crate::move_run::Moving::new(&home_for_speech),
             pipes: crate::pipes::Pipes::default(),
+            arrange_undos: crate::arrange_undo::Undos::default(),
             pipe_shares: crate::pipes::shares::State::default(),
             map_history: crate::history::record::Recorder::default(),
             history: crate::history::Kept::default(),
@@ -1022,10 +1030,17 @@ impl Factory {
         }
         // Commands a card ran when Claktory last stopped: stopped, never run again.
         crate::command_cards::recover(&factory);
+        crate::errands::retire_browser_control(&factory).await;
         crate::errands::recover(&factory);
-        // Errands drive Claktory's browser, once it's on here (#435).
+        // Each agent browses in its own Claktory's browser, once it's on here.
         if crate::browser_host::enabled() {
-            crate::errands::install(&factory, Arc::new(crate::browser_host::Handle::new(&factory)));
+            crate::errands::install(&factory, Arc::new(crate::browser_host::Browsers::new(&factory)));
+            factory.agent_browser.install(&factory);
+            tokio::spawn(crate::browser_host::setup::watch(Arc::downgrade(&factory)));
+            // Agents' commands kept from its VM on a Mac (#435 (d)).
+            if cfg!(target_os = "macos") {
+                crate::browser_host::confine::install();
+            }
         }
         tokio::spawn(watch(Arc::downgrade(&factory)));
         // factoryd.log, rotated past 50 MB (#525).
@@ -1779,7 +1794,10 @@ impl Factory {
                 None => inner.model_why.remove(id),
             };
         }
+        let browsing = change.extension.is_some_and(|extension| extension.id == crate::extensions::browser::ID);
+        let mut had_browser = None;
         self.edit_config(|config| {
+            had_browser = config.agent(id).map(crate::config::browser_on);
             if let Some(project) = change.project
                 && !project.is_empty()
                 && config.project(project).is_none()
@@ -1806,11 +1824,18 @@ impl Factory {
                 why: _,
             } = change;
             if let Some(extension) = extension {
-                // Errands only for an agent the person contained for them.
-                if extension.id == crate::errands::ERRANDS && extension.enabled == Some(true) && !self.pipes.errand_agent(id) {
-                    return Err(RequestError::Remote(
-                        "Errands is only for an agent used for errands: turn on Use for errands… in its settings first.".to_owned(),
-                    ));
+                // Never the browser for an agent limited to a pipe or to
+                // reading reports; an admin agent's is refused or
+                // turned off in `edit_config` (`Config::settle_browsers`).
+                if extension.id == crate::extensions::browser::ID && extension.enabled == Some(true) {
+                    let limited = if self.pipes.curator(id) {
+                        Some(crate::errands::REPORTS_REFUSED)
+                    } else {
+                        self.pipes.quarantined(id).then_some(crate::errands::PIPE_REFUSED)
+                    };
+                    if let Some(why) = limited {
+                        return Err(RequestError::Invalid(crate::config::Invalid::BrowserRefused(why)));
+                    }
                 }
                 crate::extensions::apply_change(config, id, extension)?;
             }
@@ -1871,6 +1896,15 @@ impl Factory {
             Ok(())
         })
         .await?;
+        // The person's switch; or Claktory's, for an agent this change made
+        // one that can't have the browser.
+        let has_browser = self.lock().config.agent(id).map(crate::config::browser_on);
+        if let (Some(had), Some(has)) = (had_browser, has_browser)
+            && had != has
+        {
+            let by = if browsing { crate::browser_switches::By::Person } else { crate::browser_switches::By::Claktory };
+            crate::browser_switches::record(&self.store, by, id, has);
+        }
         if let Some(mode) = notify {
             crate::notify::set_mode(self, id, crate::notify::Mode::from_proto(mode))?;
         }
@@ -2241,6 +2275,9 @@ impl Factory {
             // An agent deleted, moved out of its project or archived with
             // it is unpinned (`crate::pins`).
             config.prune_pins();
+            // An agent made admin loses its browser; one given the browser
+            // that can't have it is refused.
+            config.settle_browsers(&inner.config)?;
             config.validate()?;
             let text = config.to_json_keeping_form(self.home.root(), &read)?;
             self.apply_config(&mut inner, config);
@@ -2272,22 +2309,22 @@ impl Factory {
                 return;
             }
         };
-        let mut parsed = Config::parse(&text, self.home.root());
+        let mut parsed = Config::parse_settled(&text, self.home.root());
         // An agent written in without a color gets one, and a shipped prompt
         // written in becomes this version's, saved.
-        if let Ok(config) = &mut parsed {
+        if let Ok((config, dropped)) = &mut parsed {
             let colorless = config.agents.iter().any(|agent| agent.color.is_empty());
             if colorless {
                 let before = self.lock().config.clone();
                 config.keep_colors(Some(&before));
             }
-            if config.follow_default_prompts() | config.prune_pins() | colorless {
+            if config.follow_default_prompts() | config.prune_pins() | colorless | !dropped.is_empty() {
                 self.save_filled_in(&text, config).await;
             }
         }
         let mut inner = self.lock();
         match parsed {
-            Ok(config) => {
+            Ok((config, dropped)) => {
                 let had_error = inner.config_error.take().is_some();
                 if config == inner.config && !had_error {
                     return;
@@ -2306,6 +2343,17 @@ impl Factory {
                         inner.model_why.insert(agent.id.clone(), (agent.model.clone(), why));
                     }
                 }
+                // Written in the file: an admin agent's change, or
+                // Claktory's for an agent that can't have the browser.
+                let admin = crate::proposals::rivet(&config).map(|agent| agent.id.clone());
+                crate::browser_switches::record_changes(&self.store, &inner.config, &config, |agent| {
+                    use crate::browser_switches::By;
+                    match &admin {
+                        _ if dropped.iter().any(|id| id == agent) => By::Claktory,
+                        Some(admin) => By::Admin(admin),
+                        None => By::Person,
+                    }
+                });
                 self.apply_config(&mut inner, config);
             }
             Err(error) => {
@@ -2376,6 +2424,8 @@ impl Factory {
     fn apply_config(&self, inner: &mut Inner, config: Config) {
         // An agent waiting for an account may have another model now.
         self.capacity_changed();
+        // A browser turned off, or its agent gone: its session ends.
+        crate::errands::config_changed(&self.errands, &inner.config, &config);
         let mut removed = Vec::new();
         for id in inner.agents.keys() {
             if config.agent(id).is_none() && !crate::chats::is_chat(id) {
@@ -2446,6 +2496,9 @@ impl Factory {
         // Reports for an agent deleted or moved away wait for the person.
         self.pipes.handoff.agents_changed(&inner.config, &config);
         inner.config = config;
+        // An agent deleted, or whose browser was turned off, has its
+        // browser's profile deleted.
+        self.agent_browser.config_changed();
         if unarchived {
             self.unarchived.notify_one();
         }
@@ -2628,6 +2681,16 @@ impl Factory {
     pub async fn set_highlights(&self, on: bool) -> Result<(), RequestError> {
         self.edit_config(|config| {
             config.highlights = on;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Whether what agents publish credits Claktory (`Config::attribution`),
+    /// from each agent's next context.
+    pub async fn set_attribution(&self, on: bool) -> Result<(), RequestError> {
+        self.edit_config(|config| {
+            config.attribution = on;
             Ok(())
         })
         .await
@@ -2995,12 +3058,19 @@ impl Factory {
         // browser, on its sites; one limited to a pipe can't use it at all.
         for secret in &mut vault.secrets {
             let fillable = !secret.sites.is_empty() && !secret.ask_each_time && secret.connection.is_none();
+            // Only what stands in the way (Abbacchio 1767).
+            let to_fill = match (secret.connection.is_some(), secret.sites.is_empty(), secret.ask_each_time) {
+                (true, _, _) => ": the browser never fills in a connected service.",
+                (false, true, true) => ". To let it fill this in, add sites to the secret and turn off Ask each time.",
+                (false, true, false) => ". To let it fill this in, add sites to the secret.",
+                (false, false, _) => ". To let it fill this in, turn off Ask each time.",
+            };
             for grant in &secret.grants {
                 if self.pipes.contained(&grant.agent_id) {
                     let name = config.agent(&grant.agent_id).map_or(grant.agent_id.as_str(), |agent| agent.name.as_str());
                     secret.warnings.push(match (self.pipes.errand_agent(&grant.agent_id), fillable) {
                         (true, true) => format!("While {name} runs errands, it can fill this in only on the secret's sites."),
-                        (true, false) => format!("While {name} runs errands, it can't use this. To let it fill this in, add sites to the secret and turn off Ask each time."),
+                        (true, false) => format!("While {name} runs errands, it can't use this{to_fill}"),
                         (false, _) => format!("{name} can't use it while it's limited to a pipe."),
                     });
                 }
@@ -3057,6 +3127,7 @@ impl Factory {
             backend_service: Some(self.service.view()),
             // Claktory's browser (#435): unset while it's off here.
             agent_browser: self.agent_browser.view(self, &config.browser),
+            agent_browsers: self.agent_browser.agent_views(config),
             errands: self.errands.listed(inner),
             diagnostics: Some(crate::diagnostics::view(self)),
             report_schemas: crate::pipes::handoff::schemas(self),
@@ -3066,6 +3137,7 @@ impl Factory {
             extensions: crate::extensions::catalog(),
             open_panel: inner.state.selected_agent.as_deref().and_then(|agent| open_panel(inner, agent)).unwrap_or_default().to_owned(),
             highlights: config.highlights,
+            attribution: config.attribution,
             selected_agent_id: inner.state.selected_agent.clone().unwrap_or_default(),
             config_error: inner.config_error.clone().unwrap_or_default(),
             providers: inner
@@ -3142,7 +3214,7 @@ impl Factory {
                 onboarding: Some(self.onboarding.view()),
                 default_fallback_model: config.default_fallback_model.clone(),
                 max_open_panes: config::open_panes(inner.state.max_open_panes),
-                notifications: Some(crate::notify::settings(self).to_proto()),
+                notifications: Some(crate::notify::shown(self, config)),
                 checklist: Some(crate::extensions::checklist::Times::read(&self.store).proto()),
                 when_app_quits: self.service.when_app_quits().into(),
                 resource_alerts_to_admins: config.resources.alerts_to_admins,

@@ -305,8 +305,10 @@ RemoteFactory? _parsePairingCode(String text, bool fromAccount) {
   );
 }
 
-/// What this Mac's own Factory is called until it says its name.
-const thisMacName = 'This Mac';
+/// What this computer's own Factory is called until it says its name:
+/// "This PC" on Windows, as File Explorer names it (Trish 52773).
+String get thisMacName =>
+    defaultTargetPlatform == TargetPlatform.windows ? 'This PC' : 'This Mac';
 
 /// Every Factory this app connects to (this Mac's, and the ones on other
 /// machines it's paired with, all live at once), and which one the window

@@ -1,4 +1,4 @@
-// What an iPhone needs of every screen (research mobile.md §7, #198):
+// What an iPhone needs of every screen (research mobile.md §7):
 // every tap target at least 44×44pt, every one labelled, and nothing
 // hidden behind the screen in view still reachable by VoiceOver. Each
 // screen's check is on once its phase lands: the list and drawer with

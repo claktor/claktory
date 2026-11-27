@@ -425,7 +425,7 @@ void main() {
     await pumpFrames(tester, const Duration(seconds: 1));
     final body = find.textContaining('Claktory tells you');
     final rect = tester.getRect(body);
-    // 16pt from the window, 20pt inside (Lucy 49620): about 248pt.
+    // 16pt from the window, 20pt inside: about 248pt.
     expect(rect.width, greaterThanOrEqualTo(240));
     final paragraph = tester.renderObject<RenderParagraph>(
       find.descendant(of: body, matching: find.byType(RichText)),

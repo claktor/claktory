@@ -1,4 +1,4 @@
-//! Voice messages (#197): the speech model, downloaded on request from a
+//! Voice messages: the speech model, downloaded on request from a
 //! local server here, resumed, checked and kept; and, until they're built,
 //! voice messages themselves refused rather than sent on as empty ones.
 
@@ -435,7 +435,7 @@ async fn voice_messages_need_the_model_and_fail_without_it() {
         attachments: vec![said.clone()],
         ..Default::default()
     });
-    // Typed text with it (#425) changes nothing: it needs the model too.
+    // Typed text with it changes nothing: it needs the model too.
     assert_eq!(refusal(&client.request(typed).await.body), "Voice messages need the speech model. Download it first.");
 
     // Removed while one waits: it fails, saying so.
@@ -827,7 +827,7 @@ fn chat_voice(chat: &str, recording: v1::Attachment) -> Request {
     Request::SendChatMessage(v1::SendChatMessage { chat_id: chat.into(), voice: true, attachments: vec![recording], ..Default::default() })
 }
 
-/// #367: a chat takes a voice message as an agent's conversation does.
+/// A chat takes a voice message as an agent's conversation does.
 #[tokio::test]
 async fn a_chat_takes_a_voice_message_as_an_agent_does() {
     let dir = temp_dir();
@@ -893,7 +893,7 @@ async fn a_chat_takes_a_voice_message_as_an_agent_does() {
     assert!(matches!(seen.request(&mut client, discard).await, Body::Ack(_)));
     seen.follow(&mut client, |seen| seen.queued.is_empty() && seen.settled(&id)).await;
     assert_eq!(requests.lock().expect("lock").len(), asked, "the chat was given neither");
-    // Neither recording is kept: a chat has nowhere to show it (row 752).
+    // Neither recording is kept: a chat has nowhere to show it.
     assert!(!Path::new(&short.path).exists() && !Path::new(&silent.path).exists());
     assert!(Path::new(&recorded.path).exists(), "the one heard stays, to play back");
 
@@ -904,7 +904,7 @@ async fn a_chat_takes_a_voice_message_as_an_agent_does() {
     assert_eq!(refusal(&client.request(chat_voice(&id, later)).await.body), "Voice messages need the speech model. Download it first.");
 }
 
-/// #401: on a weak connection the app asks again for what it never heard
+/// On a weak connection the app asks again for what it never heard
 /// answered. A dictation's upload that finished answers as it did, and the
 /// same TranscribeAudio from the next connection waits with the first for
 /// its words, or gets them at once: never uploaded or transcribed twice.
@@ -961,7 +961,7 @@ async fn a_dictation_asked_again_after_a_drop_gets_its_words_without_uploading_a
     assert_eq!(std::fs::read_to_string(dir.join("starts")).expect("starts"), starts);
 }
 
-/// #401: a message sent again with the same client_id (its answer lost on
+/// A message sent again with the same client_id (its answer lost on
 /// a weak connection) is answered as sent and delivered once: typed or
 /// spoken, to an agent or a chat, and a new chat isn't made twice.
 #[tokio::test]
@@ -1041,7 +1041,7 @@ async fn a_message_sent_again_is_delivered_once() {
     assert_eq!((delivered("Plan the week."), delivered("And Friday."), delivered("Done.")), (1, 1, 1));
 }
 
-/// #425: what the person typed or pasted and a voice note go as one
+/// What the person typed or pasted and a voice note go as one
 /// message: it waits with the typed text, the agent reads the typed text,
 /// then the words heard after "Voice note: ", and the transcript keeps the
 /// two apart. Failed, nothing typed is lost; a chat takes them alike.

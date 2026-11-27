@@ -1,4 +1,4 @@
-// From Sorbet's S5 iPad sweep at larger text (AX1, AX5): a form's three
+// At larger text on an iPad (AX1, AX5): a form's three
 // buttons don't fit a dialog's row, so its less common action (Delete…)
 // goes on a line of its own under Cancel and Save, as on a phone; and the
 // sidebar's foot shows the count of agents at work whole, never cut to

@@ -15,7 +15,8 @@ import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
 import 'markdown.dart';
-import 'recovery_key.dart' show RecoveryKeyBox;
+import 'recovery_key.dart'
+    show RecoveryKeyBox, RecoveryKeyDownload, canSaveRecoveryKey;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/input.dart' show InputKind;
 import 'mobile/metrics.dart' show Metrics, Touch, TypeScale;
@@ -56,7 +57,10 @@ final _putOff = Expando<ValueNotifier<bool>>('sign-in put off');
 bool asksSignIn(BuildContext context) {
   final backend = AppScope.of(context);
   final store = backend.workspace;
-  if (!backend.connected.value || !store.received) return false;
+  // Its last word stands while the connection drops: the sign-in the
+  // person is in the middle of stays, what they typed with it, under the
+  // connection's own line, never the app behind it.
+  if (!store.received) return false;
   // Turned away (removed there): its problem page, not its sign-in.
   if (backend.refused.value != null) return false;
   final workspace = store.workspace;
@@ -884,14 +888,17 @@ class _AccountSettingsState extends State<AccountSettings>
                   style: type.body.copyWith(color: palette.text),
                 ),
               ),
-              Button(
-                label: 'Change…',
-                onPressed: () => showModal(
-                  context,
-                  (context, close) =>
-                      _ServiceForm(account: account, close: close),
+              // The service is the person's (SetAccountService; Fugo
+              // 52432): shown on Windows, never changed there.
+              if (!approvesElsewhere)
+                Button(
+                  label: 'Change…',
+                  onPressed: () => showModal(
+                    context,
+                    (context, close) =>
+                        _ServiceForm(account: account, close: close),
+                  ),
                 ),
-              ),
             ],
           ),
         ),
@@ -1563,6 +1570,12 @@ class _RecoveryKeyState extends State<_RecoveryKey> {
               setState(() => _copied = true);
             },
           );
+    final download = key == null || !canSaveRecoveryKey
+        ? null
+        : RecoveryKeyDownload(
+            recoveryKey: key,
+            onError: (error) => setState(() => _error = error),
+          );
     final done = Button(label: 'Done', primary: true, onPressed: widget.close);
     // On a phone at the largest text, one under another, Done first, each
     // the sheet's width.
@@ -1575,22 +1588,28 @@ class _RecoveryKeyState extends State<_RecoveryKey> {
       const SizedBox(height: Space.s),
       Text(
         'Each Claktory has its own recovery key, even on the same account: '
-        'this one opens the secrets on $name, and no other key does.\n\n'
-        'Those secrets open with two halves together: one on $name and one '
-        'at claktory.com. This key opens them by itself, if claktory.com '
-        'can\'t be reached, your account is gone or the half on $name is '
-        'lost.\n\n'
-        'Keep it in a password manager, such as Passwords or 1Password, or '
-        'on paper kept somewhere safe. Never share it: anyone with it can '
-        'open these secrets.',
+        'this one opens the secrets on $name, and no other key does. It '
+        'opens them even if claktory.com can\'t be reached or your account '
+        'is gone.\n\n'
+        'Keep it in a password manager, such as Passwords or 1Password, as a '
+        'file on a USB drive, or on paper kept somewhere safe. Never share '
+        'it: anyone with it can open these secrets.',
         style: type.body.copyWith(color: palette.textMuted),
       ),
       const SizedBox(height: Space.xl),
-      if (key != null)
+      if (key != null) ...[
         // Wrapped at its blocks, all of it in sight to copy down by hand
         // (Zucchero's row 131).
-        RecoveryKeyBox(key)
-      else if (_error case final error?)
+        RecoveryKeyBox(key),
+        if (_error case final error?)
+          Padding(
+            padding: const EdgeInsets.only(top: Space.s),
+            child: Text(
+              error,
+              style: type.caption.copyWith(color: palette.danger),
+            ),
+          ),
+      ] else if (_error case final error?)
         Text(error, style: type.caption.copyWith(color: palette.danger))
       else
         // Asked for; it comes in a moment.
@@ -1599,12 +1618,13 @@ class _RecoveryKeyState extends State<_RecoveryKey> {
     final buttons = [
       const SizedBox(height: Space.xl),
       if (stacked)
-        StepButtons(children: [done, ?copy])
+        StepButtons(children: [done, ?copy, ?download])
       else
         Row(
           mainAxisAlignment: MainAxisAlignment.end,
           children: [
             ?copy,
+            if (download != null) ...[const SizedBox(width: Space.s), download],
             const SizedBox(width: Space.s),
             done,
           ],

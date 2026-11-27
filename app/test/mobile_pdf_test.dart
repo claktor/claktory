@@ -502,7 +502,7 @@ void main() {
     );
     expect(find.textContaining('Preview'), findsNothing);
     // The page image's answer was the PDF's start: none of it read past
-    // its first piece, where it took minutes on a slow link (Zucchero).
+    // its first piece, where it took minutes on a slow link.
     expect(harness.backend.stoppedAtFirst, [_path]);
   });
 }

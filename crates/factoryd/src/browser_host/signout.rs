@@ -5,8 +5,9 @@
 //! A sign-out deletes every cookie whose domain the provider owns
 //! (`errands::fill::owner`) and clears the storage of its sign-in origins,
 //! over the browser target while Chrome is driven and no errand drives it.
-//! Otherwise it waits in `<home>/browser-sign-outs.json` (this user's only,
-//! written whole) until the next driven start, before Chrome runs any page,
+//! Otherwise it waits in its browser's file (`<home>/browser-sign-outs.json`
+//! for the person's own, `<home>/browser-sign-outs-<profile>.json` for an
+//! agent's: this user's only, written whole) until the next driven start, before Chrome runs any page,
 //! or until the errand using it ends; Stop leaves it waiting, Delete
 //! browser data makes it moot. Only once the cookies are gone does the
 //! vault forget the account (`Factory::signed_out`); meanwhile nothing is
@@ -24,7 +25,8 @@ use serde_json::{Value, json};
 
 use crate::errands::fill;
 
-/// The waiting sign-outs' file, in Claktory's home.
+/// The waiting sign-outs' file of the person's own browser, in Claktory's
+/// home; an agent's is `browser-sign-outs-<profile>.json` beside it.
 const FILE: &str = "browser-sign-outs.json";
 
 /// The cookies that say a provider is signed in: the session's own, set
@@ -35,11 +37,17 @@ const SESSION_COOKIES: &[(&str, &[&str])] = &[
     ("Microsoft", &["ESTSAUTH", "ESTSAUTHPERSISTENT", "MSPAuth", "__Host-MSAAUTH"]),
 ];
 
-/// A sign-out waiting to be applied.
+/// A sign-out waiting to be applied: of an identity provider, or of one
+/// site.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Waiting {
-    /// By name, as the vault keys it ("Google").
+    /// By name, as the vault keys it ("Google"); empty for a site's.
+    #[serde(default)]
     pub provider: String,
+    /// The site, as the browser's signed-in sites list it
+    /// ("https://x.com"); empty for a provider's.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub site: String,
     /// When the person asked for it, in ms since 1970.
     pub asked_ms: i64,
 }
@@ -50,56 +58,71 @@ struct Saved {
     sign_outs: Vec<Waiting>,
 }
 
-fn path(home: &Path) -> PathBuf {
-    home.join(FILE)
+/// The file of the browser whose profile is `profile` (`super::profile`),
+/// the person's own when `agent` is empty.
+pub(crate) fn file(home: &Path, agent: &str, profile: &str) -> PathBuf {
+    if agent.is_empty() { home.join(FILE) } else { home.join(format!("browser-sign-outs-{profile}.json")) }
 }
 
 /// The sign-outs waiting, as last saved: none when there's no file, and
 /// only providers Claktory knows. A file that's there but doesn't read
-/// fails closed (Fugo 42798): every provider in `accounts` (those the
-/// browser is signed in to) waits, so no sign-out the person asked for is
-/// lost and fills on it don't resume.
-pub(crate) fn load(home: &Path, accounts: impl FnOnce() -> Vec<String>) -> Vec<Waiting> {
-    let bytes = match std::fs::read(path(home)) {
+/// fails closed: every site in `sites` (those the browser is signed in to)
+/// waits, so no sign-out the person asked for is lost.
+pub(crate) fn load(file: &Path, sites: impl FnOnce() -> Vec<String>) -> Vec<Waiting> {
+    let bytes = match std::fs::read(file) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-        Err(error) => return unreadable(&error.to_string(), accounts()),
+        Err(error) => return unreadable(&error.to_string(), sites()),
     };
     let saved: Saved = match serde_json::from_slice(&bytes) {
         Ok(saved) => saved,
-        Err(error) => return unreadable(&error.to_string(), accounts()),
+        Err(error) => return unreadable(&error.to_string(), sites()),
     };
-    let mut waiting: Vec<Waiting> = saved.sign_outs.into_iter().filter(|one| known(&one.provider).is_some()).collect();
-    waiting.dedup_by(|a, b| a.provider == b.provider);
+    let mut waiting: Vec<Waiting> =
+        saved.sign_outs.into_iter().filter(|one| if one.site.is_empty() { known(&one.provider).is_some() } else { site_host(&one.site).is_some() }).collect();
+    waiting.dedup_by(|a, b| a.provider == b.provider && a.site == b.site);
     waiting
 }
 
-/// What waits when the file can't be read: every provider signed in to.
-fn unreadable(why: &str, accounts: Vec<String>) -> Vec<Waiting> {
-    tracing::warn!(why, "the browser's waiting sign-outs didn't read: every provider it's signed in to waits");
-    let mut waiting: Vec<Waiting> = accounts
-        .into_iter()
-        .filter_map(|provider| known(&provider).map(|known| Waiting { provider: known.name.to_owned(), asked_ms: 0 }))
-        .collect();
-    waiting.dedup_by(|a, b| a.provider == b.provider);
+/// What waits when the file can't be read: every site signed in to.
+fn unreadable(why: &str, sites: Vec<String>) -> Vec<Waiting> {
+    tracing::warn!(why, "the browser's waiting sign-outs didn't read: every site it's signed in to waits");
+    let mut waiting: Vec<Waiting> =
+        sites.into_iter().filter(|site| site_host(site).is_some()).map(|site| Waiting { provider: String::new(), site, asked_ms: 0 }).collect();
+    waiting.dedup_by(|a, b| a.site == b.site);
     waiting
 }
 
 /// Saves `waiting` (removing the file when it's empty).
-pub(crate) fn save(home: &Path, waiting: &[Waiting]) -> std::io::Result<()> {
+pub(crate) fn save(file: &Path, waiting: &[Waiting]) -> std::io::Result<()> {
     if waiting.is_empty() {
-        return match std::fs::remove_file(path(home)) {
+        return match std::fs::remove_file(file) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
             _ => Ok(()),
         };
     }
     let text = serde_json::to_vec_pretty(&Saved { sign_outs: waiting.to_vec() }).unwrap_or_default();
-    crate::remote::write_private(&path(home), &text)
+    crate::remote::write_private(file, &text)
 }
 
 /// The provider called `name`, as Claktory knows it ("google" is Google).
 pub(crate) fn known(name: &str) -> Option<&'static fill::IdentityProvider> {
     fill::IDENTITY_PROVIDERS.iter().find(|known| known.name.eq_ignore_ascii_case(name.trim()))
+}
+
+/// The host of `site`, a signed-in site as listed ("https://x.com"):
+/// None for anything else.
+pub(crate) fn site_host(site: &str) -> Option<&str> {
+    let host = site.strip_prefix("https://")?;
+    let plain = !host.is_empty() && host.len() <= 253 && host.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-');
+    (plain && !host.starts_with('.') && !host.ends_with('.')).then_some(host)
+}
+
+/// Whether a cookie for `domain` is one of `host`'s: for it, or for a
+/// name under it.
+fn of_site(domain: &str, host: &str) -> bool {
+    let domain = domain.trim_start_matches('.').to_ascii_lowercase();
+    domain == host || domain.strip_suffix(host).is_some_and(|rest| rest.ends_with('.'))
 }
 
 /// The cookies in a `Storage.getCookies` result.
@@ -121,11 +144,20 @@ pub(crate) fn signed_in(result: &Value) -> Vec<&'static str> {
     providers
 }
 
-/// `provider`'s cookies among `result`'s, as `Storage.setCookies` takes
-/// them to delete each (expired, empty): the way Puppeteer deletes one.
-pub(crate) fn expired(result: &Value, provider: &str) -> Vec<Value> {
+/// Whether a cookie for `domain` goes with sign-out `waiting`.
+fn goes(waiting: &Waiting, domain: &str) -> bool {
+    match site_host(&waiting.site) {
+        Some(host) => of_site(domain, host),
+        None => waiting.site.is_empty() && fill::owner(domain).is_some_and(|owner| owner == waiting.provider),
+    }
+}
+
+/// The cookies `waiting` signs out of among `result`'s, as
+/// `Storage.setCookies` takes them to delete each (expired, empty): the way
+/// Puppeteer deletes one.
+pub(crate) fn expired(result: &Value, waiting: &Waiting) -> Vec<Value> {
     cookies(result)
-        .filter(|cookie| cookie["domain"].as_str().and_then(fill::owner) == Some(provider))
+        .filter(|cookie| cookie["domain"].as_str().is_some_and(|domain| goes(waiting, domain)))
         .map(|cookie| {
             let mut gone = json!({
                 "name": cookie["name"],
@@ -146,14 +178,53 @@ pub(crate) fn expired(result: &Value, provider: &str) -> Vec<Value> {
         .collect()
 }
 
-/// How many of `provider`'s cookies `result` still has.
-pub(crate) fn left(result: &Value, provider: &str) -> usize {
-    cookies(result).filter(|cookie| cookie["domain"].as_str().and_then(fill::owner) == Some(provider)).count()
+/// How many of the cookies `waiting` signs out of `result` still has.
+pub(crate) fn left(result: &Value, waiting: &Waiting) -> usize {
+    cookies(result).filter(|cookie| cookie["domain"].as_str().is_some_and(|domain| goes(waiting, domain))).count()
+}
+
+/// The origins whose storage `waiting` clears.
+pub(crate) fn origins(waiting: &Waiting) -> Vec<String> {
+    match (site_host(&waiting.site), known(&waiting.provider)) {
+        (Some(_), _) => vec![waiting.site.clone()],
+        (None, Some(known)) if waiting.site.is_empty() => known.origins.iter().map(|origin| (*origin).to_owned()).collect(),
+        _ => Vec::new(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn of(provider: &str) -> Waiting {
+        Waiting { provider: provider.to_owned(), site: String::new(), asked_ms: 0 }
+    }
+
+    fn site(site: &str) -> Waiting {
+        Waiting { provider: String::new(), site: site.to_owned(), asked_ms: 0 }
+    }
+
+    #[test]
+    fn a_sites_sign_out_deletes_its_cookies_and_its_names_under_it_only() {
+        let jar = json!({"cookies": [
+            {"name": "auth", "value": "a", "domain": ".x.com", "path": "/"},
+            {"name": "ct0", "value": "b", "domain": "api.x.com", "path": "/"},
+            {"name": "c", "value": "c", "domain": "box.com", "path": "/"},
+            {"name": "d", "value": "d", "domain": ".notx.com", "path": "/"},
+            {"name": "e", "value": "e", "domain": ".com", "path": "/"},
+        ]});
+        let x = site("https://x.com");
+        let gone = expired(&jar, &x);
+        let domains: Vec<&str> = gone.iter().map(|cookie| cookie["domain"].as_str().unwrap()).collect();
+        assert_eq!(domains, [".x.com", "api.x.com"]);
+        assert_eq!(left(&jar, &x), 2);
+        assert_eq!(origins(&x), ["https://x.com"]);
+        assert_eq!(left(&jar, &site("https://api.x.com")), 1, "a name under it leaves the site above alone");
+        for bad in ["http://x.com", "https://", "https://x.com/", "https://X.com", "https://.com", "x.com", "https://a b"] {
+            assert!(site_host(bad).is_none() && expired(&jar, &site(bad)).is_empty() && origins(&site(bad)).is_empty(), "{bad}");
+        }
+        assert!(origins(&of("Google")).iter().all(|origin| origin.starts_with("https://")) && !origins(&of("Google")).is_empty());
+    }
 
     fn jar() -> Value {
         json!({"cookies": [
@@ -168,7 +239,7 @@ mod tests {
 
     #[test]
     fn a_sign_out_deletes_every_cookie_the_provider_owns_and_no_other() {
-        let gone = expired(&jar(), "Google");
+        let gone = expired(&jar(), &of("Google"));
         let domains: Vec<&str> = gone.iter().map(|cookie| cookie["domain"].as_str().unwrap()).collect();
         assert_eq!(domains, [".google.com", ".google.co.uk", ".youtube.com", "accounts.google.com"]);
         for cookie in &gone {
@@ -178,9 +249,9 @@ mod tests {
         }
         assert_eq!(gone[1]["sameSite"], "None");
         assert_eq!(gone[3]["partitionKey"]["topLevelSite"], "https://shop.example");
-        assert_eq!(left(&jar(), "Google"), 4);
-        assert_eq!(left(&jar(), "Apple"), 0);
-        assert!(expired(&jar(), "Apple").is_empty());
+        assert_eq!(left(&jar(), &of("Google")), 4);
+        assert_eq!(left(&jar(), &of("Apple")), 0);
+        assert!(expired(&jar(), &of("Apple")).is_empty());
     }
 
     #[test]
@@ -195,25 +266,41 @@ mod tests {
 
     #[test]
     fn waiting_sign_outs_are_kept_whole_and_only_this_users() {
+        #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let home = std::env::temp_dir().join(format!("claktory-signouts-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
-        assert!(load(&home, Vec::new).is_empty());
-        let waiting = vec![Waiting { provider: "Google".into(), asked_ms: 5 }];
+        // The person's own browser keeps the file it always had; each
+        // agent's has its own.
+        assert_eq!(file(&home, "", "c0123"), home.join("browser-sign-outs.json"));
+        assert_eq!(file(&home, "yukako", "c0123-a4f"), home.join("browser-sign-outs-c0123-a4f.json"));
+        let path = file(&home, "yukako", "c0123-a4f");
+        assert!(load(&path, Vec::new).is_empty());
+        let waiting = vec![Waiting { provider: "Google".into(), site: String::new(), asked_ms: 5 }, site("https://x.com")];
         let none = Vec::new;
-        save(&home, &waiting).unwrap();
-        assert_eq!(load(&home, none), waiting);
-        assert_eq!(std::fs::metadata(path(&home)).unwrap().permissions().mode() & 0o777, 0o600);
+        save(&path, &waiting).unwrap();
+        assert_eq!(load(&path, none), waiting);
+        // A Claktory before sites' sign-outs reads the provider's and
+        // passes over the site's, whose provider is no one it knows.
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["sign_outs"][1]["provider"], "");
+        // A site that isn't one as listed is no sign-out.
+        std::fs::write(&path, r#"{"sign_outs": [{"site": "file:///etc", "asked_ms": 1}]}"#).unwrap();
+        assert!(load(&path, none).is_empty());
+        #[cfg(unix)]
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        #[cfg(windows)]
+        assert!(factory_agent::windows::system::is_private_path(&path).unwrap());
         // A provider Claktory doesn't know is no sign-out.
-        std::fs::write(path(&home), r#"{"sign_outs": [{"provider": "Evil", "asked_ms": 1}]}"#).unwrap();
-        assert!(load(&home, none).is_empty());
-        // A file that doesn't read: every provider it's signed in to waits.
-        std::fs::write(path(&home), "{").unwrap();
-        let signed_in = || vec!["Google".to_owned(), "Microsoft".to_owned(), "Evil".to_owned()];
-        let providers: Vec<String> = load(&home, signed_in).into_iter().map(|one| one.provider).collect();
-        assert_eq!(providers, ["Google", "Microsoft"]);
-        save(&home, &[]).unwrap();
-        assert!(!path(&home).exists());
+        std::fs::write(&path, r#"{"sign_outs": [{"provider": "Evil", "asked_ms": 1}]}"#).unwrap();
+        assert!(load(&path, none).is_empty());
+        // A file that doesn't read: every site it's signed in to waits.
+        std::fs::write(&path, "{").unwrap();
+        let signed_in = || vec!["https://x.com".to_owned(), "https://mail.google.com".to_owned(), "file:///etc".to_owned()];
+        let sites: Vec<String> = load(&path, signed_in).into_iter().map(|one| one.site).collect();
+        assert_eq!(sites, ["https://x.com", "https://mail.google.com"]);
+        save(&path, &[]).unwrap();
+        assert!(!path.exists());
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

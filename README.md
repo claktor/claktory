@@ -22,7 +22,7 @@ To connect another device later, run `~/.factory/bin/factoryd pair "Device name"
 
 On NixOS, add `git` to your packages (your agents need it), and set `users.users.<you>.linger = true;` so Claktory keeps running after you log out.
 
-The source is available under the PolyForm Shield License 1.0.0 ([LICENSE.md](LICENSE.md)): read it, run it, change it, but not to compete with it.
+Claktory's code is source-available under the [PolyForm Shield License 1.0.0](LICENSE.md), not an open-source license. The license restricts using the software to provide a competing product. See the license for the full terms.
 
 ## Working on it
 

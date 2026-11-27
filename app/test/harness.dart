@@ -71,6 +71,17 @@ class RecordingBackend extends Backend {
   Future<void> createProject(String name) =>
       _record(ClientMessage(createProject: CreateProject(name: name)));
 
+  /// What [listErrandLog] answers: the browser log.
+  ErrandLog errandLog = ErrandLog();
+
+  @override
+  Future<ErrandLog> listErrandLog({String agentId = ''}) async {
+    await _record(
+      ClientMessage(listErrandLog: ListErrandLog(agentId: agentId)),
+    );
+    return errandLog;
+  }
+
   @override
   Future<void> updateProject(UpdateProject update) =>
       _record(ClientMessage(updateProject: update));
@@ -370,6 +381,21 @@ class RecordingBackend extends Backend {
   /// What [listFolders] answers, by the path asked; any other path doesn't
   /// exist.
   final folderLists = <String, FolderList>{};
+
+  /// Where a new project would go, as [previewProjectFolder] answers:
+  /// the workspace's folder and the name made into an id, as factoryd's.
+  String Function(String name) projectFolder = (name) => name.trim().isEmpty
+      ? ''
+      : '/Users/me/.factory/workspace/'
+            '${name.trim().toLowerCase().replaceAll(RegExp('[^a-z0-9]+'), '-')}';
+
+  @override
+  Future<ProjectFolderPreview> previewProjectFolder(String name) async {
+    await _record(
+      ClientMessage(previewProjectFolder: PreviewProjectFolder(name: name)),
+    );
+    return ProjectFolderPreview(name: name, path: projectFolder(name));
+  }
 
   @override
   Future<FolderList> listFolders(String path) async {
@@ -983,9 +1009,37 @@ class RecordingBackend extends Backend {
     ),
   );
 
+  /// What [arrangeAgent] answers: null as an older backend would.
+  Arranged? arranged = Arranged(token: 'moved');
+
   @override
-  Future<void> arrangeAgent(ArrangeAgent arrange) =>
-      _record(ClientMessage(arrangeAgent: arrange));
+  Future<Arranged?> arrangeAgent(ArrangeAgent arrange) async {
+    await _record(ClientMessage(arrangeAgent: arrange));
+    return arranged;
+  }
+
+  @override
+  Future<void> restoreArrangement(String token) => _record(
+    ClientMessage(restoreArrangement: RestoreArrangement(token: token)),
+  );
+
+  /// What [previewArrange] answers.
+  ArrangePreview arrangePreview = ArrangePreview();
+
+  @override
+  Future<ArrangePreview> previewArrange(ArrangeAgent arrange) async {
+    await _record(
+      ClientMessage(
+        previewArrange: PreviewArrange(
+          agentId: arrange.agentId,
+          parentId: arrange.parentId,
+          beforeId: arrange.beforeId,
+          projectId: arrange.hasProjectId() ? arrange.projectId : null,
+        ),
+      ),
+    );
+    return arrangePreview;
+  }
 
   @override
   Future<void> setAgentCollapsed(String agentId, bool collapsed) => _record(
@@ -1028,12 +1082,26 @@ class RecordingBackend extends Backend {
   );
 
   @override
+  Future<void> setProjectCollapsed(String projectId, bool collapsed) => _record(
+    ClientMessage(
+      setProjectCollapsed: SetProjectCollapsed(
+        projectId: projectId,
+        collapsed: collapsed,
+      ),
+    ),
+  );
+
+  @override
   Future<void> setHighlights(bool on) =>
       _record(ClientMessage(setHighlights: SetHighlights(on: on)));
 
   @override
   Future<void> setKeepAwake(bool on) =>
       _record(ClientMessage(setKeepAwake: SetKeepAwake(on: on)));
+
+  @override
+  Future<void> setAttribution(bool on) =>
+      _record(ClientMessage(setAttribution: SetAttribution(on: on)));
 
   @override
   Future<void> setLidClosed({required bool on}) =>
@@ -1483,17 +1551,6 @@ class RecordingBackend extends Backend {
   @override
   void withdrawPairing() =>
       unawaited(_record(ClientMessage(withdrawPairing: WithdrawPairing())));
-
-  @override
-  Future<void> setAgentContained(String agentId, {required bool contained}) =>
-      _record(
-        ClientMessage(
-          setAgentContained: SetAgentContained(
-            agentId: agentId,
-            contained: contained,
-          ),
-        ),
-      );
 
   @override
   Future<void> decidePipeReports(String pipeId, {required bool send}) =>
@@ -2195,6 +2252,13 @@ class RecordingBackend extends Backend {
   );
 
   @override
+  Future<void> paymentOpened(String agentId, int seq) => _record(
+    ClientMessage(
+      paymentOpened: PaymentOpened(agentId: agentId, seq: Int64(seq)),
+    ),
+  );
+
+  @override
   Future<void> readAlerts(List<String> ids) =>
       _record(ClientMessage(readAlerts: ReadAlerts(ids: ids)));
 
@@ -2625,11 +2689,24 @@ Future<void> tapProjectPlus(WidgetTester tester, String project) async {
   await mouse.removePointer();
 }
 
-/// The sidebar's "+" buttons that ask Rivet to set something up.
+/// Opens [label]'s page from the sidebar footer's More menu (Usage,
+/// Monitors, Map, Marketplace, People, What's new).
+Future<void> openFromMore(WidgetTester tester, String label) async {
+  await tester.tap(find.bySemanticsLabel(RegExp(r'^More$')).first);
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 400));
+  await tester.tap(find.text(label).last);
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 400));
+}
+
+/// The sidebar's "+" buttons that set something up, by asking Rivet: New
+/// project, New agent in a project.
 Finder askRivetButtons() => find.byWidgetPredicate(
   (widget) =>
       widget is Semantics &&
-      widget.properties.label == 'Ask Rivet to set it up',
+      (widget.properties.label == 'New project' ||
+          (widget.properties.label?.startsWith('New agent in ') ?? false)),
 );
 
 /// A camera for tests: [access] is what it answers, [granting] what asking
@@ -2747,3 +2824,12 @@ Finder inSettingsSection(String id, Finder finder) => find.descendant(
   ),
   matching: finder,
 );
+
+/// Opens the Needs you page beside the conversation, as a layout that
+/// already has its pane shows it: a computer's sidebar and chip open focus
+/// mode instead, so tests of the page itself
+/// open it directly.
+Future<void> openNeedsYouPage(WidgetTester tester) async {
+  AppScope.openPage(tester.element(find.byType(Shell)), AppPage.inbox);
+  await settle(tester);
+}

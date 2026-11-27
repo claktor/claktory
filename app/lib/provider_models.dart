@@ -1,4 +1,4 @@
-// Where a provider's models come from (friend bug #14): Claktory reads each
+// Where a provider's models come from: Claktory reads each
 // signed-in provider's list from the provider itself, every 12 hours and on
 // Refresh models, so a new model is there without a new Claktory.
 import 'package:flutter/widgets.dart';
@@ -25,8 +25,8 @@ String modelsStatus(Provider provider, DateTime now) {
 /// with Refresh models where the provider's list can be read now, and why
 /// the last read failed (the list there stays). A read the provider refused
 /// for its sign-in or key says "Sign-in expired" with Sign in again…, in
-/// place of Tell Rivet: Rivet can't sign in for the person (settings.md
-/// ST2). It marks nothing signed out: requests may still work.
+/// place of Tell Rivet: Rivet can't sign in for the person. It marks
+/// nothing signed out: requests may still work.
 class ProviderModels extends StatefulWidget {
   const ProviderModels({super.key, required this.provider});
 

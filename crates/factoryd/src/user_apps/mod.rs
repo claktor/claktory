@@ -188,7 +188,7 @@ pub(crate) fn incarnation(home: &Home, agent: &str) -> std::io::Result<String> {
     result
 }
 
-/// The migration that added replies (#370 Submit): 1 when the person
+/// The migration that added replies: 1 when the person
 /// answered the card with a comment instead (state 'declined': nothing was
 /// given).
 pub(crate) const REPLIED: &str = "
@@ -213,7 +213,7 @@ struct Row {
     error: String,
     grant_id: String,
     read_pipes: bool,
-    /// Declined by a reply (#370): the comment is what to do instead.
+    /// Declined by a reply: the comment is what to do instead.
     replied: bool,
 }
 
@@ -292,7 +292,7 @@ pub(crate) struct Card {
     pub expires_ms: i64,
     pub reason: String,
     pub created_ms: i64,
-    /// The grantee has read a web page (a pipe, before #346).
+    /// The grantee has read a web page (or, in older versions, a pipe).
     #[serde(default)]
     pub read_pipes: bool,
 }
@@ -484,7 +484,7 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppGrant)
     if row.state != State::Pending {
         return Ok(());
     }
-    // A reply (#370 Submit) gives nothing: Rivet gets the comment.
+    // A reply gives nothing: Rivet gets the comment.
     if !request.approve || request.reply {
         if let Some(row) = end(factory, &row.id, State::Declined, comment, "", "", request.reply) {
             tell(factory, &row);
@@ -507,7 +507,7 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppGrant)
         return Ok(());
     }
     // A liaison, limited to a pipe, would bridge the other Claktory to the
-    // person's app (Fugo's review).
+    // person's app.
     if factory.pipes.quarantined(&row.grantee) {
         let error = format!("{name} is limited to a pipe now, so it can't be given access to your apps. Nothing was given.");
         if let Some(row) = end(factory, &row.id, State::Failed, comment, &error, "", false) {
@@ -516,7 +516,7 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppGrant)
         return Ok(());
     }
     // It read a web page after the card was shown: the card says so now, and
-    // the person decides again, knowing (Fugo's review).
+    // the person decides again, knowing.
     if !row.read_pipes && !factory.pipes.tainted(&row.grantee).is_empty() {
         factory.store.db().execute("UPDATE app_grant_proposals SET read_pipes = 1 WHERE id = ?1", [&row.id])?;
         reshow(factory, &row.id);

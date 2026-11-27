@@ -1,4 +1,4 @@
-//! The test harness itself (#369 follow-up): a test's background tasks end
+//! The test harness itself: a test's background tasks end
 //! with its folder, rather than outlive it.
 
 use std::os::unix::process::CommandExt;

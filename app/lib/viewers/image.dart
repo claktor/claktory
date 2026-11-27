@@ -442,7 +442,7 @@ class _ImageViewerState extends State<ImageViewer>
   String? _undecodable;
 
   /// The image's box, in its own pixels: the original's, also while a
-  /// preview of it shows (#379), so zoom, comments' regions and ink are
+  /// preview of it shows, so zoom, comments' regions and ink are
   /// where they'd be on the original, and nothing moves when it comes.
   Size? _box;
 
@@ -642,7 +642,7 @@ class _ImageViewerState extends State<ImageViewer>
     // On an iPad pane that can draw on it: Draw, on a whole image Claktory
     // read (a cut one has no version for its ink to belong to).
     final draw = _commentable ? InkDraw.maybeOf(context)?.onDraw : null;
-    // The ink saved on this version, over it, read-only (#362 I2).
+    // The ink saved on this version, over it, read-only.
     final inked = file != null && file.error.isEmpty && !file.truncated
         ? file.sha256
         : '';
@@ -927,7 +927,7 @@ class _ImageViewerState extends State<ImageViewer>
                   ),
                 ),
               // A preview says so, in the corner clear of the header's
-              // buttons, Comment's and the bar under the image (#379); on
+              // buttons, Comment's and the bar under the image; on
               // a phone, over its foot with the chrome.
               if (!phone)
                 if (previewBadge() case final badge?)
@@ -943,7 +943,7 @@ class _ImageViewerState extends State<ImageViewer>
       );
     }
     // Apple Pencil touching an image says how to draw on it, or, where
-    // it can't be drawn on, how to comment instead (#362 I2). A touch
+    // it can't be drawn on, how to comment instead. A touch
     // never starts drawing by itself: Draw is a deliberate tap.
     Widget pencil(Widget body) => image == null
         ? body

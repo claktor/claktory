@@ -38,9 +38,8 @@ fn last_request(models: &Scripted) -> crate::common::Request {
     models.requests.lock().expect("lock").last().cloned().expect("a request")
 }
 
-#[cfg(unix)]
 fn link(target: &Path, at: &Path) {
-    std::os::unix::fs::symlink(target, at).expect("symlink");
+    crate::common::symlink(target, at).expect("symlink");
 }
 
 #[tokio::test]
@@ -101,15 +100,15 @@ async fn a_liaison_can_only_read_and_answer_its_pipe() {
     std::fs::write(dir.join("home/vault/auto.key"), "THE-VAULT-KEY").expect("key");
     link(&dir.join("home/vault/auto.key"), &inbox.join("brief.txt"));
     let read =
-        call(&mut client, &mut view, "liaison", "read_file", &format!(r#"{{"path": "{}"}}"#, inbox.join("brief.txt").display())).await;
+        call(&mut client, &mut view, "liaison", "read_file", &format!(r#"{{"path": "{}"}}"#, crate::common::json_text(inbox.join("brief.txt").display()))).await;
     assert!(!read.contains("THE-VAULT-KEY"), "{read}");
     std::fs::write(inbox.join("plan.txt"), "Launch Friday").expect("file");
     let read =
-        call(&mut client, &mut view, "liaison", "read_file", &format!(r#"{{"path": "{}"}}"#, inbox.join("plan.txt").display())).await;
+        call(&mut client, &mut view, "liaison", "read_file", &format!(r#"{{"path": "{}"}}"#, crate::common::json_text(inbox.join("plan.txt").display()))).await;
     assert!(read.contains("Launch Friday"), "{read}");
     std::fs::write(dir.join("site/notes.txt"), "private notes").expect("file");
     let read =
-        call(&mut client, &mut view, "liaison", "read_file", &format!(r#"{{"path": "{}"}}"#, dir.join("site/notes.txt").display())).await;
+        call(&mut client, &mut view, "liaison", "read_file", &format!(r#"{{"path": "{}"}}"#, crate::common::json_text(dir.join("site/notes.txt").display()))).await;
     assert!(!read.contains("private notes"), "{read}");
     let read = call(&mut client, &mut view, "liaison", "read_file", r#"{"path": "../../../notes.txt"}"#).await;
     assert!(!read.contains("private notes"), "{read}");
@@ -117,10 +116,10 @@ async fn a_liaison_can_only_read_and_answer_its_pipe() {
     let wrote = call(&mut client, &mut view, "liaison", "write_file", r#"{"path": "answer.md", "content": "Yes."}"#).await;
     assert!(wrote.starts_with("Created answer.md"), "{wrote}");
     assert_eq!(std::fs::read_to_string(outbox.join("answer.md")).expect("written"), "Yes.");
-    let into_inbox = format!(r#"{{"path": "{}", "content": "x"}}"#, inbox.join("forged.txt").display());
+    let into_inbox = format!(r#"{{"path": "{}", "content": "x"}}"#, crate::common::json_text(inbox.join("forged.txt").display()));
     call(&mut client, &mut view, "liaison", "write_file", &into_inbox).await;
     assert!(!inbox.join("forged.txt").exists());
-    let outside = format!(r#"{{"path": "{}", "content": "x"}}"#, dir.join("site/forged.txt").display());
+    let outside = format!(r#"{{"path": "{}", "content": "x"}}"#, crate::common::json_text(dir.join("site/forged.txt").display()));
     call(&mut client, &mut view, "liaison", "write_file", &outside).await;
     assert!(!dir.join("site/forged.txt").exists());
     link(&outbox.join("answer.md"), &outbox.join("alias.md"));
@@ -142,7 +141,7 @@ async fn a_liaison_can_only_read_and_answer_its_pipe() {
     assert!(!dir.join("elsewhere/x.md").exists());
 
     // It sends only files in the outbox.
-    let send = format!(r#"{{"text": "Notes.", "files": ["{}"]}}"#, dir.join("site/notes.txt").display());
+    let send = format!(r#"{{"text": "Notes.", "files": ["{}"]}}"#, crate::common::json_text(dir.join("site/notes.txt").display()));
     let sent = call(&mut client, &mut view, "liaison", "pipe_send", &send).await;
     assert!(sent.starts_with("Not sent:") && sent.contains("you're limited to the pipe"), "{sent}");
 }

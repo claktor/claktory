@@ -113,7 +113,7 @@ void main() {
     await tester.enterText(_field, 'nonsense');
     await pumpFrames(tester);
     expect(find.text("That isn't a Claktory code."), findsOneWidget);
-    // Another of Claktory's codes says what it is (friend bug #2).
+    // Another of Claktory's codes says what it is.
     await tester.enterText(_field, 'claktory-move://?e=abc&s=def');
     await pumpFrames(tester);
     expect(
@@ -131,7 +131,7 @@ void main() {
     await pumpFrames(tester);
     await tester.tap(find.text('Connect'));
     await pumpFrames(tester);
-    // Asked first, as every way a code comes in is (Fugo).
+    // Asked first, as every way a code comes in is.
     expect(find.text('Connect to this Claktory?'), findsOneWidget);
     expect(connections.current, isNull);
     await tester.tap(find.text('Connect').last);
@@ -176,7 +176,7 @@ void main() {
     await tester.enterText(_field, code);
     await pumpFrames(tester);
     expect(find.text("That isn't a Claktory code."), findsNothing);
-    // A quick double click asks once (Abbacchio).
+    // A quick double click asks once.
     await tester.tap(find.text('Connect'));
     await tester.tap(find.text('Connect'));
     await pumpFrames(tester);

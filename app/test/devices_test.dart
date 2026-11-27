@@ -256,7 +256,7 @@ void main() {
       findsOneWidget,
     );
     expect(find.byType(QrCode), findsOneWidget);
-    // Where to get the app, above the code (#352 P6).
+    // Where to get the app, above the code.
     final opened = <Uri>[];
     openAppPage = (url) async {
       opened.add(url);
@@ -311,7 +311,7 @@ void main() {
       findsOneWidget,
     );
     expect(find.byType(QrCode), findsNothing);
-    // A computer gets the Mac app (#352 P6).
+    // A computer gets the Mac app.
     expect(find.text("Don't have the app?"), findsOneWidget);
     expect(find.text('Get it for Mac'), findsOneWidget);
     expect(find.text('Android'), findsNothing);
@@ -402,7 +402,7 @@ void main() {
     await deviceUsesCode(tester, harness);
     await pumpFrames(tester);
     expect(find.text('Allow iPhone to connect?'), findsOneWidget);
-    // Typed off its screen, never shown here (#352 P4).
+    // Typed off its screen, never shown here.
     expect(
       find.text('To allow it, type the number its screen shows.'),
       findsOneWidget,
@@ -564,12 +564,12 @@ void main() {
       ),
     );
     await pumpFrames(tester);
-    // Add a Claktory (devices-signin.md §3): the account first, here its
+    // Add a Claktory: the account first, here its
     // sign-in, with the code one quiet link away; This Mac and the
     // Claktories already added are the rail's.
     expect(find.text('Add a Claktory'), findsOneWidget);
     expect(find.text('Running here'), findsNothing);
-    // A form dialog of at most 460 (§8.8; Abbacchio's row 1710).
+    // A form dialog of at most 460.
     expect(
       tester
           .getSize(
@@ -590,7 +590,7 @@ void main() {
     await tester.enterText(find.byType(EditableText).last, 'nonsense');
     await tester.pump();
     expect(find.text("That isn't a Claktory code."), findsOneWidget);
-    // Another of Claktory's codes says what it is (friend bug #2).
+    // Another of Claktory's codes says what it is.
     await tester.enterText(
       find.byType(EditableText).last,
       'claktory-pipe://?i=abc',
@@ -602,7 +602,7 @@ void main() {
     );
     await tester.enterText(find.byType(EditableText).last, _code);
     await tester.pump();
-    // Asked first, as every way a code comes in is (Fugo): its
+    // Asked first, as every way a code comes in is: its
     // fingerprint, in the same dialog, and Back leaves everything as it
     // was.
     final target = parsePairingCode(_code)!;
@@ -643,7 +643,7 @@ void main() {
     await pumpFrames(tester);
     expect(find.text("mac mini doesn't allow this device"), findsOneWidget);
 
-    // The content says what to do: a new code (§4), never the chooser
+    // The content says what to do: a new code, never the chooser
     // with the Claktories to switch to, which are the rail's.
     expect(
       find.text("mac mini doesn't allow this $thisDeviceKind"),
@@ -662,10 +662,10 @@ final _chooserField = find.descendant(
   matching: find.byType(EditableText),
 );
 
-/// Friend bug #2: on a phone with a camera, Connect to another Claktory
+/// On a phone with a camera, Connect to another Claktory
 /// offers Scan code; a code read there asks first, as a pasted one does.
 /// On an iPad or a phone, Scan code is the primary, with Paste code beside
-/// it bringing the field (devices-signin.md §7, Lucy 49057).
+/// it bringing the field.
 void _scanInChooser() {
   for (final (where, size) in [
     ('phone', const Size(390, 844)),
@@ -799,7 +799,7 @@ void _claktoryCodes() {
     await tester.enterText(find.byType(EditableText).last, code);
     await tester.pump();
     expect(find.text("That isn't a Claktory code."), findsNothing);
-    // A quick double click asks once (Abbacchio).
+    // A quick double click asks once.
     await tester.tap(find.text('Connect'));
     await tester.tap(find.text('Connect'));
     await pumpFrames(tester);

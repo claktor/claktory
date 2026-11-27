@@ -13,6 +13,8 @@ factory-protocol = { path = "../factory-protocol" }
 # For the settings file a sandbox starts with: Claktory's own defaults.
 factoryd = { path = "../factoryd" }
 futures-util = "0.3.34"
+# A live view's frame (JPEG) saved as a PNG by `replay`; real images for the usage test.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 libc = "0.2"
 prost = "0.14.6"
 prost-reflect = { version = "0.16.5", features = ["serde"] }
@@ -24,7 +26,3 @@ tokio-tungstenite = "0.30.0"
 [build-dependencies]
 prost = "0.14.6"
 protox = "0.10.0"
-
-[dev-dependencies]
-# Real images for the usage test.
-image = { version = "0.25", default-features = false, features = ["png"] }

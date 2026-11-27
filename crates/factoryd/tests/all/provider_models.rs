@@ -1,4 +1,4 @@
-//! Model lists from the providers themselves (friend bug #14): reading one
+//! Model lists from the providers themselves: reading one
 //! now (RefreshModels), how it went on each Provider, and adding a model the
 //! list doesn't have by its id (AddModel, UpdateAgent), checked with the
 //! provider and kept across restarts.
@@ -233,7 +233,7 @@ async fn a_providers_list_is_read_on_request_and_a_model_it_lacks_is_added_once_
     );
 }
 
-/// Friend bug #41: the person looking at the models (ProvidersShown) reads
+/// The person looking at the models (ProvidersShown) reads
 /// again a list more than 15 minutes old, and leaves a newer one be.
 #[tokio::test]
 async fn a_stale_list_is_read_again_when_the_person_looks_at_the_models() {

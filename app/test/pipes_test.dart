@@ -1371,9 +1371,8 @@ void main() {
     final clipboard = FakeSecretClipboard.install();
     await tester.tap(menuButton());
     await pumpFrames(tester);
+    // The project's menu has it (§4).
     await tester.longPress(find.text('Factory').first);
-    await pumpFrames(tester);
-    await tester.tap(find.text('Project settings'));
     await pumpFrames(tester);
     await tester.ensureVisible(find.text('Connect a pipe…'));
     await tester.tap(find.text('Connect a pipe…'));

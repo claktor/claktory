@@ -67,6 +67,9 @@ serve options:
                           the review box's backend key (base64url, one line):
                           the only Claktory a review email signs in; while
                           FILE isn't there, none does
+  --review-only           a service for the store reviewers alone: every email
+                          but a --review-account's is refused at sign-in
+                          (403 review_only), so nobody else can use it
 
 init-secrets writes new keys to FILE (never over one): back up its k_share and
 signing_key offline.
@@ -196,7 +199,7 @@ fn serve(args: &[String]) -> Result<(), String> {
             "--review-account",
             "--review-claktory-key",
         ],
-        &["--trust-proxy"],
+        &["--trust-proxy", "--review-only"],
     )?;
     let db = PathBuf::from(options.required("--db")?);
     let secrets = Secrets::load(&PathBuf::from(options.required("--secrets")?))?;
@@ -241,6 +244,14 @@ fn serve(args: &[String]) -> Result<(), String> {
     }
     if !config.review_accounts.is_empty() {
         tracing::info!("review accounts: {} on", config.review_accounts.len());
+    }
+    config.review_only = options.flag("--review-only");
+    if config.review_only {
+        // Its accounts are the reviewers': none reads as Claktory's staff.
+        if !config.vouched_claktory_emails.is_empty() {
+            return Err("a --review-only service vouches for no one: leave out --vouch-claktory-email".to_owned());
+        }
+        tracing::info!("review only: no email but a review account's signs in");
     }
     if let Some(path) = options.value("--review-claktory-key")? {
         config.review_claktory_key = server::review::read_claktory_key(&PathBuf::from(&path))?;

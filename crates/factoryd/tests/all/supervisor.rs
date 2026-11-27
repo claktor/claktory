@@ -23,7 +23,13 @@ struct Supervisor(Child);
 
 impl Drop for Supervisor {
     fn drop(&mut self) {
+        #[cfg(unix)]
         let _ = Command::new("kill").arg(self.0.id().to_string()).status();
+        // Its stop event, which it passes on to its backend, as SIGTERM.
+        #[cfg(windows)]
+        if factoryd::windows::stop::ask_to_stop(self.0.id()).is_err() {
+            let _ = self.0.kill();
+        }
         let _ = self.0.wait();
     }
 }
@@ -75,9 +81,12 @@ async fn reconnect(addr: SocketAddr, until: impl Fn(&v1::Workspace) -> bool) -> 
 fn publish(home: &Path, version: &str, backend: &[u8]) {
     let release = home.join("releases").join(version);
     std::fs::create_dir_all(&release).expect("mkdir");
-    std::fs::write(release.join("factoryd"), backend).expect("write");
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(release.join("factoryd"), std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    std::fs::write(release.join(factoryd::home::program("factoryd")), backend).expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(release.join(factoryd::home::program("factoryd")), std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
     std::fs::write(home.join("releases/latest"), version).expect("write");
 }
 
@@ -91,9 +100,14 @@ async fn a_backend_update_that_does_not_start_is_undone_and_a_good_one_sticks() 
     std::fs::create_dir_all(home.join("bin")).expect("mkdir");
     let original = std::fs::read(factoryd("FACTORYD_UNDER_TEST")).expect("read factoryd");
     let update = std::fs::read(factoryd("FACTORYD_UPDATE")).expect("read the update");
-    std::fs::write(home.join("bin/factoryd"), &original).expect("install");
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(home.join("bin/factoryd"), std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // As the installer puts it: `bin/factoryd` (`factoryd.exe` on Windows).
+    let installed = factoryd::home::Home::new(home.clone()).backend();
+    std::fs::write(&installed, &original).expect("install");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
     let port = std::net::TcpListener::bind("127.0.0.1:0").expect("bind").local_addr().expect("addr").port();
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     serves(addr, factoryd::home::Home::new(home.clone()));
@@ -109,8 +123,10 @@ async fn a_backend_update_that_does_not_start_is_undone_and_a_good_one_sticks() 
     assert!(!home.join("vault/auto.key").exists());
     let open = |view: &View| view.workspace.vault.as_ref().is_some_and(|vault| vault.unlocked);
 
-    // A release whose backend can't even run.
-    publish(&home, "2099.01.01-0000", b"#!/bin/sh\nexit 3\n");
+    // A release whose backend can't even run: one that exits at once, or on
+    // Windows, where a script isn't a program, one that isn't a program.
+    let broken: &[u8] = if cfg!(windows) { b"not a program" } else { b"#!/bin/sh\nexit 3\n" };
+    publish(&home, "2099.01.01-0000", broken);
     drop((client, view));
     let (mut client, mut view) = reconnect(addr, |workspace| workspace.latest_release == "2099.01.01-0000").await;
     assert!(matches!(apply_request(&mut client, &mut view, install()).await, Body::Ack(_)));
@@ -119,11 +135,15 @@ async fn a_backend_update_that_does_not_start_is_undone_and_a_good_one_sticks() 
     let (_client, view) = reconnect(addr, |workspace| !workspace.update_error.is_empty()).await;
     assert_eq!(view.workspace.version, "dev");
     assert!(
-        view.workspace.update_error.starts_with("Claktory 2099.01.01-0000 didn't start, so you're still on dev. It stopped"),
+        view.workspace.update_error.starts_with(if cfg!(windows) {
+            "Claktory 2099.01.01-0000 didn't start, so you're still on dev. It couldn't be started"
+        } else {
+            "Claktory 2099.01.01-0000 didn't start, so you're still on dev. It stopped"
+        }),
         "{}",
         view.workspace.update_error
     );
-    assert_eq!(std::fs::read(home.join("bin/factoryd")).expect("read"), original, "the previous backend is back");
+    assert_eq!(std::fs::read(&installed).expect("read"), original, "the previous backend is back");
     assert!(!home.join("bin/trial.json").exists());
     assert!(open(&view), "the vault's key came back with it");
 
@@ -147,7 +167,7 @@ async fn a_backend_update_that_does_not_start_is_undone_and_a_good_one_sticks() 
     assert!(open(&view), "the vault stays open across the update");
     assert!(home.join("bin/factoryd.previous").exists(), "the one before is kept to go back to");
     // Byte for byte, so a signed build's signature stays whole.
-    assert_eq!(std::fs::read(home.join("bin/factoryd")).expect("read"), update, "the update is in place");
+    assert_eq!(std::fs::read(&installed).expect("read"), update, "the update is in place");
     assert_eq!(std::fs::read(home.join("bin/factoryd.previous")).expect("read"), original);
 
     // A client turned away (another user's, say) isn't an app that couldn't
@@ -160,7 +180,7 @@ async fn a_backend_update_that_does_not_start_is_undone_and_a_good_one_sticks() 
     while home.join("bin/trial.json").exists() {
         assert!(tokio::time::Instant::now() < deadline, "the trial never ended");
         if let Ok(tcp) = tokio::net::TcpStream::connect(addr).await
-            && let Ok((mut socket, _)) = tokio_tungstenite::client_async("ws://factory/", tcp).await
+            && let Ok((mut socket, _)) = tokio_tungstenite::client_async(format!("ws://{addr}/"), tcp).await
         {
             let hello = v1::Hello {
                 protocol_version: factory_protocol::PROTOCOL_VERSION,

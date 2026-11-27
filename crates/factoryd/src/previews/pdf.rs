@@ -181,7 +181,8 @@ fn render(data: &Path, path: &Path, sha: &str, screen: Screen, page: u32, helper
     Ok(Rendered::Page(header))
 }
 
-#[cfg(test)]
+// Its helper is stood in for by a shell script.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

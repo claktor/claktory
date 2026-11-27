@@ -3,7 +3,7 @@ import 'package:factory_app/people/secret_clipboard.dart';
 import 'package:flutter/services.dart' show MethodChannel;
 import 'package:flutter_test/flutter_test.dart' show addTearDown;
 
-/// The sensitive clipboard (pipe invites' codes, row 166) as a test sees
+/// The sensitive clipboard (pipe invites' codes) as a test sees
 /// it: what was copied and for how long, and which copies were cleared.
 class FakeSecretClipboard implements SecretClipboard {
   final copies = <(String, int)>[];

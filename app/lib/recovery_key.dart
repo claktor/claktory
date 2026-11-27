@@ -1,9 +1,10 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'approve_elsewhere.dart';
 import 'backend.dart';
-import 'claktory_identity.dart' show claktoryNameInText;
+import 'claktory_identity.dart' show claktoryNameInSettings, claktoryNameInText;
 import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
@@ -12,6 +13,7 @@ import 'mobile/metrics.dart' show TypeScale;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'settings_view.dart' show SettingRow;
+import 'share_files.dart' show ShareUnavailable, shareName;
 import 'visible_codes.dart' show visibleCodes;
 
 /// Saving the recovery key (R1): Needs you asks once a Claktory signs in,
@@ -112,26 +114,36 @@ class _SaveRecoveryKeyFormState extends State<SaveRecoveryKeyForm> {
       title: 'Save the recovery key for $name',
       body:
           'Each Claktory has its own recovery key, even on the same account: '
-          'this one opens the secrets on $name, and no other key does.\n\n'
-          'Those secrets open with two halves together: one on $name and one '
-          'at claktory.com. This key opens them by itself, if claktory.com '
-          'can\'t be reached, your account is gone or the half on $name is '
-          'lost.\n\n'
-          'Save it in a password manager, such as Passwords or 1Password, or '
-          'on paper kept somewhere safe. Not in a note, a screenshot or a '
-          'message. Never share it: anyone with it can open these secrets.',
+          'this one opens the secrets on $name, and no other key does. It '
+          'opens them even if claktory.com can\'t be reached or your account '
+          'is gone.\n\n'
+          'Save it in a password manager, such as Passwords or 1Password, as '
+          'a file on a USB drive, or on paper kept somewhere safe. Not in a '
+          'note, a screenshot or a message. Never share it: anyone with it '
+          'can open these secrets.',
       fields: [
         if (key != null) ...[
           RecoveryKeyBox(key),
           const SizedBox(height: Space.s),
           Align(
             alignment: AlignmentDirectional.centerStart,
-            child: Button(
-              label: _copied ? 'Copied' : 'Copy',
-              onPressed: () {
-                Clipboard.setData(ClipboardData(text: key));
-                setState(() => _copied = true);
-              },
+            child: Wrap(
+              spacing: Space.s,
+              runSpacing: Space.s,
+              children: [
+                Button(
+                  label: _copied ? 'Copied' : 'Copy',
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: key));
+                    setState(() => _copied = true);
+                  },
+                ),
+                if (canSaveRecoveryKey)
+                  RecoveryKeyDownload(
+                    recoveryKey: key,
+                    onError: (error) => setState(() => _error = error),
+                  ),
+              ],
             ),
           ),
           const SizedBox(height: Space.l),
@@ -183,6 +195,139 @@ class _SaveRecoveryKeyFormState extends State<SaveRecoveryKeyForm> {
   );
 }
 
+const _device = MethodChannel('factory/device');
+
+/// Whether this device saves the key as a file: the Mac's and Android's
+/// save dialogs, an iPhone's or iPad's Files (never the share sheet, which
+/// would offer to send it in a message).
+bool get canSaveRecoveryKey =>
+    !kIsWeb &&
+    (defaultTargetPlatform == TargetPlatform.macOS ||
+        defaultTargetPlatform == TargetPlatform.iOS ||
+        defaultTargetPlatform == TargetPlatform.android);
+
+/// [claktory]'s name as a file or the file's words have it: without the
+/// marks that keep it apart in a sentence, controls, or the characters a
+/// folder can't hold in a name.
+String _plainName(String claktory) => claktory
+    .replaceAll(
+      RegExp(
+        '[\\x00-\\x1F\\x7F/:\\\\\\u200B-\\u200F\\u202A-\\u202E'
+        '\\u2066-\\u2069\\uFEFF]',
+      ),
+      '',
+    )
+    .trim();
+
+/// The key's file: "Claktory recovery key (Studio).txt".
+String recoveryKeyFileName(String claktory) {
+  final name = _plainName(claktory);
+  return shareName(
+    name.isEmpty
+        ? 'Claktory recovery key.txt'
+        : 'Claktory recovery key ($name).txt',
+  );
+}
+
+/// What the key's file holds: whose key it is and the day it was saved,
+/// then the key.
+String recoveryKeyFileText(String claktory, String key, DateTime now) {
+  const months = [
+    'January',
+    'February',
+    'March',
+    'April',
+    'May',
+    'June',
+    'July',
+    'August',
+    'September',
+    'October',
+    'November',
+    'December',
+  ];
+  final name = _plainName(claktory);
+  return 'Recovery key for the Claktory ${name.isEmpty ? 'on this computer' : name}, '
+      'saved ${now.day} ${months[now.month - 1]} ${now.year}.\n\n'
+      '$key\n';
+}
+
+/// Saves [key] as a file where the person chooses: the save dialog on a
+/// Mac or Android, Files on an iPhone or iPad. True once it's
+/// saved, false when they cancelled. Throws [ShareUnavailable] saying why
+/// it couldn't.
+Future<bool> saveRecoveryKey(
+  BuildContext context, {
+  required String claktory,
+  required String key,
+}) async {
+  final name = recoveryKeyFileName(claktory);
+  final text = recoveryKeyFileText(claktory, key, DateTime.now());
+  try {
+    final saved = await _device.invokeMethod<Object>('saveText', {
+      'name': name,
+      'text': text,
+    });
+    return saved != null && saved != false;
+  } on MissingPluginException {
+    throw const ShareUnavailable(
+      'Update Claktory to download the key.',
+      sentence: true,
+    );
+  } on PlatformException catch (failure) {
+    throw ShareUnavailable(failure.message ?? failure.code);
+  }
+}
+
+/// Download beside the key's Copy: saves it as a file ([saveRecoveryKey]),
+/// then reads Downloaded, as Copy reads Copied. [onError] gets why it
+/// couldn't, in a sentence.
+class RecoveryKeyDownload extends StatefulWidget {
+  const RecoveryKeyDownload({
+    super.key,
+    required this.recoveryKey,
+    required this.onError,
+  });
+
+  final String recoveryKey;
+  final ValueChanged<String> onError;
+
+  @override
+  State<RecoveryKeyDownload> createState() => _RecoveryKeyDownloadState();
+}
+
+class _RecoveryKeyDownloadState extends State<RecoveryKeyDownload> {
+  var _busy = false;
+  var _saved = false;
+
+  Future<void> _save(BuildContext context) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      final saved = await saveRecoveryKey(
+        context,
+        claktory: claktoryNameInSettings(AppScope.of(context)),
+        key: widget.recoveryKey,
+      );
+      if (mounted) setState(() => _saved = _saved || saved);
+    } on ShareUnavailable catch (why) {
+      widget.onError(
+        why.sentence ? why.message : "Couldn't save the key: ${why.message}",
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Builder(
+    builder: (context) => Button(
+      label: _saved ? 'Downloaded' : 'Download',
+      onPressed: _busy ? null : () => _save(context),
+    ),
+  );
+}
+
 /// The key as a code block shows it, but wrapping at its blocks rather
 /// than scrolling sideways: all of it in sight, to copy down by hand.
 class RecoveryKeyBox extends StatelessWidget {
@@ -217,7 +362,7 @@ class RecoveryKeyBox extends StatelessWidget {
 /// Who made an account recovery key, as claktory.com says (VaultState
 /// recovery_key_made_on, _change_made_on): untrusted words on one line,
 /// every hidden character by its code, cut at 60 characters whatever
-/// claktory.com's own cap (Fugo 50510); empty, a Claktory since removed.
+/// claktory.com's own cap; empty, a Claktory since removed.
 String recoveryKeyMaker(String name) {
   if (name.trim().isEmpty) return 'a Claktory no longer on your account';
   final shown = visibleCodes(name.replaceAll(RegExp(r'\s+'), ' ').trim());
@@ -227,7 +372,7 @@ String recoveryKeyMaker(String name) {
       : '${String.fromCharCodes(runes.take(59))}…';
 }
 
-/// The account's recovery key in Settings → Secrets (#239, main's half):
+/// The account's recovery key in Settings → Secrets (main's half):
 /// "Covered by your account's recovery key" with where and when it was
 /// made, when it covers this vault; and when claktory.com has a new key
 /// this Claktory couldn't check by itself, the warning Claktory's alert
@@ -287,7 +432,7 @@ class _AccountRecoveryKeyState extends State<AccountRecoveryKey> {
             },
         ].join(', ');
         final caption = type.caption.copyWith(color: palette.textMuted);
-        // One row (Lucy 50829): the key that covers this vault, and under
+        // One row: the key that covers this vault, and under
         // it a new one waiting, to use only if the person made it. Nothing
         // tinted, and a plain button: it's a caution, not a call.
         return SettingRow(

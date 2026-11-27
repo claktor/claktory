@@ -1,8 +1,8 @@
-// Settings on an iPad's workbench, for the system's menu (Lucy's Settings
-// spec §4.1, §7): while Settings is the page shown or the pane being read,
-// ⌘F is "Search Settings" in the menu (hold ⌘) and puts the keys in its
-// search field. ↑/↓ and Esc stay Settings' own keys in its index: a key
-// command on a bare arrow or Esc would take it from every text field.
+// Settings on an iPad's workbench, for the system's menu: while Settings is
+// the page shown or the pane being read, ⌘F is "Search Settings" in the menu
+// (hold ⌘) and puts the keys in its search field. ↑/↓ and Esc stay Settings'
+// own keys in its index: a key command on a bare arrow or Esc would take it
+// from every text field.
 import 'package:flutter/widgets.dart';
 
 import 'workbench.dart' show WorkbenchFocus, WorkbenchScope;

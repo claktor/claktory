@@ -1,5 +1,4 @@
-//! This Claktory's token for Claktory's relays (#450; Fugo's
-//! coordination/security/relay-access.md).
+//! This Claktory's token for Claktory's relays.
 //!
 //! Claktory's relay forwards only to or from a Claktory signed in to a
 //! claktory.com account, which shows it a token from the account service

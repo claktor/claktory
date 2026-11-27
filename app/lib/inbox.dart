@@ -16,6 +16,7 @@ import 'package:flutter/widgets.dart';
 
 import 'app_access_card.dart' show AppAccessCard, appAccessSummary;
 import 'app_grant_card.dart' show AppGrantCard, appGrantSummary;
+import 'approve_elsewhere.dart' show approvesElsewhere;
 import 'ask_card.dart';
 import 'backend.dart';
 import 'backend_service.dart'
@@ -41,12 +42,12 @@ import 'lid_closed.dart' show LidClosedStuck, lidClosedStuck;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
-import 'mobile/navigation.dart' show PhoneRoutes;
 import 'move.dart' show BackendMove, MoveConfirmCard, MoveStatus, moveStatusOf;
 import 'name_role_line.dart';
 import 'needs_you_alerts.dart';
 import 'needs_you_entries.dart';
-import 'needs_you_focus.dart' show openFocusMode;
+import 'needs_you_focus.dart'
+    show focusUrgent, needsYouIsFocusMode, openFocusMode;
 import 'needs_you_hold.dart';
 import 'needs_you_history.dart' show NeedsYouHistoryList, NeedsYouTabs;
 import 'pairing.dart' show AllowDeviceCard, deviceCallingItself;
@@ -730,8 +731,9 @@ class _InboxViewState extends State<InboxView> {
                               setState(() => _history = history),
                         );
                         final focus = !_history && focusModeHere(context);
-                        // A phone's tabs take the width: at the largest
-                        // text, Focus mode goes under them, at the end.
+                        // A narrow iPad's tabs take the width: at the
+                        // largest text, Focus mode goes under them, at the
+                        // end.
                         if (focus &&
                             isPhoneLayout(context) &&
                             largeText(context)) {
@@ -777,11 +779,14 @@ class _InboxViewState extends State<InboxView> {
   }
 }
 
-/// Whether Needs you has a way into focus mode here: everywhere but
-/// Android, an iPhone and a narrow iPad window too (#599: Needs you opens
-/// on the list there, and focus mode is the person's choice).
+/// Whether Needs you has a way into focus mode here: a Mac, an iPad (a
+/// narrow window too, where its sitting is the phone's one-card screen),
+/// a Windows PC. Never on a phone (#606, Matt: a phone's list, a request
+/// tapped opening alone, is already focus mode): an iPhone's idiom, not its
+/// layout, so a narrow iPad keeps its button; Android never had it.
 bool focusModeHere(BuildContext context) =>
-    defaultTargetPlatform != TargetPlatform.android;
+    defaultTargetPlatform != TargetPlatform.android &&
+    deviceIdiom(context) != Idiom.phone;
 
 /// The page's way into focus mode (#514), as ⌘⇧N, at the end of its tabs:
 /// shown while something waits, since focus mode shows only what waits.
@@ -822,12 +827,7 @@ class FocusModeButton extends StatelessWidget {
                   child: FittedBox(child: FocusGlyph(color: color)),
                 );
               },
-              // An iPhone's is a screen of its own over the list, never
-              // kept as the device's focus mode (#599).
-              onPressed: () {
-                if (PhoneRoutes.of(context)?.openFocus() ?? false) return;
-                openFocusMode(context);
-              },
+              onPressed: () => openFocusMode(context),
             ),
           ),
         );
@@ -1126,32 +1126,6 @@ class _NeedsYouListState extends State<NeedsYouList> {
     });
   }
 
-  /// Signs in again, or unlocks the secrets: no card to open first.
-  void _act(NeedsYouItem item) {
-    switch (item.kind) {
-      case NeedsYouKind.signIn:
-        final account = signInAccount(_backend.workspace.workspace, item);
-        if (account == null) return;
-        // Settings → Providers shows how the sign-in goes, at its row.
-        fireAndLog(
-          AppScope.scope(context).login.start(
-            item.providerId,
-            account.methodId.isEmpty ? 'oauth' : account.methodId,
-            addAccount: true,
-          ),
-        );
-        AppScope.openProviders(context);
-      case NeedsYouKind.vault:
-        showModal(context, (context, close) => UnlockSecretsForm(close: close));
-      case NeedsYouKind.recoveryKey:
-        showModal(
-          context,
-          (context, close) => SaveRecoveryKeyForm(close: close),
-        );
-      default:
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
@@ -1209,7 +1183,11 @@ class _NeedsYouListState extends State<NeedsYouList> {
         ),
     };
     final order = {for (var i = 0; i < items.length; i++) items[i].key: i};
+    // What stops agents first, under the urgent alerts, as focus mode's
+    // queue has it; then the requests.
     items.sort((a, b) {
+      final ua = focusUrgent(a), ub = focusUrgent(b);
+      if (ua != ub) return ua ? -1 : 1;
       final ta = times[a.key]!;
       final tb = times[b.key]!;
       final ka = ta == 0 ? 1 << 62 : ta, kb = tb == 0 ? 1 << 62 : tb;
@@ -1238,7 +1216,7 @@ class _NeedsYouListState extends State<NeedsYouList> {
           waiting: keys.contains(item.key),
           open: _open.contains(item.key),
           onToggle: () => item.isAction
-              ? _act(item)
+              ? actOnNeedsYouItem(context, item)
               : widget.onOpen == null
               ? _toggle(item)
               : _openAlone(item),
@@ -2044,8 +2022,13 @@ mixin _ItemParts {
         final why = workspace.vault.lockedWhy;
         return why.isEmpty ? 'Agents are waiting for your secrets.' : why;
       case NeedsYouKind.recoveryKey:
-        return 'Your way back into your secrets if you ever lose access. '
-            'Save it in a password manager, then confirm you have it.';
+        // Never shown or saved on Windows (approve_elsewhere.dart): the
+        // row says where (Hermes 53678).
+        return approvesElsewhere
+            ? 'Your way back into your secrets if you ever lose access. '
+                  'To save it, use your phone, tablet or Mac.'
+            : 'Your way back into your secrets if you ever lose access. '
+                  'Save it in a password manager, then confirm you have it.';
       case NeedsYouKind.dmSend:
         return dmSendSummary(workspace, item);
       case NeedsYouKind.providerWait:
@@ -2389,6 +2372,38 @@ class NeedsYouCard extends StatelessWidget with _ItemParts {
   }
 }
 
+/// What an action item's button says ([NeedsYouItem.isAction]).
+String needsYouActionLabel(NeedsYouItem item) => switch (item.kind) {
+  NeedsYouKind.signIn => 'Sign in again',
+  NeedsYouKind.vault => 'Unlock secrets…',
+  _ => 'Save recovery key…',
+};
+
+/// Does what an action item asks, with no card to open first: signs in
+/// again (Settings → Providers shows how it goes), or opens the form that
+/// unlocks the secrets or saves the recovery key.
+void actOnNeedsYouItem(BuildContext context, NeedsYouItem item) {
+  switch (item.kind) {
+    case NeedsYouKind.signIn:
+      final backend = AppScope.of(context);
+      final account = signInAccount(backend.workspace.workspace, item);
+      if (account == null) return;
+      fireAndLog(
+        AppScope.scope(context).login.start(
+          item.providerId,
+          account.methodId.isEmpty ? 'oauth' : account.methodId,
+          addAccount: true,
+        ),
+      );
+      AppScope.openProviders(context);
+    case NeedsYouKind.vault:
+      showModal(context, (context, close) => UnlockSecretsForm(close: close));
+    case NeedsYouKind.recoveryKey:
+      showModal(context, (context, close) => SaveRecoveryKeyForm(close: close));
+    default:
+  }
+}
+
 /// Opens where [item] is answered: the conversation at its card, the chat,
 /// or the pipe; leaving the page it's opened from unless [closePage] is
 /// false (focus mode leaves itself first, #514).
@@ -2422,6 +2437,9 @@ void openNeedsYouItem(
       ].firstOrNull;
       if (chat != null) openChat(context, chat);
     }
+  } else if (item.isAlert && item.pipeId.isEmpty) {
+    // Its agent's conversation; Claktory's own alerts have none.
+    if (item.agentId.isNotEmpty) fireAndLog(backend.selectAgent(item.agentId));
   } else if (item.kind == NeedsYouKind.browser) {
     // Its card shows in the agent's conversation the whole time.
     fireAndLog(backend.selectAgent(item.agentId));
@@ -2607,8 +2625,10 @@ String needsYouChipLabel(int count) => count == 1
 
 /// Over every conversation, at its top right, while anything anywhere
 /// waits for the person's answer: a floating chip saying how many ("2 need
-/// you"). A click drops the Needs you bubbles down under it, over the
-/// conversation, which stays as it is; another click folds them away. What
+/// you"). A click opens focus mode at the conversation's own request on a
+/// computer and a wide iPad; elsewhere it drops the Needs you bubbles down
+/// under it, over the conversation, which stays as it is; another click
+/// folds them away. What
 /// the person answers there stays, answered, while it's open. With nothing
 /// waiting and nothing open, it's nothing at all.
 class NeedsYouChip extends StatefulWidget {
@@ -2628,6 +2648,22 @@ class _NeedsYouChipState extends State<NeedsYouChip> {
   void _toggle() {
     final onOpen = widget.onOpen;
     if (onOpen != null) return onOpen();
+    // On a computer and a wide iPad, focus mode, at this conversation's
+    // own request: one Needs you.
+    if (needsYouIsFocusMode(context)) {
+      final agent = AppScope.of(context).workspace.selectedAgent;
+      final seqs = <int>[
+        if (agent != null)
+          for (final seq in agent.waitingSeqs) seq.toInt(),
+      ];
+      openFocusMode(
+        context,
+        at: agent == null || seqs.isEmpty
+            ? null
+            : NeedsYouItem.entry(agent.id, seqs.reduce(math.max)).key,
+      );
+      return;
+    }
     setState(() => _open = !_open);
   }
 
@@ -2705,8 +2741,9 @@ class _NeedsYouChipState extends State<NeedsYouChip> {
                 style: TypeScale.of(context).label
                     .copyWith(color: palette.text, fontWeight: FontWeight.w500),
               ),
-              // It drops down: a sheet from below has no need of it.
-              if (widget.onOpen == null) ...[
+              // It drops down: a sheet from below, or focus mode, has no
+              // need of it.
+              if (widget.onOpen == null && !needsYouIsFocusMode(context)) ...[
                 const SizedBox(width: Space.xs + 2),
                 AnimatedRotation(
                   turns: _open ? 0.5 : 0,

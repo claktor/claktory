@@ -1,4 +1,4 @@
-//! Images on the ChatGPT subscription (#403), as Codex makes them: a request
+//! Images on the ChatGPT subscription, as Codex makes them: a request
 //! to Codex's own image endpoint, `…/backend-api/codex/images/generations`,
 //! with `gpt-image-2`, on the sign-in's token and the headers its other
 //! requests carry. One image per request; nothing is ever sent again by

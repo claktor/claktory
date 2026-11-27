@@ -1,4 +1,4 @@
-// The Map on a phone (#198, phase 3A): Back, Search and Lines in its
+// The Map on a phone: Back, Search and Lines in its
 // header; the board at its own type size with Fit at its foot; a tapped
 // agent's card with Open conversation; everything on it as a list to
 // search; a pipe's pad a finger can tap.

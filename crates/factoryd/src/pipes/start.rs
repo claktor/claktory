@@ -1,4 +1,4 @@
-//! An agent starts a pipe for the person (#244): `pipes_invite` and
+//! An agent starts a pipe for the person: `pipes_invite` and
 //! `pipes_accept` (the Pipes extension, Rivet's by default) open a card in
 //! its conversation (`v1::PipeStart`), filled in from what the person told
 //! it. The person makes the invite or pastes the code they were given on
@@ -393,7 +393,7 @@ pub(crate) fn list(factory: &Factory, project: Option<&str>) -> Result<String, S
                 .and_then(|group| groups.iter().find(|known| &known.id == group))
                 .map(|group| format!(", in the group {} (id {})", group.name, group.id))
                 .unwrap_or_default();
-            // The person's websites it gets, by their own names (#471 G4):
+            // The person's websites it gets, by their own names:
             // never the other side's, which are their words.
             let websites: Vec<String> = shared
                 .remove(&record.id)
@@ -439,9 +439,9 @@ fn shown_name(record: &Record) -> String {
     if theirs { "a pipe named by the other side".to_owned() } else { format!("\"{}\"", record.name) }
 }
 
-/// What waits on a pipe, counted only (#471 G11, Fugo: never what they
-/// say): "; 2 messages wait for Matt (1 to send, 1 to let in); 1 message no
-/// agent has answered".
+/// What waits on a pipe, counted only (never what they say): "; 2 messages
+/// wait for Matt (1 to send, 1 to let in); 1 message no agent has
+/// answered".
 fn waiting(factory: &Factory, record: &Record, person: &str) -> String {
     let (out, incoming) = (super::waiting_outgoing(factory, &record.id), super::waiting_incoming(factory, &record.id));
     let unanswered = super::lead::unanswered(factory, &factory.lock().config, record).len();

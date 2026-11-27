@@ -27,7 +27,7 @@ fn built(path: &Path, bytes: usize) {
     std::fs::write(path, vec![7; bytes]).expect("write");
     let old = SystemTime::now() - Duration::from_secs(3600);
     for at in path.ancestors().take(4) {
-        if let Ok(file) = std::fs::File::open(at) {
+        if let Ok(file) = crate::common::open_to_date(at) {
             let _ = file.set_modified(old);
         }
     }
@@ -221,7 +221,11 @@ async fn a_busy_agent_s_caches_are_trimmed_between_its_steps_and_cleared_once_id
     // nothing here depends on how fast the machine is.
     let (started, release) = (dir.join("call-started"), dir.join("call-release"));
     let build =
-        format!(r#"call bash {{"command":"touch {}; while [ ! -e {} ]; do sleep 0.05; done"}}"#, started.display(), release.display());
+        format!(
+            r#"call bash {{"command":"touch {}; while [ ! -e {} ]; do sleep 0.05; done"}}"#,
+            crate::common::shell_path(&started),
+            crate::common::shell_path(&release)
+        );
     apply_request(&mut client, &mut view, send_message("builder", &build)).await;
     eventually("Builder's tool call starting", || started.exists()).await;
     built(&tree.join("target/debug/big"), 2_000_000);

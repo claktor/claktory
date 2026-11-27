@@ -1,9 +1,9 @@
-// Images and videos on an iPhone (#198 phase 2B; research mobile.md §4,
-// "Comments and annotations"): Comment under the picture, in the thumb's
-// reach, then a tap for a spot, a drag for an area, two fingers to zoom
-// meanwhile, or Whole image with no gesture at all; a pin a fingertip
-// reaches. A video's controls a finger's size, its timeline a slider
-// VoiceOver moves, and Comment twice writes about the moment on screen.
+// Images and videos on an iPhone (research mobile.md §4, "Comments and
+// annotations"): Comment under the picture, in the thumb's reach, then a
+// tap for a spot, a drag for an area, two fingers to zoom meanwhile, or
+// Whole image with no gesture at all; a pin a fingertip reaches. A
+// video's controls a finger's size, its timeline a slider VoiceOver
+// moves, and Comment twice writes about the moment on screen.
 import 'package:factory_app/annotations.dart';
 import 'package:factory_app/mobile/presentation.dart' show PhoneSheet;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';

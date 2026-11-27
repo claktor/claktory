@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
@@ -222,7 +223,9 @@ class Connection {
   /// The footer's line, and the dialog's title.
   String get line => switch (link) {
     Link.live =>
-      machine == null ? 'Running on this Mac' : 'Connected to $machine',
+      machine == null
+          ? 'Running on this $_thisComputer'
+          : 'Connected to $machine',
     Link.connecting when backend.reconnecting.value => 'Reconnecting…',
     Link.connecting =>
       machine == null ? 'Connecting…' : 'Connecting to $machine…',
@@ -232,7 +235,7 @@ class Connection {
       '' => 'Moved to another computer',
       final to => 'Moved to $to',
     },
-    Link.off => 'Turned off on this Mac',
+    Link.off => 'Turned off on this $_thisComputer',
     Link.blocked => 'Blocked by macOS',
   };
 
@@ -265,7 +268,7 @@ class Connection {
     switch (link) {
       case Link.live:
         if (machine == null) {
-          return 'Claktory is running on this Mac.'
+          return 'Claktory is running on this $_thisComputer.'
               '${at == null ? '' : ' Connected since $at.'}';
         }
         final when = at == null ? '' : ' since $at';
@@ -284,8 +287,8 @@ class Connection {
       case Link.connecting:
         return 'Trying to reach $_name…';
       case Link.off:
-        return "Claktory is turned off on this Mac, so its agents aren't "
-            'running. Start it, and they carry on where they left off.';
+        return "Claktory is turned off on this $_thisComputer, so its agents "
+            "aren't running. Start it, and they carry on where they left off.";
       case Link.blocked:
         return 'macOS is blocking Claktory from running in the background. '
             'Open System Settings and turn on Claktory under Allow in the '
@@ -512,3 +515,8 @@ class ConnectionDialog extends StatelessWidget {
     );
   }
 }
+
+/// The computer this app's own Claktory runs on, as the footer names it:
+/// a PC on Windows (Hermes 53466), a Mac everywhere else.
+String get _thisComputer =>
+    defaultTargetPlatform == TargetPlatform.windows ? 'PC' : 'Mac';

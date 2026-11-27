@@ -168,6 +168,7 @@ pub(super) fn vouch(service: &Service, call: &Call) -> Result<Reply, ApiError> {
     service.limit(&[(&format!("vouch:{}", claktory.id), 3600, VOUCHES_PER_HOUR)])?;
     let conn = service.db();
     let email = db::account_email(&conn, &claktory.account_id)?.ok_or_else(ApiError::unauthorized)?;
+    super::api::review_only_box(service, &email, &claktory.backend_key)?;
     if db::device_removed(&conn, &email, &body.account_key)? {
         return Err(removed());
     }

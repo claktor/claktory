@@ -26,7 +26,8 @@ import java.util.concurrent.Executors
  * answer on it. The attach menu and its pickers are [AttachmentPicker]'s,
  * Take photo's camera [PhotoCapture]'s,
  * the camera's permission [CameraAccess]'s, QR codes [QrCodes]', web
- * sign-in [WebAuth]'s, the share sheet [ShareSheet]'s.
+ * sign-in [WebAuth]'s, the share sheet [ShareSheet]'s, saving a text
+ * file [TextSave]'s.
  */
 class DeviceChannel(
     messenger: BinaryMessenger,
@@ -36,6 +37,7 @@ class DeviceChannel(
     private val webAuth: WebAuth? = null,
     private val share: ShareSheet? = null,
     private val photos: PhotoCapture? = null,
+    private val saves: TextSave? = null,
 ) :
     MethodChannel.MethodCallHandler, AutoCloseable {
     private val channel = MethodChannel(messenger, "factory/device")
@@ -93,6 +95,7 @@ class DeviceChannel(
             "share" -> share?.core?.share((call.arguments as? Map<*, *>)?.get("text") as? String, result)
                 ?: result.notImplemented()
             "shareFiles" -> share?.shareFiles(call.arguments as? Map<*, *>, result) ?: result.notImplemented()
+            "saveText" -> saves?.save(call.arguments, result) ?: result.notImplemented()
             "cancelWebAuth" -> {
                 webAuth?.core?.cancel()
                 result.success(null)

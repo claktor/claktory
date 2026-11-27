@@ -1,4 +1,4 @@
-//! QA only (Fugo's E11 hostile pass, row 6; Abbacchio 40036, Bruno 40067):
+//! QA only:
 //! a Claktory that lies about whose it is, so QA can check that the
 //! person's device trusts claktory.com's list and the endpoint it dials,
 //! never a Claktory's word. Built only with the `qa-lies` feature, which a

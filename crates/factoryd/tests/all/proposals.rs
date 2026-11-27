@@ -134,7 +134,7 @@ async fn an_approved_proposal_reaches_rivet_as_the_persons_message_with_their_co
     assert!(matches!(again, Body::Error(_)), "{again:?}");
 }
 
-/// Submit (#370): a comment instead of Approve or Dismiss is an answer.
+/// Submit: a comment instead of Approve or Dismiss is an answer.
 /// Rivet gets the proposal with the comment as what to do, and the agent
 /// is told it was answered so: neither approved nor dismissed.
 #[tokio::test]
@@ -209,7 +209,7 @@ async fn a_dismissed_proposal_tells_the_agent_and_rivet_gets_nothing() {
     let reply = apply_request(&mut client, &mut view, decide("builder", &proposal.id, false, "")).await;
     assert!(matches!(reply, Body::Ack(_)), "{reply:?}");
     assert_eq!(proposal_entry(&view.entries, &proposal.id).state(), ProposalState::Dismissed);
-    // Dismissed without a comment, Builder is told quietly (friend bug #19):
+    // Dismissed without a comment, Builder is told quietly:
     // it waits for Builder's next wake rather than waking it.
     let events = |view: &View| -> Vec<(String, bool)> {
         view.entries
@@ -313,7 +313,7 @@ async fn agents_call_the_user_by_name_once_it_is_given() {
     let (said, _) = propose(&mut client, &mut view, NEEDED).await;
     assert!(said.starts_with("Proposed; the person will approve or dismiss it. Its id is "), "{said}");
     let prompt = system_prompt.lock().expect("lock").clone();
-    assert!(!prompt.contains("\nThe person you work with is") && prompt.contains("where the person approves it"), "{prompt}");
+    assert!(!prompt.contains("\nThe person you work with is") && prompt.contains("The person approves it, dismisses it or answers it"), "{prompt}");
 
     // Named mid-context: Builder hears it now, and its system prompt stays
     // as it is until its next context.
@@ -344,7 +344,7 @@ async fn agents_call_the_user_by_name_once_it_is_given() {
     apply_request(&mut client, &mut view, send_message("builder", "hello")).await;
     view.follow(&mut client, |view| view.entries.len() >= 3 && idle(view, "builder")).await;
     let prompt = system_prompt.lock().expect("lock").clone();
-    assert!(prompt.contains("\nThe person you work with is Matt.\n") && prompt.contains("where Matt approves it"), "{prompt}");
+    assert!(prompt.contains("\nThe person you work with is Matt.\n") && prompt.contains("Matt approves it, dismisses it or answers it"), "{prompt}");
     assert!(!prompt.contains("{{user}}") && !prompt.contains("{{User}}"));
 
     // Removed: "the person" again.
@@ -354,7 +354,7 @@ async fn agents_call_the_user_by_name_once_it_is_given() {
 
 // An agent that has read a web page proposes: the card says which page
 // (threat model §7, P1). One that has read a pipe, or nothing, keeps none
-// (#346; a null taint, as every proposal from before reads back too).
+// (a null taint, as every proposal from before reads back too).
 #[tokio::test]
 async fn a_proposal_from_an_agent_that_read_a_web_page_says_so_and_a_pipe_reader_isnt_marked() {
     let dir = temp_dir();

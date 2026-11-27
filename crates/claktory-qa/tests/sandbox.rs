@@ -304,7 +304,7 @@ fn noisy_png(width: u32, height: u32, seed: u64) -> Vec<u8> {
     bytes
 }
 
-/// #490: an agent holding three large screenshots holds a few thousand
+/// An agent holding three large screenshots holds a few thousand
 /// tokens of them, what its provider charges for their size, never their
 /// base64's million: it doesn't compact, before a restart or after.
 #[test]

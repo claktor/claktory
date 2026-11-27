@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 use serde_json::{Value, json};
 
 use super::geo::Location;
-use crate::protocol::{Activity, CheckIn, Counts, Health, PublicStats, RecoveryKey, Usage, hex, sha256};
+use crate::protocol::{Activity, CheckIn, Counts, Health, PublicStats, RecoveryKey, Usage, clean_name, hex, sha256};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS accounts (
@@ -385,9 +385,28 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
         "INSERT OR IGNORE INTO key_accounts (account_key, account_id) SELECT account_key, account_id FROM devices;
          INSERT OR IGNORE INTO key_accounts (account_key, account_id) SELECT account_key, account_id FROM removed_devices;",
     )?;
-    tx.pragma_update(None, "user_version", 4)?;
+    if version < 5 {
+        clean_names(&tx)?;
+    }
+    tx.pragma_update(None, "user_version", 5)?;
     tx.commit()?;
     Ok(conn)
+}
+
+/// Claktories' names kept before `clean_name` left out what they hide
+/// (direction and invisible characters), as it would have kept them.
+fn clean_names(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    let names: Vec<(String, String, Option<String>)> = tx
+        .prepare("SELECT id, name, display_name FROM claktories")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (id, name, display_name) in names {
+        let cleaned = (clean_name(&name), display_name.as_deref().map(clean_name));
+        if (cleaned.0.as_str(), cleaned.1.as_deref()) != (name.as_str(), display_name.as_deref()) {
+            tx.execute("UPDATE claktories SET name = ?2, display_name = ?3 WHERE id = ?1", params![id, cleaned.0, cleaned.1])?;
+        }
+    }
+    Ok(())
 }
 
 /// Writes a consistent copy of the database at `db` to `dir` (made if

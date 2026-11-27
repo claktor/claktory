@@ -893,7 +893,7 @@ void main() {
       await tester.pump(const Duration(seconds: 2));
     });
 
-    // Zucchero's row 136: a later show in place of the oldest pane kept
+    // A later show in place of the oldest pane kept
     // its id for another page, and a click brought that forward.
     testWidgets('a pane that shows something else now is passed by: the '
         'click goes to the file', (tester) async {
@@ -960,7 +960,7 @@ void main() {
       expect(harness.last.setLayout.agentId, 'a1');
     });
 
-    // Zucchero's row 343: a name with a hidden character shows its code,
+    // A name with a hidden character shows its code,
     // but the file opened is the real one, not one named with the code.
     testWidgets('a hidden character in its name shows as its code; the '
         'click opens the file as it is', (tester) async {
@@ -1276,7 +1276,7 @@ void main() {
       'when src/, a.csv change',
     );
     expect(describeWhen({'watch': 'tail -F x'}), 'when tail -F x prints');
-    // Pipes (friend bug #34): which, and on what, in words.
+    // Pipes: which, and on what, in words.
     expect(describeWhen({'pipes': '*'}), 'when any pipe changes');
     expect(
       describeWhen({
@@ -1299,7 +1299,7 @@ void main() {
     );
   });
 
-  // Abbacchio's rows 544 and 552: in a conversation narrowed to about 200
+  // In a conversation narrowed to about 200
   // px by a pane beside it, a tool's name ran over how long it took, and
   // the show card's folder left its file no room.
   group('with the app\'s font', () {
@@ -1345,7 +1345,7 @@ void main() {
     }
   });
 
-  // Zucchero's row 140: on an iPad at AX5, rows of a fixed height cut their
+  // On an iPad at AX5, rows of a fixed height cut their
   // text at the top and bottom.
   group('on an iPad at AX5', () {
     Future<void> show(WidgetTester tester, List<Entry> entries) async {

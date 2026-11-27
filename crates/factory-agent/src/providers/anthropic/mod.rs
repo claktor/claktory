@@ -162,8 +162,8 @@ fn image_block(data: &ImageData, mime_type: &str) -> Value {
     }
 }
 
-/// The file id each image already at Anthropic goes as, by digest (#382,
-/// `files`); the others go inline.
+/// The file id each image already at Anthropic goes as, by digest
+/// (`files`); the others go inline.
 type FileRefs = HashMap<String, String>;
 
 fn file_block(file_id: &str) -> Value {
@@ -830,7 +830,7 @@ pub fn limit_claim(headers: &reqwest::header::HeaderMap) -> Option<&str> {
     headers.get("anthropic-ratelimit-unified-representative-claim").and_then(|value| value.to_str().ok()).map(str::trim)
 }
 
-/// The images of `context` that can go as files (#382): read since, in a
+/// The images of `context` that can go as files: read since, in a
 /// request to Anthropic that keeps files, for a model that takes images.
 fn file_images<'a>(model: &Model, context: &'a LlmContext, options: &StreamOptions) -> Vec<files::Image<'a>> {
     if options.image_files.is_none() || !model.input.iter().any(|input| input == "image") {
@@ -867,7 +867,7 @@ pub fn file_headers(model: &Model, options: &StreamOptions, oauth: bool) -> Vec<
     request_headers(model, &LlmContext::default(), options, oauth)
 }
 
-/// Whether requests go gzip-compressed (#454, `providers::gzip`): to
+/// Whether requests go gzip-compressed (`providers::gzip`): to
 /// Anthropic's own API, which takes them; elsewhere (a proxy, qa-model)
 /// only when the model's `gzipRequests` says so.
 fn takes_gzip(model: &Model) -> bool {
@@ -892,7 +892,7 @@ async fn request(
     sink: &EventSink,
 ) -> Result<(), String> {
     let oauth = options.api_key.as_deref().is_some_and(|key| key.contains("sk-ant-oat"));
-    // Images read since #382 go as files Anthropic already has, uploaded
+    // Images read with a hash go as files Anthropic already has, uploaded
     // the first time. A request Anthropic answers it hasn't one of them (a
     // 404 naming it: another conversation let go of it) is sent again with
     // that one uploaded again, the rest as they were, once for each it

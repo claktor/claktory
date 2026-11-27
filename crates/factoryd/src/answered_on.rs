@@ -1,4 +1,4 @@
-//! Which device the person decided each card from (#514, spec §9.2), so
+//! Which device the person decided each card from, so
 //! another device can say "Answered on Matt's iPhone" (Entry.answered_on),
 //! and History can too (NeedsYouRecord.answered_on, from the card).
 //!
@@ -6,7 +6,7 @@
 //! (`deciding`) notes what waits for the person before it (every agent's
 //! and chat's `waiting_seqs`), and what stopped waiting when it's done was
 //! decided from the connection's device, the one it signed in as, never
-//! one a request names (Fugo). Kept in factory.db by conversation and
+//! one a request names. Kept in factory.db by conversation and
 //! entry; set on loaded entries at once, and on a conversation's when it's
 //! read again (`restore`).
 

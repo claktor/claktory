@@ -45,10 +45,10 @@ fn blank(url: &str) -> bool {
     url.is_empty() || url == "about:blank"
 }
 
-/// Whether a page at `url` may be the errand's: blank, or on one of its
-/// `sites`.
-pub(crate) fn errands_own(sites: &[String], url: &str) -> bool {
-    blank(url) || super::fence::check(sites, url).is_ok()
+/// Whether a page at `url` may be the agent's to drive: blank, or where
+/// the fence lets the browser go (an https site on the internet).
+pub(crate) fn drivable(url: &str) -> bool {
+    blank(url) || super::fence::check(url).is_ok()
 }
 
 /// What the reader gets in place of the extension's `chrome`: the listener
@@ -112,7 +112,7 @@ fn agreement(words: &str) -> bool {
 }
 
 /// Why an agreement checkbox isn't the agent's.
-pub(crate) const AGREEMENT: &str = "an agreement: the person accepts it (errand_handoff, kind \"agreement\")";
+pub(crate) const AGREEMENT: &str = "an agreement: the person accepts it (browser_handoff, kind \"agreement\")";
 
 /// Roles a box the person ticks to agree may have.
 fn tickable(role: &str) -> bool {
@@ -189,8 +189,8 @@ impl Page {
         crate::locking::lock(&self.two_step).clone()
     }
 
-    /// The errand's tab, attached and brought to the front: the one the
-    /// person sees among those on the errand's `sites` or blank. Chrome can
+    /// The agent's tab, attached and brought to the front: the one shown
+    /// among those it may drive (`drivable`). Chrome can
     /// hold page targets its tab strip doesn't show (an about:blank beside
     /// the tabs a relaunch restored, Ghiaccio 38463), so with more than
     /// one, each is asked whether it's visible, in a world of Claktory's
@@ -202,7 +202,7 @@ impl Page {
     /// Fugo 38499) is never attached, read or moved. Just relaunched,
     /// Chrome lists the tabs it restores a moment later: it's given
     /// [`RESTORING`] to before a new blank tab is made for want of one.
-    pub(crate) async fn shown(cdp: Arc<Cdp>, sites: &[String], last: Option<&str>) -> Result<Page, Error> {
+    pub(crate) async fn shown(cdp: Arc<Cdp>, last: Option<&str>) -> Result<Page, Error> {
         let until = std::time::Instant::now() + RESTORING;
         let pages = loop {
             let targets = cdp.call("Target.getTargets", json!({}), None).await?;
@@ -214,7 +214,7 @@ impl Page {
                 .filter_map(|target| {
                     let id = target["targetId"].as_str().filter(|id| id.len() <= 128)?;
                     let url = target["url"].as_str().unwrap_or_default();
-                    errands_own(sites, url).then(|| (id.to_owned(), url.to_owned()))
+                    drivable(url).then(|| (id.to_owned(), url.to_owned()))
                 })
                 .take(MOST_PAGES)
                 .collect();
@@ -250,7 +250,7 @@ impl Page {
         let mut chosen = None;
         if let Some((_, target, session)) = best {
             let page = Page::new(cdp.clone(), session.clone());
-            if matches!(page.elsewhere(sites).await, Ok(None)) {
+            if matches!(page.elsewhere().await, Ok(None)) {
                 chosen = Some((target, page));
             } else {
                 detach(&session).await;
@@ -271,14 +271,22 @@ impl Page {
         Ok(page)
     }
 
-    /// Where the page is when it isn't the errand's: not on one of its
-    /// `sites`, nor a blank page of none of them (a popup an off-site page
-    /// wrote). Read, scroll and act refuse it (Fugo 38499).
-    pub(crate) async fn elsewhere(&self, sites: &[String]) -> Result<Option<String>, Error> {
+    /// Whether the top frame is Chrome's own error page: a page that
+    /// didn't load, one the fence stopped, or a site Safe Browsing flags,
+    /// since the profile's policy lets no one past its warning. Asked at
+    /// the moment of acting; a page Claktory can't read counts as one.
+    pub(crate) async fn flagged(&self) -> bool {
+        self.frame().await.map_or(true, |frame| frame.url.starts_with("chrome-error:"))
+    }
+
+    /// Where the page is when the agent may not drive it: not an https
+    /// site on the internet (Chrome's error page, an http page), nor a
+    /// blank page such a page wrote. Read, scroll and act refuse it.
+    pub(crate) async fn elsewhere(&self) -> Result<Option<String>, Error> {
         let frame = self.frame().await?;
         let made_by = url::Url::parse(&frame.origin).ok().filter(|origin| matches!(origin.scheme(), "http" | "https"));
-        let theirs = made_by.as_ref().is_some_and(|origin| !sites.contains(&origin.origin().ascii_serialization()));
-        if errands_own(sites, &frame.url) && !theirs {
+        let theirs = made_by.as_ref().is_some_and(|origin| super::fence::check(&origin.origin().ascii_serialization()).is_err());
+        if drivable(&frame.url) && !theirs {
             return Ok(None);
         }
         let shown = url::Url::parse(&frame.url)
@@ -482,6 +490,11 @@ impl Page {
         schema::answer(&op, &scrolled.to_string()).map_err(|_| unreadable())
     }
 
+    /// Whether `target` is an element of one of the page's frames, as the last read named it.
+    pub(crate) fn in_a_frame(&self, target: &str) -> bool {
+        self.frame_origin(target).is_some()
+    }
+
     /// The element `target` of `document`, as the agent read it, for a fill
     /// from the vault (#435 W6, `super::fill`): the reader checks it's still
     /// the element read, visible, enabled, on screen and not covered, then
@@ -520,7 +533,7 @@ impl Page {
     /// Checks `target` of `document`, as the agent read it, for a click or
     /// a fill of `text`: still the element read, where it was, not covered
     /// and not off-limits.
-    async fn validated(&self, document: &str, target: &str, kind: &str, text: &str) -> Result<frames::Place, (String, String)> {
+    pub(super) async fn validated(&self, document: &str, target: &str, kind: &str, text: &str) -> Result<frames::Place, (String, String)> {
         let place = self.place_of(document, target).await?;
         let described = self.ask_on(place.session.as_deref(), place.context, json!({"op": "describe", "kind": kind, "target": target, "text": text})).await?;
         let described: Value = serde_json::from_str(&described).map_err(|_| unreadable())?;
@@ -613,7 +626,7 @@ impl Page {
         if over.personal {
             return Err((
                 "sensitive_action".to_owned(),
-                format!("the {} asks for a password, a card or a code: the person's, with errand_handoff", over.kind),
+                format!("the {} asks for a password, a card or a code: the person's, with browser_handoff", over.kind),
             ));
         }
         let signature = format!("{}\u{1f}{}", frame.is_some(), over.signature());
@@ -621,7 +634,7 @@ impl Page {
             return Err((
                 "unsupported_target".to_owned(),
                 format!(
-                    "this {} came back after it was dismissed: Claktory doesn't dismiss it again. Work around it, or hand it to the person with errand_handoff",
+                    "this {} came back after it was dismissed: Claktory doesn't dismiss it again. Work around it, or hand it to the person with browser_handoff",
                     over.kind
                 ),
             ));
@@ -829,7 +842,7 @@ impl Page {
 
     /// Where in `target` to press: near its middle, checked to be on it;
     /// its very middle when that isn't.
-    async fn point_in(&self, hand: &mut Hand<'_>, spot: &frames::Spot<'_>, target: &str) -> Result<Point, (String, String)> {
+    pub(super) async fn point_in(&self, hand: &mut Hand<'_>, spot: &frames::Spot<'_>, target: &str) -> Result<Point, (String, String)> {
         let (rect, view) = (spot.rect, spot.view);
         let aimed = pace::aim(hand.rng, rect, view);
         if self.hits(spot, target, aimed).await.is_ok() {
@@ -843,7 +856,7 @@ impl Page {
     /// The mouse travels to `at`, rests, and presses there: right after
     /// `target` is checked to be the element there, nothing awaited
     /// between (R11.3 #1). Held, then let go.
-    async fn press(&self, hand: &mut Hand<'_>, spot: &frames::Spot<'_>, target: &str, at: Point) -> Result<(), (String, String)> {
+    pub(super) async fn press(&self, hand: &mut Hand<'_>, spot: &frames::Spot<'_>, target: &str, at: Point) -> Result<(), (String, String)> {
         self.move_to(hand, at, spot.view, spot.rect.2.min(spot.rect.3)).await?;
         let pause = pace::hover(hand.rng);
         hand.wait_until(Instant::now() + pause).await?;
@@ -911,7 +924,7 @@ impl Page {
     /// code sent on a Mac pressed other keys (Shift and C opened Chrome's
     /// settings). Chrome derives the native key from `code` and the
     /// Windows virtual key instead (Fugo 40712).
-    async fn type_one(&self, grapheme: &str, held: Duration, lead: Duration) -> Result<(), Error> {
+    pub(super) async fn type_one(&self, grapheme: &str, held: Duration, lead: Duration) -> Result<(), Error> {
         let Some(key) = keys::key(grapheme) else {
             return self.call("Input.insertText", json!({"text": grapheme})).await.map(drop);
         };
@@ -937,7 +950,7 @@ impl Page {
     }
 
     /// A key that types nothing (Backspace), held `held`.
-    async fn press_key(&self, key: &str, code: &str, vk: u32, held: Duration) -> Result<(), Error> {
+    pub(super) async fn press_key(&self, key: &str, code: &str, vk: u32, held: Duration) -> Result<(), Error> {
         let event = |kind: &str| json!({"type": kind, "key": key, "code": code, "windowsVirtualKeyCode": vk});
         self.call("Input.dispatchKeyEvent", event("rawKeyDown")).await?;
         tokio::time::sleep(held).await;
@@ -945,7 +958,7 @@ impl Page {
     }
 
     /// Ctrl+A in the field that has the keyboard: its whole text selected.
-    async fn select_all(&self) -> Result<(), Error> {
+    pub(super) async fn select_all(&self) -> Result<(), Error> {
         let control = |kind: &str, modifiers: u32| {
             json!({"type": kind, "key": "Control", "code": "ControlLeft", "windowsVirtualKeyCode": 17, "modifiers": modifiers})
         };
@@ -1003,7 +1016,7 @@ const UNTOUCHED: &[&str] = &[
     "funcaptcha.com",
 ];
 
-pub(crate) const UNTOUCHED_WHY: &str = "it's a sign-in, a payment or a check that you're a person: the person's, with errand_handoff";
+pub(crate) const UNTOUCHED_WHY: &str = "it's a sign-in, a payment or a check that you're a person: the person's, with browser_handoff";
 
 /// Whether `url` is on one of [`UNTOUCHED`]'s services, or Google's
 /// reCAPTCHA.
@@ -1294,16 +1307,10 @@ pub(crate) mod tests {
     }
 
     const MAIL: &str = "data:text/html,<title>Inbox</title>Your code is 123456";
-    const SITES: &[&str] = &["https://www.scrapingcourse.com"];
-
-    fn sites() -> Vec<String> {
-        SITES.iter().map(|site| (*site).to_owned()).collect()
-    }
-
-    /// The person left another site's tab in front (their mail, for a
-    /// code) beside a blank one Chrome doesn't show (Ghiaccio 38463, Fugo
-    /// 38499): the errand drives the blank one, and the other tab is never
-    /// attached, read or moved.
+    /// A tab the agent may not drive in front (a data: page here) beside a
+    /// blank one Chrome doesn't show: the
+    /// agent drives the blank one, and the other tab is never attached,
+    /// read or moved.
     #[tokio::test]
     async fn the_page_driven_is_the_errands_never_another_sites_tab_in_front() {
         let Some((local, cdp, profile)) = chrome("shown") else { return };
@@ -1312,7 +1319,7 @@ pub(crate) mod tests {
         let blank = made["targetId"].as_str().unwrap().to_owned();
         assert_eq!(pages(&cdp).await.len(), 2);
 
-        let page = Page::shown(cdp.clone(), &sites(), None).await.unwrap();
+        let page = Page::shown(cdp.clone(), None).await.unwrap();
         assert_eq!(page.frame().await.unwrap().url, "about:blank");
         let now = pages(&cdp).await;
         assert_eq!(now.len(), 2, "no new tab: {now:?}");
@@ -1322,12 +1329,12 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&profile);
     }
 
-    /// Only another site's tab: a new blank one, the other left alone.
+    /// Only a tab it may not drive: a new blank one, the other left alone.
     #[tokio::test]
     async fn with_only_another_sites_tab_a_new_blank_one_is_driven() {
         let Some((local, cdp, profile)) = chrome("shown-new") else { return };
         let mail = first_to(&cdp, MAIL).await;
-        let page = Page::shown(cdp.clone(), &sites(), None).await.unwrap();
+        let page = Page::shown(cdp.clone(), None).await.unwrap();
         assert_eq!(page.frame().await.unwrap().url, "about:blank");
         let now = pages(&cdp).await;
         assert_eq!(now.len(), 2, "{now:?}");
@@ -1349,7 +1356,7 @@ pub(crate) mod tests {
             let made = later.call("Target.createTarget", json!({"url": "about:blank", "background": true}), None).await.unwrap();
             made["targetId"].as_str().unwrap().to_owned()
         });
-        let page = Page::shown(cdp.clone(), &sites(), None).await.unwrap();
+        let page = Page::shown(cdp.clone(), None).await.unwrap();
         let restored = restored.await.unwrap();
         let info = page.call("Target.getTargetInfo", json!({})).await.unwrap();
         assert_eq!(info["targetInfo"]["targetId"].as_str(), Some(restored.as_str()));
@@ -1360,14 +1367,14 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&profile);
     }
 
-    /// Among the errand's own, the tab shown beats a hidden one.
+    /// Among the agent's own, the tab shown beats a hidden one.
     #[tokio::test]
     async fn among_blank_tabs_the_one_shown_is_driven() {
         let Some((local, cdp, profile)) = chrome("shown-blank") else { return };
         let first = pages(&cdp).await[0].0.clone();
         let made = cdp.call("Target.createTarget", json!({"url": "about:blank", "background": true}), None).await.unwrap();
         let hidden = made["targetId"].as_str().unwrap().to_owned();
-        let page = Page::shown(cdp.clone(), &sites(), None).await.unwrap();
+        let page = Page::shown(cdp.clone(), None).await.unwrap();
         let info = page.call("Target.getTargetInfo", json!({})).await.unwrap();
         let driven = info["targetInfo"]["targetId"].as_str().unwrap_or_default().to_owned();
         let now = pages(&cdp).await;
@@ -1377,18 +1384,18 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&profile);
     }
 
-    /// The reader won't read a tab that went to another site.
+    /// The reader won't read a tab that went where the browser doesn't go.
     #[tokio::test]
     async fn a_tab_on_another_site_is_elsewhere() {
         let Some((_local, page, profile)) = page_with(FORM).await else { return };
-        assert_eq!(page.elsewhere(&sites()).await.unwrap(), None, "blank, the reader's own");
+        assert_eq!(page.elsewhere().await.unwrap(), None, "blank, the reader's own");
         let frame = page.frame().await.unwrap();
         page.call("Page.navigate", json!({"url": MAIL, "frameId": frame.id})).await.unwrap();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while page.frame().await.unwrap().url != MAIL && std::time::Instant::now() < until {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        let there = page.elsewhere(&sites()).await.unwrap().expect("elsewhere");
+        let there = page.elsewhere().await.unwrap().expect("elsewhere");
         assert!(there.starts_with("data:text/html"), "{there}");
         let _ = std::fs::remove_dir_all(&profile);
     }
@@ -1428,7 +1435,9 @@ pub(crate) mod tests {
     /// Room for the many Chromes tests run at once: a Mac's 256 open
     /// files by default run out.
     pub(crate) fn room_for_chromes() {
+        #[cfg(unix)]
         static RAISED: std::sync::Once = std::sync::Once::new();
+        #[cfg(unix)]
         RAISED.call_once(|| {
             let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
             // SAFETY: getrlimit and setrlimit only read and write `limit`.
@@ -1721,7 +1730,7 @@ pub(crate) mod tests {
         let Some((_local, page, profile)) = page_with(codes).await else { return };
         let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
         let block = element(&read, "recovery codes (withheld)");
-        assert_eq!(block.sensitive.as_deref(), Some("recovery codes: the person's (errand_handoff, kind recovery_codes)"));
+        assert_eq!(block.sensitive.as_deref(), Some("recovery codes: the person's (browser_handoff, kind recovery_codes)"));
         let everything = format!("{read:?}");
         for code in ["a8f2-91kd", "7bq1-x0pe", "u8yn-41bc"] {
             assert!(!everything.contains(code), "{code} in {everything}");
@@ -1729,7 +1738,7 @@ pub(crate) mod tests {
         assert!(read.text.contains("Save your backup codes") && read.text.contains("Order 1234"), "{}", read.text);
         assert!(element(&read, "Continue").sensitive.is_none());
         assert!(!read.elements.iter().any(|element| element.name.contains("Copy")), "{:?}", read.elements);
-        // Claktory reads them by the ref, as errand_handoff does.
+        // Claktory reads them by the ref, as browser_handoff does.
         let (object, _) = page.element(&read.document, &block.reference).await.expect("the block");
         let text = page
             .call("Runtime.callFunctionOn", json!({"objectId": object, "functionDeclaration": "function () { return this.innerText; }", "returnByValue": true}))

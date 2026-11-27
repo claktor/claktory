@@ -5,6 +5,7 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/user_apps/grants.dart';
 import 'package:factory_app/user_apps/grants_view.dart';
 import 'package:factory_app/user_apps/session.dart';
+import 'package:factory_app/visible_codes.dart' show nameInText;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -79,7 +80,8 @@ class _Service {
 
 const _claktories = [
   AccountClaktory(id: 'k1', name: "Matt's Mac", endpointId: 'e1'),
-  AccountClaktory(id: 'k2', name: 'Studio', endpointId: 'e2'),
+  // Named with a character that reorders what's around it.
+  AccountClaktory(id: 'k2', name: 'Stu\u202Edio שלום', endpointId: 'e2'),
 ];
 
 Workspace _workspace() => Workspace(
@@ -125,7 +127,7 @@ void main() {
     expect(userAppScopeLabel('dm.send'), 'Send messages as you in them');
   });
 
-  // Fugo's rule: every conversation a grant reaches is counted, named or
+  // Every conversation a grant reaches is counted, named or
   // not; an unnamed one still changes the count.
   test('where it reaches: friends by name, the rest counted', () {
     final two = [
@@ -173,7 +175,10 @@ void main() {
     expect(find.text('Until you take it back.'), findsNWidgets(2));
     // Another Claktory: its agent by id.
     expect(find.text('lea', findRichText: true), findsOneWidget);
-    expect(find.textContaining('On Studio'), findsOneWidget);
+    expect(
+      find.textContaining('On ${nameInText('Stu\u202Edio שלום')} · '),
+      findsOneWidget,
+    );
 
     await tester.tap(find.text('Remove…').first);
     await settle(tester);

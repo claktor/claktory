@@ -28,7 +28,7 @@ typedef MarkdownTextBlock = Widget Function(
   Widget Function(TextSpan span) build,
 );
 
-/// A Markdown file's own pictures and videos (#540): what shows a picture
+/// A Markdown file's own pictures and videos: what shows a picture
 /// or video it embeds (`![alt](src)`), and what opens a file it points to.
 /// Only where the Markdown is a file (the text viewer); elsewhere, a
 /// picture is its words.
@@ -1035,7 +1035,7 @@ class _Renderer {
   }
 
   /// A picture not shown in place, as words: on the web, a link to it,
-  /// never fetched (Fugo, 41320); a file here that opens (a document, an
+  /// never fetched; a file here that opens (a document, an
   /// SVG), a link that opens it; else its words alone.
   InlineSpan _picture(md.Element node) {
     final src = node.attributes['src'] ?? '';

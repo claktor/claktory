@@ -5,13 +5,13 @@
 //! Read only, over the tables the cards are kept in: asks, proposals,
 //! pipe_secret_approvals, pipe_starts, app_grant_proposals and
 //! pipe_handoff_changes (where reports go, changed) and pipe_member_changes
-//! (who only sends to a pipe, #414) in factory.db; requests and
+//! (who only sends to a pipe) in factory.db; requests and
 //! connect_proposals in vault.db (names, comments and states only, never a
 //! value), and pipe_decisions, kept here, for the decisions on a pipe that
 //! leave no other trace (a held message let through or discarded, a loop
 //! pause continued). Expired and waiting cards aren't listed, nor
 //! withdrawn requests for secrets; questions and proposals their agents
-//! withdrew (#407) are, with the agent's reason.
+//! withdrew are, with the agent's reason.
 //! What the other side of a pipe wrote never becomes a title: a held
 //! message's text goes only in `excerpt`, for the app to frame; an ask
 //! keeps its taint, as on its card; a pipe start is named by its kind, and
@@ -60,7 +60,7 @@ CREATE INDEX pipe_decisions_by_time ON pipe_decisions (decided);
 ";
 
 /// The person's comment on a pipe decision, kept apart from the pipe
-/// tables (Fugo): nothing that forwards to the other side reads outside
+/// tables: nothing that forwards to the other side reads outside
 /// them, so no pipe* table ever holds the person's words.
 pub(crate) const NOTES: &str = "
 -- The person's comment with a decision, for Needs you's history, apart
@@ -103,12 +103,12 @@ pub(crate) fn keep_note(factory: &Factory, kind: &str, reference: &str, comment:
 }
 
 /// What tells an agent the person dismissed its card (a question, a
-/// proposal, a held pipe message) with nothing to say about it (friend bug
-/// #19): an event from Claktory, sent quietly, as agents_send's `quiet`
-/// is. It waits for the agent's next wake rather than waking it, since
-/// often the card was settled elsewhere (in its chat, say), and the agent
-/// still reads it then, so it doesn't ask again. A dismissal with the
-/// person's words, an answer or an approval wakes it as before.
+/// proposal, a held pipe message) with nothing to say about it: an event
+/// from Claktory, sent quietly, as agents_send's `quiet` is. It waits for
+/// the agent's next wake rather than waking it, since often the card was
+/// settled elsewhere (in its chat, say), and the agent still reads it
+/// then, so it doesn't ask again. A dismissal with the person's words, an
+/// answer or an approval wakes it as before.
 pub(crate) fn dismissed_event(summary: String) -> factory_agent::Event {
     let mut event = crate::factory::host_event(summary);
     event.provenance = Some(factory_agent::Provenance { quiet: true, ..Default::default() });
@@ -195,7 +195,7 @@ struct Row {
     /// WITHDRAWN and SECRET_GIVEN_UP: the agent's reason, cut;
     /// SECRET_SAVED: the secret's description.
     reason: String,
-    /// QUESTION, REVIEW and PROPOSAL: how many times its agent changed it (#428).
+    /// QUESTION, REVIEW and PROPOSAL: how many times its agent changed it.
     updates: u32,
     /// APP_ACCESS and PROPOSAL_GRANT made on an approved proposal: its id,
     /// and its agent.
@@ -204,14 +204,14 @@ struct Row {
     /// ALERT: the alert as kept, and where it was read.
     alert: Option<v1::Alert>,
     on: Option<v1::AnsweredOn>,
-    /// QUESTION and REVIEW with steps (#533): what History says of them.
+    /// QUESTION and REVIEW with steps: what History says of them.
     procedure: Procedure,
     /// SECRET_REQUEST: how it was approved.
     secret: SecretOutcome,
     /// COMMAND: the card's command, with how it ran.
     command: Option<v1::AskCommand>,
     /// QUESTION from an errand's handoff: what it was, whether its action
-    /// failed, and the secret its recovery codes were kept as (row 1645).
+    /// failed, and the secret its recovery codes were kept as.
     handoff: Option<v1::ErrandHandoff>,
     action_error: String,
     codes_kept_as: String,
@@ -219,7 +219,7 @@ struct Row {
     search: String,
 }
 
-/// A procedure's outcome (#533), as History shows it: the step it's about
+/// A procedure's outcome, as History shows it: the step it's about
 /// (1 for the first; 0 without steps), how many there are, and whether its
 /// agent stopped it there after Can't do this.
 #[derive(Default)]
@@ -271,10 +271,10 @@ struct SecretOutcome {
 }
 
 impl SecretOutcome {
-    /// From a request's row: its state, its new secret's JSON (what the
-    /// card asked to make, and whether the person added it there, #360),
-    /// the name of the secret given, and the admin agent it went to ('' when
-    /// the person decided it themselves).
+    /// From a request's row: its state, its new secret's JSON (what the card
+    /// asked to make, and whether the person added it there), the name of
+    /// the secret given, and the admin agent it went to ('' when the person
+    /// decided it themselves).
     fn of(state: &str, new_secret: &str, given_name: String, admin: String) -> SecretOutcome {
         use v1::NeedsYouSecretOutcome as Secret;
         let new: Value = serde_json::from_str(new_secret).unwrap_or_default();
@@ -424,12 +424,12 @@ fn outcome(
     Ok(if row.get::<_, bool>(replied)? { Outcome::Replied } else if state == when.0 { when.1 } else { otherwise })
 }
 
-/// How many times a card was changed (#428), from its version.
+/// How many times a card was changed, from its version.
 fn updates(revision: i64) -> u32 {
     u32::try_from(revision - 1).unwrap_or(0)
 }
 
-/// A card its agent withdrew (#407, state 'withdrawn') wins over `decided`,
+/// A card its agent withdrew (state 'withdrawn') wins over `decided`,
 /// the outcome its other states give.
 fn withdrawn(row: &rusqlite::Row<'_>, state: usize, decided: Outcome) -> rusqlite::Result<Outcome> {
     Ok(if row.get::<_, String>(state)? == "withdrawn" { Outcome::Withdrawn } else { decided })
@@ -527,7 +527,7 @@ fn from_factory(
             };
             let answered = if command.is_some() { Outcome::Approved } else { Outcome::Answered };
             let outcome = withdrawn(row, 4, outcome(row, 4, 10, ("answered", answered), Outcome::Dismissed)?)?;
-            // Talked through on its card and ended with Resolve (#430).
+            // Talked through on its card and ended with Resolve.
             let outcome = if row.get::<_, bool>(13)? { Outcome::Resolved } else { outcome };
             let mut found = Row::new(kind, id.to_string(), row.get(1)?, outcome, row.get(5)?, row.get(6)?);
             let agents_title: String = row.get(2)?;
@@ -540,7 +540,7 @@ fn from_factory(
             found.procedure = Procedure::of(row.get::<_, Option<String>>(14)?.as_deref(), row.get(10)?, row.get(13)?);
             let words = command.as_ref().map(|command| command.command.clone()).unwrap_or_default();
             found.command = command;
-            // An errand's handoff: what it was, as History says it (row 1645).
+            // An errand's handoff: what it was, as History says it.
             if let Ok(crate::card_actions::Action::Handoff { handoff }) = serde_json::from_str(&action) {
                 if handoff.kind == v1::ErrandHandoffKind::RecoveryCodes as i32 {
                     found.codes_kept_as = crate::extensions::ask::kept_as(&found.reply).unwrap_or_default().to_owned();
@@ -616,9 +616,9 @@ fn from_factory(
                 "held_incoming" => (Kind::PipeHeld, "A message from the other side"),
                 _ => (Kind::PipeLoop, "Your agents and theirs kept replying to each other"),
             };
-            // A held message sent back with a reply (#370 Submit) was
-            // neither sent nor simply discarded; one its writer took back
-            // (pipe_withdraw, friend bug #19) was withdrawn, with its reason.
+            // A held message sent back with a reply was neither
+            // sent nor simply discarded; one its writer took back
+            // (pipe_withdraw) was withdrawn, with its reason.
             let withdrawn: String = row.get(11)?;
             let outcome = match row.get::<_, bool>(2)? {
                 _ if !withdrawn.is_empty() => Outcome::Withdrawn,
@@ -723,6 +723,21 @@ fn from_factory(
     from_alerts(db, window, found)?;
     from_protected(db, window, found)?;
     from_recovery_key_changes(db, window, found)?;
+    from_browser_switches(db, window, names, found)?;
+    Ok(())
+}
+
+/// Agents' browsers turned on or off (`browser_switches`), with no card:
+/// Claktory's sentence, whose browser as the subject.
+fn from_browser_switches(db: &Connection, window: &Window, names: &HashMap<String, String>, found: &mut Found) -> rusqlite::Result<()> {
+    let switches = crate::browser_switches::between(db, window.since, window.before, i64::from(MAX_SCAN) + 1)?;
+    found.changes(switches, |switch| {
+        let mut row = Row::new(Kind::Browser, format!("browser:{}", switch.id), switch.admin().to_owned(), Outcome::Changed, switch.at, switch.at);
+        row.title = cut(&switch.title(names), MAX_TITLE);
+        row.member = switch.agent.clone();
+        let subject = names.get(&switch.agent).cloned().unwrap_or_default();
+        row.searched(&[&subject])
+    });
     Ok(())
 }
 
@@ -758,7 +773,7 @@ fn from_alerts(db: &Connection, window: &Window, found: &mut Found) -> rusqlite:
 }
 
 /// The account's recovery key changes this Claktory sealed its vault to
-/// (`account::recovery`, #239): Claktory's sentence, asked when the
+/// (`account::recovery`): Claktory's sentence, asked when the
 /// check-in saw the new key.
 fn from_recovery_key_changes(db: &Connection, window: &Window, found: &mut Found) -> rusqlite::Result<()> {
     let changes = crate::account::recovery::between(db, window.since, window.before, i64::from(MAX_SCAN) + 1)?;
@@ -799,7 +814,7 @@ fn from_given_up(db: &Connection, window: &Window, names: &HashMap<String, Strin
     Ok(())
 }
 
-/// Access agents gave up on their own (`crate::given_up`, #236):
+/// Access agents gave up on their own (`crate::given_up`):
 /// Claktory's sentence, the agent's reason apart, and what it gave up.
 fn from_access_given_up(db: &Connection, window: &Window, names: &HashMap<String, String>, found: &mut Found) -> rusqlite::Result<()> {
     use crate::given_up::What;
@@ -1049,7 +1064,7 @@ fn has_column(db: &Connection, table: &str, column: &str) -> bool {
 }
 
 fn from_vault(db: &Connection, window: &Window, found: &mut Found) -> rusqlite::Result<()> {
-    // Answered with a reply (#370): 0 in a vault from before it.
+    // Answered with a reply: 0 in a vault from before it.
     let replied = |table: &str| if has_column(db, table, "replied") { "replied" } else { "0 AS replied" };
     found.add(rows(
         db,
@@ -1255,7 +1270,7 @@ impl Factory {
                     inner.agents.get(&row.agent).and_then(|runtime| runtime.transcript.as_ref()).map(|transcript| transcript.in_memory());
                 let piped = piped(row.kind);
                 let found = if piped { None } else { entries.and_then(|entries| card(entries, &row)) };
-                // The device it was decided from, as its card says (#514).
+                // The device it was decided from, as its card says.
                 let answered_on = found.as_ref().and_then(|(seq, _)| {
                     let transcript = inner.agents.get(&row.agent).and_then(|runtime| runtime.transcript.as_ref())?;
                     transcript.entry(*seq)?.answered_on.clone()
@@ -1301,7 +1316,7 @@ impl Factory {
                     app_id: row.app.app,
                     agent_reason: match row.kind {
                         _ if row.outcome == Outcome::Withdrawn => row.reason,
-                        // Closed by its agent as settled in the talk (#496).
+                        // Closed by its agent as settled in the talk.
                         _ if row.outcome == Outcome::Resolved => row.reason,
                         Kind::Model => row.model.reason,
                         Kind::Conversation => row.conversation.reason,
@@ -1318,7 +1333,7 @@ impl Factory {
                             .is_none_or(|agent| (agent.model.clone(), agent.effort.clone()) != row.model.after),
                     subject_agent_id: match row.kind {
                         Kind::Conversation => row.conversation.subject,
-                        Kind::PipeMember | Kind::GivenUp => row.member,
+                        Kind::PipeMember | Kind::GivenUp | Kind::Browser => row.member,
                         Kind::SecretRequest => row.secret.admin,
                         _ => row.model.subject,
                     },

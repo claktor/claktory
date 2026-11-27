@@ -228,6 +228,40 @@ fn with_capacity<'a>(accounts: &'a [Account], tried: &[String], pool: Pool, now:
     accounts.iter().enumerate().find(|(_, account)| has_capacity(account, pool, now) && !tried.contains(&account.id))
 }
 
+/// The windows each account's last usage read showed at 100%, by provider
+/// and account id, each with when it resets (ms since 1970; 0 unknown): kept
+/// only while Claktory runs, and read again at its start.
+type ReadFull = HashMap<String, HashMap<String, Vec<(String, u64)>>>;
+
+/// Whether the account's last usage read showed a window the pool's
+/// requests draw on at 100%, not reset by `now`.
+fn reads_full(full: &[(String, u64)], pool: Pool, now: u64) -> bool {
+    full.iter().any(|(window, resets_at)| (*resets_at == 0 || *resets_at > now) && pool.limited_by(window))
+}
+
+/// The account a request for the pool goes to at `now` (`tried` left out):
+/// the first with capacity whose usage doesn't read full for the pool, else
+/// the first with capacity. A provider may keep answering an account its
+/// usage reads at 100% (one answered at a weekly 100% while another read
+/// 0%), so only a refusal marks one spent
+/// (`has_capacity`); a full read only puts it after those with room, and it
+/// comes first again once that window resets or a read shows room. With
+/// every account read full, requests go as before, waiting only on a refusal.
+fn pick<'a>(
+    accounts: &'a [Account],
+    tried: &[String],
+    pool: Pool,
+    now: u64,
+    full: Option<&HashMap<String, Vec<(String, u64)>>>,
+) -> Option<(usize, &'a Account)> {
+    let full_now = |account: &Account| full.and_then(|full| full.get(&account.id)).is_some_and(|windows| reads_full(windows, pool, now));
+    accounts
+        .iter()
+        .enumerate()
+        .find(|(_, account)| has_capacity(account, pool, now) && !tried.contains(&account.id) && !full_now(account))
+        .or_else(|| with_capacity(accounts, tried, pool, now))
+}
+
 /// How an account's request failed for good on that account.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Spent {
@@ -323,6 +357,8 @@ struct Inner {
     env: Env,
     /// The state of the keys in the environment, by provider id.
     env_state: Mutex<HashMap<String, EnvState>>,
+    /// What each account's last usage read showed at 100% ([pick]).
+    read_full: Mutex<ReadFull>,
     /// Model lists fetched from a provider, in place of its bundled one, by
     /// provider id.
     fetched: Mutex<HashMap<String, Arc<Vec<Model>>>>,
@@ -356,6 +392,7 @@ impl Registry {
                 store,
                 env,
                 env_state: Mutex::new(HashMap::new()),
+                read_full: Mutex::new(HashMap::new()),
                 fetched: Mutex::new(HashMap::new()),
                 added: Mutex::new(HashMap::new()),
                 image_files: None,
@@ -728,10 +765,11 @@ impl Registry {
     pub async fn accounts(&self, id: &str) -> Result<Vec<AccountInfo>, Error> {
         let now = now_ms();
         let accounts = self.outlined_candidates(id).await?;
+        let read_full = self.inner.read_full.lock().get(id).cloned();
         // As shown: the normal pool, which is what most models draw on.
-        let in_use = with_capacity(&accounts, &[], Pool::Normal, now).map(|(position, _)| position);
+        let in_use = pick(&accounts, &[], Pool::Normal, now, read_full.as_ref()).map(|(position, _)| position);
         let fable = in_fable_pool(id, "claude-fable");
-        let fable_in_use = with_capacity(&accounts, &[], Pool::Fable, now).map(|(position, _)| position).filter(|_| fable);
+        let fable_in_use = pick(&accounts, &[], Pool::Fable, now, read_full.as_ref()).map(|(position, _)| position).filter(|_| fable);
         Ok(accounts
             .into_iter()
             .enumerate()
@@ -757,6 +795,32 @@ impl Registry {
     pub async fn room_for(&self, provider: &str, model: &str) -> bool {
         let Ok(accounts) = self.candidates(provider).await else { return false };
         !accounts.is_empty() && with_capacity(&accounts, &[], Pool::of(provider, model), now_ms()).is_some()
+    }
+
+    /// Takes in what a usage read of one of the provider's accounts showed:
+    /// the ids of its windows at 100%, each with when it resets (ms since
+    /// 1970; 0 unknown). Requests prefer the provider's other accounts with
+    /// room while one of them holds ([pick]). True when that changed
+    /// which windows read full, so the account in use may have changed.
+    pub fn note_full(&self, id: &str, account: &str, full: Vec<(String, u64)>) -> bool {
+        let mut read_full = self.inner.read_full.lock();
+        let accounts = read_full.entry(id.to_owned()).or_default();
+        let ids = |windows: &[(String, u64)]| windows.iter().map(|(window, _)| window.clone()).collect::<Vec<_>>();
+        let before = accounts.get(account).map(|windows| ids(windows)).unwrap_or_default();
+        let changed = before != ids(&full);
+        if changed {
+            if full.is_empty() {
+                tracing::info!(provider = id, %account, "account's usage reads with room again");
+            } else {
+                tracing::info!(provider = id, %account, full = ?ids(&full), "account's usage reads full; requests go to its provider's accounts with room first");
+            }
+        }
+        if full.is_empty() {
+            accounts.remove(account);
+        } else {
+            accounts.insert(account.to_owned(), full);
+        }
+        changed
     }
 
     /// When a request next tries one of the provider's keys out of credit
@@ -1533,7 +1597,8 @@ impl Registry {
                         sink.push(event);
                         return;
                     }
-                    let chosen = with_capacity(&accounts, &tried, pool, now_ms()).map(|(_, account)| account.clone());
+                    let read_full = registry.inner.read_full.lock().get(&model.provider).cloned();
+                    let chosen = pick(&accounts, &tried, pool, now_ms(), read_full.as_ref()).map(|(_, account)| account.clone());
                     if chosen.is_none() && !accounts.is_empty() {
                         sink.push(registry.none_left(&model, &accounts));
                         return;
@@ -1705,7 +1770,8 @@ impl Registry {
                             "out of credit".to_owned()
                         }
                     };
-                    let Some((position, next)) = with_capacity(&accounts, &tried, pool, now_ms()) else {
+                    let read_full = registry.inner.read_full.lock().get(&model.provider).cloned();
+                    let Some((position, next)) = pick(&accounts, &tried, pool, now_ms(), read_full.as_ref()) else {
                         tracing::info!(provider = %model.provider, "no account left with capacity ({why} on account {account})");
                         if let Some(notes) = &notes {
                             notes(AccountNote::Exhausted);

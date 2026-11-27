@@ -201,10 +201,10 @@ class DmMessage {
   final String fromLeaf;
 
   /// The person's earlier message this sends again, by its id, after the
-  /// friend's Claktory couldn't read that one (#451); empty for others.
+  /// friend's Claktory couldn't read that one; empty for others.
   final String resends;
 
-  /// When its sender says they sent it, by their own clock (row 556); 0
+  /// When its sender says they sent it, by their own clock; 0
   /// when it doesn't say. Only shown, never its place: that's
   /// [acceptedMs], when the person's own home took it, which a friend
   /// can't set.
@@ -212,7 +212,7 @@ class DmMessage {
 
   /// From a device its person has since taken off their list, read only
   /// because one of their devices that was there all along took it out
-  /// again (row 561): said under it.
+  /// again: said under it.
   final bool departed;
 
   /// The time it shows: when it was sent, unless that's unknown or later
@@ -230,11 +230,11 @@ class DmMessage {
 }
 
 /// How much later than it was sent a message must arrive for its arrival
-/// time to show too (Bruno, row 556).
+/// time to show too.
 const arrivedLateAfter = Duration(minutes: 5);
 
-/// How the person's own message is getting on past their home Claktory
-/// (#451), as the home says.
+/// How the person's own message is getting on past their home Claktory,
+/// as the home says.
 enum DmDelivered {
   /// Taken by their home; nothing more known yet.
   sent,
@@ -245,9 +245,9 @@ enum DmDelivered {
   /// The friend's Claktory isn't reachable; it goes once it is.
   notYet,
 
-  /// The friend's Claktory turns the person's away (row 567: it isn't
-  /// their home any more, or doesn't know the person's yet); it goes once
-  /// it takes it.
+  /// The friend's Claktory turns the person's away (it isn't their home
+  /// any more, or doesn't know the person's yet); it goes once it takes
+  /// it.
   notTaking,
 
   /// The friend's Claktory couldn't read it (their conversation moved on
@@ -322,11 +322,10 @@ class ChatApi {
       DmProposal.fromJson(item),
   ];
 
-  /// Approves [proposal], with the revision and the digest of exactly
-  /// what this device opened; the device sends it after (#451, Mista
-  /// 32507). `409 changed` ([UserAppProblem.stale]) when it changed since;
-  /// `410 unsendable` ([UserAppProblem.gone]) when it can't be sent any
-  /// more.
+  /// Approves [proposal], with the revision and the digest of exactly what
+  /// this device opened; the device sends it after. `409 changed`
+  /// ([UserAppProblem.stale]) when it changed since; `410 unsendable`
+  /// ([UserAppProblem.gone]) when it can't be sent any more.
   Future<void> approve(DmProposal proposal) => session.post(
     '$_dms/proposals/${proposal.id}/approve',
     {'revision': proposal.revision, 'proposal_digest': proposal.digest},
@@ -388,7 +387,7 @@ enum OutgoingState {
   /// Kept on this device until the person's home Claktory takes it, and
   /// why ([OutgoingMessage.problem]: `unreachable` or `notHome`, the home
   /// isn't there; `homeFull`; `rateLimited`; `behind`): it goes by itself
-  /// (#451).
+  /// .
   waiting,
 }
 
@@ -406,7 +405,7 @@ class OutgoingMessage {
   final String clientId;
   final String text;
 
-  /// An agent's message the person approved (#451): that agent's name.
+  /// An agent's message the person approved: that agent's name.
   final String agentName;
   OutgoingState state;
   String problem;
@@ -476,7 +475,7 @@ class ChatThread extends ChangeNotifier {
   final deciding = <String>{};
 
   /// Agents' proposals and drafts the service lists here whose message
-  /// hasn't come from their Claktory through the home yet (#451): never
+  /// hasn't come from their Claktory through the home yet: never
   /// shown as text until it has, only that something is on its way.
   var arriving = 0;
   var _proposalsArriving = 0;
@@ -496,7 +495,7 @@ class ChatThread extends ChangeNotifier {
   /// It can be sent to now: writable, its group and this device's keys
   /// are here, and the group isn't waiting for a new security key, nor
   /// held at a change this device can't take yet (a send then would only
-  /// fail: Fugo, row 654).
+  /// fail).
   bool get canSend =>
       writable &&
       group.isNotEmpty &&
@@ -505,21 +504,21 @@ class ChatThread extends ChangeNotifier {
       joining == null &&
       !held;
 
-  /// The friend isn't in this conversation yet (row 676): nothing is sent
+  /// The friend isn't in this conversation yet: nothing is sent
   /// until a device of theirs is, and the chat says so. Their account.
   String? get joining => group.isEmpty ? null : e2ee.joining[group];
 
-  /// Whose new security key the group waits for (row 630, Fugo): someone
+  /// Whose new security key the group waits for: someone
   /// started over on a new key, and their devices under the old one are
   /// still in it until their new device takes them out. Nothing is sent
   /// until it has (it would reach those devices); the chat says so.
   String? get waitingFor => group.isEmpty ? null : e2ee.waitingFor[group];
 
-  /// What it waits for is a reinstalled device (row 202): its name.
+  /// What it waits for is a reinstalled device: its name.
   String? get reinstalling => group.isEmpty ? null : e2ee.reinstalling[group];
 
   /// The friend's security key changed and the person hasn't seen it:
-  /// nothing is sent to them until they have (Fugo 2b).
+  /// nothing is sent to them until they have.
   bool get keyChanged => e2ee.pin(friend)?.changedUnseen ?? false;
 
   /// The friend's key now is one the person said didn't match before
@@ -535,11 +534,11 @@ class ChatThread extends ChangeNotifier {
   bool get held => group.isNotEmpty && e2ee.held.containsKey(group);
 
   /// The feed waits at a message from past this device's place in the
-  /// chat, until what it missed comes (row 551): nothing is passed over
+  /// chat, until what it missed comes: nothing is passed over
   /// unread meanwhile.
   bool get behind => group.isNotEmpty && e2ee.behind.containsKey(group);
 
-  /// Held a day or more: Join again is offered (Fugo).
+  /// Held a day or more: Join again is offered.
   bool get heldLong => held && e2ee.heldLong(group);
 
   /// Joins the conversation again, past what it waits at.
@@ -782,7 +781,7 @@ class ChatThread extends ChangeNotifier {
   }
 
   /// Whether a record with no message here yet names one its Claktory is
-  /// still sending through the home (#451); one that came and didn't open
+  /// still sending through the home; one that came and didn't open
   /// isn't shown at all.
   Future<bool> _onItsWay(
     String envelope,
@@ -847,7 +846,7 @@ class ChatThread extends ChangeNotifier {
     final group = this.group;
     try {
       // Approved first; then sealed here and sent through the home, kept
-      // until it took it (#451).
+      // until it took it.
       await api.approve(proposal);
       proposals.removeWhere((each) => each.id == proposal.id);
       _changed();
@@ -1020,7 +1019,7 @@ class ChatThread extends ChangeNotifier {
     await e2ee.discard(group, message.clientId);
   }
 
-  /// Where the person's own [message] stands past their home (#451), and
+  /// Where the person's own [message] stands past their home, and
   /// for [DmDelivered.notYet] since when the friend's Claktory has been
   /// out of reach (0 when it isn't known).
   ({DmDelivered state, int sinceMs}) delivered(DmMessage message) {
@@ -1037,7 +1036,7 @@ class ChatThread extends ChangeNotifier {
         if (e2ee.askResend.contains(id)) {
           return (state: DmDelivered.askResend, sinceMs: 0);
         }
-        // Only the device that sent it sends it again (Fugo).
+        // Only the device that sent it sends it again.
         return (
           state: message.fromLeaf == e2ee.leafId
               ? DmDelivered.resending
@@ -1046,13 +1045,13 @@ class ChatThread extends ChangeNotifier {
         );
       default:
         // Not delivered yet: the friend's Claktory out of reach, as the
-        // home says of it (Mista 32614: not a delivery of its own). Only
+        // home says of it (not a delivery of its own). Only
         // the home's word: another Claktory of the person's doesn't send
-        // (Zucchero's row 567).
+        // .
         final home = e2ee.homeIsHere ? e2ee.homeState : null;
-        // Sent before this Claktory became the home (row 595): an earlier
+        // Sent before this Claktory became the home: an earlier
         // home sent it on, and only that one knew whether it arrived, so
-        // it's said as sent, never as not delivered (Mista 41960).
+        // it's said as sent, never as not delivered.
         final since = home?.homeSinceMs.toInt() ?? 0;
         if (since > 0 && message.shownMs < since) {
           return (state: DmDelivered.sent, sinceMs: 0);

@@ -1,11 +1,11 @@
-//! Members that only send (#414): an agent that sends to a pipe without
-//! reading it. It has pipe_send and pipe_status, never pipe_read; nothing
-//! the other side says reaches it (Fugo's invariant 1, checked with their
-//! words as an injection); what arrives never wakes it; it never leads; and
-//! once it has read from outside, every message it sends waits for the
-//! person. Rivet sets it with pipes_sender, only on a pipe the person
-//! approved and never while it has read from outside, and each change is in
-//! Needs you's history.
+//! Members that only send: an agent that sends to a pipe without reading
+//! it. It has pipe_send and pipe_status, never pipe_read; nothing the other
+//! side says reaches it (checked with their words as an
+//! injection); what arrives never wakes it; it never leads; and once it has
+//! read from outside, every message it sends waits for the person. Rivet
+//! sets it with pipes_sender, only on a pipe the person approved and never
+//! while it has read from outside, and each change is in Needs you's
+//! history.
 
 use std::sync::Arc;
 
@@ -316,7 +316,7 @@ async fn the_settings_never_make_a_reader_send_only() {
     assert_eq!(stray, "Rivet isn't one of this pipe's agents.");
 }
 
-/// Friend bug #33: a member that only sends answers nothing, so its posts
+/// A member that only sends answers nothing, so its posts
 /// are no exchange and never pause the pipe as a loop, the same long text
 /// again included; a flood of them still meets the pipe's own limits.
 #[tokio::test]
@@ -350,11 +350,10 @@ async fn a_senders_posts_never_pause_the_pipe_as_a_loop_but_meet_its_limits() {
     view.follow(&mut client, |view| pipe_of(view, &pipe).paused() == v1::PipePause::Loop).await;
 }
 
-/// Friend bug #33 on the receiving side (Fugo 33515): what the other side
-/// marks as a sender's post takes no part in this side's loop breaker, not
-/// even a place among the latest; so a peer that marks everything still
-/// can't hide this side's own loops, and a person's message counts whatever
-/// it says.
+/// On the receiving side, what the other side marks as a
+/// sender's post takes no part in this side's loop breaker, not even a
+/// place among the latest; so a peer that marks everything still can't hide
+/// this side's own loops, and a person's message counts whatever it says.
 #[tokio::test]
 async fn the_other_sides_sender_posts_are_left_out_of_the_loop_breaker_and_never_hide_ours() {
     let (factory, mut client, mut view, _pipe, _models) = setup().await;
@@ -418,7 +417,7 @@ async fn the_other_sides_sender_posts_are_left_out_of_the_loop_breaker_and_never
     view.follow(&mut client, |view| paused(view, &count) == v1::PipePause::Loop).await;
 }
 
-/// Fugo 33882: the other side's word that its person continued a loop
+/// The other side's word that its person continued a loop
 /// pause starts this side's repeats over, never its count: a peer cycling
 /// pause and continue still pauses this side at its own LOOP_AFTER, which
 /// only this side's person continues.
@@ -443,7 +442,7 @@ async fn a_peer_continuing_its_loop_pauses_never_lifts_our_count() {
     view.follow(&mut client, |view| pipe_of(view, &pipe).paused() == v1::PipePause::Loop).await;
 }
 
-/// Friend bug #35: Rivet is told it can post to a pipe itself by making
+/// Rivet is told it can post to a pipe itself by making
 /// itself its sender, and both rules read the same everywhere: pipes_sender
 /// is refused while the admin agent has read from outside, and a sender
 /// that has read from outside has each message wait for the person.

@@ -435,7 +435,7 @@ impl Transcript {
         for (number, stamp) in &stamps[cached..] {
             let first = transcript.len();
             // An older segment is only shown, and images show as "[image]":
-            // their data, often most of its bytes, isn't kept (#377).
+            // their data, often most of its bytes, isn't kept.
             let segment = transcript.parse(*number, false)?;
             transcript.restore_after(*number, segment, next, before.take())?;
             sections.push(Section { number: *number, file: *stamp, first, count: transcript.len() - first, offset: 0, bytes: 0 });
@@ -758,9 +758,9 @@ impl Transcript {
         self.waiting.keys().copied().collect()
     }
 
-    /// Each waiting entry's fingerprint (Agent.waiting_versions, Squalo's
-    /// B3): it changes whenever anything in the entry does, so the app
-    /// fetches again only the cards that changed.
+    /// Each waiting entry's fingerprint (Agent.waiting_versions): it
+    /// changes whenever anything in the entry does, so the app fetches
+    /// again only the cards that changed.
     pub fn waiting_versions(&self) -> BTreeMap<u64, u64> {
         self.waiting.clone()
     }
@@ -868,8 +868,8 @@ impl Transcript {
     }
 
     /// Shows a pipe secret approval as decided; None if it isn't shown.
-    /// `reply`: the person's reply when they answered it with a comment
-    /// (#370), else None.
+    /// `reply`: the person's reply when they answered it with a comment,
+    /// else None.
     pub fn set_secret_approval(&mut self, id: &str, state: v1::SecretApprovalState, decided_ms: i64, reply: Option<&str>) -> Option<Entry> {
         let entry = self.in_memory_mut().find(|entry| matches!(&entry.kind, Some(Kind::SecretApproval(shown)) if shown.id == id))?;
         if let Some(Kind::SecretApproval(approval)) = &mut entry.kind {
@@ -889,8 +889,9 @@ impl Transcript {
         self.replace_shown(Kind::AskPerson(ask))
     }
 
-    /// Says which device the card at `seq` was decided from (#514,
-    /// `crate::answered_on`); the changed entry, or None if it isn't shown.
+    /// Says which device the card at `seq` was decided from
+    /// (`crate::answered_on`); the changed entry, or None if it isn't
+    /// shown.
     pub fn set_answered_on(&mut self, seq: u64, on: v1::AnsweredOn) -> Option<Entry> {
         let entry = self.in_memory_mut().find(|entry| entry.seq == seq)?;
         entry.answered_on = Some(on);
@@ -1724,7 +1725,7 @@ fn notice(text: String, level: NoticeLevel) -> Kind {
     Kind::Notice(v1::Notice { text, level: level.into(), ..Default::default() })
 }
 
-/// A voice message sent with typed text (#425): its two parts apart, so
+/// A voice message sent with typed text: its two parts apart, so
 /// the app shows what was typed, then the recording with the words heard.
 fn voice_parts(message: &UserMessage, text: &str) -> v1::UserText {
     let Some(voice) = message.voice.as_ref() else { return v1::UserText::default() };

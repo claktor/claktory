@@ -1,4 +1,4 @@
-// The phone's building blocks (research mobile.md, phase 0; #198): its
+// The phone's building blocks (research mobile.md, phase 0): its
 // sizes and type, the keyboard each kind of field brings, native text
 // selection with our own items, the header, haptics and the drawer's
 // gesture hold. Each is checked on an iPhone and, where it differs, on a
@@ -782,5 +782,40 @@ void main() {
       expect(await chosen, 'settings');
       semantics.dispose();
     });
+
+    for (final (text, side) in const [
+      (1.0, 16.0),
+      (1.5, 24.0),
+      (53 / 17, 32.0),
+    ]) {
+      testWidgets("an action's glyph grows with the text, to twice ($text)", (
+        tester,
+      ) async {
+        late BuildContext context;
+        await _show(
+          tester,
+          _Context((found) => context = found),
+          textScale: text,
+        );
+        const glyph = Key('glyph');
+        unawaited(
+          showActions<String>(
+            context,
+            actions: [
+              SheetAction(
+                'Files',
+                'files',
+                glyph: (color) =>
+                    const SizedBox.square(key: glyph, dimension: 16),
+              ),
+            ],
+          ),
+        );
+        await pumpFrames(tester);
+        final drawn = tester.getRect(find.byKey(glyph));
+        expect(drawn.width, moreOrLessEquals(side, epsilon: 0.5));
+        expect(tester.takeException(), isNull);
+      });
+    }
   });
 }

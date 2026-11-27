@@ -13,6 +13,15 @@
 //! next heading of the same or a higher level), or else one list item (up to
 //! the next item, a blank line or a heading). Everything unmarked is core. A
 //! heading left with nothing under it in the core goes too.
+//!
+//! In the core, a marker line
+//!
+//! ```text
+//! <!-- setting: <key> -->     or     <!-- setting: !<key> -->
+//! ```
+//!
+//! makes the block after it (as above) only for agents whose context starts
+//! while that setting is on (or, with `!`, off): `Manual::core_for`.
 
 use std::sync::LazyLock;
 
@@ -29,9 +38,30 @@ pub(crate) struct Note {
 }
 
 pub(crate) struct Manual {
-    pub core: String,
     pub notes: Vec<Note>,
+    /// The core's lines, each with the settings it's only for (key, on).
+    lines: Vec<(String, Vec<(String, bool)>)>,
 }
+
+impl Manual {
+    /// The core as an agent reads it, `on` saying whether each setting a
+    /// block is for is on.
+    pub(crate) fn core_for(&self, on: impl Fn(&str) -> bool) -> String {
+        let kept: Vec<&str> = self
+            .lines
+            .iter()
+            .filter(|(_, when)| when.iter().all(|(key, wanted)| on(key) == *wanted))
+            .map(|(line, _)| line.as_str())
+            .collect();
+        tidy(&kept)
+    }
+}
+
+/// The address commits made by agents name Claktory as their co-author
+/// with (`Co-authored-by: Claktory <…>`, the manual's `{{co_author}}`): None
+/// until Claktory's own account on GitHub exists, and then no trailer is
+/// asked for.
+pub(crate) const CO_AUTHOR: Option<&str> = None;
 
 static PARSED: LazyLock<Manual> = LazyLock::new(|| parse(MANUAL));
 
@@ -49,6 +79,16 @@ pub(crate) fn render(text: &str, home: &Home, user: Option<&str>) -> String {
         .replace("{{config}}", &home.config_path().display().to_string())
         .replace("{{workspace}}", &home.workspace().display().to_string())
         .replace("{{home}}", &home.root().display().to_string())
+        .replace("{{co_author}}", &CO_AUTHOR.map(|address| format!("Claktory <{address}>")).unwrap_or_default())
+}
+
+/// A setting marker line's key, and whether it's for the setting on.
+fn setting(line: &str) -> Option<(&str, bool)> {
+    let key = line.trim().strip_prefix("<!-- setting:")?.strip_suffix("-->")?.trim();
+    Some(match key.strip_prefix('!') {
+        Some(key) => (key.trim(), false),
+        None => (key, true),
+    })
 }
 
 /// A marker line's slug and summary.
@@ -70,7 +110,8 @@ fn block_end(lines: &[&str], start: usize) -> usize {
     if let Some(level) = heading(lines[start]) {
         // A marker just before the next heading belongs to it.
         let ends = |line: &str| heading(line).is_some_and(|next| next <= level);
-        while end < lines.len() && !ends(lines[end]) && !(marker(lines[end]).is_some() && lines.get(end + 1).is_some_and(|line| ends(line)))
+        let marks = |line: &str| marker(line).is_some() || setting(line).is_some();
+        while end < lines.len() && !ends(lines[end]) && !(marks(lines[end]) && lines.get(end + 1).is_some_and(|line| ends(line)))
         {
             end += 1;
         }
@@ -80,6 +121,7 @@ fn block_end(lines: &[&str], start: usize) -> usize {
             && !lines[end].starts_with("- ")
             && heading(lines[end]).is_none()
             && marker(lines[end]).is_none()
+            && setting(lines[end]).is_none()
         {
             end += 1;
         }
@@ -89,12 +131,22 @@ fn block_end(lines: &[&str], start: usize) -> usize {
 
 pub(crate) fn parse(text: &str) -> Manual {
     let lines: Vec<&str> = text.lines().collect();
-    let mut core: Vec<&str> = Vec::new();
+    let mut core: Vec<(String, Vec<(String, bool)>)> = Vec::new();
     let mut notes = Vec::new();
+    // The settings blocks are for, each until (exclusive) its line.
+    let mut when: Vec<(String, bool, usize)> = Vec::new();
     let mut at = 0;
     while at < lines.len() {
+        when.retain(|(_, _, end)| *end > at);
+        if let Some((key, on)) = setting(lines[at]) {
+            if at + 1 < lines.len() {
+                when.push((key.to_owned(), on, block_end(&lines, at + 1)));
+            }
+            at += 1;
+            continue;
+        }
         let Some((slug, summary)) = marker(lines[at]) else {
-            core.push(lines[at]);
+            core.push((lines[at].to_owned(), when.iter().map(|(key, on, _)| (key.clone(), *on)).collect()));
             at += 1;
             continue;
         };
@@ -107,7 +159,7 @@ pub(crate) fn parse(text: &str) -> Manual {
         notes.push(Note { slug: slug.to_owned(), summary: summary.to_owned(), body });
         at = end;
     }
-    Manual { core: tidy(&core), notes }
+    Manual { notes, lines: core }
 }
 
 /// Drops headings left empty, and runs of blank lines.
@@ -153,7 +205,38 @@ mod tests {
                 ("ext-c", "C.", "- **C**: does c."),
             ]
         );
-        assert_eq!(manual.core, "# Manual\n\nIntro.\n\n## Extensions\n\nHow they work.\n\n- **B**: does b.\n");
+        assert_eq!(manual.core_for(|_| true), "# Manual\n\nIntro.\n\n## Extensions\n\nHow they work.\n\n- **B**: does b.\n");
+    }
+
+    #[test]
+    fn setting_blocks_are_only_for_agents_with_that_setting() {
+        let text = "# Manual\n\nIntro.\n\n<!-- setting: credit -->\n## Credit\n\nSay so:\n- In a PR.\n<!-- setting: trailer -->\n- In a commit.\n\nOnly there.\n\n<!-- setting: !credit -->\n## Credit\n\nSay nothing.\n\n<!-- admin: a | A. -->\n## Admin\n\nA.\n\n## End\n\nBye.\n";
+        let manual = parse(text);
+        let core = |credit: bool, trailer: bool| manual.core_for(|key| if key == "credit" { credit } else { trailer });
+        assert_eq!(
+            core(true, true),
+            "# Manual\n\nIntro.\n\n## Credit\n\nSay so:\n- In a PR.\n- In a commit.\n\nOnly there.\n\n## End\n\nBye.\n"
+        );
+        assert_eq!(core(true, false), "# Manual\n\nIntro.\n\n## Credit\n\nSay so:\n- In a PR.\n\nOnly there.\n\n## End\n\nBye.\n");
+        assert_eq!(core(false, true), "# Manual\n\nIntro.\n\n## Credit\n\nSay nothing.\n\n## End\n\nBye.\n");
+        assert_eq!(manual.notes.len(), 1);
+        assert_eq!(manual.notes[0].body, "## Admin\n\nA.");
+    }
+
+    /// The real manual's credit for Claktory: the line on, no trailer
+    /// until there's an address, and the other words off.
+    #[test]
+    fn the_manual_credits_claktory_unless_turned_off() {
+        let co_author = CO_AUTHOR.is_some();
+        let on = manual().core_for(|key| key == "attribution" || (key == "co_author" && co_author));
+        assert!(on.contains("`Made with [Claktory](https://claktory.com)`"), "{on}");
+        assert_eq!(on.contains("Co-authored-by:"), co_author);
+        assert!(!on.contains("turned off crediting Claktory"));
+        assert!(!on.contains("<!--"));
+        let off = manual().core_for(|_| false);
+        assert!(!off.contains("Made with [Claktory]"));
+        assert!(off.contains("turned off crediting Claktory"), "{off}");
+        assert!(on.contains("## Changing Claktory as an agent") && off.contains("## Changing Claktory as an agent"));
     }
 
     /// The real manual splits cleanly: notes with unique slugs and one-line
@@ -169,9 +252,10 @@ mod tests {
             assert!(!note.summary.is_empty() && note.summary.len() <= 150 && !note.summary.contains('\n'), "{}", note.slug);
             assert!(!note.body.is_empty(), "{} is empty", note.slug);
         }
-        assert!(!manual.core.contains("<!--"), "a marker that marks nothing");
-        assert!(manual.core.starts_with("# Claktory manual"));
-        assert!(manual.core.contains("## Agents"));
-        assert!(manual.core.len() < 16_000, "the core manual is {} bytes", manual.core.len());
+        let core = manual.core_for(|_| true);
+        assert!(!core.contains("<!--"), "a marker that marks nothing");
+        assert!(core.starts_with("# Claktory manual"));
+        assert!(core.contains("## Agents"));
+        assert!(core.len() < 16_000, "the core manual is {} bytes", core.len());
     }
 }

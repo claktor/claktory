@@ -79,14 +79,17 @@ pub(crate) fn write(store: &Store, entry: &Entry) {
 
 /// ListErrandLog: `errand`'s entries (every errand's when empty), the last
 /// 7 days, oldest first.
-pub(crate) fn list(store: &Store, errand: &str) -> Result<v1::ErrandLog, rusqlite::Error> {
+pub(crate) fn list(store: &Store, errand: &str, agent: &str) -> Result<v1::ErrandLog, rusqlite::Error> {
     let db = store.db();
+    // An agent's entries: its own steps, and the person's on its sessions.
     let mut statement = db.prepare(
         "SELECT at, errand, agent, origin, path, action, outcome, target FROM errand_log
-         WHERE at >= ?1 AND (?2 = '' OR errand = ?2) ORDER BY at DESC, id DESC LIMIT ?3",
+         WHERE at >= ?1 AND (?2 = '' OR errand = ?2)
+           AND (?4 = '' OR agent = ?4 OR errand IN (SELECT id FROM errands WHERE agent = ?4))
+         ORDER BY at DESC, id DESC LIMIT ?3",
     )?;
     let mut entries = statement
-        .query_map(params![now_ms() - KEEP_MS, errand, MAX_ENTRIES], |row| {
+        .query_map(params![now_ms() - KEEP_MS, errand, MAX_ENTRIES, agent], |row| {
             Ok(v1::ErrandLogEntry {
                 at_ms: row.get(0)?,
                 errand_id: row.get(1)?,

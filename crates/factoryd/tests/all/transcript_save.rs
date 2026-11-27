@@ -1,4 +1,4 @@
-//! Saving a conversation (#383): its current segment is JSON Lines, a
+//! Saving a conversation: its current segment is JSON Lines, a
 //! message at a time, appended; a segment from before is read as it is and
 //! written whole as JSON Lines at its first save. Whatever happens, it
 //! reads back as it was.
@@ -206,7 +206,7 @@ async fn while_an_update_is_on_trial_segments_stay_json() {
     same(&dir, &mut transcript).await;
 }
 
-/// #454 Part 1 #9: a save writes each image once, as a file beside the
+/// A save writes each image once, as a file beside the
 /// segments, and the segment names it instead of carrying its base64; it
 /// reads back the same, images and all. While an update is on trial,
 /// images stay inline, as the version it would roll back to reads them.

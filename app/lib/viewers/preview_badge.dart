@@ -1,4 +1,4 @@
-// A file shown as a preview (#379): a phone or tablet gets an image made
+// A file shown as a preview: a phone or tablet gets an image made
 // for its screen, and a slow link a smaller video, so it comes many times
 // sooner. Never without saying so: this badge sits over the file while
 // it's a preview, with Show original to load the file itself in place.
@@ -133,8 +133,8 @@ class PreviewBadge extends StatelessWidget {
     };
     // Over the picture it labels, it grows with the text only so far, as
     // iOS's own badges over photos and video do: at the largest sizes it
-    // would hide most of what it labels (Zucchero's #379 row at AX5 on an
-    // SE). VoiceOver reads it whole all the same.
+    // would hide most of what it labels (at AX5 on an
+    // iPhone SE). VoiceOver reads it whole all the same.
     return MediaQuery.withClampedTextScaling(
       maxScaleFactor: maxPreviewBadgeTextScale,
       child: Unselectable(

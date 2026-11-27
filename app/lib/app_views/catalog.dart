@@ -2311,7 +2311,7 @@ class _RenderBar extends RenderBox
     // Missed: a button of icons alone (•••) narrower than a finger's
     // target takes a tap within a target around it, reaching into the
     // gaps and the page's edge without moving anything or taking another
-    // button's taps (Zucchero row 444).
+    // button's taps.
     for (final (i, child) in _children.indexed) {
       if (_words(i) || _weight(i) != null) continue;
       final offset = (child.parentData! as _BarParentData).offset;

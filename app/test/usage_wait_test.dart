@@ -535,7 +535,7 @@ void main() {
       });
     }
 
-    // Zucchero's row 228: on a 320-point iPhone SE at accessibility sizes
+    // On a 320-point iPhone SE at accessibility sizes
     // the controls under the conversation scroll (at most 60% of the
     // height), kept at the message box, which left the wait above out of
     // view: it's brought into view, and so is a refusal (first: both don't
@@ -580,7 +580,7 @@ void main() {
       shows(_inLine('3 are waiting now, not 2. Choose again.'));
     });
 
-    // Sale's row 66: the text size (or the display's) changed while the
+    // The text size (or the display's) changed while the
     // wait showed left its first line shaved off at the top, for good.
     testWidgets('the text size changing while it shows keeps the wait in '
         'view', (tester) async {
@@ -601,7 +601,7 @@ void main() {
         (2.0, 1.0),
         (2.0, 1.3),
         (TextFactor.ax5, 1.3),
-        // Sale's row 73: the text size alone, at the larger display size.
+        // The text size alone, at the larger display size.
         (1.0, 1.3),
         (2.0, 1.3),
       ]) {

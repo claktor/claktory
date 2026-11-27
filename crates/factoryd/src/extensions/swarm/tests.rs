@@ -224,7 +224,7 @@ fn the_person_over_asked_and_idle_agents_and_wake_ups() {
     assert_eq!(red, ["over_asked", "wake_cost", "idle:idle"]);
 }
 
-/// Rivet's report (Bruno 25299): new agents were judged over 3 days they
+/// Rivet's report: new agents were judged over 3 days they
 /// hadn't lived, and agents working on request over the wake-ups they
 /// answered.
 #[test]

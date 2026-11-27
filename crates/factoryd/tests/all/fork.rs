@@ -1,4 +1,4 @@
-//! Going back in a conversation (friend bug #9): the conversation goes back
+//! Going back in a conversation: the conversation goes back
 //! to right before a message, and what came after is set aside as another
 //! version, to switch back to or delete; the agent hears what that part did
 //! that still stands, in a quiet note with whatever wakes it next.
@@ -261,7 +261,7 @@ async fn the_person_goes_back_lists_switches_and_deletes_versions() {
     assert!(matches!(&refused, Body::Error(error) if error.code() == v1::ErrorCode::NotFound), "{refused:?}");
 }
 
-/// Changed again before the agent read its note (Zucchero's row 388): it
+/// Changed again before the agent read its note: it
 /// gets one note, about the conversation it remembers and the one it's in
 /// now, never one about a conversation it's no longer in.
 #[tokio::test]
@@ -439,7 +439,7 @@ async fn rivet_takes_an_agents_conversation_back_with_its_reason() {
     assert!(note.starts_with("Rivet switched you to another version of your conversation"), "{note}");
     assert!(note.contains("Rivet's reason: Back to where it was."), "{note}");
 
-    // A version set aside is deleted for good, with its reason in History (#423).
+    // A version set aside is deleted for good, with its reason in History.
     select(&mut client, &mut view, "rivet").await;
     let aside = fork::branches_for_test(&factory, "builder");
     assert_eq!(aside.len(), 1, "{aside:?}");
@@ -452,7 +452,7 @@ async fn rivet_takes_an_agents_conversation_back_with_its_reason() {
     let again = serde_json::json!({"agent": "builder", "branch": aside[0].id, "reason": "Again."});
     let (refused, _) = call(&mut client, &mut view, "rivet", "conversation_delete", again).await;
     assert!(refused.ends_with("list them with conversation_points. Nothing was deleted."), "{refused}");
-    // Never without a reason: it can't be undone (Abbacchio's row 1047).
+    // Never without a reason: it can't be undone.
     let bare = serde_json::json!({"agent": "builder", "branch": aside[0].id, "reason": " "});
     let (refused, _) = call(&mut client, &mut view, "rivet", "conversation_delete", bare).await;
     assert_eq!(refused, "Give reason: why this version can go, in a short line the person reads in History. Nothing was deleted.");
@@ -471,7 +471,7 @@ async fn rivet_takes_an_agents_conversation_back_with_its_reason() {
     assert!(refused.ends_with("The person can delete a version with Delete… in the agent's Other versions. Nothing was deleted."), "{refused}");
 }
 
-/// Abbacchio's row 753: a teammate's message queued while the agent works
+/// A teammate's message queued while the agent works
 /// waits out the fork and comes after the note, in the conversation as it
 /// is now, never handed to the stopped run on the conversation as it was;
 /// the command the fork cut off says so in the version set aside.

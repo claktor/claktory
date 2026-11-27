@@ -1,4 +1,4 @@
-// A window frozen for a move (#217) is the move's screen and nothing else:
+// A window frozen for a move is the move's screen and nothing else:
 // MoveGate takes the window's overlay with it, so no sheet, dialog or
 // popover shown before the pause outlives it. Each ends as if dismissed
 // (what waits on it hears null, it's counted out of the sheets showing,

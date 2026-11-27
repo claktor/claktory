@@ -1,4 +1,4 @@
-//! Recording the Map (#458 B1): every time the Map the app is sent changes,
+//! Recording the Map: every time the Map the app is sent changes,
 //! what changed is kept in `map_history`, with names, so History can play
 //! this Claktory back as it was, deleted agents and all. One place covers
 //! every way the setup changes (the app, Rivet editing the settings file,
@@ -7,7 +7,7 @@
 //! in that Map (the app draws them from `Workspace.pipes`), so they're
 //! added here: a node under their project, and an edge from each member.
 //!
-//! Rows (history-replay.md §3; Giorno's backfill writes the same shape):
+//! Rows (the backfill writes the same shape):
 //! - `kind`: node_add, node_change, node_remove, edge_add, edge_change,
 //!   edge_remove.
 //! - `node`: a MapNode id ("agent:builder", "pipe:<id>"); `edge`:

@@ -9,14 +9,14 @@ import '../identity.dart';
 import '../mobile/device.dart' show Idiom, deviceCapabilities;
 import '../mobile/metrics.dart' show TypeScale;
 
-/// Over a pane Apple Pencil doesn't draw in yet (an image, #362 I2): when
+/// Over a pane Apple Pencil doesn't draw in yet (an image): when
 /// the Pencil touches it on an iPad, a line at the pane's foot says why
 /// nothing drew and what works there instead, for a few seconds. Nothing
 /// changes for a finger, a mouse or a trackpad, or anywhere but an iPad.
 class PencilHint extends StatefulWidget {
   const PencilHint({super.key, required this.text, required this.child});
 
-  /// What the line says (Trish's words).
+  /// What the line says.
   final String text;
   final Widget child;
 

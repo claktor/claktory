@@ -340,6 +340,28 @@ void main() {
     semantics.dispose();
   });
 
+  // Abbacchio's row 1734: the agent deleted while its ⋯ menu is open (its
+  // conversation gone from under the menu), Pin still says why it can't.
+  testWidgets('⋯ open as its agent is deleted: Pin says it is gone', (
+    tester,
+  ) async {
+    final start = header()
+      ..agents.add(Agent(id: 'a2', name: 'Fred', projectId: 'p1'));
+    final harness = await showHeader(tester, start);
+    await tester.tap(said('More options for June'));
+    await settle(tester);
+    harness.backend.refuse = 'no agent with id "a1"';
+    final gone = start.deepCopy()
+      ..agents.removeWhere((agent) => agent.id == 'a1')
+      ..selectedAgentId = 'a2';
+    await harness.apply(tester, gone);
+    await tester.tap(find.text('Pin').last);
+    await settle(tester);
+    expect(harness.last.pinAgent.agentId, 'a1');
+    expect(find.text("Couldn't pin June"), findsOneWidget);
+    expect(find.text("June isn't in this Claktory any more."), findsOneWidget);
+  });
+
   // Abbacchio's row 1647: Extensions… opened the settings at the top with
   // the extensions folded, as Agent settings… does.
   testWidgets('Extensions… opens the settings at its extensions, unfolded', (

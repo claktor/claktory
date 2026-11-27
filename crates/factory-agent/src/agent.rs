@@ -64,20 +64,20 @@ pub struct Settings {
 pub type WaitOut = Arc<dyn Fn(Option<u64>, String) -> BoxFuture<bool> + Send + Sync>;
 
 /// How an agent waits for the network when its model calls keep failing to
-/// connect, after the quick retries (#364 O2); the text is the error. Ok
+/// connect, after the quick retries; the text is the error. Ok
 /// once it should ask again; Err to let the failure stand, with what to say
 /// in place of the error when there's something better.
 pub type WaitNetwork = Arc<dyn Fn(String) -> BoxFuture<Result<(), Option<String>>> + Send + Sync>;
 
 /// How an agent waits out its provider when its answers keep failing in a
 /// way that passes (an overload, a 5xx, a rate limit that isn't the
-/// account's usage, an answer cut short), after the quick retries (#490):
+/// account's usage, an answer cut short), after the quick retries:
 /// as `WaitNetwork`, the text being the error, with how long the provider
 /// asked to wait at least (its Retry-After, ms) when it said.
 pub type WaitProvider = Arc<dyn Fn(String, Option<u64>) -> BoxFuture<Result<(), Option<String>>> + Send + Sync>;
 
 /// The longest a provider's Retry-After holds a quick retry back: the
-/// longest wait for a provider (#490).
+/// longest wait for a provider.
 const RETRY_AFTER_MOST_MS: u64 = 15 * 60 * 1000;
 
 /// Whether a failed response is the connection rather than the provider's
@@ -122,7 +122,7 @@ pub const FORGED_TAG_CALL: &str = "Not run: your reply has a line that starts a 
 /// A tool call in a reply its provider stopped where it began one of
 /// Claktory's tags: calls written before the cut are whole, as measured,
 /// but that's the provider's behaviour, not a promise, and a call cut in
-/// its arguments must never run (Gyro 45937).
+/// its arguments must never run.
 pub const FORGED_TAG_CUT_CALL: &str =
     "Not run: your reply was cut where it began a Claktory tag, so this call may be cut too. Call it again if you still need it.";
 
@@ -500,7 +500,7 @@ impl Agent {
             _ => {}
         }
         // The last listener gets the event itself: a streamed piece carries
-        // the whole message so far, twice (#454).
+        // the whole message so far, twice.
         if let Some((last, others)) = self.listeners.split_last() {
             for listener in others {
                 listener(event.clone()).await?;
@@ -743,7 +743,7 @@ impl Agent {
                     attempt = 0;
                     self.take_inbox(context, produced).await?;
                     // Its model may have changed meanwhile (another
-                    // provider, #341): the request goes there.
+                    // provider): the request goes there.
                     model = self.state.model.clone();
                     continue;
                 }
@@ -776,15 +776,15 @@ impl Agent {
             let failed = if message.stop_reason == StopReason::Error { message.error_message.as_deref() } else { None };
             let lost = failed.is_some_and(connection_lost);
             // A failure that passes, not the connection's: an overload, a
-            // server error, a rate limit, an answer cut short (#490).
+            // server error, a rate limit, an answer cut short.
             // A refusal for the account's usage or credit isn't one: that
             // waits on the account (`wait_out`), or fails.
             let passing = !lost && failed.is_some_and(lasting_outage) && crate::accounts::none_left(&message).is_none();
             let retry = if (offline && lost) || (provider_down && passing) { None } else { self.retry_delay(&message, attempt, token) };
             let Some(delay) = retry else {
                 // Still no connection after the quick retries: wait for the
-                // network, then ask again (#364 O2). Still failing: wait out
-                // the provider, then ask again (#490).
+                // network, then ask again. Still failing: wait out
+                // the provider, then ask again.
                 let asked = crate::accounts::retry_after(&message);
                 let wait: Option<WaitProvider> = if lost {
                     self.wait_network.clone().map(|wait| -> WaitProvider { Arc::new(move |why, _| wait(why)) })
@@ -987,7 +987,7 @@ impl Agent {
                 }
                 // The context's message stays the start's until the end
                 // replaces it: nothing reads it before. So each piece copies
-                // the message so far once, not twice (#454).
+                // the message so far once, not twice.
                 event => {
                     if added {
                         let partial = event.message().clone();
@@ -998,7 +998,7 @@ impl Agent {
             }
         }
         // It ended without an answer or an error: a failed answer, retried
-        // and waited out as a provider's passing failure (#490).
+        // and waited out as a provider's passing failure.
         let started = match context.last() {
             Some(Message::Assistant(started)) if added => Some(started.clone()),
             _ => None,
@@ -1119,7 +1119,7 @@ impl Agent {
         }
         Ok(match outcome {
             Ok(result) => (result, false),
-            // macOS refusing a protected folder says so (permissions.md P2).
+            // macOS refusing a protected folder says so.
             Err(error) => (crate::tools::protected::refused(&error).unwrap_or_else(|| ToolResult::error(error.to_string())), true),
         })
     }

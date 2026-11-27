@@ -1,4 +1,4 @@
-// The fallback model (#225): what a step a model declines is tried again
+// The fallback model: what a step a model declines is tried again
 // on, an agent's own in its settings and the Claktory-wide default in
 // Settings → Defaults.
 import 'package:factory_app/controls.dart' show Field, showModal;

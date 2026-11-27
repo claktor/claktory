@@ -13,6 +13,9 @@ mod anthropic_auth;
 mod anthropic_files;
 mod anthropic_oauth;
 mod anthropic_provider;
+// Unix programs (sh, /bin/sleep, process groups); Windows' guard is tested
+// in factory-agent's src/windows and on the lab laptop.
+#[cfg(unix)]
 mod asking;
 mod bash;
 mod catalog;

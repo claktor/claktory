@@ -4,8 +4,8 @@
 //! live view (P5) can be built before Linux runs. Frames come from CDP's
 //! screencast and input goes in through CDP's Input domain; there's no
 //! private screen, user, Landlock or firewall: it's only for development,
-//! with its own throwaway profile in the dev home, and never undriven (the
-//! mode is only reported).
+//! with its own throwaway profile in the dev home (one for each agent's
+//! browser, `profile`), and never undriven (the mode is only reported).
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -18,17 +18,72 @@ use super::Io;
 use crate::browser_runner::wire::{self, Button, Channel, Control, FrameHeader, InputEvent, Mode, Report};
 use crate::factory::Factory;
 
+#[cfg(unix)]
+use crate::browser_runner::uploads::Uploads;
+
+/// Where the runner's uploads don't build (Windows): none is ever staged.
+#[cfg(not(unix))]
+struct Uploads;
+
+#[cfg(not(unix))]
+impl Uploads {
+    fn new(_: &std::path::Path) -> std::io::Result<Uploads> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn begin(&mut self, _: u64, _: &str, _: u64) -> Result<(), String> {
+        Err("uploads aren't here".to_owned())
+    }
+    fn chunk(&mut self, _: &[u8]) -> Option<Report> {
+        None
+    }
+    fn staged(&self, _: &str) -> bool {
+        false
+    }
+    fn empty(&mut self) {}
+}
+
 /// Ids of the stand-in's own CDP calls: above anything a client uses, and
 /// within the 32-bit integer Chrome takes.
 const OWN_IDS: u64 = 1_000_000_000;
 
-pub(crate) fn spawn(factory: &Arc<Factory>) -> Result<Io, String> {
+/// The stand-in's profile folder for `agent`'s browser: the dev home's
+/// `browser-standin` for the person's own (`agent` empty), as before, and
+/// `browser-standins/<agent key>` for an agent's.
+fn profile(home: &std::path::Path, agent: &str) -> std::path::PathBuf {
+    if agent.is_empty() { home.join("browser-standin") } else { home.join("browser-standins").join(super::agent_key(agent)) }
+}
+
+/// Deletes `agent`'s profile folder, its downloads and its uploads (its
+/// browser isn't running).
+pub(crate) fn forget(home: &std::path::Path, agent: &str) -> Result<(), String> {
+    let profile = profile(home, agent);
+    for folder in [downloads(&profile), beside(&profile, "uploads"), profile] {
+        match std::fs::remove_dir_all(&folder) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.to_string()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Where the Chrome over `profile` downloads (the errand sets it so).
+fn downloads(profile: &std::path::Path) -> std::path::PathBuf {
+    beside(profile, "downloads")
+}
+
+/// The folder `<profile>-<what>` beside `profile`.
+fn beside(profile: &std::path::Path, what: &str) -> std::path::PathBuf {
+    let name = profile.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+    profile.with_file_name(format!("{name}-{what}"))
+}
+
+pub(crate) fn spawn(factory: &Arc<Factory>, agent: &str) -> Result<Io, String> {
     // An uncontained Chrome: only ever for the dev Claktory or a debug
     // build, never the real one (Fugo 37166).
     if !super::dev_home(factory.home().root()) && !cfg!(debug_assertions) {
         return Err("Claktory's browser isn't available on this computer yet.".to_owned());
     }
-    let profile = factory.home().root().join("browser-standin");
+    let profile = profile(factory.home().root(), agent);
     let (to, from_host) = mpsc::channel::<(Channel, Vec<u8>)>(64);
     let (to_host, from) = mpsc::channel::<(Channel, Vec<u8>)>(64);
     let quit = tokio_util::sync::CancellationToken::new();
@@ -48,6 +103,7 @@ pub(crate) fn spawn(factory: &Arc<Factory>) -> Result<Io, String> {
             events: None,
             later: std::collections::VecDeque::new(),
             mode: None,
+            uploads: None,
         };
         standin.run(from_host, quitting).await;
     });
@@ -84,6 +140,8 @@ struct Standin {
     /// How Chrome runs, as asked: a change takes the runner a moment (it
     /// starts Chrome again), which the stand-in takes too.
     mode: Option<Mode>,
+    /// The files staged for uploads, as the runner keeps them.
+    uploads: Option<Uploads>,
 }
 
 /// About how long the runner takes to start Chrome again in another mode.
@@ -139,10 +197,16 @@ impl Standin {
                         let chrome = self.version().await;
                         let downloads = self.downloads();
                         let download_dir = std::fs::create_dir_all(&downloads).is_ok().then(|| downloads.display().to_string());
+                        let uploads = beside(&self.profile, "uploads");
+                        let _ = std::fs::remove_dir_all(&uploads);
+                        self.uploads = std::fs::create_dir_all(&uploads).ok().and_then(|()| Uploads::new(&uploads).ok());
                         self.mode = Some(mode);
-                        self.report(Report::Ready { wire: wire::VERSION, chrome, landlock_abi: 0, mode, download_dir }).await;
+                        self.report(Report::Ready { wire: wire::VERSION, chrome, landlock_abi: 0, mode, download_dir, safe_browsing: None }).await;
                     }
                     Control::Mode { mode, url } => {
+                        if let Some(uploads) = &mut self.uploads {
+                            uploads.empty();
+                        }
                         if self.mode.replace(mode) != Some(mode) {
                             tokio::time::sleep(RELAUNCH).await;
                         }
@@ -174,6 +238,15 @@ impl Standin {
                     // Nor an input gate: every lease is granted (dev only).
                     Control::LeaseInput { id, .. } => self.report(Report::Lease { id, granted: true, why: String::new() }).await,
                     Control::EndLease { .. } => {}
+                    Control::Upload { id, name, bytes } => {
+                        let began = match &mut self.uploads {
+                            Some(uploads) => uploads.begin(id, &name, bytes),
+                            None => Err("the browser has no uploads folder".to_owned()),
+                        };
+                        if let Err(why) = began {
+                            self.report(Report::UploadFailed { id, why }).await;
+                        }
+                    }
                     Control::DownloadRead { guid } => self.download(&guid).await,
                     Control::DownloadDrop { guid } => {
                         if wire::guid_ok(&guid) {
@@ -213,9 +286,24 @@ impl Standin {
                 let text = String::from_utf8_lossy(payload).into_owned();
                 self.call("Input.insertText", json!({"text": text})).await;
             }
-            // A client's own CDP: as it is, to the browser.
-            Channel::Cdp => self.send(payload).await,
-            Channel::Files => {}
+            // A client's own CDP: as it is, to the browser, but for files
+            // given a page, which the runner holds to those it staged.
+            Channel::Cdp => {
+                let uploads = self.uploads.as_ref();
+                let staged = |path: &str| uploads.is_some_and(|uploads| uploads.staged(path));
+                let sets_files = serde_json::from_slice::<Value>(payload).is_ok_and(|message| message["method"] == "DOM.setFileInputFiles");
+                match crate::browser_runner::lease::judge_with_uploads(payload, true, &staged) {
+                    crate::browser_runner::lease::Verdict::Refuse(reply) if sets_files => {
+                        let _ = self.to_host.send((Channel::Cdp, reply)).await;
+                    }
+                    _ => self.send(payload).await,
+                }
+            }
+            Channel::Files => {
+                if let Some(report) = self.uploads.as_mut().and_then(|uploads| uploads.chunk(payload)) {
+                    self.report(report).await;
+                }
+            }
         }
         true
     }
@@ -270,7 +358,7 @@ impl Standin {
 
     /// Where its Chrome's downloads land (the errand sets it so).
     fn downloads(&self) -> std::path::PathBuf {
-        self.profile.with_file_name("browser-standin-downloads")
+        downloads(&self.profile)
     }
 
     /// Sends download `guid` on channel 5, as the runner does.

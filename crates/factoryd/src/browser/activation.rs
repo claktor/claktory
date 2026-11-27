@@ -19,7 +19,7 @@ use serde_json::Value;
 
 use super::ms;
 use crate::config::{AgentConfig, Config};
-use crate::extensions::browser::ID;
+use crate::extensions::browser_control::ID;
 use crate::factory::{Factory, RequestError};
 use crate::transcript::now_ms;
 

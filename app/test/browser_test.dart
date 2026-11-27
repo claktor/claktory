@@ -689,7 +689,7 @@ void main() {
           Agent(
             id: 'june',
             name: 'June',
-            extensions: [AgentExtension(id: 'browser', enabled: on)],
+            extensions: [AgentExtension(id: 'browser_control', enabled: on)],
           ),
         ],
       );
@@ -754,7 +754,7 @@ void main() {
         Agent(
           id: 'june',
           name: 'June',
-          extensions: [AgentExtension(id: 'browser', enabled: true)],
+          extensions: [AgentExtension(id: 'browser_control', enabled: true)],
         ),
       ],
     );

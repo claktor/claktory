@@ -1,7 +1,7 @@
-// Extension panels on an iPhone (#198 phase 3A; research mobile.md §4,
-// "Map and secondary features"): each panel a sheet with its name and
-// Close, every control in it a finger's size and labelled for VoiceOver,
-// its text the phone's; the Mac's panels unchanged.
+// Extension panels on an iPhone (research mobile.md §4, "Map and
+// secondary features"): each panel a sheet with its name and Close,
+// every control in it a finger's size and labelled for VoiceOver, its
+// text the phone's; the Mac's panels unchanged.
 import 'dart:ui' show Tristate;
 
 import 'package:factory_app/extensions.dart' show ExtensionPanel;

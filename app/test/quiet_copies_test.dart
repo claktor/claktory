@@ -1,4 +1,4 @@
-// Quiet copies and message provenance (#285): a lead sees what its team
+// Quiet copies and message provenance: a lead sees what its team
 // handed each other without being woken for it (its Messaging panel), and
 // an agent's message says why it was sent and what it replies to.
 import 'package:factory_app/phone.dart';

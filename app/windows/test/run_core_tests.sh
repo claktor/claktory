@@ -14,5 +14,6 @@ ${CXX:-c++} -std=c++17 -Wall -Wextra -Werror -Wconversion -Wno-sign-conversion \
   "$runner/core/json.cpp" \
   "$runner/core/connection_store.cpp" \
   "$runner/core/window_geometry.cpp" \
+  "$runner/core/launcher_plan.cpp" \
   -o "$out/core_test"
 "$out/core_test"

@@ -8,7 +8,7 @@
 //! from Claktory starts it, after moving it to a model that can run if its
 //! own can't.
 //!
-//! "When Claktory quits" (friend bug #27) is needed when a new Claktory
+//! "When Claktory quits" is needed when a new Claktory
 //! runs under its Mac's background service, which the Mac app can stop and
 //! start (`crate::service`): the person answers it
 //! (UpdateSettings.when_app_quits) or skips it, and it keeps running.

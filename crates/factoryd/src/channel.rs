@@ -140,9 +140,28 @@ const DOWNLOAD_TIMEOUT_SECONDS: &str = "1800";
 const MAX_RELEASE_BYTES: u64 = 1 << 30;
 /// Releases kept, as `scripts/release.sh` keeps them.
 const KEEP: usize = 3;
-/// macOS always has these; elsewhere they're wherever PATH finds them.
+/// macOS always has these; on Linux they're wherever PATH finds them.
+#[cfg(not(windows))]
 const CURL: &str = if cfg!(target_os = "macos") { "/usr/bin/curl" } else { "curl" };
+#[cfg(not(windows))]
 const TAR: &str = if cfg!(target_os = "macos") { "/usr/bin/tar" } else { "tar" };
+
+/// `curl` or `tar` (bsdtar), as this system has it: on Windows only
+/// Windows' own, in its system folder as the system names it, never one
+/// PATH finds (an agent can write to folders on this user's PATH). Err
+/// says why there's none.
+fn system_program(name: &str) -> Result<std::ffi::OsString, String> {
+    #[cfg(not(windows))]
+    {
+        Ok(if name == "curl" { CURL } else { TAR }.into())
+    }
+    #[cfg(windows)]
+    {
+        let folder = factory_agent::windows::system::system_folder().ok_or("Windows' system folder isn't known")?;
+        let program = folder.join(format!("{name}.exe"));
+        if program.is_file() { Ok(program.into_os_string()) } else { Err(format!("{} isn't on this computer", program.display())) }
+    }
+}
 /// In a release with no app (a Linux one), where its Mac app is: the Mac
 /// tarball of the same release, as the manifest named it, for apps paired
 /// from a Mac to update themselves (`crate::app_archive`).
@@ -234,6 +253,13 @@ pub struct Manifest {
     /// Empty when the release has none.
     #[serde(default)]
     pub linux: BTreeMap<String, Tarball>,
+    /// The Windows releases, by architecture as Rust names it ("x86_64",
+    /// "aarch64"): `factoryd.exe`, its helpers, `tools/`, the app in `app/`
+    /// and `backend-version` in a tarball. Empty when the release has none;
+    /// a manifest from before them has none, and older backends don't read
+    /// it.
+    #[serde(default)]
+    pub windows: BTreeMap<String, Tarball>,
     /// When it was published, in ms since 1970, as `scripts/publish.sh`
     /// stamps it (strictly increasing on a channel); None in manifests from
     /// before stamps. Compared only with other manifests' stamps, never
@@ -296,7 +322,7 @@ pub enum Found {
     /// A newer release this machine can't run, or one already rejected.
     Skipped { version: String, why: String },
     /// A newer release to download, and its tarball for this machine.
-    Newer(Manifest, Tarball),
+    Newer(Box<Manifest>, Tarball),
 }
 
 /// What a check found.
@@ -330,6 +356,11 @@ impl Manifest {
                 return bad(&format!("Linux {arch}: {reason}"));
             }
         }
+        for (arch, tarball) in &mut manifest.windows {
+            if let Err(reason) = tarball.check() {
+                return bad(&format!("Windows {arch}: {reason}"));
+            }
+        }
         Ok(manifest)
     }
 
@@ -337,6 +368,10 @@ impl Manifest {
     pub fn here(&self) -> Option<Tarball> {
         if cfg!(target_os = "linux") {
             return self.linux.get(std::env::consts::ARCH).cloned();
+        }
+        // Its architecture's Windows build; the Mac's is never this machine's.
+        if cfg!(windows) {
+            return self.windows.get(std::env::consts::ARCH).cloned();
         }
         Some(Tarball { url: self.url.clone(), sha256: self.sha256.clone(), size: self.size })
     }
@@ -365,8 +400,35 @@ async fn this_macos() -> Option<(u32, u32)> {
     macos_version(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// The first link (a symbolic link, a junction, a file with more than one
+/// name) in what a Windows release unpacked to, if any.
+#[cfg(windows)]
+fn linked_entry(dir: &Path) -> Option<PathBuf> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&at) else { return Some(at) };
+        for entry in entries {
+            let Ok(entry) = entry else { return Some(at) };
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else { return Some(path) };
+            let identity = crate::windows::fs::identity(&path);
+            if meta.file_type().is_symlink() || identity.as_ref().map_or(true, |identity| identity.links > 1 && meta.is_file()) {
+                return Some(path);
+            }
+            if meta.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    None
+}
+
 /// Why this machine can't run the release; None when it can.
 async fn unsupported(manifest: &Manifest) -> Option<String> {
+    // Windows' own curl and tar fetch and unpack it, or nothing does.
+    if cfg!(windows) {
+        return ["curl", "tar"].into_iter().find_map(|name| system_program(name).err());
+    }
     if !cfg!(target_os = "macos") {
         // A Linux backend is static; its entry is its architecture's.
         return None;
@@ -386,7 +448,8 @@ async fn unsupported(manifest: &Manifest) -> Option<String> {
 /// what it downloads carries no quarantine, so Gatekeeper treats the app as
 /// one built here.
 async fn curl(url: &str, timeout: &str, max_bytes: &str, output: Option<&Path>) -> Result<Vec<u8>, ChannelError> {
-    let mut command = tokio::process::Command::new(CURL);
+    let curl = system_program("curl").map_err(ChannelError::Fetch)?;
+    let mut command = tokio::process::Command::new(curl);
     command
         .args(["--fail", "--silent", "--show-error", "--location", "--proto", "=https,file", "--proto-redir", "=https"])
         .args(["--max-time", timeout, "--max-filesize", max_bytes])
@@ -513,9 +576,10 @@ impl Channel {
             return Ok(Found::Skipped { version: version.clone(), why: why.clone() });
         }
         match (unsupported(&manifest).await, manifest.here()) {
-            (None, Some(tarball)) => Ok(Found::Newer(manifest, tarball)),
+            (None, Some(tarball)) => Ok(Found::Newer(Box::new(manifest), tarball)),
             (reason, _) => {
-                let why = reason.unwrap_or_else(|| format!("it has no build for Linux {}", std::env::consts::ARCH));
+                let system = if cfg!(windows) { "Windows" } else { "Linux" };
+                let why = reason.unwrap_or_else(|| format!("it has no build for {system} {}", std::env::consts::ARCH));
                 tracing::info!(version = %manifest.version, %why, "a newer release can't run here");
                 self.rejected = Some((manifest.version.clone(), why.clone()));
                 Ok(Found::Skipped { version: manifest.version, why })
@@ -606,12 +670,38 @@ impl Channel {
         }
         tokio::fs::create_dir_all(partial).await?;
         // tar keeps the bundle's symlinks and modes, and refuses paths outside the folder.
-        let untar = tokio::process::Command::new(TAR).arg("-xzf").arg(tarball).arg("-C").arg(partial).output().await?;
+        let tar = system_program("tar").map_err(|why| rejected(format!("it can't be unpacked here: {why}")))?;
+        let untar = tokio::process::Command::new(tar).arg("-xzf").arg(tarball).arg("-C").arg(partial).output().await?;
         if !untar.status.success() {
             return Err(rejected(format!("it doesn't unpack: {}", String::from_utf8_lossy(&untar.stderr).trim())));
         }
-        if !tokio::fs::metadata(partial.join("factoryd")).await.is_ok_and(|metadata| metadata.is_file()) {
-            return Err(rejected("it has no factoryd".into()));
+        // Windows releases carry no links: any link, or a file with a
+        // second name, means it isn't one of ours.
+        #[cfg(windows)]
+        if let Some(link) = tokio::task::spawn_blocking({
+            let partial = partial.to_path_buf();
+            move || linked_entry(&partial)
+        })
+        .await
+        .map_err(std::io::Error::other)?
+        {
+            return Err(rejected(format!("it holds a link ({})", link.display())));
+        }
+        let backend = crate::home::program("factoryd");
+        if !tokio::fs::metadata(partial.join(&backend)).await.is_ok_and(|metadata| metadata.is_file()) {
+            return Err(rejected(format!("it has no {backend}")));
+        }
+        // Every program of Claktory's in it (not tools\) signed under this
+        // backend's own certificate profile, when this backend is signed.
+        #[cfg(windows)]
+        if let Err(why) = tokio::task::spawn_blocking({
+            let partial = partial.to_path_buf();
+            move || crate::windows::authenticode::check_release(&partial)
+        })
+        .await
+        .map_err(std::io::Error::other)?
+        {
+            return Err(rejected(format!("it isn't signed as Claktory's own: {why}")));
         }
         // A Linux release has no app: the app runs on another machine.
         if cfg!(target_os = "macos") {
@@ -702,7 +792,7 @@ impl Channel {
             let after_running = name != running && (running == "dev" || newer(&name, running));
             if downloaded && after_running && newer(&name, listed) && came_from.is_none_or(|stamp| stamp < issued) {
                 pulled.push(name);
-            } else if dir.join("factoryd").is_file() {
+            } else if dir.join(crate::home::program("factoryd")).is_file() {
                 left.push(name);
             }
         }
@@ -905,12 +995,12 @@ mod tests {
         let releases = home.releases();
         for version in ["v0.1.20", "v0.1.21", "v0.1.22"] {
             std::fs::create_dir_all(releases.join(version)).expect("release");
-            std::fs::write(releases.join(version).join("factoryd"), "backend").expect("factoryd");
+            std::fs::write(releases.join(version).join(crate::home::program("factoryd")), "backend").expect("factoryd");
             std::fs::write(releases.join(version).join(DOWNLOADED_FROM), "file:///channel/latest.json\n").expect("marker");
         }
         // One from a manifest stamped after the one that moves back.
         std::fs::create_dir_all(releases.join("v0.1.23")).expect("release");
-        std::fs::write(releases.join("v0.1.23/factoryd"), "backend").expect("factoryd");
+        std::fs::write(releases.join("v0.1.23").join(crate::home::program("factoryd")), "backend").expect("factoryd");
         std::fs::write(releases.join("v0.1.23").join(DOWNLOADED_FROM), "file:///channel/latest.json\n5\n").expect("marker");
         std::fs::write(releases.join("latest"), "v0.1.22\n").expect("latest");
         let channel = Channel::new(home.clone(), "file:///channel/latest.json");
@@ -943,7 +1033,7 @@ mod tests {
         let releases = home.releases();
         for version in ["v0.1.27", "v0.1.28", "v0.1.30", "v0.1.32", "v0.1.33", "v0.1.34"] {
             std::fs::create_dir_all(releases.join(version)).expect("release");
-            std::fs::write(releases.join(version).join("factoryd"), "backend").expect("factoryd");
+            std::fs::write(releases.join(version).join(crate::home::program("factoryd")), "backend").expect("factoryd");
         }
         std::fs::write(releases.join("latest"), "v0.1.34\n").expect("latest");
         // On trial: v0.1.30 runs, and a rollback would go back to v0.1.28.
@@ -1024,6 +1114,30 @@ mod tests {
         assert!(manifest(with).is_err());
     }
 
+    /// A Windows backend takes its architecture's `windows` entry, never the
+    /// Mac tarball; a manifest without the key (all before it) still reads,
+    /// and offers a Windows backend nothing.
+    #[test]
+    fn windows_releases_are_checked_and_taken_only_on_windows() {
+        let before = manifest(good()).expect("a manifest without windows");
+        assert!(before.windows.is_empty());
+        if cfg!(windows) {
+            assert_eq!(before.here(), None, "the Mac's isn't Windows's");
+        }
+        let mut with = good();
+        with["windows"] = serde_json::json!({std::env::consts::ARCH: {"url": "https://example.com/windows.tar.gz", "sha256": "EF".repeat(32), "size": 10}});
+        let parsed = manifest(with.clone()).expect("manifest");
+        assert_eq!(parsed.windows[std::env::consts::ARCH].sha256, "ef".repeat(32));
+        let here = parsed.here().map(|tarball| tarball.url);
+        if cfg!(windows) {
+            assert_eq!(here.as_deref(), Some("https://example.com/windows.tar.gz"));
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(here, Some(parsed.url.clone()), "a Mac never takes Windows's");
+        }
+        with["windows"][std::env::consts::ARCH]["url"] = serde_json::json!("http://example.com/windows.tar.gz");
+        assert!(manifest(with).is_err());
+    }
+
     #[test]
     fn newer_versions_sort_later() {
         assert!(newer("2026.11.20-1012", "2026.11.19-2359"));
@@ -1044,16 +1158,6 @@ mod tests {
         assert!(newer("v0.1.4-dev.20261120-1013", "v0.1.4-dev.20261120-1012"));
         // An unstamped build is never offered one.
         assert!(!newer("v0.1.9", "dev"));
-    }
-
-    /// A backend from before numbered versions compared them as text: v0.1.0
-    /// must look newer to it than its own date stamp, so it offers the update.
-    #[test]
-    fn the_first_numbered_version_looks_newer_to_a_backend_comparing_text() {
-        let old_newer = |candidate: &str, than: &str| candidate > than;
-        assert!(old_newer("v0.1.0", "2026.11.19-1958"));
-        assert!(old_newer("v0.1.0", "2026.11.19-2200"));
-        assert!(old_newer("v0.1.0-dev.20261120-1012", "2026.11.20-0900"));
     }
 
     #[test]

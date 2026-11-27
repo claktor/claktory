@@ -121,7 +121,7 @@ async fn names_that_hide_or_reorder_text_are_refused_or_cleaned() {
     ] {
         let reply = client.request(refused.clone()).await;
         let Body::Error(error) = &reply.body else { panic!("{refused:?} wasn't refused: {:?}", reply.body) };
-        assert!(error.message.contains("hide or reorder text"), "{}", error.message);
+        assert!(error.message.contains("can't have line breaks or hidden characters"), "{}", error.message);
         assert!(!error.message.chars().any(factory_agent::text::hidden), "the refusal shows the name without them: {:?}", error.message);
     }
     let saved: serde_json::Value = serde_json::from_str(&config()).expect("json");

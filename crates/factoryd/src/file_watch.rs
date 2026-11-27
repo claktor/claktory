@@ -38,7 +38,9 @@ impl FileWatch {
                     return;
                 };
                 let names = names.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                if event.paths.is_empty() || event.paths.iter().any(|path| path.file_name().is_some_and(|name| names.contains(name))) {
+                if event.paths.is_empty()
+                    || event.paths.iter().any(|path| path.file_name().is_some_and(|name| names.contains(name)) && !written_inside(&event, path))
+                {
                     changed.notify_one();
                 }
             })
@@ -91,6 +93,20 @@ impl FileWatch {
     }
 }
 
+/// On Windows a folder is reported changed whenever anything in it is
+/// written, files no one watches too: only its being made, renamed or
+/// removed counts there.
+#[cfg(windows)]
+fn written_inside(event: &notify::Event, path: &std::path::Path) -> bool {
+    use notify::EventKind::Modify;
+    use notify::event::ModifyKind;
+    matches!(event.kind, Modify(ModifyKind::Any | ModifyKind::Data(_) | ModifyKind::Metadata(_) | ModifyKind::Other)) && path.is_dir()
+}
+
+#[cfg(not(windows))]
+fn written_inside(_event: &notify::Event, _path: &std::path::Path) -> bool {
+    false
+}
 
 #[cfg(test)]
 mod tests {

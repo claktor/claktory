@@ -1,9 +1,9 @@
-// Viewers and comments on an iPhone (#198 phase 2B; research mobile.md §4,
-// "Comments and annotations"): a viewer's header of Back, its name, the
-// comments' count and More, with Close everywhere there rather than
-// a × beside Back; Comment and Suggest in the text's own menu; comments
-// written in a sheet above the keyboard, Return sending them; a marker a
-// finger's size, opening its thread in a sheet; the list of them with Send.
+// Viewers and comments on an iPhone (research mobile.md §4, "Comments and
+// annotations"): a viewer's header of Back, its name, the comments' count
+// and More, with Close everywhere there rather than a × beside Back;
+// Comment and Suggest in the text's own menu; comments written in a sheet
+// above the keyboard, Return sending them; a marker a finger's size,
+// opening its thread in a sheet; the list of them with Send.
 import 'dart:convert';
 
 import 'package:cupertino_ui/cupertino_ui.dart'
@@ -11,6 +11,7 @@ import 'package:cupertino_ui/cupertino_ui.dart'
 import 'package:factory_app/mobile/comment_editor.dart';
 import 'package:factory_app/mobile/presentation.dart' show PhoneSheet;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/sidebar.dart' show Sidebar;
 import 'package:factory_app/viewers/text.dart' show TextViewer;
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
@@ -303,7 +304,15 @@ void main() {
     harness.backend.files['/w/essay.md'] = _file('/w/essay.md', _essay);
     await harness.show(tester);
     await pumpFrames(tester);
-    expect(find.bySemanticsLabel('More'), findsNothing);
+    final more = find.bySemanticsLabel('More');
+    expect(
+      more.evaluate().length,
+      find
+          .descendant(of: find.byType(Sidebar), matching: more)
+          .evaluate()
+          .length,
+      reason: "only the sidebar's More, no header's",
+    );
     expect(find.text('Formatted'), findsOneWidget);
   });
 }

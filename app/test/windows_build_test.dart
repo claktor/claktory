@@ -4,9 +4,9 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../hook/build.dart' show assetFile, windowsTriples;
 
-/// The tunnel's Rust library builds for Windows (app/windows, windows.md):
-/// the hook finds the library it built by a Windows path as well as a file
-/// URI, and the toolchain installs its targets (Avdol's first MSVC build).
+/// The tunnel's Rust library builds for Windows (app/windows): the hook
+/// finds the library it built by a Windows path as well as a file URI, and
+/// the toolchain installs its targets.
 void main() {
   test('the toolchain installs every Windows target the hook builds', () {
     final toolchain = File('rust/rust-toolchain.toml').readAsStringSync();

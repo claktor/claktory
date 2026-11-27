@@ -9,9 +9,13 @@
 //! anything it starts can unmount that /proc again. It's PID 1 there: when
 //! it ends, the kernel ends Chrome and the screen with it.
 //!
+//! On a Linux server the gate does this (`enter_for_gate`) and runs the
+//! runner inside, which checks it finds itself so (`gated`); inside the
+//! Mac's VM the runner does it itself (`enter`).
+//!
 //! It fails closed: a runner that can't do this doesn't run. On Ubuntu
 //! 23.10 and later that needs the AppArmor profile setup installs for the
-//! runner's path; Debian and NixOS allow it as they are.
+//! gate's path; Debian and NixOS allow it as they are.
 
 use std::ffi::CString;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -34,9 +38,28 @@ extern "C" fn pass_on(signal: libc::c_int) {
 ///
 /// Must run before the process has a second thread.
 pub(crate) fn enter() -> Result<(), String> {
+    enter_with(Policy::Written)
+}
+
+/// The gate's: the same, with Chrome's policy folders mounted empty and
+/// left for the runner it runs to write (`gated`), so the policy is always
+/// the runner's own, whichever factoryd made the gate.
+pub(crate) fn enter_for_gate() -> Result<(), String> {
+    enter_with(Policy::LeftToTheRunner)
+}
+
+/// Who writes Chrome's policy into the folders mounted for it.
+#[derive(Clone, Copy, PartialEq)]
+enum Policy {
+    Written,
+    LeftToTheRunner,
+}
+
+fn enter_with(policy: Policy) -> Result<(), String> {
     // Before the user namespace, where root shows as nobody.
     x_sockets_folder_ok()?;
     let policy_folders = policy_folders()?;
+    let seed = if super::safe_browsing::usable(std::path::Path::new(super::safe_browsing::SEED)) { Seed::Kept } else { Seed::Hidden };
     // SAFETY: getuid and getgid can't fail.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     // SAFETY: a single-threaded process unsharing its own namespaces.
@@ -57,7 +80,15 @@ pub(crate) fn enter() -> Result<(), String> {
     if child > 0 {
         parent(child);
     }
-    inside(&policy_folders)
+    inside(&policy_folders, policy, seed)
+}
+
+/// What becomes of Safe Browsing's seed in the namespace, as decided
+/// before it.
+#[derive(Clone, Copy, PartialEq)]
+enum Seed {
+    Kept,
+    Hidden,
 }
 
 /// The parent, outside: passes its signals on and ends as the child does.
@@ -83,7 +114,7 @@ fn parent(child: libc::pid_t) -> ! {
 }
 
 /// PID 1, inside.
-fn inside(policy_folders: &[&str]) -> Result<(), String> {
+fn inside(policy_folders: &[&str], policy: Policy, seed: Seed) -> Result<(), String> {
     // Gone with the parent (factoryd's sudo ended, say): the kernel then
     // ends everything in the namespace.
     // SAFETY: a prctl on ourselves.
@@ -106,7 +137,10 @@ fn inside(policy_folders: &[&str]) -> Result<(), String> {
         }
     }
     own_x_sockets()?;
-    own_policy(policy_folders)?;
+    own_policy(policy_folders, policy)?;
+    if seed == Seed::Hidden {
+        hide_seed()?;
+    }
     sees_only_itself()?;
     drop_capabilities()?;
     // SAFETY: a prctl on ourselves.
@@ -147,13 +181,35 @@ fn own_x_sockets() -> Result<(), String> {
     Ok(())
 }
 
+/// A seed that isn't root's alone, under an empty read-only folder: the
+/// runner, in here, can't tell root's files from anyone else's.
+fn hide_seed() -> Result<(), String> {
+    let seed = super::safe_browsing::SEED;
+    if !std::fs::symlink_metadata(seed).is_ok_and(|meta| meta.is_dir()) {
+        return Ok(());
+    }
+    let at = CString::new(seed).unwrap_or_default();
+    let kind = CString::new("tmpfs").unwrap_or_default();
+    let options = CString::new("mode=0555,size=4k").unwrap_or_default();
+    let flags = libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+    // SAFETY: a mount in our own mount namespace, with C strings of ours.
+    if unsafe { libc::mount(kind.as_ptr(), at.as_ptr(), kind.as_ptr(), flags, options.as_ptr().cast()) } != 0 {
+        return Err(format!("couldn't keep Safe Browsing's seed from the browser: {}", std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
 /// Chrome's managed policy (C4; Fugo 49031): pages kept off the local
 /// network, no sign-in to Chrome itself or sync, so a site's sign-in stays
 /// that site's cookies (Fugo 41236), no warning bar for the runner's fixed
 /// flags (R11, Fugo 41700), and Chrome never filling or saving a card or an
-/// address itself (W9, Fugo 41400). LocalNetworkAccessRestrictionsEnabled
-/// is for Chromes before 158, which call it unknown.
-pub(crate) const POLICY: &str = r#"{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"], "BrowserSignin": 0, "SyncDisabled": true, "CommandLineFlagSecurityWarningsEnabled": false, "AutofillCreditCardEnabled": false, "AutofillAddressEnabled": false}"#;
+/// address itself (W9, Fugo 41400), nor saving a password into the profile
+/// (logins live only in the vault, guard 10), no site's cookies sent to
+/// another's frames (guard 4), and Safe Browsing on with no way past its
+/// warning (guard 3: a flagged page is only ever Chrome's error page).
+/// LocalNetworkAccessRestrictionsEnabled is for Chromes before 158, which
+/// call it unknown.
+pub(crate) const POLICY: &str = r#"{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"], "BrowserSignin": 0, "SyncDisabled": true, "CommandLineFlagSecurityWarningsEnabled": false, "AutofillCreditCardEnabled": false, "AutofillAddressEnabled": false, "PasswordManagerEnabled": false, "BlockThirdPartyCookies": true, "SafeBrowsingProtectionLevel": 1, "DisableSafeBrowsingProceedAnyway": true}"#;
 
 /// Where Google Chrome and Chromium read their managed policy on Linux.
 pub(crate) const CHROME_POLICY: &str = "/etc/opt/chrome/policies/managed";
@@ -189,8 +245,7 @@ fn policy_folders() -> Result<Vec<&'static str>, String> {
 /// its own over each policy folder, holding `POLICY`, so the person's own
 /// Chrome on this computer never reads it (and the browser stays Google's
 /// Chrome, with its updates). Fails closed: no policy, no runner.
-fn own_policy(folders: &[&str]) -> Result<(), String> {
-    use std::os::unix::fs::OpenOptionsExt;
+fn own_policy(folders: &[&str], policy: Policy) -> Result<(), String> {
     let kind = CString::new("tmpfs").unwrap_or_default();
     let options = CString::new("mode=0755,size=64k").unwrap_or_default();
     for folder in folders {
@@ -199,18 +254,67 @@ fn own_policy(folders: &[&str]) -> Result<(), String> {
         if unsafe { libc::mount(kind.as_ptr(), at.as_ptr(), kind.as_ptr(), libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, options.as_ptr().cast()) } != 0 {
             return Err(format!("couldn't give Chrome's policy a folder of its own ({folder}): {}", std::io::Error::last_os_error()));
         }
-        let path = std::path::Path::new(folder).join(POLICY_FILE);
-        let written = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o644)
-            .open(&path)
-            .and_then(|mut file| std::io::Write::write_all(&mut file, POLICY.as_bytes()));
-        if let Err(error) = written {
-            return Err(format!("couldn't write Chrome's policy ({}): {error}", path.display()));
+        if policy == Policy::Written {
+            write_policy(folder)?;
+        }
+    }
+    if policy == Policy::Written {
+        policy_in_place()?;
+    }
+    Ok(())
+}
+
+fn write_policy(folder: &str) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = std::path::Path::new(folder).join(POLICY_FILE);
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, POLICY.as_bytes()));
+    written.map_err(|error| format!("couldn't write Chrome's policy ({}): {error}", path.display()))
+}
+
+/// The runner the gate ran (`browser-runner run-gated`), before anything
+/// else: it must be what the gate makes it, PID 1 of namespaces of its
+/// own, seeing no process outside, with no new privileges, no capability
+/// and the browser user's uid. Then it writes its own Chrome policy into
+/// the folders the gate mounted for it.
+pub(crate) fn gated() -> Result<(), String> {
+    // SAFETY: getpid and getuid can't fail; PR_GET_NO_NEW_PRIVS only reads.
+    let (pid, uid, no_new_privs) = unsafe { (libc::getpid(), libc::getuid(), libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0)) };
+    if pid != 1 {
+        return Err("the browser's runner isn't PID 1 of its own namespace: only Claktory's browser gate runs it".to_owned());
+    }
+    if no_new_privs != 1 {
+        return Err("the browser's runner could still gain privileges: only Claktory's browser gate runs it".to_owned());
+    }
+    if !capabilities_empty()? {
+        return Err("the browser's runner still has capabilities: only Claktory's browser gate runs it".to_owned());
+    }
+    if Some(uid) != browser_uid() {
+        return Err(format!("the browser's runner runs as uid {uid}, not as {}", crate::browser_host::setup::USER));
+    }
+    sees_only_itself()?;
+    let mounts = std::fs::read_to_string("/proc/self/mounts").map_err(|error| format!("couldn't read the browser's mounts: {error}"))?;
+    for folder in [CHROME_POLICY, CHROMIUM_POLICY] {
+        let own = mounts.lines().rfind(|line| line.split_whitespace().nth(1) == Some(folder)).is_some_and(|line| line.starts_with("tmpfs "));
+        if own {
+            write_policy(folder)?;
         }
     }
     policy_in_place().map(drop)
+}
+
+/// The browser user's uid, as the system's users say.
+fn browser_uid() -> Option<libc::uid_t> {
+    let name = CString::new(crate::browser_host::setup::USER).ok()?;
+    // SAFETY: getpwnam with a C string of ours; the entry is read at once,
+    // in this single-threaded start.
+    let entry = unsafe { libc::getpwnam(name.as_ptr()) };
+    // SAFETY: a non-null entry getpwnam returned.
+    (!entry.is_null()).then(|| unsafe { (*entry).pw_uid })
 }
 
 /// The policy folder the browser reads: Chromium's when the browser is
@@ -266,27 +370,41 @@ fn sees_only_itself() -> Result<(), String> {
 /// Every capability the new user namespace gave this process, dropped:
 /// effective, permitted and inheritable, so nothing it starts gets one.
 fn drop_capabilities() -> Result<(), String> {
-    #[repr(C)]
-    struct Header {
-        version: u32,
-        pid: i32,
-    }
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct Data {
-        effective: u32,
-        permitted: u32,
-        inheritable: u32,
-    }
-    const VERSION_3: u32 = 0x2008_0522;
-    let header = Header { version: VERSION_3, pid: 0 };
-    let data = [Data { effective: 0, permitted: 0, inheritable: 0 }; 2];
+    let header = CapHeader { version: CAP_VERSION_3, pid: 0 };
+    let data = [CapData { effective: 0, permitted: 0, inheritable: 0 }; 2];
     // SAFETY: capset with a v3 header and its two data words.
-    if unsafe { libc::syscall(libc::SYS_capset, &header as *const Header, data.as_ptr()) } != 0 {
+    if unsafe { libc::syscall(libc::SYS_capset, &header as *const CapHeader, data.as_ptr()) } != 0 {
         return Err(format!("couldn't drop the browser's capabilities: {}", std::io::Error::last_os_error()));
     }
     Ok(())
 }
+
+/// Whether this process has no capability, effective or permitted.
+fn capabilities_empty() -> Result<bool, String> {
+    let header = CapHeader { version: CAP_VERSION_3, pid: 0 };
+    let mut data = [CapData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+    // SAFETY: capget with a v3 header and room for its two data words.
+    if unsafe { libc::syscall(libc::SYS_capget, &header as *const CapHeader, data.as_mut_ptr()) } != 0 {
+        return Err(format!("couldn't read the browser's capabilities: {}", std::io::Error::last_os_error()));
+    }
+    Ok(data.iter().all(|word| word.effective == 0 && word.permitted == 0))
+}
+
+#[repr(C)]
+struct CapHeader {
+    version: u32,
+    pid: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+const CAP_VERSION_3: u32 = 0x2008_0522;
 
 fn write(path: &str, what: &str) -> Result<(), String> {
     std::fs::write(path, what).map_err(|error| format!("couldn't map the browser's user ({path}): {error}"))

@@ -39,7 +39,7 @@ enum MonitorsShown {
   final List<MonitorState> states;
 }
 
-/// Every agent's monitors in one place (friend bug #10): scheduled jobs,
+/// Every agent's monitors in one place: scheduled jobs,
 /// reminders and watches, by agent, filtered by agent, project and state.
 /// Each agent's name opens its conversation; a monitor opened shows its
 /// prompt and what happened to it, a page at a time. Asked of the backend
@@ -198,7 +198,7 @@ class _MonitorsOverviewState extends State<MonitorsOverview> {
     // Each filter as wide as its words need at the text size (its widest
     // choice, with the field's padding and chevron), up to the page's width,
     // so "Paused or failed" stays on one line on a phone at any size short
-    // of that (Zucchero's rows 390 and 409).
+    // of that.
     final scaler = MediaQuery.textScalerOf(context);
     final phone = touchFirst(context);
     final style = type.body;
@@ -549,15 +549,14 @@ class _MonitorHistoryViewState extends State<MonitorHistoryView> {
           : ' by ${store.agent(event.actor)?.name ?? event.actor}';
       // The detail is what agents read, naming an agent by its id ("fired
       // by kai"): an agent's doing says its name instead, and only what it
-      // waits for stays, from when it was set (Ghiaccio).
+      // waits for stays, from when it was set.
       final detail =
           event.detail.isEmpty ||
               (event.actor.isNotEmpty &&
                   event.kind != MonitorEventKind.MONITOR_EVENT_KIND_CREATED)
           ? ''
-          // The person's doing comes as its detail ("by Matt"), read as an
-          // agent's is: "Paused by Matt", as "Paused by Rivet" (Giorno,
-          // Zucchero's row 408).
+          // The person's doing comes as its detail, read as an agent's is:
+          // "Paused by Matt", as "Paused by Rivet".
           : event.actor.isEmpty && event.detail.startsWith('by ')
           ? ' ${event.detail}'
           : ': ${event.detail}';

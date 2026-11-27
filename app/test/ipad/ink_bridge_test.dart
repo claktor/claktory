@@ -129,14 +129,14 @@ void main() {
       'ev_ready_outline.json': InkReady,
       'ev_error_document_too_large.json': InkError,
       'ev_link_tapped.json': InkLinkTapped,
-      // Phase 4/6's (Gelato's fixtures; the host's use of them comes later).
+      // The host's use of these comes later.
       'ev_ready_handwriting.json': InkReady,
       'ev_ready_handwriting_unavailable.json': InkReady,
       'ev_stroke_interrupted_background.json': InkStrokeInterrupted,
       'ev_stroke_selection_changed.json': InkStrokeSelectionChanged,
-      // A PDF changing while open (Gelato's reload fixtures).
+      // A PDF changing while open.
       'ev_stroke_interrupted_reload.json': InkStrokeInterrupted,
-      // Pencil gestures (Gelato's; Sorbet's type for pencilAction to come).
+      // Pencil gestures (a type for pencilAction to come).
       'ev_tool_changed_squeeze.json': InkToolChanged,
       'ev_pencil_action.json': InkUnknownEvent,
     };

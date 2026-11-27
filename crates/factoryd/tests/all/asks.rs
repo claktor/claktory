@@ -1,4 +1,4 @@
-//! Asks (#208): an agent blocked on something only the person can give asks
+//! Asks: an agent blocked on something only the person can give asks
 //! them with ask_person, a card the person answers or dismisses; the agent
 //! is told which. Pending asks wait across restarts, at most 3 at once.
 
@@ -78,7 +78,7 @@ fn told_count(view: &View) -> usize {
     view.entries.iter().filter(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.source() == v1::EventSource::Factory)).count()
 }
 
-/// A quiet event from Claktory (friend bug #19): it waits, leaving Builder
+/// A quiet event from Claktory: it waits, leaving Builder
 /// idle, until something else wakes it (here the person's message), and
 /// then comes marked quiet; its text, the `count`th event from Claktory.
 async fn told_quietly(client: &mut Client, view: &mut View, count: usize) -> String {
@@ -139,7 +139,7 @@ async fn a_dismissed_ask_tells_the_agent_to_use_its_judgment_and_a_yes_needs_no_
     let (seq, _) = first.expect("a card");
     apply_request(&mut client, &mut view, answer(seq, true, "")).await;
     assert_eq!(card(&view, seq).state(), AskPersonState::Dismissed);
-    // Dismissed without a word, it's told quietly (friend bug #19): at
+    // Dismissed without a word, it's told quietly: at
     // Builder's next wake, never waking it.
     let text = told_quietly(&mut client, &mut view, 1).await;
     assert!(text.starts_with("The person dismissed your question \"Deploy to production tonight?\""), "{text}");
@@ -161,7 +161,7 @@ async fn a_dismissed_ask_tells_the_agent_to_use_its_judgment_and_a_yes_needs_no_
     assert!(text.starts_with("The person answered your question \"Delete the old bucket?\": yes, go ahead."), "{text}");
 }
 
-/// Submit (#370): a comment instead of Approve or Dismiss is a reply,
+/// Submit: a comment instead of Approve or Dismiss is a reply,
 /// neither a yes nor a no. The agent gets the person's words to act on.
 #[tokio::test]
 async fn a_reply_is_told_as_the_persons_words_never_as_a_yes() {

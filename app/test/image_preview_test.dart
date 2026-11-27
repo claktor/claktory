@@ -1,4 +1,4 @@
-// Images as previews made for the screen (#379): a phone asks for one and
+// Images as previews made for the screen: a phone asks for one and
 // says it's a preview, with Show original beside it; the original comes in
 // its place with nothing moving, by itself once zoomed past the preview's
 // sharpness; and a Mac on a normal link gets the original as before.
@@ -188,7 +188,7 @@ void main() {
     expect(badge.right, lessThanOrEqualTo(393));
   });
 
-  // Zucchero's #379 row: at AX5 on an SE the badge took most of the
+  // At AX5 on an SE the badge took most of the
   // picture. It grows with the text only so far.
   testWidgets('at the largest text on a small iPhone, the badge grows no '
       'more than at 1.5x and leaves the picture to see', (tester) async {

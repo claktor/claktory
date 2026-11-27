@@ -82,7 +82,7 @@ struct Inner {
 }
 
 /// Where `claktory-speech` is: `FACTORY_SPEECH`, or beside factoryd's own
-/// program (links resolved: friend bug #24), or else this version's in the
+/// program (links resolved), or else this version's in the
 /// home's releases, then the installed one in its `bin`, for a backend
 /// started from somewhere else.
 pub(crate) fn program(home: &crate::home::Home) -> Option<PathBuf> {
@@ -444,7 +444,7 @@ mod program_tests {
 
     /// A backend started from somewhere else (through a link on PATH, say)
     /// still finds this version's speech host in the home's releases, else
-    /// the installed one in its bin (friend bug #24).
+    /// the installed one in its bin.
     #[test]
     fn a_backend_started_from_elsewhere_finds_the_installed_speech_host() {
         if std::env::var_os("FACTORY_SPEECH").is_some() || crate::update::beside_backend(crate::update::SPEECH_HOST).is_some() {

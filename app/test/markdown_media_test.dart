@@ -1,11 +1,11 @@
-// Pictures and videos in a Markdown file (#540, Matt via Bruno 41298): a
-// picture beside the file, or at an absolute path, shows in place, read as
-// the image viewer reads it, never wider than the text; a click opens it in
-// its own pane, a right click offers Open and Share…; a video is a card
-// with Play that opens the video viewer. Never fetched (Fugo, 41320): a
-// picture on the web is a link; a path that isn't a picture or video isn't
-// read; an SVG isn't read; a file named as a picture that isn't one is
-// never kept on the device. One that can't show says so under its words.
+// Pictures and videos in a Markdown file: a picture
+// beside the file, or at an absolute path, shows in place, read as the
+// image viewer reads it, never wider than the text; a click opens it in its
+// own pane, a right click offers Open and Share…; a video is a card with
+// Play that opens the video viewer. Never fetched: a picture on the web is
+// a link; a path that isn't a picture or video isn't read; an SVG isn't
+// read; a file named as a picture that isn't one is never kept on the
+// device. One that can't show says so under its words.
 import 'dart:convert';
 import 'dart:io';
 
@@ -55,9 +55,10 @@ Future<Harness> _show(
   String markdown, {
   Map<String, FileContent> files = const {},
   Size size = const Size(1400, 900),
+  String doc = _doc,
 }) async {
-  final harness = Harness(snapshot(layout: beside('text', _doc)));
-  harness.backend.files[_doc] = text(_doc, markdown, mime: 'text/markdown');
+  final harness = Harness(snapshot(layout: beside('text', doc)));
+  harness.backend.files[doc] = text(doc, markdown, mime: 'text/markdown');
   harness.backend.files.addAll(files);
   await harness.show(tester, size: size);
   await _working(tester);
@@ -96,6 +97,75 @@ void main() {
       expect(markdownMediaKind('/a/b.svg'), isNull);
       expect(markdownMediaKind('/a/.ssh/id_ed25519'), isNull);
       expect(markdownMediaKind('/a/b.png.txt'), isNull);
+      expect(markdownMediaKind(r'C:\x.y\Shot.PNG'), MarkdownMediaKind.picture);
+    });
+
+    // As the backend's embeds::markdown_path names them (its
+    // a_file_on_windows_names_its_pictures_as_windows_does).
+    test('a file on Windows names its pictures as Windows does', () {
+      const file = r'C:\Users\ann\notes\plan.md';
+      expect(markdownPath(file, 'shot.png'), r'C:\Users\ann\notes\shot.png');
+      expect(
+        markdownPath(file, 'img/shot.png'),
+        r'C:\Users\ann\notes\img\shot.png',
+      );
+      expect(
+        markdownPath(file, r'.\img\..\shot.png?v=2#top'),
+        r'C:\Users\ann\notes\shot.png',
+      );
+      expect(markdownPath(file, '../a%20b.png'), r'C:\Users\ann\a b.png');
+      expect(
+        markdownPath(file, r'D:\pics\x.png'),
+        r'D:\pics\x.png',
+        reason: "a drive isn't a scheme",
+      );
+      expect(markdownPath(file, 'd:/pics/x.png'), r'd:\pics\x.png');
+      expect(markdownPath(file, r'\tmp\x.png'), r'C:\tmp\x.png');
+      expect(markdownPath(file, 'file:///D:/a%20b.png'), r'D:\a b.png');
+      expect(markdownPath(file, '~/Desktop/x.png'), r'~/Desktop\x.png');
+      expect(markdownPath(file, r'~\Desktop\x.png'), r'~/Desktop\x.png');
+      expect(markdownPath(file, 'https://example.com/x.png'), isNull);
+      expect(markdownPath(file, '../../../../x.png'), isNull);
+      // A POSIX file's names are as before, backslashes and all.
+      expect(markdownPath('/n/doc.md', r'a\b.png'), r'/n/a\b.png');
+    });
+
+    // Reading another computer's share sends it this user's sign-in
+    // (NTLM): only the shown file's own share.
+    test("a file on Windows never names another computer's share", () {
+      const file = r'C:\Users\ann\notes\plan.md';
+      for (final src in [
+        r'\\nas\photos\x.png',
+        '//attacker.example/x/y.png',
+        r'\\evil\s\x.png',
+        '//evil/s/x.png',
+        '%5C%5Cevil%5Cs%5Cx.png',
+        'file:////evil/s/x.png',
+        r'\\evil@SSL\s\x.png',
+        r'\\?\C:\x.png',
+      ]) {
+        expect(markdownPath(file, src), isNull, reason: src);
+      }
+      // The host of file://host/… is dropped: the file's own drive.
+      expect(markdownPath(file, 'file://evil/s/x.png'), r'C:\s\x.png');
+      // Device paths are never a share either: nothing.
+      expect(markdownPath(file, r'\\?\UNC\evil\s\x.png'), isNull);
+      expect(markdownPath(file, r'\\.\UNC\evil\s\x.png'), isNull);
+      // Home stays home, and a drive-relative name is local.
+      expect(markdownPath(file, r'~/\\evil\s'), r'~/evil\s');
+      expect(markdownPath(file, 'C:x.png'), r'C:\Users\ann\notes\C:x.png');
+
+      const shared = r'\\nas\docs\plan.md';
+      expect(markdownPath(shared, 'shot.png'), r'\\nas\docs\shot.png');
+      expect(
+        markdownPath(shared, r'\\nas\docs\img\x.png'),
+        r'\\nas\docs\img\x.png',
+      );
+      expect(markdownPath(shared, '//NAS/docs/x.png'), r'\\nas\docs\x.png');
+      expect(markdownPath(shared, r'\\nas\other\x.png'), isNull);
+      expect(markdownPath(shared, r'\img\x.png'), r'\\nas\docs\img\x.png');
+      expect(markdownPath(r'\\evil\other\plan.md', r'\\EVIL\S'), isNull);
+      expect(markdownPath(r'\\evil\other\plan.md', r'\\EVIL\S\x.png'), isNull);
     });
   });
 
@@ -240,6 +310,20 @@ void main() {
     expect(find.text("Can't show gone.png"), findsOneWidget);
   });
 
+  testWidgets("a Windows picture that can't show says only its file's name", (
+    tester,
+  ) async {
+    await _show(
+      tester,
+      r'![x](\\192.0.2.1\share\e1.png) ![y](~\Desktop\gone.png)'
+      '\n',
+      doc: r'C:\w\docs\notes.md',
+    );
+    expect(find.text("Can't show e1.png"), findsOneWidget);
+    expect(find.text("Can't show gone.png"), findsOneWidget);
+    expect(find.textContaining('192.0.2.1'), findsNothing);
+  });
+
   testWidgets('a file named as a picture that is not one is not shown, and '
       'never kept on the device', (tester) async {
     final folder = Directory.systemTemp.createTempSync('md-kept');
@@ -380,7 +464,7 @@ void main() {
       // A page over the document, not a pane in its place.
       expect(find.byType(ImageViewer), findsOneWidget);
       expect(harness.backend.sent.where((m) => m.hasSetLayout()), isEmpty);
-      // Back comes back to the document (Zucchero's row 601).
+      // Back comes back to the document.
       await tester.tap(find.bySemanticsLabel('Back').last);
       await pumpFrames(tester);
       expect(find.byType(ImageViewer), findsNothing);

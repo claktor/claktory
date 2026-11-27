@@ -1,4 +1,4 @@
-//! Needs you's focus mode (#514): each device's own focus mode, kept in the
+//! Needs you's focus mode: each device's own focus mode, kept in the
 //! backend; which device decided each card; and watching a conversation
 //! without selecting it (focus mode's Context).
 

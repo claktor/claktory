@@ -668,7 +668,19 @@ impl Drop for SecretFiles {
 /// (sudo…) is stopped, and said in its output (`factory_agent::tools::asking`).
 async fn run_check(agent: &str, folder: &Path, command: &str, last_fired: i64, path: &str, environment: &[(String, Zeroizing<String>)]) -> CheckRun {
     use tokio::io::AsyncReadExt;
-    let spawned = tokio::process::Command::new("bash")
+    // Claktory's own Git Bash on Windows, in a job of its own, as agents'
+    // commands are (`factory_agent::windows::shell`).
+    #[cfg(windows)]
+    let spawned = factory_agent::windows::shell::Shell::get().and_then(|shell| {
+        let mut extra = environment.to_vec();
+        extra.push(("FACTORY_MONITOR_LAST_FIRED".to_owned(), Zeroizing::new(last_fired.to_string())));
+        extra.push(("PATH".to_owned(), Zeroizing::new(path.to_owned())));
+        let environment = shell.environment(std::env::vars_os(), &extra)?;
+        shell.spawn_check(folder, command, environment).map(|(child, _)| child)
+    });
+    // Under what agents' commands run under (factory_agent::tools::confine).
+    #[cfg(unix)]
+    let spawned = factory_agent::tools::confine::command("bash")
         .args(["--noprofile", "--norc", "-o", "pipefail", "-c", &format!("exec 2>&1\n{command}")])
         .env("FACTORY_MONITOR_LAST_FIRED", last_fired.to_string())
         .env("PATH", path)

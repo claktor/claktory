@@ -282,11 +282,11 @@ class AppUpdater {
   final int leastPiece;
   final int mostPiece;
 
-  /// While the connection goes by a relay rather than directly (friend bug
-  /// #51): pieces of at most [relayedPiece], at most [relayedRate] bytes a
-  /// second, so the download doesn't crowd the relay (which may throttle
-  /// it) and the connection's own messages and pings. 50 MB takes about 3
-  /// minutes so; once the path is direct it goes at the link's pace again.
+  /// While the connection goes by a relay rather than directly: pieces of
+  /// at most [relayedPiece], at most [relayedRate] bytes a second, so the
+  /// download doesn't crowd the relay (which may throttle it) and the
+  /// connection's own messages and pings. 50 MB takes about 3 minutes so;
+  /// once the path is direct it goes at the link's pace again.
   final int relayedPiece;
   final int relayedRate;
 

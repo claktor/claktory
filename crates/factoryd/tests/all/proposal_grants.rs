@@ -1,4 +1,4 @@
-//! Grants on a proposal (v0.1.22; Bruno 29146, Fugo 29187): an agent names
+//! Grants on a proposal: an agent names
 //! exactly what it asks Rivet to give; the person approves the proposal
 //! once, and Rivet makes it with the proposal's id and no second card, but
 //! only within what it named, once, within a day, while Rivet hasn't read
@@ -223,7 +223,7 @@ async fn some_grants_are_refused_and_deleting_an_apps_data_always_asks() {
     assert!(proposal.is_none() && said.contains("so your proposal can't carry grants"), "{said}");
 }
 
-/// Abbacchio 30516: a call that doesn't fit is told why by the grants of
+/// A call that doesn't fit is told why by the grants of
 /// its own kind, numbered as Rivet's message numbers them, and the others
 /// left out.
 #[tokio::test(flavor = "multi_thread")]
@@ -272,7 +272,7 @@ async fn propose_joining(client: &mut Client, view: &mut View, name: &str) -> St
     id
 }
 
-/// Fugo 29531: a pipe grant covers only the agents and the other side it
+/// A pipe grant covers only the agents and the other side it
 /// was approved for, and none that has read from outside since: an agent
 /// deleted and made again, another key at the other end, or Cy marked
 /// after the approval each get the card.
@@ -334,7 +334,7 @@ async fn dismiss(client: &mut Client, view: &mut View) {
     apply_request(client, view, Request::AnswerAsk(v1::AnswerAsk { agent_id: "rivet".into(), seq, dismiss: true, ..Default::default() })).await;
 }
 
-/// Fugo 29531: an agent given an app's access that has read from outside
+/// An agent given an app's access that has read from outside
 /// since the approval gets the card.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_app_grant_to_an_agent_marked_since_gets_its_card() {
@@ -352,7 +352,7 @@ async fn an_app_grant_to_an_agent_marked_since_gets_its_card() {
     assert!(!conversations_on(&view));
 }
 
-/// Abbacchio rows 1193-1195: continuing a pipe its agents' looping paused
+/// Continuing a pipe its agents' looping paused
 /// always gets a card of its own, so a proposal can't name it as a grant
 /// (its card would tell the person something no approval does).
 #[tokio::test(flavor = "multi_thread")]
@@ -368,7 +368,7 @@ async fn continuing_a_looped_pipe_is_never_a_grant() {
     assert!(said.contains("Continuing a pipe its agents' looping paused always needs a request of its own"), "{said}");
 }
 
-/// #471: renaming a pipe, changing its words, raising its liaison's
+/// Renaming a pipe, changing its words, raising its liaison's
 /// spending limit or deleting it always asks on a card that shows exactly
 /// that, never as a proposal's grant.
 #[tokio::test]

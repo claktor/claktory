@@ -198,7 +198,7 @@ class TranscriptStore extends ChangeNotifier {
 
   /// The revision of this conversation last applied
   /// (ServerMessage.transcript_revision), sent back in Hello so a
-  /// reconnect brings only what changed since (#413); empty when none is
+  /// reconnect brings only what changed since; empty when none is
   /// held (an older Claktory, or nothing loaded).
   String get heldRevision => _heldRevision;
   var _heldRevision = '';

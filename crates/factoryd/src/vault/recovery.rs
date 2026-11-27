@@ -83,7 +83,7 @@ impl Vault {
         Ok(Some(Zeroizing::new(String::from_utf8_lossy(&opened).into_owned())))
     }
 
-    /// The vault is sealed to the account's recovery key (#239): covered by
+    /// The vault is sealed to the account's recovery key: covered by
     /// it, rather than by a key of its own.
     pub(super) fn account_covered(db: &Connection) -> Result<bool, VaultError> {
         Ok(account_recovery::generation(db)?.is_some())
@@ -123,7 +123,7 @@ impl Vault {
 
     /// Whether the vault, open, holds a recovery key of its own the person
     /// hasn't confirmed (VaultState.recovery_key_unconfirmed); covered by the
-    /// account's (#239), nothing is asked. False while locked.
+    /// account's, nothing is asked. False while locked.
     pub(super) fn recovery_unconfirmed(inner: &Inner) -> Result<bool, VaultError> {
         let Some(vmk) = inner.vmk.as_deref() else { return Ok(false) };
         let db = Self::db(inner)?;

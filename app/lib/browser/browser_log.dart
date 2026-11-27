@@ -29,7 +29,7 @@ const browserLogPage = 100;
 /// Whether the backend has browser control: a backend without it (its
 /// preview off) has no such extension.
 bool browserControlAvailable(Workspace workspace) =>
-    workspace.extensions.any((extension) => extension.id == 'browser');
+    workspace.extensions.any((extension) => extension.id == 'browser_control');
 
 /// What an entry says happened. [agent] is the agent's name, [device] the
 /// device's, '' when not known.

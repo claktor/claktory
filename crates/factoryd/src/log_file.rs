@@ -8,7 +8,9 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -45,6 +47,7 @@ pub(crate) async fn watch(log: PathBuf) {
 /// file, opened to append, and bigger than `cap`: copies it to `log.1`
 /// (after moving the older ones up) and empties it. A writer at its own
 /// place would leave a hole, so then it's left alone. Whether it rotated.
+#[cfg(unix)]
 pub fn rotate(log: &Path, output: &impl AsRawFd, cap: u64) -> std::io::Result<bool> {
     let fd = output.as_raw_fd();
     // SAFETY: fd is open for as long as `output` is; F_GETFL only reads its flags.
@@ -78,6 +81,39 @@ pub fn rotate(log: &Path, output: &impl AsRawFd, cap: u64) -> std::io::Result<bo
     let file = std::fs::OpenOptions::new().write(true).open(log)?;
     let check = file.metadata()?;
     if check.ino() != ours.st_ino as u64 {
+        return Ok(false);
+    }
+    file.set_len(0)?;
+    Ok(true)
+}
+
+/// As above, on Windows: `output` is the log when it's the same file
+/// (volume and index) opened to append only (FILE_APPEND_DATA without
+/// FILE_WRITE_DATA), which writes at the end whatever its length.
+#[cfg(windows)]
+pub fn rotate(log: &Path, output: &impl std::os::windows::io::AsRawHandle, cap: u64) -> std::io::Result<bool> {
+    use crate::windows::fs::{appends_only, identity, identity_of};
+    if !appends_only(output).unwrap_or(false) {
+        return Ok(false);
+    }
+    let Ok(ours) = identity_of(output) else { return Ok(false) };
+    let Ok(at) = std::fs::metadata(log) else { return Ok(false) };
+    if !at.is_file() || identity(log).ok() != Some(ours) || at.len() <= cap {
+        return Ok(false);
+    }
+    let old = |n: u32| PathBuf::from(format!("{}.{n}", log.display()));
+    let _ = std::fs::remove_file(old(KEPT));
+    for n in (1..KEPT).rev() {
+        match std::fs::rename(old(n), old(n + 1)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    let mut from = std::fs::File::open(log)?;
+    let mut to = std::fs::OpenOptions::new().write(true).create_new(true).open(old(1))?;
+    std::io::copy(&mut from, &mut to)?;
+    let file = std::fs::OpenOptions::new().write(true).open(log)?;
+    if identity_of(&file)?.index != ours.index {
         return Ok(false);
     }
     file.set_len(0)?;

@@ -1,5 +1,5 @@
 //! One of the person's Claktories that isn't their home introduces itself
-//! to the home over `claktory-dm/1` (#451 H2; Fugo 32512), so the home can
+//! to the home over `claktory-dm/1`, so the home can
 //! send it the messages of the groups its leaf is in, and take its own.
 //!
 //! - **What it proves.** The Claktory's leaf is on the person's current
@@ -19,11 +19,11 @@
 //!   already bound is let in as a route, without waiting on those limits.
 //!
 //! A friend's new home introduces itself the same way, with its person's
-//! signed device list naming it their home (`HomeList`, row 595, Fugo
-//! 41473): the home takes it under its leaf's pin for that friend (from the
-//! person's own devices) and moves only the groups already routed to that
-//! friend there, so a friend who moved while all the person's devices were
-//! off is still reached. Within the same limits; its list may be 16 KiB.
+//! signed device list naming it their home (`HomeList`): the home takes it
+//! under its leaf's pin for that friend (from the person's own devices) and
+//! moves only the groups already routed to that friend there, so a friend
+//! who moved while all the person's devices were off is still reached.
+//! Within the same limits; its list may be 16 KiB.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -322,7 +322,7 @@ mod tests {
         assert!(!verify(&key.public(), content(&home, &from, 1000, "ann", "ann-mac"), &bare));
     }
 
-    /// Row 595 (Fugo 41473): a friend's new home is taken only from that
+    /// A friend's new home is taken only from that
     /// friend's list under the pin the person's devices gave, current and
     /// seen, never older than what was taken, naming the endpoint dialling.
     #[test]
@@ -375,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hello_is_read_strictly() {
+    fn a_hello_takes_no_field_its_signature_doesnt_cover() {
         let hello = r#"{"kind":"hello","account_id":"ann","leaf_id":"x","at_ms":1,"signature":"AA"}"#;
         assert!(serde_json::from_str::<Hello>(hello).is_ok());
         let more = r#"{"kind":"hello","account_id":"ann","leaf_id":"x","at_ms":1,"signature":"AA","endpoint":"ff"}"#;

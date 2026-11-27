@@ -1,4 +1,4 @@
-// The conversation's scrollbar (#237): steady while scrolling a long
+// The conversation's scrollbar: steady while scrolling a long
 // conversation of very different heights, where the app's own scrollbar,
 // driven by Flutter's estimate of a lazily built list, jumped up and down.
 import 'package:factory_app/conversation_scrollbar.dart';

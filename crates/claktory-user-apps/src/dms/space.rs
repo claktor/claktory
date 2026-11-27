@@ -1,9 +1,9 @@
-//! How much of the account box's disk DMs may take (#448; Fugo's sizing,
-//! narrowed for #451, when the worker stopped keeping messages: what's left
-//! is the control plane, commits, a leaf's own Remove proposal and the
-//! Welcomes commits make). The box's 20 GB disk is shared with the account
-//! service, whose writes (sign-in, the vault's service share, check-ins)
-//! fail for everyone if it fills, so:
+//! How much of the account box's disk DMs may take (narrowed when
+//! the worker stopped keeping messages: what's left is the
+//! control plane, commits, a leaf's own Remove proposal and the Welcomes
+//! commits make). The box's 20 GB disk is shared with the account service,
+//! whose writes (sign-in, the vault's service share, check-ins) fail for
+//! everyone if it fills, so:
 //!
 //! - **The disk guard.** Before anything new is stored (a mailbox entry, a
 //!   Welcome, a KeyPackage, an agent's proposal digest, a hand-off), the free
@@ -351,7 +351,7 @@ fn free(transaction: &Transaction<'_>, kept: Kept, which: &str, values: &[&dyn T
 
 /// A friendship's end (removed, blocked, an account deleted): what each of
 /// the two sent the other in their conversation stops counting for the
-/// other at once (Fugo), while the entries stay for the drain until their
+/// other at once, while the entries stay for the drain until their
 /// time. Welcomes between them in it, which no one can use now, go.
 pub fn release(transaction: &Transaction<'_>, conversation: &str) -> rusqlite::Result<()> {
     let groups = "group_id IN (SELECT group_id FROM dm_groups WHERE conversation_id = ?1 AND kind = 'conversation')";

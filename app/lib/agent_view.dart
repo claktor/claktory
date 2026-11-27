@@ -15,9 +15,6 @@ import 'characters/character.dart';
 import 'connection.dart';
 import 'controls.dart';
 import 'conversation_find.dart' show ConversationFind;
-import 'errands/browser_session.dart'
-    show agentBrowserAvailable, runningErrandOf;
-import 'errands/errand_controls.dart' show ErrandHeaderControls;
 import 'find.dart' show ClearOfFindBar, FindSessions;
 import 'forms.dart';
 import 'highlights.dart' show Glow;
@@ -192,7 +189,7 @@ class _AgentViewState extends State<AgentView> {
               // Its browser sessions: waiting, running, just ended.
               BrowserSessionStrip(agentId: agent.id),
               ArchivedLine(agent: agent),
-              // Back to its own provider once it has room (#341).
+              // Back to its own provider once it has room.
               UsageSwitchLine(id: agent.id),
               // One line above the box, so the box never changes as the
               // agent starts and stops: reconnecting, else working with
@@ -272,9 +269,6 @@ class _AgentViewState extends State<AgentView> {
                     workspace.models.isEmpty,
                     workspace.pipes,
                     workspace.extensions,
-                    // Its errand's controls (Claktory's browser).
-                    workspace.errands,
-                    workspace.agentBrowser,
                   ],
                   builder: (_) => _Header(
                     agent: agent,
@@ -315,7 +309,7 @@ class _AgentViewState extends State<AgentView> {
   }
 }
 
-/// The agent's bar, in its color (agent-view.md §3): its character and
+/// The agent's bar, in its color: its character and
 /// name, a button to its settings; its model · effort, a control that
 /// changes them in place; its marks; then its Checklist (and Tasks, while
 /// they run), its context meter and ⋯, its menu. Nothing else in it is a
@@ -384,10 +378,10 @@ class _Header extends StatelessWidget {
   static const _nameInset = Space.xs + 2;
 
   /// The empty space kept between the marks and the panel buttons, to
-  /// drag the window by (Polnareff).
+  /// drag the window by.
   static const dragRoom = 80.0;
 
-  /// How much has given way in [width] (agent-view.md §3), in order: 1,
+  /// How much has given way in [width], in order: 1,
   /// Tasks drops its words to its glyph and count; 2, Checklist does; 3,
   /// the meter goes; 4, the effort leaves the model control; 5, the role
   /// under the name goes. Past that the name is cut. The model control and
@@ -417,9 +411,6 @@ class _Header extends StatelessWidget {
     final nameWidth = measure(agent.name, labelStyle);
     final panels = _panels(workspace);
     final target = touch ? Metrics.of(context).target : 28.0;
-    final errand =
-        agentBrowserAvailable(workspace) &&
-        runningErrandOf(workspace, agent.id) != null;
     double need(int level) {
       var total = Space.xl - _nameInset + Space.m + dragRoom;
       // Character and name, in their button.
@@ -451,15 +442,6 @@ class _Header extends StatelessWidget {
       }
       if (level < 3) {
         total += Space.m + 40 + Space.s + measure(_meterLabel, type.caption);
-      }
-      // Its errand in Claktory's browser, while it runs one: the errand
-      // and Stop.
-      if (errand) {
-        total +=
-            2 * Space.s +
-            target +
-            2 * (touch ? Touch.gutter : Space.m) +
-            measure('Stop', touch ? PhoneType.label : TextStyles.label);
       }
       // ⋯.
       return total + Space.s + target;
@@ -596,8 +578,6 @@ class _Header extends StatelessWidget {
     final right = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // Its errand in Claktory's browser: the errand, and Stop.
-        ErrandHeaderControls(agent: agent),
         for (final (id, extension) in panels) ...[
           const SizedBox(width: Space.s),
           Glow(
@@ -704,7 +684,7 @@ class _NameButton extends StatelessWidget {
       ].join(', '),
       hint: 'Opens agent settings',
       // Its own element, which VoiceOver presses as a click does
-      // (Abbacchio's row 1615).
+      // .
       container: true,
       onTap: () => showAgentSettings(context, agent),
       excludeSemantics: true,
@@ -1011,8 +991,7 @@ class _PanelButton extends StatelessWidget {
     };
     return Semantics(
       button: true,
-      // A toggle without it reads to iOS as a dimmed switch (Zucchero's
-      // row 695).
+      // A toggle without it reads to iOS as a dimmed switch.
       enabled: true,
       toggled: active,
       label: said,
@@ -1230,7 +1209,7 @@ class _ContextMeter extends StatelessWidget {
 /// tries fail (the machine off, asleep or offline), it says it can't
 /// connect and what to do, as the Claktory's connection line does. A tap
 /// (a click on a Mac) reconnects from scratch at once, as relaunching the
-/// app would (#214).
+/// app would.
 class ReconnectingLine extends StatefulWidget {
   const ReconnectingLine({super.key, this.otherwise = const SizedBox.shrink()});
 
@@ -1464,7 +1443,7 @@ class WorkingLine extends StatelessWidget {
                 onPressed: onStop,
               );
               // Held up by usage: what it waits for, and what can be done
-              // about it (#341).
+              // about it.
               if (wait.isNotEmpty && waiting.isNotEmpty) {
                 return UsageWaitActionLine(
                   wait: wait,

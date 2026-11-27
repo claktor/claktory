@@ -1,4 +1,4 @@
-//! History's events (#458 B3): every message, card, proposal, request for a
+//! History's events: every message, card, proposal, request for a
 //! secret and pipe message, and when agents worked, read from where each
 //! is kept, merged in time order and paged by a cursor. What's said is
 //! never read, but for telling a list send's copies apart in messages from
@@ -19,7 +19,7 @@ pub(super) enum Source {
 }
 
 /// A row of an agent's, not of a chat's (`crate::chats::PREFIX`): chats
-/// are the person's own conversations, never part of History (#473).
+/// are the person's own conversations, never part of History.
 const NOT_A_CHAT: &str = "substr(agent, 1, 5) != 'chat:'";
 
 const SOURCES: [Source; 6] = [Source::Messages, Source::Asks, Source::Proposals, Source::Requests, Source::PipeOut, Source::Runs];

@@ -138,10 +138,16 @@ impl std::fmt::Debug for Store {
 /// The file opened as the store must be, with no key: for forgetting.
 fn connect(path: &Path) -> rusqlite::Result<Connection> {
     let db = Connection::open(path)?;
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
+    #[cfg(windows)]
+    let _ = factory_agent::windows::private::protect(path);
+    // Private anyway, by the home's DACL: a test notices if not.
+    #[cfg(windows)]
+    debug_assert!(factory_agent::windows::system::is_private_path(path).unwrap_or(false), "{} isn't private", path.display());
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     db.pragma_update(None, "secure_delete", "ON")?;
     // Answers the mode it's in.
@@ -330,6 +336,9 @@ mod tests {
         drop(again);
 
         // Another vault: the store is started over, nothing of it read.
+        // Windows deletes no file that's open: the first vault's closes first.
+        #[cfg(windows)]
+        drop(first);
         std::fs::remove_dir_all(home.root().join("vault")).unwrap();
         let second = vault(home);
         let fresh = Store::open(home, &second).unwrap();

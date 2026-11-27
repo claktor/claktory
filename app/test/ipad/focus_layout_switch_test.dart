@@ -59,8 +59,8 @@ Future<Harness> _show(WidgetTester tester, Size size) async {
   final harness = Harness(_waiting());
   harness.backend.entriesById
     ..['june/1'] = _ask(1, 30)
-    ..['june/2'] = _ask(2, 5)
-    ..['mista/7'] = _ask(7, 60);
+    ..['june/2'] = _ask(2, 60)
+    ..['mista/7'] = _ask(7, 5);
   final focus = WorkbenchFocus();
   addTearDown(focus.dispose);
   await harness.show(

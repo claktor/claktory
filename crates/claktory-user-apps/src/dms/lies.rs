@@ -1,6 +1,5 @@
-//! Lies, for QA only (Fugo's E11 hostile pass, section D; Abbacchio 40035,
-//! Bruno 40066): a worker that answers the person's devices falsely on
-//! purpose, so their checks can be seen to hold against a worker that
+//! Lies, for QA only: a worker that answers the person's devices falsely
+//! on purpose, so their checks can be seen to hold against a worker that
 //! lies. Built only with the `qa-lies` feature, which a release build
 //! refuses (below), so no deployed worker can carry it. Each lie is off
 //! unless its variable is set in the worker's environment:

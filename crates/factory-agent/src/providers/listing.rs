@@ -1,4 +1,4 @@
-//! Model lists read from the providers themselves (friend bug #14), so a
+//! Model lists read from the providers themselves, so a
 //! new model shows up without waiting for a Claktory update: Anthropic's
 //! and OpenAI's `GET /v1/models` and Codex's `GET /codex/models`, with the
 //! signed-in account (OpenRouter's is `catalog::parse_openrouter`, U4).
@@ -536,7 +536,7 @@ fn dated(id: &str) -> bool {
     id.rsplit('-').next().is_some_and(|last| last.len() == 8 && last.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
-/// The newer version of the model `current` among `ids` (#404), the same
+/// The newer version of the model `current` among `ids`, the same
 /// provider's: the newest one of its line with a higher version, if any.
 /// An id's line is its words, its version its numbers, the same rule for
 /// every provider, as each puts its versions in its ids: Anthropic's

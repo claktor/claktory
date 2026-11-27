@@ -1,7 +1,7 @@
-// Which account requests go to, and saying so only when it's true (#343
-// U1, U10): "In use" only while an agent or chat runs on the provider's
-// models, Fable's own pool counted and its limit shown per account, and a
-// provider signed in to that none of the agents use says so.
+// Which account requests go to, and saying so only when it's true: "In
+// use" only while an agent or chat runs on the provider's models, Fable's
+// own pool counted and its limit shown per account, and a provider signed
+// in to that none of the agents use says so.
 import 'package:factory_app/login.dart' show ProviderCard;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';

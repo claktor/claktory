@@ -3,20 +3,19 @@
 //! person about. Never to act on: the alert says so.
 //!
 //! A sampler started with Factory reads the machine and its processes every
-//! minute (`sample`) and keeps the last hour in memory; what Factory's data
-//! and projects take on disk is measured in the background every 20 minutes
-//! (`disk`). When memory stays above `resources.ram_percent`, a volume
-//! Factory uses runs short of space, or (if set) the processors stay busier
-//! than `cpu_percent`, the admin agents with the extension on hear it once,
-//! as a Factory event; it's said again only after the machine recovered.
-//! What was said and still holds is kept in factory.db (#455), so a restart
-//! doesn't say it again while the machine is still short.
-//! A process that uses a full core in every sample for an hour, owned by
-//! no agent's task, watch or running command (Part 2 #4: a leftover
-//! `cat /dev/zero` did for 37 hours), is told the same way, once while it
-//! lives. Other agents with it on can look, but aren't told (friend bug #13: one
-//! owner for the machine's health). When no admin agent can take it,
-//! Claktory notifies the person itself.
+//! minute (`sample`) and keeps the last hour in memory; what Factory's data and
+//! projects take on disk is measured in the background every 20 minutes
+//! (`disk`). When memory stays above `resources.ram_percent`, a volume Factory
+//! uses runs short of space, or (if set) the processors stay busier than
+//! `cpu_percent`, the admin agents with the extension on hear it once, as a
+//! Factory event; it's said again only after the machine recovered. What was
+//! said and still holds is kept in factory.db, so a restart doesn't say it again
+//! while the machine is still short. A process that uses a full core in every
+//! sample for an hour, owned by no agent's task, watch or running command (Part
+//! 2 #4: a leftover `cat /dev/zero` did for 37 hours), is told the same way,
+//! once while it lives. Other agents with it on can look, but aren't told (one
+//! owner for the machine's health). When no admin agent can take it, Claktory
+//! notifies the person itself.
 
 mod disk;
 mod sample;
@@ -39,7 +38,7 @@ use crate::transcript::now_ms;
 
 pub(crate) const ID: &str = "resources";
 
-/// What was said about the machine and still holds (#455), by what it's
+/// What was said about the machine and still holds, by what it's
 /// about, so a restart doesn't say it again.
 pub(crate) const SCHEMA: &str = "
 -- Alerts about this machine that were given and still hold (#455), by what
@@ -475,7 +474,7 @@ fn check(
     // last hour, owned by no agent's task (Part 2 #4): told once while it
     // lives, whatever it does after. Judged by its processor time, never
     // sample by sample, so a loaded machine that starves it now and then
-    // doesn't hide it (#490, row 1243), and by the clock, so samples far
+    // doesn't hide it, and by the clock, so samples far
     // apart (a machine asleep) don't make one.
     let at = now.sampled;
     now.strays.retain(|id, stray| alive.contains(id) && (stray.told || at.saturating_sub(stray.seen) <= stray_ms));
@@ -535,8 +534,8 @@ fn stray(about: &str) -> Option<(u32, u64)> {
 
 /// Takes a sample in: history, alerts and the panel. An alert goes to the
 /// agents that look after the machine (`keepers`: the admin agents unless
-/// the person chose otherwise, and those they chose, friend bugs #13 and
-/// #54); with none, Claktory tells the person itself.
+/// the person chose otherwise, and those they chose); with none, Claktory
+/// tells the person itself.
 fn record(factory: &Arc<Factory>, sampled: sample::Sample) {
     let time = now_ms();
     let (lines, config) = {
@@ -594,7 +593,7 @@ fn record(factory: &Arc<Factory>, sampled: sample::Sample) {
 fn keep(factory: &Factory, alerts: &[(String, String)], time: i64) -> bool {
     let mut db = factory.store.db();
     let kept = db.transaction().and_then(|transaction| {
-        // Those still holding keep when they were told (Abbacchio, #455).
+        // Those still holding keep when they were told.
         let holding: Vec<&str> = alerts.iter().map(|(about, _)| about.as_str()).collect();
         let gone: Vec<String> = {
             let mut statement = transaction.prepare("SELECT about FROM resource_alerts")?;
@@ -659,7 +658,7 @@ fn hears(config: &Config, agent: &AgentConfig) -> bool {
         || config.resources.alert_agents.contains(&agent.id)
 }
 
-/// Everyone who hears the alerts (friend bug #54), as Settings shows them:
+/// Everyone who hears the alerts, as Settings shows them:
 /// the admin agents (such as Rivet) while `resources.alerts_to_admins` is
 /// on, then the agents chosen in `resources.alert_agents`, each once; told
 /// when it has the extension on, is in no archived project, and its model
@@ -1020,7 +1019,7 @@ mod tests {
 
     const CAT: (u32, u64) = (3063, 1_795_000_000);
 
-    /// Part 2 #4, #490 row 1243: a process is told once it used a full
+    /// A process is told once it used a full
     /// core's worth of processor time over an hour by the clock, though a
     /// loaded machine starved it in some samples (here 1.4 cores most
     /// minutes, a twentieth of one every fifth), once while it lives; gone,

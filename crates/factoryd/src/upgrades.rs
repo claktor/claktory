@@ -1,4 +1,4 @@
-//! Newer models (#404): when a provider brings out a newer version of a
+//! Newer models: when a provider brings out a newer version of a
 //! model agents run on ("everything runs on GPT 6.1, but 6.2 is out"),
 //! Rivet is told, once, and asks the person before anything changes.
 //! Looked at as Claktory starts, every time it looks whether a model list

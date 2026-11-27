@@ -100,13 +100,13 @@ void main() {
       layout: beside(),
       size: const Size(1600, 900),
     );
-    await tester.tap(glyphButton("What's new"));
+    await openFromMore(tester, "What's new");
     await settle(tester);
     expect(kinds(harness), ['chat', 'changelog', 'text']);
     expect(find.byType(ChangelogView), findsOneWidget);
     expect(find.text("What's new"), findsWidgets);
 
-    await tester.tap(glyphButton('Marketplace'));
+    await openFromMore(tester, 'Marketplace');
     await settle(tester);
     expect(kinds(harness), ['chat', 'marketplace', 'changelog', 'text']);
     // Its tabs stay, under the pane's header.
@@ -143,7 +143,7 @@ void main() {
   testWidgets('the Map opens beside the conversation as a canvas of its '
       'own, and closes again', (tester) async {
     final harness = await showWith(tester);
-    await tester.tap(glyphButton('Map'));
+    await openFromMore(tester, 'Map');
     await settle(tester);
     expect(kinds(harness), ['chat', 'map']);
     expect(find.byType(MapView), findsOneWidget);
@@ -156,18 +156,18 @@ void main() {
       findsNothing,
     );
     expect(find.text('Done'), findsNothing);
-    expect(active('Map'), isTrue);
+    expect(active('More'), isTrue);
 
-    await tester.tap(glyphButton('Map'));
+    await openFromMore(tester, 'Map');
     await settle(tester);
     expect(find.byType(MapView), findsNothing);
-    expect(active('Map'), isFalse);
+    expect(active('More'), isFalse);
   });
 
   testWidgets('squeezed under 320, a page keeps 320 and scrolls sideways, '
       'its cut edge fading', (tester) async {
-    // Settings as a pane narrower than a page's least, as Abbacchio's B6
-    // pass had it: a window too narrow for it and the conversation's least
+    // Settings as a pane narrower than a page's least, with
+    // a window too narrow for it and the conversation's least
     // both (with room for both, it gets its least).
     final harness = Harness(snapshot(layout: beside('settings', '')));
     harness.backend.appliesLayouts = true;
@@ -201,7 +201,7 @@ void main() {
     expect(fades().fadesLeft, isTrue);
   });
 
-  // Abbacchio's row 512: a wide file beside the conversation, then Needs
+  // A wide file beside the conversation, then Needs
   // you and Settings: their room comes from the file, and the conversation
   // keeps a width it can be read at.
   test('a page opened beside the conversation takes its room from the '

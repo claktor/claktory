@@ -9,6 +9,7 @@ import 'backend.dart';
 import 'controls.dart';
 import 'devices.dart' show thisDeviceKind;
 import 'identity.dart';
+import 'needs_you_focus.dart' show focusModeOf, setFocusMode;
 import 'scope.dart';
 import 'settings_view.dart' show SettingRow;
 
@@ -179,6 +180,9 @@ class _AppZoomState extends State<AppZoom> {
         await zoom.zoomOut();
       case 'actualSize':
         await zoom.actualSize();
+      // The View menu's Focus on Needs You (⇧⌘N), on the Claktory shown.
+      case 'focusMode':
+        setFocusMode(zoom.backend, !focusModeOf(zoom.backend).value);
     }
   }
 

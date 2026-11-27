@@ -1,4 +1,4 @@
-// Selecting under the app's zoom (#326) in Needs you and the Checklist
+// Selecting under the app's zoom in Needs you and the Checklist
 // panel: scrolled part way down, a drag selects what's under the pointer,
 // not lines away from it (ScrolledSelection).
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';

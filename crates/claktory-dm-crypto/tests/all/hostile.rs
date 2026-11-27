@@ -1,4 +1,4 @@
-//! Hostile tests (dms-e2ee.md §9, E9) at the crate's level: what a
+//! Hostile tests at the crate's level: what a
 //! service or a stale copy can make, which no endpoint takes. The person's
 //! devices' own are in app/rust/src/dm/hostile.rs; H1 (13) is in
 //! group.rs's tests.
@@ -217,7 +217,7 @@ fn group_of(provider: &Provider, kind: &GroupKind, id: &[u8]) -> Group {
     Group::load(provider, kind.clone(), id).unwrap().unwrap()
 }
 
-/// Row 671 (Fugo): Ana takes a leaf of hers out of a conversation by its
+/// Ana takes a leaf of hers out of a conversation by its
 /// id. Bo's leaf under the same id (no two accounts share a device's key
 /// since, but a leaf id is only what a certificate says) stays: a removal
 /// never touches another person's leaf. Named with his account, it's his.

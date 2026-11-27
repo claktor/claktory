@@ -1,5 +1,5 @@
 // A dialog over the window (showModal) with the on-screen keyboard up, as
-// on an iPad with no keyboard attached (Sorbet): centred in what the
+// on an iPad with no keyboard attached: centred in what the
 // keyboard leaves, its fields scrolling when that's short, its buttons in
 // sight.
 import 'package:factory_app/agent_view.dart' show AgentView;
@@ -84,7 +84,7 @@ void main() {
 
   // Something under it had the keys (the iPad's paired and full tiers, the
   // message box): the dialog takes them all the same, and Esc closes it
-  // (Sorbet: the sign-in dialog stayed, and Esc found no action).
+  // (the sign-in dialog stayed, and Esc found no action).
   testWidgets('Esc closes a dialog with no field, whatever had the keys', (
     tester,
   ) async {

@@ -1,6 +1,4 @@
-//! When an unlock is emailed (#412, Fugo's rule in
-//! coordination/security/unlock-mail-rule.md): only when it doesn't look
-//! like the Claktory restarting where it runs. A network none of its
+//! When an unlock is emailed: only when it doesn't look like the Claktory restarting where it runs. A network none of its
 //! unlocks in the last 30 days came from, or an older copy of it, is
 //! emailed at once; the first unlock just after signing in is the person's.
 //! The account page lists every unlock and says which were emailed.

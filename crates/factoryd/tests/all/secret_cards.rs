@@ -188,7 +188,12 @@ async fn a_generated_key_put_in_place_tells_the_agent_once() {
 #[tokio::test]
 async fn an_import_asked_for_no_one_cant_be_given_to_the_agent() {
     let (dir, mut client, mut view) = setup().await;
+    // On Windows as people write it, without canonicalize's \\?\ (which
+    // an import refuses).
+    #[cfg(unix)]
     let files = dir.canonicalize().expect("real").join("files");
+    #[cfg(windows)]
+    let files = factoryd::windows::fs::canonical(&dir).expect("real").join("files");
     std::fs::create_dir_all(&files).expect("files");
     std::fs::write(files.join("cert.p12"), [0u8, 1, 2, 3, 255, 254]).expect("file");
     let ask = serde_json::json!({

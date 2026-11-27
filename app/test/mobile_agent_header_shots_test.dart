@@ -1,5 +1,5 @@
-// The phone's agent header (mobile/agent_header.dart, agent-view.md §5),
-// drawn for Lucy's check: with SHOTS set, PNGs of the header with a role
+// The phone's agent header (mobile/agent_header.dart),
+// drawn to check by eye: with SHOTS set, PNGs of the header with a role
 // and model, a long role that's cut, no role, no model, and marks under the
 // name, on an iPhone SE and a Pro Max at the default text size and the
 // largest:

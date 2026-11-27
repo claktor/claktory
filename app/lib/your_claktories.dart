@@ -29,6 +29,7 @@ import 'device_vouch.dart' show SignInThroughThisMac;
 import 'devices.dart' show thisDeviceKind;
 import 'forms.dart' show FittedHeading, FormFrame;
 import 'identity.dart';
+import 'main.dart' show isDevBuild;
 import 'markdown.dart' show Markdown;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/input.dart' show InputKind;
@@ -49,6 +50,7 @@ import 'rail.dart'
         confirmRemoveClaktory;
 import 'scope.dart';
 import 'usage.dart' show formatAge;
+import 'visible_codes.dart' show nameInText;
 
 /// Where to get Claktory for a Mac, a Linux server or Windows.
 const downloadUrl = 'https://claktory.com/download';
@@ -58,14 +60,35 @@ const downloadUrl = 'https://claktory.com/download';
 /// confirmation, no code needed (onboarding slice 6). The account is this
 /// device's own ([Connections.account]), not a Claktory's.
 
-/// The account service a device signs in with: one a Claktory it shows
-/// already uses (the dev Claktory's, say), else claktory.com's.
+/// Whether the device's own sign-in, asked by no Claktory in particular,
+/// may take its account service from a Claktory this app shows: in Claktory
+/// Dev and debug builds only, for QA on the dev Claktory's service. A store
+/// build signs in at claktory.com, since any Claktory, one someone else
+/// runs too, could name a server of its own and so be sent the email
+/// typed (Fugo 53274). Null: as the build says.
+@visibleForTesting
+bool? debugServiceFromClaktories;
+
+bool get _serviceFromClaktories =>
+    debugServiceFromClaktories ?? (!kReleaseMode || isDevBuild);
+
+/// The account service a device signs in with when no Claktory in
+/// particular asks: claktory.com's, or in Claktory Dev and debug builds one
+/// a Claktory it shows already uses (the dev Claktory's, say).
 String accountServiceFor(Claktories? claktories) {
+  if (!_serviceFromClaktories) return defaultAccountService;
   for (final claktory in claktories?.all ?? const []) {
     final service = claktory.backend.workspace.workspace.account.service;
     if (service.isNotEmpty) return service;
   }
   return defaultAccountService;
+}
+
+/// The account service [backend]'s Claktory uses, as its Workspace has
+/// it, for a sign-in it asks for itself; null when it names none.
+String? claktoryAccountService(Backend backend) {
+  final service = backend.workspace.workspace.account.service;
+  return service.isEmpty ? null : service;
 }
 
 /// "claktory.com", or a service's host.
@@ -160,7 +183,7 @@ List<String> _throughAccount(BuildContext context) {
           final found? when found.isNotEmpty => claktoryName(
             found.first.backend,
           ),
-          _ => target.label,
+          _ => nameInText(target.label),
         },
   ];
 }
@@ -331,8 +354,9 @@ class DeviceSignInForm extends StatefulWidget {
   final String? refused;
 
   /// The account service to sign in with, when it's known whose it must be
-  /// (a Claktory that turned this device away said); null: a Claktory's
-  /// this app knows of, or claktory.com's.
+  /// (a Claktory that turned this device away said); null: claktory.com's
+  /// ([accountServiceFor]). One that isn't claktory.com's is named in the
+  /// form (Fugo 53274).
   final String? service;
 
   /// Signs in again only with this address (the account this device is
@@ -490,6 +514,18 @@ class _DeviceSignInFormState extends State<DeviceSignInForm> {
               widget.intro,
               style: type.body.copyWith(color: palette.textMuted),
             ),
+            // The email goes to another server than claktory.com's: said
+            // before it's sent (Fugo 53274).
+            if (_service != defaultAccountService) ...[
+              const SizedBox(height: Space.s),
+              Text(
+                "You'll sign in at "
+                '${nameInText(accountServiceName(_service))}, not '
+                'claktory.com.',
+                key: const ValueKey('device-sign-in-at'),
+                style: type.body.copyWith(color: palette.text),
+              ),
+            ],
             const SizedBox(height: Space.l),
             if (widget.email case final email?)
               Text(
@@ -768,7 +804,7 @@ class _YourClaktoriesState extends State<YourClaktories> {
             const SizedBox(width: Space.m),
             Expanded(
               child: Text(
-                'Connect to ${claktory.name}?',
+                'Connect to ${nameInText(claktory.name)}?',
                 style: type.emphasis.copyWith(color: palette.text),
               ),
             ),
@@ -776,7 +812,8 @@ class _YourClaktoriesState extends State<YourClaktories> {
         ),
         const SizedBox(height: Space.s),
         Text(
-          'If you already use ${claktory.name} on another device, allow this '
+          'If you already use ${nameInText(claktory.name)} on another device, '
+          'allow this '
           '$thisDeviceKind there.',
           style: type.body.copyWith(color: palette.textMuted),
         ),
@@ -799,8 +836,11 @@ class _YourClaktoriesState extends State<YourClaktories> {
     final claktories = ClaktoriesScope.of(context);
     final listed = _listed;
     final error = _error;
-    // Those this app already shows, by their endpoint id.
+    // Those this app already shows, by their endpoint id: this Mac's own
+    // by its code too, even before it answers.
+    final own = claktories?.ownEndpoint ?? '';
     final shown = <String, String>{
+      if (own.isNotEmpty) own: 'This $thisDeviceKind',
       for (final (backend, target)
           in claktories?.all.map((each) => (each.backend, each.target)) ??
               [(AppScope.of(context), AppScope.of(context).target)])
@@ -956,7 +996,7 @@ class _AccountClaktoryRow extends StatelessWidget {
     final last = claktory.lastContact;
     final where = [
       if (claktory.machine.isNotEmpty && claktory.machine != claktory.name)
-        claktory.machine,
+        nameInText(claktory.machine),
       if (!claktory.reachable)
         "Can't be reached yet"
       else if (claktory.online(now))
@@ -970,7 +1010,7 @@ class _AccountClaktoryRow extends StatelessWidget {
     final phone = isPhoneLayout(context);
     return Semantics(
       button: enabled,
-      label: claktory.name,
+      label: nameInText(claktory.name),
       child: Pressable(
         onTap: enabled ? onTap : null,
         builder: (context, hovered) => Container(
@@ -996,8 +1036,9 @@ class _AccountClaktoryRow extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    // The account's word, whoever chose it (row 1784).
                     Text(
-                      claktory.name,
+                      nameInText(claktory.name),
                       maxLines: phone ? null : 1,
                       overflow: phone ? null : TextOverflow.ellipsis,
                       style: type.body.copyWith(
@@ -1084,6 +1125,7 @@ class DeviceSignInDialog extends StatefulWidget {
     required this.intro,
     required this.close,
     this.refused,
+    this.service,
   });
 
   final String title;
@@ -1092,6 +1134,9 @@ class DeviceSignInDialog extends StatefulWidget {
 
   /// The account the Claktory asking turns away ([DeviceSignInForm]).
   final String? refused;
+
+  /// The account service of the Claktory asking ([DeviceSignInForm]).
+  final String? service;
 
   @override
   State<DeviceSignInDialog> createState() => _DeviceSignInDialogState();
@@ -1151,7 +1196,11 @@ class _DeviceSignInDialogState extends State<DeviceSignInDialog> {
             ],
           ),
           const SizedBox(height: Space.l),
-          DeviceSignInForm(intro: widget.intro, refused: widget.refused),
+          DeviceSignInForm(
+            intro: widget.intro,
+            refused: widget.refused,
+            service: widget.service,
+          ),
         ],
       ),
     );
@@ -1159,17 +1208,22 @@ class _DeviceSignInDialogState extends State<DeviceSignInDialog> {
 }
 
 /// Opens [DeviceSignInDialog] to confirm this device is the owner's on
-/// [name]: once signed in, it confirms by itself.
-Future<void> showConfirmSignIn(BuildContext context, String name) => showModal(
-  context,
-  (context, close) => DeviceSignInDialog(
-    title: 'Sign in to keep using $name',
-    intro:
-        'Use the email $name is signed in with. Your '
-        "$thisDeviceKind stays connected, and you won't be asked again.",
-    close: close,
-  ),
-);
+/// [name], the Claktory this app shows, at its own account service: once
+/// signed in, it confirms by itself.
+Future<void> showConfirmSignIn(BuildContext context, String name) {
+  final service = claktoryAccountService(AppScope.of(context));
+  return showModal(
+    context,
+    (context, close) => DeviceSignInDialog(
+      title: 'Sign in to keep using $name',
+      intro:
+          'Use the email $name is signed in with. Your '
+          "$thisDeviceKind stays connected, and you won't be asked again.",
+      close: close,
+      service: service,
+    ),
+  );
+}
 
 /// A Claktory this device connects to wants it to confirm it's the
 /// owner's ([Backend.confirmBy]) and the device isn't signed in to do it
@@ -1272,6 +1326,7 @@ class _OtherAccountViewState extends State<OtherAccountView> {
     final account = _account!;
     // The account it turns away: not offered again as this Mac's.
     final refused = account.email;
+    final service = claktoryAccountService(AppScope.of(context));
     if (account.signedIn) {
       await signOutOfAccount(context, account);
       if (account.signedIn || !mounted) return;
@@ -1285,6 +1340,7 @@ class _OtherAccountViewState extends State<OtherAccountView> {
             '$thisDeviceKind in again.',
         close: close,
         refused: refused.isEmpty ? null : refused,
+        service: service,
       ),
     );
   }

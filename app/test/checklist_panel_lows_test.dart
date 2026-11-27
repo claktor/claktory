@@ -1,9 +1,9 @@
-// Abbacchio's #325 LOWs (rows 499–501): a copy from the Checklist panel
-// is each item's words, what it waits on and its note, a line each, never
-// the panel's labels run together ("router#1OpenUnassignToday"); with no
-// goals, the items start under Add goal…, not two fifths down the panel;
-// and an ask card in a narrow Mac column keeps its words readable, its
-// buttons under them inside the card.
+// Small fixes in the Checklist panel: a copy from the Checklist panel is each item's
+// words, what it waits on and its note, a line each, never the panel's
+// labels run together ("router#1OpenUnassignToday"); with no goals, the
+// items start under Add goal…, not two fifths down the panel; and an ask
+// card in a narrow Mac column keeps its words readable, its buttons under
+// them inside the card.
 import 'package:factory_app/ask_card.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:flutter/widgets.dart';

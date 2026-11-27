@@ -1,4 +1,4 @@
-// Find in a conversation, inside tool calls (#320): a match in a folded
+// Find in a conversation, inside tool calls: a match in a folded
 // call opens it, once, and its words are marked as a message's are, in the
 // header, the input and the output, escaped first; the person's own close
 // wins; and an agents_send's message opens to its match.

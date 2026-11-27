@@ -1,7 +1,7 @@
-// How much of a phone's screen each viewer gives its content (Bruno's
-// v0.1.22 task, Matt: a landscape video showed less video than portrait):
-// a video, an image, a PDF and a text file, pushed over the conversation
-// on an iPhone 16 in portrait and in landscape, measured, and with SHOTS
+// How much of a phone's screen each viewer gives its content (a
+// landscape video once showed less video than portrait): a
+// video, an image, a PDF and a text file, pushed over the conversation on
+// an iPhone 16 in portrait and in landscape, measured, and with SHOTS
 // set, drawn to PNGs there:
 //   SHOTS=/tmp/viewers flutter test test/mobile_viewer_shots_test.dart
 // Each prints "<kind> <orientation>: content <n>% of the screen".
@@ -110,16 +110,29 @@ String _viewKind(ViewerKind kind) => switch (kind) {
   ViewerKind.text => 'text',
 };
 
+/// Opens a [kind] file over the conversation on a phone of [screen]:
+/// [text] in place of the usual text file's, and [files] beside it.
 Future<Harness> openOnPhone(
   WidgetTester tester,
   ViewerKind kind,
-  ({Size size, FakeViewPadding padding}) screen,
-) async {
+  ({Size size, FakeViewPadding padding}) screen, {
+  String? text,
+  Map<String, FileContent> files = const {},
+}) async {
   debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
   addTearDown(() => debugDefaultTargetPlatformOverride = null);
   final path = _path(kind);
   final harness = Harness(snapshot(layout: beside(_viewKind(kind), path)));
-  harness.backend.files[path] = await _file(tester, kind);
+  harness.backend.files[path] = text == null
+      ? await _file(tester, kind)
+      : FileContent(
+          path: path,
+          mime: 'text/markdown',
+          size: Int64(text.length),
+          data: text.codeUnits,
+          sha256: 'v1',
+        );
+  harness.backend.files.addAll(files);
   tester.view.padding = screen.padding;
   addTearDown(tester.view.resetPadding);
   await harness.show(tester, size: screen.size);

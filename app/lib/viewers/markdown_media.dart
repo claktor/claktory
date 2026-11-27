@@ -13,6 +13,7 @@ import '../markdown.dart' show MarkdownFiles;
 import '../layout.dart' show viewerLeaf;
 import '../mobile/metrics.dart';
 import '../mobile/navigation.dart' show PhoneRoute, PhoneRoutes;
+import '../mobile/viewer_chrome.dart' show ViewerScreen;
 import '../pane_chrome.dart' show PaneChrome, PhonePane;
 import '../mobile/presentation.dart' show SheetAction, showActions;
 import '../paced.dart' show FilePreviews, lostWhileReading;
@@ -28,19 +29,19 @@ import '../share_files.dart'
 import '../visible_codes.dart' show shownName;
 import 'registry.dart';
 
-/// The pictures a Markdown file shows in place (#540), by extension: what
+/// The pictures a Markdown file shows in place, by extension: what
 /// every app's decoder reads. Anything else it points to is a link, never
-/// read until the person opens it (Fugo, 41320).
+/// read until the person opens it.
 const markdownPictureTypes = {'png', 'jpg', 'jpeg', 'gif', 'webp'};
 
 /// The videos a Markdown file shows in place, as a card that opens them.
 const markdownVideoTypes = {'mp4', 'mov', 'm4v'};
 
 /// The most a `data:` picture may hold, decoded; a bigger one shows as its
-/// words (Fugo, 41320).
+/// words.
 const markdownDataLimit = 5 * 1024 * 1024;
 
-/// The pictures and videos of the Markdown file at [file] (#540): each
+/// The pictures and videos of the Markdown file at [file]: each
 /// `![alt](src)` with a path to one (beside the file, or absolute) shows
 /// it, read as its viewer reads it; one to another file is a link that
 /// opens it. Remote ones are never fetched: [Markdown] makes them links.
@@ -90,7 +91,7 @@ class FileMarkdownMedia implements MarkdownFiles {
 
 /// Opens [path], which a Markdown file shows or links to: in its own pane
 /// beside the document on a Mac or iPad; on a phone, as a page over the
-/// document, so Back comes back to it where it was (Zucchero's row 601),
+/// document, so Back comes back to it where it was,
 /// rather than in the agent's layout in the document's place.
 void openFromMarkdown(BuildContext context, String path) {
   final routes = PhoneRoutes.of(context);
@@ -99,6 +100,7 @@ void openFromMarkdown(BuildContext context, String path) {
     routes.push<void>(
       PhoneRoute(
         id: 'markdown-file:$path',
+        edgeToEdge: deviceIdiom(context) != Idiom.pad,
         builder: (context) => PaneChrome(
           phone: PhonePane(title: _nameOf(path), onBack: routes.pop),
           child: Builder(
@@ -115,7 +117,7 @@ enum MarkdownMediaKind { picture, video }
 /// Whether [path] is a picture or a video a Markdown file shows in place,
 /// by its extension; null for anything else.
 MarkdownMediaKind? markdownMediaKind(String path) {
-  final name = path.split('/').last;
+  final name = path.split(RegExp(r'[/\\]')).last;
   final dot = name.lastIndexOf('.');
   if (dot < 0) return null;
   final extension = name.substring(dot + 1).toLowerCase();
@@ -130,15 +132,31 @@ MarkdownMediaKind? markdownMediaKind(String path) {
 /// folder, then `..` and the rest), absolute, or from the home folder
 /// ("~/…", which the backend reads as such). Null for an address on the
 /// web or of any other kind, and for one that climbs past the root.
+///
+/// A file on Windows (`C:\…`, or a share's `\\server\share\…`) names its
+/// pictures as Windows does, exactly as the backend's
+/// `annotations::embeds::markdown_path`: `\` and `/` both separate, a
+/// drive (`D:\…`, `D:/…`, never a one-letter scheme) is absolute, `\…` is
+/// on the file's own drive, `~` comes back as `~/` and the rest with `\`.
+/// A share is only ever the file's own: reading another computer's sends
+/// it this user's sign-in (NTLM), so a file naming one, `\\?\…` or
+/// `\\.\…` names nothing.
 String? markdownPath(String file, String src) {
+  final windows = _windowsRoot(file) != null;
   var target = src.trim();
   if (target.isEmpty || target.startsWith('#')) return null;
   final scheme = RegExp(r'^([a-zA-Z][a-zA-Z0-9+.-]*):').firstMatch(target);
-  if (scheme != null) {
+  if (scheme != null && !(windows && scheme.group(1)!.length == 1)) {
     if (scheme.group(1)!.toLowerCase() != 'file') return null;
     final uri = Uri.tryParse(target);
     if (uri == null || uri.path.isEmpty) return null;
     target = uri.path;
+    // file:///C:/x.png is C:/x.png.
+    if (windows &&
+        target.startsWith('/') &&
+        _windowsRoot(target.substring(1)) != null) {
+      target = target.substring(1);
+    }
   } else {
     // Its anchor or query is no part of the file's name.
     final cut = target.indexOf(RegExp('[?#]'));
@@ -150,6 +168,7 @@ String? markdownPath(String file, String src) {
     // A stray "%": the name as written.
   }
   if (target.isEmpty) return null;
+  if (windows) return _windowsPath(file, target);
   final String joined;
   if (target.startsWith('/') || target == '~' || target.startsWith('~/')) {
     joined = target;
@@ -170,6 +189,90 @@ String? markdownPath(String file, String src) {
   }
   if (parts.isEmpty) return null;
   return '${home ? '~' : ''}/${parts.join('/')}';
+}
+
+/// A Windows path's root and the rest: `C:` for `C:\…` or `C:/…`, and
+/// `\\server\share` for a share (either separator); null otherwise.
+(String, String)? _windowsRoot(String path) {
+  if (RegExp(r'^[a-zA-Z]:[\\/]').hasMatch(path)) {
+    return (path.substring(0, 2), path.substring(2));
+  }
+  final String rest;
+  if (path.startsWith(r'\\') || path.startsWith('//')) {
+    rest = path.substring(2);
+  } else {
+    return null;
+  }
+  final server = rest.indexOf(RegExp(r'[\\/]'));
+  if (server <= 0) return null;
+  // `\\?\…` and `\\.\…` aren't shares.
+  final name = rest.substring(0, server);
+  if (name == '?' || name == '.') return null;
+  final share = rest.substring(server + 1);
+  var end = share.indexOf(RegExp(r'[\\/]'));
+  if (end < 0) end = share.length;
+  if (end == 0) return null;
+  final root = 2 + server + 1 + end;
+  return (path.substring(0, root), path.substring(root));
+}
+
+/// [target] in the Markdown file at [file] on Windows: see [markdownPath].
+String? _windowsPath(String file, String target) {
+  final (fileRoot, fileRest) = _windowsRoot(file)!;
+  final String root;
+  final bool home;
+  final String rest;
+  if (_windowsRoot(target) case (final named, final after)) {
+    // Reading another computer's share sends it this user's sign-in
+    // (NTLM): only the shown file's own share, never one a file names.
+    final share = named.startsWith(RegExp(r'[\\/]'));
+    if (share && !_sameRoot(named, fileRoot)) return null;
+    // The file's own share, named as the file names it.
+    root = share ? fileRoot : named;
+    home = false;
+    rest = after;
+  } else if (target.startsWith(r'\\') ||
+      target.startsWith('//') ||
+      target.startsWith(r'\/') ||
+      target.startsWith(r'/\')) {
+    // `\\?\…`, `\\.\…` or a share with no name: not a picture's place.
+    return null;
+  } else if (target == '~' ||
+      target.startsWith('~/') ||
+      target.startsWith(r'~\')) {
+    root = '';
+    home = true;
+    rest = target.substring(1);
+  } else if (target.startsWith(RegExp(r'[\\/]'))) {
+    root = fileRoot;
+    home = false;
+    rest = target;
+  } else {
+    final slash = fileRest.lastIndexOf(RegExp(r'[\\/]'));
+    root = fileRoot;
+    home = false;
+    rest = '${slash < 0 ? '' : fileRest.substring(0, slash)}\\$target';
+  }
+  final parts = <String>[];
+  for (final part in rest.split(RegExp(r'[\\/]'))) {
+    if (part.isEmpty || part == '.') continue;
+    if (part == '..') {
+      if (parts.isEmpty) return null;
+      parts.removeLast();
+      continue;
+    }
+    parts.add(part);
+  }
+  if (parts.isEmpty) return null;
+  // `~/` as the backend's watcher expands it, then Windows' own `\`.
+  return home ? '~/${parts.join(r'\')}' : '$root\\${parts.join(r'\')}';
+}
+
+/// Whether two Windows roots (`C:`, `\\server\share`) are the same, as
+/// Windows compares them: case aside, `\` and `/` alike.
+bool _sameRoot(String a, String b) {
+  String plain(String root) => root.replaceAll('/', r'\').toLowerCase();
+  return plain(a) == plain(b);
 }
 
 /// The picture a `data:` address holds: its bytes, when it's a picture
@@ -202,7 +305,7 @@ Uint8List? dataPicture(String src) {
 
 /// What picture [bytes] begin as ("png", "jpeg", "gif", "webp"), by their
 /// first bytes; null when they're none of them, so they're never kept on
-/// the device as one (Fugo, 41320).
+/// the device as one.
 String? pictureType(List<int> bytes) {
   bool at(int offset, List<int> signature) {
     if (bytes.length < offset + signature.length) return false;
@@ -236,9 +339,18 @@ bool looksLikeVideo(List<int> bytes) {
 }
 
 /// The file's name as the person reads it.
-String _nameOf(String path) => shownName(
-  path.split('/').where((part) => part.isNotEmpty).lastOrNull ?? path,
-);
+String _nameOf(String path) {
+  final windows =
+      _windowsRoot(path) != null ||
+      (path.startsWith('~/') && path.contains(r'\'));
+  return shownName(
+    path
+            .split(windows ? RegExp(r'[\\/]') : RegExp('/'))
+            .where((part) => part.isNotEmpty)
+            .lastOrNull ??
+        path,
+  );
+}
 
 /// A picture in a Markdown file, read as the image viewer reads it (from
 /// this device's copy when it's still the file, as a preview made for a
@@ -651,8 +763,23 @@ class _Sized extends StatelessWidget {
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, constraints) {
       final room = constraints.maxWidth;
-      final width = room.isFinite ? math.min(size.width, room) : size.width;
-      final height = width * size.height / size.width;
+      var width = room.isFinite ? math.min(size.width, room) : size.width;
+      var height = width * size.height / size.width;
+      // On a phone, never taller than the screen shows under the page's
+      // header: a tall screenshot, or any picture on a turned phone, is
+      // seen whole, and opens bigger when tapped.
+      if (ViewerScreen.wholeOf(context)) {
+        final screen = MediaQuery.sizeOf(context).height;
+        final safe = MediaQuery.paddingOf(context);
+        final most = math.max(
+          120.0,
+          screen - safe.top - safe.bottom - Touch.target - 2 * Space.l,
+        );
+        if (height > most) {
+          width = width * most / height;
+          height = most;
+        }
+      }
       return Align(
         alignment: AlignmentDirectional.centerStart,
         child: builder(width, height),
@@ -692,7 +819,7 @@ class _MediaPress extends StatelessWidget {
         title: _nameOf(path),
         actions: [
           const SheetAction('Open', 'open'),
-          // On a Mac, into Downloads (#541).
+          // On a Mac, into Downloads.
           if (canDownloadFiles) const SheetAction(downloadLabel, 'download'),
           if (canShareFiles) const SheetAction('Share…', 'share'),
         ],

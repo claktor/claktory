@@ -39,6 +39,7 @@ class BoardStill {
     required this.boxOpacity,
     required this.padOpacity,
     required this.words,
+    this.you = true,
   });
 
   /// Each node's chip (an index into the scene's chips) where it is now,
@@ -48,6 +49,9 @@ class BoardStill {
   final List<double> boxOpacity;
   final List<double> padOpacity;
   final BoardWords words;
+
+  /// You show in it.
+  final bool you;
 }
 
 /// What a share calls things.
@@ -328,7 +332,7 @@ extension on _HistoryBoardState {
             painter: _GlowPainter(controller, palette, reduced: false),
           ),
         ),
-        if (scene.layout.you case final you?)
+        if (scene.layout.you case final you? when still.you)
           Positioned.fromRect(
             rect: you,
             child: Column(

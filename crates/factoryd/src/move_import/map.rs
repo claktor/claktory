@@ -105,7 +105,8 @@ pub fn parse_pair(text: &str) -> Result<(PathBuf, PathBuf), String> {
     Ok((from, to))
 }
 
-#[cfg(test)]
+// Moving isn't on Windows yet (`move_run::NOT_ON_WINDOWS`).
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

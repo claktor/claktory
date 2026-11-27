@@ -1,4 +1,4 @@
-// Choosing a model (Squalo's U3, #343): with OpenRouter signed in there are
+// Choosing a model: with OpenRouter signed in there are
 // hundreds, some named alike across providers ("Claude Opus 5" from
 // Anthropic and from OpenRouter). The field names the provider beside the
 // model, and opens a list grouped by provider, with a search.
@@ -196,7 +196,7 @@ class _ModelSelectState extends State<ModelSelect> {
 /// ("openrouter/google/gemini-4-neon", or "gemini-4-neon" under each
 /// provider signed in to) is offered under the list, "Use … from
 /// OpenRouter": the provider is asked whether this sign-in has it before
-/// it's chosen, and its refusal shows (friend bug #14).
+/// it's chosen, and its refusal shows.
 class ModelChooser extends StatefulWidget {
   const ModelChooser({
     super.key,
@@ -443,7 +443,7 @@ class _ModelChooserState extends State<ModelChooser> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // A search only for a long list (Lucy): two models need none.
+          // A search only for a long list: two models need none.
           if (widget.workspace.models.length + widget.extra.length >
               embeddedSearchPast)
             ...search,
@@ -481,8 +481,8 @@ class _ModelChooserState extends State<ModelChooser> {
 /// search.
 const embeddedSearchPast = 8;
 
-/// What the model list says after a model that can make images (#403,
-/// Model.image_output).
+/// What the model list says after a model that can make images
+/// (Model.image_output).
 const modelMakesImages = 'Makes images';
 
 /// One choice: its name, then [note] faint, the chosen one tinted.

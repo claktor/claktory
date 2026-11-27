@@ -635,6 +635,71 @@ async fn only_this_computers_own_app_signs_in_through_this_claktory() {
     assert!(vouched.refused == "unavailable" || (vouched.refused.is_empty() && !vouched.code.is_empty()), "{vouched:?}");
 }
 
+/// What the service gives a device signed in to `account` through the
+/// device whose account key is `account_key` (b64), with tunnel key `device`.
+fn assertion_with_key(instance: &Instance, account: &str, account_key: &str, device: &Endpoint) -> String {
+    let now = jiff::Timestamp::now().as_second();
+    let said = DeviceAssertion {
+        v: 1,
+        account_id: account.to_owned(),
+        account_key: account_key.to_owned(),
+        device_key: device.id().to_string(),
+        iat: now,
+        exp: now + 3600,
+    };
+    sign_device_assertion(&ed25519_dalek::SigningKey::from_bytes(&instance.secrets.1), &said)
+}
+
+/// #619 (Fugo 53968): this computer's own app, signed in through this
+/// Claktory, reaching it through the account (an entry of its own for it,
+/// beside This Mac) is only turned away: no one waits to be allowed, and it
+/// isn't let in. Any other key is a newcomer as ever; after a sign-out the
+/// key vouched for before counts for nothing; and the app's own connection
+/// works as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn this_computers_own_app_through_the_account_is_turned_away_not_asked_about() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let (_factory, mut client, mut view, local) = signed_in(&dir, &instance).await;
+    let account = account_id(&dir);
+    // The first device through the account is in at once: one, so the
+    // others are newcomers.
+    let first = new_device().await;
+    let (mut phone, answer) = knock(&local, &first, "", &assertion(&instance, &account, &first)).await;
+    welcomed(&mut phone, answer).await;
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let app_key = claktory_account::protocol::b64(key.verifying_key().as_bytes());
+    let Body::DeviceVouched(vouched) = client.request(vouch(&key)).await.body else { panic!("expected DeviceVouched") };
+    assert!(vouched.refused.is_empty() && !vouched.code.is_empty(), "{vouched:?}");
+    let relays = v1::SetRemoteAccess { relays: vec!["http://127.0.0.1:9/".into()], set_relays: true, ..Default::default() };
+    apply_request(&mut client, &mut view, Request::SetRemoteAccess(relays)).await;
+    let devices = remote(&view).devices.len();
+    assert_eq!(devices, 1, "the phone");
+
+    // Its key through the tunnel: turned away, and nothing waits.
+    let own = new_device().await;
+    let (_, answer) = knock(&local, &own, "", &assertion_with_key(&instance, &account, &app_key, &own)).await;
+    let (code, reason) = refused(&answer);
+    assert!(code == ErrorCode::InvalidRequest && reason.contains("this computer's own Claktory"), "{code:?} {reason}");
+    // Its own connection works as before, and shows no one waiting.
+    let relays = v1::SetRemoteAccess { relays: vec!["http://127.0.0.1:9/".into()], set_relays: true, ..Default::default() };
+    assert!(!matches!(apply_request(&mut client, &mut view, Request::SetRemoteAccess(relays)).await, Body::Error(_)));
+    assert!(remote(&view).pending_devices.is_empty(), "{:?}", remote(&view).pending_devices);
+    assert_eq!(remote(&view).devices.len(), devices);
+
+    // Another device's key: a newcomer, as ever.
+    let other = new_device().await;
+    let (_, answer) = knock(&local, &other, "", &assertion_with_key(&instance, &account, "another-device-key", &other)).await;
+    assert!(matches!(answer, Body::PairingPending(_)), "{answer:?}");
+
+    // Signed out and in again: the key vouched for before is any key.
+    client.ok(Request::AccountSignOut(v1::AccountSignOut {})).await;
+    view.workspace = sign_in(&mut client, &instance, "matt@example.com").await;
+    let again = new_device().await;
+    let (_, answer) = knock(&local, &again, "", &assertion_with_key(&instance, &account, &app_key, &again)).await;
+    assert!(matches!(answer, Body::PairingPending(_)), "{answer:?}");
+}
+
 /// A call to the account service as a device, signed by its account key
 /// `key`: the answer's status and body.
 async fn as_device(instance: &Instance, key: &ed25519_dalek::SigningKey, path: &str, body: serde_json::Value) -> (u16, serde_json::Value) {

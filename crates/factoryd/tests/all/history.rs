@@ -606,3 +606,63 @@ async fn at_scale() {
     }
     assert!(overview.message_count > 0);
 }
+
+/// The tokens agents used per hour, beside the histogram, as
+/// the Usage pane totals them; one project's by where each agent was at
+/// the time; an hour with none reads 0.
+#[tokio::test]
+async fn the_tokens_used_each_hour_are_beside_the_histogram_and_one_projects_are_its_agents_then() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    ack(apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await);
+    ack(apply_request(&mut client, &mut view, create_project("Lab", &dir.join("lab"))).await);
+    for (project, name) in [("site", "Mike"), ("lab", "Zoe")] {
+        ack(apply_request(&mut client, &mut view, create_agent(project, name, "")).await);
+    }
+    const HOUR: i64 = 3_600_000;
+    // History from three hours ago on; usage two hours ago and now.
+    let t0 = now() - 3 * HOUR;
+    let db = rusqlite::Connection::open(dir.join("home/factory.db")).expect("factory.db");
+    db.execute(
+        "INSERT INTO messages (agent, source, sender, sender_id, summary, text, created) VALUES ('mike', 'person', '', '', '', 'hi', ?1)",
+        [t0],
+    )
+    .expect("message");
+    let used = |hour_ms: i64, agent: &str, (input, output, read, write): (i64, i64, i64, i64)| {
+        db.execute(
+            "INSERT INTO agent_usage (hour, provider, model, account, agent, agent_name, requests, input, output, cache_read, cache_write)
+             VALUES (?1, 'anthropic', 'claude', '', ?2, ?2, 1, ?3, ?4, ?5, ?6)",
+            rusqlite::params![hour_ms.div_euclid(HOUR) * 3600, agent, input, output, read, write],
+        )
+        .expect("usage");
+    };
+    let earlier = t0 + HOUR;
+    used(earlier, "mike", (100, 10, 1000, 5));
+    used(earlier, "zoe", (4, 3, 0, 0));
+    used(earlier, "chat:1", (50, 0, 0, 0));
+    used(earlier, "", (2, 1, 0, 0));
+    // Before History's first hour: in no bar.
+    used(t0 - 5 * HOUR, "mike", (9_999, 0, 0, 0));
+
+    // Zoe moves to Site; what she uses from then is Site's.
+    let moved = v1::UpdateAgent { agent_id: "zoe".into(), project_id: Some("site".into()), ..Default::default() };
+    ack(apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(moved)).await);
+    used(now(), "zoe", (20, 0, 0, 0));
+
+    let all = overview(&mut client).await;
+    let site = project_overview(&mut client, "site").await;
+    let lab = project_overview(&mut client, "lab").await;
+    let at = |overview: &v1::HistoryOverview, ms: i64| {
+        overview.tokens[usize::try_from(ms.div_euclid(HOUR) - overview.start_ms.div_euclid(HOUR)).expect("hour")]
+    };
+    for overview in [&all, &site, &lab] {
+        assert_eq!(overview.tokens.len(), overview.histogram.len());
+        assert_eq!(at(overview, t0), 0, "an hour with none");
+    }
+    assert!(all.start_ms <= t0, "{} {t0}", all.start_ms);
+    assert_eq!((at(&all, earlier), at(&site, earlier), at(&lab, earlier)), (1115 + 7 + 50 + 3, 1115, 7));
+    assert_eq!((at(&all, now()), at(&site, now()), at(&lab, now())), (20, 20, 0));
+    assert_eq!(all.tokens.iter().sum::<u64>(), 1115 + 7 + 50 + 3 + 20);
+}

@@ -1,12 +1,12 @@
-// Kinds of report as data (pipes-automation.md §11, T4, on Cioccolata's
-// contract): Settings → Pipes lists every kind a pipe's agent can forward,
-// built-in ones marked, each opening to exactly what crosses (which fields
-// hold the other side's words and so mark whoever reads them, which are
-// only a choice), and an editor for Matt: a name, a table of fields (a
-// kind, required, its cap clamped to Claktory's ceiling, a list's
-// choices), and what its reader may answer. The backend checks every rule
-// and keeps every version; the app only shows them and sends the person's
-// edits. On screen it's never a schema, record, hand-off or taint.
+// Kinds of report as data: Settings → Pipes
+// lists every kind a pipe's agent can forward, built-in ones marked, each
+// opening to exactly what crosses (which fields hold the other side's
+// words and so mark whoever reads them, which are only a choice), and an
+// editor for Matt: a name, a table of fields (a kind, required, its cap
+// clamped to Claktory's ceiling, a list's choices), and what its reader
+// may answer. The backend checks every rule and keeps every version; the
+// app only shows them and sends the person's edits. On screen it's never a
+// schema, record, hand-off or taint.
 
 import 'dart:async';
 
@@ -14,13 +14,15 @@ import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart' show TextInputFormatter;
 import 'package:flutter/widgets.dart';
 
+import 'approve_elsewhere.dart';
 import 'backend.dart';
 import 'controls.dart';
+import 'devices.dart' show QuietLink;
 import 'forms.dart' show FormFrame;
 import 'identity.dart';
 import 'mobile/input.dart' show InputKind;
 import 'mobile/metrics.dart';
-import 'pipes.dart' show PortalGlyph, pipeColor;
+import 'pipes.dart' show ConnectPipeForm, PortalGlyph, pipeColor;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'usage.dart' show formatAge;
@@ -363,29 +365,71 @@ class ReportTypesSettings extends StatelessWidget {
         final workspace = backend.workspace.workspace;
         final types = workspace.reportSchemas;
         final most = workspace.reportTypeRules.types;
+        // Where pipes are made, with the way there: each project a
+        // link, or one button with only one.
+        final projects = [
+          for (final project in workspace.projects)
+            if (!project.archived) project,
+        ];
+        void connect(Project project) => unawaited(
+          showModal(
+            context,
+            (context, close) => ConnectPipeForm(project: project, close: close),
+          ),
+        );
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // What they're for, and where pipes are made (Lucy's Settings
-            // spec §6, ST5); the section's title names them already.
+            Text(
+              'Pipes connect a project to someone else’s Claktory. To make '
+              'one, choose Connect a pipe… in a project’s ⋯ menu.',
+              style: type.body.copyWith(color: palette.textMuted),
+            ),
+            if (projects.length == 1) ...[
+              const SizedBox(height: Space.s),
+              Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: Button(
+                  label: 'Connect a pipe…',
+                  onPressed: () => connect(projects.single),
+                ),
+              ),
+            ] else if (projects.length > 1)
+              Wrap(
+                spacing: Space.m,
+                children: [
+                  for (final project in projects)
+                    QuietLink(
+                      label: project.name,
+                      onTap: () => connect(project),
+                    ),
+                ],
+              ),
+            const SizedBox(height: Space.m),
+            // What they're for; the section's title names them
+            // already.
             Text(
               'What a pipe’s agent fills in for each kind of report it passes '
-              'on. Pipes themselves are set up in their project.',
+              'on.',
               style: type.body.copyWith(color: palette.textMuted),
             ),
             const SizedBox(height: Space.m),
             for (final each in types)
               ReportTypeRow(key: ValueKey(each.id), type: each),
             const SizedBox(height: Space.s),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Button(
-                label: 'New report type…',
-                onPressed: most > 0 && types.length >= most
-                    ? null
-                    : () => editReportType(context),
+            // Report types are the person's.
+            if (approvesElsewhere)
+              const ApproveElsewhere(text: reportTypesElsewhereText)
+            else
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Button(
+                  label: 'New report type…',
+                  onPressed: most > 0 && types.length >= most
+                      ? null
+                      : () => editReportType(context),
+                ),
               ),
-            ),
             const SizedBox(height: Space.l),
             Text(
               'A pipe’s agent fills in one of these for each report it '
@@ -519,7 +563,7 @@ class _ReportTypeSheetState extends State<ReportTypeSheet> {
             .firstOrNull ??
         widget.type;
     // Delete is refused while it's on anywhere: the confirm says where,
-    // rather than promising pipes stop forwarding it (Zucchero's T6 nit).
+    // rather than promising pipes stop forwarding it.
     final places = reportTypePlaces(workspace, type.id);
     return FormFrame(
       title: type.name,
@@ -575,29 +619,31 @@ class _ReportTypeSheetState extends State<ReportTypeSheet> {
         ],
       ],
       error: _error,
-      secondary: Wrap(
-        spacing: Space.s,
-        runSpacing: Space.xs,
-        children: [
-          Button(
-            label: 'Edit…',
-            onPressed: () {
-              widget.close();
-              unawaited(editReportType(context, type: type));
-            },
-          ),
-          if (!type.builtin)
-            Button(
-              label: 'Delete…',
-              onPressed: _deleting || _busy
-                  ? null
-                  : () => setState(() {
-                      _deleting = true;
-                      _error = null;
-                    }),
+      secondary: approvesElsewhere
+          ? null
+          : Wrap(
+              spacing: Space.s,
+              runSpacing: Space.xs,
+              children: [
+                Button(
+                  label: 'Edit…',
+                  onPressed: () {
+                    widget.close();
+                    unawaited(editReportType(context, type: type));
+                  },
+                ),
+                if (!type.builtin)
+                  Button(
+                    label: 'Delete…',
+                    onPressed: _deleting || _busy
+                        ? null
+                        : () => setState(() {
+                            _deleting = true;
+                            _error = null;
+                          }),
+                  ),
+              ],
             ),
-        ],
-      ),
       submitLabel: 'Done',
       onSubmit: widget.close,
       onCancel: widget.close,
@@ -631,11 +677,13 @@ String reportTypeChangedText(Workspace workspace, ReportSchema type) {
 }
 
 /// The editor: a new kind, or (with [type]) a new version of one.
-Future<void> editReportType(BuildContext context, {ReportSchema? type}) =>
-    showModal(
-      context,
-      (context, close) => ReportTypeEditor(type: type, close: close),
-    );
+Future<void> editReportType(BuildContext context, {ReportSchema? type}) async {
+  if (approvesElsewhere) return;
+  await showModal(
+    context,
+    (context, close) => ReportTypeEditor(type: type, close: close),
+  );
+}
 
 /// One field as it's being edited.
 class _FieldDraft {

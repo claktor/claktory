@@ -1,4 +1,4 @@
-//! A pipe's liaison waits (#343 U18, Fugo's ruling): this side tells the
+//! A pipe's liaison waits: this side tells the
 //! other its lead waits, and until when (a quarter of an hour), never why,
 //! when it changes and at most once a minute; what the other side says
 //! shows to the person, in this side's words, and reaches no agent.

@@ -1,4 +1,4 @@
-//! The Images extension (#403): an agent whose model can make images makes
+//! The Images extension: an agent whose model can make images makes
 //! them with image_generate. The image is kept in its agent folder, the
 //! call's details are what the app draws it from, and the tool is in the
 //! frame only of agents whose model can make images on its sign-in.
@@ -159,7 +159,7 @@ async fn an_agent_whose_model_makes_images_makes_one_into_its_own_folder() {
     assert_eq!(made.state(), v1::ToolCallState::Done, "{}", made.output);
     let details: Value = serde_json::from_str(&made.details).expect("details are JSON");
     let path = details["path"].as_str().expect("a path").to_owned();
-    // The details the app draws the call from, exactly these keys (#403 §3).
+    // The details the app draws the call from, exactly these keys.
     assert_eq!(
         details,
         json!({
@@ -179,6 +179,10 @@ async fn an_agent_whose_model_makes_images_makes_one_into_its_own_folder() {
     assert!(path.ends_with(".png"), "{path}");
     assert_eq!(std::fs::read(&path).expect("the image"), png(48, 32));
     assert!(made.output.contains(&path), "{}", made.output);
+    // ChatGPT chooses the size and quality: the result gives what it made,
+    // and what was asked for (#403).
+    assert!(made.output.contains("(48×32 PNG)"), "{}", made.output);
+    assert!(made.output.contains("You asked for 1536×1024 at low quality; ChatGPT chooses the final size and quality."), "{}", made.output);
     assert_eq!(
         models.asked.lock().expect("lock").clone(),
         [ImageRequest {
@@ -192,6 +196,7 @@ async fn an_agent_whose_model_makes_images_makes_one_into_its_own_folder() {
     let again = call(&mut client, &mut view, "painter", json!({"prompt": "a lighthouse"})).await;
     let details: Value = serde_json::from_str(&again.details).expect("details are JSON");
     assert_eq!((details["size"].as_str(), details["quality"].as_str()), (Some("auto"), Some("auto")));
+    assert!(again.output.contains("ChatGPT chose its size and quality."), "{}", again.output);
     assert_ne!(details["path"].as_str(), Some(path.as_str()), "a new file for each image");
 
     // Only the agent whose model makes images has the tool.

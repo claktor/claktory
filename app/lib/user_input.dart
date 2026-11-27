@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 /// key or brought the app back to the foreground: on a phone or tablet left
 /// alone, each Claktory's connection rests, checked every 25 s instead of
 /// every few, so the radio can idle between checks, and the next touch
-/// checks it at once ([Backend]'s idle; Polpo's idle-keepalive.md).
+/// checks it at once ([Backend]'s idle).
 ///
 /// Typing on the screen's keyboard isn't seen here (it reaches the app as
 /// text, not touches); whatever is sent from it counts, as everything that

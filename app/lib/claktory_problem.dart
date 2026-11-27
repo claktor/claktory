@@ -1,8 +1,8 @@
-// When a Claktory can't be used (Lucy's devices-signin.md §4, area 2): one
+// When a Claktory can't be used: one
 // page for every problem, in place of the content on a Mac and an iPad,
 // and as the screen on a phone. What's wrong is the title, what to do
 // there the body, then the quiet ways out and the one press that moves
-// forward: at the right on a Mac and an iPad, stacked on a phone (§7), the
+// forward: at the right on a Mac and an iPad, stacked on a phone, the
 // primary full width nearest the thumb and each way out a link under it.
 import 'dart:async';
 
@@ -24,8 +24,7 @@ import 'rail.dart' show ClaktoriesScope, PhoneClaktories, confirmRemoveClaktory;
 import 'scope.dart';
 
 /// One of a problem page's buttons. Remove… is quiet too, on every
-/// device: it only asks, and the red is the question's own Remove (Lucy
-/// 49057).
+/// device: it only asks, and the red is the question's own Remove.
 class ProblemAction {
   const ProblemAction(this.label, this.onPressed);
 
@@ -149,7 +148,7 @@ class _ProblemLink extends StatelessWidget {
           child: Align(
             widthFactor: 1,
             // At the full text size, as the primary above it, wrapping;
-            // a word shrinks only when it alone can't fit (Lucy 50830).
+            // a word shrinks only when it alone can't fit.
             child: FittedHeading(
               action.label,
               textAlign: TextAlign.center,
@@ -168,7 +167,7 @@ class _ProblemLink extends StatelessWidget {
 /// The way on, on a phone: the full width, filled as a primary [Button],
 /// its label at the full text size (never clamped) and wrapping, the
 /// button growing with it; a word shrinks only when it alone can't fit
-/// the width, so none breaks mid-word (Lucy 50760, 50830).
+/// the width, so none breaks mid-word.
 class _ProblemPrimary extends StatelessWidget {
   const _ProblemPrimary(this.action);
 
@@ -216,8 +215,7 @@ class _ProblemPrimary extends StatelessWidget {
 
 /// Add a Claktory, at "Use a code instead" when [code]: where a new code
 /// is the way back. On a phone, its own Add a Claktory page, pushed over
-/// the problem with Back to it, never the Mac's chooser in a sheet (Lucy
-/// 49058).
+/// the problem with Back to it, never the Mac's chooser in a sheet.
 void showAddClaktory(BuildContext context, {bool code = false}) {
   if (isPhoneLayout(context) && PhoneClaktories.showAdding(code: code)) {
     return;
@@ -244,7 +242,7 @@ Future<void> removeClaktory(BuildContext context, RemoteFactory target) async {
 
 /// "Can't connect to nixos": what to check, Details (the connection in
 /// full) and Try again. On an iPhone or iPad, whether Local Network is on,
-/// checked only when asked (§7).
+/// checked only when asked.
 class CantConnectPage extends StatelessWidget {
   const CantConnectPage({super.key, required this.backend});
 
@@ -291,9 +289,9 @@ class CantConnectPage extends StatelessWidget {
 
 /// "nixos no longer allows this Mac": it was removed there, so only a new
 /// code brings it back: from `factoryd pair` there when this device knows
-/// no other device of the person's is connected to it (Squalo 41528),
+/// no other device of the person's is connected to it,
 /// else from that Claktory's Settings → Devices, without a command that
-/// may not be needed (Lucy 49057). Remove… is the way out.
+/// may not be needed. Remove… is the way out.
 class NoLongerAllowedPage extends StatelessWidget {
   const NoLongerAllowedPage({super.key, required this.backend});
 
@@ -325,7 +323,7 @@ class NoLongerAllowedPage extends StatelessWidget {
           ProblemText(
             '${others == null ? '' : '$removed '}To use $name on this $device '
             'again, add it from your Claktory account, then approve it on your '
-            'phone or Mac.',
+            'phone, tablet or Mac.',
           ),
         ],
         quiet: [
@@ -377,7 +375,7 @@ class NoLongerAllowedPage extends StatelessWidget {
 /// Account; a new code would pair it twice. With no screen there,
 /// `factoryd pair` in its terminal lets this device in by code, to sign it
 /// in from here: never the account commands, which are the person's alone
-/// (Fugo 46047, Giorno 46058; Trish 49188). [quiet]: Remove… where this
+/// . [quiet]: Remove… where this
 /// device found it through the account.
 class ClaktorySignedOutPage extends StatelessWidget {
   const ClaktorySignedOutPage({

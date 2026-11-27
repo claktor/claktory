@@ -27,7 +27,7 @@ RUN apt-get update -q && apt-get install -yq --no-install-recommends ca-certific
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --home-dir /var/lib/claktory-browser --no-create-home --shell /usr/sbin/nologin claktory-browser \
  && install -d -m 0755 /etc/opt/chrome/policies/managed /opt/claktory-browser \
- && echo '{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"], "BrowserSignin": 0, "SyncDisabled": true, "CommandLineFlagSecurityWarningsEnabled": false}' >/etc/opt/chrome/policies/managed/claktory.json
+ && echo '{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"], "BrowserSignin": 0, "SyncDisabled": true, "CommandLineFlagSecurityWarningsEnabled": false, "AutofillCreditCardEnabled": false, "AutofillAddressEnabled": false, "PasswordManagerEnabled": false, "BlockThirdPartyCookies": true, "SafeBrowsingProtectionLevel": 1, "DisableSafeBrowsingProceedAnyway": true}' >/etc/opt/chrome/policies/managed/claktory.json
 COPY --chmod=0644 claktory-browser.nft /etc/claktory-browser.nft
 COPY --chmod=0755 claktory-browser-nft.sh /usr/local/sbin/claktory-browser-nft
 LABEL org.opencontainers.image.source=https://github.com/claktory/claktory \

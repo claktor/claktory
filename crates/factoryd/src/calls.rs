@@ -1,4 +1,4 @@
-//! Model calls counted (#454): the tokens by hour and model for the
+//! Model calls counted: the tokens by hour and model for the
 //! account's check-ins (`account::analytics`, `model_usage`), by hour, model,
 //! account and agent for the Usage pane (`usage_report`, `agent_usage`), and
 //! each run's last call (`runs.last_call`). Kept here and written together,

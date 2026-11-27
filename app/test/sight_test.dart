@@ -1,6 +1,6 @@
-// What's new shows while the window is reported unseen (friend bugs #31
-// and #40): nothing waits on an animation that can't run while
-// [TickerMode] is off, and the pointer over the window counts as seen.
+// What's new shows while the window is reported unseen: nothing waits
+// on an animation that can't run while [TickerMode] is off, and the
+// pointer over the window counts as seen.
 import 'package:factory_app/controls.dart';
 import 'package:factory_app/identity.dart' show Motion;
 import 'package:factory_app/sight.dart';

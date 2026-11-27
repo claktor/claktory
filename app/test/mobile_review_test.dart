@@ -1,10 +1,10 @@
-// A review an agent asks of a file on an iPhone (#275): PhoneRoutes'
+// A review an agent asks of a file on an iPhone: PhoneRoutes'
 // showFile opens the file as a page over the agent's conversation (chosen
 // first, the file put in its layout as its `show` would, unless it's
 // there), and the viewer's foot says who asks and what, with the answer's
 // field always open: Approve or Dismiss with nothing typed; a typed
 // comment is one Submit (Return too), sent as a reply that carries out
-// nothing (#370); and the viewer closes, back where the person was.
+// nothing; and the viewer closes, back where the person was.
 import 'dart:convert';
 
 import 'package:factory_app/backend.dart' show RequestFailure;
@@ -243,7 +243,7 @@ void main() {
     final harness = await phone(tester);
     harness.page.value = AppPage.inbox;
     await pumpFrames(tester);
-    // Listed first (#599): the request alone, then its Review.
+    // Listed first: the request alone, then its Review.
     await _openRequest(tester);
     await tester.tap(find.text('Review').last);
     await pumpFrames(tester);
@@ -261,7 +261,7 @@ void main() {
     await tester.tap(find.byType(PhoneNeedsYouButton));
     await pumpFrames(tester);
     expect(harness.page.value, AppPage.inbox);
-    // Listed first (#599): the request alone, then its Review.
+    // Listed first: the request alone, then its Review.
     await _openRequest(tester);
     await tester.tap(find.text('Review').last);
     await pumpFrames(tester);
@@ -334,7 +334,7 @@ void main() {
     expect(answer.answerAsk.dismiss, isFalse);
     expect(answer.answerAsk.reply, isFalse);
     expect(answer.answerAsk.text, isEmpty);
-    // Opened from the file, not its card: no talk seen (#492).
+    // Opened from the file, not its card: no talk seen.
     expect(answer.answerAsk.hasTalkSeen(), isTrue);
     expect(answer.answerAsk.talkSeen, 0);
     expect(find.text('Builder asks you to review this'), findsNothing);
@@ -351,7 +351,7 @@ void main() {
       ]);
     harness.page.value = AppPage.inbox;
     await pumpFrames(tester);
-    // Listed first (#599): the request alone, then its Review.
+    // Listed first: the request alone, then its Review.
     await _openRequest(tester);
     await tester.tap(find.text('Review').last);
     await pumpFrames(tester);

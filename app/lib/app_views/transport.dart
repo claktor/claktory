@@ -2,7 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
-/// App views (C1H, Secco's contract): an app installed in Claktory shows
+/// App views: an app installed in Claktory shows
 /// views the person opens in a pane (Mac) or a pushed screen (phone). The
 /// backend holds each surface; the app here renders it with its own
 /// widgets (catalog.dart) and sends back what the person does.

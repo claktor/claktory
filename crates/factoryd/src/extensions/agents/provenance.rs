@@ -1,5 +1,4 @@
-//! Where an agent's message stands among the others (#285, middleman.md
-//! H1 and H3).
+//! Where an agent's message stands among the others.
 //!
 //! Provenance: every agents_send records, with each recipient's row in
 //! `messages`, the send it belongs to (one id for a whole fanout), the
@@ -7,7 +6,7 @@
 //! context, not a confirmed reply), the messages it answers (`reply_to`,
 //! each checked to be an agent's message the sender received), why it was
 //! sent as the sender said (`intent`), and the sender's pipe taint then
-//! (`{}` since #346: nothing a sender read reaches anyone).
+//! (`{}`: nothing a sender read reaches anyone).
 //! Rows from before it keep NULLs there: unknown, never clean. An agent
 //! reads each message's number (`msg="…"` on its event) to answer it.
 //!
@@ -117,7 +116,7 @@ pub(crate) fn send_id() -> String {
 }
 
 /// What the sender records now: the send's id and its run. Its taint is
-/// `{}`: since #346 what a sender read never reaches those it messages.
+/// `{}`: what a sender read never reaches those it messages.
 pub(crate) fn sent(factory: &Factory, sender: &str) -> Sent {
     let sender_run = factory.lock().agents.get(sender).and_then(|runtime| runtime.run);
     Sent { send_id: send_id(), sender_run, taint: "{}".to_owned() }
@@ -132,7 +131,7 @@ pub(crate) fn check(factory: &Factory, sender: &str, said: &mut Said) -> Result<
         return Err(format!("`intent` is one of {}, or left out.", INTENTS.join(", ")));
     }
     // A quiet message waits for its recipient's next wake: a question sent
-    // so hides from the one who should answer it (#280).
+    // so hides from the one who should answer it.
     if said.quiet && said.intent == "decision_request" {
         return Err("A decision request waits on its answer, so it never goes quietly: send it again without `quiet`. Nothing was sent.".to_owned());
     }
@@ -319,7 +318,7 @@ fn read(factory: &Arc<Factory>, reader: &str, args: &ReadArgs) -> Result<ToolRes
         let none = if args.all { "No agent has sent you a quiet copy." } else { "No unread quiet copies. all: true lists the latest ones again." };
         return Ok(ToolResult::text(none, json!({"copies": []})));
     }
-    // Every copy is given: since #346 nothing a sender read reaches its
+    // Every copy is given: nothing a sender read reaches its
     // readers (its `taint` column is kept, `{}` from then on).
     let checked = vec![true; rows.len()];
     let unread: Vec<i64> = rows.iter().filter(|copy| !copy.read).map(|copy| copy.id).collect();

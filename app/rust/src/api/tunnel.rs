@@ -10,7 +10,7 @@ use crate::tunnel::{self, Failure, Path, Phase, Reach, RelayTrouble};
 
 /// The tunnels' own runtime: iroh's tasks outlive any one call from Dart.
 /// Made on first use, and made afresh by [fresh_runtime] when it stops
-/// answering ([runtime_answers]), as relaunching the app would (#214).
+/// answering ([runtime_answers]), as relaunching the app would.
 static RUNTIME: Mutex<Option<tokio::runtime::Runtime>> = Mutex::new(None);
 
 /// The current runtime's handle, making it if there's none.
@@ -37,7 +37,7 @@ pub async fn runtime_answers() -> bool {
 /// Ends the tunnels' runtime without waiting for it, and with it every
 /// tunnel it ran (their tasks dropped, their endpoints with them); the next
 /// tunnel opens on a new one. What relaunching the app does, without
-/// relaunching it: only for a runtime that stopped answering (#214).
+/// relaunching it: only for a runtime that stopped answering.
 #[frb(sync)]
 pub fn fresh_runtime() {
     let old = RUNTIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
@@ -52,7 +52,7 @@ pub fn fresh_runtime() {
 pub struct TunnelHandle {
     tunnel: Arc<tunnel::Tunnel>,
     runtime: tokio::runtime::Handle,
-    /// The relays the device's endpoint is made with (#450).
+    /// The relays the device's endpoint is made with.
     homes: Arc<Mutex<Vec<iroh::RelayUrl>>>,
 }
 
@@ -124,7 +124,7 @@ impl TunnelHandle {
     }
 
     /// The relays its Claktory uses now, as its Workspace says
-    /// (`RemoteAccess.relays`, #450): the device homes on them from its next
+    /// (`RemoteAccess.relays`): the device homes on them from its next
     /// endpoint on, and dials through them. Those that aren't http(s) URLs
     /// are left out; none changes nothing.
     #[frb(sync)]
@@ -224,7 +224,7 @@ impl TunnelHandle {
 
     /// Listens on this device's loopback at [port] and carries each
     /// connection to [target] on the backend's machine: a website a pipe's
-    /// peer shares, from a port of this device's own (#503).
+    /// peer shares, from a port of this device's own.
     pub async fn forward_port_to(&self, port: u16, target: u16) -> Result<ForwardHandle, ForwardError> {
         let tunnel = self.tunnel.clone();
         let runtime = self.runtime.clone();
@@ -314,14 +314,14 @@ pub struct TunnelStatus {
     pub relay_trouble: TunnelRelayTrouble,
     /// Bytes received from the backend so far, as they arrive, wrapping:
     /// while it moves, the link is delivering, even before a whole message
-    /// is in (#413).
+    /// is in.
     pub received: u32,
     /// Bytes the open connection has received at all, QUIC's own traffic
     /// included, wrapping: it moves while the link is alive even when a
-    /// backed-off connection holds the data back (#413).
+    /// backed-off connection holds the data back.
     pub link_received: u32,
     /// How long the next dial has, in ms: it grows after dials that timed
-    /// out, and the app's connect window with it (#413).
+    /// out, and the app's connect window with it.
     pub dial_timeout_ms: u32,
     /// What a direct path crosses, from its address (never the address):
     /// for diagnostics, per route.

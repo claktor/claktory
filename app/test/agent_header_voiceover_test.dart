@@ -1,4 +1,4 @@
-// The agent's header for VoiceOver (Abbacchio's row 1615): each control is
+// The agent's header for VoiceOver: each control is
 // an element of its own with a tap, so pressing it with a screen reader
 // does what a click does, rather than landing on the pane around it.
 import 'dart:ui' show Tristate;
@@ -77,7 +77,7 @@ void main() {
     expect(harness.last.openPanel.extensionId, 'tasks');
     await _press(tester, 'Checklist, 4 open');
     expect(harness.last.openPanel.extensionId, 'checklist');
-    // Toggles that read as on, never dimmed (Zucchero's row 695).
+    // Toggles that read as on, never dimmed.
     for (final label in ['Tasks, 2 running', 'Checklist, 4 open']) {
       final flags = _node(tester, label).getSemanticsData().flagsCollection;
       expect(flags.isEnabled, Tristate.isTrue, reason: label);

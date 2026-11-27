@@ -1,5 +1,5 @@
-// Notifications pushed to this iPhone while the app isn't in front (#273 B3,
-// notifications.md §3 in Research).
+// Notifications pushed to this iPhone while the app isn't in front
+// (notifications.md §3 in Research).
 //
 // Each Claktory this iPhone connects to gets its own registration: the push
 // relay gives this iPhone a handle for its push token, this iPhone makes a
@@ -346,7 +346,7 @@ class PushRegistrar {
         _sync(claktory);
         // Just paired, and in: the person paired this iPhone to hear from
         // their agents, so the system asks now whether Claktory may notify
-        // them, rather than only once they first send something (#352 P3).
+        // them, rather than only once they first send something.
         if (_paired.add(claktory)) unawaited(askInContext());
       }
 
@@ -563,9 +563,9 @@ class PushRegistrar {
   }
 
   /// The ask went before an answer, its window with it (a resize between
-  /// an iPad's narrow and wide layouts, Sale's row 198): asked again in
-  /// the window showing now, or the next time the app comes back with a
-  /// Claktory connected (Lucy 49620).
+  /// an iPad's narrow and wide layouts): asked again in the window
+  /// showing now, or the next time the app comes back with a Claktory
+  /// connected.
   Future<void> _askAgainIfLost() async {
     final flow = _asking;
     if (flow == null || flow.shown || flow.stage == PermissionStage.done) {
@@ -631,7 +631,7 @@ Future<void> openNotificationSettings() async {
 
 /// Whether Android said a first no left it still to ask (factory/push
 /// "state" refusedOnce): This phone's Permissions row reads Off with
-/// Turn on… (Lucy's ruling 6). False elsewhere.
+/// Turn on…. False elsewhere.
 Future<bool> notificationsRefusedOnce() async {
   try {
     final state = await const MethodChannel('factory/push')

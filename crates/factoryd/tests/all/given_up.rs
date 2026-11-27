@@ -1,4 +1,4 @@
-//! Agents give up access on their own (#236): a pipe, or only reading or
+//! Agents give up access on their own: a pipe, or only reading or
 //! leading it (pipe_leave); an app (apps_give_up); messaging an agent of
 //! another project (agents_give_up_reach). At once, with no card, only
 //! their own and only what they hold when the call runs; History keeps it
@@ -63,7 +63,7 @@ async fn an_agent_gives_up_reading_leading_or_a_whole_pipe_and_only_the_person_g
     view.follow(&mut client, |view| pipe_of(view, &pipe).send_only_ids == ["bo"]).await;
     let read = call(&mut client, &mut view, "bo", "pipe_read", "{}").await;
     // Gone from its tools, as for any member that only sends, and it's told
-    // it still sends (Abbacchio's NIT 1597).
+    // it still sends.
     assert!(read.contains("You only send to your pipes now, so pipe_read doesn't work any more. pipe_send still does."), "{read}");
     let said = call(&mut client, &mut view, "bo", "pipe_leave", &leave(json!({"only": "reading", "reason": "Again."}))).await;
     assert!(said.starts_with("You already only send to") && said.ends_with("Nothing was changed."), "{said}");

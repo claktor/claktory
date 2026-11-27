@@ -5,7 +5,9 @@ import 'package:flutter/services.dart';
 
 import 'backend.dart';
 import 'inbox.dart' show NeedsYouItem;
+import 'needs_you_alerts.dart' show alertItems, alertsOf;
 import 'needs_you_entries.dart' show NeedsYouEntries;
+import 'needs_you_focus.dart' show setFocusMode;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'rail.dart' show Claktories, Claktory;
 import 'scope.dart' show AppPage;
@@ -172,6 +174,12 @@ class ClaktoryNotifications {
   /// notification opens Needs you at it (#514 §7.2). Null: never.
   final bool Function()? phone;
 
+  /// Whether Needs you is focus mode here ([needsYouIsFocusMode]): not as
+  /// on a phone, and not on Android.
+  bool get _focusMode =>
+      !(phone?.call() ?? false) &&
+      defaultTargetPlatform != TargetPlatform.android;
+
   late final StreamSubscription<NotificationTarget> _clicks;
   final _listening = <Claktory, StreamSubscription<Notify>>{};
 
@@ -247,8 +255,19 @@ class ClaktoryNotifications {
     if (claktory == null) return;
     claktories.select(claktory);
     final backend = claktory.backend;
+    // On a computer and a wide iPad, Needs you is focus mode, at what it's
+    // about: it keeps no Needs you page.
+    void needsYou([String? at]) {
+      if (!_focusMode) {
+        claktory.page.value = AppPage.inbox;
+        return;
+      }
+      if (at != null) backend.needsYouCard.value = at;
+      setFocusMode(backend, true);
+    }
+
     if (target.deviceId.isNotEmpty) {
-      claktory.page.value = AppPage.inbox;
+      needsYou(NeedsYouItem.device(target.deviceId).key);
       return;
     }
     // An alert waiting in Needs you: there, at it (§3.9). Read already
@@ -257,15 +276,30 @@ class ClaktoryNotifications {
         backend.workspace.workspace.alerts.any(
           (alert) => alert.id == target.alertId,
         )) {
-      claktory.page.value = AppPage.inbox;
-      NeedsYouEntries.of(backend).revealAlert.value = target.alertId;
+      if (!_focusMode) {
+        claktory.page.value = AppPage.inbox;
+        NeedsYouEntries.of(backend).revealAlert.value = target.alertId;
+        return;
+      }
+      // Its row, alone or in its sender's fold.
+      final alert = alertItems(backend.workspace.workspace)
+          .where(
+            (item) =>
+                item.key == 'alert:${target.alertId}' ||
+                alertsOf(
+                  backend.workspace.workspace.alerts,
+                  item,
+                ).any((alert) => alert.id == target.alertId),
+          )
+          .firstOrNull;
+      needsYou(alert?.key);
       return;
     }
     if (target.agentId.isEmpty &&
         target.pipeId.isEmpty &&
         target.chatId.isEmpty) {
       // About no one thing (what waited out quiet hours): Needs you.
-      if (target.kind == 'needs_you') claktory.page.value = AppPage.inbox;
+      if (target.kind == 'needs_you') needsYou();
       return;
     }
     // A card that needs you, on a phone: Needs you at that card, over what

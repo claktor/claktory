@@ -1,6 +1,6 @@
 // The agent's bar over its conversation (agent_view.dart's _Header): the
 // title bar's height at ordinary text, and taller rather than cut when
-// large text needs it (Sorbet's iPad pass: "Theo / Researcher" spilled over
+// large text needs it ("Theo / Researcher" once spilled over
 // the pane below at Accessibility XL). Its controls: agent_menu_test.
 import 'package:factory_app/agent_name.dart';
 import 'package:factory_app/agent_view.dart';
@@ -70,9 +70,9 @@ void main() {
   }
 
   // A 600-point window beside the sidebar leaves the conversation about 312
-  // points: the header gives way (agent-view.md §3: the meter goes, then
-  // the effort, the role, and the name is cut) rather than overflow; the
-  // model control and ⋯ stay.
+  // points: the header gives way (the meter goes, then the effort, the
+  // role, and the name is cut) rather than overflow; the model control and
+  // ⋯ stay.
   testWidgets('in a 600-point window, the header fits: the model and ⋯ '
       'stay', (tester) async {
     final harness = Harness(workspace());

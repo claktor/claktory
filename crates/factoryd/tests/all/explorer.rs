@@ -212,7 +212,7 @@ async fn shown_after(client: &mut Client, view: &mut View, change: impl FnOnce()
     started.elapsed()
 }
 
-/// Polpo's explorer.md: the folders an explorer lists are watched rather
+/// The folders an explorer lists are watched rather
 /// than listed twice a second, so a file made, removed or renamed shows
 /// within a moment (about 150 ms; a second at most here, under a loaded
 /// test run), in a root and in a folder opened after the watch began; the

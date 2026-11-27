@@ -674,9 +674,9 @@ async fn request(
         let retry_after_ms = crate::accounts::retry_after_header(response.headers());
         let retry_after = response.headers().clone();
         let body = response_text(response).await;
-        // This request costs more than the key may spend on it (friend bug
-        // #42): asked once more for as many tokens as it can afford; still
-        // too much, an error of its own, the account untouched.
+        // This request costs more than the key may spend on it: asked once
+        // more for as many tokens as it can afford; still too much, an
+        // error of its own, the account untouched.
         if let Some(affordable) = crate::accounts::unaffordable(status, &body) {
             if !lowered && let Some(fewer) = fewer_tokens(max_tokens, affordable) {
                 tracing::info!(model = %model.id, from = max_tokens, to = fewer, "OpenRouter can't afford the request's max_tokens; asking for fewer");

@@ -164,11 +164,19 @@ void main() {
     }
 
     Future<void> openNeedsYou(WidgetTester tester, Harness harness) async {
-      await harness.show(tester);
+      await harness.show(tester, size: const Size(1400, 900));
       await settle(tester);
       await pumpFrames(tester);
-      await click(tester, find.text('1 needs you'));
+      // Beside the conversation, where a pane opens it.
+      harness.backend.appliesLayouts = true;
+      AppScope.openPage(
+        tester.element(
+          find.text('Line one of the conversation', findRichText: true).first,
+        ),
+        AppPage.inbox,
+      );
       await settle(tester);
+      await pumpFrames(tester);
     }
 
     testWidgets('a click on a Needs you card, after one in the conversation', (

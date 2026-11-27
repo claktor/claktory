@@ -1,7 +1,9 @@
 // A project's Files with a finger on an iPad's wide layouts (#540, Sale):
 // its touch and hold offers Files, and the focused project's heading keeps
 // its Files button in sight, both opening a pane beside the conversation
-// as the Mac's hover button does.
+// as the Mac's hover button does (a page of their own when the agent shown
+// is in another project).
+import 'package:factory_app/explorer.dart' show FilesPage;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -38,14 +40,23 @@ void _expectFilesOf(Harness harness, String projectId) {
 void main() {
   for (final size in const [Size(1194, 834), Size(809, 834)]) {
     testWidgets("at $size, a project's touch and hold offers its Files, "
-        'opened beside the conversation', (tester) async {
+        'opened beside the conversation of an agent in it, else as a page '
+        '(projects-sidebar.md §6)', (tester) async {
       final harness = await _show(tester, size);
-      await tester.longPress(find.text('Site'));
+      await tester.longPress(find.text('Factory').first);
       await pumpFrames(tester);
-      expect(find.text('Project settings'), findsOneWidget);
+      expect(find.text('Project settings…'), findsOneWidget);
       await tester.tap(find.text('Files'));
       await pumpFrames(tester);
-      _expectFilesOf(harness, 'p2');
+      _expectFilesOf(harness, 'p1');
+      expect(find.byType(FilesPage), findsNothing);
+
+      await tester.longPress(find.text('Site'));
+      await pumpFrames(tester);
+      await tester.tap(find.text('Files'));
+      await pumpFrames(tester);
+      expect(find.byType(FilesPage), findsOneWidget);
+      expect(layoutsSent(harness), hasLength(1), reason: 'no pane for it');
     });
   }
 
@@ -64,7 +75,7 @@ void main() {
     final harness = await _show(tester, const Size(1194, 834), focused: 'p1');
     await tester.tap(find.text('Factory'));
     await pumpFrames(tester);
-    expect(find.text('Project settings'), findsOneWidget);
+    expect(find.text('Project settings…'), findsOneWidget);
     await tester.tap(find.text('Files'));
     await pumpFrames(tester);
     _expectFilesOf(harness, 'p1');
@@ -87,7 +98,7 @@ void main() {
     tester,
   ) async {
     final harness = await _show(tester, const Size(1194, 834));
-    final plus = find.bySemanticsLabel('Ask Rivet to set it up').first;
+    final plus = find.bySemanticsLabel('New project').first;
     final rect = tester.getRect(plus);
     expect(rect.size, const Size(20, 20));
     // At the row's end: all 44 before it, 32 before its middle.
@@ -110,7 +121,8 @@ void main() {
     final harness = Harness(snapshot(layout: withFilesOf('p1'), focused: 'p1'));
     await harness.show(tester, size: const Size(1194, 834));
     await pumpFrames(tester);
-    final button = tester.getRect(filesButtons());
+    // Open, the glyph that closes them (§4).
+    final button = tester.getRect(find.bySemanticsLabel('Hide files'));
     await tester.tapAt(button.center + const Offset(-18, 11));
     await pumpFrames(tester);
     expect(layoutsSent(harness), isEmpty);

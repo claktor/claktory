@@ -1,8 +1,7 @@
-//! The Windows app's check of whom it reached on this PC (windows.md Part I,
-//! B; Fugo 48392 b, 48411), before it sends its own Claktory anything, the
-//! app's token included: another account could be listening on the
-//! backend's port while the backend is down, and would otherwise get the
-//! token and whatever the person typed after it.
+//! The Windows app's check of whom it reached on this PC, before it sends
+//! its own Claktory anything, the app's token included: another account
+//! could be listening on the backend's port while the backend is down, and
+//! would otherwise get the token and whatever the person typed after it.
 //!
 //! The function is here on every platform, so the bindings are the same
 //! everywhere; the check itself is Windows only.

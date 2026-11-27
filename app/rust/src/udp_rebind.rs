@@ -1,5 +1,5 @@
 //! Tests of iroh's UDP socket, Claktory's copy of netwatch
-//! (vendor/netwatch, #490): after a network change iroh rebinds its sockets,
+//! (vendor/netwatch): after a network change iroh rebinds its sockets,
 //! and a rebind whose bind fails (the port held for a moment by something
 //! else) must leave the socket to try again at its next send, not closed for
 //! good. Upstream, every send then failed with "socket closed" until the

@@ -16,7 +16,7 @@
 //! marked quiet; the model reads Claktory's line on the batch ("While you
 //! were idle, 4 quiet messages came…") just before the first.
 //!
-//! Quiet copies for a lead (`provenance`, #285) are separate: they're never
+//! Quiet copies for a lead (`provenance`) are separate: they're never
 //! in `messages`.
 
 use std::sync::Arc;

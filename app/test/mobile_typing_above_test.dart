@@ -1,6 +1,6 @@
 // On a phone the message box steps aside while a Needs you card's field in
 // the conversation has the keyboard, and comes back as it was, draft and
-// all (Lucy, needs-you-cards.md §5.2). On a Mac it stays.
+// all. On a Mac it stays.
 import 'package:factory_app/ask_card.dart';
 import 'package:factory_app/message_box.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';

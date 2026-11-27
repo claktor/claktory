@@ -1,4 +1,4 @@
-//! #382: an image read since goes to Anthropic once, as a file, and every
+//! An image read since goes to Anthropic once, as a file, and every
 //! later request names it; what a request sent never changes after (an
 //! image sent inline stays inline), a file Anthropic lost is uploaded again
 //! with one retry, the others staying files, and an account whose uploads
@@ -153,8 +153,8 @@ fn not_found(message: &str) -> Served {
 
 #[tokio::test]
 async fn a_lost_file_is_uploaded_again_and_the_others_stay_files() {
-    // Another conversation with the same image let go of it, say (#490:
-    // all three went inline for good, and every request after was 47.7 MB).
+    // Another conversation with the same image let go of it, say (all three
+    // went inline for good, and every request after was 47.7 MB).
     let dir = tempfile::tempdir().expect("dir");
     let path = dir.path().join("anthropic-files.jsonl");
     let files = Arc::new(ImageFiles::new(Some(path.clone())));
@@ -377,7 +377,7 @@ async fn a_personal_subscription_keeps_files_and_deletes_them_when_forgotten_or_
 
 #[tokio::test]
 async fn an_api_key_a_team_and_an_unread_plan_send_images_inline() {
-    // Files are reachable to everyone with access to the workspace (Fugo).
+    // Files are reachable to everyone with access to the workspace.
     for (variable, value, answers) in [
         ("ANTHROPIC_API_KEY", "sk-ant-api03-test", vec![hello()]),
         ("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat01-test", vec![profile("claude_team"), hello()]),

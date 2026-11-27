@@ -1,5 +1,5 @@
 //! An admin agent's card asking the person to accept a change in who a
-//! pipe's other side is (#471 G7; Fugo 34521, Polnareff 34518):
+//! pipe's other side is:
 //! `pipes_trust` opens it, and only the person's AcceptPipeIdentity from it
 //! (or in the pipe) accepts the change. It holds no email, account or name
 //! (the app shows those from the Workspace's Pipe), only the change it was

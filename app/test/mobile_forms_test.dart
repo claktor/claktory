@@ -1,9 +1,10 @@
-// Forms on a phone (#198, phase 2A): a sheet with Cancel and the action
+// Forms on a phone: a sheet with Cancel and the action
 // along its top as iOS lays one out, the fields scrolling under them, each
 // bringing the keyboard it needs; the folder browser's rows a finger's
 // size.
 import 'package:factory_app/agent_view.dart' show AgentView;
 import 'package:factory_app/controls.dart';
+import 'package:factory_app/decision.dart' show QuietLink;
 import 'package:factory_app/folder_browser.dart';
 import 'package:factory_app/forms.dart';
 import 'package:factory_app/connectors.dart' show ConnectServiceForm;
@@ -222,6 +223,34 @@ void main() {
     expect(
       tester.getRect(find.text('Remove')).top,
       greaterThan(tester.getRect(find.text('Remove this device?')).bottom),
+    );
+  });
+
+  testWidgets('every confirm stacks as a phone sheet does: the action the '
+      'sheet\'s width, Cancel a link under it', (tester) async {
+    await _showForm(
+      tester,
+      (close) => FormFrame(
+        title: 'Remove this device?',
+        fields: const [],
+        error: null,
+        submitLabel: 'Remove',
+        onSubmit: () {},
+        onCancel: () {},
+      ),
+    );
+    final title = tester.getRect(find.text('Remove this device?'));
+    final action = tester.getRect(
+      find.ancestor(of: find.text('Remove'), matching: find.byType(Button)),
+    );
+    final cancel = tester.getRect(find.text('Cancel'));
+    expect(action.width, greaterThan(phone.width * 0.7));
+    expect(cancel.top, greaterThanOrEqualTo(action.bottom));
+    expect(cancel.center.dx, moreOrLessEquals(action.center.dx, epsilon: 1));
+    expect(action.top, greaterThan(title.bottom));
+    expect(
+      find.ancestor(of: find.text('Cancel'), matching: find.byType(QuietLink)),
+      findsOneWidget,
     );
   });
 

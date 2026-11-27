@@ -1,4 +1,4 @@
-//! #490: a provider that keeps answering with an error that passes
+//! A provider that keeps answering with an error that passes
 //! (overloaded, a server error, a rate limit) is waited out, past the quick
 //! retries, and the run carries on once it answers; an error that won't
 //! pass still fails at once.
@@ -176,7 +176,7 @@ fn too_many() -> Answer {
 
 /// A provider that says how long to wait (Retry-After) isn't asked again
 /// sooner: neither by the quick retries nor after a wait, whose time says
-/// when it really asks (Abbacchio's row 1249).
+/// when it really asks.
 #[tokio::test]
 async fn retry_after_is_honoured() {
     let dir = temp_dir();

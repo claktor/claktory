@@ -1,5 +1,4 @@
-//! End-to-end encryption for Claktory's direct messages (dms-e2ee.md, in the
-//! Research folder): MLS through OpenMLS, ciphersuite 0x0001.
+//! End-to-end encryption for Claktory's direct messages: MLS through OpenMLS, ciphersuite 0x0001.
 //!
 //! One crate for every endpoint (the app's Rust, factoryd's Claktory leaf)
 //! and for the delivery service (claktory-user-apps' worker), so all of them
@@ -67,15 +66,15 @@ pub enum Error {
     /// pins hold it (L5): refused like any `Refused`, but typed, since a
     /// commit from one can never be taken here. A device fallen behind
     /// across more than one new key of a friend's rejoins the group, and
-    /// says what it skipped (row 654).
+    /// says what it skipped.
     #[error("refused: {account}'s certificate is from a security key that was replaced")]
     Replaced { account: String },
     /// A group still holds a leaf its account is about to take out: a dead
     /// device leaf (`validation::dead`, under a security key its account
-    /// replaced, off its current list: a start-over's, row 630) or a stale
-    /// one (`validation::stale`, a former install of a device now listed
-    /// under a new key: a reinstall's, row 202). Nothing is sent until it's
-    /// gone: it could still read it. `reason` says which.
+    /// replaced, off its current list: a start-over's) or a stale one
+    /// (`validation::stale`, a former install of a device now listed under
+    /// a new key: a reinstall's). Nothing is sent until it's gone: it could
+    /// still read it. `reason` says which.
     #[error("waiting for {account}'s {reason} to finish")]
     Waiting { account: String, reason: validation::Held },
     /// An add whose every leaf is in the group already (or repeated in

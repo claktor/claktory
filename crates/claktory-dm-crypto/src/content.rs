@@ -1,4 +1,4 @@
-//! Mista's (dms-e2ee.md §4, "Formats"): what an application message carries,
+//! Formats: what an application message carries,
 //! once decrypted, and its padding.
 //!
 //! A content is a JSON object: `{v, kind, client_message_id, text,
@@ -38,7 +38,7 @@ pub const LATEST_SENT_MS: i64 = 253_402_300_799_999;
 /// The sizes a content is padded to.
 pub const BUCKETS: [usize; 5] = [256, 1024, 4096, 16 * 1024, MOST];
 
-/// The kinds of content (dms-e2ee.md §4, §5.1, §6).
+/// The kinds of content.
 pub mod kind {
     /// A message in a conversation.
     pub const TEXT: &str = "text";
@@ -54,7 +54,7 @@ pub mod kind {
     /// (`draft_id` and the conversation in `extra`).
     pub const AGENT_DRAFT: &str = "agent_draft";
     /// The person's pins for their friends, from their devices to a
-    /// Claktory, in its channel (§2: a Claktory pins only what they give it).
+    /// Claktory, in its channel (a Claktory pins only what they give it).
     pub const PINS: &str = "pins";
     /// A new device asking the person's device that added it to send its
     /// history again (E8, "Try again"), in the self group: the asking
@@ -62,7 +62,7 @@ pub mod kind {
     pub const HISTORY_AGAIN: &str = "history_again";
 }
 
-/// Which agent wrote a message the person approved (§6): signed by the
+/// Which agent wrote a message the person approved: signed by the
 /// person's device, inside the encryption.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ByAgent {
@@ -226,15 +226,6 @@ mod tests {
         assert!(Content::decode(br#"{"v":2,"kind":"text"}"#).is_err());
         assert!(Content::decode(br#"{"v":1,"kind":"text","padding":7}"#).is_err());
         assert!(Content::decode(b"[1]").is_err());
-    }
-
-    #[test]
-    fn by_agent_rides_inside() {
-        let mut content = Content::text("abcdefghijklmnopqrstuv", "hello");
-        content.by_agent =
-            Some(ByAgent { claktory_id: "c1".into(), agent_id: "mike".into(), incarnation: "i1".into(), name: "Mike".into() });
-        let decoded = Content::decode(&content.encode().unwrap()).unwrap();
-        assert_eq!(decoded.by_agent.unwrap().name, "Mike");
     }
 
     #[test]

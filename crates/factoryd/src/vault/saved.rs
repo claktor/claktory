@@ -1,12 +1,11 @@
-//! Secrets agents saved from a command's output (bash's `save_as`, Fugo's
-//! save-as-secret.md, Bruno 45874): for Matt's rule of one broad
-//! credential, a key made with it for the job, the broad one revoked and
-//! given up. The output goes straight into the vault, granted only to the
-//! agent that saved it; no card asks, since the key is narrower than what
-//! the person already gave, but the person sees it in History
-//! (NEEDS_YOU_RECORD_KIND_SECRET_SAVED: "Pericolo saved Play deploy key, a
-//! new secret made with Google Cloud owner") and in
-//! Settings → Secrets as saved by that agent, where they can delete it.
+//! Secrets agents saved from a command's output (bash's `save_as`): for
+//! the rule of one broad credential, a key made with it for the job, the
+//! broad one revoked and given up. The output goes straight into the vault,
+//! granted only to the agent that saved it; no card asks, since the key is
+//! narrower than what the person already gave, but the person sees it in
+//! History (NEEDS_YOU_RECORD_KIND_SECRET_SAVED: "Pericolo saved Play deploy
+//! key, a new secret made with Google Cloud owner") and in Settings →
+//! Secrets as saved by that agent, where they can delete it.
 //!
 //! What's checked before the command runs, so a key made at a service is
 //! never lost to a refusal after: the vault is open, the name is free, the
@@ -245,7 +244,7 @@ pub(crate) struct Saved {
 
 impl Saved {
     /// Claktory's sentence for it, with the agent's name now, what was
-    /// saved first (Trish 50375): "Pericolo saved Play deploy key, a new
+    /// saved first: "Pericolo saved Play deploy key, a new
     /// secret made with Google Cloud owner".
     pub(crate) fn title(&self, names: &HashMap<String, String>) -> String {
         let agent = names.get(&self.agent).cloned().unwrap_or_else(|| self.agent.clone());

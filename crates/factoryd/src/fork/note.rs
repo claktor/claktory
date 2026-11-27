@@ -80,7 +80,7 @@ pub(super) fn write(
     };
     let summary = match change {
         // The line people see names whose conversation it was: the person
-        // reads it too, where "your" would be theirs (row 756).
+        // reads it too, where "your" would be theirs.
         Change::Back => format!("{who} took {} conversation back to {}", crate::apps::changes::possessive(&subject), when(since)),
         Change::Switched => format!("{who} switched {subject} to another version"),
     };

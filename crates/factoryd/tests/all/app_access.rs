@@ -1,11 +1,10 @@
-//! Rivet sets an app up (#333, #339): apps_set_access applies what it takes
-//! away, and what it gives when none of Fugo's rules needs the person;
-//! otherwise what it gives goes on a card, and only the person's approval
-//! of it, exactly as shown (its digest), gives anything. Checked again at
-//! approval: an app updated since fails the card, and an agent that read a
-//! web page since changes it. Every change is kept, shows in History and
-//! Marketplace → Apps, and only the person undoes it. Never all of
-//! Claktory's records.
+//! Rivet sets an app up: apps_set_access applies what it takes away, and
+//! what it gives when none of the access rules needs the person; otherwise what
+//! it gives goes on a card, and only the person's approval of it, exactly
+//! as shown (its digest), gives anything. Checked again at approval: an app
+//! updated since fails the card, and an agent that read a web page since
+//! changes it. Every change is kept, shows in History and Marketplace →
+//! Apps, and only the person undoes it. Never all of Claktory's records.
 
 use ed25519_dalek::SigningKey;
 use factory_protocol::v1::{self, AgentStatus, AppGrantState as State, client_message::Body as Request, entry::Kind, server_message::Body};
@@ -177,7 +176,7 @@ pub(crate) async fn install(client: &mut Client, version: &str) {
     client.ok(ask(true, &permissions.sha256)).await;
 }
 
-/// What Rivet may apply itself (Fugo's ruling): giving what isn't private to
+/// What Rivet may apply itself: giving what isn't private to
 /// an app that reaches no site, to agents that haven't read another
 /// Claktory's messages. It's kept, shows in History at Rivet's call with
 /// Rivet's reason apart from Claktory's sentence, and in the app as given
@@ -307,7 +306,7 @@ async fn rivet_sets_an_app_up_at_once_when_nothing_needs_the_person_and_the_pers
     assert_eq!(records[1].title, "You changed what Lea can do in Charts: See dashboards");
 }
 
-/// Fugo's rules, each: private data, an app that reaches the internet, an
+/// The access rules, each: private data, an app that reaches the internet, an
 /// agent that has read a web page, and a Rivet that has: what it gives goes on a card, saying why, while what it takes away
 /// is applied. Approved, the card's change is the person's; declined, it
 /// shows in History with nothing to undo.
@@ -356,7 +355,7 @@ async fn what_needs_the_person_goes_on_a_card_and_what_takes_away_is_applied() {
     assert_eq!(records[0].title, "Let Charts read Conversations");
     assert_eq!(records[0].agent_reason, "Who talks most.");
 
-    // Submit (#370): a comment instead of Approve gives nothing; Rivet gets
+    // Submit: a comment instead of Approve gives nothing; Rivet gets
     // it, to propose again with it in mind.
     set(&mut client, &mut view, &json!({"app": "charts", "sources": {"conversations": true}, "reason": "Who talks most."})).await;
     let (seq, shown) = card(&view);
@@ -389,7 +388,7 @@ async fn what_needs_the_person_goes_on_a_card_and_what_takes_away_is_applied() {
     assert_eq!(card_at(&view, seq).state(), State::Failed);
     assert!(!app(&view).sources.iter().any(|source| source.id == "conversations" && source.granted));
 
-    // 3: Max has read a web page (#346: only that marks an agent). His
+    // 3: Max has read a web page (only that marks an agent). His
     // database is private like any other (1), whatever he read.
     factoryd::pipes::taint_for_test(&factory, "max", "browser:https://example.com");
     let said =
@@ -480,7 +479,7 @@ async fn rivets_cards_close_with_its_conversation_and_read_back_as_they_ended() 
 }
 
 /// Conversations hold what pipes brought, and reading them through an app
-/// marks no one (#346): the card for them is about what people wrote (rule
+/// marks no one: the card for them is about what people wrote (rule
 /// 1), never who would read them. Given by the person, an agent that read a
 /// pipe is given the app with no card, and a Rivet that read them through
 /// it still sets apps up.
@@ -552,11 +551,10 @@ fn taint(factory: &factoryd::factory::Factory, agent: &str) -> String {
     factoryd::pipes::taint_of_for_test(factory, agent)
 }
 
-/// Every other way what an app reads, or Claktory's records, reach an agent
-/// (Fugo's #333 follow-ups): the records' messages through db_query, an
-/// agent's database whose agent read a web page, an app's events, and an
-/// app's crash. Since #346 none of them marks the agent, and the crash's
-/// error is shown.
+/// Every other way what an app reads, or Claktory's records, reach an
+/// agent: the records' messages through db_query, an agent's database whose
+/// agent read a web page, an app's events, and an app's crash. None of
+/// them marks the agent, and the crash's error is shown.
 #[tokio::test(flavor = "multi_thread")]
 async fn others_words_reach_an_agent_and_mark_no_one_however_they_come() {
     let dir = temp_dir();

@@ -1,4 +1,4 @@
-//! What OpenRouter keys have to spend (#343 U8, U14): read at sign-in, so
+//! What OpenRouter keys have to spend: read at sign-in, so
 //! the step can say a new key has no credit yet, and kept on the account
 //! (Account.credit), from OpenRouter's GET /key, numbers only.
 

@@ -22,6 +22,7 @@
 //! It answers with one JSON line on stdout (`Report`) and an exit code for
 //! each result (`Outcome::exit_code`); anything else goes to stderr.
 
+#[cfg(unix)]
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -195,6 +196,7 @@ pub(crate) fn answers(port: u16, within: Duration) -> bool {
 /// Something of another user's answers on `port`: it answers, and no
 /// process of this user's listens there (lsof sees only this user's). False
 /// when that can't be told.
+#[cfg(unix)]
 fn taken_by_another(port: u16) -> bool {
     if !answers(port, Duration::from_millis(300)) {
         return false;
@@ -209,6 +211,14 @@ fn taken_by_another(port: u16) -> bool {
         Ok(output) => output.stdout.iter().all(u8::is_ascii_whitespace) && output.status.code() == Some(1),
         Err(_) => false,
     }
+}
+
+/// On Windows, as its TCP tables say (`windows::ports`).
+#[cfg(windows)]
+fn taken_by_another(port: u16) -> bool {
+    use crate::windows::ports::{Owner, listening, owner};
+    answers(port, Duration::from_millis(300))
+        && listening(port).is_ok_and(|sockets| sockets.iter().any(|socket| owner(socket.pid) == Some(Owner::Others)))
 }
 
 /// How things stand, changing nothing.
@@ -556,7 +566,14 @@ fn login_path() -> String {
     login_shell().and_then(|shell| path_from(&shell, SHELL_WITHIN)).unwrap_or_else(|| FALLBACK_PATH.to_owned())
 }
 
+/// None on Windows: no login shell sets a PATH there.
+#[cfg(windows)]
+fn login_shell() -> Option<PathBuf> {
+    None
+}
+
 /// The user's shell, from the user database (an app has no $SHELL).
+#[cfg(unix)]
 fn login_shell() -> Option<PathBuf> {
     // SAFETY: getpwuid returns a pointer into static storage or null; it's
     // read at once, before anything else could call it.
@@ -572,6 +589,14 @@ fn login_shell() -> Option<PathBuf> {
 
 /// What PATH `shell`, as an interactive login shell, sets, between markers
 /// so whatever else its startup files print is left out.
+#[cfg(windows)]
+fn path_from(_shell: &Path, _within: Duration) -> Option<String> {
+    None
+}
+
+/// What PATH `shell`, as an interactive login shell, sets, between markers
+/// so whatever else its startup files print is left out.
+#[cfg(unix)]
 fn path_from(shell: &Path, within: Duration) -> Option<String> {
     use std::os::unix::process::CommandExt;
     const MARK: &str = "__CLAKTORY_PATH__";

@@ -5,7 +5,7 @@
 //! Database extension's authorizer (agents' memory, pipes and comments on
 //! files stay unreadable), 10 s, and at most 10,000 rows and 2 MB an answer.
 //!
-//! The sources (#333, Fugo's review):
+//! The sources:
 //! - **Activity** (`activity`): what happened, never what was written: of
 //!   factory.db, only the tables and columns `ACTIVITY_READS` lists (ids, agents,
 //!   times, states, counts and token use), every other read refused by the
@@ -423,7 +423,7 @@ pub(crate) async fn query(factory: &Arc<Factory>, asked: wire::DataQuery) -> wir
         source
     };
     // A curator's database holds friends' words: an app could pass them to
-    // an agent untainted (pipes-automation.md §6). The person reads it in
+    // an agent untainted. The person reads it in
     // the app instead.
     if let Reads::Agent(agent) = &source.reads
         && factory.pipes.curator(agent)
@@ -563,7 +563,7 @@ fn limit(db: &mut rusqlite::Connection, allowed: &'static [(&'static str, &'stat
 /// Whether `table`, in a read of no column, is a WITH clause's or a
 /// subquery's result rather than one of the database's own tables (`own`):
 /// SQLite asks so when it takes no value from it, as `NOT EXISTS (SELECT 1
-/// FROM c)` does from a grouped WITH used twice (Carne 30029). What it holds
+/// FROM c)` does from a grouped WITH used twice. What it holds
 /// came from reads already checked, so counting its rows shows nothing more.
 /// sqlite_ and pragma_ names are never one.
 pub(super) fn derived(table: &str, own: &[impl AsRef<str>]) -> bool {
@@ -728,7 +728,7 @@ mod tests {
         assert_eq!(rows("SELECT r.agent FROM runs r JOIN messages m ON m.agent = r.agent WHERE m.id = 1"), json!([["lea"]]));
         assert_eq!(rows("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n LIMIT 3) SELECT sum(i) FROM n"), json!([[6]]));
         // A grouped WITH used twice is materialised, and NOT EXISTS reads it
-        // with no column (Carne 30029).
+        // with no column.
         let twice = "WITH c AS (SELECT agent, count(*) AS n FROM messages GROUP BY agent) \
                      SELECT agent, n FROM c UNION ALL SELECT 'none', 0 WHERE NOT EXISTS (SELECT 1 FROM c)";
         assert_eq!(rows(twice), json!([["lea", 2]]));

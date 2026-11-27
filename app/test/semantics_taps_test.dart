@@ -2,7 +2,7 @@
 // whose embedder has no fallback; a double tap on an iPhone or iPad). A
 // control that reads as one button over its own parts (Semantics with
 // button and excludeSemantics) drops those parts' tap with their words, so
-// it gives its own (Abbacchio's row 1716). One of each kind is pressed
+// it gives its own. One of each kind is pressed
 // here the way VoiceOver does; the scan keeps new ones from leaving it out.
 import 'dart:io';
 

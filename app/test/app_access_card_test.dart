@@ -1,6 +1,6 @@
 // Rivet's proposal of what an app may read and which agents may use it
-// (#333, AppAccessProposal): the card in Rivet's conversation and in Needs
-// you, source by source and agent by agent (Fugo's point 8), Approve (all
+// (AppAccessProposal): the card in Rivet's conversation and in Needs
+// you, source by source and agent by agent, Approve (all
 // or nothing, with the digest shown) and Decline (DecideAppAccess), and each
 // decided state.
 import 'package:factory_app/app_access_card.dart';
@@ -250,7 +250,7 @@ void main() {
       ),
       findsOneWidget,
     );
-    // Reading a pipe through the app marks no one any more (#346).
+    // Reading a pipe through the app marks no one any more.
     expect(find.textContaining('would read messages'), findsNothing);
   });
 

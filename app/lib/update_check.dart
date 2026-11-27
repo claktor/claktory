@@ -234,8 +234,7 @@ class _UpdateCheckRowState extends State<UpdateCheckRow> with SettingRequests {
                   if (version.isNotEmpty)
                     Text(
                       // On a phone or an iPad, the computer's: named, since
-                      // This iPhone has the app's own (Lucy's Settings spec
-                      // §6, ST1).
+                      // This iPhone has the app's own.
                       replacesApp
                           ? versionLabel(version)
                           : '${claktoryNameInSettings(scope.backend)} · Claktory '
@@ -294,11 +293,11 @@ class _UpdateCheckRowState extends State<UpdateCheckRow> with SettingRequests {
                           onPressed: _updating ? null : _update,
                         ),
                       // An iPhone's or iPad's from its store, the one it
-                      // came from (settings.md ST1); none on a dev build.
+                      // came from; none on a dev build.
                       if (answer.appFirst && updatesHere && !replacesApp)
                         const AppSourceButton(primary: true),
                       // Android's app comes from its download page, not a
-                      // store (Sale's row 60).
+                      // store.
                       if (answer.appFirst && !updatesHere)
                         Button(
                           label: _opening ? 'Opening…' : 'Download',
@@ -307,8 +306,7 @@ class _UpdateCheckRowState extends State<UpdateCheckRow> with SettingRequests {
                         ),
                     ],
                   ),
-                // What the browser's download may ask (Lucy's permissions
-                // spec, Android).
+                // What the browser's download may ask on Android.
                 if (answer.appFirst && !updatesHere) ...[
                   const SizedBox(height: Space.xs),
                   Text(
@@ -354,7 +352,7 @@ class _UpdateCheckRowState extends State<UpdateCheckRow> with SettingRequests {
                   style: type.caption.copyWith(color: palette.danger),
                 ),
               ],
-              // On Android, a new version of this app (#355 D2).
+              // On Android, a new version of this app.
               const AndroidUpdateNotice(padding: EdgeInsets.only(top: Space.s)),
             ],
           ),

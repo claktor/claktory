@@ -228,7 +228,7 @@ fn screen_name(factory: &Factory, config: &Config, asker: &str, screen: &str, id
         "changelog" => none("What's new"),
         "agent" => Ok(format!("{}'s conversation", agent(id)?)),
         "agent_settings" => Ok(format!("{}'s settings", agent(id)?)),
-        // A pipe (#471 G9, Fugo): only by the name this side gave it, else
+        // A pipe: only by the name this side gave it, else
         // its id; one of another project only for an admin agent.
         "pipe" | "pipe_settings" => {
             let admin = config.agent(asker).is_some_and(crate::proposals::is_admin);

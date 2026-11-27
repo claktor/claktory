@@ -76,6 +76,10 @@ import UniformTypeIdentifiers
     let quick = engineBridge.pluginRegistry.registrar(forPlugin: "QuickActions")!
     quick.addSceneDelegate(QuickActions.shared)
     QuickActions.shared.register(with: quick.messenger())
+    // Files dragged in from another app, on an iPad (Drop.swift, #512).
+    let drop = engineBridge.pluginRegistry.registrar(forPlugin: "Drop")!
+    drop.addSceneDelegate(Drop.shared)
+    Drop.shared.register(with: drop.messenger())
     // Notifications: those the app shows, its pushes' taps, and this
     // iPhone's registration for pushes (Notifications.swift, Push.swift).
     Notifications.shared.register(with: messenger)
@@ -155,6 +159,10 @@ import UniformTypeIdentifiers
       case "share":
         // The system's share sheet for text (lib/mobile/share.dart).
         Self.share(call.arguments as? [String: Any] ?? [:], result)
+      case "saveText":
+        // The recovery key as a file (lib/recovery_key.dart): exported to
+        // Files only, never the share sheet, which offers Messages and Mail.
+        Self.saveText(call.arguments as? [String: Any] ?? [:], result)
       case "shareFiles":
         // The share sheet for files the app fetched (lib/share_files.dart,
         // #418): AirDrop, Messages, Save to Files…
@@ -265,6 +273,46 @@ import UniformTypeIdentifiers
       return
     }
     present([text], args, result)
+  }
+
+  /// The name a saved text goes by: only the last part of `name`, never
+  /// empty, "." or "..", so it can't leave its folder.
+  static func savedTextName(_ name: String) -> String? {
+    let last = (name as NSString).lastPathComponent
+    return last.isEmpty || last == "." || last == ".." || last == "/" ? nil : last
+  }
+
+  /// Writes `text` as `name` in a folder of its own in claktory-share,
+  /// readable only while the device is unlocked, and opens Files to export
+  /// a copy. The folder goes once Files answers, or as soon as the write
+  /// fails; one cut short goes at the next launch (lib/share_files.dart's
+  /// sweep). True once it's saved, false if the person cancelled.
+  static func saveText(_ args: [String: Any], _ result: @escaping FlutterResult) {
+    guard let given = args["name"] as? String, let name = savedTextName(given),
+      let text = args["text"] as? String
+    else {
+      result(FlutterError(code: "failed", message: "a name and the text", details: nil))
+      return
+    }
+    let files = FileManager.default
+    let folder = files.temporaryDirectory
+      .appendingPathComponent("claktory-share", isDirectory: true)
+      .appendingPathComponent("key-\(UUID().uuidString)", isDirectory: true)
+    let file = folder.appendingPathComponent(name)
+    do {
+      try files.createDirectory(
+        at: folder, withIntermediateDirectories: true,
+        attributes: [.protectionKey: FileProtectionType.complete])
+      try Data(text.utf8).write(to: file, options: [.completeFileProtection, .withoutOverwriting])
+    } catch {
+      try? files.removeItem(at: folder)
+      result(FlutterError(code: "failed", message: error.localizedDescription, details: nil))
+      return
+    }
+    SaveToFiles.show(file, named: name) { answer in
+      try? files.removeItem(at: folder)
+      result(answer)
+    }
   }
 
   /// The share sheet for `paths`, files on this device (the app deletes
@@ -715,8 +763,11 @@ final class WebAuth: NSObject, ASWebAuthenticationPresentationContextProviding {
 }
 
 /// Links that open the app, as on the Mac (links.dart): `claktory://add?code=…`
-/// (the build's own scheme), and a pairing code's own `factory://…`, which
-/// the Camera hands over when it reads a Claktory's QR code. Kept until the
+/// (the build's own scheme), a pairing code's own `factory://…`, which
+/// the Camera hands over when it reads a Claktory's QR code, and Claktory's
+/// pairing page, `https://claktory.com/pair#<the code's query>`, as a
+/// Universal Link (#352 P6; the Release app's applinks:claktory.com, the
+/// site's apple-app-site-association naming /pair only). Kept until the
 /// app listens on `factory/links`, then each as it comes. The app asks
 /// before connecting to anything a link names; a link alone does nothing.
 final class Links: NSObject, FlutterSceneLifeCycleDelegate {
@@ -727,6 +778,18 @@ final class Links: NSObject, FlutterSceneLifeCycleDelegate {
 
   /// Longer than any pairing code: dropped before the app parses it.
   static let maxLength = 4096
+
+  /// Whether [url] is Claktory's pairing page with a code in its fragment,
+  /// exactly: https, claktory.com and /pair, nothing else (no user, port
+  /// or query), so no other page a Universal Link could name reaches the
+  /// app.
+  static func isPairPage(_ url: URL) -> Bool {
+    guard url.scheme?.lowercased() == "https", url.host?.lowercased() == "claktory.com",
+      url.path == "/pair", url.user == nil, url.password == nil, url.port == nil,
+      url.query == nil, let fragment = url.fragment, !fragment.isEmpty
+    else { return false }
+    return true
+  }
 
   private var channel: FlutterMethodChannel?
   private var listening = false
@@ -755,7 +818,8 @@ final class Links: NSObject, FlutterSceneLifeCycleDelegate {
     var took = false
     for url in urls {
       let link = url.absoluteString
-      guard let scheme = url.scheme?.lowercased(), Self.schemes.contains(scheme),
+      guard let scheme = url.scheme?.lowercased(),
+        Self.schemes.contains(scheme) || Self.isPairPage(url),
         link.utf8.count <= Self.maxLength
       else { continue }
       took = true
@@ -768,12 +832,29 @@ final class Links: NSObject, FlutterSceneLifeCycleDelegate {
     return took
   }
 
-  // The app opened by a link: it comes with the scene's connection.
+  // The app opened by a link: it comes with the scene's connection, a
+  // Universal Link as a web-browsing activity.
   func scene(
     _ scene: UIScene, willConnectTo session: UISceneSession,
     options connectionOptions: UIScene.ConnectionOptions?
   ) -> Bool {
-    open(connectionOptions?.urlContexts.map(\.url) ?? [])
+    let urls = connectionOptions?.urlContexts.map(\.url) ?? []
+    let pages = connectionOptions?.userActivities.compactMap(Self.page) ?? []
+    return open(urls + pages)
+  }
+
+  // A Universal Link while the app runs (or wakes from the background).
+  func scene(_ scene: UIScene, continue userActivity: NSUserActivity) -> Bool {
+    guard let page = Self.page(userActivity) else { return false }
+    return open([page])
+  }
+
+  /// The page a web-browsing activity opened: only Claktory's pairing page.
+  static func page(_ activity: NSUserActivity) -> URL? {
+    guard activity.activityType == NSUserActivityTypeBrowsingWeb,
+      let url = activity.webpageURL, isPairPage(url)
+    else { return nil }
+    return url
   }
 
   // A link while the app runs (or wakes from the background).

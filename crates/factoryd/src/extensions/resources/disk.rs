@@ -2,7 +2,10 @@
 //! slow, so it runs in the background now and then, never when asked.
 
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use crate::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 

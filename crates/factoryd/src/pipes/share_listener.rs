@@ -1,6 +1,5 @@
 //! Opening a website a pipe's peer shares with this Claktory, in this
-//! computer's own browser (pipe-port-sharing.md, revised plan: the
-//! receiving side).
+//! computer's own browser (revised plan: the receiving side).
 //!
 //! The first Open starts a listener for the share on 127.0.0.1, at a port
 //! that stays the share's for as long as it lasts (the sharer's own number
@@ -14,7 +13,7 @@
 //! spoken as HTTP/1.1, so keep-alive and upgrades work as they would on the
 //! sharer's computer.
 //!
-//! What this keeps out (Fugo, msg 30760): other users of this computer and
+//! What this keeps out: other users of this computer and
 //! web pages, which can all reach 127.0.0.1 with any Host they like. The
 //! exact Host check stops DNS rebinding; the cookie stops everything that
 //! hasn't been through Open. Safari can't resolve `*.localhost`, so there
@@ -24,12 +23,12 @@
 //!
 //! A device showing this Claktory from another machine (a paired MacBook)
 //! opens a share through a forward of its own: a port it picks on its own
-//! loopback, carried to the share's port here (W1, Polnareff's contract).
-//! Its browser names that port, so either host is taken at any port: the
-//! port adds nothing to the gate, since a browser names the very port it
-//! reached (only a forward makes them differ), the hostname's 100 random
-//! bits stop DNS rebinding, and the key cookie, which browsers keep by host
-//! and not by port, stops everything else (Fugo, 35888).
+//! loopback, carried to the share's port here. Its
+//! browser names that port, so either host is taken at any port: the port
+//! adds nothing to the gate, since a browser names the very port it reached
+//! (only a forward makes them differ), the hostname's 100 random bits stop
+//! DNS rebinding, and the key cookie, which browsers keep by host and not by
+//! port, stops everything else.
 //!
 //! The share's end (Stop on either side, its pipe paused or closed, the
 //! peer's identity changed) closes the listener and every connection at
@@ -98,7 +97,7 @@ pub(crate) struct Listeners {
     live: Mutex<HashMap<String, Live>>,
     /// The latest failure each share's browser was shown (Claktory's 502
     /// page), until a request goes through again: when, and its words
-    /// (#505 row 655). Kept while Claktory runs.
+    /// . Kept while Claktory runs.
     failures: Mutex<HashMap<String, (i64, String)>>,
 }
 
@@ -210,7 +209,7 @@ pub(crate) fn status(factory: &Factory, share: &str, peer: &str, port: u16) -> S
 }
 
 /// The person hides the share, or shows it again; an agent that may act
-/// on its pipe hides it (#502, Fugo 35687). Hidden, it isn't reachable
+/// on its pipe hides it. Hidden, it isn't reachable
 /// here: its listener closes with every connection it has, and it isn't
 /// opened again until it's shown, when it listens again at its address if
 /// it had been opened.
@@ -428,7 +427,7 @@ fn choose_port(factory: &Factory, peer: &str, wanted: u16) -> Option<u16> {
     let usable = |port: u16| port != 0 && !own_port(factory, port) && !others.contains(&port) && bind(port).is_some();
     // The sharer's number only above 1023: a peer never steers this side
     // onto a well-known port (22, 80, 443) to hold it while the person's
-    // own service there is down (Fugo, #154).
+    // own service there is down.
     if wanted >= 1024 && usable(wanted) {
         return Some(wanted);
     }
@@ -651,7 +650,7 @@ async fn handle(
         // Opened from an app the browser counts as another site (Android's
         // Custom Tab): a redirect would stay cross-site and the Strict key
         // wouldn't go with it, so a page of Claktory's moves on to "/"
-        // itself, a navigation of the share's own (#505).
+        // itself, a navigation of the share's own.
         let mut response = if own {
             let mut response = Response::new(Either::Right(Full::new(Bytes::new())));
             *response.status_mut() = StatusCode::SEE_OTHER;
@@ -766,12 +765,11 @@ async fn handle(
 
 /// The Open link's navigation from an app that the browser counts as
 /// another site: Chrome's Custom Tab on Android sends Sec-Fetch-Site
-/// cross-site for it (#505, rows 174–176). Taken only as a top-level GET of
-/// a document to the Open path (Sec-Fetch-Mode navigate, Sec-Fetch-Dest
-/// document, both exact), with no Origin and no upgrade, checked before
-/// its one-minute, one-time code is spent; never same-site (another local
-/// port's page), a subresource, a form's POST or any other path (Fugo
-/// 46986).
+/// cross-site for it. Taken only as a top-level GET of a document to the
+/// Open path (Sec-Fetch-Mode navigate, Sec-Fetch-Dest document, both
+/// exact), with no Origin and no upgrade, checked before its one-minute,
+/// one-time code is spent; never same-site (another local port's page), a
+/// subresource, a form's POST or any other path.
 fn opened_from_an_app(method: &hyper::Method, path: &str, headers: &hyper::HeaderMap) -> bool {
     let said = |name: &str| headers.get(name).and_then(|value| value.to_str().ok()).map(str::to_ascii_lowercase);
     method == hyper::Method::GET
@@ -785,7 +783,7 @@ fn opened_from_an_app(method: &hyper::Method, path: &str, headers: &hyper::Heade
 
 /// Whether a request comes from the share's own pages, or from the person
 /// (Claktory's Open, a bookmark, the address typed): never from another
-/// site's (Fugo, #154). Every 127.0.0.1 port is the same site to a browser,
+/// site's. Every 127.0.0.1 port is the same site to a browser,
 /// so another share's page there, or any page another program serves on
 /// it, would otherwise send this share's SameSite=Strict key along. So a
 /// request a browser marks same-site or cross-site is refused, and so is
@@ -860,7 +858,7 @@ fn elsewhere(host: Option<&str>) -> String {
 const UNREACHED: &str = "The shared website couldn't be reached.";
 
 /// Claktory's 502 page for a share, its words kept as the share's latest
-/// failure for the app to show (#505 row 655).
+/// failure for the app to show.
 fn unreached(gate: &Gate, why: &str) -> Response<Body> {
     (gate.failed)(Some(why));
     page(StatusCode::BAD_GATEWAY, why)

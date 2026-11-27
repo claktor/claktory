@@ -1,4 +1,4 @@
-//! #414's boundary (Fugo 31931, 32063): a pipe's liaison, made by Claktory
+//! A pipe's liaison, made by Claktory
 //! for that pipe alone, uses no other pipe in any role (member, sending
 //! only, lead or liaison), and an agent on another pipe is never a pipe's
 //! liaison. Whoever asks (the person in the app, an agent's card, a

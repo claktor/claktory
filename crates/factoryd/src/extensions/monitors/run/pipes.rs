@@ -1,4 +1,4 @@
-//! Pipes monitors (friend bug #34): fire when pipes their agent may see
+//! Pipes monitors: fire when pipes their agent may see
 //! change: opened, closed, paused, resumed, a website shared over one or
 //! stopped, the other side coming online or going offline.
 //!

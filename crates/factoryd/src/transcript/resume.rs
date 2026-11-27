@@ -1,4 +1,4 @@
-//! Resuming the conversation shown on reconnect (#413, #378's second step).
+//! Resuming the conversation shown on reconnect.
 //!
 //! Every device shows the same agent (the selected one), and its app holds
 //! that agent's latest entries. Each whole Transcript sent, and each change

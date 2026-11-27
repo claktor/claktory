@@ -1,4 +1,4 @@
-// Choosing a model (Squalo's U3, #343): the field names the provider, and
+// Choosing a model: the field names the provider, and
 // the list is grouped by provider with a search, so "Claude Opus 5" from
 // Anthropic and from OpenRouter can be told apart.
 import 'package:factory_app/controls.dart' show SelectOption;
@@ -182,7 +182,7 @@ void main() {
   });
 }
 
-// Friend bug #14: a model id the list doesn't have can be typed; its
+// A model id the list doesn't have can be typed; its
 // provider is asked before it's chosen, and a refusal shows.
 Future<(Harness, List<String>)> _showSignedIn(WidgetTester tester) async {
   final chosen = <String>[];

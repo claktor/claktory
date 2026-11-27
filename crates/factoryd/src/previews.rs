@@ -15,6 +15,7 @@ mod pdf;
 mod video;
 
 use std::io::{Cursor, Read};
+#[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -426,7 +427,10 @@ impl Job {
         let number = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = folder.join(format!(".making-{}-{number}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        #[cfg(unix)]
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
+        #[cfg(windows)]
+        factory_agent::windows::private::create_dir_all(&dir)?;
         Ok(Job { dir })
     }
 
@@ -462,6 +466,14 @@ fn run_unless(command: &mut std::process::Command, limit: std::time::Duration, s
     command.env_clear();
     if let Some(path) = std::env::var_os("PATH") {
         command.env("PATH", path);
+    }
+    // Windows' own folder, without which a program can't start its
+    // networking or find the system's libraries.
+    #[cfg(windows)]
+    for name in ["SystemRoot", "windir"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
     }
     let mut child = command
         .stdin(Stdio::null())

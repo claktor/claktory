@@ -75,7 +75,9 @@ pub(crate) fn watch_agents(factory: &Arc<Factory>) {
         loop {
             notify.notified().await;
             let Some(factory) = weak.upgrade() else { return };
-            // A pipe whose lead was deleted gets another (`pipes::lead`).
+            // Agents moved elsewhere leave its member lists; a pipe whose
+            // lead was deleted or moved gets another (`pipes::lead`).
+            crate::pipes::moved_out(&factory);
             crate::pipes::lead::settle_all(&factory);
             super::recheck(&factory);
         }

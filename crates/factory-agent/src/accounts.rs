@@ -126,14 +126,14 @@ pub fn credit_error(status: u16, body: &str) -> bool {
 }
 
 /// Whether an OpenRouter 402 says this one request costs more than the key
-/// may spend on it, rather than that the key has nothing left (friend bug
-/// #42): its words "requires more credits, or fewer max_tokens … can only
-/// afford N", or `metadata.reason` "weight_exceeds_budget" (the request's
-/// estimate, input plus `max_tokens` at the model's price, is more than
-/// the key's in-flight budget). An expensive model with a long
-/// conversation meets it while a cheaper one on the same key runs. Some
-/// with the completion tokens the key can afford, when said; None for
-/// anything else, "can only afford 0" included (the key is out).
+/// may spend on it, rather than that the key has nothing left: its words
+/// "requires more credits, or fewer max_tokens … can only afford N", or
+/// `metadata.reason` "weight_exceeds_budget" (the request's estimate,
+/// input plus `max_tokens` at the model's price, is more than the key's
+/// in-flight budget). An expensive model with a long conversation meets it
+/// while a cheaper one on the same key runs. Some with the completion
+/// tokens the key can afford, when said; None for anything else, "can only
+/// afford 0" included (the key is out).
 pub fn unaffordable(status: u16, body: &str) -> Option<Option<u64>> {
     if status != 402 {
         return None;

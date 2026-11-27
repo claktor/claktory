@@ -24,7 +24,7 @@ pub(crate) fn canonical(input: &str) -> Result<String, String> {
         return Err("Give only the site, such as https://example.com, without a path, query or #.".to_owned());
     }
     let Some(url::Host::Domain(host)) = url.host() else {
-        return Err("A session can't be for an IP address: give the site's name.".to_owned());
+        return Err("That's an IP address: Claktory's browser goes only to a site by its name on the internet.".to_owned());
     };
     let host = host.trim_end_matches('.');
     // Plain letter-digit-hyphen labels only (Fugo 41161): never a pattern
@@ -34,7 +34,7 @@ pub(crate) fn canonical(input: &str) -> Result<String, String> {
         return Err(format!("{host} isn't a site's name: give one like https://example.com, exactly, never a pattern."));
     }
     if !host.contains('.') || LOCAL_NAMES.contains(&host) || LOCAL_SUFFIXES.iter().any(|suffix| host.ends_with(suffix)) {
-        return Err(format!("{host} is a name on this computer or its network: a session is only for a site on the internet."));
+        return Err(format!("{host} is a name on this computer or its network: Claktory's browser goes only to sites on the internet."));
     }
     let origin = url.origin().ascii_serialization();
     if origin == "null" {

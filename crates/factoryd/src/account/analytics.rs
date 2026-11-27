@@ -1,7 +1,7 @@
-//! What check-ins report besides the version and platform (Matt's call,
-//! API.md's check-in): how many agents, projects and paired devices there
-//! are, and, per period since the last accepted check-in, the tokens of
-//! model calls per provider and model, and agents' work per UTC hour.
+//! What check-ins report besides the version and platform (API.md's
+//! check-in): how many agents, projects and paired devices there are, and,
+//! per period since the last accepted check-in, the tokens of model calls
+//! per provider and model, and agents' work per UTC hour.
 //!
 //! Model calls are counted as they end, per hour, in factory.db
 //! (`model_usage`); agents' work comes from the runs factory.db records. A
@@ -37,7 +37,7 @@ CREATE TABLE model_usage (
 ALTER TABLE runs ADD COLUMN last_call INTEGER;
 ";
 
-/// #119: what check-ins count of the devices that connect, of how backend
+/// What check-ins count of the devices that connect, of how backend
 /// versions fare after updates, and of how far setup got.
 pub(crate) const HEALTH: &str = "
 -- Paired devices (this computer's own app among them) that connected, by
@@ -133,7 +133,7 @@ pub(super) fn counts(factory: &Factory) -> Counts {
 
 /// How many secrets, said only roughly (0, 1, 10 or 50: at least that
 /// many): enough to see that the vault is used, too little to single out a
-/// Claktory with many (Fugo).
+/// Claktory with many.
 fn secrets_bucket(secrets: u32) -> u32 {
     match secrets {
         0 => 0,

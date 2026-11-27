@@ -1,6 +1,5 @@
-// Pictures of Settings as area 3 and 5a lay it out (ux/settings.md,
-// ux/permissions.md §2.1), for Lucy to check against her mock-ups. With
-// SHOTS set they're drawn to PNGs there:
+// Pictures of Settings as area 3 and 5a lay it out, to check against
+// the mock-ups. With SHOTS set they're drawn to PNGs there:
 //   SHOTS=/tmp/settings flutter test test/settings_shots_test.dart
 // Without it they only check that each scene lays out without an error.
 // test-bundle: alone (loads the app's fonts)

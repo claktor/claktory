@@ -1,4 +1,4 @@
-// Selecting in a scrolled panel under the app's zoom (#326, Matt): a drag
+// Selecting in a scrolled panel under the app's zoom: a drag
 // selects what's under the pointer, not (zoom − 1) × the scroll away.
 import 'package:factory_app/database.dart' show DatabaseView;
 import 'package:factory_app/memory.dart' show MemoryView;

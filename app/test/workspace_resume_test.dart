@@ -1,4 +1,4 @@
-// #378: a connection that comes back carries on from the Workspace it holds
+// A connection that comes back carries on from the Workspace it holds
 // (Hello.workspace_revision) and gets only what changed while it was away,
 // as a patch; it must show exactly what a fresh app would, every time: after
 // a run of changes made while it was away, after a backend restart in
@@ -17,7 +17,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'tunnel_test.dart' show FakeTunnel, FakeTunnels, backendWith;
 import 'workspace_patch_test.dart' show patchFor;
 
-/// A Claktory as Secco's contract has it: every Workspace it sends has a
+/// A Claktory as the backend's resume has it: every Workspace it sends has a
 /// revision ("process-counter"); it keeps those it sent the device, and
 /// one coming back with one it holds gets a patch to it, even with nothing
 /// changed; else, after a restart say, a whole Workspace.
@@ -208,7 +208,7 @@ Future<void> _until(bool Function() done, [String Function()? reason]) async {
   expect(done(), isTrue, reason: reason?.call());
 }
 
-/// Secco's fixtures from the real backend (factoryd's tests/all/resume.rs),
+/// Fixtures from the real backend (factoryd's tests/all/resume.rs),
 /// three rounds of changes made while the app was away: the Workspace it
 /// held, the ServerMessage the backend resumed with, and what a fresh app
 /// got then. Its home's paths and this Mac's names are taken out.

@@ -1,5 +1,5 @@
 // What a device keeps of the files its viewers read from a Claktory on
-// another machine (#446, Matt's decision: device-local state). Coming back
+// another machine (device-local state). Coming back
 // to a picture, a video, a PDF or a text an agent showed shows the copy
 // kept here at once, once a one-byte read says the file is still that
 // version, rather than bringing it over the tunnel again; a file changed
@@ -48,7 +48,7 @@ const fileCacheChoices = [
 /// The variant of a file that is the file itself.
 const originalVariant = 'original';
 
-/// The variant that is a preview made for [box] (#379).
+/// The variant that is a preview made for [box].
 String previewVariant(PreviewBox box) => 'preview-${box.width}x${box.height}';
 
 /// How much of [backend]'s Claktory's files this device keeps, as set on
@@ -85,13 +85,13 @@ Future<String?> _findFolder() async {
     // The app's container's Library/Caches, beside its tmp: never backed
     // up.
     path = '${Directory.systemTemp.parent.path}/Library/Caches/files';
-    // Unreadable while the iPhone is locked (Fugo 33088): nothing is kept
+    // Unreadable while the iPhone is locked: nothing is kept
     // where that can't be made so.
     if (!await _protect(path)) return null;
   } else if (Platform.isAndroid) {
     // The app's cache folder (Context.getCacheDir), beside the temporary
     // folder, which is code_cache: Android empties that at every update
-    // (Sale's row 128).
+    // .
     path = '${Directory.systemTemp.parent.path}/cache/files';
   } else if (Platform.isMacOS) {
     const app = bool.fromEnvironment('FACTORY_DEV')
@@ -123,8 +123,8 @@ Future<String?> _findFolder() async {
 }
 
 /// iOS: [path], a folder (made if it isn't there) and what's in it, or a
-/// file moved into one, can't be opened while the iPhone is locked
-/// (Fugo 33088, 33120): whether it could be made so.
+/// file moved into one, can't be opened while the iPhone is locked:
+/// whether it could be made so.
 Future<bool> _protect(String path) async {
   try {
     await const MethodChannel('factory/device')

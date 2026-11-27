@@ -1,5 +1,5 @@
-//! pipe_leave (#236): an agent gives up a pipe of its own, or only reading
-//! it (it only sends then, #414), or only leading it, at once and with no
+//! pipe_leave: an agent gives up a pipe of its own, or only reading
+//! it (it only sends then), or only leading it, at once and with no
 //! card; the person's History keeps it (`crate::given_up`). Only the person
 //! gives any of it back, in the pipe's settings.
 //!
@@ -7,7 +7,7 @@
 //! that the person's changes take too (`change`), so a call that comes
 //! after the person took it off changes nothing. Its liaison and an agent
 //! limited to the pipe are the person's containment, so they can't leave
-//! (Fugo 43129). An agent that gives up leading is never made the lead
+//! . An agent that gives up leading is never made the lead
 //! again but by the person (`Record::declined_lead`); whoever leads after
 //! is chosen as always (`lead::settle`): never one that can run commands.
 //! The last agent leaving leaves the pipe as it is: nothing is closed or
@@ -56,7 +56,7 @@ pub(crate) fn tool(factory: &Arc<Factory>, agent: &str) -> Tool {
     )
 }
 
-/// The pipe as History names it (Trish 45527): ""Launch"" when this side
+/// The pipe as History names it: ""Launch"" when this side
 /// named it; else who it's with, "with Fred"; else "" ("a pipe"). Never
 /// its id, nor a name the other side chose.
 fn history_label(record: &super::Record) -> String {

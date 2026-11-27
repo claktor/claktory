@@ -1,4 +1,4 @@
-//! Adding a device (dms-e2ee.md §2, Fugo H3 and M3): the new device shows a
+//! Adding a device: the new device shows a
 //! QR code; one of the person's devices that's set up scans it and sends
 //! back the identity key and its pins, sealed so only the device that showed
 //! that QR code can open them.
@@ -15,8 +15,8 @@
 //! The QR code is the way. Copying the code and pasting it on the other
 //! device is the fallback, and only with a comparison: both devices show
 //! [`Offer::comparison`] and the person adds the device only once they
-//! match, since any app could have swapped the pasted code for its own
-//! (Fugo, H3). A typed code can't carry the secret, so there's none.
+//! match, since any app could have swapped the pasted code for its own.
+//! A typed code can't carry the secret, so there's none.
 //!
 //! The same HPKE context exports the key history transfer uses
 //! ([`crate::transfer`]), so only these two devices have it.

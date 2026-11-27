@@ -114,12 +114,17 @@ fn remove(path: &Path) {
 
 /// Where dictations are kept, made private if it isn't there yet.
 pub(crate) fn staging(home: &crate::home::Home) -> std::io::Result<PathBuf> {
-    use std::os::unix::fs::DirBuilderExt as _;
     let dir = home.root().join("speech").join("dictation");
-    match std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir) {
-        Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => return Err(error),
-        _ => {}
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        match std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&dir) {
+            Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => return Err(error),
+            _ => {}
+        }
     }
+    #[cfg(windows)]
+    factory_agent::windows::private::create_dir_all(&dir)?;
     Ok(dir)
 }
 

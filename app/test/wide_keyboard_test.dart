@@ -1,5 +1,5 @@
-// The wide window with an on-screen keyboard up, as on an Android tablet
-// (Sale's row 12): the conversation and a pane beside it end above the
+// The wide window with an on-screen keyboard up, as on an Android tablet:
+// the conversation and a pane beside it end above the
 // keyboard, so the message box and Send stay in sight; the rail and the
 // sidebar stay put under it, and nothing moves on a Mac, which has none.
 import 'package:factory_app/message_box.dart' show MessageBox;

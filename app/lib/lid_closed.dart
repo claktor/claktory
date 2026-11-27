@@ -1,5 +1,5 @@
-// Keeping a laptop's agents working with its lid closed (#371,
-// coordination/security/lid-closed.md): Settings → General → Sleep's
+// Keeping a laptop's agents working with its lid closed
+// (coordination/security/lid-closed.md): Settings → General → Sleep's
 // switch for it, its own question before it's turned on, and where it
 // stands (Workspace.keep_awake.lid_closed). The backend itself keeps the
 // Mac awake with its lid closed while agents work and it's plugged in, and
@@ -29,7 +29,7 @@ bool lidClosedHere(Backend backend) =>
     backend.localBackend &&
     backend.target == null;
 
-// The words (Trish's to polish).
+// The words.
 
 const lidClosedLabel = 'Keep agents working with the lid closed';
 const lidClosedNote = "Only while it's plugged in and agents are working.";
@@ -78,7 +78,7 @@ const lidClosedQuestionOff = 'You can turn it off here at any time.';
   );
 }
 
-/// The person's setting, STUCK included (Abbacchio's row 872): a backend
+/// The person's setting, STUCK included: a backend
 /// from before lid_closed_turned_on says it by its state, the retired ones
 /// counting as off.
 bool lidClosedTurnedOn(KeepAwake keep) =>
@@ -149,7 +149,7 @@ class LidClosedStuck extends StatelessWidget {
         if (parts.isNotEmpty) ...[
           if (heading) const SizedBox(height: Space.xs),
           // One sentence, its commands inline, so no words are left alone
-          // after a command's box (Abbacchio's row 871); the boxes to copy
+          // after a command's box; the boxes to copy
           // them from follow it.
           Text.rich(
             TextSpan(
@@ -176,8 +176,8 @@ class LidClosedStuck extends StatelessWidget {
   }
 }
 
-/// Its own question, before it's turned on (Matt's ruling: never bundled
-/// with keeping the Mac awake): what it does, the heat and the bag.
+/// Its own question, before it's turned on (never bundled with keeping
+/// the Mac awake): what it does, the heat and the bag.
 class _LidClosedQuestion extends StatefulWidget {
   const _LidClosedQuestion({required this.close, required this.backend});
 

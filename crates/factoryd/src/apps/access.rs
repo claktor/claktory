@@ -1,9 +1,9 @@
-//! Rivet sets an app up (#333): what one of the installed apps may read and
+//! Rivet sets an app up: what one of the installed apps may read and
 //! which agents may use it, for what the person wants (charted, say). It
 //! proposes, with `apps_propose_access` (the App grants extension); the
 //! person decides on the card it opens in Rivet's conversation
 //! (`v1::AppAccessProposal`, DecideAppAccess). Installing an app gives it
-//! nothing, and only the person's approval gives anything (Fugo's review):
+//! nothing, and only the person's approval gives anything:
 //!
 //! - Only Rivet proposes, never after reading a pipe, and never all of
 //!   Claktory's records (only the sources that say what they hold), a
@@ -65,7 +65,7 @@ CREATE TABLE app_access_proposals (
 CREATE INDEX app_access_proposals_by_agent ON app_access_proposals (agent, created);
 ";
 
-/// The migration that added replies (#370 Submit): 1 when the person
+/// The migration that added replies: 1 when the person
 /// answered the card with a comment instead (state 'declined': nothing was
 /// given).
 pub(crate) const REPLIED: &str = "
@@ -103,7 +103,7 @@ struct Row {
     decided: Option<i64>,
     comment: String,
     error: String,
-    /// Declined by a reply (#370): the comment is what to do instead.
+    /// Declined by a reply: the comment is what to do instead.
     replied: bool,
 }
 
@@ -257,15 +257,15 @@ fn installed(factory: &Factory, wanted: &str, nothing: &str) -> Result<(super::A
 }
 
 /// Whether `agent` carries a stranger's words: it read a web page through
-/// browser control (#346: reading a pipe, or others' words through an app
-/// or Claktory's records, marks no one).
+/// browser control (reading a pipe, or others' words through an app or
+/// Claktory's records, marks no one).
 fn tainted(factory: &Factory, agent: &str) -> bool {
     !factory.pipes.tainted(agent).is_empty()
 }
 
 /// apps_set_access, for Rivet (the caller checks it's Rivet): what the
 /// change takes away is applied at once; what it gives, at once too when
-/// none of Fugo's rules needs the person (`card_rules`), and otherwise on
+/// none of the access rules needs the person (`card_rules`), and otherwise on
 /// one card for all of it. Kept as changes (`super::changes`).
 pub(crate) async fn set_access(factory: &Arc<Factory>, rivet: &str, args: SetArgs) -> Result<ToolResult, String> {
     let nothing = "Nothing was changed.";
@@ -567,15 +567,15 @@ fn yours(change: &changes::Change, names: &std::collections::BTreeMap<String, St
 }
 
 /// Why giving `widen` (after `narrow`) needs the person's approval, each
-/// one of Claktory's sentences; none when Rivet may apply it (Fugo's
-/// ruling, #339). Judged from the manifest, the sources and the agents as
-/// they are now, never from what Rivet says.
+/// one of Claktory's sentences; none when Rivet may apply it. Judged from
+/// the manifest, the sources and the agents as they are now, never from
+/// what Rivet says.
 fn card_rules(factory: &Factory, rivet: &str, manifest: &super::bundle::Manifest, widen: &Access) -> Vec<String> {
     let name = &manifest.name;
     let names = changes::agent_names(factory);
     let agent_name = |id: &str| names.get(id).cloned().unwrap_or_else(|| id.to_owned());
     let mut rules = Vec::new();
-    // 4: Rivet has read a stranger's words (a web page, #346).
+    // 4: Rivet has read a stranger's words (a web page).
     if tainted(factory, rivet) {
         rules.push(format!(
             "{} has read {}, which may hold someone else's instructions, so what it gives needs your approval.",
@@ -599,7 +599,7 @@ fn card_rules(factory: &Factory, rivet: &str, manifest: &super::bundle::Manifest
             changes::and(&manifest.hosts)
         ));
     }
-    // 3: an agent given it has read a stranger's words (a web page, #346).
+    // 3: an agent given it has read a stranger's words (a web page).
     for agent in widen.agents.keys() {
         if tainted(factory, agent) {
             rules.push(format!(
@@ -1065,7 +1065,7 @@ pub(crate) async fn decide(factory: &Arc<Factory>, request: &v1::DecideAppAccess
         reshow(factory, &found);
         return Ok(());
     }
-    // A reply (#370 Submit) gives nothing: Rivet gets the comment.
+    // A reply gives nothing: Rivet gets the comment.
     if !request.approve || request.reply {
         if let Some(row) = end(factory, &id, State::Declined, comment, "", request.reply) {
             tell(factory, &row);

@@ -1,4 +1,4 @@
-//! The Pipes extension: an agent starts a pipe for the person (#244), the
+//! The Pipes extension: an agent starts a pipe for the person, the
 //! way devices_add adds a device. `pipes_invite` and `pipes_accept` open a
 //! card in its conversation for the person to make the invite, or paste the
 //! code they were given, themselves (`crate::pipes::start`); `pipes_list`
@@ -6,34 +6,34 @@
 //! it's turned off. No tool takes or returns a code, approves a pipe or
 //! chooses the agents that read it.
 //!
-//! `pipes_forward` (pipes-automation.md §7.1) sets where a pipe's reports go,
+//! `pipes_forward` sets where a pipe's reports go,
 //! or a project's default, and can make the recipient a report reader: only
 //! for an admin agent, checked on every call, and never while it has read
 //! anything from outside (a pipe, the web, direct messages). It only moves
 //! toward containment: nothing in it lifts a reader or a liaison, and it
 //! never releases reports waiting for the person.
 //!
-//! `pipes_group` (#359) arranges a project's pipes into groups in the
+//! `pipes_group` arranges a project's pipes into groups in the
 //! sidebar, as the person does from a pipe's menu: only for an admin agent.
 //! Arrangement only, so nothing about a pipe changes.
 //!
-//! `pipes_sender` (#414) lets an agent only send to a pipe the person
+//! `pipes_sender` lets an agent only send to a pipe the person
 //! approved, or stops it: only for an admin agent, checked on every call,
 //! never while it has read anything from outside, and only for agents that
 //! aren't the pipe's or only send to it, never one that reads it. Each
 //! change is in Needs you's history.
 //!
-//! `pipes_settings` (#423) changes a pipe as the person asks, for an admin
+//! `pipes_settings` changes a pipe as the person asks, for an admin
 //! agent that hasn't read anything from outside: what narrows it at once
 //! (the pipe says who), what widens it only through a card the person
 //! approves (`crate::card_actions`).
 //!
-//! `pipes_report_type` (§11.3) defines, edits, deletes or shows report types
-//! from the person's plain description: only for an admin agent, and its
-//! changes never while it has read anything from outside, since a type
-//! written from the other side's words would let them shape their own
-//! channel (Fugo's invariant 7). factoryd checks every definition against
-//! the rules in code (`handoff::types::validate`), whoever asks.
+//! `pipes_report_type` defines, edits, deletes or shows report types from the
+//! person's plain description: only for an admin agent, and its changes never
+//! while it has read anything from outside, since a type written from the
+//! other side's words would let them shape their own channel.
+//! factoryd checks every definition against the rules in code
+//! (`handoff::types::validate`), whoever asks.
 
 use std::sync::Arc;
 
@@ -66,7 +66,7 @@ static MANIFEST: Manifest = Manifest {
 };
 
 /// The Pipes option for an admin agent to hear when the other side of a
-/// pipe starts or stops sharing a website (#502); a pipe's lead always
+/// pipe starts or stops sharing a website; a pipe's lead always
 /// does.
 pub(crate) const SHARE_EVENTS: &str = "share_events";
 
@@ -385,12 +385,12 @@ fn find_agent(factory: &Factory, wanted: &str, project: &str) -> Result<String, 
         .ok_or_else(|| format!("There's no agent \"{wanted}\"."))
 }
 
-/// pipes_settings (#423, Bruno 28259): narrows a pipe at once, or asks the
+/// pipes_settings: narrows a pipe at once, or asks the
 /// person on a card to approve a change that widens it.
 async fn settings(factory: Arc<Factory>, agent: String, args: SettingsArgs) -> Result<ToolResult, String> {
     use crate::card_actions::{Action, Tense, listed};
     // Narrowing stays allowed after reading from outside, labelled so;
-    // widening doesn't (#471, Fugo 33607).
+    // widening doesn't.
     admin(&factory, &agent, "change a pipe's settings", "in the pipe's settings")?;
     let tainted = !factory.pipes.tainted(&agent).is_empty();
     let reason = args.reason.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -428,7 +428,7 @@ async fn settings(factory: Arc<Factory>, agent: String, args: SettingsArgs) -> R
     let title = if only_resume && change.looped_at.is_some() { format!("Continue {pipe_called}") } else { format!("Change {pipe_called}") };
     let mut description = format!("{me} asks to {}.", listed(&said));
     // The loop breaker's pause: why, in Claktory's words, and what
-    // continuing does (friend bug #32, Fugo 33421).
+    // continuing does.
     if change.looped_at.is_some() {
         let why = crate::pipes::Looped::why(record.looped);
         description.push_str(&format!(
@@ -441,7 +441,7 @@ async fn settings(factory: Arc<Factory>, agent: String, args: SettingsArgs) -> R
         description.push(' ');
         description.push_str(&words);
     }
-    // Its liaison let out (#471, Squalo): it's no longer limited to the
+    // Its liaison let out: it's no longer limited to the
     // pipe at all, as the pipe's settings say.
     if change.commands.contains(&record.bound) {
         description.push_str(&format!(
@@ -492,14 +492,14 @@ struct ShareArgs {
     pipe: String,
     port: u32,
     name: String,
-    /// How long it stays shared (#46): 1 to 168 hours, 24 unless given.
+    /// How long it stays shared: 1 to 168 hours, 24 unless given.
     #[serde(default)]
     hours: Option<i64>,
     #[serde(default)]
     reason: String,
 }
 
-/// pipes_share (friend bug #32, Fugo 33421): asks the person on a card to
+/// pipes_share: asks the person on a card to
 /// share one website on this computer with one pipe, showing exactly what
 /// it exposes, in Claktory's words; only their Approve shares it, the same
 /// program still listening (`card_actions::Action::Share`).
@@ -511,7 +511,7 @@ async fn share(factory: Arc<Factory>, agent: String, args: ShareArgs) -> Result<
         return Err("Give reason: why, in a sentence the person reads. Nothing was asked.".to_owned());
     }
     // How long: only a time the person sees on the card, never "until
-    // stopped", which is theirs to choose (#46, Fugo 46375).
+    // stopped", which is theirs to choose.
     let most = crate::pipes::shares::CARD_HOURS_MOST;
     let hours = match args.hours {
         None => crate::pipes::shares::CARD_HOURS,
@@ -537,7 +537,7 @@ async fn share(factory: Arc<Factory>, agent: String, args: ShareArgs) -> Result<
         return Err(format!("{why} Nothing was asked."));
     }
     // One the person shares with it already: offered again as it is; one
-    // that ended there: shared again, the same website (#502).
+    // that ended there: shared again, the same website.
     let again = match crate::pipes::shares::on_pipe_by_port(&factory, &record.id, port) {
         Some((_, name, false)) => {
             return Err(format!(
@@ -552,9 +552,9 @@ async fn share(factory: Arc<Factory>, agent: String, args: ShareArgs) -> Result<
         return Err(format!("Nothing answers on port {port} on this computer, so there's nothing to share yet. Nothing was asked."));
     }
     // Only a program of the person's, named: never another user's or a
-    // system service's, nor one that could change unseen (Fugo 33782).
+    // system service's, nor one that could change unseen.
     // On Linux it's read from /proc, so lsof isn't needed (W10); another
-    // user's is said whose, never which (Fugo 36064).
+    // user's is said whose, never which.
     let heard = tokio::task::spawn_blocking(move || crate::card_actions::heard(port)).await.unwrap_or(crate::card_actions::Heard::Unknown);
     let listener = match heard {
         crate::card_actions::Heard::Mine(listener) => listener,
@@ -586,7 +586,7 @@ async fn share(factory: Arc<Factory>, agent: String, args: ShareArgs) -> Result<
     };
     let me = factory.agent_name(&agent);
     // Shared again: the name it had, the same port, what answers there
-    // now, and the end it has already (#46: never lengthened by a card).
+    // now, and the end it has already (never lengthened by a card).
     let (name, again_words, title, lasts) = match &again {
         Some((id, was)) => {
             let ends = crate::pipes::shares::expires_of(&factory, id)
@@ -659,7 +659,7 @@ struct SharesArgs {
     reason: String,
 }
 
-/// What an agent does to a website shared over a pipe (#502), at once.
+/// What an agent does to a website shared over a pipe, at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WebsiteAct {
     /// Stops a website of the person's on that pipe.
@@ -673,7 +673,7 @@ pub(crate) enum WebsiteAct {
 /// Does `act` to the website `wanted` names on `record`, for `agent`
 /// (`by`: how the pipe's chat names it): narrowing, or offering again
 /// what's shared already, so at once, even after it read from outside
-/// (Fugo 35687). What it did, or why not.
+/// . What it did, or why not.
 pub(crate) fn website_act(
     factory: &Arc<Factory>,
     agent: &str,
@@ -707,7 +707,7 @@ pub(crate) fn website_act(
     }
 }
 
-/// pipes_shares (#502, friend bug #32): what's shared over the person's
+/// pipes_shares: what's shared over the person's
 /// pipes both ways, for an admin agent, and stopping, hiding, offering
 /// again or asking to show one.
 async fn shares(factory: Arc<Factory>, agent: String, args: SharesArgs) -> Result<ToolResult, String> {
@@ -790,7 +790,7 @@ fn reason_of(reason: &str) -> Result<String, String> {
     Ok(reason)
 }
 
-/// pipes_reports (#471 G6, Fugo 33607): asks the person on a card to send
+/// pipes_reports: asks the person on a card to send
 /// a pipe's waiting reports to its reader, or discard them; bound to
 /// those reports and that reader.
 fn reports(factory: &Arc<Factory>, agent: &str, args: ReportsArgs) -> Result<ToolResult, String> {
@@ -836,7 +836,7 @@ struct ReleaseReaderArgs {
     fresh: Option<bool>,
 }
 
-/// pipes_release_reader (#471 G6, Fugo 33607): asks the person on a card to
+/// pipes_release_reader: asks the person on a card to
 /// let an agent stop reading reports, saying what it gives back and that
 /// its conversation holds the reports' words; fresh unless asked not to.
 fn release_reader(factory: &Arc<Factory>, agent: &str, args: ReleaseReaderArgs) -> Result<ToolResult, String> {
@@ -868,7 +868,7 @@ fn release_reader(factory: &Arc<Factory>, agent: &str, args: ReleaseReaderArgs) 
 }
 
 /// pipes_shares show: asks the person on a card to show again a website
-/// the other side shares, hidden here (#502, Fugo 35687): its name quoted
+/// the other side shares, hidden here: its name quoted
 /// as theirs, and where it's reached here; bound to the pipe's key.
 fn show_card(factory: &Arc<Factory>, agent: &str, record: &crate::pipes::Record, wanted: &str, reason: &str) -> Result<ToolResult, String> {
     untainted_admin(factory, agent, "ask to show a website again", "in the pipe's settings")?;
@@ -970,7 +970,7 @@ fn change_of(factory: &Factory, args: &SettingsArgs) -> Result<(crate::pipes::Re
         commands: ids(&args.commands)?,
         lead: args.lead.as_deref().map(|lead| find_agent(factory, lead, &record.project)).transpose()?,
         liaison: args.liaison.as_ref().map(|name| name.trim().to_owned()),
-        // Only a review it changes (Abbacchio row 1232).
+        // Only a review it changes.
         review_outgoing: args.review_outgoing.filter(|review| *review != record.review),
         review_incoming: args.review_incoming.filter(|review| *review != record.review_incoming),
         names: Default::default(),
@@ -1045,8 +1045,8 @@ pub(crate) fn resolve_grant(factory: &Arc<Factory>, args: serde_json::Value) -> 
         return Err("Continuing a pipe its agents' looping paused always needs a request of its own, for that pause: leave it out of grants."
             .to_owned());
     }
-    // What the person reads old beside new, or can't undo (#471, Fugo's
-    // rule C): only ever on a card that shows it.
+    // What the person reads old beside new, or can't undo: only ever on
+    // a card that shows it.
     if change.only_on_a_card() {
         return Err("Renaming a pipe, changing what it's for or its instructions, raising its liaison's spending limit or deleting it always asks in a request of its own, which shows exactly that: leave it out of grants.".to_owned());
     }
@@ -1110,7 +1110,7 @@ struct ApproveArgs {
     send_only: Vec<String>,
 }
 
-/// pipes_approve (#471 G1): asks the person on a card to approve a new
+/// pipes_approve: asks the person on a card to approve a new
 /// pipe with these choices (`crate::pipes::approval_card`).
 fn approve(factory: &Arc<Factory>, agent: &str, args: ApproveArgs) -> Result<ToolResult, String> {
     untainted_admin(factory, agent, "ask to approve a pipe", "in the pipe itself")?;
@@ -1172,7 +1172,7 @@ struct TrustArgs {
     reason: String,
 }
 
-/// pipes_trust (#471 G7): asks the person on a card to accept a change in
+/// pipes_trust: asks the person on a card to accept a change in
 /// who's at a pipe's other end (`crate::pipes::trust_card`).
 fn trust(factory: &Arc<Factory>, agent: &str, args: TrustArgs) -> Result<ToolResult, String> {
     untainted_admin(factory, agent, "ask to accept who's at a pipe's other end", "in the pipe itself")?;

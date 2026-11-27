@@ -1,4 +1,4 @@
-// A tour of the iPhone app for screenshots (#198), against the dev
+// A tour of the iPhone app for screenshots, against the dev
 // Claktory, in the Simulator: pairing, the list of Claktories, the agents,
 // a conversation with a three-line draft, a message's menu, the ⋯ sheet,
 // a file and its comment popover, Settings, an agent's settings, and the

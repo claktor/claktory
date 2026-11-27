@@ -29,6 +29,7 @@ class HeldBox extends SingleChildRenderObjectWidget {
     required this.rows,
     this.movedUp,
     this.onPushedAbove,
+    this.holdsAtTop = true,
     super.child,
   });
 
@@ -44,25 +45,41 @@ class HeldBox extends SingleChildRenderObjectWidget {
   /// the pill to count them (Lucy 50118).
   final void Function(List<String> keys)? onPushedAbove;
 
+  /// Whether rows hold still at the very top too. False: at the top, what
+  /// comes in goes in where it belongs and the rows under it move down, so
+  /// the top rows stay in view (focus mode's queue, beside its stage).
+  final bool holdsAtTop;
+
   @override
-  RenderHeldBox createRenderObject(BuildContext context) =>
-      RenderHeldBox(rows: rows, movedUp: movedUp, onPushedAbove: onPushedAbove);
+  RenderHeldBox createRenderObject(BuildContext context) => RenderHeldBox(
+    rows: rows,
+    movedUp: movedUp,
+    onPushedAbove: onPushedAbove,
+    holdsAtTop: holdsAtTop,
+  );
 
   @override
   void updateRenderObject(BuildContext context, RenderHeldBox renderObject) {
     renderObject
       ..rows = rows
       ..movedUp = movedUp
-      ..onPushedAbove = onPushedAbove;
+      ..onPushedAbove = onPushedAbove
+      ..holdsAtTop = holdsAtTop;
   }
 }
 
 class RenderHeldBox extends RenderSliverSingleBoxAdapter {
-  RenderHeldBox({required this.rows, this.movedUp, this.onPushedAbove});
+  RenderHeldBox({
+    required this.rows,
+    this.movedUp,
+    this.onPushedAbove,
+    this.holdsAtTop = true,
+  });
 
   Map<String, RenderBox> Function() rows;
   Set<String> Function()? movedUp;
   void Function(List<String> keys)? onPushedAbove;
+  bool holdsAtTop;
 
   /// The rows in view as last laid out, top first, and where each was in
   /// the box.
@@ -86,7 +103,7 @@ class RenderHeldBox extends RenderSliverSingleBoxAdapter {
   /// How far the offset moves so the rows in view stay where they were,
   /// each row being at [now] in the box: 0 when nothing needs holding.
   double _correction(Map<String, double> now, double offset) {
-    if (_inView.isEmpty) return 0;
+    if (_inView.isEmpty || (!holdsAtTop && offset <= 0)) return 0;
     // A row that came in, or moved up from further down, between [from]
     // and [to].
     final moved = movedUp?.call() ?? const <String>{};

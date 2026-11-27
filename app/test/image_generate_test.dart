@@ -1,6 +1,6 @@
-// An agent making an image (#403): image_generate's row says what it's
+// An agent making an image: image_generate's row says what it's
 // making while it works, then shows the picture, read as a preview sized
-// for it (#379), which opens in the image viewer; a refusal shows the
+// for it, which opens in the image viewer; a refusal shows the
 // backend's words as they are. On a Mac and on an iPhone.
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/tool_views.dart' show MadeImage;

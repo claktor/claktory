@@ -57,12 +57,15 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         Body::Hello(_) => vec![View],
         // Projects, agents and folders: the settings file.
         Body::CreateProject(_) | Body::UpdateProject(_) | Body::DeleteProject(_) => vec![Config(&["projects"])],
-        Body::CreateAgent(_) | Body::DeleteAgent(_) | Body::ArrangeAgent(_) => vec![Config(&["agents"])],
+        Body::CreateAgent(_) | Body::DeleteAgent(_) | Body::ArrangeAgent(_) | Body::RestoreArrangement(_) => {
+            vec![Config(&["agents"])]
+        }
         Body::UpdateAgent(request) => update_agent(request),
         Body::CreateFolder(_) | Body::UpdateFolder(_) | Body::DeleteFolder(_) => vec![Config(&["projects.folders"])],
         Body::UpdateSettings(request) => update_settings(request),
         Body::RestoreSettings(_) => vec![Config(&[])],
         Body::SetHighlights(_) => vec![Config(&["highlights"])],
+        Body::SetAttribution(_) => vec![Config(&["attribution"])],
         Body::SetZoom(_) => vec![Config(&["display.zoom"])],
         Body::SetFileCache(_) => vec![Config(&["display.file_cache"])],
         Body::PinAgent(_) | Body::UnpinAgent(_) => vec![Config(&["pinned_agents"])],
@@ -87,12 +90,9 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         Body::ShowRecoveryCodes(_) | Body::KeepRecoveryCodes(_) => vec![Person(CODES)],
         // Page text (Fugo 36686): never read untainted through View.
         Body::ListErrandLog(_) => vec![Person(BROWSER)],
-        // The person's (#435 W12, Bruno 49773): agents open errands only
-        // with errand_open, a lead's tool for the agent it leads, refused
-        // while that lead is tainted.
-        Body::OpenErrand(_) => vec![Person(BROWSER)],
-        // Fugo's condition 6: only the person contains an agent or lifts it.
-        Body::SetAgentContained(_) => vec![Person(BROWSER)],
+        // Refused for everyone since browser-simple (agents open their own
+        // browser, and none is contained for it): kept for older apps.
+        Body::OpenErrand(_) | Body::SetAgentContained(_) => vec![Person(BROWSER)],
         Body::ShuffleAvatar(_) => vec![Config(&["user.avatar.seed", "user.avatar.choice"])],
         Body::SetRemoteAccess(_) => vec![Config(&["remote.relays"])],
         // What a connection shows, reads and transfers.
@@ -107,6 +107,7 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         | Body::SetFolderCollapsed(_)
         | Body::SetProjectCollapsed(_)
         | Body::PreviewProjectFolder(_)
+        | Body::PreviewArrange(_)
         | Body::SetPipeGroupCollapsed(_)
         | Body::SetLayout(_)
         | Body::PaneOpened(_)
@@ -240,6 +241,7 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         | Body::ConfirmDevice(_)
         | Body::DismissAllowNotice(_)
         | Body::ConfirmMove(_)
+        | Body::PaymentOpened(_)
         | Body::SetOnboarding(_) => vec![Person(CARD)],
         // A pipe's waiting reports, and letting a reader go: on a card the
         // person approves (#471 G6); making one a reader with pipes_forward.

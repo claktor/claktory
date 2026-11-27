@@ -1,4 +1,4 @@
-//! Keys and passwords the vault makes itself (#252): an agent asks for one
+//! Keys and passwords the vault makes itself: an agent asks for one
 //! by type, the person approves, and it's made here, in factoryd's memory,
 //! sealed straight into a new secret. It's never written, shown, logged or
 //! sent anywhere else; the asker is told only a key's public half, or what
@@ -357,7 +357,7 @@ mod tests {
         let all = password_spec(&ask(0), 0).expect("spec");
         assert_eq!((all.alphabet_size, all.length, all.shortest, all.longest), (90, 16, 16, 256));
         assert!(all.bits >= 80.0 && all.lowercase && all.uppercase && all.digits && all.symbols);
-        // Pericolo's: letters and digits, 32, without look-alikes.
+        // Letters and digits, 32, without look-alikes.
         let review = Password { length: 32, lowercase: true, uppercase: true, digits: true, avoid_similar: true, ..Password::default() };
         let review = password_spec(&review, 0).expect("spec");
         assert_eq!((review.alphabet_size, review.length, classes(&review).as_str()), (56, 32, "letters and digits"));

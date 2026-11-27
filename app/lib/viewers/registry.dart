@@ -80,7 +80,7 @@ final _viewers = <Viewer>[
             defaultTargetPlatform == TargetPlatform.iOS
         ? PdfViewer(key: ValueKey(leaf.path), path: leaf.path)
         // In a pane all the same: on a phone its header, with Back, and
-        // Share… to save it or open it in another app (Sale, Bruno 30855).
+        // Share… to save it or open it in another app.
         : _problemPane(
             context,
             leaf.path,
@@ -116,7 +116,7 @@ Widget viewerBody(BuildContext context, ViewLeaf leaf) =>
 
 /// A pane for a file this app can't show: why, in a pane with its header
 /// (Back on a phone), and Share… so it can still go to an app that can
-/// (#418).
+/// .
 Widget _problemPane(BuildContext context, String path, String text) =>
     PaneScaffold(
       share: path,
@@ -184,7 +184,7 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
 
   FileContent? file;
 
-  /// What Share… sends (#418): the file, once a read of it worked.
+  /// What Share… sends: the file, once a read of it worked.
   String? get sharePath {
     final file = this.file;
     return file != null && file.error.isEmpty ? path : null;
@@ -195,11 +195,11 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
 
   /// Why [failure] is, as the viewer shows it: the file's path under it,
   /// except for a read lost with the connection, which is no fault of the
-  /// file (Zucchero's row 588).
+  /// file.
   String get failurePath => lostWithConnection(failure) ? '' : path;
 
   /// From a drop, how long a read lost with it waits for the connection
-  /// before it says it failed (#375, Zucchero's row 588).
+  /// before it says it failed.
   Timer? _giveUp;
 
   Listenable? _reloads;
@@ -265,7 +265,7 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
     // Dropped: a read lost with it waits for it, as a read in pieces does,
     // up to [lostReadWaits], then says it failed. A read made of one piece
     // (a video's next part) fails with its request, so this is what holds
-    // it to the same time (Zucchero's row 588).
+    // it to the same time.
     if (dropped) {
       _giveUp?.cancel();
       _giveUp = Timer(lostReadWaits, _gaveUp);
@@ -282,8 +282,7 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
       unawaited(reload());
     }
     // The original, given up on with the connection: on from where it
-    // got, as Share carries on, rather than waiting for Try again (Bruno
-    // 29790).
+    // got, as Share carries on, rather than waiting for Try again.
     if (connecting && originalLoad is OriginalFailed && _originalLost) {
       unawaited(loadOriginal());
     }
@@ -321,14 +320,14 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
         if (agent.id == by) return '${agent.name} just updated this file';
       }
     }
-    // The copy kept on this device, offline (#446).
+    // The copy kept on this device, offline.
     if (_unchecked) {
       return usual.isEmpty ? mayBeOutOfDate : '$mayBeOutOfDate · $usual';
     }
     return usual;
   }
 
-  /// What shows is the copy this device kept (#446), and whether the file
+  /// What shows is the copy this device kept, and whether the file
   /// is still that version couldn't be asked (offline): the header says
   /// so, and it's asked once connected.
   var _unchecked = false;
@@ -339,7 +338,7 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
   set showingUnchecked(bool unchecked) => _unchecked = unchecked;
 
   /// The copy of [variants] of the file this device keeps, if any and
-  /// still the file's version, or offline (#446): shown, and true; false
+  /// still the file's version, or offline: shown, and true; false
   /// when it has to be read.
   Future<bool> _showKept(Backend backend, List<String> variants) async {
     final cache = FileCache.of(backend);
@@ -377,7 +376,7 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
     return true;
   }
 
-  /// Keeps [read] on this device, for next time (#446).
+  /// Keeps [read] on this device, for next time.
   void _keep(Backend backend, FileContent read) {
     final cache = FileCache.of(backend);
     if (cache == null || read.truncated || read.error.isNotEmpty) return;
@@ -389,19 +388,19 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
   }
 
   /// Whether [read] may be kept on this device: a viewer that reads files
-  /// it wasn't asked to open (a Markdown file's pictures, #540) keeps only
-  /// what is what it says it is (Fugo, 41320).
+  /// it wasn't asked to open (a Markdown file's pictures) keeps only
+  /// what is what it says it is.
   @protected
   bool keeps(FileContent read) => true;
 
-  /// How far the read on its way has got, while it's on its way (#375).
+  /// How far the read on its way has got, while it's on its way.
   ({int through, int size})? _progress;
 
   /// What [waiting] says is loading: "Loading image…".
   String get loadingLabel => 'Loading…';
 
   /// Whether this viewer's file may come as a preview made for this
-  /// screen (#379; previews.dart says when).
+  /// screen (previews.dart says when).
   bool get previews => false;
 
   /// The original was asked for, by Show original or by zooming past the
@@ -432,7 +431,7 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
   Future<void> reload() async {
     try {
       final backend = AppScope.of(context);
-      // Kept on this device and still the file (#446): the original if
+      // Kept on this device and still the file: the original if
       // it's here, else the preview made for this screen.
       final kept = await _showKept(backend, [
         originalVariant,
@@ -448,7 +447,7 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
       // reads the original, and asks for one only once it's clear the
       // original would be slow to come (previews.dart).
       // An image too big to open whole comes as a preview too, rather
-      // than its first 20 MB to no use (Zucchero, #375).
+      // than its first 20 MB to no use.
       final ask = previews && !wantOriginal;
       bool tooBig(int size) => size > wholeImageLimit;
       final slow = stopWhenSlow(backend);
@@ -510,7 +509,7 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
     setState(() => originalLoad = const OriginalLoading(0, 0));
     try {
       final backend = AppScope.of(context);
-      // Kept on this device (#446): at once.
+      // Kept on this device: at once.
       if (await _showKept(backend, [originalVariant]) || !mounted) return;
       final read = await backend.readFile(
         path,
@@ -553,10 +552,10 @@ mixin FileLoading<T extends StatefulWidget> on State<T> {
   Widget? waiting() {
     final file = this.file;
     final connected = _backend?.connected;
-    // Lost with the connection: read again once it's back (#375), so it
+    // Lost with the connection: read again once it's back, so it
     // waits for it rather than saying it failed.
     // Lost a moment before the connection says it's down, the same.
-    // Given up on, it says so (Zucchero's row 588).
+    // Given up on, it says so.
     if (failure != null &&
         failure != lostWhileReading &&
         connected != null &&
@@ -652,7 +651,7 @@ class HeaderTextButton extends StatelessWidget {
 }
 
 /// The header's word on a copy kept on this device that couldn't be
-/// checked against the file, offline (#446).
+/// checked against the file, offline.
 const mayBeOutOfDate = 'Saved copy, may be out of date';
 
 /// How long after a drop a read lost with it waits for the connection
@@ -668,5 +667,5 @@ bool lostWithConnection(String? failure) => _lostWith.contains(failure);
 const _lostWith = {
   lostWhileReading,
   'Connection lost.',
-  'Not connected to the backend.',
+  "Can't reach your Claktory right now.",
 };

@@ -1,4 +1,4 @@
-//! Where Claktory lives on Windows (windows.md §1): one resolver the
+//! Where Claktory lives on Windows: one resolver the
 //! backend, its setup and the app's hooks agree on, from Windows' Known
 //! Folders, never a guessed `C:\Users\<name>` or `%HOME%`.
 //!

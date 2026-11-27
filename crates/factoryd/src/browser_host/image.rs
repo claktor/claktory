@@ -189,6 +189,8 @@ pub(crate) fn ensure(home: &Path, container: &Path, built: &Built) -> Result<(),
                     Prep::Failed { why, failures, again: Instant::now() + retry_after(failures) }
                 }
             };
+            // The setup card says so now, not at its next check.
+            super::setup::recheck(&home);
         });
         if let Err(error) = started {
             *state = Prep::Failed {
@@ -252,6 +254,15 @@ fn delete(container: &Path, reference: &str) {
 }
 
 /// The private folder the archive is downloaded and unpacked in (0700).
+#[cfg(windows)]
+fn folder(home: &Path) -> Result<PathBuf, String> {
+    let folder = home.join("cache").join("browser-image");
+    factory_agent::windows::private::create_dir_all(&folder).map_err(|error| format!("Claktory can't make its folder for it ({error})."))?;
+    Ok(folder)
+}
+
+/// The private folder the archive is downloaded and unpacked in (0700).
+#[cfg(unix)]
 fn folder(home: &Path) -> Result<PathBuf, String> {
     use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
     let folder = home.join("cache").join("browser-image");
@@ -454,7 +465,8 @@ fn unpack(archive: &Path, to: &Path, most: u64) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
+// Claktory's browser isn't on Windows (`setup::check` says so).
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

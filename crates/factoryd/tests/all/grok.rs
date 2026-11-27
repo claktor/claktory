@@ -1,4 +1,4 @@
-//! Grok on a subscription (#493), as the Claktory keeps it: its sign-in
+//! Grok on a subscription, as the Claktory keeps it: its sign-in
 //! only in the vault (never in `auth.json`, not even its copy for an older
 //! backend, and refused while the vault is locked), its tokens in no log,
 //! transcript or other file, and revoked at xAI on sign-out.

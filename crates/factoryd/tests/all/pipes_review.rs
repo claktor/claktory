@@ -1,6 +1,6 @@
-//! Review incoming (#247): every message from the other side waits for the
-//! person's Let in before any agent reads anything of it (Fugo's list: the
-//! lead's event, pipe_read, pipe_status, the files), whoever the other side
+//! Review incoming: every message from the other side waits for the
+//! person's Let in before any agent reads anything of it (the lead's
+//! event, pipe_read, pipe_status, the files), whoever the other side
 //! says wrote it.
 
 use crate::common::apply_request;

@@ -1,8 +1,8 @@
-//! What Rivet changes only through a card the person approves (#423, Bruno
-//! 28259): Continue automatically, uninstalling an app, and widening a pipe;
-//! narrowing a pipe it does at once, and the pipe says so. Dismissing or
-//! replying changes nothing; approving makes exactly the change asked for,
-//! checked again then, and Rivet is told how it went.
+//! What Rivet changes only through a card the person approves: Continue
+//! automatically, uninstalling an app, and widening a pipe; narrowing a pipe
+//! it does at once, and the pipe says so. Dismissing or replying changes
+//! nothing; approving makes exactly the change asked for, checked again
+//! then, and Rivet is told how it went.
 
 use serde_json::json;
 
@@ -84,7 +84,7 @@ async fn continue_automatically_changes_only_with_the_persons_approval() {
     assert_eq!(card.title, "Turn on Continue automatically");
     assert!(card.body.starts_with("Rivet asks to change it in Settings → Providers:"), "{}", card.body);
     assert!(card.body.ends_with("Matt asked for it."), "{}", card.body);
-    // Its two parts apart (Fugo): Claktory's words, and Rivet's reason.
+    // Its two parts apart: Claktory's words, and Rivet's reason.
     assert!(card.action_description.starts_with("Rivet asks to change it in Settings → Providers:"), "{}", card.action_description);
     assert!(card.action_description.ends_with('.') && !card.action_description.contains("Matt asked"), "{}", card.action_description);
     assert_eq!(card.action_reason, "Matt asked for it.");
@@ -112,7 +112,7 @@ async fn continue_automatically_changes_only_with_the_persons_approval() {
     let said = call(&mut client, &mut view, "rivet", "models_auto_continue", r#"{"on": true, "reason": "x"}"#).await;
     assert_eq!(said, "Continue automatically is on already. Nothing was asked.");
 
-    // Its words can't be talked over (#492, Fugo A): a reply to the person's
+    // Its words can't be talked over: a reply to the person's
     // comment, with new words or none, is refused, and the card stays as it was.
     call(&mut client, &mut view, "rivet", "models_auto_continue", r#"{"on": false, "reason": "Matt asked."}"#).await;
     let (seq, _) = cards(&view).pop().expect("a card");
@@ -171,7 +171,7 @@ async fn rivet_narrows_a_pipe_at_once_and_widens_it_only_with_the_persons_approv
         card.action_description
     );
     assert!(card.body.starts_with(&card.action_description), "{}", card.body);
-    // Its words can't be changed while it waits (Fugo): what the person
+    // Its words can't be changed while it waits: what the person
     // approves is what happens.
     let id = card.id.clone();
     let update = json!({"id": id, "title": "Pause the pipe", "body": "Rivet asks to pause it.", "reason": "Shorter."});
@@ -200,7 +200,7 @@ async fn rivet_narrows_a_pipe_at_once_and_widens_it_only_with_the_persons_approv
     assert_eq!(after.member_ids, ["lea", "bo", "cy"]);
     assert_eq!(after.can_run_commands_ids, ["lea", "bo"]);
     assert_eq!(after.limits.expect("limits").messages_per_hour, lower + 5);
-    // Who joined shows in the pipe (Abbacchio's row 1092).
+    // Who joined shows in the pipe.
     let lines = pipes::messages_for_test(&factory, &pipe);
     assert!(lines.iter().any(|line| line.text == "Cy joined the pipe."), "{lines:?}");
 
@@ -211,7 +211,7 @@ async fn rivet_narrows_a_pipe_at_once_and_widens_it_only_with_the_persons_approv
     apply_request(&mut client, &mut view, Request::DeleteAgent(v1::DeleteAgent { agent_id: "cy".into() })).await;
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
     match apply_request(&mut client, &mut view, answer(seq, false)).await {
-        // Named as the person knew it, not by its id (Abbacchio's LOW).
+        // Named as the person knew it, not by its id.
         v1::server_message::Body::Error(error) => {
             assert!(error.message.starts_with("Cy is no longer in this Claktory"), "{}", error.message)
         }
@@ -278,8 +278,8 @@ async fn moving_a_pipe_into_a_group_that_shares_websites_asks_the_person() {
     assert_eq!(card.action_reason, "Matt wants the partners together.");
     assert!(pipe_of(&view, &pipe).group_id.is_empty(), "nothing moved yet");
 
-    // The group shares more meanwhile: Approve is refused, the card stays
-    // (Fugo 31072); asked again, the card names both.
+    // The group shares more meanwhile: Approve is refused, the card stays;
+    // asked again, the card names both.
     let more = v1::SharePipeWebsite { port: 8124, name: "Metrics".into(), group_id: partners.clone(), ..Default::default() };
     apply_request(&mut client, &mut view, Request::SharePipeWebsite(more)).await;
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
@@ -309,7 +309,7 @@ async fn moving_a_pipe_into_a_group_that_shares_websites_asks_the_person() {
 }
 
 /// Another Claktory can share at most 32 websites over one pipe: past
-/// that, more are dropped, with no line for each (Fugo 31072).
+/// that, more are dropped, with no line for each.
 #[tokio::test]
 async fn the_other_side_shares_at_most_so_many_websites_over_a_pipe() {
     let (factory, mut client, mut view, pipe) = setup().await;
@@ -325,8 +325,7 @@ async fn the_other_side_shares_at_most_so_many_websites_over_a_pipe() {
     view.follow(&mut client, |view| view.workspace.pipe_shares.iter().any(|share| share.name == "Renamed")).await;
 }
 
-/// Approved, but the change couldn't be made (#414's boundary here): the
-/// card says why on every device, not only to Rivet (Zucchero's #414 run).
+/// Approved, but the change couldn't be made: the card says why on every device, not only to Rivet.
 #[tokio::test]
 async fn an_approved_change_that_cant_be_made_says_why_on_the_card() {
     let (factory, mut client, mut view, pipe) = setup().await;
@@ -357,7 +356,7 @@ async fn an_approved_change_that_cant_be_made_says_why_on_the_card() {
     assert_eq!(again.action_error, decided.action_error);
 }
 
-/// Friend bug #32 (Fugo 33421): Rivet asks to share a website with a pipe
+/// Rivet asks to share a website with a pipe
 /// only on a card, which shows exactly what it exposes; never for another
 /// agent, nor while it has read from outside, nor with a pipe it can't
 /// trust, nor for a port that can't be shared; and nothing is shared until
@@ -397,7 +396,7 @@ async fn rivet_asks_to_share_a_website_only_on_a_card_that_shows_what_it_exposes
     let refused = call(&mut client, &mut view, "rivet", "pipes_share", &ask(nothing)).await;
     assert!(refused.starts_with(&format!("Nothing answers on port {nothing} on this computer")), "{refused}");
     // How long: 1 to 168 hours, never until it's stopped, which is the
-    // person's (#46, Fugo 46375).
+    // person's.
     for hours in [json!(0), json!(169), json!("never"), json!(-24)] {
         let args = json!({"pipe": "Website", "port": port, "name": "Dashboard", "hours": hours, "reason": "Matt wants Ana to see it."});
         let refused = call(&mut client, &mut view, "rivet", "pipes_share", &args.to_string()).await;
@@ -439,7 +438,7 @@ async fn rivet_asks_to_share_a_website_only_on_a_card_that_shows_what_it_exposes
     assert!(view.workspace.pipe_shares.is_empty());
 
     // A program Claktory can't name there (another user's, say): never
-    // from a card (Fugo 33782): refused when asked, and void at Approve.
+    // from a card: refused when asked, and void at Approve.
     let theirs = std::net::TcpListener::bind("127.0.0.1:0").expect("someone else's website");
     let unnamed = theirs.local_addr().expect("its port").port();
     pipes::shares::unnamed_listener_for_test(unnamed);

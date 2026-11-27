@@ -8,7 +8,9 @@
 //! `factoryd browser-runner run` built for Linux from the same release, so
 //! its wire is this factoryd's. C1 runs over the container's stdin and
 //! stdout as over sudo's on Linux (`linux::pipes`); the kept profile lives
-//! in a named volume of each Claktory home's own (Fugo 50272).
+//! in a named volume of each Claktory home's own, one for each
+//! agent's browser, deleted with its profile (`forget`). Each
+//! agent's browser is a VM of its own, so several run at once.
 //!
 //! The VM ends with its runner (stdin closing ends the runner; SIGTERM to
 //! `container run` stops the VM), and is killed once `container run` has
@@ -37,7 +39,7 @@ const CONTAINER_MIN: (u32, u32, u32) = (1, 7, 1);
 /// Where `container` is installed: Homebrew's, or Apple's installer's.
 const CONTAINER: [&str; 2] = ["/opt/homebrew/bin/container", "/usr/local/bin/container"];
 /// The VM's memory: Chrome with a few tabs took ~900 MiB of the default
-/// 1 GiB in the spike.
+/// 1 GiB in the spike. `memory::PER_BROWSER` counts each VM as this much.
 const MEMORY: &str = "2048M";
 /// The VM's DNS server: `container`'s own forwarder doesn't resolve on a
 /// Mac running Tailscale (spike); the firewall lets the browser reach only
@@ -53,18 +55,20 @@ fn dev(home: &Path) -> bool {
     super::dev_home(home)
 }
 
-/// The VMs' name and their volume's, by Claktory home (Fugo 50272):
+/// The VMs' name and their volume's, by Claktory home:
 /// `claktory-browser-<home id>`, so no two Claktories under one user share
 /// a profile or stop each other's VM; this user's own dev Claktory and
-/// tests keep theirs.
-fn name(home: &Path) -> String {
-    if TEST_IMAGE.get().is_some() {
+/// tests keep theirs. An agent's browser adds `-` and its key
+/// (`super::agent_key`); the person's own (`agent` empty) is the home's.
+fn name(home: &Path, agent: &str) -> String {
+    let base = if TEST_IMAGE.get().is_some() {
         "claktory-browser-test".to_owned()
     } else if dev(home) {
         "claktory-browser-dev".to_owned()
     } else {
         format!("claktory-browser-{}", super::home_id(home))
-    }
+    };
+    if agent.is_empty() { base } else { format!("{base}-{}", super::agent_key(agent)) }
 }
 
 /// The image to run, by the reference it's loaded under (`image`), once
@@ -207,11 +211,11 @@ fn os_version() -> Option<String> {
 /// 38515): killing `container run`, as a runner that won't stop is, leaves
 /// its VM running otherwise, Chrome and all, and the next would share its
 /// profile.
-pub(crate) fn spawn(factory: &Arc<Factory>) -> Result<Io, String> {
+pub(crate) fn spawn(factory: &Arc<Factory>, agent: &str) -> Result<Io, String> {
     let home = factory.home().root();
     let container = container().ok_or("Apple's container tool isn't on this Mac.")?;
     let image = image(home, &container)?;
-    let base = name(home);
+    let base = name(home, agent);
     let kind = base.strip_prefix("claktory-browser-").unwrap_or_default().to_owned();
     // Its own name each time, so a VM still stopping never blocks the next.
     let own = format!("{base}-{:x}", crate::transcript::now_ms());
@@ -235,16 +239,18 @@ pub(crate) fn spawn(factory: &Arc<Factory>) -> Result<Io, String> {
     let quit = CancellationToken::new();
     let quitting = quit.clone();
     tokio::spawn(async move {
-        // One VM at a time: the one before goes first, its runner told to
-        // end and given its time (a profile written whole), then killed.
-        let _turn = TURN.lock().await;
+        // One VM at a time on a volume: the one before goes first, its
+        // runner told to end and given its time (a profile written whole),
+        // then killed.
+        let turn = turn(&base);
+        let _turn = turn.lock().await;
         clear(&container, &base, &kind).await;
         // Let go of while it waited: none starts.
         if quitting.is_cancelled() {
             return;
         }
         let io = match command.spawn() {
-            Ok(child) => super::linux::pipes(child),
+            Ok(child) => super::linux::pipes(child, None),
             Err(error) => Err(error.to_string()),
         };
         let Io { to: runner, from: mut said, quit: runner_quit } = match io {
@@ -291,8 +297,38 @@ pub(crate) fn spawn(factory: &Arc<Factory>) -> Result<Io, String> {
     Ok(Io { to, from, quit })
 }
 
-/// Held by a VM's run from before it starts until it's gone.
-static TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Held by a VM's run from before it starts until it's gone, and by its
+/// volume's deletion: one for each name (`name`).
+fn turn(name: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static TURNS: std::sync::Mutex<std::collections::BTreeMap<String, Arc<tokio::sync::Mutex<()>>>> =
+        std::sync::Mutex::new(std::collections::BTreeMap::new());
+    let mut turns = TURNS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    turns.entry(name.to_owned()).or_default().clone()
+}
+
+/// Deletes the volume of `agent`'s browser (the person's own when empty),
+/// once no VM uses it: what's left of a profile deleted while its VM ran,
+/// or the whole profile when none did. Ok when it's gone (or never was).
+pub(crate) async fn forget(home: &Path, agent: &str) -> Result<(), String> {
+    let Some(container) = container() else { return Ok(()) };
+    let volume = name(home, agent);
+    let turn = turn(&volume);
+    let _turn = turn.lock().await;
+    let kind = volume.strip_prefix("claktory-browser-").unwrap_or_default().to_owned();
+    clear(&container, &volume, &kind).await;
+    let said = Command::new(&container).args(["volume", "delete", &volume]).stdin(Stdio::null()).output().await;
+    let listed = Command::new(&container)
+        .args(["volume", "list", "--quiet"])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| format!("Apple's container tool didn't run: {error}"))?;
+    if String::from_utf8_lossy(&listed.stdout).lines().any(|line| line.trim() == volume) {
+        let why = said.map(|said| String::from_utf8_lossy(&said.stderr).trim().to_owned()).unwrap_or_else(|error| error.to_string());
+        return Err(format!("its volume {volume} stayed: {}", super::view::cleaned(&why, 200)));
+    }
+    Ok(())
+}
 
 /// How long a VM has to go once it's told to.
 const GONE: Duration = Duration::from_secs(15);
@@ -368,25 +404,48 @@ mod tests {
         assert!(!pinned(&format!("@sha256:{digest}")));
     }
 
-    /// Fugo 50272: two Claktory homes get their own volumes; this user's
+    /// Two Claktory homes get their own volumes; this user's
     /// own ~/.factory-dev keeps the dev one.
     #[test]
     fn each_claktory_home_keeps_its_own_volume() {
-        let real = name(Path::new("/Users/someone/.factory"));
-        let sandbox = name(Path::new("/Users/someone/qa/sandboxes/w12/user/.factory"));
+        let real = name(Path::new("/Users/someone/.factory"), "");
+        let sandbox = name(Path::new("/Users/someone/qa/sandboxes/w12/user/.factory"), "");
         assert_ne!(real, sandbox);
         assert!(real.starts_with("claktory-browser-") && real != "claktory-browser-dev", "{real}");
-        assert_ne!(name(Path::new("/Users/someone/qa/.factory-dev")), "claktory-browser-dev");
+        assert_ne!(name(Path::new("/Users/someone/qa/.factory-dev"), ""), "claktory-browser-dev");
         if let Some(account) = super::super::account_home() {
-            assert_eq!(name(&account.join(".factory-dev")), "claktory-browser-dev");
+            assert_eq!(name(&account.join(".factory-dev"), ""), "claktory-browser-dev");
         }
+    }
+
+    /// Each agent's browser has a volume (and VMs) of its own in
+    /// its home's, which the home's own cleanup leaves alone.
+    #[test]
+    fn each_agents_browser_keeps_its_own_volume() {
+        let home = Path::new("/Users/someone/.factory");
+        let (person, yukako, koichi) = (name(home, ""), name(home, "yukako"), name(home, "koichi"));
+        assert!(yukako.starts_with(&format!("{person}-a")) && yukako != koichi, "{yukako} {koichi}");
+        assert_eq!(yukako, name(home, "yukako"));
+        // A VM's name, with the start time it adds, is a host name.
+        assert!(format!("{yukako}-{:x}", crate::transcript::now_ms()).len() <= 63, "{yukako}");
+        let kind = person.strip_prefix("claktory-browser-").unwrap();
+        let agent_kind = yukako.strip_prefix("claktory-browser-").unwrap();
+        let listed: Vec<serde_json::Value> = serde_json::from_str(&format!(
+            r#"[
+            {{"id": "{person}-18f2a", "configuration": {{"labels": {{"claktory.browser": "{kind}"}}}}}},
+            {{"id": "{yukako}-18f2b", "configuration": {{"labels": {{"claktory.browser": "{agent_kind}"}}}}}}
+        ]"#
+        ))
+        .unwrap();
+        assert_eq!(leftovers(&listed, &person, kind), [format!("{person}-18f2a")]);
+        assert_eq!(leftovers(&listed, &yukako, agent_kind), [format!("{yukako}-18f2b")]);
     }
 
     /// Cleanup for home A leaves home B's VMs (and the dev one's) alone.
     #[test]
     fn leftovers_are_this_claktory_homes_own_vms_only() {
-        let a = name(Path::new("/Users/someone/.factory"));
-        let b = name(Path::new("/Users/someone/qa/sandboxes/w12/user/.factory"));
+        let a = name(Path::new("/Users/someone/.factory"), "");
+        let b = name(Path::new("/Users/someone/qa/sandboxes/w12/user/.factory"), "");
         let (kind_a, kind_b) = (a.strip_prefix("claktory-browser-").unwrap(), b.strip_prefix("claktory-browser-").unwrap());
         let listed: Vec<serde_json::Value> = serde_json::from_str(&format!(
             r#"[

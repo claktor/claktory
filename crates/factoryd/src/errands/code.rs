@@ -1,8 +1,8 @@
-//! What only the person may give an errand, and what they settle about
-//! its sign-ins (#435 W8, Fugo 41236, Giorno 41238):
+//! What only the person may give an agent's browser, and signing it out
+//! of a site:
 //!
 //! - **A code sent to the person** (a text message, an email): the agent
-//!   names the field (errand_handoff, kind code, with the field as its last
+//!   names the field (browser_handoff, kind code, with the field as its last
 //!   read named it), the person types the code on a card, and Claktory
 //!   fills it into that field itself, only if the page and the field are
 //!   still the ones the card named. The agent never sees the code; nothing
@@ -15,16 +15,9 @@
 //!   says the same and isn't ticked. A reply ticks nothing and goes to the
 //!   agent.
 //!
-//! - **The first sign-in at an identity provider** (Google, Apple,
-//!   Microsoft) from the vault puts a card in the errand agent's
-//!   conversation, in Claktory's words: the browser stays signed in there
-//!   for later errands, and Approve signs it out. The errand doesn't wait on
-//!   it, and the agent can't take it back. Dismissing it keeps the account.
-//! - **Signing out** asks the browser (`Browser::sign_out`): done at once,
-//!   or, while an errand drives it, when that errand ends. The vault forgets
-//!   the account only once it's done (`Factory::signed_out`, which the host
-//!   calls), and until then nothing is filled or pressed on that provider's
-//!   sites (`fill::while_signing_out`).
+//! - **Signing out of a site** asks the agent's own browser
+//!   (`Browser::sign_out_site`): done at once, or, while a session drives
+//!   it, when that session ends.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -32,13 +25,12 @@ use std::sync::{Arc, Mutex};
 use factory_agent::ToolResult;
 use factory_protocol::v1;
 use rusqlite::{OptionalExtension, params};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::reader::Page;
 use super::{HandoffRow, SignedOut, State, log};
 use crate::factory::{Factory, RequestError};
 use crate::transcript::now_ms;
-use crate::vault::sites::Fillable;
 
 /// Whether the node (in the reader's world) takes a code: a text, number,
 /// telephone or password input, or one marked for a one-time code;
@@ -143,17 +135,21 @@ struct Target {
     title: String,
 }
 
-/// Finds `target` of `document` on the page `agent`'s errand drives, on an
-/// https page of the errand's sites that isn't an identity provider's
-/// sign-in; `card` names the card in what the agent is told.
+/// Finds `target` of `document` on the page `agent`'s browser shows, on
+/// an https page of a site on the internet that isn't an identity
+/// provider's sign-in; `card` names the card in what the agent is told.
 async fn target(factory: &Arc<Factory>, agent: &str, document: &str, target: &str, card: &str) -> Result<Target, String> {
     let errand = factory.driving(agent).map_err(super::said)?;
-    let mut live = factory.errands.live.lock().await;
-    let page = factory.page(&mut live, &errand).await.map_err(super::said)?;
-    match page.elsewhere(&errand.sites).await {
+    let seat = factory.seat(agent)?;
+    let mut live = seat.live.lock().await;
+    let page = factory.page(&seat, &mut live, &errand).await.map_err(super::said)?;
+    if page.flagged().await {
+        return Err(super::said(("error_page".to_owned(), super::FLAGGED.to_owned())));
+    }
+    match page.elsewhere().await {
         Ok(None) => {}
         Ok(Some(origin)) => {
-            return Err(super::said(("off_site".to_owned(), format!("this tab is on {origin}, not one of the errand's sites: go back to one with errand_navigate"))));
+            return Err(super::said(("off_site".to_owned(), format!("this tab is on {origin}, where Claktory's browser doesn't go: go to another page with browser_open"))));
         }
         Err(error) => return Err(super::said(("interrupted".to_owned(), crate::browser::schema::one_line(&error.to_string(), 200)))),
     }
@@ -172,7 +168,7 @@ async fn target(factory: &Arc<Factory>, agent: &str, document: &str, target: &st
     if let Some(provider) = super::fill::provider(&origin) {
         return Err(super::said((
             "sensitive_action".to_owned(),
-            format!("{provider}'s sign-in is the person's: hand it over with errand_handoff, kind sign_in"),
+            format!("{provider}'s sign-in is Claktory's to fill: use browser_sign_in"),
         )));
     }
     let title = page
@@ -246,13 +242,13 @@ fn sentence(what: &str) -> Result<String, String> {
     Ok(what)
 }
 
-/// errand_handoff with kind code: the person types the code sent to them on
+/// browser_handoff with kind code: the person types the code sent to them on
 /// a card, and Claktory fills it into `target` of `document`, the field the
 /// agent's last read named. What the agent is told, with the card.
 pub(crate) async fn hand(factory: &Arc<Factory>, agent: &str, what: &str, document: Option<&str>, target: Option<&str>) -> Result<ToolResult, String> {
     let what = sentence(what)?;
     let (Some(document), Some(node)) = (document.filter(|d| !d.is_empty()), target.filter(|t| !t.is_empty())) else {
-        return Err("kind code needs document and target: the field the code goes into, as your last errand_read named it. The person types the code in the request and Claktory fills it in.".to_owned());
+        return Err("kind code needs document and target: the field the code goes into, as your last browser_read named it. The person types the code in the request and Claktory fills it in.".to_owned());
     };
     let person = factory.lock().config.person().to_owned();
     let at = self::target(factory, agent, document, node, "a code").await?;
@@ -262,8 +258,8 @@ pub(crate) async fn hand(factory: &Arc<Factory>, agent: &str, what: &str, docume
     let numeric = says(&at.page, &at.object, NUMERIC).await;
     let title = format!("{} asks for a code", at.host);
     let body = format!(
-        "{what}\n\nErrand: {}. Type the code here: Claktory fills it into the field on {} itself, and the agent never sees it. If no code came, press Can't do this.",
-        at.errand.purpose, at.origin
+        "{what}\n\nType the code here: Claktory fills it into the field on {} itself, and the agent never sees it. If no code came, press Can't do this.",
+        at.origin
     );
     let handoff = HandoffRow {
         kind: v1::ErrandHandoffKind::Code as i32,
@@ -274,17 +270,18 @@ pub(crate) async fn hand(factory: &Arc<Factory>, agent: &str, what: &str, docume
         errand: at.errand.id.clone(),
         numeric,
         agreement: String::new(),
+        ..Default::default()
     };
     let card = Card { agent, title: title.clone(), body: body.clone(), wants_text: true, handoff: handoff.clone(), words: String::new(), logged: "Handed to you: a code", keeps_node: true };
     let id = post(factory, at, card)?;
     let said = format!(
-        "Handed to {person} in a request: \"{title}\". They type the code there and Claktory fills it into the field; you never see it. Until they answer, errand_read, errand_act and errand_navigate wait. You're told when it's filled, with the page as it is then; if they can't, the errand ends."
+        "Handed to {person} in a request: \"{title}\". They type the code there and Claktory fills it into the field; you never see it. Until they answer, browser_read, browser_act and browser_open wait. You're told when it's filled, with the page as it is then; if they can't, you're told why."
     );
     let details = json!({"ask": id.to_string(), "title": title, "body": body, "wants_text": true, "code": true, "handoff": handoff});
     Ok(ToolResult::text(said, details))
 }
 
-/// errand_handoff with kind agreement (R12.2, Fugo 40593): the person reads
+/// browser_handoff with kind agreement: the person reads
 /// the box's words on a card, as the site's, and Accept has Claktory tick
 /// only that box, `target` of `document`, on that page. What the agent is
 /// told, with the card.
@@ -297,7 +294,7 @@ pub(crate) async fn hand_agreement(
 ) -> Result<ToolResult, String> {
     let what = sentence(what)?;
     let (Some(document), Some(node)) = (document.filter(|d| !d.is_empty()), target.filter(|t| !t.is_empty())) else {
-        return Err("kind agreement needs document and target: the box to tick, as your last errand_read named it. The person reads its words in the request, and Claktory ticks it if they accept.".to_owned());
+        return Err("kind agreement needs document and target: the box to tick, as your last browser_read named it. The person reads its words in the request, and Claktory ticks it if they accept.".to_owned());
     };
     let person = factory.lock().config.person().to_owned();
     let at = self::target(factory, agent, document, node, "an agreement request").await?;
@@ -316,8 +313,8 @@ pub(crate) async fn hand_agreement(
     }
     let title = format!("{} asks you to agree", at.host);
     let body = format!(
-        "{what}\n\nErrand: {}. Accept, and Claktory ticks only this box on {}. Reply instead, and nothing is ticked: the agent gets your words. The terms themselves aren't shown here; open {} to read them.",
-        at.errand.purpose, at.origin, at.host
+        "{what}\n\nAccept, and Claktory ticks only this box on {}. Reply instead, and nothing is ticked: the agent gets your words. The terms themselves aren't shown here; open {} to read them.",
+        at.origin, at.host
     );
     let handoff = HandoffRow {
         kind: v1::ErrandHandoffKind::Agreement as i32,
@@ -328,11 +325,12 @@ pub(crate) async fn hand_agreement(
         errand: at.errand.id.clone(),
         numeric: false,
         agreement: words.clone(),
+        ..Default::default()
     };
     let card = Card { agent, title: title.clone(), body: body.clone(), wants_text: false, handoff: handoff.clone(), words, logged: "Handed to you: an agreement", keeps_node: true };
     let id = post(factory, at, card)?;
     let said = format!(
-        "Handed to {person} in a request: \"{title}\", with the box's words. If they accept, Claktory ticks only that box; if they reply, nothing is ticked and you get their words. Until they answer, errand_read, errand_act and errand_navigate wait. You're told how it went, with the page as it is then; if they can't, the errand ends."
+        "Handed to {person} in a request: \"{title}\", with the box's words. If they accept, Claktory ticks only that box; if they reply, nothing is ticked and you get their words. Until they answer, browser_read, browser_act and browser_open wait. You're told how it went, with the page as it is then; if they can't, you're told why."
     );
     let details = json!({"ask": id.to_string(), "title": title, "body": body, "wants_text": false, "handoff": handoff});
     Ok(ToolResult::text(said, details))
@@ -421,7 +419,7 @@ pub(crate) fn drop_codes(factory: &Factory, card: i64) {
     }
 }
 
-/// errand_handoff with kind recovery_codes (#435 W8b, Fugo 40691, 42966):
+/// browser_handoff with kind recovery_codes:
 /// Claktory reads the codes off `target` of `document`, the block the
 /// agent's last read withheld, seals them in the vault at once (in memory
 /// while it's locked), and the person gets them on a card. The agent never
@@ -429,7 +427,7 @@ pub(crate) fn drop_codes(factory: &Factory, card: i64) {
 pub(crate) async fn hand_codes(factory: &Arc<Factory>, agent: &str, what: &str, document: Option<&str>, target: Option<&str>) -> Result<ToolResult, String> {
     let what = sentence(what)?;
     let (Some(document), Some(node)) = (document.filter(|d| !d.is_empty()), target.filter(|t| !t.is_empty())) else {
-        return Err("kind recovery_codes needs document and target: the block your last errand_read withheld as recovery codes. Claktory reads them and hands them to the person; you never see them.".to_owned());
+        return Err("kind recovery_codes needs document and target: the block your last browser_read withheld as recovery codes. Claktory reads them and hands them to the person; you never see them.".to_owned());
     };
     let person = factory.lock().config.person().to_owned();
     let at = self::target(factory, agent, document, node, "recovery codes").await?;
@@ -455,8 +453,8 @@ pub(crate) async fn hand_codes(factory: &Arc<Factory>, agent: &str, what: &str, 
         "Secrets is locked, so Claktory keeps them only until it restarts: save them now."
     };
     let body = format!(
-        "{first}\n\n{what}\n\nErrand: {}. {} showed these codes once, and the agent never saw them. Show them and save them somewhere safe, then choose I saved them, or choose Keep in Secrets.",
-        at.errand.purpose, at.host
+        "{first}\n\n{what}\n\n{} showed these codes once, and the agent never saw them. Show them and save them somewhere safe, then choose I saved them, or choose Keep in Secrets.",
+        at.host
     );
     let handoff = HandoffRow {
         kind: v1::ErrandHandoffKind::RecoveryCodes as i32,
@@ -467,6 +465,7 @@ pub(crate) async fn hand_codes(factory: &Arc<Factory>, agent: &str, what: &str, 
         errand: at.errand.id.clone(),
         numeric: false,
         agreement: String::new(),
+        ..Default::default()
     };
     let card =
         Card { agent, title: title.clone(), body: body.clone(), wants_text: false, handoff: handoff.clone(), words: String::new(), logged: "Handed to you: recovery codes", keeps_node: false };
@@ -481,7 +480,7 @@ pub(crate) async fn hand_codes(factory: &Arc<Factory>, agent: &str, what: &str, 
         crate::locking::lock(&IN_MEMORY).get_or_insert_with(HashMap::new).insert(memory_key(factory, id), codes);
     }
     let said = format!(
-        "Claktory read the recovery codes off the page and handed them to {person} in a request: \"{title}\". You never see them. Until they've saved them, errand_read, errand_act and errand_navigate wait. You're told when they have, with the page as it is then."
+        "Claktory read the recovery codes off the page and handed them to {person} in a request: \"{title}\". You never see them. Until they've saved them, browser_read, browser_act and browser_open wait. You're told when they have, with the page as it is then."
     );
     let details = json!({"ask": id.to_string(), "title": title, "body": body, "wants_text": false, "handoff": handoff});
     Ok(ToolResult::text(said, details))
@@ -498,7 +497,7 @@ pub(crate) async fn codes_saved(factory: &Arc<Factory>, agent: &str, handoff: &H
     };
     let Some(errand) = factory.errands.get(&handoff.errand).filter(|errand| State::from_wire(errand.state) == State::PersonsTurn) else {
         log::write(&factory.store, &log::Entry { errand: handoff.errand.clone(), origin: handoff.origin.clone(), action: logged.to_owned(), ..Default::default() });
-        factory.deliver_event(agent, format!("{told} (Errand {} was over by then.)", handoff.errand), crate::factory::host_event("Recovery codes saved".to_owned()));
+        factory.deliver_event(agent, format!("{told} (Your browser had closed by then.)"), crate::factory::host_event("Recovery codes saved".to_owned()));
         return;
     };
     let mut record = errand.clone();
@@ -508,9 +507,9 @@ pub(crate) async fn codes_saved(factory: &Arc<Factory>, agent: &str, handoff: &H
     log::write(&factory.store, &log::Entry { errand: errand.id.clone(), origin: handoff.origin.clone(), action: logged.to_owned(), ..Default::default() });
     let page = match factory.errand_step(agent, super::Step::Read { limit: 4096 }).await {
         Ok((page, _)) => format!("The page is now:\n{page}"),
-        Err(why) => format!("Reading the page didn't work ({why}): read it with errand_read."),
+        Err(why) => format!("Reading the page didn't work ({why}): read it with browser_read."),
     };
-    factory.deliver_event(agent, format!("{told} {page}"), crate::factory::host_event(format!("Errand {}: your turn again", errand.id)));
+    factory.deliver_event(agent, format!("{told} {page}"), crate::factory::host_event("Your browser is yours again".to_owned()));
 }
 
 /// Two-step sign-in an errand may turn on, approved by the person (#435
@@ -531,7 +530,7 @@ pub(crate) fn two_step_origins(factory: &Factory, errand: &str) -> Vec<String> {
 }
 
 /// Why a two-step control isn't the agent's.
-pub(crate) const TWO_STEP: &str = "two-step sign-in: the person decides (errand_handoff, kind two_step)";
+pub(crate) const TWO_STEP: &str = "two-step sign-in: the person decides (browser_handoff, kind two_step)";
 /// Why an authenticator, security key or passkey isn't the agent's even
 /// when two-step is approved.
 pub(crate) const TWO_STEP_METHOD: &str =
@@ -556,7 +555,7 @@ pub(crate) fn two_step_refusal(words: &str, origin: &str, approved: &[String]) -
     if approved.iter().any(|allowed| allowed == origin) { None } else { Some(TWO_STEP) }
 }
 
-/// errand_handoff with kind two_step (#435 W8b, Fugo 40691, option 4(c)):
+/// browser_handoff with kind two_step:
 /// turning on two-step sign-in on this page's site is the person's call; at
 /// an identity provider, never an errand's. What the agent is told, with
 /// the card.
@@ -564,8 +563,9 @@ pub(crate) async fn hand_two_step(factory: &Arc<Factory>, agent: &str, what: &st
     let what = sentence(what)?;
     let person = factory.lock().config.person().to_owned();
     let errand = factory.driving(agent).map_err(super::said)?;
-    let mut live = factory.errands.live.lock().await;
-    let page = factory.page(&mut live, &errand).await.map_err(super::said)?;
+    let seat = factory.seat(agent)?;
+    let mut live = seat.live.lock().await;
+    let page = factory.page(&seat, &mut live, &errand).await.map_err(super::said)?;
     drop(live);
     let frame = page.frame().await.map_err(|error| super::said(("interrupted".to_owned(), crate::browser::schema::one_line(&error.to_string(), 200))))?;
     let mut origin = url::Url::parse(&frame.origin)
@@ -576,17 +576,16 @@ pub(crate) async fn hand_two_step(factory: &Arc<Factory>, agent: &str, what: &st
     if origin.is_empty() && crate::locking::lock(&ANY_ORIGIN_FOR_TEST).iter().any(|test| test.upgrade().is_some_and(|test| Arc::ptr_eq(&test, factory))) {
         origin = "https://shown.test".to_owned();
     }
-    if origin.is_empty() || !super::reader::errands_own(&errand.sites, &frame.url) && origin != "https://shown.test" {
-        return Err(super::said(("unsupported_target".to_owned(), "two-step sign-in is handed over only on an https page of the errand's sites".to_owned())));
+    if origin.is_empty() || !super::reader::drivable(&frame.url) && origin != "https://shown.test" {
+        return Err(super::said(("unsupported_target".to_owned(), "two-step sign-in is handed over only on an https page of a site on the internet".to_owned())));
     }
     if let Some(provider) = super::fill::provider(&origin) {
-        return Err(super::said(("sensitive_action".to_owned(), format!("{provider}'s two-step sign-in is never an errand's: report it to your lead"))));
+        return Err(super::said(("sensitive_action".to_owned(), format!("{provider}'s two-step sign-in is never an agent's: say in your reply that it's the person's to set up"))));
     }
     let host = url::Url::parse(&origin).ok().and_then(|url| url.host_str().map(str::to_owned)).unwrap_or_else(|| origin.clone());
     let title = format!("{host} wants two-step sign-in turned on");
     let body = format!(
-        "{what}\n\nErrand: {}. Approve to let the agent turn on two-step sign-in on {origin} for this errand. Codes come to you by text message or email only, never through an authenticator app, a security key or a passkey, and any recovery codes come to you in a request. Can't do this ends the errand.",
-        errand.purpose
+        "{what}\n\nApprove to let the agent turn on two-step sign-in on {origin}. Codes come to you by text message or email only, never through an authenticator app, a security key or a passkey, and any recovery codes come to you in a request."
     );
     let handoff = HandoffRow {
         kind: v1::ErrandHandoffKind::TwoStep as i32,
@@ -597,6 +596,7 @@ pub(crate) async fn hand_two_step(factory: &Arc<Factory>, agent: &str, what: &st
         errand: errand.id.clone(),
         numeric: false,
         agreement: String::new(),
+        ..Default::default()
     };
     crate::locking::lock(&ASKED).get_or_insert_with(HashMap::new).insert(errand_key(factory, &errand.id), frame.origin.clone());
     let at = Target { errand, page, object: String::new(), frame, origin, host, title: String::new() };
@@ -604,7 +604,7 @@ pub(crate) async fn hand_two_step(factory: &Arc<Factory>, agent: &str, what: &st
     super::owe_cache_clear(factory, &handoff.origin);
     let id = post(factory, at, card)?;
     let said = format!(
-        "Handed to {person} in a request: \"{title}\". Until they answer, errand_read, errand_act and errand_navigate wait. Approved, you're told so, with the page as it is then; if they can't, the errand ends."
+        "Handed to {person} in a request: \"{title}\". Until they answer, browser_read, browser_act and browser_open wait. Approved, you're told so, with the page as it is then; if they can't, you're told why."
     );
     let details = json!({"ask": id.to_string(), "title": title, "body": body, "wants_text": false, "handoff": handoff});
     Ok(ToolResult::text(said, details))
@@ -635,15 +635,15 @@ pub(crate) async fn two_step_approved(factory: &Arc<Factory>, agent: &str, hando
     );
     let page = match factory.errand_step(agent, super::Step::Read { limit: 4096 }).await {
         Ok((page, _)) => format!("The page is now:\n{page}"),
-        Err(why) => format!("Reading the page didn't work ({why}): read it with errand_read."),
+        Err(why) => format!("Reading the page didn't work ({why}): read it with browser_read."),
     };
     factory.deliver_event(
         agent,
         format!(
-            "{person} approved turning on two-step sign-in on {}. Turn it on with codes sent by text message or email only: an authenticator app, a security key or a passkey stays theirs, and is refused. A code sent to them goes through errand_handoff, kind code; recovery codes the site shows, through kind recovery_codes, as soon as they show. {page}",
+            "{person} approved turning on two-step sign-in on {}. Turn it on with codes sent by text message or email only: an authenticator app, a security key or a passkey stays theirs, and is refused. A code sent to them goes through browser_handoff, kind code; recovery codes the site shows, through kind recovery_codes, as soon as they show. {page}",
             handoff.origin
         ),
-        crate::factory::host_event(format!("Errand {}: your turn again", errand.id)),
+        crate::factory::host_event("Your browser is yours again".to_owned()),
     );
 }
 
@@ -860,166 +860,49 @@ pub(crate) async fn answered(factory: &Arc<Factory>, agent: &str, handoff: &Hand
     log::write(&factory.store, &log::Entry { errand: errand.id.clone(), origin: handoff.origin.clone(), action: logged, outcome: why, ..Default::default() });
     let page = match factory.errand_step(agent, super::Step::Read { limit: 4096 }).await {
         Ok((page, _)) => format!("The page is now:\n{page}"),
-        Err(why) => format!("Reading the page didn't work ({why}): read it with errand_read."),
+        Err(why) => format!("Reading the page didn't work ({why}): read it with browser_read."),
     };
-    factory.deliver_event(agent, format!("{told} {page}"), crate::factory::host_event(format!("Errand {}: your turn again", errand.id)));
+    factory.deliver_event(agent, format!("{told} {page}"), crate::factory::host_event("Your browser is yours again".to_owned()));
 }
 
-/// The card's title.
-fn title(provider: &str) -> String {
-    format!("Claktory's browser is signed in to {provider}")
-}
-
-/// Posts the card telling the person the browser just signed in to
-/// `provider` with `fillable`, for `errand`: its details, for the fill's
-/// result, which shows it in `agent`'s conversation; or why not.
-pub(crate) fn signed_in(factory: &Arc<Factory>, agent: &str, errand: &v1::Errand, provider: &str, fillable: &Fillable) -> Result<Value, String> {
-    let title = title(provider);
-    let description = format!(
-        "For the errand \"{}\", Claktory's browser signed in to {provider} with {}, and stays signed in there for later errands. Approve signs it out of {provider}: at once, or when the errand ends if it's still going. Dismiss to stay signed in.",
-        errand.purpose, fillable.name
-    );
-    let action = crate::card_actions::Action::BrowserSignOut {
-        provider: provider.to_owned(),
-        secret: fillable.id.clone(),
-        errand: errand.id.clone(),
-    };
-    let action = serde_json::to_string(&action).map_err(|error| error.to_string())?;
-    let id = {
-        let db = factory.store.db();
-        db.execute(
-            "INSERT INTO asks (agent, title, body, wants_text, created, state, answer, action, action_description, action_reason) VALUES (?1, ?2, ?3, 0, ?4, 'pending', '', ?5, ?3, '')",
-            params![agent, title, description, now_ms(), action],
-        )
-        .map_err(|error| error.to_string())?;
-        db.last_insert_rowid()
-    };
-    log::write(
-        &factory.store,
-        &log::Entry {
-            errand: errand.id.clone(),
-            agent: agent.to_owned(),
-            action: format!("Asked you whether the browser stays signed in to {provider}"),
-            ..Default::default()
-        },
-    );
-    Ok(json!({"ask": id.to_string(), "title": title, "body": description, "wants_text": false, "action_description": description}))
-}
-
-/// Whether the card can still be approved: the browser is still signed in
-/// to `provider` with `secret`.
-pub(crate) fn check(factory: &Factory, provider: &str, secret: &str) -> Result<(), String> {
-    if factory.vault.browser_account(provider).as_deref() == Some(secret) {
-        return Ok(());
-    }
-    Err(format!("Claktory's browser isn't signed in to {provider} with that account any more: dismiss this request."))
-}
-
-/// The person signs the browser out of `provider` (by name, "Google"):
-/// approving the card of errand `errand`, or with Sign out in the browser's
-/// settings (`errand` empty: nothing to log it in). What was done, or why
-/// it couldn't be, as the card's answer says it.
-pub(crate) async fn sign_out(factory: &Arc<Factory>, provider: &str, errand: &str) -> Result<String, String> {
-    let browser = factory.errands.browser().ok_or("Claktory's browser isn't available here, so it couldn't sign out.")?;
-    let signed_out = browser.sign_out(provider).await;
-    let (action, outcome) = match &signed_out {
-        Ok(SignedOut::Applied) => (format!("Signed out of {provider}"), String::new()),
-        Ok(SignedOut::Pending) => (format!("Signing out of {provider} when the errand ends"), String::new()),
-        Err(why) => (format!("Signing out of {provider}"), why.clone()),
-    };
-    if !errand.is_empty() {
-        log::write(&factory.store, &log::Entry { errand: errand.to_owned(), action, outcome, ..Default::default() });
-    }
-    // The browser's settings show it signing out, or signed out.
-    factory.broadcast_workspace(&factory.lock());
-    match signed_out {
-        Ok(SignedOut::Applied) => {
-            factory.signed_out(provider);
-            Ok(format!("Claktory's browser is signed out of {provider}."))
-        }
-        Ok(SignedOut::Pending) => Ok(format!(
-            "Claktory's browser signs out of {provider} when the errand using it ends; until then nothing is filled or pressed on {provider}'s sites. It hasn't signed out yet."
-        )),
-        Err(why) => Err(format!("signing out of {provider} didn't work: {why}")),
-    }
+/// A request from before each agent had its own browser, to sign the one
+/// shared browser out of an identity provider: nothing holds that sign-in
+/// any more, so it can only be dismissed.
+pub(crate) fn sign_out_gone() -> String {
+    "Each agent's browser now has its own sign-ins: dismiss this request, and sign an agent's browser out of a site in Settings, Claktory's browser.".to_owned()
 }
 
 impl Factory {
-    /// The browser is signed out of `provider` (its cookies deleted): the
-    /// vault forgets its account there, so the next sign-in tells the
-    /// person again. The host calls it each time a sign-out is applied;
-    /// calling it again changes nothing.
-    pub(crate) fn signed_out(&self, provider: &str) {
-        if self.vault.browser_account(provider).is_none() {
-            return;
-        }
-        if let Err(error) = self.vault.forget_browser_accounts(Some(provider)) {
-            tracing::error!(%error, %provider, "the vault didn't forget the browser's account after a sign-out");
-        }
-        self.broadcast_workspace(&self.lock());
-    }
-
-    /// The host's cookie check saw `provider`'s session cookies in the
-    /// browser (Giorno 41843): at an errand's end, after a sign-in turn, or
-    /// on the turn's own end. The first time, the vault records the account
-    /// (with no secret: the person signed in themselves) and the person gets
-    /// the first-sign-in card with Sign out. Idempotent: the host calls it
-    /// again while the cookies are there.
-    pub(crate) fn browser_signed_in(&self, provider: &str) {
-        // The card itself comes with the sign-in turn's card (after W8):
-        // until then the account is recorded, and shown in the browser's
-        // settings with Sign out.
-        match self.vault.set_browser_account(provider, "") {
-            Ok(true) => self.broadcast_workspace(&self.lock()),
-            Ok(false) => {}
-            Err(error) => tracing::error!(%error, %provider, "the browser's account at an identity provider wasn't kept"),
-        }
-    }
-
-    /// Refused on `page` while the browser waits to sign out of the
-    /// identity provider whose site it is on: no click or fill there.
-    pub(crate) async fn while_signing_out(&self, page: &Arc<Page>) -> Option<(String, String)> {
-        let browser = self.errands.browser()?;
+    /// Refused on `page` while `browser` waits to sign out of the identity
+    /// provider whose site it is on: no click or fill there.
+    pub(crate) async fn while_signing_out(&self, browser: &dyn super::Browser, page: &Arc<Page>) -> Option<(String, String)> {
         let origin = page.frame().await.ok()?.origin;
         super::fill::while_signing_out(&origin, |provider| browser.signing_out(provider))
     }
 }
 
-/// The identity providers the browser is signed in to, for the Workspace
-/// (AgentBrowser.accounts); `signing_out`, the host's word on whether a
-/// sign-out of one waits.
-pub(crate) fn accounts(factory: &Factory, signing_out: impl Fn(&str) -> bool) -> Vec<v1::AgentBrowserAccount> {
-    factory
-        .vault
-        .browser_accounts()
-        .into_iter()
-        .map(|account| v1::AgentBrowserAccount {
-            provider: account.provider.to_lowercase(),
-            signing_out: signing_out(&account.provider),
-            name: account.provider,
-            secret_id: account.secret_id,
-            secret_name: account.secret_name,
-            signed_in_ms: account.since,
-        })
-        .collect()
-}
-
-/// SignOutAgentBrowserAccount: the person's Sign out beside an account in
-/// the browser's settings.
+/// SignOutAgentBrowserAccount: the person's Sign out beside a site in an
+/// agent's browser, in Settings: that site's cookies (and its
+/// subdomains') and storage deleted in that agent's browser only, now or,
+/// while it browses, when its session ends.
 pub(crate) async fn sign_out_request(factory: &Arc<Factory>, request: &v1::SignOutAgentBrowserAccount) -> Result<(), RequestError> {
     let refused = |why: String| RequestError::Command(why);
-    let Some(provider) = super::fill::IDENTITY_PROVIDERS.iter().find(|known| known.name.eq_ignore_ascii_case(request.provider.trim())) else {
-        return Err(refused("Claktory's browser doesn't sign in to that provider.".to_owned()));
-    };
-    let name = provider.name;
-    if factory.vault.browser_account(name).is_none() {
-        return Err(refused(format!("Claktory's browser isn't signed in to {name}.")));
+    let site = request.site.trim();
+    if request.agent_id.is_empty() || site.is_empty() {
+        return Err(refused("Choose an agent's browser and a site to sign out of.".to_owned()));
     }
-    let errand = factory.errands.begun().map(|errand| errand.id).unwrap_or_default();
-    sign_out(factory, name, &errand).await.map(|_| ()).map_err(|why| {
-        let mut chars = why.chars();
-        refused(chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or(why))
-    })
+    let name = factory.lock().config.agent(&request.agent_id).map(|agent| agent.name.clone()).ok_or_else(|| refused("That agent isn't in this Claktory any more.".to_owned()))?;
+    let seat = factory.seat(&request.agent_id).map_err(refused)?;
+    let signed_out = seat.browser.sign_out_site(site).await;
+    let session = factory.errands.open_of(&request.agent_id).map(|session| session.id).unwrap_or_default();
+    let (action, outcome) = match &signed_out {
+        Ok(SignedOut::Applied) => (format!("You signed {name}'s browser out of {site}"), String::new()),
+        Ok(SignedOut::Pending) => (format!("You signed {name}'s browser out of {site}, from when it closes"), String::new()),
+        Err(why) => (format!("Signing {name}'s browser out of {site}"), why.clone()),
+    };
+    log::write(&factory.store, &log::Entry { errand: session, agent: request.agent_id.clone(), action, outcome, ..Default::default() });
+    factory.broadcast_workspace(&factory.lock());
+    signed_out.map(|_| ()).map_err(|why| refused(format!("Signing out of {site} didn't work: {why}")))
 }
 
 #[cfg(test)]

@@ -136,7 +136,7 @@ class InstallResult {
 
   /// For stopped: the person turned it off (Stop Claktory), so it stays
   /// off until they start it; else the app quitting stopped it, and
-  /// opening the app starts it (friend bug #27).
+  /// opening the app starts it.
   final bool held;
 
   /// For a dry run of uninstall: how much data it would delete (0 when
@@ -225,7 +225,7 @@ class SetupChannel {
 
   /// Whether macOS lets this Mac's Claktory run in the background: its
   /// switch under System Settings → General → Login Items → Allow in the
-  /// Background (friend bug #28). [BackgroundStatus.unavailable] where the
+  /// Background. [BackgroundStatus.unavailable] where the
   /// app can't say.
   Future<BackgroundStatus> backgroundStatus() async {
     try {
@@ -307,8 +307,8 @@ enum LocalEngine {
 
 /// Where Claktory may show under Allow in the Background: a Mac that set
 /// it up before the release that names it there keeps its developer's
-/// name for good (Pericolo's VM tests, friend bug #28). No person's name
-/// in the app's words (Bruno 30973).
+/// name for good. No person's name in the app's
+/// words.
 const backgroundItemNote =
     'If you had Claktory before this version, it may be listed under its '
     "developer's name instead.";
@@ -346,7 +346,7 @@ enum SetupStage {
   notRunning,
 
   /// macOS keeps it from running in the background: its switch under
-  /// Login Items is off (friend bug #28).
+  /// Login Items is off.
   blocked,
 
   /// The app carries no backend and none is installed.

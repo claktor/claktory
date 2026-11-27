@@ -25,9 +25,11 @@ pub(crate) mod given_up;
 pub mod handoff;
 pub(crate) mod held_codes;
 pub(crate) mod import;
+pub mod logins;
 pub mod memory;
 pub(crate) mod recovery;
 pub(crate) mod requests;
+pub(crate) mod runner_key;
 pub(crate) mod saved;
 pub(crate) mod signins;
 pub(crate) mod sites;
@@ -500,18 +502,92 @@ fn hint(value: &str) -> String {
     if value.chars().count() < HINTED { String::new() } else { last_four(value) }
 }
 
+/// Whether a variable shows no hint: recovery codes and passwords, whose
+/// last characters would give part of them away to anyone who sees the
+/// screen.
+fn hides_its_hint(variable: &str) -> bool {
+    let variable = variable.to_ascii_uppercase();
+    variable == held_codes::CODES_VARIABLE
+        || ["PASSWORD", "PASSWD", "PASS", "PASSPHRASE", "PIN"].iter().any(|word| variable == *word || variable.ends_with(&format!("_{word}")))
+}
+
 fn last_four(text: &str) -> String {
     let count = text.chars().count();
     text.chars().skip(count.saturating_sub(4)).collect()
 }
 
 /// Creates a file only its owner can read and write.
+#[cfg(unix)]
 fn private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
     file.write_all(bytes)?;
     file.sync_all()
+}
+
+/// On Windows: this user and SYSTEM only from its creation, written whole
+/// (`windows::private::write`).
+#[cfg(windows)]
+fn private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    factory_agent::windows::private::write(path, bytes)
+}
+
+/// How the key on disk is kept (`protectors.params` of 'auto'): in hex on
+/// Unix, where its mode keeps it to its owner; on Windows also sealed for
+/// this user with DPAPI (`windows::dpapi`), so it never touches
+/// the disk unwrapped. Readers go by the file's own text, never this.
+const AUTO_PARAMS: &str = if cfg!(windows) { "dpapi1" } else { "file" };
+
+/// The key file's text for `kek`.
+fn auto_key_text(kek: &[u8], vault_id: &str) -> std::io::Result<Zeroizing<String>> {
+    let text = Zeroizing::new(crypto::hex(kek));
+    #[cfg(windows)]
+    let text = Zeroizing::new(crate::windows::dpapi::seal_auto_key(&text, vault_id)?);
+    #[cfg(unix)]
+    let _ = vault_id;
+    Ok(text)
+}
+
+/// The key in a key file's text, in hex. On Windows only a sealed one, by
+/// this user for this vault: anything else leaves the vault locked (it
+/// opens by the account, or asks), and the file as it is.
+pub(crate) fn auto_key_hex(text: &str, vault_id: &str) -> Option<Zeroizing<String>> {
+    #[cfg(windows)]
+    return crate::windows::dpapi::open_auto_key(text, vault_id);
+    #[cfg(unix)]
+    {
+        let _ = vault_id;
+        Some(Zeroizing::new(text.to_owned()))
+    }
+}
+
+/// A key file as a backup carries it: on Windows unsealed (the backup is
+/// encrypted to its recipients, and a DPAPI seal opens only for this user on
+/// this PC), so it restores anywhere; elsewhere as it is.
+pub(crate) fn portable_auto_key(bytes: Zeroizing<Vec<u8>>, vault_id: &str) -> Zeroizing<Vec<u8>> {
+    if !cfg!(windows) {
+        return bytes;
+    }
+    match std::str::from_utf8(&bytes).ok().and_then(|text| auto_key_hex(text, vault_id)) {
+        Some(hex) => Zeroizing::new(hex.as_bytes().to_vec()),
+        None => bytes,
+    }
+}
+
+/// A key file from a backup, as this computer keeps it: on Windows a plain
+/// one is sealed for this user before it's written; elsewhere as it is.
+pub(crate) fn local_auto_key(bytes: &[u8], vault_id: &str) -> std::io::Result<Zeroizing<Vec<u8>>> {
+    #[cfg(windows)]
+    if let Ok(text) = std::str::from_utf8(bytes)
+        && !text.starts_with(crate::windows::dpapi::SEALED_KEY)
+        && let Some(kek) = crypto::unhex(text.trim_end()).map(Zeroizing::new)
+    {
+        return Ok(Zeroizing::new(auto_key_text(&kek, vault_id)?.as_bytes().to_vec()));
+    }
+    #[cfg(unix)]
+    let _ = vault_id;
+    Ok(Zeroizing::new(bytes.to_vec()))
 }
 
 /// The schema version this backend writes: a vault above it was made by a
@@ -603,6 +679,7 @@ impl Vault {
     /// The vault's key, if the key on disk at `path` opens it.
     fn vmk_with_key_file(inner: &Inner, path: &Path) -> Option<Key> {
         let text = Zeroizing::new(std::fs::read_to_string(path).ok()?);
+        let text = auto_key_hex(&text, &inner.vault_id)?;
         let bytes = Zeroizing::new(crypto::unhex(&text)?);
         let kek: [u8; 32] = bytes.as_slice().try_into().ok()?;
         let sealed: Vec<u8> = inner
@@ -662,9 +739,9 @@ impl Vault {
     /// A new key on disk, and its protector.
     fn auto_protector(&self, vault_id: &str, vmk: &[u8; 32]) -> Result<Protector, VaultError> {
         let kek = crypto::new_key();
-        private_file(&self.auto_path(), crypto::hex(kek.as_slice()).as_bytes())?;
+        private_file(&self.auto_path(), auto_key_text(kek.as_slice(), vault_id)?.as_bytes())?;
         let sealed_vmk = crypto::seal(&kek, vmk.as_slice(), &aad(&["vmk", vault_id, "auto"]));
-        Ok(Protector { kind: "auto".to_owned(), params: "file".to_owned(), salt: Vec::new(), sealed_vmk })
+        Ok(Protector { kind: "auto".to_owned(), params: AUTO_PARAMS.to_owned(), salt: Vec::new(), sealed_vmk })
     }
 
     fn save_protector(db: &Connection, protector: &Protector) -> Result<(), VaultError> {
@@ -697,10 +774,13 @@ impl Vault {
             }
             None => (None, None),
         };
+        #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
             std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&self.dir)?;
         }
+        #[cfg(windows)]
+        factory_agent::windows::private::create_dir_all(&self.dir)?;
         let auto = if locked_mode { None } else { Some(self.auto_protector(&vault_id, &vmk)?) };
         // Made aside and moved into place, so a vault is never half made.
         let draft = self.dir.join("vault.db.new");
@@ -781,6 +861,21 @@ impl Vault {
         }
     }
 
+    /// After the vault was opened by hand: when it keeps its key on this
+    /// computer (not locked mode) and that key no longer opens it (gone,
+    /// damaged, or on Windows one that isn't sealed for this user), a fresh
+    /// one is written, so it opens by itself again from the next start. The
+    /// key that was there is never used. Whether one was written.
+    pub(crate) fn mend_auto_key(&self) -> Result<bool, VaultError> {
+        {
+            let inner = self.lock();
+            if inner.locked_mode || inner.vmk.is_none() || self.auto_vmk(&inner).is_some() {
+                return Ok(false);
+            }
+        }
+        self.rotate_auto_key()
+    }
+
     /// Opens the vault with `vmk`, known to be its key, keeping a check of it
     /// the first time (to know a key handed over at an update).
     fn set_open(inner: &mut Inner, vmk: &[u8; 32]) {
@@ -817,6 +912,7 @@ impl Vault {
     /// Hands the open vault's key to the next backend, before this one exits
     /// for an update: through the supervisor, or `exec` (Some: the fd to
     /// leave open, for `handoff::FD_ENV`). Without a key, nothing.
+    #[cfg(unix)]
     pub(crate) fn hand_over(&self, exec: bool) -> Option<std::os::fd::OwnedFd> {
         let inner = self.lock();
         let vmk = inner.vmk.as_deref()?;
@@ -829,6 +925,17 @@ impl Vault {
             tracing::info!("no supervisor to hand the vault's key to; it opens again by itself, or asks");
         }
         None
+    }
+
+    /// On Windows, through the supervisor only (`handoff`): with none, the
+    /// next backend opens the vault again by itself, or asks.
+    #[cfg(windows)]
+    pub(crate) fn hand_over(&self) {
+        let inner = self.lock();
+        let Some(vmk) = inner.vmk.as_deref() else { return };
+        if !handoff::keep(&inner.vault_id, vmk) {
+            tracing::info!("no supervisor to hand the vault's key to; it opens again by itself, or asks");
+        }
     }
 
     fn open_vmk(inner: &Inner) -> Result<&[u8; 32], VaultError> {
@@ -901,9 +1008,9 @@ impl Vault {
         }
         let vmk = Zeroizing::new(*Self::open_vmk(&inner)?);
         let kek = crypto::new_key();
-        private_file(&next, crypto::hex(kek.as_slice()).as_bytes())?;
+        private_file(&next, auto_key_text(kek.as_slice(), &inner.vault_id)?.as_bytes())?;
         let sealed_vmk = crypto::seal(&kek, vmk.as_slice(), &aad(&["vmk", &inner.vault_id, "auto"]));
-        let protector = Protector { kind: "auto".to_owned(), params: "file".to_owned(), salt: Vec::new(), sealed_vmk };
+        let protector = Protector { kind: "auto".to_owned(), params: AUTO_PARAMS.to_owned(), salt: Vec::new(), sealed_vmk };
         Self::save_protector(Self::db(&inner)?, &protector)?;
         std::fs::rename(&next, self.auto_path())?;
         Ok(true)
@@ -964,9 +1071,14 @@ impl Vault {
         let version = version.to_string();
         let sealed_dek = crypto::seal(vmk, dek.as_slice(), &dek_aad(vault_id, id, &version, ask));
         db.execute("DELETE FROM variables WHERE secret = ?1", [id])?;
+        let has_sites = db
+            .query_row("SELECT sites FROM secrets WHERE id = ?1", [id], |row| row.get::<_, String>(0))
+            .optional()?
+            .is_some_and(|sites| !sites.is_empty());
         for (position, value) in (0i64..).zip(values) {
             let sealed = crypto::seal(&dek, value.value.as_bytes(), &aad(&["value", vault_id, id, &version, &value.variable]));
-            let hint = if value.binary || value.variable == held_codes::CODES_VARIABLE { String::new() } else { hint(&value.value) };
+            let hidden = value.binary || hides_its_hint(&value.variable) || (has_sites && value.variable != logins::USERNAME);
+            let hint = if hidden { String::new() } else { hint(&value.value) };
             db.execute(
                 "INSERT INTO variables (secret, position, name, file, hint, short, sealed_value, binary) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![id, position, value.variable, value.file, hint, value.value.len() < SHORT, sealed, value.binary],
@@ -1323,13 +1435,17 @@ impl Vault {
         })?;
         for secret in rows {
             let mut secret = secret?;
+            let mut shorts = Vec::new();
             let mut variables = db.prepare("SELECT name, hint, file, short FROM variables WHERE secret = ?1 ORDER BY position")?;
             for row in variables.query_map([&secret.id], |row| {
                 Ok((v1::SecretVariable { name: row.get(0)?, hint: row.get(1)?, file: row.get(2)? }, row.get::<_, bool>(3)?))
             })? {
-                let (variable, short) = row?;
+                let (mut variable, short) = row?;
                 if short {
-                    secret.warnings.push(format!("{} is too short to hide in agents' output.", variable.name));
+                    shorts.push(variable.name.clone());
+                }
+                if hides_its_hint(&variable.name) {
+                    variable.hint.clear();
                 }
                 secret.variables.push(variable);
             }
@@ -1360,6 +1476,18 @@ impl Vault {
                 });
             }
             Self::sites_view(inner, db, &mut secret)?;
+            // A website login's fields may be named anything: only its username shows a hint.
+            if !secret.sites.is_empty() {
+                for variable in secret.variables.iter_mut().filter(|variable| variable.name != logins::USERNAME) {
+                    variable.hint.clear();
+                }
+            }
+            // Typed only into its sites, a value never reaches an agent's output.
+            if secret.sites.is_empty() || secret.grants.iter().any(|grant| !grant.fill_only) {
+                for name in shorts {
+                    secret.warnings.push(format!("{name} is too short to hide in agents' output."));
+                }
+            }
             Self::connection_view(db, &mut secret)?;
             secrets.push(secret);
         }
@@ -1441,9 +1569,9 @@ impl Vault {
                 let sites = Self::sites_of(&inner, &key, &id)?;
                 let fills = match (fill_only, sites.is_empty()) {
                     (true, true) => "; fill only, and bound to no site yet, so it can't be filled anywhere".to_owned(),
-                    (true, false) => format!("; fill only: browser_fill_secret puts it into {}, never a command", sites.join(", ")),
+                    (true, false) => format!("; fill only: Claktory types it on {} when you sign in there with browser_sign_in, never into a command", sites.join(", ")),
                     (false, true) => String::new(),
-                    (false, false) => format!("; browser_fill_secret also puts it into {}", sites.join(", ")),
+                    (false, false) => format!("; Claktory also types it on {} when you sign in there with browser_sign_in", sites.join(", ")),
                 };
                 let asks = if fill_only { "" } else { asks };
                 granted.insert(id, format!("{name} (sets {}{fills}){about}{asks}", variables.join(", ")));
@@ -1524,7 +1652,7 @@ impl Vault {
             };
             if fill_only {
                 return Err(Refusal::Said(format!(
-                    "{name} is yours only to fill into its sites in Claktory's browser, with browser_fill_secret: no command can have it."
+                    "{name} is yours only for Claktory to type into its sites when you sign in with browser_sign_in: no command can have it."
                 )));
             }
             if Self::asks(db, &id)? && !Self::is_armed(&inner, agent, &name) {
@@ -1682,30 +1810,6 @@ impl Vault {
         inner.state = None;
         Ok(())
     }
-
-    /// The identity providers Claktory's browser is signed in to (#435),
-    /// by name ("Google"): the secret's id and its name now (empty when
-    /// it's gone), and when it first signed in there. Empty without a vault.
-    pub(crate) fn browser_accounts(&self) -> Vec<BrowserAccount> {
-        let inner = self.lock();
-        let Some(db) = inner.db.as_ref() else { return Vec::new() };
-        query(
-            db,
-            "SELECT b.provider, b.secret, COALESCE(s.name, ''), b.since FROM browser_accounts b LEFT JOIN secrets s ON s.id = b.secret ORDER BY b.since",
-            [],
-            |row| Ok(BrowserAccount { provider: row.get(0)?, secret_id: row.get(1)?, secret_name: row.get(2)?, since: row.get(3)? }),
-        )
-        .unwrap_or_default()
-    }
-}
-
-/// An identity provider the browser is signed in to (`Vault::browser_accounts`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BrowserAccount {
-    pub provider: String,
-    pub secret_id: String,
-    pub secret_name: String,
-    pub since: i64,
 }
 
 #[cfg(test)]
@@ -1751,6 +1855,35 @@ mod tests {
             }
             None => false,
         }
+    }
+
+    /// Opened by hand while its key on disk doesn't open it (gone or
+    /// damaged): a fresh key on disk, so the next start opens by itself; in
+    /// locked mode, none.
+    #[test]
+    fn opened_by_hand_without_a_working_key_on_disk_it_writes_a_fresh_one() {
+        let dir = temp();
+        let vault = vault(&dir);
+        vault.create(Some("correct horse battery"), false).expect("create");
+        let key = dir.join("vault").join("auto.key");
+        assert!(!vault.mend_auto_key().expect("mend"), "its key opens it: kept");
+        for broken in [None, Some("not a key")] {
+            match broken {
+                None => std::fs::remove_file(&key).expect("gone"),
+                Some(text) => std::fs::write(&key, text).expect("damaged"),
+            }
+            let vault = super::tests::vault(&dir);
+            assert!(!vault.is_open());
+            assert!(unlock(&vault, "correct horse battery"));
+            assert!(vault.mend_auto_key().expect("mend"), "{broken:?}");
+            assert!(super::tests::vault(&dir).is_open(), "it opens by itself again");
+        }
+        vault.set_locked_mode(true).expect("locked mode");
+        let vault = super::tests::vault(&dir);
+        assert!(unlock(&vault, "correct horse battery"));
+        assert!(!vault.mend_auto_key().expect("mend"), "locked mode keeps no key on disk");
+        assert!(!key.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

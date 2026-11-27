@@ -1,9 +1,12 @@
 import 'dart:math' as math;
 
+import 'package:fixnum/fixnum.dart';
 import 'package:flutter/widgets.dart';
 
 import 'controls.dart';
 import 'identity.dart';
+import 'mobile/metrics.dart' show Touch;
+import 'mobile/platform_policy.dart' show PhonePlatformPolicy;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'usage_resets.dart';
 
@@ -26,8 +29,8 @@ class UsageMeter {
     return provider.hasUsage() ? provider.usage : null;
   }
 
-  /// What its API key has to spend, as its provider says (OpenRouter,
-  /// #343 U8); null when the provider doesn't say or it isn't read yet.
+  /// What its API key has to spend, as its provider says (OpenRouter);
+  /// null when the provider doesn't say or it isn't read yet.
   AccountCredit? get credit {
     final account = this.account;
     return account != null && account.hasCredit() ? account.credit : null;
@@ -78,12 +81,14 @@ List<UsageMeter> usageMeters(List<Provider> providers) => [
 /// without limits (API keys) show the mark alone, which doesn't read as a
 /// meter.
 ///
-/// With [onAdd], a + after them, a circle's size, to add another provider
-/// (a friend with one couldn't find where to add a second). [leading]
-/// comes first in the same row (the sidebar's who's-at-work badge): with
-/// many accounts they all wrap together onto more lines, each starting at
-/// the row's left edge, each line's cells centred on one another (Matt,
-/// with four subscriptions).
+/// With [onAdd], a +, a circle's size, to add another provider (a friend
+/// with one couldn't find where to add a second), pinned at the right end
+/// of the first line: it never wraps onto a line of its own, away from the
+/// circles. [leading] comes first in the same row (the sidebar's
+/// who's-at-work badge): with many accounts they all wrap together onto
+/// more lines, each starting at the row's left edge, each line's cells
+/// centred on one another (with four subscriptions), and the + stays where
+/// it was.
 class ProviderUsageCircles extends StatelessWidget {
   const ProviderUsageCircles({
     super.key,
@@ -99,14 +104,34 @@ class ProviderUsageCircles extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final onAdd = this.onAdd;
-    return Wrap(
+    final circles = Wrap(
       spacing: Space.xs,
       runSpacing: Space.xs,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
         ?leading,
         for (final meter in usageMeters(providers)) UsageCircle(meter: meter),
-        if (onAdd != null) AddProviderButton(onTap: onAdd),
+      ],
+    );
+    if (onAdd == null) return circles;
+    // The first line is a cell tall, a finger's target with touch, as the
+    // badge is then: the + is as tall, so the two share a middle.
+    final touch = touchFirst(context);
+    final target = PhonePlatformPolicy.least(context, Touch.target);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Padding(
+            // Without the badge, the circles' 24 in the target's middle.
+            padding: EdgeInsets.only(
+              top: touch && leading == null ? (target - 24) / 2 : 0,
+            ),
+            child: circles,
+          ),
+        ),
+        const SizedBox(width: Space.xs),
+        AddProviderButton(onTap: onAdd),
       ],
     );
   }
@@ -125,44 +150,57 @@ class AddProviderButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    final touch = touchFirst(context);
+    // Android's 48dp where it asks for more than 44.
+    final target = PhonePlatformPolicy.least(context, Touch.target);
     return Semantics(
       container: true,
       button: true,
       label: addProviderLabel,
-      // Pointer only for now: its 24pt is short of a finger's target, which
-      // a tap of its own would claim for VoiceOver on a phone (until it
-      // grows, VoiceOver's touch there reaches it as a tap).
-      onTap: touchFirst(context) ? null : onTap,
+      onTap: onTap,
       excludeSemantics: true,
       child: HoverCard(
         card: (context) => const Text(addProviderLabel),
         child: Pressable(
           onTap: onTap,
-          builder: (context, hovered) => SizedBox.square(
-            dimension: 24,
-            child: Center(
-              child: AnimatedContainer(
-                duration: Motion.fast,
-                width: 20,
-                height: 20,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: hovered ? palette.hover : null,
-                  border: Border.all(
-                    color: hovered ? palette.textMuted : palette.hairline,
-                    width: 1.5,
+          // With touch, a finger's target: the same circle at its end, the
+          // room before it its own (it ends the row).
+          builder: (context, hovered) {
+            final circle = SizedBox.square(
+              dimension: 24,
+              child: Center(
+                child: AnimatedContainer(
+                  duration: Motion.fast,
+                  width: 20,
+                  height: 20,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: hovered ? palette.hover : null,
+                    border: Border.all(
+                      color: hovered ? palette.textMuted : palette.hairline,
+                      width: 1.5,
+                    ),
+                  ),
+                  child: ExtensionGlyph(
+                    icon: 'plus',
+                    name: '+',
+                    size: 12,
+                    color: hovered ? palette.text : palette.textMuted,
                   ),
                 ),
-                child: ExtensionGlyph(
-                  icon: 'plus',
-                  name: '+',
-                  size: 12,
-                  color: hovered ? palette.text : palette.textMuted,
-                ),
               ),
-            ),
-          ),
+            );
+            return touch
+                ? SizedBox.square(
+                    dimension: target,
+                    child: Align(
+                      alignment: AlignmentDirectional.centerEnd,
+                      child: circle,
+                    ),
+                  )
+                : circle;
+          },
         ),
       ),
     );
@@ -183,7 +221,11 @@ class UsageCircle extends StatelessWidget {
         interactive: true,
         // On iPhone, a touch and hold opens it.
         holdToShow: true,
-        card: (context) => UsageCard(meter: meter, now: DateTime.now()),
+        // Scrolls when it's taller than the screen (the largest text on a
+        // small phone).
+        card: (context) => SingleChildScrollView(
+          child: UsageCard(meter: meter, now: DateTime.now()),
+        ),
         child: UsageRing(meter: meter),
       ),
     );
@@ -287,6 +329,48 @@ const inUseDot = 4.0;
 String formatDollars(double usd) => usd == usd.roundToDouble() && usd.abs() >= 1
     ? '\$${usd.round()}'
     : '\$${usd.toStringAsFixed(2)}';
+
+/// An amount of [currency] in its minor units, said as dollars are: "\$12.50",
+/// "€50", or with no symbol known, "12.50 CHF".
+String formatMoney(Int64 minor, int places, String currency) {
+  var scale = Int64.ONE;
+  for (var i = 0; i < places; i++) {
+    scale *= 10;
+  }
+  final amount = minor.isNegative ? -minor : minor;
+  final whole = amount ~/ scale;
+  final part = amount % scale;
+  final number = places == 0 || (part.isZero && whole > 0)
+      ? '$whole'
+      : '$whole.${part.toString().padLeft(places, '0')}';
+  final sign = minor.isNegative ? '-' : '';
+  return switch (currency.toUpperCase()) {
+    'USD' => '$sign\$$number',
+    'EUR' => '$sign€$number',
+    'GBP' => '$sign£$number',
+    'JPY' => '$sign¥$number',
+    final code => '$sign$number $code'.trimRight(),
+  };
+}
+
+/// What a subscription may spend past its plan's limits, in a line: "Extra
+/// usage on · used \$12.50 of \$50 this month", "Extra usage limit reached ·
+/// used \$50 of \$50 this month" or "Extra usage off"; null when the provider
+/// says nothing of it. [reached] marks the cap reached, when requests past
+/// the plan's limits stop.
+({String text, bool reached})? extraUsageLine(ProviderUsage usage) {
+  if (!usage.hasExtraUsage()) return null;
+  final extra = usage.extraUsage;
+  if (!extra.enabled) return (text: 'Extra usage off', reached: false);
+  String money(Int64 minor) =>
+      formatMoney(minor, extra.decimalPlaces, extra.currency);
+  final used = extra.limitMinor > 0
+      ? 'used ${money(extra.usedMinor)} of ${money(extra.limitMinor)} this month'
+      : 'used ${money(extra.usedMinor)} this month';
+  return extra.limitReached
+      ? (text: 'Extra usage limit reached · $used', reached: true)
+      : (text: 'Extra usage on · $used', reached: false);
+}
 
 /// What an API key has to spend, in a line: "\$3.20 left of \$10 a day ·
 /// \$0.80 today", or with no limit on the key, "\$0.80 today · no spending
@@ -448,11 +532,13 @@ class UsageCard extends StatelessWidget {
           children: [
             Dot(color: providerColor(provider.id, palette)),
             const SizedBox(width: Space.s),
-            Text(
-              provider.name,
-              style: TextStyles.label.copyWith(
-                color: palette.text,
-                fontWeight: FontWeight.w600,
+            Flexible(
+              child: Text(
+                provider.name,
+                style: TextStyles.label.copyWith(
+                  color: palette.text,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
           ],
@@ -470,7 +556,7 @@ class UsageCard extends StatelessWidget {
               color: state.problem ? palette.danger : palette.textMuted,
             ),
           ),
-        // An API key's credit, where its provider says it (#343 U8).
+        // An API key's credit, where its provider says it.
         if (meter.credit case final credit? when usage == null) ...[
           if (credit.readMs > 0)
             Padding(
@@ -511,35 +597,19 @@ class UsageCard extends StatelessWidget {
           ),
         if (windows.isNotEmpty) ...[
           const SizedBox(height: Space.s),
-          Table(
-            defaultColumnWidth: const IntrinsicColumnWidth(),
-            children: [
-              for (final window in windows)
-                TableRow(
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.only(right: Space.m),
-                      child: Text(window.label),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.only(right: Space.m),
-                      child: Text(
-                        formatPercent(window.usedPercent),
-                        textAlign: TextAlign.right,
-                        style: const TextStyle(
-                          fontFeatures: [FontFeature.tabularFigures()],
-                        ),
-                      ),
-                    ),
-                    Text(
-                      formatReset(window.resetsAt.toInt(), now),
-                      style: caption,
-                    ),
-                  ],
-                ),
-            ],
-          ),
+          _Windows(windows: windows, now: now, caption: caption),
         ],
+        if (usage == null ? null : extraUsageLine(usage) case final extra?)
+          Padding(
+            padding: const EdgeInsets.only(top: Space.s),
+            child: Text(
+              extra.text,
+              style: caption.copyWith(
+                color: extra.reached ? palette.danger : null,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
         if (usage != null && !read && usage.error.isEmpty)
           Padding(
             padding: const EdgeInsets.only(top: Space.s),
@@ -573,6 +643,108 @@ class UsageCard extends StatelessWidget {
   }
 }
 
+/// A card's limits, one line each: the label, its share used and when it
+/// resets, in columns; each reset under its limit instead when a line is
+/// wider than the card has room for (large text on a phone).
+class _Windows extends StatelessWidget {
+  const _Windows({
+    required this.windows,
+    required this.now,
+    required this.caption,
+  });
+
+  final List<UsageWindow> windows;
+  final DateTime now;
+  final TextStyle caption;
+
+  static const _figures = TextStyle(
+    fontFeatures: [FontFeature.tabularFigures()],
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    final body = DefaultTextStyle.of(context).style;
+    final scaler = MediaQuery.textScalerOf(context);
+    final lines = [
+      for (final window in windows)
+        (
+          label: window.label,
+          percent: formatPercent(window.usedPercent),
+          reset: formatReset(window.resetsAt.toInt(), now),
+        ),
+    ];
+    double width(String text, TextStyle style) {
+      final painter = TextPainter(
+        text: TextSpan(text: text, style: style),
+        textDirection: TextDirection.ltr,
+        textScaler: scaler,
+      )..layout();
+      final width = painter.width;
+      painter.dispose();
+      return width;
+    }
+
+    double widest(Iterable<double> widths) => widths.fold(0, math.max);
+    final columns =
+        widest(lines.map((l) => width(l.label, body))) +
+        Space.m +
+        widest(lines.map((l) => width(l.percent, body.merge(_figures)))) +
+        Space.m +
+        widest(lines.map((l) => width(l.reset, caption)));
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (columns <= constraints.maxWidth) {
+          return Table(
+            defaultColumnWidth: const IntrinsicColumnWidth(),
+            children: [
+              for (final line in lines)
+                TableRow(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.only(right: Space.m),
+                      child: Text(line.label),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(right: Space.m),
+                      child: Text(
+                        line.percent,
+                        textAlign: TextAlign.right,
+                        style: _figures,
+                      ),
+                    ),
+                    Text(line.reset, style: caption),
+                  ],
+                ),
+            ],
+          );
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (final (i, line) in lines.indexed)
+              Padding(
+                padding: EdgeInsets.only(top: i == 0 ? 0 : Space.s),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      spacing: Space.m,
+                      children: [
+                        Text(line.label),
+                        Text(line.percent, style: _figures),
+                      ],
+                    ),
+                    Text(line.reset, style: caption),
+                  ],
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
 /// What [account] is doing now: requests go to it ("In use"), it reached a
 /// usage limit and is skipped until it resets ("Limit reached, back at
 /// 14:00"), an API key ran out of credit, its sign-in expired ("Sign-in
@@ -601,7 +773,7 @@ class UsageCard extends StatelessWidget {
     );
   }
   // Its key can't run paid models: no credit yet, or its spending limit is
-  // used up (Claktory's sentence, #343 U8).
+  // used up (Claktory's sentence).
   if (account.hasCredit() && account.credit.warning.isNotEmpty) {
     return (text: account.credit.warning, problem: true);
   }
@@ -611,20 +783,20 @@ class UsageCard extends StatelessWidget {
 }
 
 /// Under a provider signed in to whose models no agent or chat runs yet
-/// (Provider.agents 0, #343 U1): signing in doesn't move them.
+/// (Provider.agents 0): signing in doesn't move them.
 String noAgentsOnProvider(Provider provider) =>
     'No agents or chats use ${provider.name} models yet.';
 
 /// Whether requests go to [account] now: an agent or chat runs on its
 /// provider's models and it's the first with room, in its normal pool
-/// (#343 U1: only while one does) or Fable's own (U10).
+/// (only while one does) or Fable's own (U10).
 bool accountInUse(Account account) => account.inUse || account.fableInUse;
 
 /// Where [account] stands when nothing's wrong with it: "In use" while
 /// requests go to it ("In use for Fable" for Fable's alone), else "Signed
-/// in"; with Fable's own weekly limit
-/// reached on it, that too ("In use · Fable: limit reached, back at Fri
-/// 18:00", #343 U10), since Fable's requests then go to another account.
+/// in"; with Fable's own weekly limit reached on it, that too ("In use ·
+/// Fable: limit reached, back at Fri 18:00"), since Fable's requests then
+/// go to another account.
 String accountUseLine(Account account, DateTime now) {
   final fableUntil = account.fableExhaustedUntil.toInt();
   return [
@@ -710,7 +882,7 @@ String formatReset(int ms, DateTime now) {
   final time =
       '${at.hour.toString().padLeft(2, '0')}:'
       '${at.minute.toString().padLeft(2, '0')}';
-  // The weekday and time stay together on a narrow card (Abbacchio).
+  // The weekday and time stay together on a narrow card.
   return 'resets in $days, ${weekdays[at.weekday - 1]}\u00A0$time';
 }
 

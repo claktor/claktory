@@ -91,8 +91,8 @@ async fn a_release_without_an_app_serves_the_mac_releases() {
     assert_eq!((last.sha256, last.app_name.as_str()), (sha256(&bytes), "Factory.app"));
 
     // A Mac release that isn't what the manifest said is refused, and said
-    // again to every ask for a while rather than downloaded again at each
-    // (friend bug #56): even once it would be right.
+    // again to every ask for a while rather than downloaded again at each:
+    // even once it would be right.
     note("2026.11.21-0900", &"0".repeat(64));
     let refused = fetch_all(&mut client, &mut view, "2026.11.21-0900").await.expect_err("refused");
     assert!(refused.contains("the Mac app it downloaded didn't match the release, so it wasn't used"), "{refused}");
@@ -106,9 +106,9 @@ async fn a_release_without_an_app_serves_the_mac_releases() {
     assert!(!dir.join("home/releases/2026.11.21-0900/app.tar.gz").exists());
 }
 
-/// The Mac release is a .tar.xz since #454: a Linux Claktory reads its app's
+/// The Mac release is a .tar.xz: a Linux Claktory reads its app's
 /// name in Rust, with no xz on the computer, and serves it as it is, which
-/// every Mac app's `tar -xzf` unpacks (friend bug #56).
+/// every Mac app's `tar -xzf` unpacks.
 #[tokio::test]
 async fn a_mac_release_in_xz_is_served_too() {
     let dir = temp_dir();
@@ -194,7 +194,7 @@ async fn an_app_on_another_machine_fetches_its_release_in_chunks() {
         std::fs::read_dir(&unpacked).expect("ls").map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned()).collect();
     assert_eq!(top, ["Factory.app"]);
 
-    // Smaller pieces for a slow link (#408): as asked, never over 1 MiB,
+    // Smaller pieces for a slow link: as asked, never over 1 MiB,
     // and the same bytes.
     let piece = |offset: u64, max_bytes: u64| {
         client_message::Body::FetchApp(v1::FetchApp { version: "2026.11.20-1012".into(), offset, max_bytes })

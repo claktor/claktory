@@ -52,6 +52,7 @@ class HistoryTimeline {
     required this.edgeSpans,
     required this.histogram,
     required this.histogramStart,
+    required this.tokens,
     required this.chapters,
     required this.cursors,
     required this.messageCount,
@@ -83,6 +84,7 @@ class HistoryTimeline {
       ],
       histogram: Uint32List.fromList(overview.histogram),
       histogramStart: (overview.startMs.toInt() ~/ hour * hour).toDouble(),
+      tokens: [for (final n in overview.tokens) n.toInt()],
       chapters: [...overview.chapters]
         ..sort((a, b) => a.atMs.compareTo(b.atMs)),
       cursors: [...overview.cursors],
@@ -110,6 +112,10 @@ class HistoryTimeline {
   /// Events per hour, hour 0 starting at [histogramStart].
   final Uint32List histogram;
   final double histogramStart;
+
+  /// Tokens used per hour, as [histogram] (HistoryOverview.tokens): the
+  /// same sum Usage counts. Empty from a Claktory that doesn't send them.
+  final List<int> tokens;
   final List<HistoryChapter> chapters;
   final List<HistoryCursor> cursors;
   final int messageCount;

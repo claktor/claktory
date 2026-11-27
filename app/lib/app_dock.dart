@@ -759,7 +759,7 @@ class _ManageRow extends StatelessWidget {
   }
 }
 
-/// On a phone, the dock as a strip for the sidebar (where Prosciutto puts
+/// On a phone, the dock as a strip for the sidebar (where a phone keeps
 /// it): a 44pt chip with its icon and name for each pinned app, scrolling
 /// sideways, then All apps, which opens the launcher's list as a sheet. A
 /// long press on a chip unpins it or opens its settings. Nothing while

@@ -13,10 +13,10 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'dm_fakes.dart';
 
-// #451 H7: messages go through the person's home Claktory, not
-// claktory.com (dms-no-server-storage.md; Mista's H3 contract). The worker
-// still carries keys, Welcomes and commits; what's said comes and goes
-// through the home, once this device went over to it.
+// Messages go through the person's home Claktory, not claktory.com
+// The worker still carries keys, Welcomes and
+// commits; what's said comes and goes through the home, once this device
+// went over to it.
 
 DmContent _text(String id, String text) =>
     DmContent(kind: 'text', clientMessageId: id, text: text, extraJson: '');
@@ -260,7 +260,7 @@ void main() {
     await world.matt.e2ee.say(world.group, _text('m1', 'hi'));
     expect(world.matt.e2ee.delivery('m1'), isNull);
     // A friend's Claktory out of reach is the home's state, not a
-    // delivery (Mista 32614).
+    // delivery.
     world.home
       ..peers.add(DmPeer(accountId: 'ana', reachable: false))
       ..said();
@@ -396,7 +396,7 @@ void main() {
       // Matt's list named no home: the one the app shows, from now on.
       expect(world.matt.e2ee.homeEndpoint, world.home.endpointId);
       // A service that names a stranger in the conversation gets no route
-      // to her home: who's in it is the MLS group's word (Fugo).
+      // to her home: who's in it is the MLS group's word.
       world.worker.listAccounts(world.group, ['ana', 'eve', 'matt']);
       world.matt.device.lists['eve'] = DmDeviceList(
         version: BigInt.one,
@@ -420,7 +420,7 @@ void main() {
     },
   );
 
-  // Zucchero's row 567: Ana keeps her messages on another Claktory. The
+  // Ana keeps her messages on another Claktory. The
   // worker tells Matt's device only while it follows: changed while the
   // app was closed, it's read as following starts; changed while it
   // follows, the routes follow at once.
@@ -451,7 +451,7 @@ void main() {
       world.matt.e2ee.dispose();
     });
 
-    // Fugo: what the service lists alone never pins anyone.
+    // What the service lists alone never pins anyone.
     test('a stranger the service names in a conversation is never '
         'fetched or pinned as following starts', () async {
       await world.setUp();
@@ -477,7 +477,7 @@ void main() {
     });
   });
 
-  // Row 567 (Mista): Ana's home turns Matt's away. His device reads her
+  // Ana's home turns Matt's away. His device reads her
   // keys again and gives his home its routes again; again only after a
   // wait while it goes on, and from the start once it's over.
   test("a friend's home that turns the person's away: their keys read "
@@ -528,7 +528,7 @@ void main() {
     world.matt.e2ee.dispose();
   });
 
-  // Mista 39824: a device whose first Claktory isn't the person's home
+  // A device whose first Claktory isn't the person's home
   // stays on the worker until it's connected to the home, never reading a
   // home that isn't one.
   test('connected first to another Claktory than the home: it goes over '
@@ -558,7 +558,7 @@ void main() {
     expect(world.home.follows, isNotEmpty);
   });
 
-  // Row 569: the rail shows another of Matt's Claktories, each with its
+  // The rail shows another of Matt's Claktories, each with its
   // own connection: the engine talks to the one shown, and back again.
   test('the app shows another Claktory: the engine talks to it, and to '
       'the home again once it is shown', () async {
@@ -579,7 +579,7 @@ void main() {
     expect(world.home.follows.length, follows + 1);
   });
 
-  // Row 582 (Zucchero 40993): the home said it let go of a group past this
+  // The home said it let go of a group past this
   // device's cursor; once joined again, what it said then no longer
   // stands: followed afresh from the new place, it joins again only if
   // the home says so again, never at every sync.
@@ -606,7 +606,7 @@ void main() {
     expect(rejoins(), joined);
   });
 
-  // Row 578 (Mista 40770): a message the home took, which hadn't come back
+  // A message the home took, which hadn't come back
   // when the person's home moved, goes to the new home once this device is
   // connected to it, not only at the next launch.
   test('one the old home took goes to the new one', () async {
@@ -627,7 +627,7 @@ void main() {
     expect([for (final send in moved.sends) send.clientMessageId], ['m1']);
   });
 
-  // Zucchero's row 572: the home's answer to routes came after the app
+  // The home's answer to routes came after the app
   // showed another Claktory; what the home said of itself never stands for
   // the one shown now.
   test('a late answer from the Claktory shown before never stands', () async {
@@ -648,7 +648,7 @@ void main() {
     expect(world.matt.e2ee.homeIsHere, isFalse);
   });
 
-  // Fugo 39894/39914: a Claktory the person's account doesn't list by the
+  // A Claktory the person's account doesn't list by the
   // endpoint the app dials it by (someone else's, paired with) is given
   // nothing: no leaf, pins or list change, no routes, no home, nothing
   // sent; once the account lists it, it all goes on.
@@ -736,7 +736,7 @@ void main() {
       expect(world.matt.e2ee.ownership, DmOwnership.ours);
     });
 
-    // Fugo 40182: one on another machine paired with a direct code from
+    // One on another machine paired with a direct code from
     // before the tunnel has no endpoint, and nothing authenticates which
     // Claktory it is: never confirmed, whatever it offers.
     test("this Mac's own, then one paired with a direct code: given "
@@ -831,7 +831,7 @@ void main() {
     });
   });
 
-  // Zucchero's row 567: the app switched to another of Matt's Claktories,
+  // The app switched to another of Matt's Claktories,
   // no longer his home; what the last said of itself never stands for it.
   test('another Claktory connected: its own word on being the home', () async {
     await world.setUp();
@@ -846,7 +846,7 @@ void main() {
     expect(world.matt.e2ee.homeIsHere, isFalse);
   });
 
-  // Zucchero's row 549: a new friend not in the conversation yet joins by
+  // A new friend not in the conversation yet joins by
   // a commit that reaches this device only through the homes, so the
   // route to their home is there before they're a member: the friend this
   // device's record of the conversation waits for, never anyone the
@@ -879,7 +879,7 @@ void main() {
     expect(ana.e2ee.setup, DmSetup.ready);
   });
 
-  // Row 551: Matt's own commit was taken by the worker just as his app
+  // Matt's own commit was taken by the worker just as his app
   // stopped, before it merged it or handed it to his home. What Ana says
   // after it reaches him through his home: held, never acked unread,
   // until the commit comes from the worker; then read.
@@ -906,7 +906,7 @@ void main() {
     expect(world.matt.e2ee.behind, isEmpty);
   });
 
-  // Zucchero's row 568: a commit made from a device connected to another
+  // A commit made from a device connected to another
   // of the person's Claktories reaches only the worker, and nothing is said
   // after it: read from there at the next sync all the same.
   test('a commit only the worker has, with nothing after it, is read from '
@@ -938,7 +938,7 @@ void main() {
     expect(world.feedReads(), reads);
   });
 
-  // Row 553: the same commit, in a group where nothing else comes: settled
+  // The same commit, in a group where nothing else comes: settled
   // against the worker at the next launch, never left unmerged.
   test('a pending commit the worker took is merged at the next launch, '
       'with nothing else to bring it', () async {
@@ -968,7 +968,7 @@ void main() {
     expect(mine.epoch.toInt(), before + 1);
   });
 
-  // Mista's gap: the worker is past this device, but the commit there is
+  // The worker is past this device, but the commit there is
   // one it refuses, so nothing brings it there: it joins again, never
   // waits for good.
   test(

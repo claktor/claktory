@@ -69,7 +69,7 @@ async fn a_file_is_given_only_on_a_card_and_read_live() {
     let (seq, shown) = card(&view);
     let source = shown.sources.first().expect("the file");
     assert_eq!((source.id.as_str(), source.label.as_str(), source.kind()), (BUGS, "reports/bugs.csv in Web Site", v1::AppDataKind::File));
-    let full = dir.join("site/reports/bugs.csv");
+    let full = dir.join("site").join("reports").join("bugs.csv");
     assert!(source.holds.contains(&full.display().to_string()) && source.private, "{source:?}");
     assert!(rows(&stand, BUGS, "SELECT 1").await.is_err(), "nothing given yet");
 
@@ -114,14 +114,27 @@ async fn only_a_plain_file_with_one_name_outside_claktorys_own_folder_is_read_an
     let home = dir.join("home");
     write(&dir.join("outside/x.csv"), "a\n1\n");
     write(&dir.join("outside/reports/bugs.csv"), "severity,count\nswapped,1\n");
-    std::os::unix::fs::symlink(site.join("reports/bugs.csv"), site.join("link.csv")).expect("a link inside");
-    std::os::unix::fs::symlink(dir.join("outside"), site.join("out")).expect("a link outside");
-    std::fs::hard_link(home.join("factory.db"), site.join("records.csv")).expect("a hard link to the records");
-    let fifo = std::ffi::CString::new(site.join("pipe.csv").display().to_string()).expect("a path");
-    // SAFETY: a valid C string.
-    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "a FIFO");
+    crate::common::symlink(&site.join("reports/bugs.csv"), &site.join("link.csv")).expect("a link inside");
+    crate::common::symlink(&dir.join("outside"), &site.join("out")).expect("a link outside");
+    // On Windows factory.db is held open without sharing, so a second name
+    // for it couldn't even be opened: one for a file of the home's no one
+    // holds shows the refusal itself.
+    let records = if cfg!(windows) { home.join("records.db") } else { home.join("factory.db") };
+    if cfg!(windows) {
+        write(&records, "a\n1\n");
+    }
+    std::fs::hard_link(&records, site.join("records.csv")).expect("a hard link to the records");
+    // Windows has no FIFO; a named pipe isn't in a folder.
+    #[cfg(unix)]
+    {
+        let fifo = std::ffi::CString::new(site.join("pipe.csv").display().to_string()).expect("a path");
+        // SAFETY: a valid C string.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "a FIFO");
+    }
     let big = std::fs::File::create(site.join("big.csv")).expect("big");
     big.set_len(10 * 1024 * 1024 + 1).expect("over 10 MB");
+    // Closed: Windows opens a file for an app only while no one writes to it.
+    drop(big);
     // A project at the folder Claktory's own is in, as one at the home
     // folder would be.
     write(&home.join("secret.csv"), "a\n1\n");
@@ -139,7 +152,11 @@ async fn only_a_plain_file_with_one_name_outside_claktorys_own_folder_is_read_an
         ("file:above:home/secret.csv", "is in Claktory's own folder, which apps can't read"),
         ("file:above:home/agents/rivet/x.csv", "is in Claktory's own folder, which apps can't read"),
         ("file:above:.ssh/x.csv", "a hidden name"),
-    ] {
+    ]
+    .into_iter()
+    // No FIFO on Windows.
+    .filter(|(id, _)| cfg!(unix) || !id.ends_with("pipe.csv"))
+    {
         let said = give(&mut client, &mut view, id).await.expect_err(id);
         assert!(said.contains(why), "{id}: {said}");
     }
@@ -180,16 +197,20 @@ async fn only_a_plain_file_with_one_name_outside_claktorys_own_folder_is_read_an
     give(&mut client, &mut view, BUGS).await.expect("bugs");
     assert_eq!(rows(&stand, BUGS, "SELECT count(*) FROM rows").await.expect("read"), json!([[2]]));
     std::fs::rename(site.join("reports"), site.join("reports-old")).expect("moved away");
-    std::os::unix::fs::symlink(dir.join("outside/reports"), site.join("reports")).expect("a link in its place");
+    crate::common::symlink(&dir.join("outside/reports"), &site.join("reports")).expect("a link in its place");
     let (_, message) = rows(&stand, BUGS, "SELECT * FROM rows").await.expect_err("a link now");
     assert!(message.contains("is reached through a link (reports)"), "{message}");
+    // A link to a folder is a folder on Windows.
+    #[cfg(unix)]
     std::fs::remove_file(site.join("reports")).expect("the link");
+    #[cfg(windows)]
+    std::fs::remove_dir(site.join("reports")).expect("the link");
     std::fs::rename(site.join("reports-old"), site.join("reports")).expect("back");
     std::fs::hard_link(site.join("reports/bugs.csv"), dir.join("outside/second-name.csv")).expect("a second name");
     let (_, message) = rows(&stand, BUGS, "SELECT * FROM rows").await.expect_err("two names now");
     assert!(message.contains("more than one name"), "{message}");
     std::fs::remove_file(dir.join("outside/second-name.csv")).expect("one name again");
-    std::fs::File::options().append(true).open(site.join("reports/bugs.csv")).expect("bugs").set_len(10 * 1024 * 1024 + 1).expect("grown");
+    std::fs::File::options().write(true).open(site.join("reports/bugs.csv")).expect("bugs").set_len(10 * 1024 * 1024 + 1).expect("grown");
     let (_, message) = rows(&stand, BUGS, "SELECT * FROM rows").await.expect_err("too big now");
     assert!(message.contains("is over 10 MB"), "{message}");
     // Still given: the person takes it back.

@@ -1,4 +1,4 @@
-// The model popover (agent-view.md §3): under the model control in an
+// The model popover: under the model control in an
 // agent's header, the model and its reasoning effort, applied at once as
 // Settings → Defaults applies them, and a way to the rest of its settings.
 import 'dart:async';
@@ -129,7 +129,7 @@ class ModelPopover extends StatelessWidget {
     if (efforts.isEmpty) {
       effort = null;
     } else if (touch) {
-      // A finger's segments, not a list over the list (Sorbet).
+      // A finger's segments, not a list over the list.
       effort = Field(
         label: 'Reasoning effort',
         child: EffortSegments(

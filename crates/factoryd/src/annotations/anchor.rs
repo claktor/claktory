@@ -476,7 +476,7 @@ fn whole_words(text: &[u16], range: Range<usize>) -> Range<usize> {
 /// The plain text a Markdown file's formatted view shows, with runs of
 /// whitespace as one space, and where each of its units comes from in the
 /// file's text. A picture or video shown in place shows no words, its alt
-/// text none either, and ends the text before it (`embeds`, row 1449).
+/// text none either, and ends the text before it (`embeds`).
 #[derive(Debug, Default)]
 pub(crate) struct Projection {
     pub text: Vec<u16>,
@@ -753,7 +753,7 @@ mod tests {
         assert_eq!(gone.start(4)..gone.end(7), 4..4, "deleted text maps to where it was");
     }
 
-    /// Row 1449 (Formaggio's rule, 43704): a picture or video shown in
+    /// A picture or video shown in
     /// place shows no words and ends the text before it; one that isn't
     /// (remote, another kind of file, in a heading or a table cell) keeps
     /// its alt text.

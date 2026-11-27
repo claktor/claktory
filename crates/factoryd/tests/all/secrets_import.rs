@@ -20,7 +20,12 @@ async fn setup() -> (PathBuf, PathBuf, Client, View, std::sync::Arc<factoryd::Fa
     let mut view = View { workspace, ..View::default() };
     apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
     apply_request(&mut client, &mut view, create_agent("site", "Bo", "")).await;
+    // On Windows as people write it, without canonicalize's \\?\ (where
+    // `..` can't be named).
+    #[cfg(unix)]
     let files = dir.canonicalize().expect("real").join("files");
+    #[cfg(windows)]
+    let files = factoryd::windows::fs::canonical(&dir).expect("real").join("files");
     std::fs::create_dir_all(&files).expect("files");
     (dir, files, client, view, factory)
 }
@@ -156,10 +161,11 @@ async fn the_vault_imports_a_text_and_a_binary_file_that_no_one_sees() {
         &mut view,
         "bo",
         "bash",
-        &format!(
-            r#"{{"command":"cmp \"$UPLOAD_P12\" '{}' && echo same","secrets":["Android upload"]}}"#,
-            files.join("upload.p12").display()
-        ),
+        &serde_json::json!({
+            "command": format!("cmp \"$UPLOAD_P12\" '{}' && echo same", crate::common::shell_path(&files.join("upload.p12"))),
+            "secrets": ["Android upload"],
+        })
+        .to_string(),
     )
     .await;
     assert!(same.contains("same"), "{same}");
@@ -218,31 +224,43 @@ async fn an_import_is_refused_for_anything_but_a_plain_file() {
     let (dir, files, mut client, mut view, _factory) = setup().await;
     std::fs::create_dir_all(files.join("real")).expect("real");
     std::fs::write(files.join("real/key.p12"), binary()).expect("file");
-    std::os::unix::fs::symlink(files.join("real"), files.join("folder")).expect("link");
-    std::os::unix::fs::symlink(files.join("real/key.p12"), files.join("link.p12")).expect("link");
-    let fifo = std::ffi::CString::new(files.join("fifo").to_str().unwrap()).unwrap();
-    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    crate::common::symlink(&files.join("real"), &files.join("folder")).expect("link");
+    crate::common::symlink(&files.join("real/key.p12"), &files.join("link.p12")).expect("link");
+    // Windows has no FIFO.
+    #[cfg(unix)]
+    {
+        let fifo = std::ffi::CString::new(files.join("fifo").to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    }
     std::fs::write(files.join("big"), vec![b'a'; 1024 * 1024 + 1]).expect("big");
-    let vault_db = dir.canonicalize().unwrap().join("home/vault/vault.db");
+    let vault_db = files.parent().expect("dir").join("home").join("vault").join("vault.db");
     assert!(vault_db.exists(), "the test's vault");
-    let refusals = [
+    #[cfg_attr(windows, allow(unused_mut))]
+    let mut refusals = vec![
         (files.join("folder/key.p12"), "is a symbolic link"),
         (files.join("link.p12"), "is a symbolic link"),
-        (files.join("fifo"), "isn't a file"),
-        (files.join("real"), "isn't a file"),
         (files.join("big"), "over 1 MB"),
         (files.join("missing.p12"), "There's no file at"),
         (vault_db, "inside Claktory's own folder"),
-        (PathBuf::from("/dev/zero"), "Claktory doesn't import from /dev"),
         (PathBuf::from("relative/key.p12"), "full path"),
         (files.join("real/../real/key.p12"), "without . or .."),
     ];
+    #[cfg(unix)]
+    refusals.extend([
+        (files.join("fifo"), "isn't a file"),
+        (files.join("real"), "isn't a file"),
+        (PathBuf::from("/dev/zero"), "Claktory doesn't import from /dev"),
+    ]);
+    // A folder is refused as it's opened; there's no FIFO or /dev.
+    #[cfg(windows)]
+    refusals.push((files.join("real"), "is a folder"));
     for (path, why) in refusals {
         let told = call(&mut client, &mut view, "bo", "secrets_request", &ask("K", &[("KEY", &path)])).await;
         assert!(told.contains(why), "{}: {told}", path.display());
     }
-    // The temporary folder through its link (/var → /private/var on a Mac).
-    if dir != dir.canonicalize().unwrap() {
+    // The temporary folder through its link (/var → /private/var on a Mac;
+    // on Windows canonicalize only adds \\?\).
+    if cfg!(unix) && dir != dir.canonicalize().unwrap() {
         let told = call(&mut client, &mut view, "bo", "secrets_request", &ask("K", &[("KEY", &dir.join("files/real/key.p12"))])).await;
         assert!(told.contains("is a symbolic link"), "{told}");
     }
@@ -312,7 +330,7 @@ async fn a_file_changed_or_replaced_since_it_was_asked_is_refused() {
     call(&mut client, &mut view, "bo", "secrets_request", &ask("C", &[("KEY", &files.join("c.p12"))])).await;
     let linked = pending(&view);
     std::fs::rename(files.join("c.p12"), files.join("c-real.p12")).unwrap();
-    std::os::unix::fs::symlink(files.join("c-real.p12"), files.join("c.p12")).unwrap();
+    crate::common::symlink(&files.join("c-real.p12"), &files.join("c.p12")).unwrap();
     let refused = decide(&mut client, &mut view, approve(&linked.id)).await;
     let server_message::Body::Error(error) = refused else { panic!("{refused:?}") };
     assert!(error.message.contains("is a symbolic link"), "{error:?}");

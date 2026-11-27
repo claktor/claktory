@@ -59,7 +59,7 @@ async fn an_agent_keeps_records_in_its_own_database_and_its_panel_follows() {
     apply_request(&mut client, &mut view, client_message::Body::OpenPanel(open)).await;
     let file = dir.join("home").join("agents").join("scout").join("database.sqlite");
     assert!(panel(&view).tables.is_empty());
-    assert!(panel(&view).path.ends_with("agents/scout/database.sqlite"), "{}", panel(&view).path);
+    assert!(std::path::Path::new(&panel(&view).path).ends_with("agents/scout/database.sqlite"), "{}", panel(&view).path);
 
     // Nothing is made until the first write.
     assert_eq!(call(&mut client, &mut view, "scout", "db_schema", "{}").await, "No tables yet; create them with db_exec.");

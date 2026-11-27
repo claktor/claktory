@@ -1,5 +1,5 @@
-// An agent's settings in Lucy's agent view §6 order, drawn as they look,
-// for her to check: on a Mac window and on an iPhone, at the default text
+// An agent's settings in their order, drawn as they look,
+// to check by eye: on a Mac window and on an iPhone, at the default text
 // and the largest on the iPhone; the top, its folder, the extensions folded
 // and unfolded, the foot, and opened at its extensions (⋯ → Extensions…). With
 // SHOTS set, each is drawn to a PNG there:
@@ -142,7 +142,7 @@ void main() {
         await _shot(tester, 'settings-$where-foot');
       });
 
-      // From ⋯ → Extensions… (Formaggio's way in): open, there.
+      // From ⋯ → Extensions… open, there.
       testWidgets('agent settings at its extensions on the $where', (
         tester,
       ) async {

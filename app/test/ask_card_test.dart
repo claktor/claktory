@@ -86,8 +86,7 @@ void main() {
     harness.backend.entriesById['june/7'] = _entry();
     await harness.show(tester);
     await settle(tester);
-    await tester.tap(find.text('Needs you'));
-    await settle(tester);
+    await openNeedsYouPage(tester);
     await settle(tester);
     expect(find.byType(InboxView), findsOneWidget);
     await tester.tap(find.text('Restart the helper as root'));

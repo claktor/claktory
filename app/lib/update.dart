@@ -34,14 +34,26 @@ class AppBuild {
 
   /// The running app: its stamped version, the bundle it runs from, and
   /// quitting by exiting the process.
-  factory AppBuild.current() => AppBuild(
-    version: const String.fromEnvironment(
-      'FACTORY_VERSION',
-      defaultValue: 'dev',
-    ),
-    bundlePath: bundlePathOf(Platform.resolvedExecutable),
-    quit: () => exit(0),
-  );
+  factory AppBuild.current() {
+    final windowsRoot = Platform.isWindows
+        ? windowsInstallRoot(
+            Platform.resolvedExecutable,
+            (path) => File(path).existsSync(),
+          )
+        : '';
+    return AppBuild(
+      version: const String.fromEnvironment(
+        'FACTORY_VERSION',
+        defaultValue: 'dev',
+      ),
+      bundlePath: Platform.isWindows
+          ? windowsRoot
+          : bundlePathOf(Platform.resolvedExecutable),
+      quit: windowsRoot.isEmpty
+          ? () => exit(0)
+          : () => unawaited(restartThroughLauncher(windowsRoot)),
+    );
+  }
 
   /// Stamped by the build scripts, e.g. "2026.11.18-1652"; "dev" when not.
   final String version;
@@ -50,7 +62,8 @@ class AppBuild {
   /// one.
   final String bundlePath;
 
-  /// Quits the app so its bundle can be replaced.
+  /// Quits the app so its bundle can be replaced; on Windows, where the
+  /// update lays the new version down beside it, it starts again in it.
   final VoidCallback quit;
 
   /// Replaces this app with a Factory's on another machine.
@@ -63,6 +76,37 @@ String bundlePathOf(String executable) {
   const inside = '.app/Contents/MacOS/';
   final index = executable.lastIndexOf(inside);
   return index < 0 ? '' : executable.substring(0, index + '.app'.length);
+}
+
+/// Where Claktory is installed on Windows, for an executable in
+/// `<root>\app\<version>\` with the launcher at `<root>\Claktory.exe`
+/// ([exists]): `<root>`. An update lays the next version down beside it
+/// there. Empty for any other executable (a build run from where it was
+/// built), whose updates are the backend's alone.
+String windowsInstallRoot(String executable, bool Function(String) exists) {
+  final parts = executable.split('\\');
+  if (parts.length < 4) return '';
+  final version = parts[parts.length - 2];
+  if (parts[parts.length - 3].toLowerCase() != 'app' ||
+      !RegExp(r'^\d+(\.\d+)*$').hasMatch(version)) {
+    return '';
+  }
+  final root = parts.sublist(0, parts.length - 3).join('\\');
+  if (root.isEmpty || !exists('$root\\Claktory.exe')) return '';
+  return root;
+}
+
+/// Starts Claktory again through its launcher at [root], which waits for
+/// this app to have quit, then quits it.
+Future<void> restartThroughLauncher(String root) async {
+  try {
+    await Process.start('$root\\Claktory.exe', [
+      '--after',
+      '$pid',
+    ], mode: ProcessStartMode.detached);
+  } finally {
+    exit(0);
+  }
 }
 
 /// Whether [release] is newer than [version], by [compareVersions]. An
@@ -159,7 +203,7 @@ String offeredBackend(Workspace workspace) => workspace.latestBackend.isEmpty
     : workspace.latestBackend;
 
 /// The paired devices, other than [thisDevice], whose app won't connect
-/// after the update on offer until it's updated (#355 D1): the backend's
+/// after the update on offer until it's updated: the backend's
 /// word (PairedDevice.update_leaves_behind), by its kept app versions.
 List<PairedDevice> leftBehind(Workspace workspace, String thisDevice) => [
   for (final device in workspace.remote.devices)
@@ -183,7 +227,7 @@ String? leftBehindText(List<PairedDevice> devices) =>
 /// tablet's comes from its store): its own row says so
 /// (PairedDevice.update_leaves_behind), or, with a backend too old to
 /// say, its build is on another line than the backend on offer. Updating
-/// would lock it out, so it isn't offered there (#355 D1).
+/// would lock it out, so it isn't offered there.
 bool cantFollowUpdate(
   Workspace workspace, {
   required String thisDevice,
@@ -200,7 +244,7 @@ bool cantFollowUpdate(
 /// What a device that can't follow the update says in its place
 /// ([cantFollowUpdate]): its app first, then the Claktory. The iPhone and
 /// iPad app comes from the App Store or TestFlight; the Android app from
-/// its download page, which Download beside it opens (Sale's row 60).
+/// its download page, which Download beside it opens.
 String updateAppFirstText(String claktory, String release) => updatesHere
     ? "Update this $thisDeviceKind's app first, from the App Store or "
           'TestFlight. Then $claktory can update to Claktory $release.'
@@ -234,7 +278,7 @@ bool restartsBackend(Workspace workspace) => isNewer(
 ///
 /// There the Claktory updates first, since it has the release already,
 /// and the app's download follows, over its restart and any drop of the
-/// connection (#408): a slow link never holds the Claktory back. Only a
+/// connection: a slow link never holds the Claktory back. Only a
 /// release this app can't work with (another line, [mismatch]) is
 /// downloaded first, so the app never faces a Claktory it can't follow.
 Future<bool> installLatest(
@@ -302,7 +346,7 @@ Future<bool> _install(
       fetches && mismatch(build.version, offeredBackend(workspace)) != null;
   Future<StagedApp> fetch() async {
     // Through the tunnel by a relay, not directly: the download goes gently
-    // until the path is direct (friend bug #51).
+    // until the path is direct.
     final tunnel = scope.backend.tunnel;
     bool byRelay() => tunnel.value?.path == TunnelPath.relayed;
     final relayed = ValueNotifier(byRelay());
@@ -796,8 +840,8 @@ class _Progress extends StatelessWidget {
   }
 }
 
-/// The Android app's check for a new version of itself (#355 D2, Doppio's
-/// android_app_updates.dart), for what's below it to show
+/// The Android app's check for a new version of itself
+/// (android_app_updates.dart), for what's below it to show
 /// ([AndroidUpdateNotice]): read as the app starts and each time it comes
 /// back to the front, never polled or kept. Off outside a release build on
 /// Android, where it finds nothing.
@@ -856,8 +900,7 @@ class _AndroidAppUpdatesScope extends InheritedNotifier<AndroidAppUpdates> {
 }
 
 /// What [AndroidUpdateNotice] says: with this app's own version when it's
-/// stamped, since in Settings it sits under the Claktory's (Sale's row,
-/// Trish's words).
+/// stamped, since in Settings it sits under the Claktory's.
 String androidUpdateText(String appVersion) =>
     RegExp(r'^v\d').hasMatch(appVersion)
     ? 'This app is $appVersion. A new version is available.'

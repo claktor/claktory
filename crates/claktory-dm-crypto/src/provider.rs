@@ -1,4 +1,4 @@
-//! Mista's (dms-e2ee.md §3): the OpenMLS provider, libcrux's cryptography
+//! The OpenMLS provider, libcrux's cryptography
 //! and randomness with [`SqlStorage`] over the caller's transaction.
 //!
 //! Make one [`Crypto`] per process and keep it; make a [`Provider`] per
@@ -23,7 +23,7 @@ use crate::{Error, Result};
 ///
 /// Never fork without exec while one is alive: the child would copy the
 /// DRBG's state and repeat its randomness. factoryd's commands fork and exec
-/// at once (Fugo, E1).
+/// at once.
 pub struct Crypto(openmls_libcrux_crypto::CryptoProvider);
 
 impl Crypto {

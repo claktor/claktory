@@ -1,7 +1,7 @@
 // Every extension's icon, as factoryd names it, and every icon Claktory's
 // own apps name (their Icon components and their own icon), is one the app
-// draws: one it doesn't shows as a bare letter (Sorbet: Comments showed
-// "C"), or in an app's view as a dot (Scolippi: Charts' menus' chevrons).
+// draws: one it doesn't shows as a bare letter (Comments showed "C"), or
+// in an app's view as a dot (Charts' menus' chevrons).
 import 'dart:io';
 
 import 'package:factory_app/controls.dart';

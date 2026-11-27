@@ -16,6 +16,7 @@ import 'compatibility.dart';
 import 'connect_step.dart';
 import 'connection.dart' show Connection, Link;
 import 'engine.dart' show WhenAppQuitsStep, asksWhenAppQuits;
+import 'explorer.dart' show FilesPage;
 import 'claktory_problem.dart'
     show
         CantConnectPage,
@@ -145,13 +146,13 @@ class _ShellState extends State<Shell> {
     listenable: Listenable.merge([
       AppScope.of(context).workspace,
       // A Claktory that turns this device away: its screen takes the
-      // first launch's questions' place at once (Sale row 173), rather
+      // first launch's questions' place at once, rather
       // than the name step waiting there, "Connecting…", until a relaunch.
       AppScope.of(context).signInRequired,
       AppScope.of(context).otherAccount,
       // Turned away or gone: a step that asked over the Claktory (its own
       // sign-in) leaves with it, never left over its problem page
-      // (Abbacchio's 1676).
+      // .
       AppScope.of(context).connected,
       AppScope.of(context).refused,
       signInPutOff(AppScope.of(context)),
@@ -170,7 +171,7 @@ class _ShellState extends State<Shell> {
       // app and its Claktory can't work together (compatibility.dart).
       final mismatch = mismatchIn(context);
       // A Mac with no Claktory of its own connects to one first; an iPad
-      // the phone's way, which scans and signs in too (#363 F3).
+      // the phone's way, which scans and signs in too.
       final question = asksToConnect(context)
           ? defaultTargetPlatform == TargetPlatform.iOS &&
                     deviceIdiom(context) == Idiom.pad
@@ -186,7 +187,7 @@ class _ShellState extends State<Shell> {
           ? const SignInStep()
           : asksName(context)
           ? const NameStep()
-          // What quitting the Mac app does (friend bug #27).
+          // What quitting the Mac app does.
           : asksWhenAppQuits(context)
           ? const WhenAppQuitsStep()
           : asksModel(context)
@@ -200,10 +201,10 @@ class _ShellState extends State<Shell> {
         bannerOnTop: setupStep == null && question != null,
         covered: step != null,
       );
-      // Focus mode (#514) over the window, which stays as it was under it;
+      // Focus mode over the window, which stays as it was under it;
       // a phone's Needs you is its own. An iPad's window keeps it at every
       // width, so the sitting and its card live through a resize into
-      // Slide Over or ⅓ Split View and back (spec §6.2), where IPadFocus
+      // Slide Over or ⅓ Split View and back, where IPadFocus
       // shows the phone's one-card screen.
       final window = isPhoneLayout(context) && !_workbench(context)
           ? laid
@@ -531,7 +532,7 @@ class _ShellState extends State<Shell> {
                           ),
                         ),
                       // No room beside the conversation: over it, from the
-                      // right edge (agent-view.md §3), as an iPad's
+                      // right edge, as an iPad's
                       // workbench shows it.
                       if (panel != null && agent != null && !panelShown)
                         Positioned(
@@ -653,7 +654,7 @@ class _Content extends StatelessWidget {
         scope.page,
       ]),
       builder: (context, _) {
-        // Another account's Claktory (#529, S4): what it said, in place of
+        // Another account's Claktory: what it said, in place of
         // it, before anything that would ask this device to sign in.
         if (backend.otherAccount.value != null) {
           return const OtherAccountView();
@@ -664,7 +665,7 @@ class _Content extends StatelessWidget {
         if (backend.signInRequired.value != null && waiting != null) {
           return SignInRequiredView(
             // Its Remove… asks first, with the rail's question, never at
-            // once (Abbacchio's row 1675).
+            // once.
             onCancel: waiting.fromAccount
                 ? () => unawaited(removeClaktory(context, waiting))
                 : null,
@@ -685,11 +686,15 @@ class _Content extends StatelessWidget {
           AppPage.usage => const UsageView(),
           AppPage.monitors => const MonitorsOverview(),
           AppPage.inbox => const InboxView(),
+          AppPage.files => FilesPage(
+            key: ValueKey('files/${backend.filesPage.value}'),
+            projectId: backend.filesPage.value,
+          ),
           AppPage.agent => null,
         };
         if (page != null) return _PageBack(child: page);
         // Turned away: what was open can't be used any more, so it says
-        // so instead (Zucchero's row 232).
+        // so instead.
         if (turnedAway(backend)) return const NoAgentView();
         final store = backend.workspace;
         final workspace = store.workspace;
@@ -783,17 +788,17 @@ class NoAgentView extends StatelessWidget {
         backend.workspace,
         backend.connected,
         backend.refused,
-        // The drawer's "Can't connect" shows here too (row 480).
+        // The drawer's "Can't connect" shows here too.
         Connection.of(backend),
       ]),
       builder: (context, _) {
         final workspace = backend.workspace.workspace;
         // Turned away (a code that expired, a device removed there): it
         // won't connect by trying, so it says so, as the drawer does, with
-        // the way to another Claktory (Zucchero's row 220).
+        // the way to another Claktory.
         if (turnedAway(backend)) {
           // Signed out of the person's account (its sign-in lost to a
-          // failing disk, say: friend bug #38), it lets this device in
+          // failing disk, say), it lets this device in
           // again once it's signed in: a new code would pair it twice. As
           // factoryd's `remote::SIGNED_OUT` says it.
           const signedOut = 'was signed out of your Claktory account';
@@ -806,7 +811,7 @@ class NoAgentView extends StatelessWidget {
         // it: an empty one isn't "no agents yet".
         if (!backend.connected.value || !backend.workspace.received) {
           // Once it says it can't connect, the pane says so too, not
-          // "Connecting…" behind the drawer's "Can't connect" (row 480).
+          // "Connecting…" behind the drawer's "Can't connect".
           if (Connection(backend).link == Link.failing) {
             return CantConnectPage(backend: backend);
           }
@@ -821,13 +826,12 @@ class NoAgentView extends StatelessWidget {
             body: noProjects
                 ? 'Agents work in projects. Start a project, then add agents '
                       'to it.'
-                : isPhoneLayout(context)
-                ? "Add one from a project's ⋯ in the menu."
-                : 'Add one with + Agent in a project.',
+                : "Choose Add an agent… in a project's ⋯ menu.",
             action: noProjects ? 'New project' : null,
             onAction: noProjects
-                ? () => showModal(
+                ? () => askRivetOrForm(
                     context,
+                    'Set up a new project for ',
                     (context, close) => CreateProjectForm(close: close),
                   )
                 : null,
@@ -956,7 +960,7 @@ class _LiftedBannerState extends State<_LiftedBanner> {
           link: _link,
           // Its own height, as in its place in the window's column: given
           // the overlay's height, an iPad's banner filled it, over the
-          // whole step (Zucchero's row 635).
+          // whole step.
           child: UnconstrainedBox(
             constrainedAxis: Axis.horizontal,
             alignment: Alignment.topLeft,

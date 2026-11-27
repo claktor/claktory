@@ -19,7 +19,7 @@ import 'scanner.dart';
 import 'scope.dart';
 
 /// Whether a field for a code (a pairing code, a pipe's invite, a move's
-/// destination) offers Scan beside Paste (friend bug #2): wherever there's
+/// destination) offers Scan beside Paste: wherever there's
 /// a camera, even one refused so far, since the scanner then says how to
 /// allow it, with Open Settings. Not where there's none (a Mac, the
 /// Simulator) or where the person can't allow it (Screen Time, a managed
@@ -338,7 +338,7 @@ class _ScannerState extends State<_Scanner> with WidgetsBindingObserver {
           key: _previewKey,
           // The camera kept from the app (an iPad sharing its screen,
           // another app using it): its words in a band, and Paste code
-          // instead below (Sorbet's; Lucy 48961).
+          // instead below.
           child: NotificationListener<CameraAvailability>(
             onNotification: (notice) {
               if (notice.unavailable != _kept) {

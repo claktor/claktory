@@ -49,8 +49,8 @@ class TellRivet extends StatelessWidget {
         if (rivet == null || !rivet.modelAvailable || error.isEmpty) {
           return const SizedBox.shrink();
         }
-        // Asleep on a usage limit, Rivet wouldn't read it until the reset
-        // (Squalo's U5): its wait instead, and the way to carry on now.
+        // Asleep on a usage limit, Rivet wouldn't read it until the reset:
+        // its wait instead, and the way to carry on now.
         if (rivet.usageWait.isNotEmpty) {
           return _RivetWaits(rivet: rivet, link: link);
         }
@@ -92,7 +92,7 @@ class TellRivet extends StatelessWidget {
 
 /// In [TellRivet]'s place while Rivet waits out a usage limit: "Rivet is
 /// waiting for your Claude usage to reset at Fri 18:00", and Continue on
-/// another provider when one can run it (#341), or Sign in… when none is
+/// another provider when one can run it, or Sign in… when none is
 /// signed in. As [link], caption links after the words; else buttons.
 class _RivetWaits extends StatefulWidget {
   const _RivetWaits({required this.rivet, required this.link});
@@ -133,8 +133,7 @@ class _RivetWaitsState extends State<_RivetWaits> {
         : '${rivet.name}: $line';
     final signingIn = line.startsWith('Waiting for you to sign in to');
     // A switch changes the settings file, so not while it's broken (the
-    // settings-file error dialog shows this; Abbacchio's LOW): the wait
-    // alone then.
+    // settings-file error dialog shows this): the wait alone then.
     final broken = AppScope.of(context)
         .workspace
         .workspace

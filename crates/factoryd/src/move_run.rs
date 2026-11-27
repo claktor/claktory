@@ -231,6 +231,9 @@ fn place(home: &Home) -> Place {
     }
 }
 
+/// Why a move is refused on Windows, for now: the person and agents read it.
+pub const NOT_ON_WINDOWS: &str = "Moving a Claktory isn't available on Windows yet.";
+
 /// StartMove.
 pub(crate) fn start(factory: &Arc<Factory>, code: &str) -> Result<(), RequestError> {
     start_by(factory, code, "", Vec::new())
@@ -240,6 +243,9 @@ pub(crate) fn start(factory: &Arc<Factory>, code: &str) -> Result<(), RequestErr
 /// says so (`Move.started_by_agent_id`), and the person confirms its digits
 /// in the app all the same. `skip`: project folders to leave out.
 pub(crate) fn start_by(factory: &Arc<Factory>, code: &str, agent: &str, skip: Vec<String>) -> Result<(), RequestError> {
+    if cfg!(windows) {
+        return Err(refused(NOT_ON_WINDOWS));
+    }
     if factory.moving.phase().is_some_and(|phase| phase != Phase::Failed) {
         return Err(refused("A move is already under way."));
     }
@@ -701,7 +707,10 @@ async fn drive(
     // goes to the supervisor, and it starts this backend again.
     tokio::time::sleep(Duration::from_millis(300)).await;
     factory.finish_writes(Duration::from_secs(5)).await;
+    #[cfg(unix)]
     factory.vault.hand_over(false);
+    #[cfg(windows)]
+    factory.vault.hand_over();
     factory.store.write_calls();
     crate::account::analytics::backend_stopped(&factory.home);
     std::process::exit(0);

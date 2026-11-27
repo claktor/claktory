@@ -8,10 +8,12 @@ import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
 import 'characters/character.dart';
+import 'claktory_identity.dart' show claktoryName;
 import 'controls.dart';
 import 'identity.dart';
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
+import 'outbox.dart' show connectionLost;
 import 'pane_chrome.dart' show InPane;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -21,6 +23,7 @@ import 'mobile/lines.dart' show ActionLine;
 import 'usage.dart'
     show
         UsageCard,
+        extraUsageLine,
         UsageMeter,
         UsageRing,
         accountState,
@@ -184,9 +187,15 @@ class _UsageViewState extends State<UsageView> {
   var _range = UsageRange.week;
   UsageReport? _report;
   String? _error;
+
+  /// The last ask didn't reach this Claktory: it says so in the app's
+  /// words, with Reconnect, rather than the connection's own, and asks
+  /// again once it's back.
+  var _offline = false;
   var _loading = false;
   Timer? _timer;
   var _asked = 0;
+  Backend? _backend;
 
   @override
   void initState() {
@@ -196,8 +205,22 @@ class _UsageViewState extends State<UsageView> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final backend = AppScope.of(context);
+    if (identical(backend, _backend)) return;
+    _backend?.connected.removeListener(_connectedChanged);
+    _backend = backend..connected.addListener(_connectedChanged);
+  }
+
+  void _connectedChanged() {
+    if (_offline && _backend!.connected.value) unawaited(_load());
+  }
+
+  @override
   void dispose() {
     _timer?.cancel();
+    _backend?.connected.removeListener(_connectedChanged);
     super.dispose();
   }
 
@@ -212,12 +235,14 @@ class _UsageViewState extends State<UsageView> {
       setState(() {
         _report = report;
         _error = null;
+        _offline = false;
         _loading = false;
       });
     } on RequestFailure catch (failure) {
       if (!mounted || asked != _asked) return;
       setState(() {
-        _error = failure.message;
+        _offline = connectionLost(failure);
+        _error = _offline ? null : failure.message;
         _loading = false;
       });
     }
@@ -320,14 +345,20 @@ class _UsageViewState extends State<UsageView> {
         if (meter.usage != null) meter,
     ];
     final reportPart = [
-      if (report == null)
+      if (_offline)
+        _Unreachable(
+          name: claktoryName(backend),
+          onReconnect: backend.reconnectNow,
+          below: report != null,
+        ),
+      if (report == null && !_offline)
         Text(
           _error ?? (_loading ? 'Loading usage…' : ''),
           style: TypeScale.of(context).body.copyWith(
             color: _error == null ? palette.textFaint : palette.danger,
           ),
         )
-      else
+      else if (report != null)
         ..._report_(context, palette, workspace, report),
       if (_error != null && report != null)
         Padding(
@@ -1419,14 +1450,17 @@ class _LimitDetail extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.end,
+                  // The percent at the end of the label's line, or under
+                  // it when both don't fit (the largest text), so the label
+                  // never breaks inside a word.
+                  Wrap(
+                    alignment: WrapAlignment.spaceBetween,
+                    crossAxisAlignment: WrapCrossAlignment.end,
+                    spacing: Space.s,
                     children: [
-                      Expanded(
-                        child: Text(
-                          window.label,
-                          style: type.body.copyWith(color: palette.text),
-                        ),
+                      Text(
+                        window.label,
+                        style: type.body.copyWith(color: palette.text),
                       ),
                       Text(
                         formatPercent(window.usedPercent),
@@ -1445,6 +1479,17 @@ class _LimitDetail extends StatelessWidget {
                   const SizedBox(height: Space.xs),
                   Text(formatReset(window.resetsAt.toInt(), now), style: muted),
                 ],
+              ),
+            ),
+          if (usage == null ? null : extraUsageLine(usage) case final extra?)
+            Padding(
+              padding: const EdgeInsets.only(top: Space.m),
+              child: Text(
+                extra.text,
+                style: muted.copyWith(
+                  color: extra.reached ? palette.danger : null,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
               ),
             ),
           if (usage != null && usage.error.isNotEmpty)
@@ -1609,4 +1654,44 @@ class _Share extends StatelessWidget {
       ),
     ),
   );
+}
+
+/// Usage's line while its Claktory can't be reached: what's true, in the
+/// app's words, and Reconnect; over the last report when there is one,
+/// which may be out of date meanwhile.
+class _Unreachable extends StatelessWidget {
+  const _Unreachable({
+    required this.name,
+    required this.onReconnect,
+    required this.below,
+  });
+
+  final String name;
+  final VoidCallback onReconnect;
+
+  /// The last report shows under it.
+  final bool below;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Padding(
+      padding: EdgeInsets.only(bottom: below ? Space.m : 0),
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: Space.s,
+        runSpacing: Space.xs,
+        children: [
+          Text(
+            below
+                ? "Can't reach $name right now, so this may be out of date."
+                : "Can't reach $name right now.",
+            style: TypeScale.of(context).body
+                .copyWith(color: palette.textMuted),
+          ),
+          Button(label: 'Reconnect', onPressed: onReconnect),
+        ],
+      ),
+    );
+  }
 }

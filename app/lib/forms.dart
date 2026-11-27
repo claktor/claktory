@@ -1,18 +1,26 @@
+import 'dart:async';
+import 'dart:io' show File;
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'agent_name.dart';
 import 'characters/character.dart';
 import 'backend.dart';
+import 'explorer.dart' show shortPath;
+import 'approve_elsewhere.dart' show approvesElsewhere, browserElsewhereText;
 import 'controls.dart';
 import 'decision.dart' show QuietLink;
 import 'extension_about.dart' show hasExtensionView;
 import 'folder_browser.dart';
-import 'errands/errand_agent_field.dart'
-    show ErrandAgentField, errandsExtension;
-import 'highlights.dart' show Glow, HighlightStore;
+import 'errands/browser_agent.dart'
+    show
+        browserDescription,
+        browserExtension,
+        browserRefusal,
+        confirmBrowserOff;
 import 'identity.dart';
 import 'mobile/metrics.dart';
 import 'model_select.dart' show ModelSelect;
@@ -35,11 +43,16 @@ import 'pipes.dart'
         PortalGlyph,
         openPipe,
         pipeColor,
+        pipeLead,
         pipeLimitText,
+        pipePeerName,
         pipeStatus,
         pipesIn,
         pipesLimiting;
+import 'selection.dart' show SelectableArea, Unselectable;
 import 'settings_view.dart';
+import 'share_files.dart' show showInFinder;
+import 'visible_codes.dart' show nameInText;
 import 'state.dart';
 
 /// Title, fields, an error line and the buttons. Cmd+Enter (or Ctrl+Enter)
@@ -54,6 +67,7 @@ class FormFrame extends StatelessWidget {
     required this.onSubmit,
     required this.onCancel,
     this.body,
+    this.points = const [],
     this.secondary,
     this.cancelLabel = 'Cancel',
     this.dirty = false,
@@ -67,6 +81,10 @@ class FormFrame extends StatelessWidget {
 
   /// A sentence under the title.
   final String? body;
+
+  /// A short list under the title (and [body]), one point each: what a
+  /// confirm's action will do.
+  final List<String> points;
   final List<Widget> fields;
   final String? error;
   final String submitLabel;
@@ -116,6 +134,10 @@ class FormFrame extends StatelessWidget {
                     style: TypeScale.of(context).emphasis
                         .copyWith(color: palette.text),
                   ),
+                  if (FormNote.of(context) case final note?) ...[
+                    const SizedBox(height: Space.s),
+                    note,
+                  ],
                   if (body != null) ...[
                     const SizedBox(height: Space.s),
                     Text(
@@ -123,6 +145,10 @@ class FormFrame extends StatelessWidget {
                       style: TypeScale.of(context).body
                           .copyWith(color: palette.textMuted),
                     ),
+                  ],
+                  if (points.isNotEmpty) ...[
+                    const SizedBox(height: Space.s),
+                    _Points(points),
                   ],
                   const SizedBox(height: Space.xl),
                   // A long form scrolls between its title and its buttons.
@@ -143,16 +169,30 @@ class FormFrame extends StatelessWidget {
                             .copyWith(color: palette.danger),
                       ),
                     ),
-                  Row(
+                  // The less common action at the start, the buttons at the
+                  // end; where their words don't fit beside it (longer
+                  // words, larger text), it goes under them.
+                  OverflowBar(
+                    alignment: MainAxisAlignment.spaceBetween,
+                    overflowAlignment: OverflowBarAlignment.end,
+                    overflowDirection: VerticalDirection.up,
+                    overflowSpacing: Space.m,
                     children: [
-                      if (!apart) ?secondary,
-                      const Spacer(),
-                      Button(label: cancelLabel, onPressed: onCancel),
-                      const SizedBox(width: Space.s),
-                      Button(
-                        label: submitLabel,
-                        onPressed: onSubmit,
-                        primary: true,
+                      if (!apart && secondary != null)
+                        secondary!
+                      else
+                        const SizedBox.shrink(),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Button(label: cancelLabel, onPressed: onCancel),
+                          const SizedBox(width: Space.s),
+                          Button(
+                            label: submitLabel,
+                            onPressed: onSubmit,
+                            primary: true,
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -169,9 +209,11 @@ class FormFrame extends StatelessWidget {
   }
 
   /// A dialog with nothing to fill in, on a phone (Reconnect, Remove this
-  /// device?): its words scroll over its buttons at the foot; at the
-  /// largest text sizes the buttons are one over the other, the action
-  /// first, each the sheet's width, and scroll with the words.
+  /// device?): its words scroll over its choices at the foot, stacked as a
+  /// phone's sheet stacks them: the action full width, nearest the thumb,
+  /// then [secondary] (such as Archive instead) and Cancel as links under
+  /// it, never side by side, so no label is ever cut. At the largest text
+  /// sizes they scroll with the words.
   Widget _phoneDialog(BuildContext context, Palette palette) {
     final type = TypeScale.of(context);
     final body = this.body;
@@ -183,7 +225,6 @@ class FormFrame extends StatelessWidget {
       onPressed: onSubmit,
       primary: true,
     );
-    final cancel = Button(label: cancelLabel, onPressed: onCancel);
     final words = [
       Semantics(
         header: true,
@@ -196,6 +237,10 @@ class FormFrame extends StatelessWidget {
         const SizedBox(height: Space.s),
         Text(body, style: type.body.copyWith(color: palette.textMuted)),
       ],
+      if (points.isNotEmpty) ...[
+        const SizedBox(height: Space.s),
+        _Points(points),
+      ],
       if (error != null) ...[
         const SizedBox(height: Space.m),
         Text(error, style: type.secondary.copyWith(color: palette.danger)),
@@ -203,25 +248,13 @@ class FormFrame extends StatelessWidget {
     ];
     final buttons = [
       const SizedBox(height: Space.xl),
-      if (large) ...[
-        submit,
-        const SizedBox(height: Space.s),
-        cancel,
-      ] else
-        Row(
-          children: [
-            const Spacer(),
-            cancel,
-            const SizedBox(width: Space.s),
-            submit,
-          ],
-        ),
-      // A phone is too narrow for three buttons in a row: the less
-      // common action goes on a line of its own, under them.
-      if (secondary != null) ...[
-        const SizedBox(height: Space.m),
-        Align(alignment: AlignmentDirectional.centerStart, child: secondary),
-      ],
+      submit,
+      const SizedBox(height: Space.s),
+      // Centred under it, as the permission sheets' Not now.
+      if (secondary != null) Center(child: secondary),
+      Center(
+        child: QuietLink(label: cancelLabel, onTap: onCancel),
+      ),
     ];
     // At the largest text sizes even the buttons may not fit: all of it
     // scrolls together then.
@@ -402,6 +435,7 @@ class FormFrame extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                ?FormNote.of(context),
                 if (body != null) ...[
                   Text(
                     body,
@@ -632,23 +666,65 @@ class _CreateProjectFormState extends State<CreateProjectForm>
     with _Submitting {
   final _name = TextEditingController();
 
+  /// The folder the name typed would get, as the backend answers
+  /// (PreviewProjectFolder: its rule, never copied here); "" before any.
+  var _folder = '';
+
+  /// What was last asked, so an answer to an earlier name is dropped.
+  var _asked = '';
+  Timer? _typing;
+
+  @override
+  void initState() {
+    super.initState();
+    _name.addListener(_named);
+  }
+
   @override
   void dispose() {
+    _typing?.cancel();
     _name.dispose();
     super.dispose();
+  }
+
+  /// Asks where the name would go once typing pauses.
+  void _named() {
+    final name = _name.text.trim();
+    if (name == _asked) return;
+    _asked = name;
+    _typing?.cancel();
+    // The folder shown is only ever this name's.
+    setState(() => _folder = '');
+    if (name.isEmpty) return;
+    _typing = Timer(const Duration(milliseconds: 250), () async {
+      try {
+        final preview = await AppScope.of(context).previewProjectFolder(name);
+        if (mounted && preview.name == _asked) {
+          setState(() => _folder = preview.path);
+        }
+      } on RequestFailure {
+        // An older Claktory, or offline: no caption, never a guess.
+        if (mounted && name == _asked) setState(() => _folder = '');
+      }
+    });
   }
 
   void _submit() {
     final name = _name.text.trim();
     if (name.isEmpty || submitting) return;
+    // Created: where it would go no longer needs asking.
+    _typing?.cancel();
     final backend = AppScope.of(context);
     final history = AppScope.scope(context).history;
     final before = {
       for (final project in backend.workspace.workspace.projects) project.id,
     };
-    // A new project opens focused, ready for its first agent.
+    final focus = !phoneShowsAllProjects(context);
+    // A new project opens focused, ready for its first agent; a phone
+    // focuses none.
     Future<void> createAndFocus() async {
       await backend.createProject(name);
+      if (!focus) return;
       for (final project in backend.workspace.workspace.projects) {
         if (!before.contains(project.id)) {
           history.clear();
@@ -673,6 +749,11 @@ class _CreateProjectFormState extends State<CreateProjectForm>
         fields: [
           Field(
             label: 'Name',
+            // Where its files go (Lucy's projects-sidebar §6), on the
+            // machine that runs the agents.
+            note: _folder.isEmpty || _asked.isEmpty
+                ? null
+                : _folderCaption(context, _folder),
             child: TextField(
               controller: _name,
               autofocus: true,
@@ -684,6 +765,24 @@ class _CreateProjectFormState extends State<CreateProjectForm>
       ),
     );
   }
+}
+
+/// "Folder: ~/.factory/workspace/bakery", or on a Claktory on another
+/// machine "Folder on Mac Studio: ~/…" (Trish's words, §12).
+String _folderCaption(BuildContext context, String path) {
+  final backend = AppScope.of(context);
+  final machine = _machineOf(backend);
+  final where = machine == null ? 'Folder' : 'Folder on $machine';
+  return '$where: ${shortPath(path)}';
+}
+
+/// The machine that runs the agents, when it isn't this one.
+String? _machineOf(Backend backend) {
+  if (backend.localBackend && backend.target == null) return null;
+  final named = backend.workspace.workspace.remote.machine;
+  if (named.isNotEmpty) return nameInText(named);
+  final label = backend.target?.label ?? '';
+  return label.isEmpty ? 'its computer' : nameInText(label);
 }
 
 /// Renames or deletes a project, and keeps its folders: renames them,
@@ -842,15 +941,21 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
     final backend = AppScope.of(context);
     final project = widget.project;
     if (_confirmingDelete) {
-      final agents = backend.workspace.agentsIn(project.id).length;
+      void archive() {
+        if (submitting) return;
+        submitRequest(
+          backend.updateProject(
+            UpdateProject(projectId: project.id, archived: true),
+          ),
+          widget.close,
+        );
+      }
+
       return FormFrame(
         title: 'Delete ${project.name}?',
-        body: [
-          if (agents == 1) 'Its agent and its conversation are deleted.',
-          if (agents > 1)
-            'Its $agents agents and their conversations are deleted.',
-          "The project's folder and its files are kept.",
-        ].join(' '),
+        // Where the files stay, and which pipes close (Lucy's
+        // projects-sidebar §7, Trish's words).
+        body: deleteProjectBody(backend.workspace.workspace, project),
         error: error,
         submitLabel: 'Delete project',
         onSubmit: submitting
@@ -863,6 +968,14 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
           _confirmingDelete = false;
           error = null;
         }),
+        // Nothing lost, and it can be unarchived: on a phone, the first
+        // link under Delete project, as the safer way.
+        secondary: isPhoneLayout(context)
+            ? QuietLink(label: 'Archive instead', onTap: archive)
+            : Button(
+                label: 'Archive instead',
+                onPressed: submitting ? null : archive,
+              ),
         fields: const [],
       );
     }
@@ -928,6 +1041,11 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
             }),
           ),
           fields: [
+            // Where its files are, first (Lucy's projects-sidebar §6).
+            Field(
+              label: 'Folder',
+              child: ProjectFolderLine(path: project.path),
+            ),
             Field(
               label: 'Name',
               child: TextField(
@@ -1015,7 +1133,11 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
                     const SizedBox(width: Space.s),
                     Expanded(
                       child: Text(
-                        pipeStatus(pipe),
+                        // A liaison waiting on its limit says so (#357 L1).
+                        pipeStatus(
+                          pipe,
+                          lead: pipeLead(backend.workspace.workspace, pipe),
+                        ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TypeScale.of(context).caption
@@ -1059,6 +1181,13 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
               'Hides the project and its agents from the sidebar, and its '
                   'agents stop working. Nothing is deleted, and you can '
                   'unarchive it anytime.',
+              // Its liaison doesn't run: the other side hears nothing.
+              if (pipesIn(
+                backend.workspace.workspace,
+                widget.project.id,
+              ).isNotEmpty)
+                'Its pipes stay open, but nothing answers on them until you '
+                    'unarchive it.',
               // Its agents' pins go with it, and don't come back.
               unpinnedOnArchive(backend.workspace.workspace, widget.project.id),
             ].where((line) => line.isNotEmpty).join(' '),
@@ -1113,6 +1242,16 @@ class _FolderRow extends StatelessWidget {
                 onSubmitted: (_) => onSubmit(),
               ),
             ),
+            // Where it is now, as saved.
+            if (showsInFinder(AppScope.of(context)) &&
+                edit.folder.path.isNotEmpty) ...[
+              const SizedBox(width: Space.xs),
+              Button(
+                label: 'Show in Finder',
+                onPressed: () =>
+                    unawaited(showInFinder([File(edit.folder.path)])),
+              ),
+            ],
             const SizedBox(width: Space.xs),
             GlyphButton(
               label: 'Remove ${edit.folder.name}',
@@ -1134,6 +1273,217 @@ class _FolderRow extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// A line at the top of the form under it: why it's open instead of
+/// something else (Rivet paused, say).
+class FormNote extends InheritedWidget {
+  const FormNote({super.key, required this.note, required super.child});
+
+  final Widget note;
+
+  static Widget? of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<FormNote>()?.note;
+
+  @override
+  bool updateShouldNotify(FormNote old) => old.note != note;
+}
+
+/// A phone shows every project, each folding in place: no project is
+/// focused there, even while one is on a Mac or an iPad.
+bool phoneShowsAllProjects(BuildContext context) =>
+    isPhoneLayout(context) &&
+    switch (defaultTargetPlatform) {
+      TargetPlatform.iOS => deviceIdiom(context) != Idiom.pad,
+      TargetPlatform.android => true,
+      _ => false,
+    };
+
+/// A dialog's points: each a bullet, its lines hanging after it.
+class _Points extends StatelessWidget {
+  const _Points(this.points);
+
+  final List<String> points;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = TypeScale.of(context).body
+        .copyWith(color: Palette.of(context).textMuted);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (final point in points)
+          Padding(
+            padding: const EdgeInsets.only(top: Space.xs),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                ExcludeSemantics(child: Text('•  ', style: style)),
+                Expanded(child: Text(point, style: style)),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// What moving [agent] to the project [to] ("" for none) changes, for
+/// Agent settings' Project (Lucy's projects-sidebar §5.2, Trish's words):
+/// "June will work in Bakery's folder and can message only agents in
+/// Bakery." Null while it stays where it is. An admin agent messages every
+/// agent wherever it is, so only its folder is said.
+String? projectMoveNote(
+  Workspace workspace, {
+  required Agent agent,
+  required String to,
+  required bool admin,
+}) {
+  if (to == agent.projectId) return null;
+  final name = nameInText(agent.name);
+  if (to.isEmpty) {
+    return admin
+        ? '$name will work in the workspace folder.'
+        : '$name will work in the workspace folder and can message only '
+              'Rivet and other agents outside projects.';
+  }
+  final project = workspace.projects.where((p) => p.id == to).firstOrNull;
+  if (project == null) return null;
+  final there = nameInText(project.name);
+  return admin
+      ? "$name will work in $there's folder."
+      : "$name will work in $there's folder and can message only agents in "
+            '$there.';
+}
+
+/// What deleting [project] does, said before it's done (Lucy's
+/// projects-sidebar §7): its agents and their conversations go, its folder
+/// and files stay, and its pipes close, their messages here deleted for
+/// good (the other side keeps its own).
+String deleteProjectBody(Workspace workspace, Project project) {
+  final agents = workspace.agents
+      .where((agent) => agent.projectId == project.id)
+      .length;
+  final pipes = [
+    for (final pipe in pipesIn(workspace, project.id)) pipePeerName(pipe),
+  ];
+  final names = pipes.length <= 3
+      ? _andNames(pipes)
+      : '${pipes.take(3).join(', ')} and ${pipes.length - 3} more';
+  return [
+    if (agents == 1) 'This deletes its agent and its conversation.',
+    if (agents > 1) 'This deletes its $agents agents and their conversations.',
+    project.path.isEmpty
+        ? 'Its folder and files stay.'
+        : 'Its folder and files stay in ${shortPath(project.path)}.',
+    if (pipes.length == 1)
+      'Its pipe with $names closes, and its messages here are deleted for '
+          'good.',
+    if (pipes.length > 1)
+      'Its pipes with $names close, and their messages here are deleted for '
+          'good.',
+  ].join(' ');
+}
+
+/// "A", "A and B", "A, B and C".
+String _andNames(List<String> names) => names.length < 2
+    ? names.join()
+    : '${names.sublist(0, names.length - 1).join(', ')} and ${names.last}';
+
+/// Whether Show in Finder can show a folder of [backend]'s: on the Mac
+/// that runs the agents, where its folders are this Mac's.
+bool showsInFinder(Backend backend) =>
+    defaultTargetPlatform == TargetPlatform.macOS &&
+    backend.localBackend &&
+    backend.target == null;
+
+/// A project's folder in Project settings (Lucy's projects-sidebar §6):
+/// its path in a caption, selectable, cut in the middle when it's long;
+/// on the Mac that runs the agents, Show in Finder after it.
+class ProjectFolderLine extends StatelessWidget {
+  const ProjectFolderLine({super.key, required this.path});
+
+  final String path;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final backend = AppScope.of(context);
+    final machine = _machineOf(backend);
+    final style = TypeScale.of(context).caption
+        .copyWith(color: palette.textMuted);
+    final shown = Semantics(
+      label: machine == null ? path : '$path, on $machine',
+      excludeSemantics: true,
+      child: SelectableArea(child: MiddleCut(shortPath(path), style: style)),
+    );
+    if (!showsInFinder(backend)) return shown;
+    return Row(
+      children: [
+        Expanded(child: shown),
+        const SizedBox(width: Space.s),
+        Unselectable(
+          child: Button(
+            label: 'Show in Finder',
+            onPressed: () => unawaited(showInFinder([File(path)])),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// [text] on one line, cut in the middle with "…" when it doesn't fit, so
+/// a path keeps its start and, longer, its end.
+class MiddleCut extends StatelessWidget {
+  const MiddleCut(this.text, {super.key, required this.style});
+
+  final String text;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    final direction = Directionality.of(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        double width(String words) {
+          final painter = TextPainter(
+            text: TextSpan(text: words, style: style),
+            textDirection: direction,
+            textScaler: scaler,
+            maxLines: 1,
+          )..layout();
+          final measured = painter.width;
+          painter.dispose();
+          return measured;
+        }
+
+        String cut(int keep) {
+          final head = keep ~/ 3;
+          return '${text.substring(0, head)}…'
+              '${text.substring(text.length - (keep - head))}';
+        }
+
+        var shown = text;
+        if (constraints.hasBoundedWidth && width(text) > constraints.maxWidth) {
+          // The most characters that fit, a third of them from the start.
+          var low = 0;
+          var high = text.length - 1;
+          while (low < high) {
+            final mid = (low + high + 1) ~/ 2;
+            if (width(cut(mid)) <= constraints.maxWidth) {
+              low = mid;
+            } else {
+              high = mid - 1;
+            }
+          }
+          shown = cut(low);
+        }
+        return Text(shown, style: style, maxLines: 1, softWrap: false);
+      },
     );
   }
 }
@@ -1344,6 +1694,7 @@ class _AgentFields extends StatelessWidget {
     required this.offerDefault,
     required this.offerWorkspace,
     this.outsideLabel = 'Workspace',
+    this.projectNote,
     this.defaultPrompt = '',
     this.lead,
     this.fallback,
@@ -1382,6 +1733,9 @@ class _AgentFields extends StatelessWidget {
   /// What to call the place outside any project: "Admin" for an admin
   /// agent, else "Workspace".
   final String outsideLabel;
+
+  /// Under Project: what moving it there changes, once it's changed.
+  final String? projectNote;
 
   /// The prompt Claktory ships for this agent, to go back to; empty when it
   /// has none (only Rivet has one).
@@ -1555,6 +1909,7 @@ class _AgentFields extends StatelessWidget {
         ? null
         : Field(
             label: 'Project',
+            note: projectNote,
             child: Select(
               value: this.project,
               options: [
@@ -1971,30 +2326,6 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
   /// Its extensions' list is unfolded ("11 on · Change…").
   late var _extensionsOpen = widget.showExtensions;
 
-  /// Times the agent was just made an errand agent here: Errands, under
-  /// its extensions, is scrolled to and glows.
-  var _errandsShown = 0;
-
-  Widget _errandsRow(String id, Widget row) => _errandsRowOf(
-    id,
-    row,
-    shown: _errandsShown,
-    store: AppScope.scope(context).backend.highlights,
-    agentId: widget.agent.id,
-  );
-
-  void _errandsNext() {
-    setState(() {
-      _extensionsOpen = true;
-      _errandsShown++;
-    });
-    final highlights = AppScope.scope(context).backend.highlights;
-    final key = 'agent-settings:errands:${widget.agent.id}';
-    WidgetsBinding.instance.addPostFrameCallback(
-      (_) => highlights.glow(key, const [signal]),
-    );
-  }
-
   /// Asking whether to save before going to Rivet (Lucy's agent view §6).
   var _confirmingRivet = false;
 
@@ -2161,8 +2492,19 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
     final update = _changes();
     final changes = _extensionChanges();
     final id = widget.agent.id;
+    // Turning the browser off deletes its sign-ins and data, so Save asks
+    // first.
+    final browserOff = changes.any(
+      (change) =>
+          change.id == browserExtension &&
+          change.hasEnabled() &&
+          !change.enabled,
+    );
     // One extension change per request, as the protocol has it.
     Future<void> save() async {
+      if (browserOff && !await confirmBrowserOff(context, backend, _current)) {
+        throw const _SetAside();
+      }
       if (update != null) await backend.updateAgent(update);
       for (final change in changes) {
         await backend.updateAgent(
@@ -2346,6 +2688,14 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
               // As the backend has it now, with what's changed here: the
               // admin option turned on or off makes it an admin agent.
               outsideLabel: outsideProjectsLabel(_edited),
+              // What Save would change by moving it (Lucy's
+              // projects-sidebar §5.2); no confirm, Save is deliberate.
+              projectNote: projectMoveNote(
+                workspace,
+                agent: agent,
+                to: _project,
+                admin: isAdminAgent(_edited),
+              ),
               defaultPrompt:
                   [
                     for (final candidate in workspace.agents)
@@ -2426,9 +2776,6 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
               _PipeLimitNote(agent: _current, workspace: workspace),
             // Reading reports keeps it from the same: why, and the way out.
             if (_current.readsReports) StopReadingReportsField(agent: _current),
-            // Errands in Claktory's browser, at once, not through Save; just
-            // turned on, Errands is the next step (Lucy 49837).
-            ErrandAgentField(agent: _current, onContained: _errandsNext),
             // Above the extensions, so it's in sight: which secrets it has.
             AgentSecretsField(agent: _current),
             if (workspace.extensions.isNotEmpty && !_extensionsOpen)
@@ -2451,27 +2798,34 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
                       // Those with something to show first (Lucy's §6).
                       for (final extension in _showingFirst(workspace))
                         if (_saved(extension.id) case final saved?)
-                          _errandsRow(
-                            extension.id,
-                            _ExtensionSettings(
-                              extension: extension,
-                              workspace: workspace,
-                              agentId: agent.id,
-                              projectId: _project,
-                              // Ask is all a pipe's limit leaves it; reading
-                              // reports, its database and Reports too.
-                              limited: !containedKeeps(_current, extension.id),
-                              enabled: _enabled[extension.id] ?? saved.enabled,
-                              value: (option) =>
-                                  _options[extension.id]?[option] ??
-                                  saved.options[option] ??
-                                  OptionValue(),
-                              onEnabled: (on) =>
-                                  setState(() => _enabled[extension.id] = on),
-                              onOption: (option, value) => setState(
-                                () => (_options[extension.id] ??= {})[option] =
-                                    value,
-                              ),
+                          _ExtensionSettings(
+                            extension: extension,
+                            workspace: workspace,
+                            agentId: agent.id,
+                            projectId: _project,
+                            description: extension.id == browserExtension
+                                ? browserRefusal(_current) ??
+                                      (approvesElsewhere && !saved.enabled
+                                          ? browserElsewhereText(_current.name)
+                                          : browserDescription(_current.name))
+                                : null,
+                            // Ask is all a pipe's limit leaves it; reading
+                            // reports, its database and Reports too.
+                            limited:
+                                !containedKeeps(_current, extension.id) ||
+                                (extension.id == browserExtension &&
+                                    (browserRefusal(_current) != null ||
+                                        approvesElsewhere && !saved.enabled)),
+                            enabled: _enabled[extension.id] ?? saved.enabled,
+                            value: (option) =>
+                                _options[extension.id]?[option] ??
+                                saved.options[option] ??
+                                OptionValue(),
+                            onEnabled: (on) =>
+                                setState(() => _enabled[extension.id] = on),
+                            onOption: (option, value) => setState(
+                              () => (_options[extension.id] ??= {})[option] =
+                                  value,
                             ),
                           ),
                     ],
@@ -2483,27 +2837,6 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
       },
     );
   }
-}
-
-/// Errands' row, just after the agent was made an errand agent: scrolled
-/// to and glowing once, since turning it on is the next step.
-Widget _errandsRowOf(
-  String id,
-  Widget row, {
-  required int shown,
-  required HighlightStore store,
-  required String agentId,
-}) {
-  if (id != errandsExtension) return row;
-  return _ScrolledTo(
-    key: ValueKey('errands:$shown'),
-    scroll: shown > 0,
-    child: Glow(
-      store: store,
-      matches: (key) => key == 'agent-settings:errands:$agentId',
-      child: row,
-    ),
-  );
 }
 
 /// An agent's extensions, folded (Lucy's agent view §6): "11 on ·
@@ -2586,6 +2919,7 @@ class _ExtensionSettings extends StatelessWidget {
     required this.onEnabled,
     required this.onOption,
     this.limited = false,
+    this.description,
   });
 
   final Extension extension;
@@ -2602,6 +2936,8 @@ class _ExtensionSettings extends StatelessWidget {
   final OptionValue Function(String optionId) value;
   final ValueChanged<bool> onEnabled;
   final void Function(String optionId, OptionValue value) onOption;
+
+  final String? description;
 
   @override
   Widget build(BuildContext context) {
@@ -2631,7 +2967,7 @@ class _ExtensionSettings extends StatelessWidget {
                 color: enabled && !limited ? palette.text : palette.textMuted,
               ),
               label: extension.name,
-              description: extension.description,
+              description: description ?? extension.description,
               strong: true,
               value: enabled,
               onChanged: limited ? null : onEnabled,
@@ -2961,8 +3297,10 @@ class _SwitchRow extends StatelessWidget {
 /// every other agent, grouped by where they live, to choose from (an
 /// extension's agent-list option, who hears Resources alerts). The agents
 /// in project [alwaysIn] are always in (an option's `includes_project`), so
-/// they show checked and greyed; [hidden] (the agent whose option it is)
-/// isn't offered.
+/// they show checked and greyed, as do the agents in [always] (admin
+/// agents, who may always send urgent alerts); [hidden] (the agent whose
+/// option it is) isn't offered. An empty [label] leaves the field's own
+/// label out, for a row that has one.
 class AgentListField extends StatefulWidget {
   const AgentListField({
     super.key,
@@ -2971,6 +3309,7 @@ class AgentListField extends StatefulWidget {
     required this.workspace,
     this.hidden = '',
     this.alwaysIn,
+    this.always = const {},
     required this.chosen,
     required this.onChanged,
   });
@@ -2980,6 +3319,7 @@ class AgentListField extends StatefulWidget {
   final Workspace workspace;
   final String hidden;
   final String? alwaysIn;
+  final Set<String> always;
   final List<String> chosen;
   final ValueChanged<List<String>> onChanged;
 
@@ -2996,6 +3336,10 @@ class _AgentListFieldState extends State<AgentListField> {
   /// Agents in the agent's own project, which count without being chosen.
   bool _inProject(Agent agent) =>
       widget.alwaysIn != null && agent.projectId == widget.alwaysIn;
+
+  /// Agents that count without being chosen, and can't be taken out.
+  bool _fixed(Agent agent) =>
+      _inProject(agent) || widget.always.contains(agent.id);
 
   void _toggle(Agent agent) {
     final chosen = widget.chosen.toSet();
@@ -3018,17 +3362,19 @@ class _AgentListFieldState extends State<AgentListField> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text(
-          widget.label,
-          style: TypeScale.of(context).body.copyWith(color: palette.text),
-        ),
+        if (widget.label.isNotEmpty)
+          Text(
+            widget.label,
+            style: TypeScale.of(context).body.copyWith(color: palette.text),
+          ),
         if (widget.description.isNotEmpty)
           Text(
             widget.description,
             style: TypeScale.of(context).caption
                 .copyWith(color: palette.textMuted),
           ),
-        const SizedBox(height: Space.xs + 2),
+        if (widget.label.isNotEmpty || widget.description.isNotEmpty)
+          const SizedBox(height: Space.xs + 2),
         TapRegion(
           groupId: _tapRegion,
           onTapOutside: (_) {
@@ -3137,7 +3483,7 @@ class _AgentListFieldState extends State<AgentListField> {
         ),
       );
       for (final agent in agents) {
-        final fixed = _inProject(agent);
+        final fixed = _fixed(agent);
         final on = fixed || widget.chosen.contains(agent.id);
         rows.add(
           Pressable(

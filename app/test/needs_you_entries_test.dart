@@ -1,4 +1,4 @@
-// Needs you's store of cards (#514 prep): one per Claktory, shared by the
+// Needs you's store of cards: one per Claktory, shared by the
 // Needs you page and focus mode, fetching each waiting card once, keeping
 // held ones up to date as they stop waiting.
 import 'package:factory_app/inbox.dart';

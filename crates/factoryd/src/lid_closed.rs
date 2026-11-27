@@ -1,5 +1,4 @@
-//! Keeping a laptop's agents working with its lid closed (#371; design:
-//! coordination/security/lid-closed.md, redone after Abbacchio's no-go).
+//! Keeping a laptop's agents working with its lid closed.
 //!
 //! macOS sleeps a laptop when its lid closes unless a bit of the kernel's
 //! power manager says not to: IOPMrootDomain's clamshell sleep disable
@@ -17,7 +16,7 @@
 //! next start. The person's own SleepDisabled (`pmset disablesleep`) holds
 //! the same bit through powerd, so it's read just before the first set: if
 //! it's on, factoryd sets nothing and leaves it to them; otherwise the bit
-//! is its own and always cleared (Fugo 31829), whatever `pmset` says later,
+//! is its own and always cleared, whatever `pmset` says later,
 //! which may be factoryd's own bit showing. Should clearing fail, or an old rehearsal's SleepDisabled be
 //! on while it's on, the setting says the Mac can't sleep (STUCK) with what
 //! fixes it, whatever else it says, and Needs you tells the person
@@ -51,7 +50,7 @@ CREATE TABLE lid_closed (
 ";
 
 /// factoryd set the kernel's clamshell bit and hasn't cleared it yet: what
-/// the next start clears (#371's redesign; the helper's columns are unused).
+/// the next start clears (the helper's columns are unused).
 /// 0 none; 1 factoryd's own (`OURS`), always cleared; 2 the person's own
 /// SleepDisabled was on before (`THEIRS`): nothing set, nothing cleared.
 pub(crate) const SET_BIT: &str = "
@@ -649,7 +648,7 @@ mod tests {
         assert!(!*fake.bit.lock().unwrap() && recorded(&store) == 0 && !view(&lid).lid_closed_holding);
     }
 
-    /// Fugo 31829: SleepDisabled is read just before the first set, and
+    /// SleepDisabled is read just before the first set, and
     /// recorded with it; the bit is cleared unless it was the person's own
     /// before.
     #[test]

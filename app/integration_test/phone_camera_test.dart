@@ -33,6 +33,8 @@
 //   pinch FACTOR [X Y]  two fingers about X Y (the centre if left out)
 //                spread apart (or together) to scale by FACTOR, held still
 //                before they lift
+//   orient landscape|portrait|any  turns the screen (simctl can't): the
+//                app asks for landscape left, portrait up, or any again
 //   quit         ends it
 // Each command done is logged in MARKS_DIR/log with the wall-clock time.
 //
@@ -45,17 +47,20 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:factory_app/backend.dart' show RequestFailure;
+import 'package:factory_app/connect_step.dart' show ConnectStep;
 import 'package:factory_app/inbox.dart' show InboxView;
 import 'package:factory_app/main.dart' as app;
 import 'package:factory_app/mobile/needs_you_button.dart'
     show PhoneNeedsYouButton;
 import 'package:factory_app/mobile/composer.dart' show SendButton;
 import 'package:factory_app/mobile/voice_input.dart' show PhoneMicButton;
+import 'package:factory_app/phone.dart' show PairScreen;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/recorder.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/shell.dart';
 import 'package:factory_app/sidebar.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
@@ -175,9 +180,10 @@ void main() {
     await app.main();
     await hold(2000);
 
-    // Not paired yet: its code pasted in, then the four digits while it's
-    // allowed there.
-    if (!shows(drawer) && !shows(menu)) {
+    // Not paired yet (the pairing screen, an iPhone's or an iPad's, or
+    // the first step's Connect; never the drawer, which an iPad in
+    // portrait folds to its rail): its code pasted in, then allowed there.
+    if (shows(find.byType(PairScreen)) || shows(find.byType(ConnectStep))) {
       final code = File('$_marks/code');
       if (!code.existsSync()) fail('not paired, and no $_marks/code');
       for (var i = 0; i < 25; i++) {
@@ -203,6 +209,18 @@ void main() {
         await hold(1200);
         await tester.tap(find.text('Connect').last);
       }
+      // The first connection on an iPhone or iPad: why Claktory asks for
+      // the local network (mobile/local_network.dart), then Continue; the
+      // Simulator asks nothing after it.
+      for (var i = 0; i < 25; i++) {
+        if (shows(find.text('Find your Claktory on this network'))) break;
+        await hold(200);
+      }
+      if (shows(find.text('Find your Claktory on this network'))) {
+        await hold(1200);
+        await tester.tap(find.text('Continue').last);
+        await hold(800);
+      }
       say('pairing: allow this device on the Claktory');
     }
     final began = DateTime.now();
@@ -223,10 +241,17 @@ void main() {
     File('$_marks/ready').writeAsStringSync(DateTime.now().toIso8601String());
     say('ready: append commands to ${control.path}');
 
-    Future<void> openDrawer() async {
-      if (shows(drawer)) return;
+    /// The drawer, from the Menu button; false (and said) on a page that
+    /// has none (Needs you, a request): Back first.
+    Future<bool> openDrawer() async {
+      if (shows(drawer)) return true;
+      if (!shows(menu)) {
+        say('no menu here: back first');
+        return false;
+      }
       await tester.tap(menu.first);
       await hold(700);
+      return true;
     }
 
     Future<void> tapInDrawer(String text) async {
@@ -295,220 +320,241 @@ void main() {
         final verb = space < 0 ? command : command.substring(0, space);
         final arg = space < 0 ? '' : command.substring(space + 1).trim();
         say(command);
-        switch (verb) {
-          case 'quit':
-            return;
-          case 'hold':
-            break;
-          case 'project':
-            final project = [
-              for (final project in workspace().projects)
-                if (project.id == arg || project.name == arg) project,
-            ].firstOrNull;
-            if (project == null) {
-              say('no project $arg');
+        // A command that throws is said, and the next one still runs.
+        try {
+          switch (verb) {
+            case 'quit':
+              return;
+            case 'hold':
               break;
-            }
-            await openDrawer();
-            // From All projects, unless it's the one shown already.
-            final all = find.descendant(
-              of: drawer,
-              matching: find.text('‹ All projects'),
-            );
-            if (workspace().focusedProjectId != project.id && shows(all)) {
-              await tapInDrawer('‹ All projects');
-            }
-            if (workspace().focusedProjectId != project.id) {
-              await tapInDrawer(project.name);
-            }
-            // At the top of its list, nothing scrolled.
-            final list = find.descendant(
-              of: drawer,
-              matching: find.byType(Scrollable),
-            );
-            if (shows(list)) {
-              final state = tester.state<ScrollableState>(list.first);
-              state.position.jumpTo(state.position.minScrollExtent);
-            }
-            await hold(600);
-          case 'select':
-            final agent = [
-              for (final agent in workspace().agents)
-                if (agent.id == arg || agent.name == arg) agent,
-            ].firstOrNull;
-            if (agent == null) {
-              say('no agent $arg');
-              break;
-            }
-            await openDrawer();
-            final row = find.descendant(
-              of: drawer,
-              matching: find.text(agent.name),
-            );
-            if (shows(row)) {
-              await tapInDrawer(agent.name);
-            } else {
-              // In a project not shown: as the search would find it.
-              await AppScope.of(tester.element(find.byType(Shell).first))
-                  .selectAgent(agent.id);
-            }
-            for (var i = 0; i < 50; i++) {
-              if (workspace().selectedAgentId == agent.id && !shows(drawer)) {
+            case 'project':
+              final project = [
+                for (final project in workspace().projects)
+                  if (project.id == arg || project.name == arg) project,
+              ].firstOrNull;
+              if (project == null) {
+                say('no project $arg');
                 break;
               }
-              await hold(100);
-            }
-          case 'voice':
-            mic
-              ..file = arg
-              ..levels = [
-                for (final line in _levelsOf(arg).readAsLinesSync())
-                  if (line.trim().isNotEmpty) double.parse(line),
-              ]
-              ..played = Completer<void>();
-            var played = false;
-            unawaited(mic.played.future.then((_) => played = true));
-            final record = find.byType(PhoneMicButton);
-            if (!shows(record)) {
-              say('no mic: open a conversation first');
-              break;
-            }
-            await tester.tap(record.last);
-            final until = DateTime.now().add(
-              const Duration(milliseconds: 50) * mic.levels.length +
-                  const Duration(seconds: 30),
-            );
-            while (!played && DateTime.now().isBefore(until)) {
-              await hold(50);
-            }
-            await hold(300);
-            final send = find.byType(SendButton);
-            if (!shows(send)) {
-              say("voice didn't record: no Send");
-              break;
-            }
-            await tester.tap(send.last);
-            await hold(300);
-            say('voice sent');
-          case 'inbox':
-            final header = find.byType(PhoneNeedsYouButton);
-            final row = find.byKey(const ValueKey('needs-you'));
-            if (shows(header) && !shows(drawer)) {
-              await tester.tap(header.first);
-            } else {
-              await openDrawer();
-              if (!shows(row)) {
-                say('no Needs you: nothing needs you');
+              if (!await openDrawer()) break;
+              // From All projects, unless it's the one shown already.
+              final all = find.descendant(
+                of: drawer,
+                matching: find.text('‹ All projects'),
+              );
+              if (workspace().focusedProjectId != project.id && shows(all)) {
+                await tapInDrawer('‹ All projects');
+              }
+              if (workspace().focusedProjectId != project.id) {
+                await tapInDrawer(project.name);
+              }
+              // At the top of its list, nothing scrolled.
+              final list = find.descendant(
+                of: drawer,
+                matching: find.byType(Scrollable),
+              );
+              if (shows(list)) {
+                final state = tester.state<ScrollableState>(list.first);
+                state.position.jumpTo(state.position.minScrollExtent);
+              }
+              await hold(600);
+            case 'select':
+              final agent = [
+                for (final agent in workspace().agents)
+                  if (agent.id == arg || agent.name == arg) agent,
+              ].firstOrNull;
+              if (agent == null) {
+                say('no agent $arg');
                 break;
               }
-              await tester.tap(row.first);
-            }
-            await hold(1200);
-          case 'open':
-            final card = find.descendant(
-              of: find.byType(InboxView),
-              matching: find.textContaining(arg),
-            );
-            if (!shows(card)) {
-              say('not found: $arg');
-              break;
-            }
-            await tester.ensureVisible(card.first);
-            await hold(300);
-            await tester.tap(card.first);
-            await hold(1200);
-          case 'tap':
-            final target = find.textContaining(arg, findRichText: true);
-            if (!shows(target)) {
-              say('not found: $arg');
-              break;
-            }
-            await tester.ensureVisible(target.last);
-            await hold(600);
-            await tester.tap(target.last);
-            await hold(1200);
-            say('tapped: $arg');
-          case 'swipe':
-            final words = arg.split(RegExp(r'\s+'));
-            final points = double.tryParse(words.first);
-            final at = pointOf(words.skip(1));
-            if (points == null || at == null) {
-              say('swipe: not N [X Y]: $arg');
-              break;
-            }
-            await moveFingers(
-              [at],
-              [at - Offset(0, points)],
-              (points.abs() * 2).clamp(200, 1200).round(),
-            );
-          case 'pinch':
-            final words = arg.split(RegExp(r'\s+'));
-            final factor = double.tryParse(words.first);
-            final at = pointOf(words.skip(1));
-            if (factor == null || factor <= 0 || at == null) {
-              say('pinch: not FACTOR [X Y]: $arg');
-              break;
-            }
-            // Two fingers 120 points apart, across, moved apart (or
-            // together) to FACTOR times that.
-            const half = Offset(60, 0);
-            await moveFingers(
-              [at - half, at + half],
-              [at - half * factor, at + half * factor],
-              (factor - 1).abs().clamp(0.25, 2) * 600 ~/ 1,
-            );
-          case 'scroll':
-            // Claktory's own search of the whole conversation, newest
-            // first, a page at a time: the last match is the oldest.
-            final backend = AppScope.of(
-              tester.element(find.byType(Shell).first),
-            );
-            final agentId = workspace().selectedAgentId;
-            ({int seq, String snippet})? first;
-            int? before;
-            try {
-              while (true) {
-                final found = await backend.searchConversation(
-                  agentId: agentId,
-                  query: arg,
-                  beforeSeq: before,
-                );
-                if (found.matches.isEmpty) break;
-                final last = found.matches.last;
-                first = (seq: last.seq.toInt(), snippet: last.snippet);
-                if (!found.more) break;
-                before = first.seq;
+              if (!await openDrawer()) break;
+              final row = find.descendant(
+                of: drawer,
+                matching: find.text(agent.name),
+              );
+              if (shows(row)) {
+                await tapInDrawer(agent.name);
+              } else {
+                // In a project not shown: as the search would find it.
+                await AppScope.of(tester.element(find.byType(Shell).first))
+                    .selectAgent(agent.id);
               }
-            } on RequestFailure catch (error) {
-              say('not found: $arg (${error.message})');
-              break;
-            }
-            if (first == null) {
-              say('not found: $arg');
-              break;
-            }
-            backend.reveal.reachSeq(agentId, first.seq);
-            // Until the conversation has gone there (loading back to it
-            // first), and laid out there.
-            for (var i = 0; i < 200 && backend.reveal.value != null; i++) {
-              await hold(50);
-            }
-            await hold(400);
-            say('scrolled: ${first.snippet}');
-          case 'back':
-            final back = find.bySemanticsLabel('Back');
-            if (shows(drawer)) {
-              // The strip of dimmed conversation beside it, as a thumb
-              // closes it.
-              final screen =
-                  tester.view.physicalSize / tester.view.devicePixelRatio;
-              await tester.tapAt(Offset(screen.width - 8, screen.height / 2));
-            } else if (shows(back)) {
-              await tester.tap(back.last);
-            }
-            await hold(600);
-          default:
-            say('unknown command: $command');
+              for (var i = 0; i < 50; i++) {
+                if (workspace().selectedAgentId == agent.id && !shows(drawer)) {
+                  break;
+                }
+                await hold(100);
+              }
+            case 'voice':
+              mic
+                ..file = arg
+                ..levels = [
+                  for (final line in _levelsOf(arg).readAsLinesSync())
+                    if (line.trim().isNotEmpty) double.parse(line),
+                ]
+                ..played = Completer<void>();
+              var played = false;
+              unawaited(mic.played.future.then((_) => played = true));
+              final record = find.byType(PhoneMicButton);
+              if (!shows(record)) {
+                say('no mic: open a conversation first');
+                break;
+              }
+              await tester.tap(record.last);
+              final until = DateTime.now().add(
+                const Duration(milliseconds: 50) * mic.levels.length +
+                    const Duration(seconds: 30),
+              );
+              while (!played && DateTime.now().isBefore(until)) {
+                await hold(50);
+              }
+              await hold(300);
+              final send = find.byType(SendButton);
+              if (!shows(send)) {
+                say("voice didn't record: no Send");
+                break;
+              }
+              await tester.tap(send.last);
+              await hold(300);
+              say('voice sent');
+            case 'inbox':
+              final header = find.byType(PhoneNeedsYouButton);
+              final row = find.byKey(const ValueKey('needs-you'));
+              if (shows(header) && !shows(drawer)) {
+                await tester.tap(header.first);
+              } else {
+                await openDrawer();
+                if (!shows(row)) {
+                  say('no Needs you: nothing needs you');
+                  break;
+                }
+                await tester.tap(row.first);
+              }
+              await hold(1200);
+            case 'open':
+              final card = find.descendant(
+                of: find.byType(InboxView),
+                matching: find.textContaining(arg),
+              );
+              if (!shows(card)) {
+                say('not found: $arg');
+                break;
+              }
+              await tester.ensureVisible(card.first);
+              await hold(300);
+              await tester.tap(card.first);
+              await hold(1200);
+            case 'tap':
+              final target = find.textContaining(arg, findRichText: true);
+              if (!shows(target)) {
+                say('not found: $arg');
+                break;
+              }
+              await tester.ensureVisible(target.last);
+              await hold(600);
+              await tester.tap(target.last);
+              await hold(1200);
+              say('tapped: $arg');
+            case 'swipe':
+              final words = arg.split(RegExp(r'\s+'));
+              final points = double.tryParse(words.first);
+              final at = pointOf(words.skip(1));
+              if (points == null || at == null) {
+                say('swipe: not N [X Y]: $arg');
+                break;
+              }
+              await moveFingers(
+                [at],
+                [at - Offset(0, points)],
+                (points.abs() * 2).clamp(200, 1200).round(),
+              );
+            case 'pinch':
+              final words = arg.split(RegExp(r'\s+'));
+              final factor = double.tryParse(words.first);
+              final at = pointOf(words.skip(1));
+              if (factor == null || factor <= 0 || at == null) {
+                say('pinch: not FACTOR [X Y]: $arg');
+                break;
+              }
+              // Two fingers 120 points apart, across, moved apart (or
+              // together) to FACTOR times that.
+              const half = Offset(60, 0);
+              await moveFingers(
+                [at - half, at + half],
+                [at - half * factor, at + half * factor],
+                (factor - 1).abs().clamp(0.25, 2) * 600 ~/ 1,
+              );
+            case 'scroll':
+              // Claktory's own search of the whole conversation, newest
+              // first, a page at a time: the last match is the oldest.
+              final backend = AppScope.of(
+                tester.element(find.byType(Shell).first),
+              );
+              final agentId = workspace().selectedAgentId;
+              ({int seq, String snippet})? first;
+              int? before;
+              try {
+                while (true) {
+                  final found = await backend.searchConversation(
+                    agentId: agentId,
+                    query: arg,
+                    beforeSeq: before,
+                  );
+                  if (found.matches.isEmpty) break;
+                  final last = found.matches.last;
+                  first = (seq: last.seq.toInt(), snippet: last.snippet);
+                  if (!found.more) break;
+                  before = first.seq;
+                }
+              } on RequestFailure catch (error) {
+                say('not found: $arg (${error.message})');
+                break;
+              }
+              if (first == null) {
+                say('not found: $arg');
+                break;
+              }
+              backend.reveal.reachSeq(agentId, first.seq);
+              // Until the conversation has gone there (loading back to it
+              // first), and laid out there.
+              for (var i = 0; i < 200 && backend.reveal.value != null; i++) {
+                await hold(50);
+              }
+              await hold(400);
+              say('scrolled: ${first.snippet}');
+            case 'back':
+              final back = find.bySemanticsLabel('Back');
+              if (shows(drawer)) {
+                // The strip of dimmed conversation beside it, as a thumb
+                // closes it.
+                final screen =
+                    tester.view.physicalSize / tester.view.devicePixelRatio;
+                await tester.tapAt(Offset(screen.width - 8, screen.height / 2));
+              } else if (shows(back)) {
+                await tester.tap(back.last);
+              }
+              await hold(600);
+            case 'orient':
+              // simctl can't turn a device: the app asks for it, as
+              // ipad_tour_test.dart does.
+              final turn = switch (arg) {
+                'landscape' => [DeviceOrientation.landscapeLeft],
+                'portrait' => [DeviceOrientation.portraitUp],
+                'any' => <DeviceOrientation>[],
+                _ => null,
+              };
+              if (turn == null) {
+                say('orient landscape, portrait or any, not $arg');
+                break;
+              }
+              await SystemChrome.setPreferredOrientations(turn);
+              await hold(2500);
+            default:
+              say('unknown command: $command');
+          }
+        } on Object catch (error) {
+          say('failed: $command: $error');
+          continue;
         }
         say('done: $command');
       }

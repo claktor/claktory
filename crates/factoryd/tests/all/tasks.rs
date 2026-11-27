@@ -2,7 +2,9 @@
 //! see_all, everyone's; the owner hears who stopped one. Admin agents hear
 //! of tasks that run long, once.
 
-use crate::common::{Client, View, apply_request, create_agent, create_project, describe, home, send_message, start, temp_dir};
+#[cfg(unix)]
+use crate::common::home;
+use crate::common::{Client, View, apply_request, create_agent, create_project, describe, send_message, start, temp_dir};
 use factory_protocol::v1::{self, AgentStatus, client_message, entry::Kind};
 
 fn select(agent: &str) -> client_message::Body {
@@ -162,6 +164,9 @@ async fn an_agents_commands_and_background_tasks_know_its_id() {
 /// ripgrep for every agent: `<home>/tools` is first on the PATH of its
 /// commands and background tasks; while it isn't there (no release, as here
 /// at first), it's passed over and the rest of the PATH works as before.
+// On Windows the tools are rg.exe and jq.exe, and Git Bash shows the PATH
+// its own way: a test of its own to come.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_agents_commands_find_claktorys_own_tools_first() {
     let dir = temp_dir();
@@ -259,6 +264,10 @@ async fn after_a_restart_an_agent_hears_once_of_every_task_it_ended() {
     );
     for pid in pids {
         // SAFETY: ends the test's own sleeps, by their process groups.
+        #[cfg(unix)]
         unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        // By their jobs on Windows.
+        #[cfg(windows)]
+        factory_agent::windows::job::stop(pid as u32);
     }
 }

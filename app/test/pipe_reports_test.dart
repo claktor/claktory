@@ -1,4 +1,4 @@
-// Automated pipes in the app (pipes-automation.md §7–8, H5/H6): where a
+// Automated pipes in the app: where a
 // pipe's reports go, in its settings and its project's; the agent that reads
 // them; the "Forwarded" strip under an open pipe with what's waiting; a
 // report's own words; the reader's Reports; the Map's line from a pipe to
@@ -571,8 +571,8 @@ void main() {
       findsOneWidget,
     );
     expect(find.textContaining('\nNew', findRichText: true), findsOneWidget);
-    // Show all under them, so "Forwarded" keeps its whole width (Zucchero,
-    // row 58: it broke mid-word beside it).
+    // Show all under them, so "Forwarded" keeps its whole width (it broke
+    // mid-word beside it).
     final header = find.textContaining('room for 27 more', findRichText: true);
     expect(
       tester.getTopLeft(find.text('Show all')).dy,
@@ -743,8 +743,7 @@ void main() {
     expect(text, 'Reports from Kai to Ingrid: 3 today, room for 27 more');
     expect(refused, 2);
 
-    // The hour's limit tighter than the day's: it says so (Abbacchio's
-    // row 645).
+    // The hour's limit tighter than the day's: it says so.
     final hourly = _pipe(counts: PipeReportCounts(today: 2, roomToday: 4))
       ..forward.limits = ReportLimits(perHour: 6, perDay: 30);
     expect(

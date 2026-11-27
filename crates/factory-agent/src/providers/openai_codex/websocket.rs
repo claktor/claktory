@@ -35,7 +35,7 @@ struct Job {
 }
 
 /// What the next request on the socket needs of the last one to send only
-/// what's new: digests, not the request itself (#454), which carries every
+/// what's new: digests, not the request itself, which carries every
 /// image of the conversation.
 struct Continuation {
     /// The last request's body, all but its input.

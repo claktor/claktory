@@ -797,6 +797,31 @@ in the same folder. The shell can't read through the provider either.
 
 Still owed: sending to real apps (Gmail, Messages, Drive) on a phone.
 
+### Saving a text file (the recovery key's Download)
+
+`factory/device` `saveText {name, text}` (`TextSave.kt`) opens the
+system's save dialog (`ACTION_CREATE_DOCUMENT`, `text/plain`, `name`
+suggested). The person picks where; the text goes into the document the
+dialog made, as UTF-8 through the `ContentResolver`. It answers true once
+written, false when they cancelled (or a save was already open), and the
+error `failed` when it couldn't be written or had no name or text.
+
+- **The text is the vault's recovery key:** it stays in memory only
+  while the dialog is open. No file of the app's holds it, and nothing
+  logs it.
+- **Nothing half done:** a document made but not written is deleted:
+  a failed write, or an answer that comes back after Android ended the
+  process (the text went with it).
+- **Only another app's document:** a `content://` address whose provider
+  isn't one of the app's own (`TextSaves`, user id prefix included), so
+  a dialog can't make the app write the key into its own files.
+
+Proof: `TextSavesTest` (JVM) and `TextSaveTest` (instrumentation, the
+dialog stood in for by a MediaStore Downloads document).
+
+Still owed: Google Drive and other providers as places to save, on a
+phone.
+
 ### Take photo (Bruno 46437)
 
 The attach menu's Take photo, first in the menu, as on the iPhone. The app
@@ -1110,6 +1135,7 @@ on a phone, still owed for every item.
 | Channel | Android | iPhone's |
 |---|---|---|
 | `factory/device` `pickAttachments` | `AttachmentPicker.kt`: the menu (Take photo when asked, Choose photos or videos, Choose files, Paste image), the photo picker or `ACTION_OPEN_DOCUMENT`, copies in the cache, ≤ 2 GB each; no storage permission | `Attach` |
+| `factory/device` `saveText` | `TextSave.kt`: the system's save dialog (`ACTION_CREATE_DOCUMENT`), the text written as UTF-8 into the document made, only another app's provider | the iPhone's own save sheet |
 | `factory/device` `takePhoto` | `PhotoCapture.kt`: the phone's camera app through `ACTION_IMAGE_CAPTURE` into `CameraFiles` (write grant, one address), GPS tags removed, moved into the Attachments folder | `Attach` |
 | `factory/recorder` (+`/events`) | `VoiceRecorder.kt`: `MediaRecorder`, AAC in .m4a, 16 kHz mono, 32 kbps, ten minutes; audio focus; a call or leaving the screen interrupts, keeping the file | `Recorder.swift` |
 | `factory/audio` (+`/events`) | `AudioPlayback.kt`: `MediaPlayer`, transient audio focus; a call, unplugged headphones or leaving the screen pause | `AudioPlayer.swift` |
@@ -1226,6 +1252,18 @@ on a phone, still owed for every item.
     through for 32-bit ARM too: the build now packages only the shipped
     ABIs' libraries (`packaging.jniLibs.excludes`), and check_artifact.py
     refused the 32-bit one before that fix.
+- **The pairing page's link**, `https://claktory.com/pair#<the code's
+  query>` (factoryd's `PAIR_PAGE`), is an App Link of the release build
+  only: `src/prod/AndroidManifest.xml` adds an `autoVerify` filter for that
+  host and path to `LinkActivity`, and claktory.com's
+  `/.well-known/assetlinks.json` names `com.claktory.app` with the release
+  key's certificate SHA-256 (`A4:CF:34:93:…:D4:1E`). Android checks the
+  file when the app is installed or updated, so the file must be live
+  before the first APK carrying the filter ships. Claktory Dev isn't in the
+  file and has no filter, so it never takes the real app's pairing links.
+  `PairLinks` takes only https, `claktory.com` exactly (no port, user or
+  other subdomain) and the path `/pair`; the code rides in the fragment,
+  which Dart reads, and nothing native logs it.
 - **Links** never become Flutter routes (`flutter_deeplinking_enabled`
   false); `LinkActivity` hands each to the one `MainActivity`, found in
   its own task by `CLEAR_TOP | SINGLE_TOP | NEW_TASK`, never a second.
@@ -1293,8 +1331,9 @@ at launch; Firebase's library adds `WAKE_LOCK` and
 Google Play services; §10, Notifications). No storage, contacts, location, phone or account
 permissions.
 
-**Components:** `MainActivity`, `LinkActivity` (links and the sign-in
-redirect, §10), url_launcher's `WebViewActivity` (unused by the app, from
+**Components:** `MainActivity`, `LinkActivity` (links, the sign-in
+redirect and, in the release build, `https://claktory.com/pair` as an App
+Link, §10), url_launcher's `WebViewActivity` (unused by the app, from
 the plugin), AndroidX's startup provider and profile installer receiver;
 `ClaktoryMessagingService` (pushes, not exported) and what Firebase's
 library declares with it: `FirebaseInstanceIdReceiver` (exported, but

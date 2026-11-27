@@ -1,6 +1,6 @@
-//! Claktory's own apps, shipped with each release (#201): signed .clapp
+//! Claktory's own apps, shipped with each release: signed .clapp
 //! files in an `apps` folder beside the release's programs. Claktory
-//! installs each by itself (#333), granting it nothing (no data, no agent),
+//! installs each by itself, granting it nothing (no data, no agent),
 //! unless the person uninstalled it (`app_uninstalled`, in factory.db so a
 //! rollback's config.json is untouched), and updates it when a newer one
 //! ships that asks for nothing new but data (which grants nothing either);

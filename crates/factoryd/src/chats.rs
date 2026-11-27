@@ -1,4 +1,4 @@
-//! Chats (#213): the person's one-off conversations beside their agents,
+//! Chats: the person's one-off conversations beside their agents,
 //! for a question that needs no agent ("what's the history of fried
 //! chicken?"). A chat isn't an agent: it has no name, folder, project or
 //! extensions, agents can't see or message it, and the Map leaves it out.
@@ -252,7 +252,7 @@ pub(crate) fn queue_of(inner: &Inner, id: &str) -> v1::ChatQueuedMessages {
 
 /// A change to a chat's conversation, to clients while it's shown.
 pub(crate) fn send_change(factory: &Factory, id: &str, change: Change) {
-    // To connections watching it without selecting it (#514).
+    // To connections watching it without selecting it.
     let key = crate::watch::chat_key(id);
     if factory.watches.watched(&key) {
         let chat_id = id.to_owned();
@@ -335,7 +335,7 @@ pub(crate) async fn create(
     let now = now_ms();
     let default_model = factory.lock().config.default_model.clone();
     // While others are switched away from its provider, it starts where
-    // they are (U19, #343).
+    // they are.
     let started = {
         let inner = factory.lock();
         crate::usage_switch::start_on(factory, &inner, &default_model, EFFORT)

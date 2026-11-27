@@ -1,10 +1,10 @@
-// #413 item 2 (#378's second step): back after the connection dropped, the
+// Back after the connection dropped, the
 // conversation shown carries on from what the app holds
 // (Hello.transcript_agent_id and transcript_revision): the backend sends
 // only the entries added or changed since (Transcript.resumed), put in
 // place, and the rest is kept as it was, earlier entries paged in and the
 // place in it too. Otherwise (another process, another agent shown) the
-// latest page, as before. Secco's contract (factoryd's tests/all/resume.rs).
+// latest page, as before. The backend's side: factoryd's tests/all/resume.rs.
 import 'dart:async';
 import 'dart:io';
 
@@ -23,7 +23,7 @@ Entry _said(int seq, String text) => Entry(
   assistant: AssistantText(text: text),
 );
 
-/// A Claktory as Secco's contract has it: the agent shown's conversation,
+/// A Claktory as the backend's resume has it: the agent shown's conversation,
 /// a revision ("process-counter") on each whole page and each change, and
 /// what it held at each revision, to send one coming back with it only
 /// what changed since.
@@ -400,7 +400,7 @@ void main() {
                 .text ==
             'Thirteen',
       );
-      // The same conversation, so it's taken in place (as before #413):
+      // The same conversation, so it's taken in place, as before:
       // what a fresh app holds, after the one it held before.
       final held = _held(backend.transcript);
       final page = await fresh();

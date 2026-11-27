@@ -71,7 +71,7 @@ class _PipeStartCardState extends State<PipeStartCard> with PublishesAnswer {
   /// The invite's code shows as a QR too, to scan in person.
   var _qr = false;
 
-  /// A code can be scanned here, with the camera (friend bug #2).
+  /// A code can be scanned here, with the camera.
   var _canScan = false;
   var _busy = false;
   String? _error;
@@ -108,7 +108,7 @@ class _PipeStartCardState extends State<PipeStartCard> with PublishesAnswer {
     super.dispose();
   }
 
-  /// [rethrowing] for focus mode's keys (#514): refused, it throws too.
+  /// [rethrowing] for focus mode's keys: refused, it throws too.
   Future<void> _run(
     Future<void> Function(Backend backend) request, {
     bool rethrowing = false,
@@ -181,7 +181,7 @@ class _PipeStartCardState extends State<PipeStartCard> with PublishesAnswer {
     ),
   );
 
-  /// The step showing's own button for the dock's yes (#514): Make invite,
+  /// The step showing's own button for the dock's yes: Make invite,
   /// Continue with a code pasted, then Connect. An invite keeps the dock on
   /// the card from Make invite on, since its code shows there once, after
   /// it's made; a dismissal moves on.
@@ -442,7 +442,7 @@ class _PipeStartCardState extends State<PipeStartCard> with PublishesAnswer {
   }
 
   /// The field for the card's agent, sent only with Dismiss, which says
-  /// so before anything's typed (Lucy's §3.1), above the card's [row].
+  /// so before anything's typed, above the card's [row].
   Widget _withComment(WorkspaceStore store, Widget row) {
     final name = store.agent(start.agentId)?.name ?? start.agentId;
     return CardAnswerBlock(
@@ -460,7 +460,7 @@ class _PipeStartCardState extends State<PipeStartCard> with PublishesAnswer {
   Widget _dismissButton() =>
       Button(label: 'Dismiss', onPressed: _busy ? null : _dismiss);
 
-  /// The card's row (Lucy's rule 2): the error, if any, in its line, then
+  /// The card's row: the error, if any, in its line, then
   /// the [quiet] buttons and the [primary].
   Widget _actions(Palette palette, List<Widget> quiet, Widget primary) =>
       CardRow(
@@ -719,7 +719,7 @@ String? pipeInviteCheck(String text) =>
 /// A pipe invite's code works for 10 minutes, from when it was made.
 const inviteLifetime = Duration(minutes: 10);
 
-/// Copies a pipe invite's code (row 166, Fugo): marked sensitive, so the
+/// Copies a pipe invite's code: marked sensitive, so the
 /// clipboard's preview, keyboards and clipboard history leave it out, for
 /// as long as it works ([expiresMs], else [inviteLifetime]) and cleared
 /// then, if it's still there: a dead code, never one the person is about

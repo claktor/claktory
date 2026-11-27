@@ -1,4 +1,4 @@
-//! Relay tokens (#450): a signed-in Claktory's token for its endpoint,
+//! Relay tokens: a signed-in Claktory's token for its endpoint,
 //! which Claktory's relays check with the relay-token key's public half.
 
 use claktory_account::protocol::*;

@@ -1,15 +1,15 @@
-// Answering a review where the file is (Matt's ask, after #275): while an
-// agent's review ask waits on the file a viewer pane shows, a bar at the
-// pane's foot (expanded or not) says who asks and what, with the answer's
-// field: Approve and Dismiss while it's empty; typed, one Submit, and
-// Return is Submit (the words go as the person's reply, #370), or the
-// written answer when the ask wants one. Nothing else is added to the
-// file meanwhile: on media the field is the only input; on text, line
-// comments stay and go with the answer. Answered, the pane closes and the
-// person is back where they pressed Review. The same model as the iPhone's
-// (mobile/review_bar.dart) and the iPad's PDFs (ipad/document_review.dart),
-// in Trish's words. Nothing is kept: the ask is the agent's conversation's,
-// fetched as it waits; where to go back to is navigation, in memory.
+// Answering a review where the file is (Matt's ask): while an agent's
+// review ask waits on the file a viewer pane shows, a bar at the pane's
+// foot (expanded or not) says who asks and what, with the answer's field:
+// Approve and Dismiss while it's empty; typed, one Submit, and Return is
+// Submit (the words go as the person's reply), or the written answer when
+// the ask wants one. Nothing else is added to the file meanwhile: on media
+// the field is the only input; on text, line comments stay and go with the
+// answer. Answered, the pane closes and the person is back where they
+// pressed Review. The same model as the iPhone's (mobile/review_bar.dart)
+// and the iPad's PDFs (ipad/document_review.dart).
+// Nothing is kept: the ask is the agent's conversation's, fetched as it
+// waits; where to go back to is navigation, in memory.
 
 import 'dart:async';
 import 'dart:io' show FileSystemException;
@@ -85,7 +85,7 @@ void rememberReviewReturn(BuildContext context, String agentId, String path) {
 
 /// How much of each card's talk (its thread's messages) the card showed
 /// when the person pressed its Review, by "agent/seq": sent with the answer
-/// as talk_seen (#492), so an approval from the file is refused only when
+/// as talk_seen, so an approval from the file is refused only when
 /// the agent replied while it was open. In memory only, as where to come
 /// back to is.
 final _talkSeen = <String, int>{};
@@ -101,12 +101,12 @@ void rememberReviewTalk(String agentId, int seq, int talkSeen) {
 
 /// The card whose Review the person pressed last, by agent: with two of
 /// its cards waiting on one file, the bar answers that one, never just the
-/// oldest (Abbacchio's row 1312). In memory only, as the talk seen is.
+/// oldest. In memory only, as the talk seen is.
 final _chosen = <String, int>{};
 
 /// The card whose Review was pressed last for [agentId] ([rememberReviewTalk]),
 /// until it's answered: the bars fetch it even once it no longer waits, so
-/// it stays in the bar, held, however the bar came (Abbacchio's row 1359).
+/// it stays in the bar, held, however the bar came.
 int? reviewChosen(String agentId) => _chosen[agentId];
 
 /// Forgets every card whose Review was pressed, and the talk each showed.
@@ -126,7 +126,7 @@ final reviewChosenChanged = ValueNotifier<int>(0);
 /// [path]. So a card a reply (from any device) has wait on its agent stays
 /// in the bar, held ([reviewWaits]) until its agent answers, rather than
 /// the bar falling back to an older card, which an Approve there would
-/// answer (Abbacchio's row 1325). Once it's decided, the bar moves on.
+/// answer. Once it's decided, the bar moves on.
 PendingReview? reviewPick({
   required String agentId,
   required String path,
@@ -148,7 +148,7 @@ PendingReview? reviewPick({
 
   final chosen = _chosen[agentId];
   // Pressed, stopped waiting and not fetched yet: no bar for a moment
-  // rather than an older card's (Abbacchio's row 1359).
+  // rather than an older card's.
   if (chosen != null && !waiting.contains(chosen) && entryOf(chosen) == null) {
     return null;
   }
@@ -191,11 +191,11 @@ bool reviewStale(Entry entry, {required bool waits, bool shown = false}) {
       !ask.resolved;
 }
 
-/// The seqs a review bar's watch fetches now: what waits on the person
-/// not fetched yet; the card whose Review was pressed ([reviewChosen]) and
-/// the one shown, held while they wait on their agent, even when the bar
-/// came after they stopped waiting (a pane built again, Abbacchio's row
-/// 1359); and those fetched before that are [reviewStale].
+/// The seqs a review bar's watch fetches now: what waits on the person not
+/// fetched yet; the card whose Review was pressed ([reviewChosen]) and the
+/// one shown, held while they wait on their agent, even when the bar came
+/// after they stopped waiting (a pane built again); and those fetched
+/// before that are [reviewStale].
 Iterable<int> reviewToFetch({
   required String agentId,
   required List<int> waiting,
@@ -229,7 +229,7 @@ bool reviewWaits(Backend backend, String agentId, int seq) =>
 /// card it showed closed) to another of its agent's cards on the file,
 /// rather than to one whose Review the person pressed: the bar then says
 /// so, plainly ([ReviewMovedOn]), and its field starts empty, so what's
-/// typed next answers the card it means to (Zucchero's row 513).
+/// typed next answers the card it means to.
 class ReviewMoves {
   int? _last;
   int? _moved;
@@ -281,15 +281,15 @@ String reviewHeld(AskPerson ask, String name) => ask.replied
 
 /// How much of [agentId]'s card [seq]'s talk the person had seen as the
 /// file opened: what the card showed as its Review was pressed, or 0 when
-/// the file was opened some other way, so none of it was seen (Fugo).
+/// the file was opened some other way, so none of it was seen.
 int reviewTalkSeen(String agentId, int seq) => _talkSeen['$agentId/$seq'] ?? 0;
 
 /// What a review bar shows of its card's talk: what was said on it since
 /// the person last saw it ([reviewTalkSeen]), its agent's replies above
-/// all, so "Look at it again" has somewhere to point (Zucchero's row 485).
+/// all, so "Look at it again" has somewhere to point.
 /// While a reply waits on its agent (the bar held), that reply last, as
 /// the person's: the thread takes it in only with the agent's answer
-/// (Abbacchio's row 1376).
+/// .
 List<AskThreadMessage> reviewTalkSince(String agentId, PendingReview review) {
   final seen = reviewTalkSeen(agentId, review.seq);
   final ask = review.ask;
@@ -345,7 +345,7 @@ class ReviewTalk extends StatelessWidget {
                 child: AskThread(thread: talk, agent: agent, name: name),
               ),
             ),
-          // What Approve means here, as the card says it (Bruno 37281).
+          // What Approve means here, as the card says it.
           if (follows != null) ...[
             if (talk.isNotEmpty) const SizedBox(height: Space.xs),
             Text(
@@ -362,7 +362,7 @@ class ReviewTalk extends StatelessWidget {
   }
 }
 
-/// What answering means after a talk on the card (#492), as the card says
+/// What answering means after a talk on the card, as the card says
 /// it above its buttons: agreeing with where the talk ended, when its
 /// agent's reply came after the card's words last changed
 /// (AskPerson.approve_follows_talk); null otherwise.
@@ -402,17 +402,17 @@ Entry? newerEntry(Entry? held, Entry? fetched) {
 }
 
 /// Sends the answer to [review] as its bar shows it: the card's revision
-/// (#428) and all of its talk, which the bar shows past what its card
-/// showed (#492, [ReviewTalk]). Dismiss and a reply decide nothing, so a
+/// and all of its talk, which the bar shows past what its card
+/// showed ([ReviewTalk]). Dismiss and a reply decide nothing, so a
 /// card its agent changed meanwhile (a reply on it gives it a new
-/// revision) doesn't stop them (Zucchero's row 485): refused, the card is
+/// revision) doesn't stop them: refused, the card is
 /// fetched again ([refresh]) and they go once more with its latest
 /// revision. An approval or an answer refused so stays refused, for the
 /// person to look at the card again, which [refresh] puts in the bar.
 ///
 /// Cut off by the connection, it waits ([onWaiting]: the bar says "Not sent
 /// yet") and goes again by itself once the connection is back, as a card
-/// does (#401; Abbacchio's rows 1298-1301): the first may have got there
+/// does: the first may have got there
 /// meanwhile, and then the Claktory's "already answered" means it went.
 Future<void> sendReview(
   Backend backend,
@@ -483,7 +483,7 @@ Future<void> _sendReview(
   required bool reply,
   required List<Attachment> attachments,
 }) async {
-  // The files the person added (#511), the card's own: sent up first, each
+  // The files the person added, the card's own: sent up first, each
   // once, after [attachments] (a PDF's drawings).
   final card = cardFilesKey(agentId, review.ask.id);
   final files = [
@@ -533,13 +533,13 @@ Future<void> _sendReview(
 
 /// Why a review's answer didn't go, under its bar: the backend's own
 /// words when it refused it (the card changed, or its agent replied on it
-/// since: Abbacchio's D2), "Couldn't send" only when it didn't get there.
+/// since), "Couldn't send" only when it didn't get there.
 String reviewFailure(RequestFailure failure) => connectionLost(failure)
     ? "Couldn't send your answer. Try again."
     : failure.message;
 
 /// [agentId]'s review is answered: what its card showed is spent, and
-/// which card was chosen. All an answer in focus mode does (#514), where
+/// which card was chosen. All an answer in focus mode does, where
 /// the agent's panes stay as they are; [finishReview] does it too.
 void forgetReview(String agentId) {
   _talkSeen.removeWhere((key, _) => key.startsWith('$agentId/'));
@@ -722,9 +722,8 @@ class _ReviewFrameState extends State<ReviewFrame> {
   final _childKey = GlobalKey();
 
   // What's typed in each card's bar is the card's draft ([CardDrafts]): it
-  // stays while the bar goes and comes back (a reply from another device,
-  // Zucchero's row 496), and while the app runs, wherever the card's
-  // reopened (Bruno's Q11).
+  // stays while the bar goes and comes back (a reply from another device),
+  // and while the app runs, wherever the card's reopened.
 
   /// Whether the bar moved on to its card by itself.
   final _moves = ReviewMoves();
@@ -767,15 +766,17 @@ class _ReviewFrameState extends State<ReviewFrame> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Expanded(child: ReviewAnswering(answering: true, child: child)),
-          ReviewBar(
-            key: ValueKey(pending.seq),
-            agentId: widget.agentId,
-            path: widget.path,
-            review: pending,
-            movedOn: _moves.movedTo(widget.agentId, pending.seq),
-            refresh: () => _watch!.refresh(pending.seq),
-            answer: CardDrafts.of(_watch!.backend)
-                .field(cardKey(widget.agentId, pending.ask.id)),
+          CardDropArea(
+            child: ReviewBar(
+              key: ValueKey(pending.seq),
+              agentId: widget.agentId,
+              path: widget.path,
+              review: pending,
+              movedOn: _moves.movedTo(widget.agentId, pending.seq),
+              refresh: () => _watch!.refresh(pending.seq),
+              answer: CardDrafts.of(_watch!.backend)
+                  .field(cardKey(widget.agentId, pending.ask.id)),
+            ),
           ),
         ],
       );
@@ -834,7 +835,7 @@ class _ReviewBarState extends State<ReviewBar> {
   var _busy = false;
 
   /// Why the last answer didn't go: it couldn't be sent, or its agent
-  /// changed the card meanwhile (#428).
+  /// changed the card meanwhile.
   String? _failed;
 
   @override
@@ -845,7 +846,7 @@ class _ReviewBarState extends State<ReviewBar> {
 
   bool get _wantsText => widget.review.ask.wantsText;
 
-  /// [dismiss], or answer; with [reply] (#370), what's typed on an
+  /// [dismiss], or answer; with [reply], what's typed on an
   /// approval goes as the person's reply, neither a yes nor a no.
   Future<void> _answer({required bool dismiss, bool reply = false}) async {
     final text = _text.text.trim();
@@ -861,7 +862,7 @@ class _ReviewBarState extends State<ReviewBar> {
       _failed = null;
     });
     try {
-      // The card as the bar shows it (#428), and its talk (#492).
+      // The card as the bar shows it, and its talk.
       await sendReview(
         AppScope.of(context),
         widget.agentId,
@@ -886,14 +887,14 @@ class _ReviewBarState extends State<ReviewBar> {
         setState(() => _failed = reviewFailure(failure));
       }
     } on FileSystemException catch (error) {
-      // A file to go with it couldn't be read (#511).
+      // A file to go with it couldn't be read.
       if (mounted) setState(() => _failed = cardFilesFailure(error));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
-  /// Where the files added to the answer wait (#511): the card's, so
+  /// Where the files added to the answer wait: the card's, so
   /// what was added on it comes here too.
   String get _files => cardFilesKey(widget.agentId, widget.review.ask.id);
 
@@ -902,7 +903,7 @@ class _ReviewBarState extends State<ReviewBar> {
   }
 
   /// Return sends what's typed: a written answer, or on an approval the
-  /// person's reply (Submit, #370). An empty field never approves by itself.
+  /// person's reply (Submit). An empty field never approves by itself.
   void _return() {
     if (_text.text.trim().isEmpty) return;
     unawaited(_answer(dismiss: false, reply: !_wantsText));
@@ -919,7 +920,7 @@ class _ReviewBarState extends State<ReviewBar> {
     final ask = widget.review.ask;
     final touch = touchFirst(context);
     // A reply has it wait on its agent: the bar holds, nothing to send
-    // until the agent answers (Abbacchio's row 1325).
+    // until the agent answers.
     final held = !reviewWaits(backend, widget.agentId, widget.review.seq);
     final off = _busy || held;
     final note = held && _failed == null ? reviewHeld(ask, name) : _failed;
@@ -966,7 +967,7 @@ class _ReviewBarState extends State<ReviewBar> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   // The agent's words: what reorders them shows by its code
-                  // (proseCodes, Fugo).
+                  // (proseCodes).
                   Text(
                     proseCodes(ask.title),
                     style: type.emphasis.copyWith(color: palette.text),
@@ -1010,7 +1011,7 @@ class _ReviewBarState extends State<ReviewBar> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.end,
                 children: [
-                  // Files with the answer (#511).
+                  // Files with the answer.
                   CardAttachButton(
                     card: _files,
                     enabled: !_busy,
@@ -1018,7 +1019,7 @@ class _ReviewBarState extends State<ReviewBar> {
                   ),
                   const SizedBox(width: Space.xs),
                   // Typed on an approval: one Submit in place of both, the
-                  // words a reply, neither a yes nor a no (#370).
+                  // words a reply, neither a yes nor a no.
                   CommentTyped(
                     controller: _text,
                     builder: (context, typed) => Row(

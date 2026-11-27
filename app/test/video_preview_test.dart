@@ -1,4 +1,4 @@
-// Videos on a slow link (#379): once the original's first pieces show it
+// Videos on a slow link: once the original's first pieces show it
 // would take too long, a preview made for this screen comes instead, and
 // says it's one; Show original brings the original while the preview
 // plays, and on a quick link nothing changes.
@@ -130,7 +130,7 @@ void main() {
     expect(find.text('0:00 / 1:00'), findsOneWidget);
   });
 
-  // Zucchero's #379 LOW: the header gave the preview's size beside the
+  // The header gave the preview's size beside the
   // original's bytes, as if it were the original's.
   testWidgets("while the preview plays, the header gives the original's "
       'size', (tester) async {

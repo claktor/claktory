@@ -1,8 +1,8 @@
-// Needs you's list holds still under the finger (#599, row 688; Lucy's
-// needs-you-cards.md §4.5): a request coming in above goes in with the
-// offset grown by its height, at the very top too, and a pill says what's
-// above ("↑ 1 new", "↑ 1 urgent"), scrolling up to it; a row leaving fades
-// where it was, the rows under it closing up only once no finger is down.
+// Needs you's list holds still under the finger: a request coming in above
+// goes in with the offset grown by its height, at the very top too, and a
+// pill says what's above ("↑ 1 new", "↑ 1 urgent"), scrolling up to it; a
+// row leaving fades where it was, the rows under it closing up only once
+// no finger is down.
 import 'package:factory_app/inbox.dart' show NeedsYouList, needsYouItems;
 import 'package:factory_app/needs_you_entries.dart' show NeedsYouEntries;
 import 'package:factory_app/needs_you_hold.dart';
@@ -89,7 +89,7 @@ void main() {
     expect(newAboveWords(count: 1, urgent: 0), '↑ 1 new');
     expect(newAboveWords(count: 3, urgent: 0), '↑ 3 new');
     expect(newAboveWords(count: 1, urgent: 1), '↑ 1 urgent');
-    // Both, the urgent first (Trish 50648).
+    // Both, the urgent first.
     expect(newAboveWords(count: 3, urgent: 1), '↑ 1 urgent · 2 new');
     expect(
       newAboveSpoken(requests: 1, alerts: 0, urgent: 0),
@@ -199,7 +199,7 @@ void main() {
       lessThanOrEqualTo(lea.top),
     );
     // The alert went up past the top to make room, and Kai's top with it:
-    // the pill says so (Lucy 50118; Trish 50648), until they're in view.
+    // the pill says so, until they're in view.
     expect(find.text('↑ 1 urgent · 1 new'), findsOneWidget);
     await tester.tap(_pill);
     await pumpFrames(tester);
@@ -233,7 +233,7 @@ void main() {
     expect(find.text('↑ 1 new'), findsOneWidget);
 
     // An older copy of June's card (fetched before the change): its row
-    // stays first, and nothing moves (Zucchero's row 717).
+    // stays first, and nothing moves.
     final june = tester.getRect(_row(_titles['june']!));
     harness.backend.entriesById['june/1'] = _ask(1, 50, _titles['june']!);
     for (final item in needsYouItems(harness.backend.workspace.workspace)) {

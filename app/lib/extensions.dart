@@ -485,8 +485,7 @@ class _ChecklistViewState extends State<ChecklistView> {
         item.status == ChecklistStatus.CHECKLIST_STATUS_DONE ||
         item.status == ChecklistStatus.CHECKLIST_STATUS_DROPPED;
     // Items added in one call share their millisecond: then by number, as
-    // they were added (List.sort isn't stable past 32: Abbacchio's row
-    // 661).
+    // they were added (List.sort isn't stable past 32).
     int byAdded(ChecklistItem a, ChecklistItem b) {
       final added = a.created.compareTo(b.created);
       return added != 0 ? added : a.id.compareTo(b.id);
@@ -1294,8 +1293,8 @@ WaitingWords waitingWords({
     };
     return (text: text, seeQuestion: true);
   }
-  // No card asks: the agent's state, never a task for the person (Matt's
-  // ruling). Needs you doesn't show it; the card will when one asks.
+  // No card asks: the agent's state, never a task for the person. Needs
+  // you doesn't show it; the card will when one asks.
   final owner = nameOf(agentId);
   if (dismissedMs > 0) {
     // Dismissed: the agent decides meanwhile, and asks again no sooner

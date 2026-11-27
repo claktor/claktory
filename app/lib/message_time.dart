@@ -236,11 +236,10 @@ class RenderTimeFoot extends RenderBox
     final height = paragraph.getFullHeightForCaret(end);
     // How far the last line reaches on screen, which isn't where its text
     // ends logically when it changes direction: a run the person reversed
-    // (U+202E) would otherwise run under the time (Sale).
+    // (U+202E) would otherwise run under the time.
     var dx = caret.dx;
     // Each box the height of its line, so runs in another font (Hebrew or
-    // Arabic from a fallback font, taller or shorter) are on it too (Sale,
-    // row 123).
+    // Arabic from a fallback font, taller or shorter) are on it too.
     final boxes = paragraph.getBoxesForSelection(
       TextSelection(baseOffset: 0, extentOffset: end.offset),
       boxHeightStyle: ui.BoxHeightStyle.max,

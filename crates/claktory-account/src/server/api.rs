@@ -80,6 +80,10 @@ fn key_retired_for(service: &Service, email: &str, backend_key: &str) -> Result<
 /// refused for the rest of the hour once its email had 5 wrong codes.
 pub(super) async fn start(service: &Service, mut request: db::Request, code: &str) -> Result<String, ApiError> {
     let review = service.review(&request.email);
+    if review.is_none() && service.config.review_only {
+        tracing::info!("review only: a sign-in ({}) refused, not a review account", request.kind);
+        return Err(review_only());
+    }
     if review.is_some() {
         let by_email = review_wrong(&request.email);
         if let Some(wait) = db::spent(&service.db(), &[(&by_email, 3600, review::WRONG_PER_HOUR)], service.now())? {
@@ -292,6 +296,31 @@ fn review_box_signed(service: &Service, call: &Call, request: &db::Request) -> R
 }
 
 /// What a review email's Claktory that isn't the review box is told.
+/// On a service for the store reviewers alone (`--review-only`): a
+/// Claktory of `email`'s with `backend_key` may bind a device to its
+/// account only when it's the review box of a review account (Fugo
+/// 53273). Anywhere else, every one may.
+pub(super) fn review_only_box(service: &Service, email: &str, backend_key: &str) -> Result<(), ApiError> {
+    if !service.config.review_only {
+        return Ok(());
+    }
+    if service.review(email).is_none() {
+        tracing::warn!("review only: a Claktory refused, not a review account's");
+        return Err(review_only());
+    }
+    review_box_only(service, email, backend_key)
+}
+
+/// Every sign-in but a review account's, on a service for the store
+/// reviewers alone (`--review-only`).
+fn review_only() -> ApiError {
+    ApiError::new(
+        StatusCode::FORBIDDEN,
+        "review_only",
+        "This account service is only for App Store and Google Play review. Sign in at claktory.com instead.",
+    )
+}
+
 fn review_refused() -> ApiError {
     ApiError::new(
         StatusCode::FORBIDDEN,

@@ -13,11 +13,11 @@
 //!
 //! A Linux release has no app: its archive is the published Mac release of
 //! the same version (`channel::APP_SOURCE`), downloaded and checked against
-//! the manifest's SHA-256, and served as it is: a .tar.xz since #454, which
+//! the manifest's SHA-256, and served as it is: a .tar.xz, which
 //! every Mac app's `tar -xzf` unpacks (macOS's tar reads xz and gzip by
 //! their bytes, ignoring -z), v0.1.22's included. Its app's name is read
-//! here in Rust, whatever the compression, so a Linux computer needs no xz
-//! (friend bug #56). The names stay `app.tar.gz` whatever is inside.
+//! here in Rust, whatever the compression, so a Linux computer needs no xz.
+//! The names stay `app.tar.gz` whatever is inside.
 //!
 //! A make that failed is said to every ask for a while (`backoff`) rather
 //! than tried again at each: an app asks every few seconds, and each try
@@ -174,7 +174,7 @@ async fn download(partial: &Path, mac: &Tarball) -> Result<Meta, String> {
     match download_checked(mac, partial).await {
         Ok(Ok(())) => {}
         // Its size or hashes are for the log, never the person's banner
-        // (Abbacchio 46113).
+        // .
         Ok(Err(reason)) => {
             tracing::warn!(url = %mac.url, %reason, "the Mac release isn't what its manifest says");
             return Err("the Mac app it downloaded didn't match the release, so it wasn't used".to_owned());
@@ -187,8 +187,8 @@ async fn download(partial: &Path, mac: &Tarball) -> Result<Meta, String> {
 }
 
 /// The `.app` at the top of a Mac release's tarball, read in Rust whatever
-/// its compression (xz since #454, gzip before, or none), with no tar or xz
-/// on the computer (friend bug #56).
+/// its compression (xz, gzip in older releases, or none), with no tar or xz
+/// on the computer.
 fn top_app(tarball: &Path) -> Result<String, String> {
     let unpack = |error: &dyn std::fmt::Display| format!("the Mac release doesn't unpack: {error}");
     let mut file = std::io::BufReader::new(std::fs::File::open(tarball).map_err(|error| unpack(&error))?);

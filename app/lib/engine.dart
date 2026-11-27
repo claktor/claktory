@@ -1,13 +1,12 @@
-// Stopping and starting Claktory on this Mac from its app (friend bug
-// #27). Quitting the app (⌘Q, or closing its last window) stops Claktory
-// first when the person chose that (Settings.when_app_quits): the native
-// side asks "quitting" and waits a few seconds at most. The app menu has
-// Stop Claktory while it runs under its background service
-// (BackendService.can_stop), and Start Claktory while the person has it
-// turned off. macos/Runner/Setup.swift's Engine is the other end of
-// factory/engine. Starting goes through setting up ([MacSetup.startEngine]:
-// the bundled `factoryd install --start`), since a stopped Claktory can't
-// be asked anything.
+// Stopping and starting Claktory on this Mac from its app. Quitting the app
+// (⌘Q, or closing its last window) stops Claktory first when the person
+// chose that (Settings.when_app_quits): the native side asks "quitting" and
+// waits a few seconds at most. The app menu has Stop Claktory while it runs
+// under its background service (BackendService.can_stop), and Start
+// Claktory while the person has it turned off. macos/Runner/Setup.swift's
+// Engine is the other end of factory/engine. Starting goes through setting
+// up ([MacSetup.startEngine]: the bundled `factoryd install --start`),
+// since a stopped Claktory can't be asked anything.
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
@@ -151,8 +150,8 @@ class EngineControl {
   }
 }
 
-/// Whether the first launch asks what quitting the app does (friend bug
-/// #27): a new Claktory its Mac's background service runs
+/// Whether the first launch asks what quitting the app does: a new
+/// Claktory its Mac's background service runs
 /// (Onboarding.when_app_quits), in the app on that Mac. Other devices
 /// don't ask: it's about this app quitting.
 bool asksWhenAppQuits(BuildContext context) {
@@ -230,8 +229,7 @@ class _WhenAppQuitsStepState extends State<WhenAppQuitsStep> {
             style: type.caption.copyWith(color: palette.textFaint),
           ),
           const SizedBox(height: Space.xs),
-          // Where macOS lets it be turned off, and what that does (Lucy's
-          // permissions spec, P6).
+          // Where macOS lets it be turned off, and what that does.
           Text(
             'macOS lists Claktory Agents under Login Items. If you turn it '
             'off there, your agents stop when you quit Claktory.',

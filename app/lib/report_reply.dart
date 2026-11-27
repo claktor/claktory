@@ -1,5 +1,5 @@
 // Reporting an agent's reply to Claktory's team (Google Play's policy on
-// AI-generated content; Bruno's decision): a sheet that shows exactly what
+// AI-generated content): a sheet that shows exactly what
 // goes, as the backend prepared it (the reply's text, the model that wrote
 // it, this Claktory's version), takes an optional note, and sends nothing
 // until Send.

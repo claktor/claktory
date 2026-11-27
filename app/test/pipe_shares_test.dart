@@ -1,11 +1,10 @@
-// Websites shared over pipes (pipe-port-sharing.md's revised plan, Bruno
-// 30866; Secco's contract 30935): Share a website… from a pipe's settings or
-// a group's menu (a port the Claktory checks, a name, the pipes or the
-// group, Claktory's one warning naming the port); the shares on a pipe in
-// its settings, this side's with Stop and the other side's with Hide or
-// Show; the other side's under the pipe's header with Open (Safari at
-// 127.0.0.1), Copy address and Hide; and a pipe moved into or out of a
-// group with shares, or a group deleted, saying what that changes.
+// Websites shared over pipes: Share a website… from a pipe's settings or a group's menu
+// (a port the Claktory checks, a name, the pipes or the group, Claktory's
+// one warning naming the port); the shares on a pipe in its settings, this
+// side's with Stop and the other side's with Hide or Show; the other side's
+// under the pipe's header with Open (Safari at 127.0.0.1), Copy address and
+// Hide; and a pipe moved into or out of a group with shares, or a group
+// deleted, saying what that changes.
 import 'package:factory_app/connections.dart' show parsePairingCode;
 import 'package:factory_app/devices.dart' show thisDeviceKind;
 import 'package:factory_app/loopback_forward.dart';
@@ -201,7 +200,7 @@ void main() {
       );
     });
 
-    // Squalo's W2: one not opened yet stands out, in the pipe card's wash
+    // One not opened yet stands out, in the pipe card's wash
     // and border, until it is.
     testWidgets('not opened yet, it stands out until it is', (tester) async {
       final harness = await _show(
@@ -354,7 +353,7 @@ void main() {
       expect(find.byType(ReceivedShare), findsNothing);
     });
 
-    // #503 (Matt's MacBook paired to his Mac Studio): a computer showing a
+    // A computer (a MacBook paired to a Mac Studio) showing a
     // Claktory on another machine opens it through that one, from a port of
     // its own, at the share's own host; a phone says it can't yet.
     group('showing a Claktory elsewhere', () {
@@ -439,7 +438,7 @@ void main() {
         );
       });
 
-      // Abbacchio's row 1350: cut off, it names the Claktory, not "the
+      // Cut off, it names the Claktory, not "the
       // backend", and the line goes once it's connected again.
       testWidgets("offline, Open says it can't reach the Claktory, and the "
           'line goes once it is back', (tester) async {
@@ -452,7 +451,7 @@ void main() {
         );
         await settle(tester);
         harness.backend
-          ..refuse = 'Not connected to the backend.'
+          ..refuse = "Can't reach your Claktory right now."
           ..connected.value = false;
         await tester.tap(find.text('Open'));
         await settle(tester);
@@ -606,7 +605,7 @@ void main() {
         });
       });
 
-      // W6 on iPhone and iPad (#505): in Safari's view over the app,
+      // W6 on iPhone and iPad: in Safari's view over the app,
       // which stays in front with the forward, at the share's own host.
       group('on an iPhone or iPad', () {
         late List<Uri> pages;
@@ -696,7 +695,7 @@ void main() {
           expect(inAppShareBrowser.shows(harness.backend, 's1'), isFalse);
         });
 
-        // Zucchero row 655: a site that stopped answers with the Claktory's
+        // A site that stopped answers with the Claktory's
         // own page, which Safari counts as loaded; the Claktory says it
         // failed on the share instead (last_failure).
         testWidgets('a site that failed while its page was up says why once '
@@ -814,7 +813,7 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
-    // Abbacchio's row 1374: 27 websites shared (the most kept is 32) never
+    // 27 websites shared (the most kept is 32) never
     // push the chat and its box out of reach; they scroll in their room.
     for (final (device, size) in [
       ('a Mac', const Size(1200, 860)),
@@ -918,7 +917,7 @@ void main() {
       expect(find.text('Show'), findsOneWidget);
     });
 
-    // Squalo's W3: from a MacBook showing a Claktory on a Mac Studio, the
+    // From a MacBook showing a Claktory on a Mac Studio, the
     // port shared is the Mac Studio's, and every sentence says so.
     testWidgets("from a computer showing a Claktory elsewhere, the sentences "
         "name the computer whose port it is", (tester) async {
@@ -1008,7 +1007,7 @@ void main() {
       expect(share.name, 'Dashboard');
       expect(share.pipeIds.toSet(), {'p3', 'p5'});
       expect(share.groupId, isEmpty);
-      // 24 hours unless changed (friend bug #46).
+      // 24 hours unless changed.
       expect(share.lastsS, Int64(86400));
       expect(find.text('Share a website'), findsNothing);
     });

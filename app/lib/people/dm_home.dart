@@ -7,8 +7,8 @@ import 'package:flutter/foundation.dart';
 
 import '../protocol/factory/v1/factory.pb.dart';
 
-// #451: the person's direct messages go through their own always-on
-// Claktory, their home (dms-no-server-storage.md), not claktory.com, which
+// The person's direct messages go through their own always-on
+// Claktory, their home, not claktory.com, which
 // keeps only MLS's control plane. This device hands its MLS messages to
 // the home (DmSend) and follows its groups there (DmFollow); the home
 // sends them on to friends' homes and serves the person's devices, in one
@@ -16,13 +16,13 @@ import '../protocol/factory/v1/factory.pb.dart';
 // after anything the worker numbered before.
 
 /// Every seq the home gives is past this one: a group's home numbering
-/// starts at 2^32 + 1, past any seq the worker gave (Mista, 32426). A
+/// starts at 2^32 + 1, past any seq the worker gave. A
 /// position at or under it is the worker's, so the home starts that group
 /// from this device's join.
 const dmHomeSeqBase = 1 << 32;
 
 /// The person's home Claktory, as this device reaches it: the Claktory the
-/// app shows (Mista's (c) for v1: another one's NOT_HOME means "Waiting for
+/// app shows (another one's NOT_HOME means "Waiting for
 /// your Claktory"). Tests give their own.
 abstract class DmHomeLink {
   /// Whether the app is connected to it now.

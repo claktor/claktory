@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
@@ -5,8 +6,21 @@ use factory_agent::credentials::{Credential, CredentialInfo, FileCredentialStore
 use factory_agent::errors::{AgentFailure, Error};
 use serde_json::json;
 
+#[cfg(unix)]
 fn mode(path: &Path) -> u32 {
     std::fs::metadata(path).expect("metadata").permissions().mode() & 0o777
+}
+
+/// On Windows, a mode as private as 0600 or 0700 is: only this user and
+/// SYSTEM.
+#[cfg(windows)]
+fn mode(path: &Path) -> u32 {
+    let private = factory_agent::windows::system::is_private_path(path).expect("security");
+    match (private, path.is_dir()) {
+        (true, true) => 0o700,
+        (true, false) => 0o600,
+        (false, _) => 0o644,
+    }
 }
 
 fn corrupt(error: &Error) -> (&AgentFailure, bool) {
@@ -31,6 +45,7 @@ async fn the_first_write_creates_missing_directories_private_and_leaves_no_temp_
     assert_eq!(names, ["auth.json"]);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_rewrite_keeps_the_existing_owner_group_and_mode() {
     let home = tempfile::tempdir().unwrap();

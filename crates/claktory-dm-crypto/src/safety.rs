@@ -1,4 +1,4 @@
-//! The safety number (dms-e2ee.md §5.3 Verify, Fugo 2c): what two people
+//! The safety number (dms-e2ee.md §5.3 Verify): what two people
 //! compare, read aloud or by scanning each other's QR code, to know their
 //! clients pinned each other's real identity keys and nothing between
 //! them swapped one. It's made from both identity keys and both account

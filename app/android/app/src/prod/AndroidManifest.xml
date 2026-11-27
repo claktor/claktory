@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The pairing page's App Link, in the release build only: Claktory Dev
+     isn't in claktory.com's assetlinks.json, so it never takes the real
+     app's pairing links. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity android:name=".LinkActivity">
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="https"/>
+                <data android:host="claktory.com"/>
+                <data android:path="/pair"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

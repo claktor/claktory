@@ -1,4 +1,4 @@
-//! A pipe's bound liaison (#250): made for the pipe, it's shown in it
+//! A pipe's bound liaison: made for the pipe, it's shown in it
 //! (Agent.pipe_id), its conversation streams with the pipe's, the pipe's
 //! wake names the messages it brings, and it goes with the pipe, its
 //! conversation kept in the pipe's folder.

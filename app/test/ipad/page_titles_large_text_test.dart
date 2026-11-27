@@ -1,5 +1,5 @@
-// Pages' title bars at an iPad's largest text in a narrow window (Sorbet's
-// S5 sweep): What's new, Usage and Marketplace cut their titles short
+// Pages' title bars at an iPad's largest text in a narrow window: What's
+// new, Usage and Marketplace cut their titles short
 // rather than spill past the window, Done kept at the end.
 import 'package:factory_app/scope.dart' show AppPage;
 import 'package:flutter/rendering.dart' show RenderParagraph;

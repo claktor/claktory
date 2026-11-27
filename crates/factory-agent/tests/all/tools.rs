@@ -154,6 +154,8 @@ async fn ranged_reads_and_new_files_preserve_untouched_crlf_and_unicode_source()
     assert!(text(&long).ends_with("\n[Lines 1-1 of 1]"));
 }
 
+// Unix modes and symlinks (Windows: Developer Mode or an administrator for links).
+#[cfg(unix)]
 #[tokio::test]
 async fn writes_over_directories_and_escapes_are_refused_without_side_effects() {
     let tools = TestTools::new();
@@ -189,6 +191,8 @@ async fn writes_over_directories_and_escapes_are_refused_without_side_effects() 
     }
 }
 
+// Symlinks, and Node's texts for Unix errors.
+#[cfg(unix)]
 #[tokio::test]
 async fn native_filesystem_errors_keep_nodes_text() {
     let tools = TestTools::new();
@@ -269,7 +273,7 @@ async fn targeted_edits_return_a_diff_and_refuse_ambiguous_or_overlapping_text()
     assert_eq!(tools.read("lf.txt"), "one\n2\n3\n");
     assert!(text(&lf).contains("-two\n+2\n+3"));
     let error = run(&tools, "edit_file", json!({"path": "missing.txt", "edits": [{"oldText": "a", "newText": "b"}]})).await.unwrap_err();
-    assert_eq!(error.to_string(), format!("ENOENT: no such file or directory, open '{}/missing.txt'", tools.root().display()));
+    assert_eq!(error.to_string(), format!("ENOENT: no such file or directory, open '{}'", tools.root().join("missing.txt").display()));
     let error = run(&tools, "edit_file", json!({"path": "../secret", "edits": [{"oldText": "a", "newText": "b"}]})).await.unwrap_err();
     assert_eq!(error.failure(), Some(&AgentFailure::WorkspaceEscape { path: "../secret".into() }));
 }
@@ -397,6 +401,8 @@ async fn replace_all_rewrites_every_exact_occurrence() {
 /// Bruno 29528, 29755: bash's description names ripgrep and jq, each only
 /// when it resolves on the PATH the agent's commands run with: telling
 /// agents to use a program they then can't run taught them to stop trying it.
+// Executable bits; on Windows the tools are Claktory's own, always there.
+#[cfg(unix)]
 #[test]
 fn bash_names_ripgrep_and_jq_only_when_they_are_on_the_path() {
     use std::os::unix::fs::PermissionsExt;

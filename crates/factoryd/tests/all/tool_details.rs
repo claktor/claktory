@@ -138,7 +138,7 @@ async fn extension_tools_say_what_they_did_in_details() {
     assert_eq!(schema, json!({"instance": "", "tables": 1}));
 }
 
-/// Images (#403): what the app draws an image_generate call from, these
+/// Images: what the app draws an image_generate call from, these
 /// keys and no others (`crate::image_generate` checks their values).
 #[tokio::test]
 async fn image_generate_says_what_it_made_in_details() {

@@ -213,7 +213,7 @@ void main() {
     expect(_rich('CODEMARK'), findsOneWidget);
     await inSight('CODEMARK');
 
-    // And back (Abbacchio's row 655).
+    // And back.
     await tester.tap(find.text('Formatted'));
     await pumpFrames(tester);
     expect(_count(tester), '1 of 1');

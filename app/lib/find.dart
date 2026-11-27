@@ -204,7 +204,7 @@ class FindSessions {
   /// The session of the pane last tapped or clicked in inside [context] (a
   /// view whose panes can be searched), while it's still on show: what a
   /// Find button of the view's own searches, so it finds in the pane being
-  /// read rather than always the same one (Squalo's ST14). Null when none
+  /// read rather than always the same one. Null when none
   /// was, or it's gone.
   FindSession? pressedWithin(BuildContext context) {
     final pressed = _pressed;
@@ -626,7 +626,7 @@ class FindBar extends StatelessWidget {
         semanticsLabel: target.placeholder,
         // Where Return comes as the keyboard's action rather than a key the
         // bindings above see (an iPad's, on screen or not), it goes to the
-        // next match too, the field kept (Zucchero's row 214). A key they
+        // next match too, the field kept. A key they
         // take never reaches the field: no step twice.
         textInputAction: TextInputAction.search,
         onSubmitted: (_) => step(1),

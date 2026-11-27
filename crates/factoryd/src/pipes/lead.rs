@@ -1,10 +1,10 @@
-//! A pipe's lead, the agent told of each message from the other side
-//! (pipe-edo-findings.md, Bruno's B3): a pipe with agents always has one.
+//! A pipe's lead, the agent told of each message from the other side:
+//! a pipe with agents always has one.
 //! When its lead goes (unticked, cleared, deleted, moved out of the pipe's
 //! project), its bound liaison leads it, or else its first agent limited to
 //! the pipe; the pipe says who answers now, and that agent is told at once
 //! of what came after the last it was told of. Never an agent that can run
-//! commands unless the person chose it (Fugo): the other side wakes its
+//! commands unless the person chose it: the other side wakes its
 //! lead at will. With none to choose, the pipe has no lead: what arrives
 //! waits for the person (Pipe.unanswered_seqs), and the pipe says so once.
 
@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::factory::Factory;
 
 /// The pipe's agents now that could lead it: its members that are still
-/// agents of its project, but for those that only send (#414), which never
+/// agents of its project, but for those that only send, which never
 /// read what arrives.
 fn present<'a>(config: &'a Config, record: &'a Record) -> impl Iterator<Item = &'a String> {
     record.members.iter().filter(|id| {
@@ -29,7 +29,7 @@ pub(crate) fn effective(config: &Config, record: &Record) -> Option<String> {
 }
 
 /// Who leads it: its lead, else its bound liaison, else its first agent
-/// limited to the pipe, but never one that gave up leading it (#236);
+/// limited to the pipe, but never one that gave up leading it;
 /// None when it has neither (the person chooses).
 fn chosen(config: &Config, record: &Record) -> Option<String> {
     let limited = |id: &&String| record.quarantined.contains(id) && !record.declined_lead.contains(id);
@@ -91,6 +91,30 @@ pub(crate) fn settle_all(factory: &Arc<Factory>) {
             settle(factory, &record.id, "");
         }
     }
+}
+
+/// For a move's confirm (PreviewArrange, 17b): each open pipe whose lead is
+/// among `moving` and stops leading it in `after`, with who'd lead it then
+/// ("" for none: what arrives waits for the person). As tuples of the pipe,
+/// its lead now and the next. The moving agents leave its members, as
+/// `moved_out` makes them, but for those limited to it.
+pub(crate) fn handovers(factory: &Factory, before: &Config, after: &Config, moving: &[String]) -> Vec<(String, String, String)> {
+    factory
+        .pipes
+        .all()
+        .into_iter()
+        .filter(|record| record.granted() && record.state != State::Closed)
+        .filter_map(|mut record| {
+            let lead = effective(before, &record)?;
+            if !moving.contains(&lead) || effective(after, &record).is_some() {
+                return None;
+            }
+            let quarantined = record.quarantined.clone();
+            record.members.retain(|id| !moving.contains(id) || quarantined.contains(id));
+            let next = chosen(after, &record).unwrap_or_default();
+            Some((record.id, lead, next))
+        })
+        .collect()
 }
 
 /// The messages from the other side no agent was told of, while `record`

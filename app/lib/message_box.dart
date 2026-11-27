@@ -61,14 +61,14 @@ abstract class MessageTarget {
   MessageBlocked? blocked(BuildContext context) => null;
 
   /// Whom a voice message goes to, by name ("June"), for the floating
-  /// recording bar while the box is out of sight (#409).
+  /// recording bar while the box is out of sight.
   String get name => label;
 
   /// Goes back to this conversation from anywhere in the app, as [context]
   /// shows it now (the bar's name, tapped); null where there's no way.
   VoidCallback? reopen(BuildContext context) => null;
 
-  /// What its voice messages are, kept on the device until sent (#401).
+  /// What its voice messages are, kept on the device until sent.
   KeptKind get voiceKind => KeptKind.agent;
 
   /// The color Send is filled with while the box writes to this target,
@@ -78,7 +78,7 @@ abstract class MessageTarget {
 
   /// Sends [text] with [files] (from the box, taken out of it); with
   /// [voice] (its length) it's a voice message, files[0] its recording,
-  /// [text] and any other files going with it as one message (#425). It should show at once and say if it fails, as an agent's
+  /// [text] and any other files going with it as one message. It should show at once and say if it fails, as an agent's
   /// outbox does: the box has already been cleared.
   void send(String text, {List<LocalFile> files = const [], Duration? voice});
 
@@ -194,7 +194,7 @@ class MessageBox extends StatefulWidget {
   final MessageTarget target;
 
   /// Takes the keys as it comes (not on a touch screen). Focus mode's
-  /// Context box doesn't: the keys stay with the card (#514).
+  /// Context box doesn't: the keys stay with the card.
   final bool autofocus;
 
   /// Just before a message goes: the conversation follows it.
@@ -224,17 +224,39 @@ class _MessageBoxState extends State<MessageBox> {
     _drafts.takeFocus(widget.target.key);
     _drafts.addListener(_draftChanged);
     // Files dropped on the window come here, for this target.
-    _drops = FileDrop.dropped.listen(_attach);
-    FileDrop.claim(
-      this,
-      takesFiles: widget.target.takesFiles,
-      key: widget.target.key,
-    );
+    _drops = FileDrop.dropped.listen((paths) {
+      if (FileDrop.owns(this)) unawaited(_attach(paths));
+    });
+    _stagedDrops = FileDrop.staged.listen(_attachStaged);
+    _textDrops = FileDrop.texts.listen(_dropText);
     _takeVoice();
   }
 
+  /// Whether nothing is pushed over this box (a phone layout's Settings,
+  /// say): only then do files dropped on the window come here.
+  bool? _onTop;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final onTop = ModalRoute.isCurrentOf(context) ?? true;
+    if (onTop == _onTop) return;
+    _onTop = onTop;
+    if (onTop) {
+      _claimDrops();
+    } else {
+      FileDrop.release(this);
+    }
+  }
+
+  void _claimDrops() => FileDrop.claim(
+    this,
+    takesFiles: widget.target.takesFiles,
+    key: widget.target.key,
+  );
+
   /// The voice message recorded from this box, or one recorded for its
-  /// target from a box that went meanwhile (#409): it goes on when the box
+  /// target from a box that went meanwhile: it goes on when the box
   /// goes, the floating bar sending it.
   late _BoxVoice _session;
 
@@ -282,7 +304,7 @@ class _MessageBoxState extends State<MessageBox> {
   void _voiceError(String error, {bool plain = false}) =>
       plain ? _hint(error) : setState(() => _error = error);
 
-  /// What was recorded waits in the box as its voice note (#425), to go
+  /// What was recorded waits in the box as its voice note, to go
   /// with what's written there: on a Mac the field has the keys again, to
   /// carry on writing or send it all with Return.
   void _voiceAttached() {
@@ -291,7 +313,7 @@ class _MessageBoxState extends State<MessageBox> {
     if (!touchFirst(context)) _focus.requestFocus();
   }
 
-  /// The voice note waiting in this box, if any (#425).
+  /// The voice note waiting in this box, if any.
   KeptVoice? get _note =>
       VoiceNotes.of(AppScope.of(context)).note(widget.target.key);
 
@@ -347,8 +369,7 @@ class _MessageBoxState extends State<MessageBox> {
       return false;
     }
     // While the popover asks (and the speech model's question), the box
-    // stays as it was: the recording's row only once it records (Lucy
-    // 49814, Risotto 49783).
+    // stays as it was: the recording's row only once it records.
     setState(() => _micAsking = true);
     final ready = await _micAsked() && mounted && await readyForVoice(context);
     if (!mounted) return false;
@@ -375,7 +396,7 @@ class _MessageBoxState extends State<MessageBox> {
 
   /// Watches for the app coming back while the microphone is off: from
   /// Settings with it on, the line and its Open Settings go by themselves
-  /// (permissions spec, rule 3; Lucy 49814).
+  /// (permissions spec, rule 3).
   AppLifecycleListener? _micBack;
 
   Future<void> _micResumed() async {
@@ -395,8 +416,8 @@ class _MessageBoxState extends State<MessageBox> {
   var _wasVoice = (recording: false, starting: false);
 
   /// Rebuilds when the microphone is asked for, and when recording starts
-  /// or stops: from starting to recording too, which puts Send in the strip
-  /// (#497); the strip follows the sound itself.
+  /// or stops: from starting to recording too, which puts Send in the strip;
+  /// the strip follows the sound itself.
   void _voiceChanged() {
     final now = (recording: _voice.recording, starting: _voice.starting);
     if (now == _wasVoice) return;
@@ -408,7 +429,7 @@ class _MessageBoxState extends State<MessageBox> {
   final _deskMicKey = GlobalKey(debugLabel: 'desk mic');
 
   /// The first time, before the system asks for the microphone, its
-  /// popover over the mic says why (Lucy's permissions spec, P5): whether
+  /// popover over the mic says why: whether
   /// to go on now. Not when it was set aside, nor right after it was
   /// allowed in it: the next tap or hold records, as the finger that asked
   /// has long lifted. Refused or restricted, recording goes on to fail and
@@ -471,6 +492,52 @@ class _MessageBoxState extends State<MessageBox> {
   }
 
   StreamSubscription<List<String>>? _drops;
+  StreamSubscription<StagedDrop>? _stagedDrops;
+  StreamSubscription<String>? _textDrops;
+
+  /// Text dropped on an iPad's window: typed in where the cursor
+  /// is, or at the end, as a paste would be.
+  void _dropText(String text) {
+    if (!FileDrop.owns(this)) return;
+    final value = _text.value;
+    final selection = value.selection.isValid
+        ? value.selection
+        : TextSelection.collapsed(offset: value.text.length);
+    _text.value = value
+        .replaced(selection, text)
+        .copyWith(
+          selection: TextSelection.collapsed(
+            offset: selection.start + text.length,
+          ),
+        );
+    _focus.requestFocus();
+  }
+
+  /// An iPad's drop: "Adding photo…" at once, as the picker's
+  /// photos do, then the files once they're copied for the app.
+  Future<void> _attachStaged(StagedDrop drop) async {
+    if (!FileDrop.owns(this) ||
+        !widget.target.takesFiles ||
+        widget.target.blocked(context) != null) {
+      return;
+    }
+    final drafts = AppScope.of(context).attachments;
+    final key = widget.target.key;
+    drafts.startAdding(key, drop.kinds);
+    final List<String> paths;
+    try {
+      paths = await drop.paths;
+      if (mounted) {
+        await _attach(paths);
+      } else {
+        await drafts.add(key, paths);
+      }
+    } finally {
+      drafts.doneAdding(key, drop.kinds);
+    }
+    final missing = notAdded(drop.kinds, drop.kinds.length - paths.length);
+    if (missing != null && mounted) setState(() => _error = missing);
+  }
 
   /// Puts the files at [paths] in this box, saying why any couldn't go.
   Future<void> _attach(List<String> paths) async {
@@ -505,7 +572,7 @@ class _MessageBoxState extends State<MessageBox> {
     if (!PhonePlatformPolicy.current.touch) return _attach(await pickFiles());
     // An iPhone, an iPad or Android. What was chosen shows in the box as
     // soon as the picker closes, "Adding photo…" while it's copied for the
-    // app (Matt: a photo took seconds to show).
+    // app (a photo took seconds to show).
     final drafts = AppScope.of(context).attachments;
     final key = widget.target.key;
     var chosen = const <String>[];
@@ -575,7 +642,7 @@ class _MessageBoxState extends State<MessageBox> {
 
   /// Says [text] under the box: something for the person to do (send or
   /// cancel the recording going on, say), nothing gone wrong, so no Ask
-  /// Rivet to fix (Zucchero's row 346).
+  /// Rivet to fix.
   void _hint(String text) => setState(() {
     _errorText = text;
     _errorPlain = true;
@@ -662,13 +729,10 @@ class _MessageBoxState extends State<MessageBox> {
   @override
   void didUpdateWidget(MessageBox old) {
     super.didUpdateWidget(old);
-    if (old.target.key != widget.target.key ||
-        old.target.takesFiles != widget.target.takesFiles) {
-      FileDrop.claim(
-        this,
-        takesFiles: widget.target.takesFiles,
-        key: widget.target.key,
-      );
+    if ((old.target.key != widget.target.key ||
+            old.target.takesFiles != widget.target.takesFiles) &&
+        (_onTop ?? true)) {
+      _claimDrops();
     }
     if (old.target.key == widget.target.key) _session.target = widget.target;
     if (old.target.key != widget.target.key) {
@@ -688,6 +752,8 @@ class _MessageBoxState extends State<MessageBox> {
   void dispose() {
     _micBack?.dispose();
     unawaited(_drops?.cancel());
+    unawaited(_stagedDrops?.cancel());
+    unawaited(_textDrops?.cancel());
     FileDrop.release(this);
     _drafts.removeListener(_draftChanged);
     _text.dispose();
@@ -740,7 +806,7 @@ class _MessageBoxState extends State<MessageBox> {
     // On a phone Return starts a new line, as the keyboard's own does; ⌘
     // or Ctrl with it sends from a hardware keyboard. An iPad with a
     // hardware keyboard sends with Return at every width, a narrow Split
-    // View too, as Messages does (#362 I1).
+    // View too, as Messages does.
     if (isPhoneLayout(context) &&
         !hardwareKeyboard.value &&
         !HardwareKeyboard.instance.isMetaPressed &&
@@ -860,8 +926,8 @@ class _MessageBoxState extends State<MessageBox> {
     widget.onSent();
     final files = backend.attachments.take(key);
     // It shows at once, its files uploading; one that isn't sent stays
-    // there, with Retry. A voice note goes with the rest as one message
-    // (#425), its recording first.
+    // there, with Retry. A voice note goes with the rest as one message,
+    // its recording first.
     final note = notes.take(key);
     if (note == null) {
       widget.target.send(text, files: files);
@@ -930,7 +996,7 @@ class _MessageBoxState extends State<MessageBox> {
         ]),
         builder: (context, _) {
           // With something written, what's recorded is added to it as its
-          // voice note (#425), not sent on its own.
+          // voice note, not sent on its own.
           final adding = _hasDraft;
           // Pressed, but not recording until what asks first is answered.
           final active = _phoneVoice.active && !_micAsking;
@@ -1059,7 +1125,7 @@ class _MessageBoxState extends State<MessageBox> {
     // While it's in view, the box shows its recording itself: the floating
     // bar steps aside.
     session: _session,
-    // A voice note put in or taken out (#425): the mic and Send follow.
+    // A voice note put in or taken out: the mic and Send follow.
     child: ListenableBuilder(
       listenable: VoiceNotes.of(AppScope.of(context)),
       builder: (context, _) => _build(context),
@@ -1170,7 +1236,7 @@ class _MessageBoxState extends State<MessageBox> {
                                               onCancel: _cancelVoice,
                                               // Send in the strip, so the
                                               // waveform centers on the
-                                              // whole row (#497).
+                                              // whole row.
                                               // The box's padding is
                                               // more at the start.
                                               shift: -(Space.m - Space.xs) / 2,
@@ -1178,7 +1244,7 @@ class _MessageBoxState extends State<MessageBox> {
                                                   ? Button(
                                                       // With something
                                                       // written, it's added
-                                                      // to that (#425).
+                                                      // to that.
                                                       label: _hasDraft
                                                           ? 'Add'
                                                           : 'Send',
@@ -1259,7 +1325,7 @@ class _MessageBoxState extends State<MessageBox> {
                                         ),
                                       ],
                                       // One voice note to a message: no mic
-                                      // while the box has one (#425).
+                                      // while the box has one.
                                       // Recording, Send is in the strip.
                                       if (voice &&
                                           !_voice.recording &&
@@ -1341,7 +1407,7 @@ class _MessageBoxState extends State<MessageBox> {
   }
 }
 
-/// A voice message recorded from a [MessageBox] for [target] (#409): it
+/// A voice message recorded from a [MessageBox] for [target]: it
 /// goes on when the box goes (another conversation, Settings, a page over
 /// it), the floating bar ([VoiceBar]) saying so, and [send] and [cancel]
 /// work without it. A box for the same target, built again, shows it.
@@ -1388,7 +1454,7 @@ class _BoxVoice extends VoiceSession {
   }
 
   /// The box has something written (or files) to go with it: in place, it
-  /// becomes the box's voice note rather than going alone (#425).
+  /// becomes the box's voice note rather than going alone.
   bool get _boxHasDraft {
     final drafts = _drafts;
     final backend = _backend;
@@ -1447,7 +1513,7 @@ class _BoxVoice extends VoiceSession {
 
   /// The recording is done: in its box with something written there, it
   /// waits in the box as its voice note, to go with the rest on Send;
-  /// otherwise it goes now (#425).
+  /// otherwise it goes now.
   Future<void> _finish() =>
       shownInPlace && _boxHasDraft ? _attach() : _deliver();
 
@@ -1465,7 +1531,7 @@ class _BoxVoice extends VoiceSession {
     return (made: made, size: size);
   }
 
-  /// Puts what was recorded in the box as its voice note (#425), kept on
+  /// Puts what was recorded in the box as its voice note, kept on
   /// the device meanwhile.
   Future<void> _attach() async {
     final stopped = await _stop();
@@ -1490,7 +1556,7 @@ class _BoxVoice extends VoiceSession {
   /// transcribe, through [target]'s outbox, which keeps it until the
   /// Claktory has it: it shows in the conversation at once, as any
   /// message. What's written in its box (and its files) goes with it, as
-  /// one message (#425): from the bar, away from the box, that's how it
+  /// one message: from the bar, away from the box, that's how it
   /// takes the text along. Sent from the bar, the bar says so.
   Future<void> _deliver() {
     final backend = _backend;
@@ -1561,7 +1627,7 @@ class _BoxVoice extends VoiceSession {
 
 /// On a phone, in Send's place while recording from a tap (or paused) with
 /// something written in the box: the recording is added to it as its
-/// voice note (#425), to go with it on Send. Send's disc, with a check.
+/// voice note, to go with it on Send. Send's disc, with a check.
 class _AddVoiceNote extends StatelessWidget {
   const _AddVoiceNote({required this.voice, this.accent});
 
@@ -1647,7 +1713,7 @@ class _MicButton extends StatelessWidget {
   }
 }
 
-/// The files in a message box, and its voice note (#425), as chips over
+/// The files in a message box, and its voice note, as chips over
 /// its text, each with × to take it out.
 class _Attachments extends StatelessWidget {
   const _Attachments({required this.boxKey});

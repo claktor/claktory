@@ -1,4 +1,4 @@
-//! Where each device was reading (#209 phase 3 §1): kept per device and
+//! Where each device was reading: kept per device and
 //! agent, sent only to that device's connections, with panes a layout no
 //! longer has, deleted agents and unpaired devices dropped.
 

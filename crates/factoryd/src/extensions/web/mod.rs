@@ -93,7 +93,7 @@ impl Extension for Web {
             tool(factory, agent, "web_search", "Search the web", SEARCH, search, |factory, agent, args| {
                 Box::pin(async move {
                     // What it reads is the web's: no errand_open for it
-                    // until its conversation starts afresh (Fugo 50226).
+                    // until its conversation starts afresh.
                     crate::errands::read_outside(&factory, &agent, "web search results");
                     run_search(factory, agent, args).await
                 })

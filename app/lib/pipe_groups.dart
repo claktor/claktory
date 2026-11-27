@@ -1,4 +1,4 @@
-// Pipe groups (#359): a project's pipes gathered under named rows in the
+// Pipe groups: a project's pipes gathered under named rows in the
 // sidebar, such as every friend's feedback pipe under one. Arrangement
 // only: a pipe in a group works as it did outside one. The groups, their
 // names, which pipes they hold and whether they're folded away live in the
@@ -10,6 +10,7 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 
+import 'approve_elsewhere.dart';
 import 'backend.dart';
 import 'controls.dart';
 import 'forms.dart';
@@ -255,8 +256,9 @@ Future<void> pipeGroupMenu(BuildContext context, PipeGroup group) async {
     context,
     title: group.name,
     actions: [
-      const SheetAction('Share a website…', 'share'),
-      for (final share in shares)
+      // Websites through pipes are the person's: not from Windows.
+      if (!approvesElsewhere) const SheetAction('Share a website…', 'share'),
+      for (final share in approvesElsewhere ? const <PipeShare>[] : shares)
         SheetAction(
           'Stop sharing ${visibleCodes(share.name)}…',
           'stop:${share.id}',

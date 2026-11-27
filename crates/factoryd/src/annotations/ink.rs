@@ -421,9 +421,13 @@ fn temporary(to: &Path) -> PathBuf {
 }
 
 fn finish(temporary: &Path, to: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    // An ordinary upload's, not the blob's 0600.
-    std::fs::set_permissions(temporary, std::fs::Permissions::from_mode(0o644))?;
+    // An ordinary upload's, not the blob's 0600. On Windows it has what the
+    // folder it's written in gives, as an upload does.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(temporary, std::fs::Permissions::from_mode(0o644))?;
+    }
     std::fs::rename(temporary, to).inspect_err(|_| {
         let _ = std::fs::remove_file(temporary);
     })

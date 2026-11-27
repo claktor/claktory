@@ -1,6 +1,6 @@
-//! History transfer's sealing (dms-e2ee.md §2, E8; Fugo's E8 points 1 and
-//! 2): an existing device sends a new one its decrypted history in chunks,
-//! sealed with the key both got from the add-device hand-off's HPKE context
+//! History transfer's sealing (E8): an existing
+//! device sends a new one its decrypted history in chunks, sealed with the
+//! key both got from the add-device hand-off's HPKE context
 //! (`handoff::Sealed::transfer_key`, `handoff::Received::transfer_key`), then
 //! an end record saying how much there was, so a transfer cut short or
 //! reordered is noticed.

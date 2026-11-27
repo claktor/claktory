@@ -1,4 +1,4 @@
-// Settings' section layout, as Lucy's area 3 review asked (49674, 49740):
+// Settings' section layout:
 // the heading names the Claktory, never "This Mac"; a section's title and
 // its labels share one left edge; help sits under its control, the label
 // on the control's first line; This device's row a hairline apart; and a

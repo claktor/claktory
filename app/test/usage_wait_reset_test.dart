@@ -1,4 +1,4 @@
-// Use a reset… on the wait line (Squalo's U7): when a spent account has a
+// Use a reset… on the wait line: when a spent account has a
 // usage reset that refills the limit an agent waits on, the line offers it,
 // before Continue on another provider.
 import 'package:factory_app/agent_view.dart' show WorkingLine;

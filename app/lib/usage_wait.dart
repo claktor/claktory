@@ -75,8 +75,8 @@ class TryNow extends StatelessWidget {
   }
 }
 
-/// What an agent or chat held up by its provider's usage can do about it
-/// (#341), as the backend says: carry on with another signed-in provider
+/// What an agent or chat held up by its provider's usage can do about it,
+/// as the backend says: carry on with another signed-in provider
 /// now ([alternative]), sign in to one when it has none ([noOtherProvider]),
 /// or, once it carried on elsewhere, go back ([switched]).
 typedef UsageWaitOptions = ({
@@ -125,7 +125,7 @@ UsageWaitOptions? usageWaitOptions(BuildContext context, String id) {
 }
 
 /// Whether [wait] (a [usageWaitLine]) waits for the network to come back
-/// after a connection error (#364 O2), not for a usage limit: the backend
+/// after a connection error, not for a usage limit: the backend
 /// says it in usage_wait too, with nothing to switch or reset.
 bool networkWait(String wait) => wait.startsWith('Waiting for the network');
 
@@ -133,7 +133,7 @@ bool networkWait(String wait) => wait.startsWith('Waiting for the network');
 typedef WaitReset = ({UsageMeter meter, UsageReset reset});
 
 /// The usage resets that would refill a limit [model] (as Agent.model)
-/// waits on (Squalo's U7): those of its provider's accounts with a
+/// waits on: those of its provider's accounts with a
 /// limit reached that the model draws on, refilled by the reset (one that
 /// doesn't say which limits refills them all). As the backend counts
 /// Anthropic's limits: a Fable model draws on the 5-hour, weekly and
@@ -215,14 +215,14 @@ String? usageWaitDetail(UsageWaitOptions options) {
   return null;
 }
 
-/// Continue on another provider (#341) for the agent or chat [waiting]
+/// Continue on another provider for the agent or chat [waiting]
 /// (its id), with [options] its [usageWaitOptions]: with others waiting on
 /// the same limit, asks first whether only it goes or all of them (with
 /// [allOnly], as Needs you asks for a provider's waiters, only whether all
 /// go: "All 3", or "Continue" for one), saying the other provider charges
 /// for it; then sends it, [onSending] just before. The count shown goes
 /// with all (expected_others), so should more or fewer wait by the tap,
-/// none moves (Zucchero's row 223). Completes with the refusal in the
+/// none moves. Completes with the refusal in the
 /// backend's words, or null once it's sent or the person cancelled.
 Future<String?> continueOnAlternative(
   BuildContext context, {
@@ -269,7 +269,7 @@ Future<String?> continueOnAlternative(
 /// The line above the message box while an agent or chat ([waiting], its
 /// id) waits out its provider's usage ([wait], its [usageWaitLine]): what
 /// it waits for, what carrying on elsewhere would change (or a refusal),
-/// and its controls at the end: Continue on another provider (#341), Try
+/// and its controls at the end: Continue on another provider, Try
 /// now (or Sign in…), Sign in… to another provider when none is, and
 /// [stop]. Buttons under the words where they don't fit beside them.
 class UsageWaitActionLine extends StatefulWidget {
@@ -300,11 +300,11 @@ class _UsageWaitActionLineState extends State<UsageWaitActionLine> {
 
   /// On a phone the controls under the conversation scroll, kept at the
   /// message box: at the largest text on a small one, the words above the
-  /// buttons were out of view (Zucchero's row 228). Brings them into view
-  /// each time they change (a new wait, a refusal) or their size does (the
-  /// text size or the display's changed while it shows, Sale's row 66), not
-  /// on every build, so the person's own scrolling stays; a refusal first,
-  /// where both don't fit, since it says why their tap did nothing.
+  /// buttons were out of view. Brings them into view each time they change
+  /// (a new wait, a refusal) or their size does (the text size or the
+  /// display's changed while it shows), not on every build, so the person's
+  /// own scrolling stays; a refusal first, where both don't fit, since it
+  /// says why their tap did nothing.
   void _reveal(String said) {
     if (said == _shown) return;
     _shown = said;
@@ -365,7 +365,7 @@ class _UsageWaitActionLineState extends State<UsageWaitActionLine> {
     _reveal(
       '${widget.wait}\n$detail\n$_error\n'
       // Its comparable value: Android's own scaling (nonlinear) leaves a
-      // big size as it is, so a size scaled can't tell (Sale's row 73).
+      // big size as it is, so a size scaled can't tell.
       // ignore: deprecated_member_use
       '${MediaQuery.textScalerOf(context).textScaleFactor} '
       '${MediaQuery.sizeOf(context)}',
@@ -397,7 +397,7 @@ class _UsageWaitActionLineState extends State<UsageWaitActionLine> {
     );
     return ActionLine(
       // Their size changing (the text size, on Android in steps, at a
-      // display size that isn't the default: Sale's row 73) brings them
+      // display size that isn't the default) brings them
       // into view again, whatever else changed or didn't.
       lead: NotificationListener<SizeChangedLayoutNotification>(
         onNotification: (_) {
@@ -437,12 +437,11 @@ class _UsageWaitActionLineState extends State<UsageWaitActionLine> {
 /// Above the message box while an agent or chat ([id]) carries on with
 /// another provider (Agent.usage_switch): once its own provider has room,
 /// "Your Claude usage has room again." with Back to Claude (all that are
-/// ready, or only it, when others are); before that, when it goes back
-/// (friend bug #8 A1): "Goes back to Claude at Fri 18:00", with Back now.
-/// One that went back by itself and hit the limit again soon after
-/// (UsageSwitch.goes_back false) stays until that limit resets, and goes
-/// back then: the same line, Back now the only way back sooner (Abbacchio,
-/// Mista).
+/// ready, or only it, when others are); before that, when it goes back:
+/// "Goes back to Claude at Fri 18:00", with Back now. One that went back
+/// by itself and hit the limit again soon after (UsageSwitch.goes_back
+/// false) stays until that limit resets, and goes back then: the same
+/// line, Back now the only way back sooner.
 class UsageSwitchLine extends StatefulWidget {
   const UsageSwitchLine({super.key, required this.id});
 
@@ -562,11 +561,11 @@ String _waitingSubject(List<Agent> agents, List<Chat> chats) {
   return '${who.join(' and ')} ${one ? 'is' : 'are'}';
 }
 
-/// In Settings → Providers, on a signed-in [provider]'s card (Squalo's U2):
+/// In Settings → Providers, on a signed-in [provider]'s card:
 /// while agents or chats wait on another provider's usage and would carry
 /// on with this one (their Agent.usage_wait_alternative names it), how many
 /// wait and for which provider, what would change, and Continue on
-/// [provider] for all of them, as the wait line's All N (#341). Nothing
+/// [provider] for all of them, as the wait line's All N. Nothing
 /// when none would.
 class UsageWaitOffer extends StatefulWidget {
   const UsageWaitOffer({super.key, required this.provider});
@@ -584,7 +583,7 @@ class _UsageWaitOfferState extends State<UsageWaitOffer> {
   /// [groups]: those waiting, by the provider they wait on. One request for
   /// each provider, for all its waiters at once (all_waiting), as the wait
   /// line's All N: moving one wakes the others for a moment, so a request
-  /// each was refused as not waiting (Abbacchio's rows 692-694). The count
+  /// each was refused as not waiting. The count
   /// that goes with it is the backend's own (others_waiting), so the two
   /// agree; should more or fewer wait by the tap, none moves and the
   /// backend says so. One with a better alternative elsewhere (an OpenAI
@@ -733,7 +732,7 @@ class _UsageWaitOfferState extends State<UsageWaitOffer> {
 }
 
 /// In Settings → Providers, under the providers: Continue automatically
-/// (Workspace.usage_auto_continue, friend bug #8 A2), off unless the person
+/// (Workspace.usage_auto_continue), off unless the person
 /// turns it on, saying it spends on the other provider without asking.
 class UsageAutoContinueSetting extends StatefulWidget {
   const UsageAutoContinueSetting({super.key, required this.on});

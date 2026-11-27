@@ -1,6 +1,6 @@
-// The header's model popover chooses an effort in one press (Lucy's agent
-// view §3): a segmented control, a finger's 44pt on an iPad, 28px on a Mac,
-// its efforts in rows as even as can be where they won't fit across.
+// The header's model popover chooses an effort in one press: a segmented
+// control, a finger's 44pt on an iPad, 28px on a Mac, its efforts in rows as
+// even as can be where they won't fit across.
 import 'package:factory_app/ipad/effort_segments.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:flutter/widgets.dart';

@@ -232,7 +232,7 @@ async fn leads_that_no_longer_fit_go_when_agents_move_or_are_deleted() {
     ack(apply_request(&mut client, &mut view, lead("lena", "sam")).await);
 
     // Sam moves to Lab: its lead stays in Site, and Lena, who reports to
-    // it, goes with it, nested under it there (#234).
+    // it, goes with it, nested under it there.
     let moved = v1::UpdateAgent { agent_id: "sam".into(), project_id: Some("lab".into()), ..Default::default() };
     ack(apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(moved)).await);
     assert_eq!((view.agent("sam").lead_id.as_str(), view.agent("lena").lead_id.as_str()), ("", "sam"));
@@ -278,7 +278,7 @@ async fn a_lead_written_by_hand_that_cant_be_is_ignored_and_kept() {
     assert_eq!(lead_in_config(&dir, "mike").as_deref(), Some("sam"));
 }
 
-/// #234: the sidebar's nesting is the lead. Dropping an agent onto another
+/// The sidebar's nesting is the lead. Dropping an agent onto another
 /// makes it its report, a reorder among siblings changes no lead, a lead
 /// set in config.json nests it, and `parent` (the old, visual nesting) is
 /// no longer read: agents nested that way are at the top level.
@@ -299,6 +299,7 @@ async fn nesting_in_the_sidebar_is_the_lead() {
             before_id: before.into(),
             project_id: None,
             folder_id: None,
+            ..Default::default()
         })
     };
     let placed = |view: &View, agent: &str| (view.agent(agent).parent_id.clone(), view.agent(agent).lead_id.clone());

@@ -1,4 +1,4 @@
-//! Report types as data (pipes-automation.md §11): the person and an
+//! Report types as data: the person and an
 //! untainted Rivet define types within the rules in code; each pipe forwards
 //! its own types, and an agent limited to several pipes can forward each one's;
 //! an edit makes a new version, and a report stays checked and shown
@@ -41,7 +41,7 @@ async fn setup() -> (Arc<Factory>, Client, View, String, String) {
     let add = v1::AddPipeLiaison { pipe_id: first.clone(), name: "Liaison".into() };
     apply_request(&mut client, &mut view, Request::AddPipeLiaison(add)).await;
     view.follow(&mut client, |view| shown(view, &first).is_some_and(|pipe| pipe.lead_id == "liaison")).await;
-    // A pipe's liaison uses no other pipe (#414): Scout, limited to each, is
+    // A pipe's liaison uses no other pipe: Scout, limited to each, is
     // on both.
     let members = shown(&view, &first).expect("first").member_ids;
     let both = v1::UpdatePipe {
@@ -324,7 +324,7 @@ async fn rivet_defines_types_only_while_it_has_read_nothing_from_outside() {
 
 /// A pipe's first save says only what the person changed from what the app
 /// showed (no one, Bug report), and an edit that only adds a choice widens
-/// what crosses but lets no more of their words through (Zucchero's T6).
+/// what crosses but lets no more of their words through.
 #[tokio::test]
 async fn a_first_save_and_a_new_choice_say_only_what_changed() {
     let (_factory, mut client, mut view, first, _second) = setup().await;

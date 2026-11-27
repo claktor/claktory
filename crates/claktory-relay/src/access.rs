@@ -1,5 +1,4 @@
-//! Who Claktory's relay forwards for (#450; the design is Fugo's
-//! coordination/security/relay-access.md).
+//! Who Claktory's relay forwards for.
 //!
 //! Every client gets in. A Claktory signed in to a claktory.com account
 //! shows a relay token (`Authorization: Bearer`), which the account service

@@ -3,7 +3,10 @@
 //! else: sudo, doas, su, pkexec, run0 (systemd's, through polkit), authopen,
 //! or osascript asking for administrator privileges, in its arguments or in
 //! the script file it runs (AppleScript's words, JXA's
-//! `administratorPrivileges`, compiled AppleScript's `badm`). On a Mac with Touch ID for sudo, sudo puts up a system
+//! `administratorPrivileges`, compiled AppleScript's `badm`). And Apple's
+//! `container` when its arguments name Claktory's browser (a
+//! `claktory-browser…` VM or volume), which would reach the VM
+//! and its kept profile, cookies and all. On a Mac with Touch ID for sudo, sudo puts up a system
 //! dialog that a habitual touch satisfies, which would give the agent's
 //! command root (polkit's dialog on Linux is the same risk). Any such
 //! program in a guarded command is stopped within about 100 ms (the dialog
@@ -36,6 +39,15 @@
 //! and a script piped to it on stdin (`osascript <<EOF`, `osascript -`) is
 //! never seen at all: the easiest way past it. Under containment osascript
 //! can't run at all, so this gap is only for agents that aren't contained.
+//! `container` is known by its name or its file's, and stopped as it
+//! starts, a few milliseconds after its exec: a copy of it under another
+//! name, a command quicker than that, or talking to its service directly
+//! would get through, which only a sandbox that keeps agents from the
+//! service closes: on a Mac with Claktory's browser set up, agents'
+//! commands run under one (`confine`), which denies them the service and
+//! its folder whatever runs them. On Linux, what a stopped program started as another user (sudo
+//! with nothing to ask, as a NOPASSWD line allows) can't be stopped by this
+//! user: its descendants are stopped only while they're still this user's.
 //! Programs that run as another user but ask nothing (fusermount,
 //! newuidmap) are left alone on purpose. Nothing that can't be traced to a
 //! guarded command is ever stopped: the person's own commands, run from a
@@ -216,8 +228,7 @@ pub fn asking(process: &Process) -> Option<&'static str> {
 
 #[cfg(unix)]
 fn asking_unix(process: &Process) -> Option<&'static str> {
-    let file = process.path.rsplit('/').next().unwrap_or_default();
-    let is = |name: &str| process.name == name || file == name;
+    let is = |name: &str| known_as(process, name);
     if is("sudo") {
         return Some("sudo");
     }
@@ -233,8 +244,38 @@ fn asking_unix(process: &Process) -> Option<&'static str> {
     if is("osascript") && osascript_asks(process.pid) {
         return Some("osascript with administrator privileges");
     }
+    if is("container") && arguments(process.pid).is_some_and(|arguments| names_the_browser(&arguments)) {
+        return Some("container on Claktory's browser");
+    }
     None
 }
+
+/// Whether `process` is the program `name`, by its name or its file's:
+/// once it runs as root its name can't be read, but the file it runs can.
+/// In debug builds with tests' stand-ins on (`stand_ins_for_test`),
+/// "asks-like-sudo" is sudo too.
+pub fn known_as(process: &Process, name: &str) -> bool {
+    let file = process.path.rsplit('/').next().unwrap_or_default();
+    if process.name == name || file == name {
+        return true;
+    }
+    cfg!(debug_assertions)
+        && STAND_INS.get().is_some()
+        && [file, process.name.as_str()].iter().any(|named| named.strip_prefix(STAND_IN) == Some(name))
+}
+
+/// Whether `container`'s arguments (its own name first) name Claktory's
+/// browser: a VM or volume whose name starts `claktory-browser`, in any
+/// subcommand and option (`exec`, `-v claktory-browser-x:/p`, `--mount
+/// source=…`, `volume rm`), whatever the case.
+#[cfg(unix)]
+fn names_the_browser(arguments: &[String]) -> bool {
+    arguments.iter().skip(1).any(|word| word.to_lowercase().contains(BROWSER))
+}
+
+/// What Claktory's browser's VMs and volumes are named with.
+#[cfg(unix)]
+const BROWSER: &str = "claktory-browser";
 
 /// Whether osascript at `pid` asks for administrator privileges, in its
 /// arguments (`-e` statements) or in the script file it runs.
@@ -243,6 +284,24 @@ fn osascript_asks(pid: i32) -> bool {
     let Some(arguments) = arguments(pid) else { return false };
     let joined = arguments.join(" ").to_lowercase();
     ADMINISTRATOR.iter().any(|words| joined.contains(words)) || osascript_file(&arguments).is_some_and(|file| script_asks(pid, file))
+}
+
+/// What tests' stand-ins are named with (`stand_ins_for_test`).
+pub const STAND_IN: &str = "asks-like-";
+
+/// Tests' stand-ins are on (`stand_ins_for_test`).
+static STAND_INS: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+/// For tests: a program named `asks-like-<name>` is judged as `<name>`
+/// ("asks-like-sudo" is stopped as sudo), in debug builds only. An agent
+/// runs the tests, and Claktory's own guard stops sudo and the rest in its
+/// commands at once, before the guard under test can see them or where they
+/// should be left alone, so the tests run stand-ins under names only the
+/// guard under test knows. It adds what's stopped, never takes anything
+/// away.
+#[doc(hidden)]
+pub fn stand_ins_for_test() {
+    let _ = STAND_INS.set(());
 }
 
 /// What the agent is told when `program` was stopped.
@@ -291,11 +350,11 @@ impl Command {
         }
     }
 
-    /// Stops `process` if it asks who you are.
-    fn check(&mut self, process: &Process) {
-        if let Some(program) = asking(process) {
-            self.stop(process, program);
-        }
+    /// Stops `process` if it asks who you are; whether it did.
+    fn check(&mut self, process: &Process) -> bool {
+        let Some(program) = asking(process) else { return false };
+        self.stop(process, program);
+        true
     }
 }
 
@@ -444,6 +503,47 @@ mod linux {
         })
     }
 
+    /// Stops every descendant of `pid` (in `table`, by parent): what a
+    /// stopped program started. Only those still this user's can be: one
+    /// running as another user refuses the signal.
+    fn stop_descendants(table: &[Stat], children: &HashMap<i32, Vec<usize>>, pid: i32) {
+        let mut next = vec![pid];
+        while let Some(parent) = next.pop() {
+            for &child in children.get(&parent).map(Vec::as_slice).unwrap_or_default() {
+                kill_if_still(&table[child]);
+                next.push(table[child].pid);
+            }
+        }
+    }
+
+    /// Kills the process `seen` is, only while its pid is still that
+    /// process: one that ended since the walk may have left
+    /// its pid to the person's own work. A pidfd holds the process itself,
+    /// so the start time read after opening it is the one signalled; on
+    /// kernels without pidfds (before 5.3), the start time is read just
+    /// before the signal.
+    fn kill_if_still(seen: &Stat) {
+        let still = || stat(seen.pid).is_some_and(|now| now.start == seen.start);
+        // SAFETY: pidfd_open takes a pid and flags, and returns a new fd or -1.
+        let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, seen.pid, 0) };
+        match i32::try_from(pidfd) {
+            Ok(fd) if fd >= 0 => {
+                if still() {
+                    // SAFETY: a signal through our own pidfd, with no info.
+                    unsafe { libc::syscall(libc::SYS_pidfd_send_signal, fd, libc::SIGKILL, std::ptr::null::<libc::siginfo_t>(), 0) };
+                }
+                // SAFETY: closes the fd opened above, once.
+                unsafe { libc::close(fd) };
+            }
+            _ => {
+                if still() {
+                    // SAFETY: a plain signal to one process.
+                    unsafe { libc::kill(seen.pid, libc::SIGKILL) };
+                }
+            }
+        }
+    }
+
     /// The process `stat` is, with the file it runs.
     pub(super) fn process(stat: &Stat) -> Process {
         let path = std::fs::read_link(format!("/proc/{}/exe", stat.pid)).map(|path| path.display().to_string()).unwrap_or_default();
@@ -535,7 +635,9 @@ mod linux {
             }
             watched.seen = members.iter().map(|&at| (table[at].pid, table[at].start)).collect();
             for &at in &members {
-                watched.command.check(&process(&table[at]));
+                if watched.command.check(&process(&table[at])) {
+                    stop_descendants(&table, &children, table[at].pid);
+                }
             }
         }
         state.watched.retain(|watched| !watched.seen.is_empty());

@@ -1,4 +1,4 @@
-// Settings on a phone (#198, phase 2A): a page listing the sections, each
+// Settings on a phone: a page listing the sections, each
 // a page of its own with Back, and what an agent opens (show_screen) lands
 // on its section.
 import 'package:factory_app/mobile/navigation.dart';

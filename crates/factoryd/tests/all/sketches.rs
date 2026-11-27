@@ -48,7 +48,7 @@ async fn sketches_are_blank_pngs_in_a_projects_folder_never_over_anything() {
     assert_eq!(second.path, site.join("drafts/Idea 2.png").display().to_string());
     let target = dir.join("elsewhere.txt");
     std::fs::write(&target, "keep me").expect("write");
-    std::os::unix::fs::symlink(&target, site.join("drafts/Idea 3.png")).expect("link");
+    crate::common::symlink(&target, &site.join("drafts/Idea 3.png")).expect("link");
     let fourth = created(&mut client, sketch(&site.join("drafts"), "Idea", 10, 10)).await.expect("made");
     assert_eq!(fourth.path, site.join("drafts/Idea 4.png").display().to_string());
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep me");

@@ -1,10 +1,10 @@
-//! Android pushes end to end (notifications.md §3, phase C): this Claktory
+//! Android pushes end to end: this Claktory
 //! seals a notification for a phone registered with the push relay, the
 //! relay's own code (`claktory-push`, with FCM as it runs at
 //! push.claktory.com) sends it through Firebase Cloud Messaging's HTTP v1
 //! API, here a stand-in for Google's token and send endpoints, and the
 //! phone's key opens what Google was given. One Firebase project holds both
-//! Android apps, com.claktory.app and com.claktory.app.dev (Pericolo 50628):
+//! Android apps, com.claktory.app and com.claktory.app.dev:
 //! a token from either goes through that project. A token Google retired is
 //! forgotten by the relay and by this Claktory.
 

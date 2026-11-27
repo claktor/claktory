@@ -325,7 +325,7 @@ class _ConnectModelState extends State<ConnectModel> {
         ? provider.name
         : meter.plan;
     final rivet = rivetIn(AppScope.of(context).workspace.workspace);
-    // A key that can't run paid models (#343 U14): the backend's sentence
+    // A key that can't run paid models: the backend's sentence
     // says so, rather than that the agents can work.
     final before = _before ?? const <String>{};
     final warning = provider.accounts

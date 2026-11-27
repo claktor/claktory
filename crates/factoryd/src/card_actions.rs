@@ -94,14 +94,13 @@ pub(crate) enum Action {
     /// started by `crate::extensions::ask::answer` itself, once, never by a
     /// proposal (`crate::command_cards`).
     Execute(Box<crate::command_cards::Command>),
-    /// An errand's handoff (#435, `crate::errands::handoff`): Done gives the
-    /// browser back to its agent, Can't do this ends the errand; answered
+    /// A browser handoff (`crate::errands::handoff`): however it's
+    /// answered, the browser is its agent's again, told how it went; answered
     /// by `crate::extensions::ask::answer` itself.
     Handoff { handoff: Box<crate::errands::HandoffRow> },
-    /// Signs Claktory's browser out of an identity provider (#435, Fugo
-    /// 41236): the card Claktory posts at the browser's first sign-in there
-    /// (`crate::errands::code`), for the account `secret` (its id), by
-    /// errand `errand`. Void once the browser's account there changed.
+    /// Signed the one browser agents shared out of an identity provider.
+    /// Kept so such a request still reads; it can only be dismissed now
+    /// (`crate::errands::code::sign_out_gone`).
     BrowserSignOut { provider: String, secret: String, errand: String },
 }
 
@@ -162,18 +161,46 @@ pub(crate) fn heard(port: u16) -> Heard {
     if crate::locking::lock(&UNNAMED).contains(&port) {
         return Heard::Unknown;
     }
-    // SAFETY: getuid can't fail.
-    let uid = unsafe { libc::getuid() };
-    if cfg!(target_os = "linux")
-        && let Some(heard) = from_proc(std::path::Path::new("/proc"), port, uid)
+    #[cfg(unix)]
     {
-        return heard;
+        // SAFETY: getuid can't fail.
+        let uid = unsafe { libc::getuid() };
+        if cfg!(target_os = "linux")
+            && let Some(heard) = from_proc(std::path::Path::new("/proc"), port, uid)
+        {
+            return heard;
+        }
+        from_lsof(port, uid).map_or(Heard::Unknown, Heard::Mine)
     }
-    from_lsof(port, uid).map_or(Heard::Unknown, Heard::Mine)
+    #[cfg(windows)]
+    from_tables(port)
+}
+
+/// On Windows, from its TCP tables: another account's socket anywhere on
+/// the port makes it theirs, as on Linux; the person's own is named by the
+/// process holding the socket a shared website reaches first.
+#[cfg(windows)]
+fn from_tables(port: u16) -> Heard {
+    use crate::windows::ports::{Owner, listening, owner};
+    let Ok(sockets) = listening(port) else { return Heard::Unknown };
+    let owners: Vec<(Option<u8>, u32, Option<Owner>)> =
+        sockets.iter().map(|socket| (reached_first(socket.v6, socket.address), socket.pid, owner(socket.pid))).collect();
+    if owners.iter().any(|(_, _, owner)| *owner == Some(Owner::Others)) {
+        return Heard::Others("another account".to_owned());
+    }
+    let best = owners
+        .into_iter()
+        .filter_map(|(rank, pid, owner)| match (rank, owner) {
+            (Some(rank), Some(Owner::Mine { image, started })) => Some((rank, Listener { pid, command: image, started: Some(started) })),
+            _ => None,
+        })
+        .min_by_key(|(rank, _)| *rank);
+    best.map_or(Heard::Unknown, |(_, listener)| Heard::Mine(listener))
 }
 
 /// lsof: in the system's places first, then on PATH and NixOS's (W10;
 /// Fugo 36064: it only names what the card shows, granting nothing).
+#[cfg(unix)]
 fn lsof() -> Option<std::path::PathBuf> {
     let fixed = ["/usr/sbin/lsof", "/usr/bin/lsof"].into_iter().map(std::path::PathBuf::from);
     let path = std::env::var_os("PATH").map(|path| std::env::split_paths(&path).map(|dir| dir.join("lsof")).collect::<Vec<_>>()).unwrap_or_default();
@@ -183,6 +210,7 @@ fn lsof() -> Option<std::path::PathBuf> {
 
 /// The program of user `uid` lsof sees listening on `port`: the one a
 /// shared website reaches, when several do (`reached_first`).
+#[cfg(unix)]
 fn from_lsof(port: u16, uid: u32) -> Option<Listener> {
     let output = std::process::Command::new(lsof()?)
         .args(["-nP", "-a", "+c", "0", "-sTCP:LISTEN", &format!("-iTCP:{port}"), "-u", &uid.to_string(), "-Fpctn"])
@@ -195,6 +223,7 @@ fn from_lsof(port: u16, uid: u32) -> Option<Listener> {
 /// lsof's fields (`-Fpctn`): each process (`p`, `c`), then each socket it
 /// listens on, its family (`t`) and address (`n`); the program whose
 /// socket a shared website reaches first.
+#[cfg_attr(windows, allow(dead_code, reason = "lsof is asked on a Mac or Linux; its tests run everywhere"))]
 fn from_lsof_fields(text: &str) -> Option<Listener> {
     let mut best: Option<(u8, Listener)> = None;
     let (mut pid, mut command, mut v6) = (None, String::new(), false);
@@ -238,6 +267,7 @@ fn reached_first(v6: bool, address: &str) -> Option<u8> {
 /// anywhere on the port makes it theirs; the person's own is named by the
 /// process holding that very socket (fd -> socket:[inode]), its command and
 /// start. None when there are no tables to read: lsof is asked then.
+#[cfg(unix)]
 fn from_proc(proc: &std::path::Path, port: u16, uid: u32) -> Option<Heard> {
     let mut tables = 0;
     // Each listening socket's inode, owner and how soon a shared website
@@ -306,6 +336,7 @@ fn from_proc(proc: &std::path::Path, port: u16, uid: u32) -> Option<Heard> {
 }
 
 /// A user's name, or their number when the system has none for them.
+#[cfg(unix)]
 fn user_name(uid: u32) -> String {
     // SAFETY: getpwuid_r fills `entry` from `buffer`, both ours and big
     // enough; its name is copied before either goes away.
@@ -946,9 +977,15 @@ pub(crate) fn check(factory: &Factory, action: &str) -> Result<(), String> {
         Action::Handoff { handoff } if handoff.kind == v1::ErrandHandoffKind::RecoveryCodes as i32 => Ok(()),
         Action::Handoff { handoff } => match factory.errands.get(&handoff.errand) {
             Some(errand) if errand.state == v1::ErrandState::PersonsTurn as i32 => Ok(()),
-            _ => Err("That errand is over: dismiss this request.".to_owned()),
+            errand => {
+                let name = errand.and_then(|errand| factory.lock().config.agent(&errand.agent_id).map(|agent| agent.name.clone()));
+                Err(match name {
+                    Some(name) => format!("{name}'s browser has closed since, so this no longer applies. Dismiss it."),
+                    None => "The browser has closed since, so this no longer applies. Dismiss it.".to_owned(),
+                })
+            }
         },
-        Action::BrowserSignOut { provider, secret, .. } => crate::errands::code::check(factory, &provider, &secret),
+        Action::BrowserSignOut { .. } => Err(crate::errands::code::sign_out_gone()),
     }
 }
 
@@ -1050,7 +1087,7 @@ pub(crate) async fn apply(factory: &Arc<Factory>, action: &str) -> Result<String
         // Run by the card's answer itself, never from here.
         Action::Execute(_) => Err("A command runs only from its request's Execute.".to_owned()),
         Action::Handoff { .. } => Err("A handoff is answered in its request.".to_owned()),
-        Action::BrowserSignOut { provider, errand, .. } => crate::errands::code::sign_out(factory, &provider, &errand).await,
+        Action::BrowserSignOut { .. } => Err(crate::errands::code::sign_out_gone()),
     }
 }
 
@@ -1236,6 +1273,7 @@ mod tests {
     /// A /proc of its own (W10): TCP tables with `sockets` (port, uid,
     /// inode, listening), and processes, each with its pid, command, start
     /// and the socket inodes it holds.
+    #[cfg(unix)]
     fn fake_proc(sockets: &[(u16, u32, u64, bool)], processes: &[(u32, &str, u64, &[u64])]) -> std::path::PathBuf {
         static MADE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1285,6 +1323,7 @@ mod tests {
         assert_eq!(named(""), None);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_listener_is_named_from_proc_by_the_socket_it_holds_and_another_users_never() {
         let me = 1000;

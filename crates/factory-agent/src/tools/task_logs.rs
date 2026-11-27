@@ -1,4 +1,4 @@
-//! Background tasks' logs over time (#525): a chatty task (a dev server, a
+//! Background tasks' logs over time: a chatty task (a dev server, a
 //! watch build) keeps at most [`CAP`] of its output, its start and its most
 //! recent, with a line where the rest was cut; logs of tasks that finished
 //! [`KEPT_FOR`] ago go.
@@ -48,10 +48,10 @@ pub fn cap(log: &Path, pid: u32) -> std::io::Result<bool> {
     Ok(true)
 }
 
-/// Cuts a finished task's log once it's past [`CAP`] (Abbacchio's F2: a
-/// task that writes it all and ends between two checks was never cut):
-/// with its process group gone (`pid` 0: unknown), nothing writes it any
-/// more. Whether it cut.
+/// Cuts a finished task's log once it's past [`CAP`] (a task that writes
+/// it all and ends between two checks was never cut): with its process
+/// group gone (`pid` 0: unknown), nothing writes it any more. Whether it
+/// cut.
 pub fn cap_finished(log: &Path, pid: u32) -> std::io::Result<bool> {
     if pid != 0 && super::bash::group_alive(pid) {
         return Ok(false);
@@ -71,9 +71,9 @@ fn cut(file: &std::fs::File, length: u64) -> std::io::Result<()> {
     let mut head = vec![0u8; HEAD as usize + 512];
     let read = file.read_at(&mut head, 0)?;
     head.truncate(read);
-    // An earlier cut's line ends the start where it is (Abbacchio's F1:
-    // the start's last line would otherwise fall after it): counted, and
-    // replaced. Else the start is its last whole line in HEAD.
+    // An earlier cut's line ends the start where it is (the start's last
+    // line would otherwise fall after it): counted, and replaced. Else
+    // the start is its last whole line in HEAD.
     let at_cut = (0..head.len()).filter(|at| *at == 0 || head[at - 1] == b'\n').find(|at| earlier_cut(&head[*at..]).1 > 0);
     let head_end = match at_cut {
         Some(at) => at,
@@ -217,8 +217,8 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
 
-    /// With short lines and long ones (Abbacchio's F1: with 1 KB lines the
-    /// first cut's line ended up inside the kept start, uncounted).
+    /// With short lines and long ones (with 1 KB lines the first cut's
+    /// line ended up inside the kept start, uncounted).
     #[test]
     fn a_cut_keeps_the_start_and_the_end_and_counts_what_went() {
         for width in [84, 990] {
@@ -292,7 +292,7 @@ mod tests {
     }
 
     /// A task that wrote it all between two checks is cut when it ends,
-    /// or at the next start (Abbacchio's F2); not while its group runs.
+    /// or at the next start; not while its group runs.
     #[cfg(unix)]
     #[test]
     fn a_finished_tasks_log_past_the_cap_is_cut() {
@@ -339,9 +339,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Abbacchio's row 1415: a task that still runs keeps its log however
+    /// A task that still runs keeps its log however
     /// long it has been quiet, and a finished one's week counts from when it
-    /// finished, not from its log's last write (Bruno 39663).
+    /// finished, not from its log's last write.
     #[test]
     fn a_quiet_running_tasks_log_stays_and_a_week_counts_from_the_end() {
         let dir = std::env::temp_dir().join(format!("task-logs-running-{}", std::process::id()));

@@ -5,7 +5,7 @@
 // where the Claktory's network has no internet) and how to turn it on,
 // noticing on its own when it is. Never a dead end: Not now goes on. Left
 // before Continue (Back, a swipe down, a tap beside it), it asks iOS
-// nothing and the connection it came before doesn't go on (row 206).
+// nothing and the connection it came before doesn't go on.
 //
 // iOS has no API that reads the permission, and any check asks the person
 // when they haven't answered (ios/Runner/LocalNetwork.swift), so it's
@@ -74,13 +74,12 @@ class DeviceLocalNetwork implements LocalNetwork {
 LocalNetwork? localNetwork;
 
 /// Before this device's first connection to a Claktory (a code scanned or
-/// pasted, one of the person's own from their account, a link): the
-/// Local Network sheet, until it closes. Answers whether the connection
-/// goes on: once iOS has answered, whatever it said, but not when the sheet
-/// was left before Continue (Lucy 51006: it never connects without the
-/// sheet answered). Nothing to ask, and it goes on: the device has a
-/// Claktory already (it was asked then, or iOS asks as it always did) or no
-/// Local Network to ask for.
+/// pasted, one of the person's own from their account, a link): the Local
+/// Network sheet, until it closes. Answers whether the connection goes on:
+/// once iOS has answered, whatever it said, but not when the sheet was left
+/// before Continue (it never connects without the sheet answered). Nothing
+/// to ask, and it goes on: the device has a Claktory already (it was asked
+/// then, or iOS asks as it always did) or no Local Network to ask for.
 Future<bool> localNetworkBeforeFirst(BuildContext context) async {
   final network = localNetwork;
   if (network == null) return true;
@@ -153,9 +152,8 @@ class LocalNetworkPermission extends Permission {
 /// The sheet itself, until it closes. Why Claktory asks has one way on,
 /// Continue, which brings iOS's prompt (Apple's rule for a screen before
 /// a system prompt); left before it (Back, a swipe down, a tap beside it,
-/// Esc), it's Not now and iOS is asked nothing (row 206). Declined, the
-/// sheet says so, and setting it aside is Not now. Answers whether iOS
-/// answered.
+/// Esc), it's Not now and iOS is asked nothing. Declined, the sheet says
+/// so, and setting it aside is Not now. Answers whether iOS answered.
 Future<bool> showLocalNetwork(
   BuildContext context,
   LocalNetwork network,

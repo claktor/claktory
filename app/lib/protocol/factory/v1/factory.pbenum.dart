@@ -1504,6 +1504,49 @@ class NoticeLevel extends $pb.ProtobufEnum {
   const NoticeLevel._(super.value, super.name);
 }
 
+class SecretLoginOutcome extends $pb.ProtobufEnum {
+  /// Not a login, or not tried yet.
+  static const SecretLoginOutcome SECRET_LOGIN_OUTCOME_UNSPECIFIED =
+      SecretLoginOutcome._(
+          0, _omitEnumNames ? '' : 'SECRET_LOGIN_OUTCOME_UNSPECIFIED');
+
+  /// Claktory is filling it in: "Signing in to x.com…".
+  static const SecretLoginOutcome SECRET_LOGIN_OUTCOME_SIGNING_IN =
+      SecretLoginOutcome._(
+          1, _omitEnumNames ? '' : 'SECRET_LOGIN_OUTCOME_SIGNING_IN');
+
+  /// "Signed in to x.com · Saved as X login".
+  static const SecretLoginOutcome SECRET_LOGIN_OUTCOME_SIGNED_IN =
+      SecretLoginOutcome._(
+          2, _omitEnumNames ? '' : 'SECRET_LOGIN_OUTCOME_SIGNED_IN');
+
+  /// The site didn't accept it: the request is PENDING again.
+  static const SecretLoginOutcome SECRET_LOGIN_OUTCOME_REFUSED =
+      SecretLoginOutcome._(
+          3, _omitEnumNames ? '' : 'SECRET_LOGIN_OUTCOME_REFUSED');
+
+  /// Saved and filled; the site asks for a code next (a CODE handoff
+  /// follows).
+  static const SecretLoginOutcome SECRET_LOGIN_OUTCOME_CODE_NEXT =
+      SecretLoginOutcome._(
+          4, _omitEnumNames ? '' : 'SECRET_LOGIN_OUTCOME_CODE_NEXT');
+
+  static const $core.List<SecretLoginOutcome> values = <SecretLoginOutcome>[
+    SECRET_LOGIN_OUTCOME_UNSPECIFIED,
+    SECRET_LOGIN_OUTCOME_SIGNING_IN,
+    SECRET_LOGIN_OUTCOME_SIGNED_IN,
+    SECRET_LOGIN_OUTCOME_REFUSED,
+    SECRET_LOGIN_OUTCOME_CODE_NEXT,
+  ];
+
+  static final $core.List<SecretLoginOutcome?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 4);
+  static SecretLoginOutcome? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const SecretLoginOutcome._(super.value, super.name);
+}
+
 class SecretRequestState extends $pb.ProtobufEnum {
   static const SecretRequestState SECRET_REQUEST_STATE_UNSPECIFIED =
       SecretRequestState._(
@@ -3119,6 +3162,15 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
       NeedsYouRecordKind._(24,
           _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_RECOVERY_KEY_CHANGED');
 
+  /// An agent's browser was turned on or off (the Browser extension):
+  /// outcome CHANGED; agent_id who did it (an admin agent), empty for the
+  /// person; subject_agent_id the agent; title Claktory's sentence ("Rivet
+  /// turned on the browser for Yukako", "You turned off the browser for
+  /// Yukako"). Agents can't turn their own on.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_BROWSER =
+      NeedsYouRecordKind._(
+          25, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_BROWSER');
+
   static const $core.List<NeedsYouRecordKind> values = <NeedsYouRecordKind>[
     NEEDS_YOU_RECORD_KIND_UNSPECIFIED,
     NEEDS_YOU_RECORD_KIND_QUESTION,
@@ -3145,10 +3197,11 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
     NEEDS_YOU_RECORD_KIND_PROTECTED_PLACE,
     NEEDS_YOU_RECORD_KIND_SECRET_SAVED,
     NEEDS_YOU_RECORD_KIND_RECOVERY_KEY_CHANGED,
+    NEEDS_YOU_RECORD_KIND_BROWSER,
   ];
 
   static final $core.List<NeedsYouRecordKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 24);
+      $pb.ProtobufEnum.$_initByValueList(values, 25);
   static NeedsYouRecordKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 

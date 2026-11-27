@@ -198,7 +198,7 @@ async fn what_an_agent_sends_waits_for_review_and_a_secret_never_goes() {
     };
     apply_request(&mut client, &mut view, client_message::Body::CreateSecret(secret)).await;
     // (What the person types is hidden from the model, so the agent puts it in a file.)
-    let outbox = std::fs::read_dir(dir.join("site/pipes")).expect("pipes").next().expect("a folder").expect("entry").path().join("outbox");
+    let outbox = std::fs::read_dir(dir.join("site").join("pipes")).expect("pipes").next().expect("a folder").expect("entry").path().join("outbox");
     std::fs::write(outbox.join("key.txt"), "key: wJalrXUtnFEMI-K7MDENG").expect("file");
     let refused = call(&mut client, &mut view, "lea", "pipe_send", r#"{"text": "The key.", "files": ["key.txt"]}"#).await;
     assert!(refused.starts_with("Refused: it contains the secret AWS."), "{refused}");
@@ -333,7 +333,7 @@ pub(crate) async fn aws(client: &mut Client, view: &mut View) {
 }
 
 pub(crate) fn outbox(dir: &std::path::Path) -> std::path::PathBuf {
-    std::fs::read_dir(dir.join("site/pipes")).expect("pipes").next().expect("a folder").expect("entry").path().join("outbox")
+    std::fs::read_dir(dir.join("site").join("pipes")).expect("pipes").next().expect("a folder").expect("entry").path().join("outbox")
 }
 
 pub(crate) fn inbox(dir: &std::path::Path) -> std::path::PathBuf {

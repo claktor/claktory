@@ -219,7 +219,8 @@ async fn a_new_factory_opens_on_rivet_who_knows_how_factory_works() {
     let prompt = system_prompt.lock().expect("lock").clone();
     assert!(prompt.contains("You are Rivet. You help the person achieve what they want with Claktory"), "{prompt}");
     assert!(prompt.contains("# Claktory manual"));
-    let workspace_dir = dir.join("home/workspace");
+    // As the backend joins them: a component at a time (backslashes on Windows).
+    let workspace_dir = dir.join("home").join("workspace");
     assert!(prompt.contains(&format!("`{}/web-site`", workspace_dir.display())), "paths are filled in");
     assert!(!prompt.contains("{{workspace}}") && !prompt.contains("{{config}}") && !prompt.contains("{{home}}"));
 
@@ -632,6 +633,7 @@ fn last_shipped_rivet_prompt(current: &str) -> String {
                 && !line.starts_with("- When Claktory tells you a newer version of a model")
                 && !line.starts_with("- An approved proposal can carry grants")
                 && !line.starts_with("- Proposals from agents say what's needed")
+                && !line.starts_with("- When {{user}} asks to let an agent use the browser")
         })
         .collect();
     let approved = " When {{user}} approves an agent's request for a secret, you're told what it needs and why: give it one of the vault's secrets that fits (secrets_grant with request, and aliases when the variable names differ), or, when none fits, ask {{user}} to add one with secrets_collect, which opens a filled-in request in your conversation. Hold these to the same bar: check the request's reason against the agent's work, and give the narrower thing when in doubt.";
@@ -728,11 +730,52 @@ async fn placeholders_work_in_any_agents_prompt() {
     apply_request(&mut client, &mut view, send_message("writer", "Hi")).await;
     view.follow(&mut client, |view| view.entries.len() == 2 && idle(view, "writer")).await;
     let prompt = system_prompt.lock().expect("lock").clone();
-    let notes = format!("{}/notes", dir.join("home/workspace").display());
+    let notes = format!("{}/notes", dir.join("home").join("workspace").display());
     assert!(prompt.contains(&format!("The person reads what you write. Report to the person; notes go in {notes}.")), "{prompt}");
     assert_eq!(
         view.agent("writer").prompt,
         "{{User}} reads what you write. Report to {{user}}; notes go in {{workspace}}/notes.",
         "kept as written"
     );
+}
+
+/// Crediting Claktory is on by default; turned off, each agent follows it
+/// from its next context, never mid-context, where its cached prompt stays.
+#[tokio::test]
+async fn agents_credit_claktory_in_what_they_publish_unless_turned_off() {
+    let dir = temp_dir();
+    let models = Scripted::signed_in();
+    let system_prompt = models.system_prompt.clone();
+    let (addr, _factory) = start_with(&dir, models).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    assert!(view.workspace.attribution, "on unless turned off");
+    apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
+    apply_request(&mut client, &mut view, create_agent("site", "Writer", "")).await;
+    apply_request(&mut client, &mut view, send_message("writer", "Hi")).await;
+    view.follow(&mut client, |view| view.entries.len() == 2 && idle(view, "writer")).await;
+    let on = system_prompt.lock().expect("lock").clone();
+    assert!(on.contains("## Credit for Claktory") && on.contains("`Made with [Claktory](https://claktory.com)`"), "{on}");
+    assert!(!on.contains("turned off crediting Claktory") && !on.contains("{{co_author}}"));
+
+    // Off: kept in the settings, and the app is told.
+    let off = client_message::Body::SetAttribution(v1::SetAttribution { on: false });
+    assert!(matches!(apply_request(&mut client, &mut view, off).await, v1::server_message::Body::Ack(_)));
+    assert!(!view.workspace.attribution);
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("home/config.json")).expect("config")).expect("json");
+    assert_eq!(config["attribution"], false);
+
+    // The conversation goes on with the prompt it had…
+    apply_request(&mut client, &mut view, send_message("writer", "Again")).await;
+    view.follow(&mut client, |view| view.entries.len() == 4 && idle(view, "writer")).await;
+    assert_eq!(*system_prompt.lock().expect("lock"), on, "the context's prompt doesn't change");
+
+    // …and its next context has the words for off.
+    let clear = client_message::Body::RunCommand(v1::RunCommand { agent_id: "writer".into(), name: "clear".into(), args: String::new() });
+    apply_request(&mut client, &mut view, clear).await;
+    apply_request(&mut client, &mut view, send_message("writer", "After")).await;
+    view.follow(&mut client, |view| view.entries.iter().any(|entry| format!("{entry:?}").contains("After")) && idle(view, "writer")).await;
+    let off = system_prompt.lock().expect("lock").clone();
+    assert!(off.contains("turned off crediting Claktory") && !off.contains("Made with [Claktory]"), "{off}");
 }

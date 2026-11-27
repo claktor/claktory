@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -75,7 +77,7 @@ const mapLayerNames = {
 /// The window's one Map keeps its state wherever it's shown: an iPad's
 /// window resized across the phone's layout shows it as a page instead of
 /// a pane (or the other way round), and it comes back as it was, History
-/// and where it was in it too (Sale's row 149), as a phone's rotation
+/// and where it was in it too, as a phone's rotation
 /// keeps it.
 class MapView extends StatefulWidget {
   const MapView({super.key});
@@ -135,7 +137,7 @@ class _MapViewState extends State<_Map> {
   String? _hover;
   String? _pinned;
 
-  /// History mode (#458): how this Claktory came to be, replayed.
+  /// History mode: how this Claktory came to be, replayed.
   var _history = false;
 
   /// History's page, for its header's Share replay… (a phone's).
@@ -363,7 +365,7 @@ class _MapViewState extends State<_Map> {
               PhoneHeader(
                 leading: HeaderButton.back(onTap: close),
                 search: false,
-                // Now or History (#458), once there's a map to replay.
+                // Now or History, once there's a map to replay.
                 title: layout == null
                     ? Text(
                         'Map',
@@ -388,7 +390,7 @@ class _MapViewState extends State<_Map> {
                       onTap: () => _openLines(layout),
                     ),
                   ],
-                  // History's video (#458 E1), where it can be made.
+                  // History's video, where it can be made.
                   if (layout != null && _history && canExportReplay)
                     HeaderButton(
                       key: _shareReplay,
@@ -597,7 +599,7 @@ class _MapViewState extends State<_Map> {
                                       : null,
                                   // Drawn to its own measure, as on a phone:
                                   // the system's text size would burst its
-                                  // boxes (Zucchero's row 517). Zoom reads
+                                  // boxes. Zoom reads
                                   // it closer.
                                   child: MediaQuery.withNoTextScaling(
                                     child: ZoomCanvas(
@@ -793,7 +795,7 @@ class _Board extends StatelessWidget {
 }
 
 /// A node on the board: an agent (its color down the left, its name, role
-/// and badges), a secret, or Claktory's records. History's board (#458)
+/// and badges), a secret, or Claktory's records. History's board
 /// draws its chips with it too.
 class MapChipView extends StatelessWidget {
   const MapChipView({super.key, required this.chip, required this.focused});
@@ -1046,7 +1048,7 @@ class _BoardPainter extends CustomPainter {
         focus == null ? color : color.withValues(alpha: 0.3),
         2,
       );
-      // Over its portal, as History's (Lucy): the border, padding and half
+      // Over its portal, as History's: the border, padding and half
       // the glyph in; a pad of only its portal, its middle.
       final x = pad.rect.width <= _padHeight + 0.5
           ? pad.rect.center.dx
@@ -1336,8 +1338,10 @@ class _PortalPadView extends StatelessWidget {
     final palette = Palette.of(context);
     final pipe = pad.pipe;
     final color = pad.closed ? palette.textFaint : pipeColor;
-    final status = pipeStatus(pipe);
     final liaison = pad.liaison;
+    // Its liaison's wait or daily limit, as the sidebar's row says it
+    // .
+    final status = pipeStatus(pipe, lead: liaison);
     return HoverCard(
       card: (context) => Text(
         [
@@ -1363,7 +1367,7 @@ class _PortalPadView extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: Space.s),
               decoration: BoxDecoration(
                 // The pipe's color washed in, so it reads as a way out of
-                // the board even small, as History's pad does (Bruno 44370).
+                // the board even small, as History's pad does.
                 color: hovered
                     ? palette.hover
                     : Color.alphaBlend(
@@ -1535,13 +1539,30 @@ class MapGridPainter extends CustomPainter {
     final origin = Offset(transform.storage[12], transform.storage[13]);
     final x0 = origin.dx % step;
     final y0 = origin.dy % step;
-    final paint = Paint()..color = color;
     final radius = math.max(0.6, math.min(1.0, scale));
-    for (var y = y0; y < size.height; y += step) {
-      for (var x = x0; x < size.width; x += step) {
-        canvas.drawCircle(Offset(x, y), radius, paint);
+    // Thousands of dots on a large window: one call, round points the
+    // circles' size, rather than a circle each (74% of History's
+    // raster).
+    final across = ((size.width - x0) / step).ceil();
+    final down = ((size.height - y0) / step).ceil();
+    if (across <= 0 || down <= 0) return;
+    final points = Float32List(across * down * 2);
+    var i = 0;
+    for (var row = 0; row < down; row++) {
+      final y = y0 + row * step;
+      for (var column = 0; column < across; column++) {
+        points[i++] = x0 + column * step;
+        points[i++] = y;
       }
     }
+    canvas.drawRawPoints(
+      ui.PointMode.points,
+      points,
+      Paint()
+        ..color = color
+        ..strokeWidth = radius * 2
+        ..strokeCap = StrokeCap.round,
+    );
   }
 
   @override
@@ -1594,7 +1615,7 @@ class _Key extends StatelessWidget {
     ];
     final caption = TextStyles.caption.copyWith(color: palette.textFaint);
     // Its text grows only so far, as a bar's, so the board keeps its room
-    // at the largest sizes (Zucchero's row 517); its pills grow with it.
+    // at the largest sizes; its pills grow with it.
     return MediaQuery.withClampedTextScaling(
       maxScaleFactor: 2,
       child: _strip(
@@ -1719,7 +1740,7 @@ class _LayerSwitch extends StatelessWidget {
         onTap: onToggle,
         builder: (context, hovered) => AnimatedContainer(
           duration: Motion.fast,
-          // At least 28, more as its words grow (Zucchero's row 517).
+          // At least 28, more as its words grow.
           constraints: const BoxConstraints(minHeight: 28),
           padding: const EdgeInsets.symmetric(horizontal: Space.s),
           decoration: BoxDecoration(
@@ -1836,7 +1857,7 @@ class _ZoomControls extends StatelessWidget {
               Pressable(
                 onTap: controller.fit,
                 builder: (context, hovered) => Container(
-                  // Grows with its words at a large text size (row 517).
+                  // Grows with its words at a large text size.
                   constraints: const BoxConstraints(
                     minWidth: 48,
                     minHeight: 28,

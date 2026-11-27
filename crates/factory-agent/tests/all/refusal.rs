@@ -1,4 +1,4 @@
-//! The refusal fallback (#225): a step the model's safety classifiers
+//! The refusal fallback: a step the model's safety classifiers
 //! declined is retried once on the configured fallback model, same
 //! context, with the refusal kept in the conversation but out of the
 //! model's view, and the agent told in a transient note.

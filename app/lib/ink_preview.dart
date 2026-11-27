@@ -1,5 +1,5 @@
-// The ink drawn on an image, shown read-only wherever its pane is open
-// (#362 I2): the backend keeps each ink layer with a preview, a
+// The ink drawn on an image, shown read-only wherever its pane is open:
+// the backend keeps each ink layer with a preview, a
 // transparent PNG of the ink alone in the image's own space, made for
 // other devices to lay over the file. This lays the latest one of the
 // version shown over the image, on every device, and follows saves from

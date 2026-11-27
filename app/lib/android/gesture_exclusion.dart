@@ -1,4 +1,4 @@
-// Where Android's Back swipe doesn't start (Sale's row 86).
+// Where Android's Back swipe doesn't start.
 //
 // With gesture navigation, a swipe in from either side edge is Back. The
 // phone's hold-to-record mic sits near the right edge, so holding it and

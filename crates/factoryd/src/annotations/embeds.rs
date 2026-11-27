@@ -36,7 +36,7 @@ pub(crate) enum Media {
 
 /// Whether `path` is a picture or a video shown in place, by its extension.
 pub(crate) fn media_kind(path: &str) -> Option<Media> {
-    let name = path.rsplit('/').next().unwrap_or(path);
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
     let (_, extension) = name.rsplit_once('.')?;
     let extension = extension.to_ascii_lowercase();
     if PICTURES.contains(&extension.as_str()) {
@@ -53,12 +53,21 @@ pub(crate) fn media_kind(path: &str) -> Option<Media> {
 /// rest; none past the root), absolute, from the home folder (`~`, kept
 /// as `~/…`), or a `file:` URL's path; a query or fragment is no part of a
 /// plain name, which is percent-decoded. None for any other scheme.
+///
+/// A file on Windows (`C:\…`, or a share's `\\server\share\…`) names its
+/// pictures as Windows does: `\` and `/` both separate, a drive (`D:\…`,
+/// `D:/…`, never a one-letter scheme) is absolute, `\…` is on the file's
+/// own drive, `~` comes back as `~/` (as the watcher expands it), and the
+/// rest with `\`. A share is only ever the file's own: opening another
+/// computer's would send it this user's sign-in (NTLM), so a file naming
+/// one, `\\?\…` or `\\.\…` names nothing.
 pub(crate) fn markdown_path(file: &str, src: &str) -> Option<String> {
+    let windows = windows_root(file).is_some();
     let mut target = src.trim().to_owned();
     if target.is_empty() || target.starts_with('#') {
         return None;
     }
-    match scheme(&target) {
+    match scheme(&target).filter(|scheme| !(windows && scheme.len() == 1)) {
         Some(scheme) if scheme.eq_ignore_ascii_case("file") => {
             let rest = &target[scheme.len() + 1..];
             // file:///path, file://host/path or file:/path: the path.
@@ -70,6 +79,8 @@ pub(crate) fn markdown_path(file: &str, src: &str) -> Option<String> {
             if path.is_empty() {
                 return None;
             }
+            // file:///C:/x.png is C:/x.png.
+            let path = if windows { path.strip_prefix('/').filter(|rest| windows_root(rest).is_some()).unwrap_or(path) } else { path };
             target = path.to_owned();
         }
         Some(_) => return None,
@@ -84,6 +95,9 @@ pub(crate) fn markdown_path(file: &str, src: &str) -> Option<String> {
     }
     if target.is_empty() {
         return None;
+    }
+    if windows {
+        return windows_path(file, &target);
     }
     let joined = if target.starts_with('/') || target == "~" || target.starts_with("~/") {
         target
@@ -106,6 +120,75 @@ pub(crate) fn markdown_path(file: &str, src: &str) -> Option<String> {
         return None;
     }
     Some(format!("{}/{}", if home { "~" } else { "" }, parts.join("/")))
+}
+
+/// A Windows path's root and the rest: `C:` for `C:\…` or `C:/…`, and
+/// `\\server\share` for a share (either separator).
+fn windows_root(path: &str) -> Option<(&str, &str)> {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'\\' | b'/') {
+        return Some((&path[..2], &path[2..]));
+    }
+    let rest = path.strip_prefix(r"\\").or_else(|| path.strip_prefix("//"))?;
+    let server = rest.find(['\\', '/']).filter(|&at| at > 0)?;
+    // `\\?\…` and `\\.\…` aren't shares.
+    if matches!(&rest[..server], "?" | ".") {
+        return None;
+    }
+    let share = &rest[server + 1..];
+    let end = share.find(['\\', '/']).unwrap_or(share.len());
+    if end == 0 {
+        return None;
+    }
+    let root = 2 + server + 1 + end;
+    Some((&path[..root], &path[root..]))
+}
+
+/// `target` in the Markdown file at `file` on Windows: see `markdown_path`.
+fn windows_path(file: &str, target: &str) -> Option<String> {
+    let (file_root, file_rest) = windows_root(file)?;
+    let (root, home, rest) = if let Some((root, rest)) = windows_root(target) {
+        // Opening another computer's share sends it this user's sign-in
+        // (NTLM): only the shown file's own share, never one a file names.
+        let share = root.starts_with(['\\', '/']);
+        if share && !same_root(root, file_root) {
+            return None;
+        }
+        // The file's own share, named as the file names it.
+        (if share { file_root } else { root }.to_owned(), false, rest.to_owned())
+    } else if target.starts_with(r"\\") || target.starts_with("//") || target.starts_with(r"\/") || target.starts_with(r"/\") {
+        // `\\?\…`, `\\.\…` or a share with no name: not a picture's place.
+        return None;
+    } else if target == "~" || target.starts_with("~/") || target.starts_with("~\\") {
+        (String::new(), true, target[1..].to_owned())
+    } else if target.starts_with(['\\', '/']) {
+        (file_root.to_owned(), false, target.to_owned())
+    } else {
+        let folder = file_rest.rfind(['\\', '/']).map_or("", |at| &file_rest[..at]);
+        (file_root.to_owned(), false, format!("{folder}\\{target}"))
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for part in rest.split(['\\', '/']) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    // `~/` as the watcher expands it (annotations), then Windows' own `\`.
+    Some(if home { format!("~/{}", parts.join("\\")) } else { format!("{root}\\{}", parts.join("\\")) })
+}
+
+/// Whether two Windows roots (`C:`, `\\server\share`) are the same, as
+/// Windows compares them: case aside, `\` and `/` alike.
+fn same_root(a: &str, b: &str) -> bool {
+    let plain = |root: &str| root.replace('/', "\\").to_lowercase();
+    plain(a) == plain(b)
 }
 
 /// A URL's scheme, as `[a-zA-Z][a-zA-Z0-9+.-]*:` starts it.
@@ -268,6 +351,51 @@ mod tests {
         assert_eq!(media_kind("/x/Shot.PNG"), Some(Media::Picture));
         assert_eq!(media_kind("/x/clip.mov"), Some(Media::Video));
         assert_eq!(media_kind("/x/doc.pdf"), None);
+    }
+
+    #[test]
+    fn a_file_on_windows_names_its_pictures_as_windows_does() {
+        let file = r"C:\Users\ann\notes\plan.md";
+        assert_eq!(markdown_path(file, "shot.png").as_deref(), Some(r"C:\Users\ann\notes\shot.png"));
+        assert_eq!(markdown_path(file, "img/shot.png").as_deref(), Some(r"C:\Users\ann\notes\img\shot.png"));
+        assert_eq!(markdown_path(file, r".\img\..\shot.png?v=2#top").as_deref(), Some(r"C:\Users\ann\notes\shot.png"));
+        assert_eq!(markdown_path(file, "../a%20b.png").as_deref(), Some(r"C:\Users\ann\a b.png"));
+        assert_eq!(markdown_path(file, r"D:\pics\x.png").as_deref(), Some(r"D:\pics\x.png"), "a drive isn't a scheme");
+        assert_eq!(markdown_path(file, "d:/pics/x.png").as_deref(), Some(r"d:\pics\x.png"));
+        assert_eq!(markdown_path(file, r"\tmp\x.png").as_deref(), Some(r"C:\tmp\x.png"), "on the file's drive");
+        assert_eq!(markdown_path(file, "file:///D:/a%20b.png").as_deref(), Some(r"D:\a b.png"));
+        // Another computer's share is never opened (it would be sent this
+        // user's sign-in), only the file's own.
+        assert_eq!(markdown_path(file, r"\\nas\photos\x.png"), None);
+        assert_eq!(markdown_path(file, "//attacker.example/x/y.png"), None);
+        assert_eq!(markdown_path(file, r"\\?\C:\x.png"), None);
+        // Every form of another share, after decoding, meets the same check.
+        for other in [
+            r"\\evil\s\x.png",
+            "//evil/s/x.png",
+            "%5C%5Cevil%5Cs%5Cx.png",
+            "file:////evil/s/x.png",
+            r"\\evil@SSL\s\x.png",
+            r"\\?\UNC\evil\s\x.png",
+            r"\\.\UNC\evil\s\x.png",
+        ] {
+            assert_eq!(markdown_path(file, other), None, "{other}");
+        }
+        assert_eq!(markdown_path(file, "file://evil/s/x.png").as_deref(), Some(r"C:\s\x.png"), "the host is dropped");
+        assert_eq!(markdown_path(file, "~/Desktop/x.png").as_deref(), Some(r"~/Desktop\x.png"));
+        assert_eq!(markdown_path(file, r"~\Desktop\x.png").as_deref(), Some(r"~/Desktop\x.png"));
+        assert_eq!(markdown_path(file, "https://example.com/x.png"), None);
+        assert_eq!(markdown_path(file, "../../../../x.png"), None, "past the root");
+        assert_eq!(markdown_path(r"\\nas\docs\plan.md", "shot.png").as_deref(), Some(r"\\nas\docs\shot.png"));
+        assert_eq!(markdown_path(r"\\nas\docs\plan.md", r"\\nas\docs\img\x.png").as_deref(), Some(r"\\nas\docs\img\x.png"));
+        assert_eq!(markdown_path(r"\\nas\docs\plan.md", "//NAS/docs/x.png").as_deref(), Some(r"\\nas\docs\x.png"));
+        assert_eq!(markdown_path(r"\\nas\docs\plan.md", r"\\nas\other\x.png"), None, "another share of it");
+        assert_eq!(markdown_path(r"\\evil\other\plan.md", r"\\EVIL\S\x.png"), None, "another share of the same server");
+        assert_eq!(markdown_path(r"\\nas\docs\plan.md", r"\img\x.png").as_deref(), Some(r"\\nas\docs\img\x.png"));
+        assert!(windows_root(r"\\?\C:\notes").is_none() && windows_root(r"\\.\pipe\x").is_none());
+        assert_eq!(media_kind(r"C:\x.y\Shot.PNG"), Some(Media::Picture));
+        // A POSIX file's names are as before, backslashes and all.
+        assert_eq!(markdown_path("/n/doc.md", r"a\b.png").as_deref(), Some(r"/n/a\b.png"));
     }
 
     #[test]

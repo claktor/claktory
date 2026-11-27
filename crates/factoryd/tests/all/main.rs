@@ -14,6 +14,8 @@ mod agents;
 mod app_access;
 mod app_files;
 mod app_data;
+// Not on Windows: the user-apps worker is reached over a Unix socket.
+#[cfg(unix)]
 mod app_grants;
 mod app_pins;
 mod app_update;
@@ -34,10 +36,13 @@ mod channel;
 mod characters;
 mod chats;
 mod checklist_replies;
+mod checklist_stale;
 mod checklist_waits;
 mod claktory_account;
 mod cli;
 mod cloudflare;
+// A card doesn't run a command on Windows yet; it says so.
+#[cfg(unix)]
 mod command_cards;
 mod commands;
 mod comments;
@@ -59,6 +64,8 @@ mod folders;
 mod fork;
 mod given_up;
 mod grok;
+// Not on Windows: it ends tasks by their process groups; Windows' jobs are `common::cleanup`'s.
+#[cfg(unix)]
 mod harness;
 mod hidden_characters;
 mod highlight;
@@ -72,14 +79,24 @@ mod image_generate;
 mod keep_awake;
 mod leads;
 mod login;
+mod logins;
 mod map;
 mod model_upgrades;
 mod models_ext;
 mod monitors;
+// Moving a Claktory isn't on Windows yet (move_run::NOT_ON_WINDOWS).
+#[cfg(unix)]
 mod move_app;
+// Not on Windows: moving isn't on Windows yet.
+#[cfg(unix)]
 mod move_export;
+// Not on Windows: moving isn't on Windows yet.
+#[cfg(unix)]
 mod move_import;
+// Not on Windows: moving isn't on Windows yet.
+#[cfg(unix)]
 mod move_receive;
+#[cfg(unix)]
 mod move_rivet;
 mod needs_you;
 mod no_pipe_mark;
@@ -145,6 +162,8 @@ mod settings;
 mod sign_ins;
 mod sketches;
 mod slow_reads;
+// Not on Windows: its helper is stood in for by shell scripts.
+#[cfg(unix)]
 mod speech;
 mod suggest_talk;
 mod supervisor;
@@ -159,6 +178,7 @@ mod trees;
 mod unload;
 mod update;
 mod uploads;
+mod urgent_alerts;
 mod usage_report;
 mod usage_switch;
 mod usage_waits;

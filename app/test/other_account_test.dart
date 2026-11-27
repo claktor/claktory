@@ -1,4 +1,4 @@
-// #529, S4 (Squalo's MC11; Fugo's conditions 5): a Claktory signed in to
+// A Claktory signed in to
 // another Claktory account turns this device away (ERROR_CODE_OTHER_ACCOUNT)
 // and says why: on a Mac and a phone, in place of the Claktory, its words,
 // Try again and Remove…, never a way around it.
@@ -65,8 +65,8 @@ void main() {
       expect(find.text('Sign out'), findsNothing);
       expect(find.byKey(const ValueKey('device-email')), findsNothing);
       // Which account this device is on, and, in case it's the person's
-      // own, how to move it to that one, in the app (V3; Fugo: no
-      // commands, only the person may run them).
+      // own, how to move it to that one, in the app (V3; no commands,
+      // only the person may run them).
       expect(
         find.text('This $thisDeviceKind is signed in as m…\u2060@example.com.'),
         findsOneWidget,

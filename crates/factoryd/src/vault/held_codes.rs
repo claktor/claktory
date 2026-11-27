@@ -1,10 +1,10 @@
-//! Recovery codes a site showed once, held for the person's card (#435
-//! W8b, Fugo 42966): sealed with the vault's key in `kept`, as
-//! `recovery-codes:<card>`, bound to the vault and the card, the moment
-//! Claktory reads them off the page. Never a secret: no agent can resolve,
-//! be granted or list them, and nothing else reads them but the card's Show
-//! and Keep in Secrets. They outlast restarts; only the person's I saved
-//! them or Keep in Secrets removes them (`drop_codes`).
+//! Recovery codes a site showed once, held for the person's card: sealed
+//! with the vault's key in `kept`, as `recovery-codes:<card>`, bound to the
+//! vault and the card, the moment Claktory reads them off the page. Never a
+//! secret: no agent can resolve, be granted or list them, and nothing else
+//! reads them but the card's Show and Keep in Secrets. They outlast
+//! restarts; only the person's I saved them or Keep in Secrets removes them
+//! (`drop_codes`).
 
 use rusqlite::{OptionalExtension, params};
 use zeroize::Zeroizing;
@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 use super::{Value, Vault, VaultError, aad, crypto};
 
 /// The variable a kept card's codes are in. It shows no hint: four
-/// characters of a code would reach every device (Abbacchio 45722).
+/// characters of a code would reach every device.
 pub(crate) const CODES_VARIABLE: &str = "RECOVERY_CODES";
 
 /// What `kept` names a card's codes.

@@ -62,6 +62,9 @@ struct Render<'a> {
     user: Option<&'a str>,
     /// The vault's secrets it may use (see `Frame::secrets`).
     secrets: &'a BTreeMap<String, String>,
+    /// Whether what it publishes credits Claktory (`Config::attribution`),
+    /// as the settings say when its context starts.
+    attribution: bool,
 }
 
 /// Where an agent works, and what else its file tools may reach: its own
@@ -157,10 +160,6 @@ pub(crate) fn placed(factory: &crate::factory::Factory, config: &Config, agent: 
     if factory.pipes.curator(&agent.id) {
         return crate::pipes::curator::places(factory, &agent.id);
     }
-    // An errand agent: a folder of its own, nothing else.
-    if factory.pipes.errand_agent(&agent.id) {
-        return crate::errands::places(factory, &agent.id);
-    }
     match crate::pipes::quarantine::quarantine(factory, config, &agent.id) {
         Some(quarantine) => quarantine.places(),
         None => places(&factory.home, config, agent, &pipe_outboxes(factory, config, &agent.id)),
@@ -252,10 +251,6 @@ fn extensions_of(factory: &crate::factory::Factory, agent: &AgentConfig) -> Vec<
             .collect();
     }
     let mut extensions = enabled_extensions(agent);
-    if factory.pipes.errand_agent(&agent.id) {
-        extensions.retain(|extension| crate::errands::KEPT_EXTENSIONS.contains(&extension.manifest().id));
-        return extensions;
-    }
     if factory.pipes.quarantined(&agent.id) {
         extensions.retain(|extension| crate::pipes::quarantine::KEPT_EXTENSIONS.contains(&extension.manifest().id));
     }
@@ -851,7 +846,7 @@ impl Factory {
     /// `announced` are the tools the agent was told it can call through
     /// extension_call, for a frame that keeps the tools it had.
     async fn new_frame(&self, id: &str, epoch: u64, tools: Vec<ToolSpec>, announced: Vec<String>) -> Option<Frame> {
-        let (agent, project, compact_at, models, sections, pinned, roster, folders, places, settings, folder_name, user) = {
+        let (agent, project, compact_at, models, sections, pinned, roster, folders, places, settings, folder_name, user, attribution) = {
             let mut inner = self.lock();
             if inner.agents.get(id).is_none_or(|runtime| runtime.epoch != epoch) {
                 return None;
@@ -868,7 +863,8 @@ impl Factory {
             let folder_name = if quarantined { None } else { inner.config.agent_folder(&agent).map(|folder| folder.name.clone()) };
             let compact_at = inner.config.compact_at(&agent);
             let user = inner.config.user_name().map(str::to_owned);
-            (agent, project, compact_at, inner.models.clone(), sections, pinned, roster, folders, places, settings, folder_name, user)
+            let attribution = inner.config.attribution;
+            (agent, project, compact_at, inner.models.clone(), sections, pinned, roster, folders, places, settings, folder_name, user, attribution)
         };
         // Contained, it has no secret or app.
         let quarantined = self.pipes.contained(id);
@@ -886,6 +882,7 @@ impl Factory {
             folders: &folders,
             user: user.as_deref(),
             secrets: &secrets,
+            attribution,
         };
         let system_prompt = system_prompt(&render, &places.folder, &self.home, &places.extra_dirs).await;
         let frame = Frame {
@@ -1120,9 +1117,6 @@ impl Factory {
         if self.pipes.contained(id) {
             let mut tools = if self.pipes.curator(id) {
                 crate::pipes::curator::tools(self, places)
-            } else if self.pipes.errand_agent(id) {
-                // Its file tools in its own folder, no bash (`errands`).
-                crate::pipes::quarantine::contained_tools(self, places)
             } else {
                 crate::pipes::quarantine::tools(self, id, places)
             };
@@ -1136,8 +1130,15 @@ impl Factory {
         factory_agent::tools::read_only(&mut tools, &places.read_only);
         // ripgrep and jq are named only when the agent's commands will find them.
         factory_agent::tools::installed(&mut tools, &crate::update::agents_path(&self.home));
-        // Ink and its staging are the person's until they send it (#209 §7).
-        factory_agent::tools::denied(&mut tools, &crate::ink::private(&self.home));
+        // Ink and its staging are the person's until they send it, and Apple's
+        // container tool's folder holds Claktory's browser's sessions on a Mac.
+        let browser_tools = extensions.iter().any(|extension| extension.manifest().id == crate::extensions::browser::ID);
+        let denied: Vec<_> = crate::ink::private(&self.home)
+            .into_iter()
+            .map(Into::into)
+            .chain(crate::browser_host::confine::denied(browser_tools))
+            .collect();
+        factory_agent::tools::denied(&mut tools, &denied);
         // Only agents given a secret see bash's `secrets`.
         if !self.vault.granted(id).is_empty() {
             factory_agent::tools::secrets(&mut tools);
@@ -1147,11 +1148,6 @@ impl Factory {
         }
         tools.extend(crate::apps::tools(self, id));
         tools.extend(crate::pipes::agents::tools(self, id));
-        // The lead of an errand agent opens its errands and reads their logs
-        // (`crate::errands`).
-        if crate::errands::available() && crate::extensions::errands::leads_errand_agent(self, &self.lock().config, id) {
-            tools.extend(crate::extensions::errands::lead_tools(self, id));
-        }
         tools.push(self.extension_call(id));
         tools
     }
@@ -1160,7 +1156,7 @@ impl Factory {
     fn extension_tools(self: &Arc<Self>, id: &str) -> Vec<Tool> {
         let Some(agent) = self.lock().config.agent(id).cloned() else { return Vec::new() };
         let mut tools: Vec<Tool> = extensions_of(self, &agent).into_iter().flat_map(|extension| extension.tools(self, id)).collect();
-        if self.pipes.curator(id) || self.pipes.errand_agent(id) {
+        if self.pipes.curator(id) {
             return tools;
         }
         if self.pipes.quarantined(id) {
@@ -1637,7 +1633,14 @@ async fn system_prompt(render: &Render<'_>, folder: &Path, home: &Home, extra_di
         "\n## How you persist\n\nYour conversation continues across messages and restarts. When your context reaches {compact} tokens, Claktory summarizes it and you continue from the summary, so keep important decisions and progress in the conversation or in files.\n",
         compact = render.compact_at,
     );
-    let manual = crate::manual::render(&crate::manual::manual().core, home, render.user);
+    // The core for this agent's settings: crediting Claktory, and the
+    // co-author trailer only once there's an address for it.
+    let core = crate::manual::manual().core_for(|key| match key {
+        "attribution" => render.attribution,
+        "co_author" => render.attribution && crate::manual::CO_AUTHOR.is_some(),
+        _ => true,
+    });
+    let manual = crate::manual::render(&core, home, render.user);
     let _ = write!(
         prompt,
         "\n{manual}\n## This Claktory now\n\nYour id in the settings is \"{id}\". Models available now, with their efforts:\n",

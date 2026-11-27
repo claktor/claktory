@@ -193,7 +193,7 @@ if [[ -f "$SRC_ROOT/scripts/browser-image/Containerfile" ]] &&
 fi
 if [[ -n "$PREVIOUS" && -f "$PREVIOUS/factoryd" && -f "$PREVIOUS/claktory-apps" && -f "$PREVIOUS/claktory-speech" && -f "$PREVIOUS/backend-version" && "$(cat "$PREVIOUS/backend-fingerprint" 2>/dev/null)" == "$FINGERPRINT" ]] &&
    { ! $VIDEO_PREVIEW || [[ -f "$PREVIOUS/claktory-video-preview" ]]; } && { ! $RG || [[ -f "$PREVIOUS/tools/rg" ]]; } && { ! $JQ || [[ -f "$PREVIOUS/tools/jq" ]]; } &&
-   { ! $BROWSER || [[ -f "$PREVIOUS/claktory-browser.oci.tar.zst" && -f "$PREVIOUS/browser-image.env" ]]; }; then
+   { ! $BROWSER || [[ -f "$PREVIOUS/claktory-browser.oci.tar.zst" && -f "$PREVIOUS/browser-image.env" && -f "$PREVIOUS/safe-browsing-seed.tar" ]]; }; then
   BACKEND="$PREVIOUS"
   BROWSER_DIR="$PREVIOUS"
   BACKEND_VERSION="$(cat "$PREVIOUS/backend-version")"
@@ -251,7 +251,7 @@ cp "$BACKEND/factoryd" "$BACKEND/claktory-apps" "$BACKEND/claktory-speech" "$par
 if $VIDEO_PREVIEW; then cp "$BACKEND/claktory-video-preview" "$partial/"; fi
 if $RG || $JQ; then cp -R "$BACKEND/tools" "$partial/tools"; fi
 if $BROWSER; then
-  cp -c "$BROWSER_DIR/claktory-browser.oci.tar.zst" "$BROWSER_DIR/browser-image.env" "$partial/"
+  cp -c "$BROWSER_DIR/claktory-browser.oci.tar.zst" "$BROWSER_DIR/browser-image.env" "$BROWSER_DIR/safe-browsing-seed.tar" "$partial/"
   [[ "$BROWSER_DIR" == "${PREVIOUS:-}" ]] || rm -rf "$BROWSER_DIR"
 fi
 echo "$BACKEND_VERSION" >"$partial/backend-version"

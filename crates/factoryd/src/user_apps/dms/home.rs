@@ -496,10 +496,16 @@ fn path(home: &Home) -> PathBuf {
 
 fn connect(path: &Path) -> rusqlite::Result<Connection> {
     let db = Connection::open(path)?;
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
+    #[cfg(windows)]
+    let _ = factory_agent::windows::private::protect(path);
+    // Private anyway, by the home's DACL: a test notices if not.
+    #[cfg(windows)]
+    debug_assert!(factory_agent::windows::system::is_private_path(path).unwrap_or(false), "{} isn't private", path.display());
     db.busy_timeout(std::time::Duration::from_secs(5))?;
     // The PublicGroups' storage needs it, though nothing here is secret.
     db.pragma_update(None, "secure_delete", "ON")?;

@@ -1,4 +1,4 @@
-// A conversation on a card (Matt via Bruno 29397, Ghiaccio's ask_reply): a
+// A conversation on a card (ask_reply): a
 // card its agent replied on shows the talk so far, oldest first, above its
 // own buttons, with Reply and Resolve beneath them; Resolve ends it with no
 // decision ("Resolved", never "Approved"); every answer says where it came
@@ -195,7 +195,7 @@ void main() {
     expect(harness.last.answerAsk.text, 'Use it');
   });
 
-  // #492 (Fugo's rulings): after a talk, Approve agrees with where it
+  // After a talk, Approve agrees with where it
   // ended, and says so; an answer says how much of the talk it showed, so
   // one after a reply the person didn't see is refused.
   group('approving after a talk', () {
@@ -211,8 +211,7 @@ void main() {
       await harness.show(tester);
       await settle(tester);
       final line = tester.getTopLeft(_inCard(find.text(follows)));
-      // In the card's row, beside its buttons (Lucy's spec: line · no ·
-      // primary).
+      // In the card's row, beside its buttons (line · no · primary).
       expect(
         line.dy,
         lessThan(tester.getBottomLeft(_inCard(find.text('Approve'))).dy),
@@ -403,7 +402,7 @@ void main() {
     await settle(tester);
     expect(_inCard(find.text('The new one, under Settings.')), findsOneWidget);
     expect(_inCard(find.text('Resolve')), findsOneWidget);
-    // Send, once words are typed, replies (#533).
+    // Send, once words are typed, replies.
     expect(_inCard(find.text('Reply')), findsNothing);
     await tester.tap(_inCard(find.text('Done')));
     await settle(tester);

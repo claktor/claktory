@@ -1,7 +1,6 @@
 // A field inside a phone's conversation (a card's Add a comment) while the
 // person types in it: "Latest" and the message box step aside, and the
-// field shows whole above the keyboard (Zucchero's #321, sa-23; the box,
-// Lucy's needs-you-cards.md §5.2).
+// field shows whole above the keyboard (sa-23; the box).
 import 'package:factory_app/decision.dart' show DecisionComment;
 import 'package:factory_app/identity.dart' show Space;
 import 'package:factory_app/message_box.dart' show MessageBox;
@@ -52,7 +51,7 @@ Workspace _workspace() => Workspace(
   ],
   selectedAgentId: 'june',
   // Voice on, as a Claktory that has its speech model: the field sits
-  // with its mic in a column of its own (Zucchero's row 726).
+  // with its mic in a column of its own.
   speechModel: SpeechModel(state: SpeechModelState.SPEECH_MODEL_STATE_READY),
 );
 
@@ -177,7 +176,7 @@ void main() {
     });
   }
 
-  // Zucchero's row 706: a secret request's comment on an SE at AX3. Once
+  // A secret request's comment on an SE at AX3. Once
   // typed, its line ("Lea gets your words either way, and never sees the
   // value.") stays; the field takes only the room left under it.
   testWidgets('a secret request typed in at AX3: buttons, the line, then '

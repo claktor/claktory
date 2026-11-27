@@ -4,7 +4,9 @@
 //! starts, nothing is read but that file. It holds its port so the
 //! supervisor stays content, and answers every client that it moved.
 
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use factory_protocol::v1::{self, ErrorCode, ServerMessage, client_message, server_message::Body};
@@ -88,7 +90,10 @@ const KEPT_OPEN: Duration = Duration::from_secs(600);
 pub async fn serve(listener: tokio::net::TcpListener, home: &Home, moved: Moved) {
     tracing::warn!(machine = %moved.machine, epoch = moved.epoch, "this Claktory moved away; serving moved mode only");
     let _ = crate::remote::write_private(&pid_path(home), format!("{}\n", std::process::id()).as_bytes());
+    #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+    #[cfg(windows)]
+    let mut terminate = crate::windows::stop::listen().inspect_err(|error| tracing::warn!(%error, "can't listen for being stopped")).ok();
     loop {
         let accepted = tokio::select! {
             accepted = listener.accept() => accepted,
@@ -225,10 +230,21 @@ pub(crate) fn stop_held(home: &Home) -> bool {
         return false;
     }
     // SAFETY: kill(2) on the process that wrote its id in this home.
-    unsafe { libc::kill(pid, libc::SIGTERM) == 0 }
+    #[cfg(unix)]
+    return unsafe { libc::kill(pid, libc::SIGTERM) == 0 };
+    #[cfg(windows)]
+    return crate::windows::stop::ask_to_stop(pid as u32).is_ok();
 }
 
 /// `pid` is a factoryd (not another process that took the number since).
+#[cfg(windows)]
+fn is_factoryd(pid: i32) -> bool {
+    use crate::windows::ports::{Owner, owner};
+    matches!(owner(pid as u32), Some(Owner::Mine { image, .. }) if image.eq_ignore_ascii_case("factoryd.exe"))
+}
+
+/// `pid` is a factoryd (not another process that took the number since).
+#[cfg(unix)]
 fn is_factoryd(pid: i32) -> bool {
     let Ok(output) = std::process::Command::new("ps").args(["-o", "command=", "-p", &pid.to_string()]).output() else { return false };
     let command = String::from_utf8_lossy(&output.stdout);

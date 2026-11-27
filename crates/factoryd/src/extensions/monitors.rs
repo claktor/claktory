@@ -416,15 +416,18 @@ pub(crate) fn forget(factory: &Factory, agent: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Whether something the agent's monitors wait for will wake it: an active
-/// check, files or watch monitor, or a time monitor due within the hour.
+/// Whether one of the agent's monitors will wake it soon: an active at,
+/// every or cron monitor due within the hour. A check, files, watch or
+/// pipes monitor doesn't count: it waits for something that may never
+/// happen, and an agent with one standing would never be reminded of its
+/// outstanding work.
 pub(crate) fn will_wake(factory: &Factory, agent: &AgentConfig, now: i64) -> rusqlite::Result<bool> {
     if !super::enabled(agent, ID) {
         return Ok(false);
     }
     let soon = now + 60 * when::MINUTE;
     let monitors = query(&factory.store, &Query { agent: Some(&agent.id), active: true, ..Query::default() })?;
-    Ok(monitors.iter().any(|monitor| !monitor.when.is_time() || monitor.next_due.is_some_and(|due| due <= soon)))
+    Ok(monitors.iter().any(|monitor| monitor.when.is_time() && monitor.next_due.is_some_and(|due| due <= soon)))
 }
 
 pub(crate) struct Monitors;
@@ -589,7 +592,7 @@ fn db_error(error: rusqlite::Error) -> String {
 /// it can message. The person (`asker` "") may name anyone. With
 /// `archived`, to list or change them (never to add one), an admin agent
 /// may also name an agent in an archived project, which no one can
-/// message (friend bug #55): its monitors are paused there, and only
+/// message: its monitors are paused there, and only
 /// cancelling or listing them needn't bring the project back.
 fn whose(config: &Config, asker: &str, agent: Option<&str>, archived: bool) -> Result<String, String> {
     let agent = agent.map(str::trim).filter(|agent| !agent.is_empty());
@@ -657,7 +660,7 @@ fn add_monitors(factory: &Arc<Factory>, asker: &str, wanted: Vec<AddOne>) -> Res
     let now = factory.monitors.now();
     // Outside Factory's lock, as other readers of the pipes do.
     let pipes = factory.pipes.all();
-    // Nothing the creator read reaches the monitor's agent (#346): its
+    // Nothing the creator read reaches the monitor's agent: its
     // `taint` column stays, NULL from then on.
     let mut new = Vec::new();
     {
@@ -735,7 +738,7 @@ fn add_monitors(factory: &Arc<Factory>, asker: &str, wanted: Vec<AddOne>) -> Res
     let mut added = Vec::new();
     for (monitor, id) in new.iter().zip(&ids) {
         // A prompt for another agent carries what its writer read, now as
-        // much as when it fires (row 1721).
+        // much as when it fires.
         crate::errands::relayed(factory, &monitor.agent, asker);
         run::added(factory, &monitor.agent, *id);
         let whose = if monitor.agent == asker { String::new() } else { format!(" for {}", monitor.agent) };
@@ -927,7 +930,7 @@ pub(crate) fn change(factory: &Arc<Factory>, agent: &str, actor: &str, changes: 
         return Err("changes is empty; give at least one {id, action}.".to_owned());
     }
     let by = if actor.is_empty() { format!("by {}", factory.lock().config.person()) } else { format!("by {actor}") };
-    // In an archived project nothing runs or wakes it (friend bug #55).
+    // In an archived project nothing runs or wakes it.
     let archived = {
         let inner = factory.lock();
         inner.config.agent(agent).is_some_and(|agent| inner.config.archived(agent))

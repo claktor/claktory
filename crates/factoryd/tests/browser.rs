@@ -110,7 +110,7 @@ async fn claktory(dir: &std::path::Path) -> Claktory {
     apply_request(&mut client, &mut view, create_project("Docs", &dir.join("work"))).await;
     apply_request(&mut client, &mut view, create_agent("docs", "Ada", "")).await;
     apply_request(&mut client, &mut view, create_agent("docs", "Bo", "")).await;
-    let on = v1::ExtensionChange { id: "browser".into(), enabled: Some(true), ..Default::default() };
+    let on = v1::ExtensionChange { id: "browser_control".into(), enabled: Some(true), ..Default::default() };
     let change = v1::UpdateAgent { agent_id: "ada".into(), extension: Some(on), ..Default::default() };
     apply_request(&mut client, &mut view, Request::UpdateAgent(change)).await;
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "ada".into() })).await;
@@ -166,19 +166,19 @@ impl Claktory {
 
     async fn request_as(&mut self, mode: &str) -> String {
         let args = format!(r#"{{"action":"request","purpose":"Read the\u202e setup guide","origin":"https://Docs.Example.com/","mode":"{mode}"}}"#);
-        let said = self.tool("browser_session", &args).await;
+        let said = self.tool("chrome_session", &args).await;
         assert!(said.starts_with("Asked: session bs-"), "{said}");
         said.split_whitespace().nth(2).expect("an id").trim_end_matches([',', '.']).to_owned()
     }
 
     /// Whether Ada has browser control on, as every device sees it.
     fn browser_on(&self) -> bool {
-        let at = self.view.workspace.extensions.iter().position(|extension| extension.id == "browser").expect("listed");
+        let at = self.view.workspace.extensions.iter().position(|extension| extension.id == "browser_control").expect("listed");
         self.view.agent("ada").extensions[at].enabled
     }
 
     async fn turn_on(&mut self) {
-        let on = v1::ExtensionChange { id: "browser".into(), enabled: Some(true), ..Default::default() };
+        let on = v1::ExtensionChange { id: "browser_control".into(), enabled: Some(true), ..Default::default() };
         let change = v1::UpdateAgent { agent_id: "ada".into(), extension: Some(on), ..Default::default() };
         apply_request(&mut self.client, &mut self.view, Request::UpdateAgent(change)).await;
     }
@@ -186,7 +186,7 @@ impl Claktory {
     /// Follows the Workspace until browser control is `on` for Ada.
     async fn browser_becomes(&mut self, on: bool) {
         tokio::time::timeout(WAIT, self.view.follow(&mut self.client, |view| {
-            let at = view.workspace.extensions.iter().position(|extension| extension.id == "browser").expect("listed");
+            let at = view.workspace.extensions.iter().position(|extension| extension.id == "browser_control").expect("listed");
             view.agent("ada").extensions[at].enabled == on
         }))
         .await
@@ -295,11 +295,11 @@ async fn assist_sessions_act_exactly_once_and_log_no_payload() {
     // A read session never acts.
     let id = claktory.request().await;
     broker.ok(grant(&id, "studio-1", ORIGIN)).await;
-    let refused_act = claktory.tool("browser_act", &act(&id, click)).await;
+    let refused_act = claktory.tool("chrome_act", &act(&id, click)).await;
     assert!(refused_act.starts_with("denied: This is a read session"), "{refused_act}");
-    let refused_go = claktory.tool("browser_navigate", &act(&id, r#""path":"/inbox/2""#)).await;
+    let refused_go = claktory.tool("chrome_navigate", &act(&id, r#""path":"/inbox/2""#)).await;
     assert!(refused_go.starts_with("denied"), "{refused_go}");
-    claktory.tool("browser_session", &format!(r#"{{"action":"end","session_id":"{id}"}}"#)).await;
+    claktory.tool("chrome_session", &format!(r#"{{"action":"end","session_id":"{id}"}}"#)).await;
 
     // An assist session: arguments for another op, or a bad ref, are refused here.
     let id = claktory.request_as("assist").await;
@@ -313,17 +313,17 @@ async fn assist_sessions_act_exactly_once_and_log_no_payload() {
         (r#""op":"click","document":"d1","revision":2,"target":"e1\"]""#, "an element's ref"),
         (r#""op":"fill","document":"d1","revision":2,"target":"e1","text":"a\u001bb""#, "no control characters"),
     ] {
-        let said = claktory.tool("browser_act", &act(&id, args)).await;
+        let said = claktory.tool("chrome_act", &act(&id, args)).await;
         assert!(said.contains(says), "{args}: {said}");
     }
     for path in ["/inbox?x=1", "//evil.example.com/", "https://evil.example.com/", "/a#b"] {
-        let said = claktory.tool("browser_navigate", &act(&id, &format!(r#""path":"{path}""#))).await;
+        let said = claktory.tool("chrome_navigate", &act(&id, &format!(r#""path":"{path}""#))).await;
         assert!(said.contains("path is a path on the session's site"), "{path}: {said}");
     }
 
     // A click goes out exactly as written; every device sees it waiting for
     // the person, then done.
-    let before = claktory.call("browser_act", &act(&id, click)).await;
+    let before = claktory.call("chrome_act", &act(&id, click)).await;
     let sent = command(&mut broker).await;
     assert_eq!(sent.op_json, r#"{"op":"click","document":"doc-canary7","revision":2,"target":"ref-canary9"}"#);
     assert_eq!(sent.deadline_ms, 150_000);
@@ -334,7 +334,7 @@ async fn assist_sessions_act_exactly_once_and_log_no_payload() {
 
     // A fill: the page changed what was typed, and says so in its words.
     let fill = r#""op":"fill","document":"doc-canary7","revision":2,"target":"ref-canary9","text":"Hello\nsecret-canary""#;
-    let before = claktory.call("browser_act", &act(&id, fill)).await;
+    let before = claktory.call("chrome_act", &act(&id, fill)).await;
     let sent = command(&mut broker).await;
     assert_eq!(sent.op_json, r#"{"op":"fill","document":"doc-canary7","revision":2,"target":"ref-canary9","text":"Hello\nsecret-canary"}"#);
     let took = r#"{"done":true,"took":false,"why":"the page changed what was typed","now":"Hello","over_max_length":5}"#;
@@ -343,7 +343,7 @@ async fn assist_sessions_act_exactly_once_and_log_no_payload() {
     assert!(filled.contains(&format!("what the page on {ORIGIN} says")) && filled.contains(r#""took":false"#), "{filled}");
 
     // The person says no to a navigation.
-    let before = claktory.call("browser_navigate", &act(&id, r#""path":"/inbox/2""#)).await;
+    let before = claktory.call("chrome_navigate", &act(&id, r#""path":"/inbox/2""#)).await;
     let sent = command(&mut broker).await;
     assert_eq!(sent.op_json, format!(r#"{{"op":"navigate","url":"{ORIGIN}/inbox/2"}}"#));
     broker.ok(failure(&id, &sent, "denied")).await;
@@ -351,12 +351,12 @@ async fn assist_sessions_act_exactly_once_and_log_no_payload() {
 
     // The Mac can't say what became of a click, or answers with junk: it may
     // have happened.
-    let before = claktory.call("browser_act", &act(&id, click)).await;
+    let before = claktory.call("chrome_act", &act(&id, click)).await;
     let sent = command(&mut broker).await;
     broker.ok(failure(&id, &sent, "interrupted")).await;
     let unknown = claktory.answer(before).await;
     assert!(unknown.starts_with("outcome_unknown: Claktory doesn't know whether it was done"), "{unknown}");
-    let before = claktory.call("browser_act", &act(&id, click)).await;
+    let before = claktory.call("chrome_act", &act(&id, click)).await;
     let sent = command(&mut broker).await;
     broker.ok(result(&id, &sent, r#"{"done":true,"clicked":"ref-canary9"}"#)).await;
     assert!(claktory.answer(before).await.starts_with("outcome_unknown"));
@@ -364,7 +364,7 @@ async fn assist_sessions_act_exactly_once_and_log_no_payload() {
     // A click past its deadline: outcome_unknown, never sent again, and the
     // session ends, since the Mac outlived its own review.
     claktory.factory.set_browser_limits(factoryd::browser::Limits { action: Duration::from_secs(1), ..quiet() });
-    let before = claktory.call("browser_act", &act(&id, click)).await;
+    let before = claktory.call("chrome_act", &act(&id, click)).await;
     let late = command(&mut broker).await;
     assert!(claktory.answer(before).await.starts_with("outcome_unknown"));
     match next_browser(&mut broker, WAIT, "").await.0 {
@@ -472,10 +472,10 @@ async fn browser_control_turns_itself_off_unless_changed_since() {
     claktory.session(|session| session.id == id && session.state == "active").await;
     assert!(claktory.browser_on(), "on while its session lasts");
     // Ended, it can ask again at once (for assist instead of read, say)…
-    claktory.tool("browser_session", &format!(r#"{{"action":"end","session_id":"{id}"}}"#)).await;
+    claktory.tool("chrome_session", &format!(r#"{{"action":"end","session_id":"{id}"}}"#)).await;
     let id = claktory.request_as("assist").await;
     // …and once that one's over, and a moment's passed, it's off.
-    claktory.tool("browser_session", &format!(r#"{{"action":"end","session_id":"{id}"}}"#)).await;
+    claktory.tool("chrome_session", &format!(r#"{{"action":"end","session_id":"{id}"}}"#)).await;
     claktory.browser_becomes(false).await;
 
     // Turned on, then changed by hand in config.json: the person's choice
@@ -485,7 +485,7 @@ async fn browser_control_turns_itself_off_unless_changed_since() {
     let text = std::fs::read_to_string(home.config_path()).expect("config");
     let mut config: serde_json::Value = serde_json::from_str(&text).expect("JSON");
     let ada = config["agents"].as_array_mut().expect("agents").iter_mut().find(|agent| agent["id"] == "ada").expect("Ada");
-    ada["extensions"]["browser"]["note"] = serde_json::json!("keep");
+    ada["extensions"]["browser_control"]["note"] = serde_json::json!("keep");
     std::fs::write(home.config_path(), serde_json::to_string_pretty(&config).expect("JSON")).expect("written");
     tokio::time::sleep(Duration::from_secs(4)).await;
     apply_request(&mut claktory.client, &mut claktory.view, Request::SelectAgent(v1::SelectAgent { agent_id: "ada".into() })).await;
@@ -510,12 +510,12 @@ async fn a_session_is_granted_once_and_only_its_mac_hears_and_answers() {
     assert_eq!((pending.state.as_str(), pending.origin.as_str(), pending.agent_id.as_str()), ("pending", ORIGIN, "ada"));
     assert_eq!(pending.purpose, "Read the setup guide");
     assert!(pending.device_id.is_empty());
-    let early = claktory.tool("browser_read", &format!(r#"{{"session_id":"{id}"}}"#)).await;
+    let early = claktory.tool("chrome_read", &format!(r#"{{"session_id":"{id}"}}"#)).await;
     assert!(early.starts_with("approval_pending"), "{early}");
     // Asking twice while one is going is refused.
-    let twice = claktory.tool("browser_session", r#"{"action":"request","purpose":"Again","origin":"https://example.com"}"#).await;
+    let twice = claktory.tool("chrome_session", r#"{"action":"request","purpose":"Again","origin":"https://example.com"}"#).await;
     assert!(twice.contains("already have a browser session"), "{twice}");
-    let lan = claktory.tool("browser_session", r#"{"action":"request","purpose":"x","origin":"https://192.168.1.1"}"#).await;
+    let lan = claktory.tool("chrome_session", r#"{"action":"request","purpose":"x","origin":"https://192.168.1.1"}"#).await;
     assert!(lan.contains("IP address"), "{lan}");
 
     // Grants: only with a capability, for its instance, for the session's
@@ -539,7 +539,7 @@ async fn a_session_is_granted_once_and_only_its_mac_hears_and_answers() {
     }
 
     // Ada reads: the command goes to the broker's connection alone.
-    let before = claktory.call("browser_read", &format!(r#"{{"session_id":"{id}"}}"#)).await;
+    let before = claktory.call("chrome_read", &format!(r#"{{"session_id":"{id}"}}"#)).await;
     let sent = command(&mut broker).await;
     assert_eq!((sent.session_id.as_str(), sent.lease.as_str(), sent.sequence), (id.as_str(), LEASE, 1));
     assert_eq!(sent.op_json, r#"{"op":"read","limit":65536}"#);
@@ -582,7 +582,7 @@ async fn a_session_is_granted_once_and_only_its_mac_hears_and_answers() {
     apply_request(&mut claktory.client, &mut claktory.view, Request::SelectAgent(v1::SelectAgent { agent_id: "ada".into() })).await;
 
     // A result that breaks the schema counts for nothing.
-    let before = claktory.call("browser_read", &format!(r#"{{"session_id":"{id}"}}"#)).await;
+    let before = claktory.call("chrome_read", &format!(r#"{{"session_id":"{id}"}}"#)).await;
     let sent = command(&mut broker).await;
     assert_eq!(sent.sequence, 2);
     broker.ok(result(&id, &sent, &page("x").replace(r#""truncated""#, r#""cookies":"c=1","truncated""#))).await;
@@ -590,13 +590,13 @@ async fn a_session_is_granted_once_and_only_its_mac_hears_and_answers() {
     assert!(junk.starts_with("interrupted: The page's answer wasn't one"), "{junk}");
 
     // Scroll; the Mac says the extension paused.
-    let before = claktory.call("browser_act", &format!(r#"{{"session_id":"{id}","op":"scroll","direction":"down","pages":2}}"#)).await;
+    let before = claktory.call("chrome_act", &format!(r#"{{"session_id":"{id}","op":"scroll","direction":"down","pages":2}}"#)).await;
     let sent = command(&mut broker).await;
     assert_eq!(sent.op_json, r#"{"op":"scroll","direction":"down","pages":2}"#);
     let failure = v1::BrowserResult { session_id: id.clone(), command_id: sent.command_id, failure: "paused".into(), ..Default::default() };
     broker.ok(Request::BrowserResult(failure)).await;
     assert_eq!(claktory.answer(before).await, "paused.");
-    let status = claktory.tool("browser_session", &format!(r#"{{"action":"status","session_id":"{id}"}}"#)).await;
+    let status = claktory.tool("chrome_session", &format!(r#"{{"action":"status","session_id":"{id}"}}"#)).await;
     assert!(status.contains("active, 3 of 100 commands used"), "{status}");
 
     // The person stops it from the laptop: it ends, the Mac is told, and
@@ -608,7 +608,7 @@ async fn a_session_is_granted_once_and_only_its_mac_hears_and_answers() {
     }
     let ended = claktory.session(|session| session.id == id && session.state == "ended").await;
     assert_eq!(ended.reason, "stopped", "another device's word for it is only ever stopped");
-    let after = claktory.tool("browser_read", &format!(r#"{{"session_id":"{id}"}}"#)).await;
+    let after = claktory.tool("chrome_read", &format!(r#"{{"session_id":"{id}"}}"#)).await;
     assert!(after.starts_with("expired: This session ended (stopped)"), "{after}");
     drop(claktory.factory);
 }
@@ -643,11 +643,11 @@ async fn sessions_end_at_their_limits_and_never_resume() {
     claktory.factory.set_browser_limits(factoryd::browser::Limits { heartbeat: Duration::from_secs(60), ..limits });
     let id = claktory.request().await;
     broker.ok(grant(&id, "studio-1", ORIGIN)).await;
-    let before = claktory.call("browser_read", &format!(r#"{{"session_id":"{id}"}}"#)).await;
+    let before = claktory.call("chrome_read", &format!(r#"{{"session_id":"{id}"}}"#)).await;
     let late = command(&mut broker).await;
     assert_eq!(claktory.answer(before).await, "expired: The Mac didn't answer in time.");
     assert!(refused(&mut broker, result(&id, &late, &page("late"))).await.contains("No command"));
-    let over = claktory.tool("browser_read", &format!(r#"{{"session_id":"{id}"}}"#)).await;
+    let over = claktory.tool("chrome_read", &format!(r#"{{"session_id":"{id}"}}"#)).await;
     assert!(over.starts_with("limit_exceeded"), "{over}");
     assert_eq!(claktory.session(|session| session.id == id && session.state == "ended").await.reason, "command_limit");
 

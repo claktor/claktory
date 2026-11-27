@@ -7,6 +7,9 @@
 //!
 //! A file of its own: direct messages are a process-wide preview until
 //! People ships.
+//!
+//! DMs reach the user-apps worker over a Unix socket: not on Windows.
+#![cfg(unix)]
 
 #[path = "common/mod.rs"]
 mod common;

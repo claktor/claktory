@@ -1,4 +1,4 @@
-//! Pinned agents (Lucy's ux/pinned-agents.md; Bruno 46945): the agents the
+//! Pinned agents: the agents the
 //! person keeps under Rivet in the sidebar, from any project, in their
 //! order. A pin is a shortcut, never a move: the agent stays in its
 //! project, under its lead. Kept in config.json (`pinned_agents`), so it's

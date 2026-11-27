@@ -1,13 +1,12 @@
-// The permission sheet (area 5a, ux/permissions.md): one way to ask for
-// every permission the system guards, on every device. Before the system's
-// prompt, a short sheet says why, in Claktory's words, with one way on,
-// Continue, which brings the prompt (Apple's rule for the screen before a
-// system prompt). Allowed, what the person was doing carries on. Declined,
-// it says what stops, what still works and where to turn it on, with Open
-// Settings and a quiet way out that's never a dead end; back from Settings
-// with it on, it closes by itself. Restricted (Screen Time, a work profile,
-// an administrator), Settings can't help, so it says so and offers only
-// the way out.
+// The permission sheet: one way to ask for every permission the system
+// guards, on every device. Before the system's prompt, a short sheet says
+// why, in Claktory's words, with one way on, Continue, which brings the
+// prompt (Apple's rule for the screen before a system prompt). Allowed,
+// what the person was doing carries on. Declined, it says what stops, what
+// still works and where to turn it on, with Open Settings and a quiet way
+// out that's never a dead end; back from Settings with it on, it closes by
+// itself. Restricted (Screen Time, a work profile, an administrator),
+// Settings can't help, so it says so and offers only the way out.
 //
 // A [Permission] says what the system lets the app read and do for one
 // permission, and its words; a [PermissionFlow] walks its stages; a
@@ -105,10 +104,10 @@ class PermissionWords {
   final String openSettings;
 }
 
-/// Restricted: why Settings can't help (Trish, 43277).
+/// Restricted: why Settings can't help.
 String restrictedFallback() => defaultTargetPlatform == TargetPlatform.android
     // Screen Time is Apple's; on Android it's whoever runs the phone
-    // (Risotto 49784, Trish 49822).
+    // .
     ? 'Whoever manages this $thisDeviceKind, such as your workplace, turned '
           "it off, so it can't be changed here."
     : 'Screen Time or whoever manages this $thisDeviceKind turned it off, so '
@@ -140,7 +139,7 @@ abstract class Permission {
 /// Where a permission's sheet is.
 enum PermissionStage {
   /// Why Claktory asks, with Continue. Left (Back, a swipe down, a tap
-  /// beside it, Esc), it's Not now: the system is asked nothing (row 206).
+  /// beside it, Esc), it's Not now: the system is asked nothing.
   before,
 
   /// The system's prompt is up: Continue is inactive, and nothing sets it
@@ -190,7 +189,7 @@ class PermissionFlow extends ChangeNotifier {
 
   /// Whether a sheet or dialog shows it now (its content listens while
   /// it's built): one that went before it was done was lost with its
-  /// window (row 198).
+  /// window.
   bool get shown => hasListeners;
 
   /// Completes with [result] once it's done.
@@ -208,7 +207,7 @@ class PermissionFlow extends ChangeNotifier {
 
   /// Whether the system has said (it had before this flow, or answered its
   /// Continue, "can't tell" too): false when it was left before Continue,
-  /// asking nothing (a first connection then doesn't go on; row 206).
+  /// asking nothing (a first connection then doesn't go on).
   bool get answered => _answered;
 
   var _disposed = false;
@@ -323,7 +322,7 @@ VoidCallback registerPermissionHost(BuildContext context) {
 
 /// Counts up as each screen registers ([registerPermissionHost]): a new
 /// window (a resize between an iPad's narrow and wide layouts builds one)
-/// is where an ask lost with the old one shows again (row 198).
+/// is where an ask lost with the old one shows again.
 final permissionHosts = ValueNotifier<int>(0);
 
 /// Asks for [permission] where it's needed now: nothing when it's allowed
@@ -349,8 +348,8 @@ Future<PermissionAccess> askPermission(
 /// elsewhere (an iPad's at every width). Completes as it closes. Leaving
 /// it (Back, edge-back, a swipe down, a tap beside it) is Not now at every
 /// stage but while the system's prompt is up, when a phone's sheet is held
-/// (no grabber, no swipe, no Close) and nothing changes (row 206, Lucy
-/// 51006): before Continue it asks the system nothing.
+/// (no grabber, no swipe, no Close) and nothing changes: before Continue
+/// it asks the system nothing.
 ///
 /// [untilAnswered]: it closes once the system has answered, whatever it
 /// said, for a feature that says a no in its own place (the mic's line).
@@ -368,7 +367,7 @@ Future<void> presentPermission(
   );
 
   // An iPad's is a dialog at every width, a narrow window's too, where the
-  // system's own prompt comes next (rule 8, §4; Sorbet).
+  // system's own prompt comes next.
   if (isPhoneLayout(context) && !_onIPad) {
     return presentSheet<void>(
       context,
@@ -408,11 +407,11 @@ String iosSettingsPath(String item) {
 }
 
 /// The app's name in Settings: Claktory Dev for any build but the App
-/// Store's (#501).
+/// Store's.
 String get appSettingsName => kReleaseMode ? 'Claktory' : 'Claktory Dev';
 
 /// A permission's stage, as words and buttons: [compact] in a popover (no
-/// glyph, read from the start), otherwise as #543's sheet. Keys: Return
+/// glyph, read from the start), otherwise as a sheet. Keys: Return
 /// presses the way on; Esc is Not now, but while the system asks.
 class PermissionContent extends StatefulWidget {
   const PermissionContent({
@@ -553,7 +552,7 @@ class _PermissionContentState extends State<PermissionContent>
         SizedBox(height: compact ? Space.s : Space.m),
         // Its words whole too: one too long for the column ("Claktory" at
         // the largest text in Slide Over's 320) shrinks the lines rather
-        // than breaking (Sale's row 198, Lucy 49620).
+        // than breaking.
         FittedHeading(
           body,
           textAlign: align,
@@ -601,7 +600,7 @@ class _PermissionContentState extends State<PermissionContent>
               : [wayOut, openSettings])
         // A way out given (Paste code instead) shows from the start, under
         // Continue: never only after the system's been told no, which on
-        // Android takes two (Sale's row 189c).
+        // Android takes two.
         : widget.wayOut == null
         ? [proceed]
         : (phone || compact || widget.fill
@@ -657,7 +656,7 @@ class _PermissionContentState extends State<PermissionContent>
         child: widget.fill && _onIPad
             // An iPad's screen keeps the words and the way on together in
             // the window's middle at every width, Slide Over's 320 too,
-            // never a phone's foot (area 5a, P7; Sorbet).
+            // never a phone's foot.
             // The words scroll when they must; the buttons stay under them.
             ? Center(
                 child: Column(
@@ -687,7 +686,7 @@ class _PermissionContentState extends State<PermissionContent>
                   Expanded(
                     child: Center(
                       child: ScrollsWithFade(
-                        // A new stage's words start at the top (row 619).
+                        // A new stage's words start at the top.
                         key: ValueKey(off),
                         child: Align(
                           alignment: start
@@ -704,7 +703,7 @@ class _PermissionContentState extends State<PermissionContent>
               )
             : _layout(
                 // An iPad's is a dialog, padded by it, at every width
-                // (Sale's row 198).
+                // .
                 phone && !compact && !_onIPad,
                 compact,
                 start,
@@ -735,7 +734,7 @@ class _PermissionContentState extends State<PermissionContent>
           Flexible(
             child: ScrollsWithFade(
               // The words that say it's off start at the top, not where
-              // Before's were scrolled to (Zucchero row 619).
+              // Before's were scrolled to.
               key: ValueKey(off),
               child: Align(
                 alignment: start ? Alignment.centerLeft : Alignment.center,
@@ -774,8 +773,7 @@ class _QuietLink extends StatelessWidget {
     final palette = Palette.of(context);
     return Semantics(
       // Its own node, the size of the link: without it the label joins the
-      // nearest one up, and TalkBack's box framed the whole sheet (Sale's
-      // row 195).
+      // nearest one up, and TalkBack's box framed the whole sheet.
       container: true,
       button: true,
       label: label,

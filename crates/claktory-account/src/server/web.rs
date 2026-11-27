@@ -104,7 +104,7 @@ fn home(service: &Service, call: &Call, notice: Option<&str>, grants: Option<&ap
     };
     let conn = service.db();
     let account = db::account_by_email(&conn, &email).ok().flatten();
-    // The stores' reviewers' account keeps its Claktory (#319).
+    // The stores' reviewers' account keeps its Claktory.
     let review = service.review(&email).is_some();
     let mut body = format!("{notice}<p class=\"muted\">Signed in as {}</p>", escape(&email));
     let claktories: Vec<db::Claktory> = account
@@ -162,7 +162,7 @@ fn home(service: &Service, call: &Call, notice: Option<&str>, grants: Option<&ap
                      <button class=\"plain\">Remove</button></form></li>",
                     name = escape(&device.name),
                     platform = escape(&platform_name(&device.platform)),
-                    // Signed in through the Claktory on its computer (#529).
+                    // Signed in through the Claktory on its computer.
                     through = device
                         .vouched_by
                         .as_ref()
@@ -498,7 +498,7 @@ fn remove_now(service: &Service, call: &Call, form: &Form) -> Result<(Reply, Opt
     Ok((redirect(None), (removed && apps).then_some((account.id, claktory.id, claktory.epoch))))
 }
 
-/// Removes a device at the account page, then tells the worker (row 671),
+/// Removes a device at the account page, then tells the worker,
 /// past the database's lock.
 async fn remove_device(service: &Service, call: &Call, form: &Form) -> Result<Reply, ApiError> {
     match remove_device_now(service, call, form)? {
@@ -663,9 +663,9 @@ async fn delete(service: &Service, call: &Call, form: &Form) -> Result<Reply, Ap
 }
 
 /// What a review account's page says instead of removing a Claktory from
-/// it (#319, Fugo 34608): a reviewer trying Remove would take away the box
+/// it: a reviewer trying Remove would take away the box
 /// the next review connects to. Delete account works for it, as Apple's
-/// review needs (5.1.1(v), Bruno 46782): the account comes back at the next
+/// review needs: the account comes back at the next
 /// sign-in, and only the review box signs a Claktory in to it.
 fn kept_for_review() -> Reply {
     html(

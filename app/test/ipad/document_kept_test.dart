@@ -1,8 +1,8 @@
 // An iPad's PDFs from a Claktory on another machine (always, on an iPad)
-// are kept with the other files this device keeps (#446; Settings →
-// Storage counts them and Clear removes them), not in the render cache:
-// opened again, the file's version is asked with a one-byte read, and the
-// copy shown is held, so neither Clear nor the storage limit takes it from
+// are kept with the other files this device keeps (Settings → Storage
+// counts them and Clear removes them), not in the render cache: opened
+// again, the file's version is asked with a one-byte read, and the copy
+// shown is held, so neither Clear nor the storage limit takes it from
 // under the view.
 import 'dart:io';
 

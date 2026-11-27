@@ -109,7 +109,7 @@ async fn the_persons_comment_reaches_the_agent_with_the_decision() {
         .await;
 }
 
-/// Submit (#370): a comment instead of Allow is a reply. Nothing runs, and
+/// Submit: a comment instead of Allow is a reply. Nothing runs, and
 /// the card shows the reply, kept apart from the pipe tables.
 #[tokio::test]
 async fn a_reply_runs_nothing_and_the_card_keeps_it() {
@@ -139,7 +139,7 @@ async fn a_reply_runs_nothing_and_the_card_keeps_it() {
     // The same command still asks: nothing was allowed.
     let again = call(&mut client, &mut view, "bo", "bash", r#"{"command": "echo deployed", "secrets": ["AWS"]}"#).await;
     assert!(again.starts_with("Not run"), "{again}");
-    // Kept apart from the pipe tables (Fugo): only decision_notes holds it.
+    // Kept apart from the pipe tables: only decision_notes holds it.
     let db = rusqlite::Connection::open(crate::common::home(&dir).db_path()).expect("factory.db");
     let kept: String = db.query_row("SELECT comment FROM decision_notes WHERE kind = 'secret_use'", [], |row| row.get(0)).expect("kept");
     assert_eq!(kept, "Deploy to staging first.");

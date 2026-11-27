@@ -1,6 +1,6 @@
-//! Reports (pipes-automation.md §2, H1): a pipe's liaison submits a finished
+//! Reports: a pipe's liaison submits a finished
 //! report in the fields of one of the report types the pipe forwards
-//! (`types`, §11), one way, to the one agent the person chose to read them
+//! (`types`), one way, to the one agent the person chose to read them
 //! (the pipe's forward, its recipient a report reader).
 //!
 //! This is the store, in factory.db (`pipe_handoff_*`, which the Database
@@ -663,7 +663,7 @@ pub(crate) fn forwarding_to(factory: &Factory, agent: &str) -> Option<Vec<String
 }
 
 /// How an agent is told of a pipe: the person's own name for it, else its
-/// id, never a name the other side chose (Fugo's change 2).
+/// id, never a name the other side chose.
 pub(crate) fn label(record: &Record) -> String {
     if record.named_here.unwrap_or(record.peer.is_none()) && !record.name.trim().is_empty() {
         format!("\"{}\"", super::agents::escape(&record.name))
@@ -827,7 +827,7 @@ pub(crate) fn submit(factory: &Arc<Factory>, submission: &Submission<'_>) -> Str
         Err(refusal) => return refused(refusal),
     };
     let fields = serde_json::to_string(&checked.fields).unwrap_or_default();
-    // Reading a report marks no one since #346; the column stays, empty.
+    // Reading a report marks no one; the column stays, empty.
     let taint = "{}".to_owned();
     let after_seq = i64::try_from(record.next_seq.saturating_sub(1)).unwrap_or(0);
     let text_bytes = i64::try_from(checked.text_bytes).unwrap_or(i64::MAX);
@@ -986,7 +986,7 @@ pub(crate) fn hold(factory: &Factory, ids: &[i64]) {
 }
 
 /// A pipe's reports waiting for the person (DecidePipeReports), by id,
-/// oldest first: what a card to send or discard them is bound to (#471 G6).
+/// oldest first: what a card to send or discard them is bound to.
 pub(crate) fn waiting_ids(factory: &Factory, pipe: &str) -> Vec<i64> {
     let db = factory.store.db();
     let read = || -> rusqlite::Result<Vec<i64>> {

@@ -13,7 +13,7 @@ import 'haptics.dart';
 import 'metrics.dart';
 import 'navigation.dart';
 
-/// Where a voice message stands in a phone's message box (#197, research
+/// Where a voice message stands in a phone's message box (research
 /// voice.md and mobile.md "Voice memo placement").
 enum PhoneVoiceMode {
   /// Not recording: the mic waits in the box's primary slot.
@@ -64,8 +64,7 @@ class PhoneVoice extends ChangeNotifier {
   var _letGo = false;
 
   /// Its box went (the window retired, the conversation closed) while a
-  /// start it began was still asking: what comes back after is no one's
-  /// (Doppio's popover_back_test, Bruno 50105).
+  /// start it began was still asking: what comes back after is no one's.
   var _disposed = false;
 
   @override
@@ -188,7 +187,7 @@ class PhoneMicButton extends StatelessWidget {
   final PhoneVoice voice;
 
   /// What VoiceOver and TalkBack call it: "Add a voice note" beside Send,
-  /// with text in the box (#425).
+  /// with text in the box.
   final String label;
 
   /// The recording itself, to tell a release that sends from one that

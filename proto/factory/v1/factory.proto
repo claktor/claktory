@@ -478,10 +478,21 @@ message ClientMessage {
     // Folds a project in the sidebar, or unfolds it (Project.collapsed).
     // Answered with Ack.
     SetProjectCollapsed set_project_collapsed = 269;
+    // Puts back what an undoable ArrangeAgent did (Arranged.token): the
+    // sidebar's Undo. Answered with Ack.
+    RestoreArrangement restore_arrangement = 270;
     // Where a new project with this name would be kept, as CreateProject
     // with no path would make it (New project's caption). Answered with
     // ProjectFolderPreview, to the asker only.
     PreviewProjectFolder preview_project_folder = 271;
+    // What moving an agent to another project would do to its pipes, for
+    // the move's confirm. Answered with ArrangePreview, to the asker only.
+    PreviewArrange preview_arrange = 272;
+    // The person tapped Open on a payment card. Answered with Ack.
+    PaymentOpened payment_opened = 275;
+    // Turns crediting Claktory (Workspace.attribution) on or off. Answered
+    // with Ack.
+    SetAttribution set_attribution = 276;
   }
 }
 
@@ -554,6 +565,14 @@ message Alert {
   // The notify_person call's entry in its agent's conversation, to open it
   // there; 0 for Claktory's own, or when it isn't found.
   uint64 seq = 9;
+  // Other agents' alerts about the same thing folded into this one, by
+  // their agents' names as they were sent, in the order they came, each
+  // once: show "Also from Fugo, Pericolo". An agent's alert folds into
+  // another agent's still unread one from the last 30 minutes when their
+  // titles say the same thing; it sends no notification of its own (but
+  // once, when it makes this alert urgent), and its words aren't kept.
+  // Empty for an alert nothing folded into, and for withheld ones.
+  repeated string also_from = 10;
 }
 
 // A new group at the end of the project's (Workspace.pipe_groups).
@@ -920,8 +939,12 @@ message ServerMessage {
     DeviceVouched device_vouched = 91;
     // 94: RecoveryKeyToSign (#239), the answer to NewRecoveryKey with an
     // account, comes with v0.2.0; reserved for it.
+    // The answer to an undoable ArrangeAgent, to the asker only.
+    Arranged arranged = 95;
     // The answer to PreviewProjectFolder, to the asker only.
     ProjectFolderPreview project_folder_preview = 96;
+    // The answer to PreviewArrange, to the asker only.
+    ArrangePreview arrange_preview = 97;
   }
   // Resuming the Workspace on reconnect (#378), only to an app whose Hello
   // has workspace_patches. On a message carrying a Workspace or a
@@ -1886,6 +1909,68 @@ message ArrangeAgent {
   // the project's own folder), in the same step. Unset keeps its folder, or
   // the project's own folder when it moves to another project.
   optional string folder_id = 5;
+  // Answer with Arranged, which can be undone (RestoreArrangement), instead
+  // of Ack. An app from before it leaves it unset and gets Ack, as before.
+  bool undoable = 6;
+}
+
+// The answer to an undoable ArrangeAgent: what moved, and the token that
+// puts it back (RestoreArrangement) for 8 seconds, from the device that
+// moved it only.
+message Arranged {
+  string token = 1;
+  // Each agent that moved (the dragged one first, then those under it), as
+  // it was before.
+  repeated ArrangedAgent moved = 2;
+}
+
+message ArrangedAgent {
+  string agent_id = 1;
+  // Where it was: its project ("" for the workspace), its folder ("" for the
+  // project's own), its lead ("" for none).
+  string project_id = 2;
+  string folder_id = 3;
+  string lead_id = 4;
+  // The agent it came after in the order, "" for the first. To show only:
+  // RestoreArrangement puts it back by itself.
+  string after_id = 5;
+}
+
+// Puts back what the ArrangeAgent answered with this token did: each agent
+// that moved gets its project, folder, lead and place again. Answered with
+// Ack; refused, with nothing changed, once the token is spent, from another
+// device or 8 seconds old, or when any of those agents changed since or
+// where they were is gone ("The list changed…").
+message RestoreArrangement {
+  string token = 1;
+}
+
+// What moving an agent into another project would do to the pipes of the
+// one it leaves (the move's confirm, before anything moves): which of them
+// each moving agent stops answering, and who takes over. The same fields as
+// ArrangeAgent's; refused as ArrangeAgent would be. Answered with
+// ArrangePreview, to the asker only.
+message PreviewArrange {
+  string agent_id = 1;
+  string parent_id = 2;
+  string before_id = 3;
+  optional string project_id = 4;
+}
+
+message ArrangePreview {
+  // The pipes whose lead moves away, in the Workspace's order of pipes.
+  repeated PipeHandover handovers = 1;
+}
+
+message PipeHandover {
+  string pipe_id = 1;
+  // The moving agent that answers it now.
+  string agent_id = 2;
+  // Who answers it after the move: its liaison, else its first agent
+  // limited to it (never one that runs commands unless the person chose
+  // it); "" when no one does, and the other side's messages wait for the
+  // person.
+  string next_lead_id = 3;
 }
 
 // Folds an agent's children away in the sidebar, or shows them.
@@ -1896,6 +1981,13 @@ message SetAgentCollapsed {
 
 // Turns highlights (Workspace.highlights) on or off for this Factory.
 message SetHighlights {
+  bool on = 1;
+}
+
+// Turns crediting Claktory (Workspace.attribution) on or off for this
+// Claktory. Agents follow it from their next context (a new conversation,
+// a compaction, /clear).
+message SetAttribution {
   bool on = 1;
 }
 
@@ -2966,6 +3058,20 @@ message Workspace {
   // components) and name it, as factoryd will. Empty on any system but
   // macOS.
   repeated ProtectedRoot protected_roots = 54;
+  // Each agent's own browser (the browser made simple): one per agent with
+  // the Browser extension on, in the settings' agent order, its agent_id
+  // set. agent_browser (49) keeps what belongs to the computer (setup,
+  // chrome_version, time_zone, languages) and a summary state: UNAVAILABLE
+  // while setup is set, else WARM while any agent's runs, OFF otherwise.
+  repeated AgentBrowser agent_browsers = 55;
+  // Agents credit Claktory in what they publish for the person on code
+  // hosts (the config's "attribution"; on unless the person turned it
+  // off): pull requests, issues, comments and release notes they write end
+  // with "Made with [Claktory](https://claktory.com)", and their commits
+  // name Claktory as co-author once Claktory has an address for it. Each
+  // agent follows it from its next context. False from a backend without
+  // it.
+  bool attribution = 56;
 }
 
 // A place macOS protects (Workspace.protected_places). macOS has no way to
@@ -4555,6 +4661,28 @@ message ProviderUsage {
   // the last good read, like `windows`); empty when it has none or the
   // provider offers none. Only the person uses one, with UseUsageReset.
   repeated UsageReset resets = 4;
+  // Extra usage (Anthropic's usage credits): whether requests past the
+  // plan's limits go on, billed at API rates, and how much was spent so
+  // far; unset when the provider says nothing of it (kept from the last good
+  // read, like `windows`).
+  ExtraUsage extra_usage = 5;
+}
+
+// A subscription's extra usage: what it may spend past its plan's limits.
+// Amounts are in the currency's minor units (cents), `decimal_places` of
+// them to a unit: 1250 with 2 is 12.50.
+message ExtraUsage {
+  // It's on: past a limit, requests go on and are billed.
+  bool enabled = 1;
+  // Spent this month.
+  int64 used_minor = 2;
+  // The monthly cap; 0 when there's none.
+  int64 limit_minor = 3;
+  // "USD", "EUR".
+  string currency = 4;
+  uint32 decimal_places = 5;
+  // The monthly cap is reached: requests past the plan's limits stop.
+  bool limit_reached = 6;
 }
 
 // Some of an account's usage resets, all of one kind: each refills some of
@@ -6695,6 +6823,51 @@ message SecretRequest {
   // DISMISSED by a reply (DecideSecretRequest.reply): nothing was given,
   // and `comment` is what the person said instead. Shown as replied.
   bool replied = 30;
+  // The exact https origins ("https://x.com") the secret is filled in on,
+  // and only there. For a login (`login`), the one origin Chrome reported
+  // for the page's sign-in field when the agent asked, never the agent's
+  // words. Set by the backend, which seals them to the secret on approval
+  // whatever the card sends; empty for any other request.
+  repeated string sites = 31;
+  // The grant lets the agent's browser fill the secret in, on `sites`
+  // only: no command or app of the agent's ever gets it. Always true for a
+  // login.
+  bool fill_only = 32;
+  // A site's login, asked for from the agent's browser (browser_sign_in):
+  // show the login card. new_secret.variables are USERNAME and PASSWORD,
+  // labelled "Email or username" and "Password" and marked as such for
+  // autofill. Sign in is DecideSecretRequest approved with both entries;
+  // with fitting_secret_id, Use it gives that secret (a fill-only grant
+  // for this agent on this origin).
+  bool login = 33;
+  // The login's site in Claktory's words: the registrable domain of
+  // sites[0] ("x.com"), in ASCII, so a lookalike in another script reads
+  // as xn--…. The card's bold site. Empty unless `login`.
+  string login_site = 34;
+  // What filling the login did. REFUSED: the site didn't take it, and the
+  // request is PENDING again with its fields empty; Sign in again replaces
+  // the same secret's values.
+  SecretLoginOutcome login_outcome = 35;
+  // The vault holds a login named like this one for another site: its
+  // name ("X login") and registrable domain ("x.com"), for the card's
+  // warning ("This page is x-login.com, not x.com. Your X login is for
+  // x.com."). Display only; empty when none.
+  string lookalike_secret_name = 36;
+  string lookalike_site = 37;
+}
+
+enum SecretLoginOutcome {
+  // Not a login, or not tried yet.
+  SECRET_LOGIN_OUTCOME_UNSPECIFIED = 0;
+  // Claktory is filling it in: "Signing in to x.com…".
+  SECRET_LOGIN_OUTCOME_SIGNING_IN = 1;
+  // "Signed in to x.com · Saved as X login".
+  SECRET_LOGIN_OUTCOME_SIGNED_IN = 2;
+  // The site didn't accept it: the request is PENDING again.
+  SECRET_LOGIN_OUTCOME_REFUSED = 3;
+  // Saved and filled; the site asks for a code next (a CODE handoff
+  // follows).
+  SECRET_LOGIN_OUTCOME_CODE_NEXT = 4;
 }
 
 // The person put a generated key where it goes (K6's Done): the agent is
@@ -7228,6 +7401,14 @@ message HistoryOverview {
   uint64 history_version = 9;
   // One every 10,000 events.
   repeated HistoryCursor cursors = 10;
+  // The tokens agents' model calls used per hour, aligned with histogram:
+  // as the Usage pane totals them (input, output, cache read and cache
+  // written), from the same records; 0 before they began. One project's
+  // (GetHistoryOverview.project_id): its agents', by the project each was
+  // in at the hour's end as History has it (an agent History has no node
+  // of, by its project now); chats and calls from before agents were
+  // counted are in no project's.
+  repeated uint64 tokens = 11;
 }
 
 // Answered with HistoryEvents: events in time order from after_cursor.
@@ -9683,6 +9864,28 @@ message NotificationSettings {
   // in minutes east. Filled in by the backend; ignored in updates.
   string time_zone = 11;
   int32 utc_offset_minutes = 12;
+  // The agents whose urgent alerts (notify_person's urgent) arrive urgent,
+  // by agent id, in the sidebar's order, as it resolves now: admin agents
+  // always, and either the person's own choice (urgent_from_custom) or, by
+  // default, every agent that leads at least one other. Another agent's
+  // urgent alert arrives as a normal one, and the agent is told. Filled in
+  // by the backend; ignored in updates (UpdateSettings.notifications):
+  // changed with NotificationSettingsChange.urgent_from.
+  repeated string urgent_from = 13;
+  // urgent_from is the person's own choice (true), or the default: admin
+  // agents and agents that lead others (false).
+  bool urgent_from_custom = 14;
+}
+
+// NotificationSettingsChange.urgent_from: who may send urgent alerts.
+message UrgentSenders {
+  // Back to the default (admin agents and agents that lead others);
+  // agent_ids is ignored.
+  bool use_default = 1;
+  // Otherwise the person's own choice, by agent id: admin agents are always
+  // allowed, listed or not, and an empty list leaves only them. An id that
+  // isn't an agent's is refused.
+  repeated string agent_ids = 2;
 }
 
 // UpdateSettings.notification_change: each field set replaces that one
@@ -9698,6 +9901,9 @@ message NotificationSettingsChange {
   optional uint32 quiet_end = 8;
   optional bool urgent_breaks_quiet = 9;
   optional string relay = 10;
+  // Who may send urgent alerts (NotificationSettings.urgent_from); unset
+  // leaves it as it is. The person's alone: no agent's settings tool sets it.
+  UrgentSenders urgent_from = 11;
 }
 
 // This connection's app is in front and the person is using it (true), or
@@ -10067,6 +10273,12 @@ enum NeedsYouRecordKind {
   // itself for a change every one of whose steps a device paired here
   // approved.
   NEEDS_YOU_RECORD_KIND_RECOVERY_KEY_CHANGED = 24;
+  // An agent's browser was turned on or off (the Browser extension):
+  // outcome CHANGED; agent_id who did it (an admin agent), empty for the
+  // person; subject_agent_id the agent; title Claktory's sentence ("Rivet
+  // turned on the browser for Yukako", "You turned off the browser for
+  // Yukako"). Agents can't turn their own on.
+  NEEDS_YOU_RECORD_KIND_BROWSER = 25;
 }
 
 enum NeedsYouOutcome {
@@ -11200,6 +11412,12 @@ message AgentBrowser {
   // The identity providers it's signed in to (#435), each with Sign out
   // (SignOutAgentBrowserAccount); empty when none.
   repeated AgentBrowserAccount accounts = 10;
+  // Whose browser it is, on Workspace.agent_browsers' entries (each
+  // agent's own Chrome and profile): those set agent_id, state,
+  // signed_in_sites, warm_until_ms, accounts and errand_id (the agent's
+  // browsing session, empty when none). Empty on the machine-wide
+  // Workspace.agent_browser. TAKEN_OVER and BROWSING aren't used any more.
+  string agent_id = 11;
 }
 
 // An identity provider Claktory's browser is signed in to (#435 W6), from
@@ -11328,6 +11546,28 @@ message ErrandHandoff {
   // the site's words: show them fenced as "The site's words", apart from
   // Claktory's. Empty on every other handoff.
   string agreement = 8;
+  // PAYMENT: the page's top-level URL as Chrome reported it when the agent
+  // asked, https only, at most 2,048 characters, passed on unchanged. The
+  // app opens it itself, as a plain link, on the device where Open was
+  // tapped. Empty when there's nothing to open: no Open button then, only
+  // Can't do this.
+  string url = 9;
+  // PAYMENT: url's registrable domain in Claktory's words, in ASCII
+  // ("pay.stripe.com" → "stripe.com"): "Koichi asks you to pay on
+  // stripe.com".
+  string domain = 10;
+  // PAYMENT: when the person tapped Open, on any device (PaymentOpened), in
+  // ms since 1970; 0 before. Once set, every device shows "Opened in your
+  // browser. Come back here once you've paid." with I've paid (AnswerAsk
+  // approved).
+  int64 opened_ms = 11;
+}
+
+// The person tapped Open on the payment card at `seq` in `agent_id`'s
+// conversation (ErrandHandoff.opened_ms). Answered with Ack.
+message PaymentOpened {
+  string agent_id = 1;
+  uint64 seq = 2;
 }
 
 enum ErrandHandoffKind {
@@ -11457,7 +11697,10 @@ message HandBackAgentBrowser {}
 
 // Stops it: the errand ends (STOPPED, its agent told "You stopped the
 // browser.") and Chrome closes. The profile is kept.
-message StopAgentBrowser {}
+message StopAgentBrowser {
+  // That agent's browser (AgentBrowser.agent_id); empty: every agent's.
+  string agent_id = 1;
+}
 
 // Opens it for the person with no errand (BROWSING), at `url` (http or
 // https; empty: where it left off); then WatchAgentBrowser. Refused while
@@ -11489,7 +11732,10 @@ message TimeZones {
 
 // Deletes everything the browser keeps (sign-ins, history, its profile),
 // stopping it and any errand first. Confirm in the app first.
-message DeleteAgentBrowserData {}
+message DeleteAgentBrowserData {
+  // That agent's browser's profile; empty: every agent's.
+  string agent_id = 1;
+}
 
 // Signs Claktory's browser out of one identity provider
 // (AgentBrowserAccount.provider): its cookies and stored data cleared, now
@@ -11498,6 +11744,12 @@ message DeleteAgentBrowserData {}
 // to show. A person's request only.
 message SignOutAgentBrowserAccount {
   string provider = 1;
+  // That agent's browser; empty: every agent's.
+  string agent_id = 2;
+  // One of that agent's signed_in_sites (an origin): its cookies and
+  // stored data cleared ("Sign out of x.com"). When set, provider is
+  // ignored.
+  string site = 3;
 }
 
 // The codes of the recovery-codes card at `seq` in `agent_id`'s
@@ -11534,6 +11786,8 @@ message KeepRecoveryCodes {
 // An errand's log (empty: every errand's), the last 7 days.
 message ListErrandLog {
   string errand_id = 1;
+  // That agent's entries only (with errand_id empty); empty: everyone's.
+  string agent_id = 2;
 }
 
 // The person opens an errand for an agent, as a lead does with

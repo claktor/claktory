@@ -1,7 +1,7 @@
-//! Unloading idle agents' conversations (#377 step 3, Polpo's
-//! factoryd-memory.md): an agent whose conversation nothing has needed for
-//! an hour lets it go from memory, and it's read again from its files when
-//! something needs it (`Factory::ensure_loaded`), as after a restart.
+//! Unloading idle agents' conversations: an agent whose conversation
+//! nothing has needed for an hour lets it go from memory, and it's read
+//! again from its files when something needs it (`Factory::ensure_loaded`),
+//! as after a restart.
 //!
 //! Only when that changes nothing anyone sees or the agent does: it isn't
 //! running, nothing queued for it can go to it now (a quiet message waits

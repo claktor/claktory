@@ -1,8 +1,7 @@
-// An errand's other cards (#435 W8b, Lucy's needs-you-cards.md §3.6; Fugo
-// 40593, 40694; Ghiaccio 43832): the agreement card (the site's words
-// fenced as theirs, Accept or words as a reply), the two-step card (Approve
-// or Can't do this, no reply) and the recovery-codes card (the codes asked
-// for on screen only, Copy, I saved them or Keep in Secrets, nothing else).
+// An errand's other cards: the agreement card (the site's words fenced as
+// theirs, Accept or words as a reply), the two-step card (Approve or Can't
+// do this, no reply) and the recovery-codes card (the codes asked for on
+// screen only, Copy, I saved them or Keep in Secrets, nothing else).
 import 'package:factory_app/ask_card.dart';
 import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/decision.dart' show DecisionComment;
@@ -114,7 +113,7 @@ void main() {
     testWidgets("Claktory's heading, the site's words fenced as theirs; "
         'Accept ticks the box with no words', (tester) async {
       final harness = await _show(tester, _agreement());
-      expect(find.text("June's errand needs your OK"), findsOneWidget);
+      expect(find.text('June needs your OK'), findsOneWidget);
       expect(
         find.text('play.google.com asks you to agree', findRichText: true),
         findsOneWidget,
@@ -161,7 +160,7 @@ void main() {
           ..askPerson.state = AskPersonState.ASK_PERSON_STATE_ANSWERED
           ..askPerson.decidedMs = Int64(9),
       );
-      expect(find.text("June's errand needed your OK"), findsOneWidget);
+      expect(find.text('June needed your OK'), findsOneWidget);
       expect(
         find.textContaining('Accepted', findRichText: true),
         findsOneWidget,
@@ -235,7 +234,7 @@ void main() {
         ],
       );
       expect(
-        find.text("June's errand saved recovery codes"),
+        find.text("June's browser saved recovery codes"),
         findsOneWidget,
       );
       expect(

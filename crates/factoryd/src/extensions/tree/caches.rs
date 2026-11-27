@@ -46,7 +46,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use crate::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -317,6 +320,18 @@ fn sweep_objects(target: &Path) -> (usize, u64) {
     (count, bytes)
 }
 
+/// Whether a file in `deps` is an executable. On Windows those end in
+/// `.exe`, which the names looked at here never do.
+#[cfg(unix)]
+fn executable(metadata: &std::fs::Metadata) -> bool {
+    metadata.mode() & 0o111 != 0
+}
+
+#[cfg(windows)]
+fn executable(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
 /// Whether `dir` is a Rust build's target folder.
 fn rust_target(dir: &Path) -> bool {
     dir.join(".rustc_info.json").is_file() || profiles(dir).iter().any(|profile| profile.join(".fingerprint").is_dir())
@@ -348,7 +363,7 @@ fn trimmable(target: &Path, deadline: Instant) -> Vec<(PathBuf, u64)> {
                 continue;
             }
             let Ok(metadata) = entry.metadata() else { continue };
-            if !metadata.is_file() || metadata.mode() & 0o111 == 0 {
+            if !metadata.is_file() || !executable(&metadata) {
                 continue;
             }
             let Ok(modified) = metadata.modified() else { continue };
@@ -362,6 +377,14 @@ fn trimmable(target: &Path, deadline: Instant) -> Vec<(PathBuf, u64)> {
     found
 }
 
+/// Opens a folder to set its time: Windows wants write-attributes access.
+fn date_folder(folder: &Path) -> std::io::Result<std::fs::File> {
+    #[cfg(unix)]
+    return std::fs::File::open(folder);
+    #[cfg(windows)]
+    return crate::windows::fs::open_to_date(folder);
+}
+
 /// Takes away what `trimmable` found in `target`: a folder is moved aside
 /// and deleted in the background, a file deleted. Returns the bytes freed.
 fn trim(factory: &Factory, target: &Path, found: &[(PathBuf, u64)]) -> u64 {
@@ -372,7 +395,7 @@ fn trim(factory: &Factory, target: &Path, found: &[(PathBuf, u64)]) -> u64 {
         let parent = path.parent().and_then(|parent| Some((parent, std::fs::metadata(parent).ok()?.modified().ok()?)));
         let gone = if path.is_dir() { move_aside(factory, path, target) } else { std::fs::remove_file(path) };
         if let Some((parent, modified)) = parent
-            && let Err(error) = std::fs::File::open(parent).and_then(|folder| folder.set_modified(modified))
+            && let Err(error) = date_folder(parent).and_then(|folder| folder.set_modified(modified))
         {
             tracing::warn!(path = %parent.display(), %error, "could not keep a trimmed folder's time");
         }
@@ -520,7 +543,10 @@ fn move_aside(factory: &Factory, path: &Path, cache: &Path) -> std::io::Result<(
     std::fs::create_dir_all(&trash)?;
     let name = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     let stamp = format!("{}-{}-{name}", now_ms(), MOVED.fetch_add(1, Ordering::Relaxed));
+    #[cfg(unix)]
     let same_volume = std::fs::metadata(&trash).ok().zip(std::fs::metadata(path).ok()).is_some_and(|(a, b)| a.dev() == b.dev());
+    #[cfg(windows)]
+    let same_volume = crate::windows::fs::identity(&trash).ok().zip(crate::windows::fs::identity(path).ok()).is_some_and(|(a, b)| a.volume == b.volume);
     let aside = if same_volume { trash.join(stamp) } else { cache.with_file_name(format!("{TRASH_PREFIX}{stamp}")) };
     std::fs::rename(path, &aside)?;
     delete_later(aside);
@@ -803,7 +829,8 @@ mod tests {
         std::fs::create_dir_all(root.join(".factory-trash-1-target")).expect("leftover");
         let (caches, leftovers) = find(&root);
         let found: Vec<String> = caches.iter().map(|path| path.strip_prefix(&root).expect("inside").display().to_string()).collect();
-        assert_eq!(found, ["app/.dart_tool", "app/build", "app/rust/target", "tagged", "target", "web/node_modules"]);
+        let expected = ["app/.dart_tool", "app/build", "app/rust/target", "tagged", "target", "web/node_modules"];
+        assert_eq!(found, expected.map(|path| path.replace('/', std::path::MAIN_SEPARATOR_STR)));
         assert_eq!(leftovers, [root.join(".factory-trash-1-target")]);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -849,6 +876,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // Test binaries on Windows end in .exe, which a trim leaves alone.
+    #[cfg(unix)]
     #[test]
     fn a_trim_takes_incremental_state_and_superseded_binaries_only() {
         let root = dir("trim");

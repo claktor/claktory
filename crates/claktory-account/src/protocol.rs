@@ -284,11 +284,33 @@ pub fn normalize_email(email: &str) -> Option<String> {
     fine.then_some(email)
 }
 
-/// A Claktory's name as the service shows it, in emails too: no control
-/// characters, nothing that looks like a link, at most `NAME_LIMIT`
-/// characters, and never empty.
+/// `text` without what it hides (`claktory_dm_crypto::certificate::hidden_marks`:
+/// control, direction and invisible characters, and a joiner or selector
+/// anywhere but in an emoji), each whitespace a space, trimmed.
+pub fn without_hidden(text: &str) -> String {
+    use claktory_dm_crypto::certificate::{hidden, hidden_marks};
+    // What's hidden wherever it stands goes first, so a selector or joiner
+    // is judged by what's left around it (❤ ZWSP FE0F keeps its FE0F).
+    let placed = |c: char| ('\u{FE00}'..='\u{FE0F}').contains(&c) || c == '\u{200D}';
+    let shown: String = text
+        .chars()
+        .filter_map(|c| match c {
+            c if c.is_whitespace() => Some(' '),
+            c if hidden(c) && !placed(c) => None,
+            c => Some(c),
+        })
+        .collect();
+    let marks = hidden_marks(&shown);
+    let kept: String = shown.chars().zip(marks).filter_map(|(c, hidden)| (!hidden).then_some(c)).collect();
+    kept.trim().to_owned()
+}
+
+/// A Claktory's name as the service shows it, in emails too: nothing
+/// hidden (`without_hidden`), nothing that looks like a link, at most
+/// `NAME_LIMIT` characters, and never empty.
 pub fn clean_name(name: &str) -> String {
-    let words: Vec<&str> = name
+    let shown = without_hidden(name);
+    let words: Vec<&str> = shown
         .split_whitespace()
         .filter(|word| {
             let lower = word.to_lowercase();
@@ -1450,6 +1472,9 @@ mod tests {
         assert_eq!(clean_name("a\u{7}b<c>"), "abc");
         assert_eq!(clean_name(&"x".repeat(60)).len(), NAME_LIMIT);
         assert_eq!(clean_name("  "), "Claktory");
+        assert_eq!(clean_name("\u{202E}Mac\u{200B} mini\u{2066}"), "Mac mini", "nothing hidden");
+        assert_eq!(clean_name("\u{1F469}\u{200D}\u{1F4BB} Lab"), "\u{1F469}\u{200D}\u{1F4BB} Lab", "an emoji's joiner stays");
+        assert_eq!(clean_name("\u{200B}\u{2069}"), "Claktory");
         assert_eq!(normalize_email(" Matt@Example.COM "), Some("matt@example.com".into()));
         for bad in ["matt", "matt@", "@example.com", "matt@example", "a b@example.com", "m@exa..mple.com", "m@a@b.com"] {
             assert_eq!(normalize_email(bad), None, "{bad}");

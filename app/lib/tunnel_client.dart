@@ -65,7 +65,7 @@ abstract interface class Tunnel {
   /// the next socket dials a new connection, and nothing counts as failed.
   Future<void> reconnect();
 
-  /// The relays its Claktory uses now, as its Workspace says (#450): the
+  /// The relays its Claktory uses now, as its Workspace says: the
   /// device homes on them from its next endpoint on, and dials through them.
   void setRelays(List<String> relays);
 
@@ -77,14 +77,14 @@ abstract interface class Tunnel {
 
   /// Listens on this device's 127.0.0.1 and ::1 at [port] and forwards
   /// each connection to that port on the backend's machine, or to [target]
-  /// there when given (a website shared over a pipe, #503) (ALPN
+  /// there when given (a website shared over a pipe) (ALPN
   /// claktory-forward/1). Throws [ForwardFailure].
   Future<PortForward> forwardPort(int port, {int? target});
 
   Future<void> close();
 }
 
-/// What the tunnels run on (#214): one runtime for all of them, which can
+/// What the tunnels run on: one runtime for all of them, which can
 /// be asked whether it still runs anything, and made afresh when it
 /// doesn't, as relaunching the app would.
 abstract interface class TunnelRuntime {

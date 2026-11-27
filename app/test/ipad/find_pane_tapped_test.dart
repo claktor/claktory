@@ -1,10 +1,10 @@
-// The header's Find finds in the pane being read (Squalo's ST14, Zucchero
-// rows 613–615): Settings beside the conversation on a full-width iPad by
-// touch, the magnifier opened the conversation's find even after a tap in
-// Settings, so "Sleep" found nothing. Now: the pane last tapped in the
-// agent's view, else the conversation, rather than a pane only beside it
-// (row 101). And while a pane is expanded over the window, what's under it
-// (the header's ⋯, Find… in it) is out of VoiceOver's reach.
+// The header's Find finds in the pane being read: Settings beside the
+// conversation on a full-width iPad by touch, the magnifier opened the
+// conversation's find even after a tap in Settings, so "Sleep" found
+// nothing. Now: the pane last tapped in the agent's view, else the
+// conversation, rather than a pane only beside it. And while a pane is
+// expanded over the window, what's under it (the header's ⋯, Find… in it)
+// is out of VoiceOver's reach.
 import 'package:factory_app/conversation_find.dart' show ConversationFind;
 import 'package:factory_app/find.dart' show FindSession, FindSessions;
 import 'package:factory_app/ipad/workbench.dart';
@@ -89,7 +89,7 @@ Future<void> _openFind(WidgetTester tester) async {
 /// A pane in the window's overlay (an expanded one) is grafted under the
 /// node of the place it came from (its OverlayPortal's traversal parent);
 /// with that node gone, the window drops the pane and all in it, as on an
-/// iPad (row 665), so it isn't counted here either.
+/// iPad, so it isn't counted here either.
 bool _inTree(WidgetTester tester, String label) {
   final parents = <Object>{};
   void collect(SemanticsNode node) {
@@ -151,7 +151,7 @@ void main() {
     expect(_conversation().isOpen.value, isTrue);
   });
 
-  // Row 665: hidden with what's under it, the pane itself was dropped too
+  // Hidden with what's under it, the pane itself was dropped too
   // (BlockSemantics in the overlay took the node it's grafted under).
   testWidgets('a pane expanded over the window is read alone: its band and '
       'its own controls, never the header\'s ⋯ (Find… in it) under it; collapsed, the '
@@ -179,7 +179,7 @@ void main() {
     expect(_inTree(tester, 'Message Builder\nSend'), isFalse);
     expect(_inTree(tester, 'Hide sidebar'), isFalse);
     expect(_inTree(tester, 'Rail tile'), isFalse);
-    // Pressed by VoiceOver, Back goes back, as a click does (row 1599).
+    // Pressed by VoiceOver, Back goes back, as a click does.
     final back = tester.semantics.find(
       find.bySemanticsLabel('Back to Builder'),
     );

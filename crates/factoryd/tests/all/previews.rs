@@ -1,4 +1,4 @@
-//! Phone-sized previews (#379): an app on a small screen asks ReadFile for a
+//! Phone-sized previews: an app on a small screen asks ReadFile for a
 //! preview sized to it and gets a smaller WebP that says it's a preview,
 //! with the original's version, while a plain ReadFile still gets the
 //! original.

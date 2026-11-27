@@ -113,7 +113,7 @@ const windowFixtures = <WindowFixture>[
         'full screen: the view 744×1133, safe top 32 and bottom 20 '
         '(Gelato, iPadOS 27.2)',
   ),
-  // A mini's window narrowed in Windowed Apps (Gelato, iPadOS 27.2): the
+  // A mini's window narrowed in Windowed Apps (iPadOS 27.2): the
   // view ~1097 tall, its padding 32 top and 10 bottom at every width, so
   // 1055 safe. The idiom stays pad at every width.
   WindowFixture(
@@ -156,7 +156,7 @@ const windowFixtures = <WindowFixture>[
     measured: true,
     note: 'the narrowest a window gets (a 320 target stopped here)',
   ),
-  // A Pro 13's windows (Gelato, iPadOS 27.2): upright ~1340 tall, on its
+  // A Pro 13's windows (iPadOS 27.2): upright ~1340 tall, on its
   // side 1032, with insets of 32 top and 10 bottom upright, 32 and 20 on
   // its side. The size class turns compact under 671 upright, under 669
   // on its side.

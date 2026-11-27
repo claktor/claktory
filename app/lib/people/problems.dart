@@ -1,7 +1,7 @@
 import '../user_apps/session.dart';
 
 /// What a device another of the person's devices removed says, in People
-/// and its chats (row 199): the service's own words when it refuses it.
+/// and its chats: the service's own words when it refuses it.
 const deviceRemovedText =
     'This device was removed from your account. Sign in again to start '
     'over as a new device.';

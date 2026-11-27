@@ -231,8 +231,8 @@ void main() {
     );
   });
 
-  // Settings searches everything from its list (area 3, §4.3): one search,
-  // so a section's page has no find of its own (Zucchero's 613-615).
+  // Settings searches everything from its list: one search,
+  // so a section's page has no find of its own.
   testWidgets('Settings: the search at the top of its list, none on a '
       "section's page", (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
@@ -283,7 +283,7 @@ void main() {
       ),
       'Half written',
     );
-    // Its "…" (Move to group…, #359) leads with Search, as an agent's.
+    // Its "…" (Move to group…) leads with Search, as an agent's.
     await tester.tap(find.bySemanticsLabel('Bugs: more'));
     await pumpFrames(tester);
     await tester.tap(find.text('Search'));

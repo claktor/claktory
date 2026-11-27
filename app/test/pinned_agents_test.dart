@@ -242,6 +242,51 @@ void main() {
     expect(find.text('Agent settings…'), findsOneWidget);
   });
 
+  // Abbacchio's row 1734: deleted while its menu is open, its row goes;
+  // Pin still sends and says why it can't.
+  testWidgets("a row's menu open as its agent is deleted: Pin says it is "
+      'gone', (tester) async {
+    final start = _workspace();
+    final harness = await _show(tester, start);
+    await _rightClick(tester, find.text('Speedwagon'));
+    harness.backend.refuse = 'no agent with id "speed"';
+    await harness.apply(
+      tester,
+      start.deepCopy()..agents.removeWhere((agent) => agent.id == 'speed'),
+    );
+    expect(find.text('Pin'), findsOneWidget, reason: 'the menu stays');
+    await tester.tap(find.text('Pin'));
+    await settle(tester);
+    expect(harness.last.pinAgent.agentId, 'speed');
+    expect(
+      find.text("Speedwagon isn't in this Claktory any more."),
+      findsOneWidget,
+    );
+  });
+
+  for (final (item, words) in [
+    ('Unpin', "Couldn't unpin Dana"),
+    ('Move up', "Couldn't move Dana"),
+  ]) {
+    testWidgets("a pinned row's menu open as its agent is deleted: $item "
+        'names itself', (tester) async {
+      final start = _workspace();
+      final harness = await _show(tester, start);
+      await _rightClick(tester, find.text('Dana').first);
+      harness.backend.refuse = 'no agent with id "dana"';
+      await harness.apply(
+        tester,
+        start.deepCopy()
+          ..agents.removeWhere((agent) => agent.id == 'dana')
+          ..settings.pinnedAgents.remove('dana'),
+      );
+      await tester.tap(find.text(item));
+      await settle(tester);
+      expect(find.text(words), findsOneWidget);
+      expect(find.text("Couldn't pin Dana"), findsNothing);
+    });
+  }
+
   testWidgets('a refused pin says why', (tester) async {
     final harness = await _show(tester, _workspace());
     harness.backend.refuse = "Dana's project is archived.";

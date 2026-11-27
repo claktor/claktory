@@ -1,4 +1,4 @@
-// Replies linked to what they answer (#235): over an agent's reply, the
+// Replies linked to what they answer: over an agent's reply, the
 // person's message it answers, as chat apps quote it; a click goes there.
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/transcript.dart';

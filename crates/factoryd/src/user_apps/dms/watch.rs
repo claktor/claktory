@@ -1,11 +1,10 @@
 //! Waking agents that follow a direct-message conversation (dm_subscribe).
-//! claktory.com never sees the messages (#451: they go through the
-//! person's home), so the wakes come from this Claktory's leaf: each
-//! friend's message it keeps wakes the agents here that follow that
-//! conversation, as the service lists them for each agent (its live grant
-//! to read and follow it, `subscribed`, and the grant's start), asked again
-//! at most once a minute an agent, and at once after a grant or a follow
-//! changes here.
+//! claktory.com never sees the messages (they go through the person's
+//! home), so the wakes come from this Claktory's leaf: each friend's
+//! message it keeps wakes the agents here that follow that conversation, as
+//! the service lists them for each agent (its live grant to read and follow
+//! it, `subscribed`, and the grant's start), asked again at most once a
+//! minute an agent, and at once after a grant or a follow changes here.
 //!
 //! An event wakes its agent once a conversation until the agent has read
 //! that far (dm_read), at most 20 times an hour an agent, and only an agent

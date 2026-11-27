@@ -16,7 +16,7 @@ import 'identity.dart';
 /// count. A conversation's items range from a 24px tool call to a reply
 /// thousands of pixels tall, so each scroll changes the average, the
 /// estimate swings by tens of thousands of pixels, and the scrollbar the
-/// estimate drives jumps up and down and changes size as you scroll (#237).
+/// estimate drives jumps up and down and changes size as you scroll.
 /// Heights remembered once seen change only when an item does.
 class ItemHeights {
   final _heights = <Object, double>{};

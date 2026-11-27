@@ -1,4 +1,4 @@
-//! Agents in a person's direct messages (D4a, dms.md §7): what a Claktory's
+//! Agents in a person's direct messages: what a Claktory's
 //! backend may do for one of its agents the person gave access to some of
 //! their conversations, and only that. Every call checks the agent's grant
 //! inside the same IMMEDIATE transaction as what it reads or writes
@@ -9,14 +9,14 @@
 //!   ones its grant names, with the other person as the person's devices
 //!   show them (an ended one as they were when it ended), and nothing of
 //!   the person's own view (read, drafts).
-//! - **History and wakes** aren't here any more (#451): a Claktory given
+//! - **History and wakes** aren't here any more: a Claktory given
 //!   access is a member of the conversation's group and reads it, and
 //!   wakes its agents, from its own home.
 //! - **Drafts** (`PUT conversations/<id>/agent-drafts/<client id>`,
 //!   dm.draft): a suggestion for the person, apart from their own composer
 //!   draft, for an active friendship of the generation the agent saw. The
-//!   text goes into the Claktory's channel through the person's home
-//!   (#451): only its digest is kept here, which the person's devices find
+//!   text goes into the Claktory's channel through the person's home:
+//!   only its digest is kept here, which the person's devices find
 //!   it by. The same id with the same
 //!   text answers the same; other text revises it while it's open. At most
 //!   three open a conversation an agent; the grant's quota keeps it to 20 an
@@ -538,7 +538,7 @@ mod tests {
 
     /// An agent sees only what it was given: the conversations its grant
     /// names, from when it was given, and nothing of the person's own view.
-    /// Their history isn't on claktory.com to read (#451).
+    /// Their history isn't on claktory.com to read.
     #[test]
     fn an_agent_sees_only_its_conversations() {
         let mut world = World::new();

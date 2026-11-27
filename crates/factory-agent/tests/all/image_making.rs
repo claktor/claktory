@@ -1,4 +1,4 @@
-//! Images made on ChatGPT's subscription (#403), against a mock of Codex's
+//! Images made on ChatGPT's subscription, against a mock of Codex's
 //! image endpoint: the request Codex itself sends, the image that comes
 //! back, and what each refusal means. Which models can make them is read
 //! from the sign-in, never a list.

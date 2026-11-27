@@ -1,7 +1,7 @@
 // A Markdown file shown Formatted beside the conversation, rewritten by
-// an agent (Bruno 26751, Kakyoin's shot): the viewer reads it again and
-// its blocks land in other places (a paragraph now in a quote, a list,
-// a code block). Each block's selection notifier went to the new place's
+// an agent: the viewer reads it again and its blocks
+// land in other places (a paragraph now in a quote, a list, a code
+// block). Each block's selection notifier went to the new place's
 // listener while the old one still held it, and the pane turned into the
 // debug red box ("This SelectionListenerNotifier is already registered
 // to another SelectionListener").

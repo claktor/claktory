@@ -1,6 +1,6 @@
-// The Android app never offers Claktory's updates (Bruno's minimum friend
-// build, item 3): its new version is a new APK from its link, so there's no
-// Update banner and nothing reaches the installer.
+// The Android app never offers Claktory's updates: its new version is a new
+// APK from its link, so there's no Update banner and nothing reaches the
+// installer.
 import 'package:factory_app/mobile/platform_policy.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/update.dart';

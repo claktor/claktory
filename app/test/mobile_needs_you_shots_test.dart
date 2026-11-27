@@ -1,7 +1,7 @@
-// Needs you on an iPhone, drawn: with SHOTS set, PNGs of the list first
-// (#599), a request tapped there alone with the answer under the thumb, and
-// focus mode's card and queue (#514 §7), on an iPhone SE and a Pro Max, at
-// the default text size and the largest:
+// Needs you on an iPhone, drawn: with SHOTS set, PNGs of the list and a
+// request tapped there alone with the answer under the thumb (a phone has
+// no focus mode), on an iPhone SE and a Pro Max, at the default text size
+// and the largest:
 //   SHOTS=/tmp/needs-you flutter test test/mobile_needs_you_shots_test.dart
 // test-bundle: alone (loads the app's fonts)
 import 'dart:io';
@@ -112,7 +112,7 @@ void main() {
         expect(tester.takeException(), isNull);
         await _shot(tester, '$phone-$scale-alone');
 
-        // The answer docked at the foot, as Illuso's cards publish it.
+        // The answer docked at the foot, as the cards publish it.
         final field = TextEditingController();
         addTearDown(field.dispose);
         AnswerDock.of(tester.element(find.byType(NeedsYouCard)))!
@@ -130,22 +130,6 @@ void main() {
         await tester.pump(const Duration(seconds: 2));
         expect(tester.takeException(), isNull);
         await _shot(tester, '$phone-$scale-dock');
-
-        // Back, then focus mode.
-        await tester.tap(find.bySemanticsLabel('Back').last);
-        await pumpFrames(tester);
-        final focus = find.bySemanticsLabel('Focus on Needs you');
-        await tester.ensureVisible(focus);
-        await pumpFrames(tester);
-        await tester.tap(focus);
-        await pumpFrames(tester);
-        expect(tester.takeException(), isNull);
-        await _shot(tester, '$phone-$scale-card');
-
-        await tester.tap(find.text(scale > 1.5 ? '1/2' : '1 of 2'));
-        await pumpFrames(tester);
-        expect(tester.takeException(), isNull);
-        await _shot(tester, '$phone-$scale-queue');
       });
     }
   }

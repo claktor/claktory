@@ -16,7 +16,7 @@ const MAX_SPARK: usize = 200;
 /// A Stat's most thresholds.
 const MAX_THRESHOLDS: usize = 10;
 
-/// The charts' palette by name (#380): the renderer gives each the
+/// The charts' palette by name: the renderer gives each the
 /// theme's shade; "text" is the text's own color. Never a value.
 pub(super) const COLOR_NAMES: [&str; 14] = [
     "green",
@@ -86,7 +86,7 @@ pub(super) fn catalog(component: &str) -> Option<Props> {
             ("label", DynString, false),
             ("unit", DynString, false),
             ("height", super::Kind::Chart(Kind::Range(120.0, 480.0)), false),
-            // How it draws (#380), each a plain value; left out, the
+            // How it draws, each a plain value; left out, the
             // renderer's default: a line 1 px wide, no fill, points when far
             // enough apart, 5 px across, the value axis fitted to the data,
             // automatic decimals and a legend.
@@ -98,7 +98,7 @@ pub(super) fn catalog(component: &str) -> Option<Props> {
             ("max", Number, false),
             ("decimals", super::Kind::Chart(Kind::Whole(0, 10)), false),
             ("legend", FLAG, false),
-            // The time axis's ends, in milliseconds since 1970 (#380): the
+            // The time axis's ends, in milliseconds since 1970: the
             // range shown, rows or not. The most a device's clock can
             // say is 8.64e15.
             ("timeFrom", super::Kind::Chart(Kind::Whole(0, TIME_MAX)), false),
@@ -110,7 +110,7 @@ pub(super) fn catalog(component: &str) -> Option<Props> {
             ("unit", DynString, false),
             ("spark", SPARK, false),
             ("color", STAT_COLOR, false),
-            // How it draws (#380), each a plain value; left out, the
+            // How it draws, each a plain value; left out, the
             // renderer's default: green, red from 80, the value colored,
             // a spark line under it, automatic decimals, its own height.
             ("thresholds", super::Kind::Chart(Kind::Thresholds), false),
@@ -154,7 +154,7 @@ pub(super) fn catalog(component: &str) -> Option<Props> {
 }
 
 /// Whether a component's unknown plain keys are left out rather than
-/// refused (#380): the chart family's presentation (and Row's), which the
+/// refused: the chart family's presentation (and Row's), which the
 /// Charts app may set for a newer catalog than this one, after a roll-back
 /// say. What's left out never reaches a device; known keys are still checked.
 pub(super) fn lenient(component: &str) -> bool {

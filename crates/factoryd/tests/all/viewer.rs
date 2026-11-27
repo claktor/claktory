@@ -215,7 +215,7 @@ async fn an_agent_shows_the_person_a_file_once() {
     assert!(first > 0);
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let glows = view.highlights.len();
-    apply_request(&mut client, &mut view, show(&format!(r#"{{"path":"{report}"}}"#))).await;
+    apply_request(&mut client, &mut view, show(&format!(r#"{{"path":"{}"}}"#, crate::common::json_text(&report)))).await;
     view.follow(&mut client, |view| idle(view, "builder") && view.highlights.len() > glows).await;
     assert_eq!(panes(view.agent("builder").layout.as_ref()).len(), 2);
     let again = opened(view.agent("builder").layout.as_ref(), &pane);

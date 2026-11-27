@@ -307,6 +307,7 @@ const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// Holds `<home>/import/lock` while it lives, so two imports never run at once.
 struct Lock(#[allow(dead_code)] std::fs::File);
 
+#[cfg(unix)]
 fn lock(home: &Home) -> Result<Lock, ImportError> {
     use std::os::fd::AsRawFd;
     std::fs::create_dir_all(dir(home)).map_err(|error| failed("Can't make the import's folder", error))?;
@@ -328,6 +329,29 @@ fn lock(home: &Home) -> Result<Lock, ImportError> {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     Ok(Lock(file))
+}
+
+/// The lock on Windows: LockFileEx, exclusive and failing at once, on a lock
+/// file private to this user that no one deletes while it's open.
+#[cfg(windows)]
+fn lock(home: &Home) -> Result<Lock, ImportError> {
+    factory_agent::windows::private::create_dir_all(&dir(home)).map_err(|error| failed("Can't make the import's folder", error))?;
+    let file = crate::windows::fs::open_lock(&dir(home).join("lock")).map_err(|error| failed("Can't lock the import", error))?;
+    // Child processes inherit no handle to it, so it's let go at once; it's
+    // tried for a little while all the same, as elsewhere.
+    let deadline = std::time::Instant::now() + LOCK_WAIT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Lock(file)),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(ImportError::Refused("Another factoryd import is running for this Claktory.".to_owned()));
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(failed("Can't lock the import", error)),
+        }
+    }
 }
 
 // ---- the import ----
@@ -707,6 +731,20 @@ fn empty_or_missing(path: &Path) -> bool {
 }
 
 /// Refuses a home on a network or FUSE disk: SQLite's WAL needs a local one.
+#[cfg(windows)]
+fn local_disk(root: &Path) -> Result<(), ImportError> {
+    factory_agent::windows::private::create_dir_all(root).map_err(|error| failed(&format!("Can't make {}", root.display()), error))?;
+    if crate::windows::fs::on_network_disk(root).unwrap_or(false) {
+        return Err(ImportError::Refused(format!(
+            "{} is on a network disk. Claktory's records need a disk of this computer's own: SQLite doesn't work over a network. Use a home on a local disk.",
+            root.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Refuses a home on a network or FUSE disk: SQLite's WAL needs a local one.
+#[cfg(unix)]
 fn local_disk(root: &Path) -> Result<(), ImportError> {
     use std::os::unix::ffi::OsStrExt;
     std::fs::create_dir_all(root).map_err(|error| failed(&format!("Can't make {}", root.display()), error))?;
@@ -732,7 +770,7 @@ fn network_kind(stat: &libc::statfs) -> Option<String> {
     ["nfs", "smbfs", "afpfs", "webdav", "cifs", "osxfuse", "macfuse", "fuse"].iter().any(|kind| name.starts_with(kind)).then_some(name)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn network_kind(stat: &libc::statfs) -> Option<String> {
     #[allow(clippy::unnecessary_cast)]
     let kind = stat.f_type as i64 & 0xffff_ffff;
@@ -794,7 +832,10 @@ fn copy_all(from: &Path, to: &Path) -> std::io::Result<()> {
             copy_all(&entry.path(), &to.join(entry.file_name()))?;
         }
     } else if meta.file_type().is_symlink() {
+        #[cfg(unix)]
         std::os::unix::fs::symlink(std::fs::read_link(from)?, to)?;
+        #[cfg(windows)]
+        return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, format!("{} is a link, which isn't copied on Windows", from.display())));
     } else {
         std::fs::copy(from, to)?;
     }
@@ -1312,6 +1353,19 @@ pub(crate) fn missing_tools(db: &Connection, agent: &str) -> Vec<String> {
     used.into_iter().filter(|tool| !on_path(tool)).map(str::to_owned).collect()
 }
 
+/// Whether `tool` is a program on PATH: on Windows, any name PATHEXT lets
+/// run as it (`jq.exe`, say).
+#[cfg(windows)]
+fn on_path(tool: &str) -> bool {
+    let extensions = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_owned());
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| {
+            extensions.split(';').filter(|extension| !extension.is_empty()).any(|extension| dir.join(format!("{tool}{extension}")).is_file())
+        })
+    })
+}
+
+#[cfg(unix)]
 fn on_path(tool: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::env::var_os("PATH").is_some_and(|path| {
@@ -1454,7 +1508,14 @@ fn undo(home: &Home) -> Result<String, ImportError> {
     Ok(format!("Undid the unfinished import{of}: this Claktory is as it was before it."))
 }
 
+/// On Windows the passphrase comes only from stdin, for now.
+#[cfg(windows)]
+pub fn ask_passphrase() -> Result<String, String> {
+    Err("This bundle needs its passphrase: give it with --passphrase-stdin.".to_owned())
+}
+
 /// Asks for the bundle's passphrase in the terminal, without showing it.
+#[cfg(unix)]
 pub fn ask_passphrase() -> Result<String, String> {
     use std::io::{BufRead, Write};
     use std::os::fd::AsRawFd;

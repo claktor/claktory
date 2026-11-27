@@ -338,7 +338,8 @@ void main() {
     tester,
   ) async {
     final harness = await show(tester);
-    await tester.tap(find.bySemanticsLabel('More'));
+    // The pipe's, after the sidebar's More.
+    await tester.tap(find.bySemanticsLabel('More').last);
     await settle(tester);
     expect(find.text('Liaison settings…'), findsOneWidget);
     await tester.tap(find.text('Clear conversation…'));
@@ -508,7 +509,7 @@ void main() {
     await tester.tap(find.bySemanticsLabel('Menu'));
     await settle(tester);
     expect(menus, 1);
-    // The pipe's "…": Move to group… (#359), then the liaison's own.
+    // The pipe's "…": Move to group…, then the liaison's own.
     await tester.tap(find.bySemanticsLabel('Acme launch: more'));
     await settle(tester);
     expect(find.text('Move to group…'), findsOneWidget);

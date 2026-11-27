@@ -1,4 +1,4 @@
-//! A pipe's lead (pipe-edo-findings.md, B1–B3): its liaison, else an agent
+//! A pipe's lead: its liaison, else an agent
 //! limited to the pipe, never one that can run commands unless the person
 //! chose it; a new lead is told at once of what came while none was; and
 //! with none, what arrives waits for the person.
@@ -53,7 +53,7 @@ async fn a_pipe_gets_a_contained_lead_told_at_once_or_none_and_waits_for_the_per
     assert!(lines(&factory, &pipe).contains(&"Bo answers this pipe now: it's told of each message from Ana.".to_owned()), "{:?}", lines(&factory, &pipe));
 
     // Unticked, with only an agent that can run commands left: never chosen
-    // for the person (Fugo). No lead; what arrives waits for them, said once.
+    // for the person. No lead; what arrives waits for them, said once.
     apply_request(&mut client, &mut view, select("lea")).await;
     apply_request(&mut client, &mut view, update(&pipe, Some(&["lea"]), None, Some(&[]))).await;
     view.follow(&mut client, |view| lead(view, &pipe).is_some_and(|(lead, _)| lead.is_empty())).await;
@@ -77,7 +77,7 @@ async fn a_pipe_left_without_a_lead_gets_its_liaison_at_start_then_another_conta
     let (dir, factory, mut client, mut view, _) = setup(false).await;
     apply_request(&mut client, &mut view, agent("Kai", "Liaison", "You are the liaison for the pipe \"Bugs\".")).await;
     apply_request(&mut client, &mut view, agent("Mo", "Liaison", "")).await;
-    // As Matt's was: its liaison limited to it, and no lead.
+    // As an early pipe was: its liaison limited to it, and no lead.
     let pipe = pipes::open_for_test(&factory, "site", "Bugs", &["lea", "kai", "mo"], "", false);
     pipes::upgrade_for_test(&factory, &pipe);
     pipes::unbound_for_test(&factory, &pipe);

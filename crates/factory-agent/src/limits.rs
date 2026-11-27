@@ -60,6 +60,22 @@ pub struct UsageReset {
 pub struct AccountUsage {
     pub limits: Vec<UsageLimit>,
     pub resets: Vec<UsageReset>,
+    /// Its extra usage, when the provider says (Anthropic's `extra_usage`).
+    pub extra: Option<ExtraUsage>,
+}
+
+/// A subscription's extra usage (Anthropic's usage credits): whether
+/// requests go on past its plan's limits, billed, and what was spent. Amounts
+/// in the currency's minor units, `decimal_places` of them to a unit.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ExtraUsage {
+    pub enabled: bool,
+    pub used_minor: i64,
+    /// The monthly cap; 0 when there's none.
+    pub limit_minor: i64,
+    pub currency: String,
+    pub decimal_places: u32,
+    pub limit_reached: bool,
 }
 
 /// What came of using a reset.
@@ -260,7 +276,7 @@ async fn anthropic_get(what: &str, path: &str, base_url: &str, auth: RequestAuth
 pub fn anthropic(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<AccountUsage, Error>> {
     Box::pin(async move {
         let usage = anthropic_get("Anthropic usage", "usage?cedar_ember=1&skip_spend=1", &base_url, auth).await?;
-        Ok(AccountUsage { limits: parse_anthropic(&usage), resets: parse_anthropic_resets(&usage) })
+        Ok(AccountUsage { limits: parse_anthropic(&usage), resets: parse_anthropic_resets(&usage), extra: parse_anthropic_extra(&usage) })
     })
 }
 
@@ -652,6 +668,24 @@ fn tier_plan(tier: &str) -> Option<String> {
     (words.len() > 1).then(|| words.join(" "))
 }
 
+/// Anthropic's `extra_usage`: `is_enabled`, `used_credits` and
+/// `monthly_limit` (minor units, `decimal_places` of them to a unit; the
+/// limit null for none), `currency` and `spend_limit_reached`. None when
+/// the usage has no such block.
+pub fn parse_anthropic_extra(usage: &Value) -> Option<ExtraUsage> {
+    let extra = usage.get("extra_usage").filter(|extra| extra.is_object())?;
+    // Whole minor units, whatever JSON number they come as.
+    let minor = |value: &Value| value.as_f64().map_or(0, |amount| amount.round() as i64);
+    Some(ExtraUsage {
+        enabled: extra["is_enabled"].as_bool().unwrap_or(false),
+        used_minor: minor(&extra["used_credits"]),
+        limit_minor: minor(&extra["monthly_limit"]),
+        currency: extra["currency"].as_str().unwrap_or_default().to_owned(),
+        decimal_places: extra["decimal_places"].as_u64().and_then(|places| u32::try_from(places).ok()).unwrap_or(2),
+        limit_reached: extra["spend_limit_reached"].as_bool().unwrap_or(false),
+    })
+}
+
 /// `seven_day`, `five_hour` and the per-model weekly windows, each
 /// `{"utilization": <percent>, "resets_at": "<RFC 3339>"}` or null, then any
 /// model-scoped weekly limit in `limits` not already among them.
@@ -724,7 +758,7 @@ pub fn codex(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<A
         let limits = parse_codex(&usage, now_ms());
         let available = usage["rate_limit_reset_credits"]["available_count"].as_u64().unwrap_or(0);
         if available == 0 {
-            return Ok(AccountUsage { limits, resets: Vec::new() });
+            return Ok(AccountUsage { limits, resets: Vec::new(), extra: None });
         }
         let what = "OpenAI Codex resets";
         let list = match codex_request(what, reqwest::Method::GET, "rate-limit-reset-credits", &base_url, &auth) {
@@ -737,7 +771,7 @@ pub fn codex(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<A
             Value::Null
         });
         let resets = parse_codex_resets(available, &list, &limits);
-        Ok(AccountUsage { limits, resets })
+        Ok(AccountUsage { limits, resets, extra: None })
     })
 }
 
@@ -948,7 +982,7 @@ pub fn grok(base_url: String, auth: RequestAuth) -> BoxFuture<'static, Result<Ac
             request = request.header(name, value);
         }
         let usage = get_json(what, request).await?;
-        Ok(AccountUsage { limits: parse_grok(&usage), resets: Vec::new() })
+        Ok(AccountUsage { limits: parse_grok(&usage), resets: Vec::new(), extra: None })
     })
 }
 

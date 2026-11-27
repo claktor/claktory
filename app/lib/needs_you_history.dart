@@ -5,6 +5,8 @@ import 'package:flutter/widgets.dart';
 
 import 'app_dock.dart' show openAppsTab;
 import 'apps.dart' show undoAppAccess;
+import 'ask_card.dart'
+    show askOutcome, handoffHost, isAgreement, isPayment, paymentSite;
 import 'backend.dart';
 import 'characters/character.dart';
 import 'chats.dart' show ChatGlyph, chatTitle, openChat;
@@ -386,6 +388,8 @@ String updatedTimes(int times) => switch (times) {
 String historyOutcome(NeedsYouRecord record, {String? agent, String? subject}) {
   // A procedure, where it ended; a secret, how it was given: the card's
   // own words (askOutcome, secretOutcome; #533 §7).
+  // An errand's step only the person could take: as its card said it.
+  if (_handoffOutcome(record, agent: agent) case final words?) return words;
   if (_stepOutcome(record) case final words?) return words;
   if (_secretOutcome(record, agent: agent, subject: subject)
       case final words?) {
@@ -393,6 +397,70 @@ String historyOutcome(NeedsYouRecord record, {String? agent, String? subject}) {
   }
   if (_commandOutcome(record) case final words?) return words;
   return _outcome(record, agent: agent);
+}
+
+/// An errand's card (#435 W8–W10) as it was asked, from its record
+/// (Ghiaccio's NeedsYouRecord.handoff, Abbacchio's row 1645); null for
+/// every other record.
+AskPerson? _handoffAsk(NeedsYouRecord record) {
+  if (!record.hasHandoff()) return null;
+  final outcome = record.outcome;
+  return AskPerson(
+    title: record.title,
+    handoff: record.handoff,
+    code: record.handoff.kind == ErrandHandoffKind.ERRAND_HANDOFF_KIND_CODE,
+    state: outcome == NeedsYouOutcome.NEEDS_YOU_OUTCOME_DISMISSED
+        ? AskPersonState.ASK_PERSON_STATE_DISMISSED
+        : AskPersonState.ASK_PERSON_STATE_ANSWERED,
+    actionError: record.actionError,
+    // Kept in Secrets, under that name; none when the person saved them.
+    answer: record.codesKeptAs,
+    replied: outcome == NeedsYouOutcome.NEEDS_YOU_OUTCOME_REPLIED,
+    resolved: outcome == NeedsYouOutcome.NEEDS_YOU_OUTCOME_RESOLVED,
+  );
+}
+
+/// How an errand's card ended, in its card's own words (askOutcome):
+/// "Filled in on shop.example", "Accepted", "Done", "Couldn't do this",
+/// "Kept in Secrets as …". Taken back as its errand ended, as any card.
+String? _handoffOutcome(NeedsYouRecord record, {String? agent}) {
+  final ask = _handoffAsk(record);
+  if (ask == null ||
+      record.outcome == NeedsYouOutcome.NEEDS_YOU_OUTCOME_WITHDRAWN) {
+    return null;
+  }
+  final words = askOutcome(ask, agent: agent ?? 'the agent');
+  return record.codesKeptAs.isNotEmpty
+      ? '$words as ${proseCodes(record.codesKeptAs)}'
+      : words;
+}
+
+/// An errand's card's heading, as the card has it: the site as Chrome
+/// gave it, never the page's words ("shop.example asks for a code"); null
+/// for every other record.
+String? handoffHistoryTitle(NeedsYouRecord record) {
+  final ask = _handoffAsk(record);
+  if (ask == null) return null;
+  final host = handoffHost(ask);
+  if (ask.code) return '$host asks for a code';
+  if (isPayment(ask)) return 'Asks you to pay on ${paymentSite(ask)}';
+  // The card's heading, never the page's title (handoff.title), which is
+  // the site's words.
+  return proseCodes(record.title);
+}
+
+/// Why an approved errand step couldn't be carried out, under its outcome
+/// as on its card; "" when it went through, or when the outcome says it
+/// (a code, an agreement).
+String handoffActionError(NeedsYouRecord record) {
+  final ask = _handoffAsk(record);
+  if (ask == null ||
+      ask.code ||
+      isAgreement(ask) ||
+      record.outcome == NeedsYouOutcome.NEEDS_YOU_OUTCOME_DISMISSED) {
+    return '';
+  }
+  return record.actionError;
 }
 
 /// An Execute card that ran (Secco's NEEDS_YOU_RECORD_KIND_COMMAND), as
@@ -564,46 +632,13 @@ class HistoryRow extends StatelessWidget {
     final agent = workspace.agents
         .where((agent) => agent.id == record.agentId)
         .firstOrNull;
-    final chat = workspace.chats
-        .where((chat) => chat.id == record.chatId)
-        .firstOrNull;
     final pipe = workspace.pipes
         .where((pipe) => pipe.id == record.pipeId)
         .firstOrNull;
-    // A pipe by this side's name for it, never one the other side chose;
-    // an agent with the pipe it's about, or the liaison's pipe, after it.
-    final aboutPipe = _ofPipe(record)
-        ? pipe
-        : agent == null || agent.pipeId.isEmpty
-        ? null
-        : workspace.pipes.where((pipe) => pipe.id == agent.pipeId).firstOrNull;
     final agentName =
         agent?.name ?? (record.agentName.isEmpty ? null : record.agentName);
-    // Where a project's new pipes' reports go, changed by the person: the
-    // title says it all.
-    final yours =
-        (record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_FORWARD &&
-            record.agentId.isEmpty &&
-            record.pipeId.isEmpty) ||
-        // A kind of report the person made, changed or deleted.
-        (record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_REPORT_TYPE &&
-            record.agentId.isEmpty) ||
-        // A change to an app's access the person made, or an undo.
-        (_ofApp(record) && record.agentId.isEmpty) ||
-        _settingsPlace(record) != null;
     final alert = record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_ALERT;
-    final who = yours
-        ? 'You'
-        // Claktory's own alert, by the name it was sent with.
-        : alert && record.agentId.isEmpty
-        ? (record.alert.fromName.isEmpty ? 'Claktory' : record.alert.fromName)
-        : record.chatId.isNotEmpty
-        ? (chat == null ? 'A chat' : chatTitle(chat))
-        : _ofPipe(record) && agentName == null
-        ? pipe?.name ?? 'A pipe'
-        : aboutPipe != null
-        ? '${agentName ?? 'An agent'} · ${aboutPipe.name}'
-        : agentName ?? 'An agent';
+    final who = historyWho(workspace, record);
     // The start of a held message from the other side, only under the
     // title that says where it's from, as plain text.
     final excerpt =
@@ -612,25 +647,20 @@ class HistoryRow extends StatelessWidget {
         ? _shortened(record.excerpt, 200)
         : '';
     final reply = _shortened(record.reply, 120);
-    // An app access change undone since says so after how it ended.
-    final outcome = [
-      historyOutcome(
-        record,
-        agent: agentName,
-        subject: record.subjectAgentId.isEmpty
-            ? null
-            : workspace.agents
-                  .where((agent) => agent.id == record.subjectAgentId)
-                  .firstOrNull
-                  ?.name,
-      ),
-      if ((_ofApp(record) || _ofModel(record)) && record.undone) 'Undone',
-      // Changed again since, so Undo would be refused (row 684).
-      if (_ofModel(record) && record.superseded && !record.undone)
-        'Changed since',
-      // Its agent changed the card while it waited (#428).
-      if (record.updates > 0) updatedTimes(record.updates),
-    ].where((part) => part.isNotEmpty).join(' · ');
+    final title = record.proposalId.isNotEmpty
+        // A grant's sentence names agents, apps and paths: every hidden
+        // character by its code (Fugo).
+        ? visibleCodes(record.title)
+        // An errand's card: Claktory's heading for it (row 1645).
+        : handoffHistoryTitle(record) ??
+              // An Execute card: Claktory's heading, then the command's
+              // first line, as Needs you shows it.
+              (record.hasCommand()
+                  ? commandSummary(record.command)
+                  : record.title);
+    // Approved, but the errand's step couldn't be carried out.
+    final failed = handoffActionError(record);
+    final outcome = historyEnded(workspace, record);
     // Rivet's reason, why an agent withdrew its card, closed it as settled
     // or gave up a secret, as the agent's own words, never as Claktory's.
     final reason =
@@ -651,17 +681,7 @@ class HistoryRow extends StatelessWidget {
         ? () => onUndo!(record)
         : null;
     final decided = record.decidedMs.toInt();
-    final where = record.chatId.isNotEmpty
-        ? 'Open chat'
-        : record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_REPORT_TYPE
-        ? 'Show what crosses'
-        : _opensApp(record)
-        ? 'Show in Apps'
-        : _ofPipe(record)
-        ? 'Open pipe'
-        : _settingsPlace(record) != null
-        ? 'Open Settings'
-        : 'Open conversation';
+    final where = historyWhere(record);
     return Semantics(
       button: true,
       hint: where,
@@ -755,17 +775,9 @@ class HistoryRow extends StatelessWidget {
                           color: palette.textMuted,
                         ),
                       ),
-                    if (record.title.isNotEmpty)
+                    if (title.isNotEmpty)
                       Text(
-                        // A grant's sentence names agents, apps and paths:
-                        // every hidden character by its code (Fugo).
-                        record.proposalId.isNotEmpty
-                            ? visibleCodes(record.title)
-                            // An Execute card: Claktory's heading, then the
-                            // command's first line, as Needs you shows it.
-                            : record.hasCommand()
-                            ? commandSummary(record.command)
-                            : record.title,
+                        title,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyles.body.copyWith(
@@ -851,6 +863,15 @@ class HistoryRow extends StatelessWidget {
                           fontWeight: FontWeight.w500,
                         ),
                       ),
+                    if (failed.isNotEmpty)
+                      Text(
+                        proseCodes(failed),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyles.caption.copyWith(
+                          color: palette.textMuted,
+                        ),
+                      ),
                     TaintLabel(taint: record.taint, agent: who),
                     if (undoNote case final note?)
                       Text(
@@ -877,6 +898,100 @@ class HistoryRow extends StatelessWidget {
     );
   }
 }
+
+/// Who [record] is from, as History's row names it: "You" for what the
+/// person changed themselves, Claktory's alert by the name it was sent
+/// with, a chat's title, a pipe by this side's name for it, an agent with
+/// the pipe it's about.
+String historyWho(Workspace workspace, NeedsYouRecord record) {
+  final agent = workspace.agents
+      .where((agent) => agent.id == record.agentId)
+      .firstOrNull;
+  final chat = workspace.chats
+      .where((chat) => chat.id == record.chatId)
+      .firstOrNull;
+  final pipe = workspace.pipes
+      .where((pipe) => pipe.id == record.pipeId)
+      .firstOrNull;
+  // A pipe by this side's name for it, never one the other side chose;
+  // an agent with the pipe it's about, or the liaison's pipe, after it.
+  final aboutPipe = _ofPipe(record)
+      ? pipe
+      : agent == null || agent.pipeId.isEmpty
+      ? null
+      : workspace.pipes.where((pipe) => pipe.id == agent.pipeId).firstOrNull;
+  final agentName =
+      agent?.name ?? (record.agentName.isEmpty ? null : record.agentName);
+  // Where a project's new pipes' reports go, changed by the person: the
+  // title says it all.
+  final yours =
+      (record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_FORWARD &&
+          record.agentId.isEmpty &&
+          record.pipeId.isEmpty) ||
+      // A kind of report the person made, changed or deleted.
+      (record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_REPORT_TYPE &&
+          record.agentId.isEmpty) ||
+      // A change to an app's access the person made, or an undo.
+      (_ofApp(record) && record.agentId.isEmpty) ||
+      _settingsPlace(record) != null;
+  final alert = record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_ALERT;
+  return yours
+      ? 'You'
+      // Claktory's own alert, by the name it was sent with.
+      : alert && record.agentId.isEmpty
+      ? (record.alert.fromName.isEmpty ? 'Claktory' : record.alert.fromName)
+      : record.chatId.isNotEmpty
+      ? (chat == null ? 'A chat' : chatTitle(chat))
+      : _ofPipe(record) && agentName == null
+      ? pipe?.name ?? 'A pipe'
+      : aboutPipe != null
+      ? '${agentName ?? 'An agent'} · ${aboutPipe.name}'
+      : agentName ?? 'An agent';
+}
+
+/// How [record] ended, as History's row says it: "Approved", "Dismissed
+/// · Updated twice", with an undo since or a change after it.
+String historyEnded(Workspace workspace, NeedsYouRecord record) {
+  final agentName =
+      workspace.agents
+          .where((agent) => agent.id == record.agentId)
+          .firstOrNull
+          ?.name ??
+      (record.agentName.isEmpty ? null : record.agentName);
+  // An app access change undone since says so after how it ended.
+  return [
+    historyOutcome(
+      record,
+      agent: agentName,
+      subject: record.subjectAgentId.isEmpty
+          ? null
+          : workspace.agents
+                .where((agent) => agent.id == record.subjectAgentId)
+                .firstOrNull
+                ?.name,
+    ),
+    if ((_ofApp(record) || _ofModel(record)) && record.undone) 'Undone',
+    // Changed again since, so Undo would be refused.
+    if (_ofModel(record) && record.superseded && !record.undone)
+      'Changed since',
+    // Its agent changed the card while it waited.
+    if (record.updates > 0) updatedTimes(record.updates),
+  ].where((part) => part.isNotEmpty).join(' · ');
+}
+
+/// Where opening [record] goes ([openHistoryRecord]), as its button or
+/// hint says it.
+String historyWhere(NeedsYouRecord record) => record.chatId.isNotEmpty
+    ? 'Open chat'
+    : record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_REPORT_TYPE
+    ? 'Show what crosses'
+    : _opensApp(record)
+    ? 'Show in Apps'
+    : _ofPipe(record)
+    ? 'Open pipe'
+    : _settingsPlace(record) != null
+    ? 'Open Settings'
+    : 'Open conversation';
 
 /// Opens the conversation [record]'s card is in, at the card when it's
 /// still there (seq 0: at its end), or the chat.

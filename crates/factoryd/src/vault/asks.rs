@@ -68,6 +68,24 @@ pub(crate) struct Wanted {
     /// The person answered with a new secret, added from the card.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub added: bool,
+    /// A site's login asked for from the agent's browser (browser_sign_in):
+    /// set only by Claktory, never from what an
+    /// agent sends (`ask` clears them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<Login>,
+}
+
+/// What makes a request a login's (SecretRequest.sites, fill_only, login,
+/// login_site, login_outcome).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub(crate) struct Login {
+    /// The exact https origin Chrome reported for the sign-in field's frame.
+    pub origin: String,
+    /// Its registrable domain, in ASCII.
+    pub site: String,
+    /// SecretLoginOutcome, as its number.
+    #[serde(default)]
+    pub outcome: i32,
 }
 
 fn is_zero(value: &i64) -> bool {
@@ -211,6 +229,7 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
             (wanted.link.clone(), wanted.link_host.clone(), wanted.steps.clone(), wanted.place.clone(), wanted.done_ms, wanted.added)
         })
         .unwrap_or_default();
+    let login = wanted.as_ref().and_then(|wanted| wanted.login.clone());
     let new_secret = wanted.map(|wanted| v1::NewSecret {
         name: wanted.name,
         description: wanted.description,
@@ -249,8 +268,28 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::SecretRequest> {
         admin_agent_id: row.get(13)?,
         collecting: row.get(14)?,
         replied: row.get(15)?,
-        ..v1::SecretRequest::default()
+        ..login_fields(login.as_ref())
     })
+}
+
+/// A request's login fields (sites, fill_only, login, login_site,
+/// login_outcome), the rest default.
+fn login_fields(login: Option<&Login>) -> v1::SecretRequest {
+    let Some(login) = login else { return v1::SecretRequest::default() };
+    v1::SecretRequest {
+        sites: vec![login.origin.clone()],
+        fill_only: true,
+        login: true,
+        login_site: login.site.clone(),
+        login_outcome: login.outcome,
+        ..v1::SecretRequest::default()
+    }
+}
+
+/// The login a request is for, from what the card shows.
+pub(crate) fn login_of(request: &v1::SecretRequest) -> Option<Login> {
+    let origin = request.sites.first().filter(|_| request.login)?;
+    Some(Login { origin: origin.clone(), site: request.login_site.clone(), outcome: request.login_outcome })
 }
 
 /// Reads one request without changing its state or applying an ownership check.
@@ -323,6 +362,7 @@ pub(crate) fn details(request: &v1::SecretRequest) -> serde_json::Value {
         "link_host": request.link_host,
         "steps": request.steps,
         "place": request.place,
+        "login": login_of(request),
     })
 }
 
@@ -359,12 +399,12 @@ pub(crate) fn collected(tool: &str, is_error: bool, details: &serde_json::Value)
     Some(request)
 }
 
-/// The entry a secrets_request result shows (called directly, or through
-/// extension_call), pending; None for any other result, or one that asked
-/// for nothing. A secrets_collect result (its details say `collect`) isn't
-/// a new request: `collected` reads those.
+/// The entry a secrets_request or browser_sign_in result shows (called
+/// directly, or through extension_call), pending; None for any other
+/// result, or one that asked for nothing. A secrets_collect result (its
+/// details say `collect`) isn't a new request: `collected` reads those.
 pub(crate) fn requested(tool: &str, is_error: bool, details: &serde_json::Value) -> Option<v1::SecretRequest> {
-    if !matches!(tool, TOOL | "extension_call") || is_error || details.get("collect").is_some() {
+    if !matches!(tool, TOOL | crate::errands::fill::SIGN_IN_TOOL | "extension_call") || is_error || details.get("collect").is_some() {
         return None;
     }
     parsed(details)
@@ -427,7 +467,7 @@ fn parsed(details: &serde_json::Value) -> Option<v1::SecretRequest> {
         link_host: text("link_host"),
         steps: text("steps"),
         place: text("place"),
-        ..v1::SecretRequest::default()
+        ..login_fields(details.get("login").and_then(|login| serde_json::from_value::<Login>(login.clone()).ok()).as_ref())
     })
 }
 
@@ -587,6 +627,9 @@ impl Vault {
             place,
             done_ms: 0,
             added: false,
+            // Only Claktory asks for a login (`ask_login`), from Chrome's
+            // origin: never an agent's words.
+            login: None,
         };
         let json = serde_json::to_string(&wanted).map_err(|error| VaultError::Invalid(error.to_string()))?;
         let mut inner = self.lock();
@@ -609,6 +652,89 @@ impl Vault {
             params![id, agent, name, json, reason, now_ms(), admin],
         )?;
         Self::changed_request(&mut inner, &id)
+    }
+
+    /// Records `agent`'s request for its login to `origin` (an exact https
+    /// origin Chrome reported, as `browser::origin::canonical` spells it):
+    /// USERNAME and PASSWORD, named for the site ("X login"), to be bound
+    /// to that origin and granted fill-only. One already waiting for the
+    /// same origin is answered instead of a second: (it, false). `given` is
+    /// the login it signed in with and the site refused, whose values Sign
+    /// in replaces (`outcome` REFUSED then).
+    pub(crate) fn ask_login(
+        &self,
+        agent: &str,
+        origin: &str,
+        reason: &str,
+        given: Option<(&str, &str)>,
+        outcome: v1::SecretLoginOutcome,
+    ) -> Result<(v1::SecretRequest, bool), VaultError> {
+        let site = super::logins::site_of(origin);
+        if site.is_empty() {
+            return Err(VaultError::Invalid(format!("Claktory signs in only on https sites, not {origin}.")));
+        }
+        // The agent's line is optional: the card says the site anyway.
+        let reason = if reason.trim().is_empty() { format!("To sign in to {site}.") } else { check_reason(reason)? };
+        if let Some(waiting) = self.login_request(agent, origin)?.filter(|found| found.state() == SecretRequestState::Pending) {
+            return Ok((waiting, false));
+        }
+        let name = given.map_or_else(|| super::logins::login_name(&site), |(_, name)| name.to_owned());
+        let wanted = Wanted {
+            name: name.clone(),
+            description: format!("Your login for {site}. Claktory types it on {origin} only."),
+            variables: [super::logins::USERNAME, super::logins::PASSWORD]
+                .into_iter()
+                .map(|name| WantedVariable { name: name.to_owned(), file: false })
+                .collect(),
+            login: Some(Login { origin: origin.to_owned(), site, outcome: outcome.into() }),
+            ..Wanted::default()
+        };
+        let json = serde_json::to_string(&wanted).map_err(|error| VaultError::Invalid(error.to_string()))?;
+        let (given, given_name) = given.unwrap_or_default();
+        let mut inner = self.lock();
+        let db = Self::db(&inner)?;
+        let id = format!("r{}", crypto::hex(&crypto::random::<4>()));
+        db.execute(
+            "INSERT INTO requests (id, agent, secret, secret_name, new_secret, reason, state, created, admin, given, given_name)
+             VALUES (?1, ?2, '', ?3, ?4, ?5, 'pending', ?6, '', ?7, ?8)",
+            params![id, agent, name, json, reason, now_ms(), given, given_name],
+        )?;
+        Self::changed_request(&mut inner, &id).map(|request| (request, true))
+    }
+
+    /// `agent`'s latest request for its login to exactly `origin`, however
+    /// it stands; None when it never asked.
+    pub(crate) fn login_request(&self, agent: &str, origin: &str) -> Result<Option<v1::SecretRequest>, VaultError> {
+        let inner = self.lock();
+        let Some(db) = &inner.db else { return Ok(None) };
+        let asked: Vec<v1::SecretRequest> = crate::store::query(
+            db,
+            &format!("SELECT {COLUMNS} FROM requests WHERE agent = ?1 AND new_secret LIKE '%\"login\":%' ORDER BY created DESC, rowid DESC"),
+            [agent],
+            row,
+        )?;
+        Ok(asked.into_iter().find(|request| request.login && request.sites.first().is_some_and(|site| site == origin)))
+    }
+
+    /// What filling login request `id`'s login did (SecretLoginOutcome);
+    /// REFUSED opens it again, waiting for the person, the login it was
+    /// given kept so Sign in replaces its values. Returns it as it is now.
+    pub(crate) fn set_login_outcome(&self, id: &str, outcome: v1::SecretLoginOutcome) -> Result<v1::SecretRequest, VaultError> {
+        let changed = self.change_wanted(id, |wanted| {
+            if let Some(login) = wanted.login.as_mut() {
+                login.outcome = outcome.into();
+            }
+        })?;
+        if outcome != v1::SecretLoginOutcome::Refused || changed.state() == SecretRequestState::Pending {
+            return Ok(changed);
+        }
+        let mut inner = self.lock();
+        let db = Self::db(&inner)?;
+        db.execute(
+            "UPDATE requests SET state = 'pending', decided = 0, comment = '', updated = ?2 WHERE id = ?1 AND state = 'granted'",
+            params![id, now_ms()],
+        )?;
+        Self::changed_request(&mut inner, id)
     }
 
     /// `agent`'s request `id`, if it's still waiting.
@@ -820,6 +946,12 @@ impl Vault {
     pub(crate) fn update_request(&self, agent: &str, id: &str, change: Change) -> Result<v1::SecretRequest, VaultError> {
         let id = id.trim();
         let current = self.own_waiting(agent, id)?;
+        if current.login {
+            return Err(VaultError::Invalid(format!(
+                "{} is a sign-in Claktory asked for from your browser, so it can't be changed: withdraw it with secrets_request_cancel if you no longer need it.",
+                current.id
+            )));
+        }
         let kept = self.wanted(&current.id)?;
         let mut wanted: Wanted = Wanted {
             name: current.secret_name.clone(),

@@ -44,9 +44,9 @@ class Drafts extends ChangeNotifier {
   }
 
   /// Starts a message to the agent for the person to finish: [text] becomes
-  /// its draft, or goes on a new line after the draft it has (not again
-  /// when the draft already ends with it: a "+" tapped twice, Sale's row
-  /// 163), and its message box takes the focus with the cursor at the end.
+  /// its draft, or goes on a new line after the draft it has (not again when
+  /// the draft already ends with it: a "+" tapped twice), and its message box
+  /// takes the focus with the cursor at the end.
   void compose(String agentId, String text) {
     final draft = of(agentId);
     _focusFor = agentId;

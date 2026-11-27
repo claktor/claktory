@@ -170,6 +170,62 @@ $Q down qa1                            # or: down --all (only yours)
     the same check as the other binaries. Only `vX.Y.Z` is taken.
   - **Not in the container:** `--container` refuses `--version` for now.
 
+## The person's input on Claktory's browser: `replay`
+
+`replay NAME SCRIPT [--toolbar PX] [--png FILE]` sends a scripted list of
+pointer and wheel events to the sandbox's browser, as the app's live view
+sends them during the person's turn.
+
+1. **Its connection watches** the browser (WatchAgentBrowser, `max_width`
+   0: frames as the screen is) and acknowledges every frame, so the next
+   can come.
+2. **It takes it over** (TakeOverAgentBrowser) when an errand drives it.
+   In the person's turn (BROWSING after OpenAgentBrowser, say) that changes
+   nothing. It never hands it back: send HandBackAgentBrowser when done.
+3. **Each event goes on time, as its own AgentBrowserInput,** on the newest
+   frame's `frame_seq`.
+4. **With `--png`,** the frame shown about a second after the last event is
+   saved as a PNG (waiting up to 3 s more for one still coming).
+
+A script is JSON lines, one step each:
+
+```text
+{"move": [530, 270]}                 the pointer to (x, y)
+{"down": [590, 282]}                 a button down there ("button": 1 main, 2 middle, 3 secondary)
+{"up": [590, 282]}                   and up
+{"wheel": [900, 520], "dy": 50}      the wheel there by (dx, dy) frame pixels: 50 is one notch
+{"wait_ms": 16}                      nothing for that long
+```
+
+- **Points are the page's CSS pixels,** from its top left, at a device pixel
+  ratio of 1. The live view counts the browser's whole screen, Chrome's
+  toolbar included, so give the toolbar's height with `--toolbar`; it's
+  added to every y.
+- **A wheel event of 50 frame pixels is one notch.** The host rounds to whole
+  notches, at least one, at most 10. Send a burst as separate events, never
+  one event of 150.
+- **At most 240 events a second** reach the browser; more are dropped.
+- **The live view must be on** in the sandbox's settings (`"browser":
+  {"live_view": true}` in its `home/config.json`, applied at once), and its
+  factoryd must run Claktory's browser; otherwise the sandbox refuses the
+  watch, and `replay` exits 3 with its words.
+- **Frames come at most 1280 pixels wide** (the backend's width for
+  `max_width` 0), so the PNG is the frame as sent. Positions don't depend on
+  it: they're fractions of the screen.
+
+`replays/cursor-probe.jsonl` drives the cursor probe page
+(`https://claktory.com/qa/fixtures/w3/cursor-probe`): 40 moves of 3 px about
+16 ms apart onto Go, two presses on it held 80 ms, then three single wheel
+notches 700 ms apart and three 40 ms apart. It never clicks Reset.
+
+```sh
+$Q send qa1 OpenAgentBrowser '{"url": "https://claktory.com/qa/fixtures/w3/cursor-probe"}'
+$Q replay qa1 crates/claktory-qa/replays/cursor-probe.jsonl --toolbar TOOLBAR --png probe.png
+```
+
+The probe page shows the toolbar's height itself, as line G's
+screenY − clientY, once any event has reached it.
+
 ## A feature's paths, end to end
 
 1. **Plan.** Write the numbered paths from the changelog line and the diff,
@@ -308,6 +364,28 @@ $Q limit qa1 --for 20                       # or let it reset by itself: Lea car
   message the agent, or at its usage read each minute while an agent waits.
 - **The account:** Claude Max 5x, `claude@example.test`, as Settings →
   Providers shows it. `up` prints it as `claude`, with `limited_until_ms`.
+- **Reading full while it answers:** `limit NAME --for SECS --reads-full`
+  makes the account's usage read its weekly window at 100% until then while
+  every message is still answered, as Anthropic answered Matt's account at a
+  weekly 100% (Bruno 52170). Claktory sends requests to another account with
+  room first while one reads full, and back once it resets.
+- **Two accounts:** `up NAME --claude --claude-accounts 2` signs in a second
+  fake account after the first, `claude2@example.test`, with its own limit
+  (`limit NAME --account 2 …`). `up` prints it under `claude.second`. Each
+  answered message's line in qa-model's log (`model NAME`) says which account
+  it came on (`account`). For example, an account read full gives way to the
+  one with room, and every account read full still answers on the first:
+
+  ```sh
+  $Q up qa2 --claude --claude-accounts 2 --no-account
+  $Q send qa2 CreateProject '{"name": "Site"}'; $Q send qa2 CreateAgent '{"project_id": "site", "name": "Lea"}'
+  $Q limit qa2 --for 600 --reads-full          # the first reads weekly 100%, still answering
+  $Q restart qa2                               # reads every account's usage now (else at its next read)
+  $Q ask qa2 Lea 'Hello'
+  $Q model qa2 --last 1                        # "account": "claude2@example.test"
+  $Q limit qa2 --account 2 --for 600 --reads-full; $Q restart qa2
+  $Q ask qa2 Lea 'Again'                       # both read full: back on claude@example.test
+  ```
 - **Images as files (#382):** as with Anthropic, an image an agent reads
   goes to Claude once, uploaded to qa-model's Files API, and later requests
   name its file instead of sending it again. Uploads are kept in the

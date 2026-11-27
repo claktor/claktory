@@ -14,18 +14,17 @@ import 'update.dart' show AppBuild;
 import 'your_claktories.dart' show accountProblem, thisDevicePlatform;
 
 /// A Mac's app signed in to the person's Claktory account through its own
-/// Claktory (#529), so their other Claktories take it as theirs with no
+/// Claktory, so their other Claktories take it as theirs with no
 /// second sign-in: while this Mac's Claktory is signed in and the app
 /// isn't, the app makes an account key, keeps it in the keychain
 /// ([AccountKeyVault]), asks its Claktory to vouch for it (VouchDevice)
 /// and signs in with the one-time code it gets back, signed by that key.
 ///
 /// It does so by itself unless the person signed this device out or
-/// another of their devices removed it ([DeviceAccount.autoVouch], Fugo's
-/// condition 5): then [offered] says so, and [vouchNow] does it once on
-/// the person's tap ([SignInThroughThisMac]). An account service that
-/// can't vouch yet leaves the app as it was, with nothing shown, until it
-/// starts again.
+/// another of their devices removed it ([DeviceAccount.autoVouch]): then
+/// [offered] says so, and [vouchNow] does it once on the person's tap
+/// ([SignInThroughThisMac]). An account service that can't vouch yet
+/// leaves the app as it was, with nothing shown, until it starts again.
 class LocalVouch extends ChangeNotifier {
   LocalVouch({
     required this.account,
@@ -263,7 +262,7 @@ class LocalVouch extends ChangeNotifier {
     });
   }
 
-  /// What a failed click says when nothing said why (Trish).
+  /// What a failed click says when nothing said why.
   static const _fallback =
       "Couldn't sign in this way. Try again, or use your email below.";
 
@@ -293,7 +292,7 @@ class SignInThroughThisMac extends StatelessWidget {
   final LocalVouch? vouch;
 
   /// An account the Claktory asking turns away: nothing when it's the one
-  /// this Mac's Claktory would vouch with (Abbacchio row 1541).
+  /// this Mac's Claktory would vouch with.
   final String? refused;
 
   @override

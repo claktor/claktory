@@ -1,8 +1,8 @@
-// Pairing through the window crossing between the narrow and wide layouts
-// (Sale's row 198; Lucy 49619: a resize or rotation never changes where you
-// are), with the window built as main.dart builds it: a new Shell each time
-// it crosses. The pairing screen keeps its step, and a dialog waiting for an
-// answer (Connect to this Claktory?, a permission) stays and still answers.
+// Pairing through the window crossing between the narrow and wide layouts (a
+// resize or rotation never changes where you are), with the window built as
+// main.dart builds it: a new Shell each time it crosses. The pairing screen
+// keeps its step, and a dialog waiting for an answer (Connect to this
+// Claktory?, a permission) stays and still answers.
 import 'dart:async';
 
 import 'package:factory_app/connections.dart';

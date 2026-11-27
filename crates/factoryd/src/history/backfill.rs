@@ -1,4 +1,4 @@
-//! History's backfill (#458 B2, history-replay.md §3): what the Map was
+//! History's backfill: what the Map was
 //! before Claktory began recording it, reconstructed once from what lies
 //! around, and kept in `map_history` as rows the replay draws dotted
 //! (`inferred`).
@@ -21,8 +21,8 @@
 //! Leads, secrets and apps before `since` aren't known here. Whatever it
 //! inferred that the start doesn't have ends just before `since`.
 //!
-//! It reads only factory.db and files on this computer, never the network
-//! (Fugo), and never a whole transcript: a segment's frame is near the top
+//! It reads only factory.db and files on this computer, never the network,
+//! and never a whole transcript: a segment's frame is near the top
 //! of a JSON Lines segment and the last key of an older JSON one, so only
 //! that part is read.
 

@@ -302,7 +302,7 @@ async fn rivets_app_grants_are_named_by_app_and_agent_never_by_its_reason() {
     assert_eq!(list(&mut client, "marker", 0, 0).await.records.len(), 4);
 }
 
-/// History says a card's own outcome (#533 §7, Lucy's rule 9): the step a
+/// History says a card's own outcome: the step a
 /// procedure ended at, how many it had, and whether its agent stopped it
 /// there after Can't do this; and how a secret request was approved: a
 /// secret given, added on the card, generated, imported, or left to the
@@ -336,7 +336,7 @@ async fn history_says_where_a_procedure_ended_and_how_a_secret_was_given() {
     let vault = rusqlite::Connection::open(home_of(addr).root().join("vault/vault.db")).expect("vault.db");
     // Every request names the admin agent an approval would pass it to
     // (Rivet, in a Claktory that has it); only those that passed to it
-    // were stamped approved (Abbacchio's 1580).
+    // were stamped approved.
     let requests = [
         ("Gave", "granted", "", "Hetzner prod", false),
         ("Added", "granted", r#"{"name":"Added","added":true}"#, "Added", false),

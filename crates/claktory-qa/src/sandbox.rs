@@ -183,6 +183,9 @@ pub struct Sandbox {
     /// Its Claude is signed in, fake (`up --claude`): Anthropic's side of
     /// qa-model, through a QA build of factoryd, with its agents on Claude.
     pub claude: bool,
+    /// A second fake Claude account is signed in after the first
+    /// (`--claude-accounts 2`).
+    pub claude_second: bool,
     /// The account it claims to be (`up --claim-email`, `--claim-claktory-id`):
     /// a QA build of factoryd lies about whose it is (E11 row 6).
     pub claim_email: Option<String>,
@@ -249,6 +252,15 @@ impl Sandbox {
             "claude": self.claude.then(|| json!({
                 "account": crate::model::claude::EMAIL,
                 "limited_until_ms": crate::model::claude::limited_until(&self.claude_limit()),
+                "reads_full_until_ms": crate::model::claude::reads_full_until(&self.claude_limit()),
+                "second": self.claude_second.then(|| {
+                    let limit = crate::model::claude::limit_file(&self.claude_limit(), 2);
+                    json!({
+                        "account": crate::model::claude::EMAIL_2,
+                        "limited_until_ms": crate::model::claude::limited_until(&limit),
+                        "reads_full_until_ms": crate::model::claude::reads_full_until(&limit),
+                    })
+                }),
             })),
             "owner": self.owner,
             "created_ms": self.created_ms,
@@ -269,6 +281,7 @@ impl Sandbox {
             "machine_name": self.machine_name,
             "speech": self.speech,
             "claude": self.claude,
+            "claude_second": self.claude_second,
             "claim_email": self.claim_email,
             "claim_claktory_id": self.claim_claktory_id,
             "owner": self.owner,
@@ -300,6 +313,7 @@ impl Sandbox {
             commit: record.get("commit").and_then(Value::as_str).unwrap_or_default().to_owned(),
             speech: record.get("speech").and_then(Value::as_bool).unwrap_or(false),
             claude: record.get("claude").and_then(Value::as_bool).unwrap_or(false),
+            claude_second: record.get("claude_second").and_then(Value::as_bool).unwrap_or(false),
             claim_email: record.get("claim_email").and_then(Value::as_str).map(str::to_owned),
             claim_claktory_id: record.get("claim_claktory_id").and_then(Value::as_str).map(str::to_owned),
             owner: record.get("owner").and_then(Value::as_str).unwrap_or_default().to_owned(),
@@ -372,6 +386,8 @@ pub struct Up {
     /// Claude signed in, fake, on qa-model (which this starts), with every
     /// agent on Claude: `limit` puts it at its usage limit.
     pub claude: bool,
+    /// With `claude`, a second fake account after the first.
+    pub claude_second: bool,
     /// The account its factoryd claims (a QA build's lie, E11 row 6).
     pub claim_email: Option<String>,
     pub claim_claktory_id: Option<String>,
@@ -448,6 +464,7 @@ pub fn up(request: Up) -> Result<Sandbox, Failure> {
         machine_name,
         speech: speech.is_some(),
         claude: request.claude,
+        claude_second: request.claude && request.claude_second,
         claim_email: request.claim_email.clone(),
         claim_claktory_id: request.claim_claktory_id.clone(),
         owner: caller(),
@@ -492,8 +509,10 @@ fn start(sandbox: &mut Sandbox, account: bool, model: Option<&Option<PathBuf>>, 
             .arg("--log")
             .arg(sandbox.model_log());
         if sandbox.claude {
-            crate::model::claude::set_limit(&sandbox.claude_limit(), None)
-                .map_err(|error| Failure::failed(format!("Can't write Claude's limit: {error}")))?;
+            for account in [1, 2] {
+                crate::model::claude::set_limit(&crate::model::claude::limit_file(&sandbox.claude_limit(), account), None, false)
+                    .map_err(|error| Failure::failed(format!("Can't write Claude's limit: {error}")))?;
+            }
             serve.arg("--claude").arg(sandbox.claude_limit());
         }
         let child = serve
@@ -562,7 +581,7 @@ fn start(sandbox: &mut Sandbox, account: bool, model: Option<&Option<PathBuf>>, 
     };
     write_settings(&sandbox.home(), sandbox.account_port, model)?;
     if sandbox.claude {
-        write_claude_sign_in(&sandbox.home())?;
+        write_claude_sign_in(&sandbox.home(), sandbox.claude_second)?;
     }
     launch(sandbox)
 }
@@ -570,7 +589,7 @@ fn start(sandbox: &mut Sandbox, account: bool, model: Option<&Option<PathBuf>>, 
 /// The fake Claude sign-in, straight into the sandbox's auth.json (only
 /// the sandbox's: its home was checked like the rest), with the fixed fake
 /// tokens qa-model alone accepts.
-fn write_claude_sign_in(home: &Path) -> Result<(), Failure> {
+fn write_claude_sign_in(home: &Path, second: bool) -> Result<(), Failure> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let mut file = std::fs::OpenOptions::new()
         .create_new(true)
@@ -578,7 +597,7 @@ fn write_claude_sign_in(home: &Path) -> Result<(), Failure> {
         .mode(0o600)
         .open(home.join("auth.json"))
         .map_err(|error| Failure::failed(format!("Can't write the fake Claude sign-in: {error}")))?;
-    file.write_all(crate::model::claude::credentials().to_string().as_bytes())
+    file.write_all(crate::model::claude::credentials(second).to_string().as_bytes())
         .map_err(|error| Failure::failed(format!("Can't write the fake Claude sign-in: {error}")))
 }
 

@@ -63,6 +63,14 @@ pub(crate) struct Job {
 }
 
 impl Job {
+    /// None on Windows, where there's no launchd (the sign-in task starts
+    /// Claktory there).
+    #[cfg(windows)]
+    pub(crate) fn for_this_user() -> Option<Job> {
+        None
+    }
+
+    #[cfg(unix)]
     pub(crate) fn for_this_user() -> Option<Job> {
         let user_home = std::env::var_os("HOME")?;
         // SAFETY: getuid has no preconditions.
@@ -321,6 +329,12 @@ fn switch_within(home: &Home, job: &Job, new: &NewSupervisor, port: u16, tries: 
 
 /// A shell running `script` in a session of its own (which `bootout`
 /// doesn't stop), its output going to `<home>/bin/launch-agent.log`.
+#[cfg(windows)]
+pub(crate) fn helper(_home: &Home, _script: &str) -> std::io::Result<Command> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "there's no launchd on Windows"))
+}
+
+#[cfg(unix)]
 pub(crate) fn helper(home: &Home, script: &str) -> std::io::Result<Command> {
     use std::os::unix::process::CommandExt;
     let log = std::fs::OpenOptions::new().create(true).append(true).open(home.root().join("bin/launch-agent.log"))?;

@@ -1,11 +1,13 @@
 //! Claktory's browser runner (#435, agent-browser.md Rev 2 R1–R2):
 //! `factoryd browser-runner`, the process that keeps Claktory's own Chrome
 //! on a private screen. On a Linux server factoryd runs it as the browser's
-//! own user through sudo (`sudo -n -u claktory-browser
-//! /opt/claktory-browser/runner browser-runner run`), and on a Mac inside a
-//! small Linux VM. It talks to factoryd only over its stdin and stdout
-//! (`wire`, C1): no socket, for DevTools or anything else.
+//! own user, through sudo and the browser's gate (`gate`), and on a Mac
+//! inside a small Linux VM. It talks to factoryd only over its stdin and
+//! stdout (`wire`, C1): no socket, for DevTools or anything else.
 //!
+//! - `run-gated`: as the gate runs it, in the namespaces the gate made;
+//!   it checks it finds itself so (`namespace::gated`), then goes on as
+//!   `run` does.
 //! - `run`: first its own namespaces and /proc (`namespace`), then it waits
 //!   for `start`, makes the screen (`xvfb`) and Chrome (`chrome`) on the
 //!   kept profile, fenced by Landlock (`fence`), and relays DevTools while
@@ -28,14 +30,17 @@ mod clipboard;
 mod downloads;
 #[cfg(target_os = "linux")]
 mod fence;
+pub mod gate;
 mod input;
 mod keysym;
 pub(crate) mod lease;
 mod live;
+pub(crate) mod safe_browsing;
 #[cfg(target_os = "linux")]
 mod namespace;
 #[cfg(target_os = "linux")]
 mod selftest;
+pub(crate) mod uploads;
 pub mod xvfb;
 
 use std::os::fd::OwnedFd;
@@ -60,6 +65,8 @@ pub(crate) enum Event {
     Cdp(Vec<u8>),
     /// A frame's ack, input or clipboard text: the screen's (P2).
     Screen(Channel, Vec<u8>),
+    /// A frame of an upload's bytes (channel 5 in).
+    Upload(Vec<u8>),
     /// stdin ended, or broke the wire (Some: how).
     Closed(Option<String>),
     /// A DevTools message from the Chrome of this generation.
@@ -110,7 +117,8 @@ impl Outbox {
 /// `factoryd browser-runner …`.
 pub fn main(args: &[String]) -> ExitCode {
     match args.first().map(String::as_str) {
-        Some("run") if args.len() == 1 => run(),
+        Some("run") if args.len() == 1 => run(Start::Own),
+        Some("run-gated") if args.len() == 1 => run(Start::Gated),
         #[cfg(target_os = "linux")]
         Some("selftest") => selftest::main(&args[1..]),
         #[cfg(target_os = "linux")]
@@ -119,21 +127,33 @@ pub fn main(args: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         _ => {
-            eprintln!("usage: factoryd browser-runner run | selftest | abi (Linux only)");
+            eprintln!("usage: factoryd browser-runner run | run-gated | selftest | abi (Linux only)");
             ExitCode::from(2)
         }
     }
 }
 
+/// How the runner came to be in its namespaces.
+enum Start {
+    /// It makes them itself (the Mac's VM).
+    Own,
+    /// The gate made them and ran it there.
+    Gated,
+}
+
 #[cfg(not(target_os = "linux"))]
-fn run() -> ExitCode {
+fn run(_start: Start) -> ExitCode {
     eprintln!("Claktory's browser runner runs on Linux only.");
     ExitCode::FAILURE
 }
 
 #[cfg(target_os = "linux")]
-fn run() -> ExitCode {
-    if let Err(why) = namespace::enter() {
+fn run(start: Start) -> ExitCode {
+    let ready = match start {
+        Start::Own => namespace::enter(),
+        Start::Gated => namespace::gated(),
+    };
+    if let Err(why) = ready {
         fatal_before_start(&why);
         return ExitCode::FAILURE;
     }
@@ -188,9 +208,19 @@ struct Session {
     /// Where a driven errand's downloads land (R9); None when the folder
     /// couldn't be made, which was said.
     downloads: Option<downloads::Downloads>,
+    /// Where an errand's uploads are staged; None when the folder couldn't
+    /// be made, which was said.
+    uploads: Option<uploads::Uploads>,
     width: u16,
     height: u16,
+    /// Whether its profile has Safe Browsing's lists, and when that was
+    /// last looked at.
+    lists: bool,
+    lists_checked: Instant,
 }
+
+/// How often a profile without Safe Browsing's lists is looked at again.
+const LISTS_EVERY: Duration = Duration::from_secs(10);
 
 impl Session {
     fn profile(&self) -> PathBuf {
@@ -239,6 +269,7 @@ impl Runner {
             }
             self.downloads_tick();
             self.lease_tick();
+            self.lists_tick();
             let event = match self.events.recv_timeout(Duration::from_secs(1)) {
                 Ok(event) => event,
                 Err(RecvTimeoutError::Timeout) => {
@@ -258,6 +289,11 @@ impl Runner {
                 }
                 Event::BadControl => self.error("a control message that doesn't read was dropped"),
                 Event::Cdp(message) => self.cdp(&message),
+                Event::Upload(payload) => {
+                    if let Some(report) = self.session.as_mut().and_then(|session| session.uploads.as_mut()).and_then(|uploads| uploads.chunk(&payload)) {
+                        self.out.report(&report);
+                    }
+                }
                 Event::Screen(channel, payload) => {
                     if let Some(live) = self.session.as_ref().and_then(|session| session.live.as_ref()) {
                         live.screen(channel, payload);
@@ -272,6 +308,8 @@ impl Runner {
                 }
                 Event::FromChrome(generation, message) => {
                     if generation == self.generation && !self.downloads_seen(&message) {
+                        // No cookie's value leaves the runner (lease::redact).
+                        let message = lease::redact(&message).unwrap_or(message);
                         self.out.send(Channel::Cdp, message);
                     }
                 }
@@ -330,6 +368,9 @@ impl Runner {
                 // person's turn or back (Fugo 36912).
                 if let Some(downloads) = &mut session.downloads {
                     downloads.empty();
+                }
+                if let Some(uploads) = &mut session.uploads {
+                    uploads.empty();
                 }
                 if let Some(Err(why)) = session.live.as_ref().map(live::Live::forget_clipboard) {
                     self.out.report(&Report::Error { what: format!("couldn't empty the browser's clipboard, so Chrome wasn't started again: {why}"), fatal: false });
@@ -434,6 +475,18 @@ impl Runner {
                     self.lease = None;
                 }
             }
+            // Only for a driven errand, as downloads.
+            Control::Upload { id, name, bytes } => {
+                let driven = self.driven();
+                let began = match self.session.as_mut().and_then(|session| session.uploads.as_mut()) {
+                    Some(uploads) if driven => uploads.begin(id, &name, bytes),
+                    Some(_) => Err("the browser isn't driven, so nothing can be uploaded".to_owned()),
+                    None => Err("the browser has no uploads folder".to_owned()),
+                };
+                if let Err(why) = began {
+                    self.out.report(&Report::UploadFailed { id, why });
+                }
+            }
         }
         false
     }
@@ -452,7 +505,9 @@ impl Runner {
         }
         let generation = self.generation;
         let leased = self.lease.as_ref().is_some_and(|lease| lease.live(generation, Instant::now()));
-        match lease::judge(message, leased) {
+        let uploads = self.session.as_ref().and_then(|session| session.uploads.as_ref());
+        let staged = |path: &str| uploads.is_some_and(|uploads| uploads.staged(path));
+        match lease::judge_with_uploads(message, leased, &staged) {
             lease::Verdict::Forward => {
                 let sent = self.session.as_mut().and_then(|session| session.chrome.as_mut()).map(|chrome| chrome.send(message));
                 if let Some(Err(why)) = sent {
@@ -468,6 +523,20 @@ impl Runner {
     fn end_lease(&mut self, why: &str) {
         if let Some(lease) = self.lease.take() {
             self.out.report(&Report::LeaseEnded { id: lease.id, why: why.to_owned() });
+        }
+    }
+
+    /// A profile without Safe Browsing's lists at its start: said once
+    /// Chrome has fetched them.
+    fn lists_tick(&mut self) {
+        let Some(session) = self.session.as_mut() else { return };
+        if session.lists || session.lists_checked.elapsed() < LISTS_EVERY {
+            return;
+        }
+        session.lists_checked = Instant::now();
+        if safe_browsing::ready(&session.root.join("chrome")) {
+            session.lists = true;
+            self.out.report(&Report::SafeBrowsingReady);
         }
     }
 
@@ -502,6 +571,12 @@ impl Runner {
         let home = root.join("home");
         private_folder(&home).map_err(|error| format!("couldn't make the browser's profile: {error}"))?;
         chrome::first_preferences(&root.join("chrome")).map_err(|error| format!("couldn't make the browser's profile: {error}"))?;
+        // Before its Chrome first starts: Safe Browsing's lists, from the
+        // seed, when the profile has none of its own.
+        if let Err(why) = safe_browsing::seed(&root.join("chrome"), Path::new(safe_browsing::SEED)) {
+            self.error(&why);
+        }
+        let lists = safe_browsing::ready(&root.join("chrome"));
         let binary = chrome::binary()?;
         sweep_tmp(&std::env::temp_dir());
         let (tmp, tmp_lock) = own_tmp(&std::env::temp_dir())?;
@@ -513,10 +588,32 @@ impl Runner {
             }
         };
         let mut session =
-            Session { name: profile.to_owned(), root, tmp, tmp_lock, screen, live: None, chrome: None, binary, lock, fence_version: 0, person, downloads: None, width, height };
+            Session {
+            name: profile.to_owned(),
+            root,
+            tmp,
+            tmp_lock,
+            screen,
+            live: None,
+            chrome: None,
+            binary,
+            lock,
+            fence_version: 0,
+            person,
+            downloads: None,
+            uploads: None,
+            width,
+            height,
+            lists: false,
+            lists_checked: Instant::now(),
+        };
         match downloads::Downloads::new(&session.tmp) {
             Ok(downloads) => session.downloads = Some(downloads),
             Err(error) => self.error(&format!("the browser's downloads folder couldn't be made, so nothing can be downloaded: {error}")),
+        }
+        match uploads::Uploads::new(&session.tmp) {
+            Ok(uploads) => session.uploads = Some(uploads),
+            Err(error) => self.error(&format!("the browser's uploads folder couldn't be made, so nothing can be uploaded: {error}")),
         }
         self.generation += 1;
         match launch(&mut session, mode, url, self.tell.clone(), self.generation) {
@@ -533,7 +630,15 @@ impl Runner {
             Err(why) => self.error(&format!("the browser's live view couldn't start: {why}")),
         }
         let download_dir = session.downloads.as_ref().map(downloads::Downloads::dir);
-        let report = Report::Ready { wire: wire::VERSION, chrome: chrome::version(&session.binary), landlock_abi: session.fence_version, mode, download_dir };
+        let report = Report::Ready {
+            wire: wire::VERSION,
+            chrome: chrome::version(&session.binary),
+            landlock_abi: session.fence_version,
+            mode,
+            download_dir,
+            safe_browsing: Some(lists),
+        };
+        session.lists = lists;
         self.session = Some(session);
         Ok(report)
     }
@@ -1032,6 +1137,7 @@ fn read_in(tell: Sender<Event>) {
             Err(error) => Event::Closed(Some(error.to_string())),
             Ok(Some((Channel::Control, payload))) => wire::decode(&payload).map_or(Event::BadControl, Event::Control),
             Ok(Some((Channel::Cdp, payload))) => Event::Cdp(payload),
+            Ok(Some((Channel::Files, payload))) => Event::Upload(payload),
             Ok(Some((channel, payload))) => Event::Screen(channel, payload),
         };
         let closed = matches!(event, Event::Closed(_));

@@ -1,5 +1,4 @@
-// A question card's decision on a phone (Prosciutto, from Sorbet's shots;
-// Lucy's Needs you cards §5.2): the field, then the thumb row, Dismiss at
+// A question card's decision on a phone: the field, then the thumb row, Dismiss at
 // the left and Approve at the right, wider, stacked at the largest text; and a lone button (Copy, beside a command) at the end too, a
 // finger's size, at any text size.
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -82,7 +81,7 @@ void main() {
       expect(dismiss.top, greaterThan(field.top));
       expect(approve.height, greaterThanOrEqualTo(44));
       expect(approve.right, lessThanOrEqualTo(width));
-      // One row, the no first, the primary wider (Lucy's §5.2).
+      // One row, the no first, the primary wider.
       expect(dismiss.top, approve.top);
       expect(dismiss.right, lessThan(approve.left));
       expect(approve.width, greaterThan(dismiss.width));

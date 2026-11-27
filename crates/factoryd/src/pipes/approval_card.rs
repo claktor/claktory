@@ -1,13 +1,12 @@
-//! An admin agent's card to approve a new pipe (#471 G1; Fugo 33994 and
-//! 34010, Polnareff 34001 and 34261): `pipes_approve` opens it, filled in
-//! with the agents, lead and reviews the person asked for, checked as
-//! ApprovePipe checks them. The person compares the pipe's digits with the
-//! other person themselves and approves it with their own choices
-//! (ApprovePipe with its card_id): no tool approves a pipe. The card never
-//! holds the digits, nor anything the other side said (the app shows those
-//! from the Workspace's Pipe), and its agent hears only that the person
-//! approved it or dismissed it. It's withdrawn as void once the pipe stops
-//! waiting for approval, or its other side's key changes.
+//! An admin agent's card to approve a new pipe: `pipes_approve` opens it,
+//! filled in with the agents, lead and reviews the person asked for,
+//! checked as ApprovePipe checks them. The person compares the pipe's
+//! digits with the other person themselves and approves it with their own
+//! choices (ApprovePipe with its card_id): no tool approves a pipe. The
+//! card never holds the digits, nor anything the other side said (the app
+//! shows those from the Workspace's Pipe), and its agent hears only that
+//! the person approved it or dismissed it. It's withdrawn as void once the
+//! pipe stops waiting for approval, or its other side's key changes.
 
 use std::sync::Arc;
 
@@ -22,7 +21,7 @@ use crate::factory::{Factory, RequestError};
 
 pub(crate) const TOOL: &str = "pipes_approve";
 
-/// The pipe's own settings when the card was asked (Polnareff 34261), for
+/// The pipe's own settings when the card was asked, for
 /// the app to tell what narrowed since.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -111,8 +110,8 @@ impl Approval {
 }
 
 /// The other side's pinned key, hashed (the card's action is in a table
-/// agents with Claktory's records read; the key is public anyway, Fugo
-/// 34521); '' when none is pinned.
+/// agents with Claktory's records read; the key is public anyway); ''
+/// when none is pinned.
 pub(crate) fn key_of(record: &Record) -> String {
     let key = record.peer.as_ref().map(|peer| peer.endpoint_id.as_str()).unwrap_or_default();
     if key.is_empty() { String::new() } else { crate::encoding::hex(&Sha256::digest(key.as_bytes())) }
@@ -174,7 +173,7 @@ pub(crate) fn ask(
             "That pipe's other side hasn't connected yet: ask once it waits for approval with its digits. Nothing was asked.".to_owned()
         );
     }
-    // The agent's own words in Claktory's: one short, plain name (Fugo 34864).
+    // The agent's own words in Claktory's: one short, plain name.
     if !approval.liaison.is_empty() && !plain_name(&approval.liaison) {
         return Err(format!(
             "A liaison's name is one line of at most {NAME_MAX} characters, without quotes or control characters. Nothing was asked."
@@ -185,7 +184,7 @@ pub(crate) fn ask(
     let me = factory.agent_name(agent);
     let called = called(record);
     let title = format!("Approve {called}");
-    // Older apps show only the body (Polnareff 34001).
+    // Older apps show only the body.
     let body = format!("{me} asks you to approve {called}. Update Claktory to approve it here, or approve it in the pipe.");
     let description = describe(factory, &me, &called, &approval);
     let action =

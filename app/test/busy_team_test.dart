@@ -1,7 +1,7 @@
 // A busy team changes the Workspace several times a second (each agent's
 // step, its mood, its context), and the Mac app gets every change. Each
 // must build only what shows it, not every sidebar row and every message
-// in view (#500, Polpo's idle CPU in front).
+// in view, so an idle app costs little CPU.
 
 import 'package:factory_app/agent_view.dart';
 import 'package:factory_app/kept.dart';

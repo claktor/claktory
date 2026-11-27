@@ -15,8 +15,8 @@ import 'contacts.dart';
 import 'e2ee.dart';
 import 'problems.dart';
 
-// D-S5: reporting someone in People to Claktory's team (Mista's routes,
-// crates/claktory-user-apps/README.md, "Reports"): why, the person's own
+// Reporting someone in People to Claktory's team
+// (crates/claktory-user-apps/README.md, "Reports"): why, the person's own
 // words if they like, and their name and picture only if they choose.
 // Nobody else is told, and reporting neither declines nor blocks.
 // Messages are end to end (E5), so the team sees none unless the person
@@ -229,7 +229,7 @@ class _ReportFormState extends State<ReportForm> {
           "know you reported them. Reporting doesn't block them or decline "
           'their request: do that too, if you want.',
       // Ticked messages are work too: Cancel or a swipe asks first
-      // (Zucchero's row 200).
+      // .
       dirty:
           _reason != null ||
           _note.text.isNotEmpty ||
@@ -313,8 +313,8 @@ extension on _ReportFormState {
                   label:
                       '${message.fromAccount == me ? 'You' : nameInText(name)}: '
                       '${proseCodes(message.content.text ?? '')}',
-                  // A few lines each, so a long one doesn't fill screens
-                  // (row 200); the whole text goes with the report.
+                  // A few lines each, so a long one doesn't fill screens;
+                  // the whole text goes with the report.
                   maxLines: 4,
                   onTap: () => _pick(message),
                 ),

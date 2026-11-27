@@ -1,4 +1,4 @@
-//! Alerts kept in Needs you (Bruno 44235): every alert, an agent's
+//! Alerts kept in Needs you: every alert, an agent's
 //! notify_person or Claktory's own (its disk, the machine, a newer model),
 //! waits in the person's Needs you (Workspace.alerts) until they open it or
 //! tap Got it (ReadAlerts), then goes to History as read, with when and on
@@ -48,6 +48,16 @@ CREATE INDEX IF NOT EXISTS alerts_waiting ON alerts (sent) WHERE read IS NULL;
 CREATE INDEX IF NOT EXISTS alerts_read ON alerts (read) WHERE read IS NOT NULL;
 ";
 
+/// Other agents' alerts folded into one (`fold`): their names, a JSON list.
+/// A backend rolled back to names its columns, so never reads it.
+pub(crate) const ALSO_FROM: &str = "
+ALTER TABLE alerts ADD COLUMN also_from TEXT NOT NULL DEFAULT '';
+";
+
+/// How long an unread alert takes other agents' alerts about the same thing
+/// into it (`fold`).
+pub(crate) const FOLD_MS: i64 = 30 * 60_000;
+
 /// How many waiting alerts the Workspace lists, the newest.
 pub(crate) const LISTED: usize = 100;
 
@@ -82,7 +92,7 @@ impl Alerts {
 fn load(factory: &Factory) -> rusqlite::Result<Vec<v1::Alert>> {
     let db = factory.store.db();
     let mut statement = db.prepare(
-        "SELECT id, agent, from_name, title, text, urgent, withheld, sent, seq FROM alerts WHERE read IS NULL ORDER BY sent, rowid",
+        "SELECT id, agent, from_name, title, text, urgent, withheld, sent, seq, also_from FROM alerts WHERE read IS NULL ORDER BY sent, rowid",
     )?;
     let rows = statement.query_map([], read_alert)?;
     rows.collect()
@@ -99,6 +109,18 @@ fn read_alert(row: &rusqlite::Row<'_>) -> rusqlite::Result<v1::Alert> {
         withheld: row.get(6)?,
         sent_ms: row.get(7)?,
         seq: u64::try_from(row.get::<_, i64>(8)?).unwrap_or_default(),
+        also_from: names(&row.get::<_, String>(9)?),
+    })
+}
+
+/// A kept `also_from`: '' (none) or a JSON list of names.
+fn names(kept: &str) -> Vec<String> {
+    if kept.is_empty() {
+        return Vec::new();
+    }
+    serde_json::from_str(kept).unwrap_or_else(|error| {
+        tracing::warn!(%error, "an alert's also_from can't be read");
+        Vec::new()
     })
 }
 
@@ -176,15 +198,15 @@ pub(crate) struct Read {
 /// `limit`.
 pub(crate) fn between(db: &rusqlite::Connection, since: i64, before: i64, limit: i64) -> rusqlite::Result<Vec<Read>> {
     let mut statement = db.prepare(
-        "SELECT id, agent, from_name, title, text, urgent, withheld, sent, seq, read, read_device, read_device_name FROM alerts
+        "SELECT id, agent, from_name, title, text, urgent, withheld, sent, seq, also_from, read, read_device, read_device_name FROM alerts
          WHERE read IS NOT NULL AND read >= ?1 AND read < ?2 ORDER BY read DESC, rowid DESC LIMIT ?3",
     )?;
     let rows = statement.query_map(params![since, before, limit], |row| {
-        let read: i64 = row.get(9)?;
+        let read: i64 = row.get(10)?;
         Ok(Read {
             alert: read_alert(row)?,
             read,
-            on: v1::AnsweredOn { device_id: row.get(10)?, device_name: row.get(11)?, at_ms: read },
+            on: v1::AnsweredOn { device_id: row.get(11)?, device_name: row.get(12)?, at_ms: read },
         })
     })?;
     rows.collect()
@@ -225,4 +247,158 @@ pub(crate) fn call_seq(factory: &Factory, agent: &str, title: &str) -> u64 {
             (said == title).then_some(entry.seq)
         })
         .unwrap_or(0)
+}
+
+// ---- Folding ----
+
+/// An alert folded into another agent's (`fold`).
+pub(crate) struct Folded {
+    /// The alert it folded into, as it is now.
+    pub into: v1::Alert,
+    /// It was urgent and made that alert urgent: it notifies once.
+    pub upgraded: bool,
+}
+
+/// Folds `agent`'s alert (`name`, saying `title`, `urgent` as it may send it)
+/// into another agent's about the same thing (`same_concern`), still unread
+/// and sent less than `FOLD_MS` ago, the closest by its title and the newest
+/// of equals: that alert lists `name` in also_from, once, and turns urgent
+/// when this one is and it wasn't. Nothing folds into a withheld alert or
+/// Claktory's own; the caller folds no withheld one either. None when no
+/// alert is about the same thing.
+pub(crate) fn fold(factory: &Factory, agent: &str, name: &str, title: &str, urgent: bool) -> Option<Folded> {
+    let words = concern(title);
+    let now = now_ms();
+    let (into, upgraded) = {
+        let mut waiting = factory.notify.alerts.waiting(factory);
+        let into = waiting
+            .get_or_insert_default()
+            .iter_mut()
+            .filter(|alert| !alert.agent_id.is_empty() && alert.agent_id != agent && !alert.withheld)
+            .filter(|alert| now - alert.sent_ms < FOLD_MS)
+            .filter_map(|alert| same_concern(&words, &concern(&alert.title)).map(|overlap| (overlap, alert)))
+            .max_by(|(one, first), (other, second)| one.cmp(other).then(first.sent_ms.cmp(&second.sent_ms)))
+            .map(|(_, alert)| alert)?;
+        if !into.also_from.iter().any(|already| already == name) {
+            into.also_from.push(name.to_owned());
+        }
+        let upgraded = urgent && !into.urgent;
+        into.urgent |= urgent;
+        (into.clone(), upgraded)
+    };
+    let kept = factory.store.db().execute(
+        "UPDATE alerts SET also_from = ?2, urgent = ?3 WHERE id = ?1",
+        params![into.id, serde_json::to_string(&into.also_from).unwrap_or_default(), into.urgent],
+    );
+    if let Err(error) = kept {
+        tracing::error!(%error, id = into.id, "could not keep an alert folded into another: it shows until Claktory restarts");
+    }
+    tracing::info!(into = into.id, from = agent, upgraded, "an alert folded into another agent's");
+    factory.broadcast_workspace(&factory.lock());
+    Some(Folded { into, upgraded })
+}
+
+/// Words that say nothing of what an alert is about.
+const STOP_WORDS: &[&str] = &[
+    "the", "and", "for", "are", "but", "you", "your", "yours", "with", "this", "that", "these", "those", "there", "their", "them",
+    "they", "then", "than", "from", "into", "onto", "over", "about", "after", "before", "during", "since", "until", "while", "what",
+    "which", "who", "whom", "whose", "when", "where", "why", "how", "all", "any", "both", "each", "few", "more", "most", "other",
+    "some", "such", "only", "own", "same", "too", "very", "can", "will", "just", "should", "would", "could", "may", "might", "must",
+    "shall", "now", "again", "once", "here", "also", "its", "itself", "myself", "yourself", "himself", "herself", "themselves",
+    "has", "have", "had", "having", "was", "were", "been", "being", "does", "did", "doing", "done", "per", "via", "out", "our",
+    "ours", "mine", "his", "her", "hers", "him", "she", "yes", "get", "got", "let", "use",
+];
+
+/// What an alert's title is about: its words, in lower case, but those of
+/// fewer than three letters, numbers (times, counts) and `STOP_WORDS`, each
+/// cut to a simple stem ("answering" and "answered" as "answer", "tests" as
+/// "test"), so two agents' words for one thing meet.
+pub(crate) fn concern(title: &str) -> std::collections::BTreeSet<String> {
+    title
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| word.chars().count() >= 3 && !word.chars().all(|c| c.is_ascii_digit()) && !STOP_WORDS.contains(word))
+        .map(stem)
+        .collect()
+}
+
+fn stem(word: &str) -> String {
+    let long = |at_least: usize| word.chars().count() >= at_least;
+    let cut = if long(6) && word.ends_with("ing") {
+        "ing"
+    } else if long(5) && word.ends_with("ed") {
+        "ed"
+    } else if long(4) && word.ends_with('s') && !word.ends_with("ss") {
+        "s"
+    } else {
+        ""
+    };
+    word[..word.len() - cut.len()].to_owned()
+}
+
+/// Whether two alerts' titles' words (`concern`) say the same thing: at
+/// least two words in common, and those at least 60% of all their words
+/// together. Leans towards not folding: a title's text, with its times,
+/// names and who's looking, made alerts that "it's down" and "it's back"
+/// look alike, so only titles count. How much they share, as a fraction
+/// to compare, when they do.
+fn same_concern(one: &std::collections::BTreeSet<String>, other: &std::collections::BTreeSet<String>) -> Option<Overlap> {
+    let shared = one.intersection(other).count();
+    let all = one.union(other).count();
+    (shared >= 2 && shared * 5 >= all * 3).then_some(Overlap { shared, all })
+}
+
+/// `shared` of `all` words, ordered by that fraction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Overlap {
+    shared: usize,
+    all: usize,
+}
+
+impl Ord for Overlap {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.shared * other.all).cmp(&(other.shared * self.all))
+    }
+}
+
+impl PartialOrd for Overlap {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{concern, same_concern};
+
+    fn folds(one: &str, other: &str) -> bool {
+        same_concern(&concern(one), &concern(other)).is_some()
+    }
+
+    /// Real alerts of 2026-11-27: two agents' on tprime2 going down fold; the
+    /// low disk folds with neither; and "it's back" never folds into "it's
+    /// down", nor a correction.
+    #[test]
+    fn alerts_about_the_same_thing_fold_and_others_dont() {
+        let fugo = "tprime2 stopped answering after my memory test";
+        let bruno = "tprime2 stopped answering during Fugo's memory test";
+        let disk = "Low disk is holding up the team's tests";
+        assert!(folds(fugo, bruno) && folds(bruno, fugo));
+        assert!(!folds(disk, fugo) && !folds(disk, bruno));
+        assert!(!folds("tprime2 is reachable again", "tprime2 is back up by itself"), "leans towards not folding");
+        for back in ["tprime2 is reachable again", "tprime2 is back up by itself", "Correction: tprime2 is down again"] {
+            assert!(!folds(back, fugo) && !folds(back, bruno), "{back}");
+        }
+        assert!(!folds("Tests are failing on main", "Tests are passing on main"), "opposites with one word apart");
+        assert!(folds("account.claktory.com isn't answering", "account.claktory.com isn't answering since 10:02"));
+        assert!(folds("The site is down", "The site is down"));
+        assert!(folds("The website is down", "Website down"));
+        assert!(!folds("Down", "Down"), "one word says too little");
+    }
+
+    #[test]
+    fn a_title_is_its_words_stemmed_without_numbers_or_stop_words() {
+        let words: Vec<String> = concern("Fugo's 3 tests: answering, answered at 09:10 UTC, STOPPED").into_iter().collect();
+        assert_eq!(words, ["answer", "fugo", "stopp", "test", "utc"]);
+    }
 }

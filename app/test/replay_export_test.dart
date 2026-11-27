@@ -1,30 +1,38 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:factory_app/controls.dart' show Button, GlyphButton, Toggle;
+import 'package:factory_app/history/board.dart' show HistoryBoard;
 import 'package:factory_app/history/controller.dart';
 import 'package:factory_app/history/export.dart';
 import 'package:factory_app/history/export_job.dart';
 import 'package:factory_app/history/scene.dart';
 import 'package:factory_app/history/timeline.dart';
 import 'package:factory_app/history/view.dart';
+import 'package:factory_app/identity.dart' show TextStyles;
 import 'package:factory_app/map_layout.dart' show MapBoxKind, MapLayer;
+import 'package:factory_app/panes.dart' show ExpandedPane, Pane;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/share_files.dart' show debugSharesFolder;
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter/rendering.dart' show RenderParagraph;
+import 'package:flutter/rendering.dart'
+    show OffsetLayer, RenderParagraph, RenderRepaintBoundary;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
+import 'ipad/as_ipad.dart';
+import 'panes_test.dart' show leaf, row, snapshot, split;
 import 'phone_sizes_test.dart' show loadGeist;
 import 'map_fixture.dart';
 import 'replay_fixture.dart';
+import 'replay_test.dart' show bigOverview;
 
-/// History's video export (#458 E1): what a share shows, the video's
+/// History's video export: what a share shows, the video's
 /// frames, the file's dates, and the sheet that makes it.
 void main() {
   HistoryController loaded() {
@@ -407,7 +415,7 @@ void main() {
 
     ReplayJob job() => ReplayJob(
       video: ReplayVideo(loaded(), length: ReplayLength.half),
-      shape: ReplayShape.square,
+      shape: ReplayShape.x,
       privacy: const ReplayPrivacy(dates: true),
       person: Person(),
       media: const MediaQueryData(),
@@ -464,6 +472,54 @@ void main() {
       expect(tester.takeException(), isNull);
     });
 
+    for (final ipad in [false, true]) {
+      testWidgets('on ${ipad ? 'an iPad' : 'a Mac'}, it shows in a pane '
+          'expanded over the window (the Map), above the pane rather than '
+          'over its controls (Matt, Bruno 52981)', (tester) async {
+        if (ipad) {
+          asIPad();
+        } else {
+          debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+          addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        }
+        final hold = Completer<void>();
+        addTearDown(() {
+          if (!hold.isCompleted) hold.complete();
+        });
+        writer(tester, hold: hold);
+        final workspace = snapshot(
+          layout: split('s1', row, [leaf('chat', 'chat'), leaf('m1', 'map')]),
+        );
+        workspace.agents.last.layoutFocus = 'm1';
+        final harness = Harness(workspace);
+        harness.backend
+          ..historyReply = fixtureOverview()
+          ..historyPages = [fixtureEvents()];
+        await harness.show(tester, size: const Size(1194, 834));
+        await pumpFrames(tester);
+        final expanded = find.byType(ExpandedPane);
+        expect(expanded, findsOneWidget);
+        replayJobs.start(job());
+        await settle(tester, () => calls.any((c) => c.method == 'frame'));
+        await tester.pump();
+        final strip = find.descendant(
+          of: expanded,
+          matching: find.text('Making your History video… 0%'),
+        );
+        expect(strip, findsOneWidget);
+        final pane = find.descendant(of: expanded, matching: find.byType(Pane));
+        expect(
+          tester.getRect(strip).bottom,
+          lessThanOrEqualTo(tester.getRect(pane.first).top),
+        );
+        expect(
+          find.descendant(of: expanded, matching: find.text('Cancel')),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+      });
+    }
+
     testWidgets('while one is made, Share replay says why Make video waits, '
         "at its top on the smallest iPhone (Zucchero's row 662)", (
       tester,
@@ -486,6 +542,8 @@ void main() {
       await pumpFrames(tester);
       await tester.tap(find.bySemanticsLabel('History'));
       await pumpFrames(tester);
+      // The strip shows over the phone's History page too.
+      expect(find.text('Making your History video… 0%'), findsOneWidget);
       await tester.tap(find.bySemanticsLabel('Share replay…').last);
       await pumpFrames(tester);
       final why = find.text(
@@ -578,7 +636,7 @@ void main() {
       replayJobs.start(
         ReplayJob(
           video: ReplayVideo(loaded(), length: ReplayLength.half),
-          shape: ReplayShape.square,
+          shape: ReplayShape.x,
           privacy: const ReplayPrivacy(),
           person: Person(),
           media: const MediaQueryData(),
@@ -631,11 +689,467 @@ void main() {
     });
   });
 
+  group("the video's numbers hold still (Matt, Bruno 53194)", () {
+    test('counts read as Trish wrote them (53232)', () {
+      final cases = {
+        0: '0',
+        1: '1',
+        1204: '1,204',
+        9999: '9,999',
+        10000: '10K',
+        12400: '12.4K',
+        99960: '100K',
+        124000: '124K',
+        999600: '1M',
+        2300000: '2.3M',
+        23000000: '23M',
+        999600000: '1B',
+        1200000000: '1.2B',
+        12000000000: '12B',
+      };
+      for (final MapEntry(key: n, value: shown) in cases.entries) {
+        expect(compactCount(n), shown, reason: '$n');
+      }
+      expect(countOf(1, 'message', 'messages'), '1 message');
+      expect(countOf(0, 'token', 'tokens'), '0 tokens');
+      expect(countShapes(1204), ['1,204']);
+      expect(countShapes(2300000), contains('99.9K'));
+    });
+
+    Future<void> stats(
+      WidgetTester tester, {
+      required int working,
+      int agents = 23,
+      required int messages,
+    }) => tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            width: 500,
+            child: ReplayStats(
+              working: working,
+              agents: agents,
+              mostAgents: 23,
+              messages: messages,
+              mostMessages: 1204,
+              style: TextStyles.caption,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    testWidgets('none working still reads "0 of 23 agents working"', (
+      tester,
+    ) async {
+      await stats(tester, working: 0, messages: 1);
+      expect(find.text('0'), findsOneWidget);
+      expect(find.text(' of '), findsOneWidget);
+      expect(find.text('23'), findsOneWidget);
+      expect(find.text(' agents working'), findsOneWidget);
+      expect(find.text(' message'), findsOneWidget);
+      await stats(tester, working: 1, agents: 1, messages: 0);
+      expect(find.text(' agent working'), findsOneWidget, reason: '1 of 1');
+      expect(find.text(' messages'), findsOneWidget);
+    });
+
+    test("the tokens each hour used count up through it, from the "
+        "Claktory's History", () {
+      final overview = fixtureOverview()
+        ..tokens.addAll([Int64(1000), Int64(3000)]);
+      final timeline = HistoryTimeline.of(overview);
+      final replay = HistoryController(_NoSource())
+        ..timeline = timeline
+        ..scene = HistoryScene.build(timeline)
+        ..log = (HistoryLog()..add(fixtureEvents()))
+        ..loaded = true;
+      final video = ReplayVideo(replay, length: ReplayLength.half);
+      const hour = Duration.millisecondsPerHour;
+      final start = timeline.histogramStart;
+      expect(video.tokensAt(start - hour), 0);
+      expect(video.tokensAt(start + hour / 2), 500);
+      expect(video.tokensAt(start + hour), 1000);
+      expect(video.tokensAt(start + hour * 1.5), 2500);
+      expect(video.tokensAt(start + hour * 5), 4000);
+      // A Claktory that doesn't count them: no tokens line at all.
+      final none = HistoryController(_NoSource())
+        ..timeline = HistoryTimeline.of(fixtureOverview())
+        ..scene = replay.scene
+        ..log = replay.log
+        ..loaded = true;
+      expect(
+        ReplayVideo(none, length: ReplayLength.half).tokensAt(start),
+        isNull,
+      );
+    });
+
+    testWidgets('tokens follow the messages on the second line', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        const Directionality(
+          textDirection: TextDirection.ltr,
+          child: Align(
+            alignment: Alignment.topLeft,
+            child: ReplayStats(
+              working: 1,
+              agents: 1,
+              mostAgents: 1,
+              messages: 1204,
+              mostMessages: 1204,
+              tokens: 2300000,
+              mostTokens: 2300000,
+              lines: 2,
+              style: TextStyles.caption,
+            ),
+          ),
+        ),
+      );
+      expect(find.text(' agent working'), findsOneWidget);
+      expect(find.text('2.3M'), findsOneWidget);
+      expect(find.text(' tokens'), findsOneWidget);
+      final tokens = tester.getRect(find.text(' tokens'));
+      expect(
+        tokens.center.dy,
+        closeTo(tester.getCenter(find.text(' messages')).dy, 0.5),
+      );
+      expect(
+        tokens.top,
+        greaterThanOrEqualTo(tester.getRect(find.text(' of ')).bottom - 0.5),
+      );
+    });
+
+    testWidgets('nothing moves sideways as the numbers grow', (tester) async {
+      Map<String, double> at() => {
+        for (final text in [' of ', ' · '])
+          text: tester.getTopLeft(find.text(text).first).dx,
+        'agents': tester.getTopLeft(find.textContaining('agent')).dx,
+        'messages': tester.getTopLeft(find.textContaining('message')).dx,
+      };
+      await stats(tester, working: 0, messages: 1);
+      final first = at();
+      for (final (working, messages) in const [
+        (3, 12),
+        (12, 980),
+        (23, 1204),
+      ]) {
+        await stats(tester, working: working, messages: messages);
+        expect(at(), first, reason: '$working working, $messages messages');
+      }
+      // A number inside the line ends where its room does: right-aligned.
+      await stats(tester, working: 3, messages: 12);
+      final twelve = tester.getRect(find.text('12'));
+      await stats(tester, working: 3, messages: 980);
+      expect(tester.getRect(find.text('980')).right, twelve.right);
+      // One starting the line starts where the line does.
+      final line = tester.getTopLeft(find.byType(ReplayStats)).dx;
+      expect(tester.getTopLeft(find.text('3')).dx, line);
+    });
+  });
+
+  group('made for a place (history-video.md, Lucy 53440)', () {
+    setUpAll(loadGeist);
+
+    test('the camera scales a small team up to 2.5 times, to fill the '
+        'band, and a big one down (Lucy 53709)', () {
+      double scale(Rect camera, Rect area) =>
+          ReplayStage.fit(camera, area).entry(0, 0);
+      const area = Rect.fromLTWH(60, 120, 400, 200);
+      expect(scale(const Rect.fromLTWH(0, 0, 100, 50), area), 2.5);
+      expect(scale(const Rect.fromLTWH(0, 0, 200, 50), area), 2);
+      expect(scale(const Rect.fromLTWH(0, 0, 100, 160), area), 1.25);
+      expect(scale(const Rect.fromLTWH(0, 0, 800, 100), area), 0.5);
+      // Centred in the band.
+      final m = ReplayStage.fit(const Rect.fromLTWH(10, 10, 100, 50), area);
+      expect(MatrixUtils.transformPoint(m, const Offset(60, 35)), area.center);
+    });
+
+    for (final team in ['small', 'big']) {
+      for (final shape in [ReplayShape.x, ReplayShape.vertical]) {
+        testWidgets('${shape.title}: a $team team '
+            '${team == 'small' ? 'fills the band, its names large enough to read' : 'fits it, no larger than life'} '
+            '(Lucy 53709)', (tester) async {
+          final HistoryController replay;
+          if (team == 'small') {
+            replay = loaded();
+          } else {
+            final timeline = HistoryTimeline.of(bigOverview());
+            replay = HistoryController(_NoSource())
+              ..timeline = timeline
+              ..scene = HistoryScene.build(timeline)
+              ..log = HistoryLog()
+              ..loaded = true;
+          }
+          const privacy = ReplayPrivacy(names: true, projects: true);
+          final video = ReplayVideo(replay, length: ReplayLength.half);
+          final words = ShareWords(video.scene, privacy);
+          video.step(video.frames - 1, words);
+          final boundary = GlobalKey();
+          await Harness(claktoryWorkspace()).show(
+            tester,
+            size: const Size(1000, 1000),
+            home: Align(
+              alignment: Alignment.topLeft,
+              child: RepaintBoundary(
+                key: boundary,
+                child: ReplayStage(
+                  video: video,
+                  shape: shape,
+                  privacy: privacy,
+                  person: Person(name: 'Matt', initials: 'MS'),
+                ),
+              ),
+            ),
+          );
+          await tester.pump();
+          final label = find.descendant(
+            of: find.byType(HistoryBoard),
+            matching: find.text(team == 'small' ? 'Ana' : 'Agent 0.0'),
+          );
+          final height = tester.getRect(label.first).height;
+          expect(tester.takeException(), isNull);
+          final folder = Platform.environment['SHOTS'];
+          final context = boundary.currentContext;
+          if (folder != null && context != null) {
+            final render = context.findRenderObject()! as RenderRepaintBoundary;
+            final image = await tester.runAsync(
+              () => render.toImage(pixelRatio: 2),
+            );
+            final bytes = await tester.runAsync(
+              () => image!.toByteData(format: ui.ImageByteFormat.png),
+            );
+            Directory(folder).createSync(recursive: true);
+            File('$folder/${shape.name}-$team-team.png')
+                .writeAsBytesSync(bytes!.buffer.asUint8List());
+          }
+          // A big team no larger than life; a small one as large as the
+          // band lets it be (the fixture's is tall, so its height decides).
+          if (team == 'big') expect(height, lessThanOrEqualTo(20));
+        });
+      }
+    }
+
+    for (final talks in [true, false]) {
+      testWidgets(
+        talks
+            ? 'You, sending and getting messages, are framed with the team'
+            : "You, in none of its messages, aren't drawn rather than cut at "
+                  'the edge',
+        (tester) async {
+          final replay = loaded();
+          if (!talks) replay.log = HistoryLog();
+          final video = ReplayVideo(replay, length: ReplayLength.half);
+          const privacy = ReplayPrivacy();
+          final words = ShareWords(video.scene, privacy);
+          video.step(video.frames - 1, words);
+          expect(video.youTalk, talks);
+          final you = video.scene.layout.you!;
+          expect(video.camera!.contains(you.center), talks);
+          await Harness(claktoryWorkspace()).show(
+            tester,
+            size: const Size(1000, 1000),
+            home: Align(
+              alignment: Alignment.topLeft,
+              child: ReplayStage(
+                video: video,
+                shape: ReplayShape.x,
+                privacy: privacy,
+                person: Person(name: 'Matt', initials: 'MS'),
+              ),
+            ),
+          );
+          await tester.pump();
+          expect(
+            find.descendant(
+              of: find.byType(HistoryBoard),
+              matching: find.text('You'),
+            ),
+            talks ? findsOneWidget : findsNothing,
+          );
+        },
+      );
+    }
+
+    for (final shape in ReplayShape.values) {
+      for (final named in [true, false]) {
+        testWidgets(
+          '${shape.title}, ${named ? 'with dates, names and the '
+                    'project' : 'Day N, nothing named'}: every word, the watermark '
+          'and the numbers stay inside its box, never cut',
+          (tester) async {
+            final replay = loaded();
+            if (named) replay.project = 'app';
+            final video = ReplayVideo(replay, length: ReplayLength.half);
+            final privacy = ReplayPrivacy(
+              names: named,
+              roles: named,
+              projects: named,
+              dates: named,
+            );
+            final words = ShareWords(video.scene, privacy);
+            video
+              ..step(0, words)
+              ..step(video.frames * 2 ~/ 3, words);
+            final boundary = GlobalKey();
+            await Harness(claktoryWorkspace()).show(
+              tester,
+              size: const Size(1000, 1000),
+              home: Align(
+                alignment: Alignment.topLeft,
+                child: RepaintBoundary(
+                  key: boundary,
+                  child: ReplayStage(
+                    video: video,
+                    shape: shape,
+                    privacy: privacy,
+                    person: Person(name: 'Matt', initials: 'MS'),
+                  ),
+                ),
+              ),
+            );
+            await tester.pump();
+            final stage = find.byType(ReplayStage);
+            expect(tester.getSize(stage), shape.logical);
+            final safe = shape.safe.shift(tester.getTopLeft(stage));
+            final board = find.byType(HistoryBoard);
+            final lines = [
+              for (final element
+                  in find
+                      .descendant(of: stage, matching: find.byType(RichText))
+                      .evaluate())
+                if (find
+                    .descendant(
+                      of: board,
+                      matching: find.byWidget(element.widget),
+                    )
+                    .evaluate()
+                    .isEmpty)
+                  element,
+            ];
+            expect(lines, isNotEmpty);
+            for (final element in lines) {
+              final paragraph = element.renderObject! as RenderParagraph;
+              final rect = tester.getRect(find.byWidget(element.widget));
+              final text = paragraph.text.toPlainText();
+              if (text.trim().isEmpty) continue;
+              expect(
+                rect.left,
+                greaterThanOrEqualTo(safe.left - 0.5),
+                reason: text,
+              );
+              expect(
+                rect.top,
+                greaterThanOrEqualTo(safe.top - 0.5),
+                reason: text,
+              );
+              expect(
+                rect.bottom,
+                lessThanOrEqualTo(safe.bottom + 0.5),
+                reason: text,
+              );
+              expect(
+                rect.left + paragraph.getMaxIntrinsicWidth(double.infinity),
+                lessThanOrEqualTo(safe.right + 0.5),
+                reason: '$text, whole',
+              );
+            }
+            final mark = tester.getRect(find.byType(ReplayWatermark));
+            expect(mark.left, safe.left, reason: 'left, under the chapter');
+            expect(mark.bottom, closeTo(safe.bottom, 0.5));
+            // The numbers on two lines in a social network's box.
+            final team = tester.getRect(find.text(' of '));
+            final talk = tester.getRect(find.textContaining('message'));
+            if (shape.statLines == 2) {
+              expect(talk.top, greaterThanOrEqualTo(team.bottom - 0.5));
+            } else {
+              expect(talk.center.dy, closeTo(team.center.dy, 0.5));
+            }
+            expect(tester.takeException(), isNull);
+            // SHOTS=/tmp/replay flutter test test/replay_export_test.dart
+            final folder = Platform.environment['SHOTS'];
+            if (folder != null) {
+              final render =
+                  boundary.currentContext!.findRenderObject()!
+                      as RenderRepaintBoundary;
+              final image = await tester.runAsync(
+                () => render.toImage(pixelRatio: 2),
+              );
+              final bytes = await tester.runAsync(
+                () => image!.toByteData(format: ui.ImageByteFormat.png),
+              );
+              Directory(folder).createSync(recursive: true);
+              File('$folder/${shape.name}-${named ? 'named' : 'plain'}.png')
+                  .writeAsBytesSync(bytes!.buffer.asUint8List());
+            }
+          },
+        );
+      }
+    }
+
+    for (final phone in [false, true]) {
+      testWidgets('the sheet offers Made for with its caption, X by default '
+          '${phone ? 'on an iPhone' : 'on a Mac'}', (tester) async {
+        debugDefaultTargetPlatformOverride = phone
+            ? TargetPlatform.iOS
+            : TargetPlatform.macOS;
+        addTearDown(() => debugDefaultTargetPlatformOverride = null);
+        final harness = Harness(claktoryWorkspace());
+        harness.backend
+          ..historyReply = fixtureOverview()
+          ..historyPages = [fixtureEvents()];
+        final size = phone ? const Size(390, 844) : const Size(1440, 900);
+        await harness.show(tester, size: size);
+        harness.page.value = AppPage.map;
+        await pumpFrames(tester);
+        if (phone) {
+          await tester.tap(find.bySemanticsLabel('History'));
+          await pumpFrames(tester);
+          await tester.tap(find.bySemanticsLabel('Share replay…').last);
+        } else {
+          await tester.tap(
+            find.descendant(
+              of: find.byType(MapModeSwitch),
+              matching: find.text('History'),
+            ),
+          );
+          await pumpFrames(tester);
+          await tester.tap(find.text('Share replay…'));
+        }
+        await pumpFrames(tester);
+        expect(find.text('Made for'), findsOneWidget);
+        expect(find.text('Shape'), findsNothing);
+        expect(find.text('X'), findsOneWidget);
+        expect(find.text(ReplayShape.x.caption), findsOneWidget);
+        expect(
+          tester.widget<ReplayStage>(find.byType(ReplayStage)).shape,
+          ReplayShape.x,
+        );
+        expect(tester.takeException(), isNull);
+        final folder = Platform.environment['SHOTS'];
+        if (folder != null) {
+          final view = tester.binding.renderViews.first;
+          final layer = view.debugLayer! as OffsetLayer;
+          final image = await tester.runAsync(
+            () => layer.toImage(Offset.zero & size, pixelRatio: 2),
+          );
+          final bytes = await tester.runAsync(
+            () => image!.toByteData(format: ui.ImageByteFormat.png),
+          );
+          Directory(folder).createSync(recursive: true);
+          File('$folder/sheet-${phone ? 'iphone' : 'mac'}.png')
+              .writeAsBytesSync(bytes!.buffer.asUint8List());
+        }
+      });
+    }
+  });
+
   group('at the largest text', () {
     // The real font's widths: the test font's squares wrap everything.
     setUpAll(loadGeist);
 
-    testWidgets("on a small phone, Shape's and Length's choices read whole "
+    testWidgets("on a small phone, Made for's and Length's choices read whole "
         "under their names (Zucchero's row 512)", (tester) async {
       tester.platformDispatcher.textScaleFactorTestValue = 3.12;
       addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
@@ -653,7 +1167,7 @@ void main() {
       await tester.tap(find.bySemanticsLabel('Share replay…').last);
       await pumpFrames(tester);
       expect(tester.takeException(), isNull);
-      for (final choice in ['Portrait', '30 seconds']) {
+      for (final choice in ['X', '30 seconds']) {
         final words = find.text(choice);
         expect(words, findsOneWidget, reason: choice);
         final paragraph = tester.renderObject<RenderParagraph>(words);

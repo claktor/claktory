@@ -1,4 +1,4 @@
-// An iPhone's registration for pushes (#273 B3, mobile/push.dart): once the
+// An iPhone's registration for pushes (mobile/push.dart): once the
 // person allows notifications, each Claktory it connects to gets this
 // iPhone's handle at the push relay and its key, on every connect; the relay
 // is asked again only when something it was asked with changed. The person

@@ -1,5 +1,5 @@
 // When a viewer asks for a preview of its file rather than the file
-// itself (#379). The backend makes it (an image fitted to this screen as
+// itself. The backend makes it (an image fitted to this screen as
 // WebP, a 720p video); the viewer says it's a preview and loads the
 // original on request.
 //
@@ -7,7 +7,7 @@
 //   pixels than the preview has; on a Mac only on a slow link.
 // - Videos: on any device, only on a slow link.
 //
-// A slow link is one #375's measured pace says would take over
+// A slow link is one whose measured pace says would take over
 // [slowerThan] for the original: its read stops after a piece or two once
 // that's clear, and the preview is read instead.
 import 'package:flutter/foundation.dart';

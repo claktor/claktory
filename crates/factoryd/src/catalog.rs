@@ -1,5 +1,5 @@
 //! Model lists from the providers themselves: OpenRouter's (U4), and
-//! Anthropic's, OpenAI's and Codex's (friend bug #14), so new models show
+//! Anthropic's, OpenAI's and Codex's, so new models show
 //! up without waiting for a Claktory update. The list bundled with Claktory
 //! stays until a fetched one passes its checks whole, and again whenever
 //! none has (`factory_agent::providers::listing`). The last one fetched is
@@ -7,10 +7,10 @@
 //! the provider answers. Read every 12 hours while the provider is signed
 //! in, or now when the person asks (RefreshModels), and when they look at
 //! the models or accounts (ProvidersShown) if it's more than 15 minutes old
-//! (friend bug #41).
+//! .
 //!
 //! After each read, and as Claktory starts, a newer version of a model
-//! agents run on is announced to Rivet once (`crate::upgrades`, #404).
+//! agents run on is announced to Rivet once (`crate::upgrades`).
 //!
 //! A model the list doesn't have can be added by its id (AddModel, or an
 //! agent's model set to it), once the provider says the sign-in has it and
@@ -147,7 +147,7 @@ fn fetchable(factory: &Factory, provider: &str) -> bool {
 pub(crate) async fn monitor(factory: Weak<Factory>) {
     loop {
         let Some(strong) = factory.upgrade() else { return };
-        // Newer models among those kept, from the start (#404).
+        // Newer models among those kept, from the start.
         crate::upgrades::check(&strong);
         for provider in providers(&strong) {
             let retry_due =
@@ -222,7 +222,7 @@ async fn fetch(factory: &Arc<Factory>, provider: &str) -> Result<(), String> {
     result.map(|_| ())
 }
 
-/// ProvidersShown (friend bug #41): the person looks at the models, so each
+/// ProvidersShown: the person looks at the models, so each
 /// signed-in provider's list read more than `SHOWN` ago is read again now,
 /// unless it's being read or a read failed within `SHOWN_RETRY`. Each read
 /// shows in Workspace as it goes.

@@ -1,8 +1,12 @@
 #include <flutter/dart_project.h>
 #include <flutter/flutter_view_controller.h>
 #include <windows.h>
+#include <propkey.h>
+#include <propvarutil.h>
+#include <shellapi.h>
 #include <shobjidl.h>
 
+#include <cwchar>
 #include <string>
 #include <utility>
 #include <vector>
@@ -31,6 +35,69 @@ bool AnotherIsRunning(HANDLE* mutex) {
     ::SetForegroundWindow(window);
   }
   return true;
+}
+
+// When this app runs from app\<version>\ beside the launcher
+// (../launcher/main.cpp; windows-updates.md section 5), pinning its window
+// to the taskbar pins the launcher, the Start menu's Claktory, never this
+// version's own exe, which a later update deletes. Anywhere else (a build,
+// an unzipped bundle), the window is left as Windows makes it.
+void PinTheLauncher(HWND window) {
+  wchar_t module[MAX_PATH * 4];
+  DWORD length = ::GetModuleFileNameW(nullptr, module,
+                                      static_cast<DWORD>(std::size(module)));
+  if (length == 0 || length >= std::size(module)) return;
+  std::wstring path(module, length);
+  // ...\Claktory\app\<version>\Claktory.exe: up three for the launcher.
+  auto up = [](std::wstring& folder) {
+    size_t slash = folder.find_last_of(L'\\');
+    if (slash == std::wstring::npos) return std::wstring();
+    std::wstring name = folder.substr(slash + 1);
+    folder.resize(slash);
+    return name;
+  };
+  up(path);
+  up(path);
+  if (_wcsicmp(up(path).c_str(), L"app") != 0) return;
+  std::wstring launcher = path + L"\\Claktory.exe";
+  DWORD attributes = ::GetFileAttributesW(launcher.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES ||
+      (attributes & FILE_ATTRIBUTE_DIRECTORY)) {
+    Log("no launcher beside app\\: the taskbar pins this exe");
+    return;
+  }
+  IPropertyStore* store = nullptr;
+  HRESULT got = ::SHGetPropertyStoreForWindow(window, IID_PPV_ARGS(&store));
+  if (FAILED(got)) {
+    Log("the window's properties can't be set: " +
+        Win32ErrorMessage(static_cast<unsigned long>(got)));
+    return;
+  }
+  HRESULT failed = S_OK;
+  auto set = [store, &failed](const PROPERTYKEY& key,
+                              const std::wstring& value) {
+    PROPVARIANT variant;
+    HRESULT done = ::InitPropVariantFromString(value.c_str(), &variant);
+    if (SUCCEEDED(done)) {
+      done = store->SetValue(key, variant);
+      ::PropVariantClear(&variant);
+    }
+    if (FAILED(done) && SUCCEEDED(failed)) failed = done;
+  };
+  // The relaunch properties first, the id last: Windows reads them when
+  // the id is set (Microsoft's "Application User Model IDs").
+  set(PKEY_AppUserModel_RelaunchCommand, L"\"" + launcher + L"\"");
+  set(PKEY_AppUserModel_RelaunchDisplayNameResource, flavor::kAppName);
+  set(PKEY_AppUserModel_RelaunchIconResource, launcher + L",0");
+  set(PKEY_AppUserModel_ID, flavor::kAppId);
+  if (SUCCEEDED(failed)) failed = store->Commit();
+  store->Release();
+  if (FAILED(failed)) {
+    Log("the taskbar can't be pointed at the launcher: " +
+        Win32ErrorMessage(static_cast<unsigned long>(failed)));
+  } else {
+    Log("the taskbar pins the launcher, " + Utf8FromUtf16(launcher.c_str()));
+  }
 }
 
 }  // namespace
@@ -85,6 +152,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);
+  PinTheLauncher(window.GetHandle());
 
   ::MSG msg;
   while (::GetMessage(&msg, nullptr, 0, 0)) {

@@ -1,4 +1,4 @@
-//! Device hand-offs (E2; dms-e2ee.md §2): a device of the person's that
+//! Device hand-offs: a device of the person's that
 //! holds the identity key seals it for a new one (`handoff`, from the QR
 //! the new device shows) and passes it through the worker, which keeps it
 //! sealed, for that one device, for 30 minutes at most.
@@ -59,7 +59,7 @@ fn send(transaction: &Transaction<'_>, account: &str, from: &str, removed: &[Str
         return Err(invalid("A device hands off to another device."));
     }
     // Never to a device removed from the account, even one a list still
-    // names (row 612): it may be in a thief's hands.
+    // names: it may be in a thief's hands.
     if removed.contains(&send.to) {
         return Err(Refusal(409, "removed_device", "That device was removed from your account, so nothing is handed off to it.".to_owned()));
     }
@@ -103,8 +103,8 @@ fn waiting(db: &Connection, account: &str, to: &str, now_ms: i64) -> Result<Valu
     Ok(json!({"handoffs": handoffs}))
 }
 
-/// Deletes the hand-offs waiting for a device removed from the account
-/// (E11-10, Fugo 43699): as any of its devices calls, from the removed
+/// Deletes the hand-offs waiting for a device removed from the account:
+/// as any of its devices calls, from the removed
 /// keys the service gives with the call.
 fn forget_removed(transaction: &Transaction<'_>, account: &str, removed: &[String]) -> rusqlite::Result<()> {
     for key in removed {
@@ -162,7 +162,7 @@ mod tests {
     use super::super::leaves::tests::{Person, call, claktory, device, set_up};
     use super::*;
 
-    /// Row 612: nothing is handed off to a device removed from the account,
+    /// Nothing is handed off to a device removed from the account,
     /// even while the list still names it.
     #[test]
     fn nothing_is_handed_off_to_a_removed_device() {
@@ -179,7 +179,7 @@ mod tests {
         assert_eq!(waiting, 0);
     }
 
-    /// E11-10 (Fugo 43699): a hand-off to a device that's then removed
+    /// E11-10: a hand-off to a device that's then removed
     /// from the account goes: the device, still signed in, reads nothing,
     /// and the row is deleted.
     #[test]

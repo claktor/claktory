@@ -1,5 +1,5 @@
-// A project's Files pane across the seam (#540, Sale's row 158 find): an
-// iPad window narrowed to the drawer layout with Files in front opens on the
+// A project's Files pane across the seam: an iPad
+// window narrowed to the drawer layout with Files in front opens on the
 // phone's Files page for that project, not on a viewer that can't show it;
 // Back goes to the conversation and leaves the pane in the agent's layout.
 import 'package:factory_app/ipad/workbench.dart';

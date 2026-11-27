@@ -375,11 +375,21 @@ class Button extends StatefulWidget {
     this.primary = false,
     this.glyph,
     this.semanticLabel,
+    this.filled = false,
+    this.selected = false,
   });
 
   final String label;
   final VoidCallback? onPressed;
   final bool primary;
+
+  /// A quiet button filled at rest, as it is on a touch screen, where it
+  /// must be seen before the pointer finds it (focus mode's Done).
+  final bool filled;
+
+  /// It's on (a pane it shows is open): a quiet button filled darker, on a
+  /// touch screen too, and read as selected.
+  final bool selected;
 
   /// A 16px glyph before [label], in the label's color.
   final Widget Function(Color color)? glyph;
@@ -415,7 +425,10 @@ class _ButtonState extends State<Button> {
           ? palette.text.withValues(alpha: hovered ? 0.88 : 1)
           : palette.selected;
       foreground = enabled ? palette.canvas : palette.textFaint;
-    } else if (phone) {
+    } else if (widget.selected) {
+      background = enabled ? palette.selected : palette.hover;
+      foreground = enabled ? palette.text : palette.textFaint;
+    } else if (phone || widget.filled) {
       // With no pointer to hover, a quiet button shows it's one at rest:
       // a faint fill, as iOS's gray buttons have.
       background = !enabled
@@ -437,6 +450,7 @@ class _ButtonState extends State<Button> {
     return Semantics(
       button: true,
       enabled: enabled,
+      selected: widget.selected ? true : null,
       child: FocusableActionDetector(
         enabled: enabled,
         mouseCursor: enabled
@@ -871,6 +885,13 @@ const rotateSlide = Duration(milliseconds: 450);
 /// One line at a time from [lines], each sliding up and out as the next
 /// slides up into its place, a calm vertical carousel. It holds still while
 /// [paused]; with reduced motion the lines simply swap.
+///
+/// One round, then it rests on the first line: each slide repaints, and
+/// left alone it kept a phone drawing (Polpo's placeholder carousel, Lucy
+/// 51826). A pointer down, a key or a scroll anywhere in the app, or the
+/// window coming back to the front, wakes it for another round, from the
+/// second line after a full [rotateEvery]; input during a round changes
+/// nothing. Hover alone doesn't wake it.
 class RotatingText extends StatefulWidget {
   const RotatingText({
     super.key,
@@ -899,12 +920,19 @@ class _RotatingTextState extends State<RotatingText>
   /// The next line is sliding in.
   var _sliding = false;
 
+  /// Slides left in this round, the last one back to the first line; 0
+  /// while it rests there.
+  var _left = 0;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    GestureBinding.instance.pointerRouter.addGlobalRoute(_pointer);
+    HardwareKeyboard.instance.addHandler(_key);
     final state = WidgetsBinding.instance.lifecycleState;
     _focused = state == null || state == AppLifecycleState.resumed;
+    _left = widget.lines.length;
     _schedule();
   }
 
@@ -913,6 +941,28 @@ class _RotatingTextState extends State<RotatingText>
     final focused = state == AppLifecycleState.resumed;
     if (focused == _focused) return;
     _focused = focused;
+    // Back in front: another round, if it rests.
+    if (focused && _left == 0) _left = widget.lines.length;
+    _schedule();
+  }
+
+  void _pointer(PointerEvent event) {
+    if (event is PointerDownEvent ||
+        event is PointerScrollEvent ||
+        event is PointerPanZoomStartEvent) {
+      _wake();
+    }
+  }
+
+  bool _key(KeyEvent event) {
+    if (event is KeyDownEvent) _wake();
+    return false;
+  }
+
+  /// Another round, if it rests; a round under way goes on as it was.
+  void _wake() {
+    if (!mounted || _left > 0) return;
+    _left = widget.lines.length;
     _schedule();
   }
 
@@ -926,6 +976,8 @@ class _RotatingTextState extends State<RotatingText>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    GestureBinding.instance.pointerRouter.removeGlobalRoute(_pointer);
+    HardwareKeyboard.instance.removeHandler(_key);
     _timer?.cancel();
     _slide.dispose();
     super.dispose();
@@ -937,6 +989,7 @@ class _RotatingTextState extends State<RotatingText>
     // A slide under way finishes and schedules the next itself.
     if (widget.paused ||
         !_focused ||
+        _left == 0 ||
         widget.lines.length < 2 ||
         _slide.isAnimating) {
       return;
@@ -947,7 +1000,10 @@ class _RotatingTextState extends State<RotatingText>
   void _next() {
     final lines = widget.lines.length;
     if (MediaQuery.maybeDisableAnimationsOf(context) ?? false) {
-      setState(() => _index = (_index + 1) % lines);
+      setState(() {
+        _index = (_index + 1) % lines;
+        _left = _rest(_left - 1);
+      });
       return _schedule();
     }
     setState(() => _sliding = true);
@@ -957,10 +1013,19 @@ class _RotatingTextState extends State<RotatingText>
         _index = (_index + 1) % widget.lines.length;
         _sliding = false;
         _slide.value = 0;
+        _left = _rest(_left - 1);
       });
       _schedule();
     });
   }
+
+  /// [left] slides to go, but never resting anywhere but the first line
+  /// (its lines changed under it).
+  int _rest(int left) => left > 0
+      ? left
+      : _index == 0
+      ? 0
+      : widget.lines.length - _index;
 
   @override
   Widget build(BuildContext context) {
@@ -1353,6 +1418,7 @@ Future<void> showModal(
   BackHandle? back;
   void close() {
     if (done.isCompleted) return;
+    _modals.remove(entry);
     back?.release();
     back = null;
     entry.remove();
@@ -1364,12 +1430,19 @@ Future<void> showModal(
     builder: (context) => _Modal(close: close, child: builder(context, close)),
   );
   overlay.insert(entry);
+  _modals.add(entry);
   // Android's Back closes it as Esc does, before anything under it; a
   // Claktory replaced under it takes it away without closing anything.
   back = PhoneBack.maybeOf(context)
       ?.register(CallbackBackToken(onBack: close, onRetired: close));
   return done.future;
 }
+
+final _modals = <OverlayEntry>{};
+
+/// Whether a dialog [showModal] opened over the window is open: the
+/// window's own shortcuts (⌘, for Settings) wait under it.
+bool get modalOpen => _modals.any((entry) => entry.mounted);
 
 /// Narrower than this, a dialog (an iPad's permission in Slide Over's
 /// 320) sits closer to the window's edges with less padding inside, so its
@@ -2397,7 +2470,8 @@ class _WavePainter extends CustomPainter {
 }
 
 /// A 28px square button holding a 16px glyph, tinted on hover and while
-/// what it opens is showing.
+/// what it opens is showing; with [showLabel], 28px tall with its label
+/// after the glyph.
 class GlyphButton extends StatelessWidget {
   const GlyphButton({
     super.key,
@@ -2405,10 +2479,14 @@ class GlyphButton extends StatelessWidget {
     required this.active,
     required this.onTap,
     required this.glyph,
+    this.showLabel = false,
   });
 
   /// What it opens, for assistive technology and tests.
   final String label;
+
+  /// [label] shows after the glyph, cut at the end where there's no room.
+  final bool showLabel;
   final bool active;
   final VoidCallback onTap;
   final Widget Function(Color color) glyph;
@@ -2428,13 +2506,16 @@ class GlyphButton extends StatelessWidget {
       label: label,
       child: Pressable(
         onTap: onTap,
-        builder: (context, hovered) => _phoneTarget(
+        builder: (context, hovered) => (showLabel ? _tallTarget : _phoneTarget)(
           context,
           AnimatedContainer(
             duration: Motion.fast,
-            width: 28,
+            width: showLabel ? null : 28,
             height: 28,
             alignment: Alignment.center,
+            padding: showLabel
+                ? const EdgeInsets.symmetric(horizontal: Space.s)
+                : null,
             decoration: BoxDecoration(
               color: active
                   ? palette.selected
@@ -2443,7 +2524,32 @@ class GlyphButton extends StatelessWidget {
                   : const Color(0x00000000),
               borderRadius: BorderRadius.circular(Radii.control),
             ),
-            child: glyph(active || hovered ? palette.text : palette.textMuted),
+            child: showLabel
+                ? Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      glyph(
+                        active || hovered ? palette.text : palette.textMuted,
+                      ),
+                      const SizedBox(width: Space.xs + 2),
+                      Flexible(
+                        child: ExcludeSemantics(
+                          child: Text(
+                            label,
+                            maxLines: 1,
+                            softWrap: false,
+                            overflow: TextOverflow.ellipsis,
+                            style: TypeScale.of(context).body.copyWith(
+                              color: active || hovered
+                                  ? palette.text
+                                  : palette.textMuted,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  )
+                : glyph(active || hovered ? palette.text : palette.textMuted),
           ),
         ),
       ),
@@ -2458,6 +2564,15 @@ Widget _phoneTarget(BuildContext context, Widget visual) => touchFirst(context)
     ? SizedBox.square(
         dimension: Metrics.of(context).target,
         child: Center(child: visual),
+      )
+    : visual;
+
+/// On touch, [visual] in the middle of a finger's height; with a pointer,
+/// [visual] itself.
+Widget _tallTarget(BuildContext context, Widget visual) => touchFirst(context)
+    ? ConstrainedBox(
+        constraints: BoxConstraints(minHeight: Metrics.of(context).target),
+        child: Center(widthFactor: 1, child: visual),
       )
     : visual;
 
@@ -2828,6 +2943,7 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'copy': _drawCopy,
   'star': _drawStar,
   'house': _drawHouse,
+  'layers': _drawLayers,
   'home': _drawHouse,
   'clock': _drawClock,
   'puzzle': _drawPuzzle,
@@ -2860,6 +2976,14 @@ final _drawHouse = _paths(const [
   'M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8',
   'M3 10a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v9'
       'a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
+]);
+
+// Lucide's layers: a pipe group, in a project's menu.
+final _drawLayers = _paths(const [
+  'M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91'
+      'a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z',
+  'M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12',
+  'M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17',
 ]);
 
 final _drawClock = _paths(const [

@@ -1,4 +1,4 @@
-//! Unloading idle agents' conversations (#377 step 3): one nothing has
+//! Unloading idle agents' conversations: one nothing has
 //! needed for a while leaves memory, and reads back as it was when
 //! something needs it again. Never one that's shown, has something waiting
 //! for the person, may still compact while idle, or shows something a
@@ -148,7 +148,7 @@ async fn a_conversation_that_may_compact_while_idle_stays_until_it_can_t() {
 }
 
 /// A quiet message waits for something else to wake its agent: it doesn't
-/// keep the conversation in memory meanwhile (Abbacchio's rows 909–910),
+/// keep the conversation in memory meanwhile,
 /// and still comes with what wakes it.
 #[tokio::test]
 async fn a_quiet_message_waiting_doesn_t_keep_a_conversation_in_memory() {

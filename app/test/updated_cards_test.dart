@@ -1,4 +1,4 @@
-// Cards their agents changed while they waited (#428): redrawn in place
+// Cards their agents changed while they waited: redrawn in place
 // with "Updated · <time>" and the agent's reason; what the person is typing
 // stays; every answer says which version it's for, and the refusal of an
 // answer to an older one shows as it is; History says how often.

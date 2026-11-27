@@ -1,10 +1,10 @@
 //! QA only: Anthropic's subscription pointed at qa-model on this computer,
 //! so a QA sandbox can show what a Claude sign-in does at its usage limit
-//! (#332) without a real account. Compiled only with the `qa-provider`
+//! without a real account. Compiled only with the `qa-provider`
 //! feature, which scripts/qa.sh builds sandboxes with and a release build
 //! can't have (lib.rs), and in this crate's own tests.
 //!
-//! Fugo's guard: anything that redirects a subscription's requests could
+//! Anything that redirects a subscription's requests could
 //! send the person's real Claude token elsewhere, so even when compiled in,
 //! the override is taken only for an address on this computer (loopback),
 //! never for the real Claktories' homes (`~/.factory`, `~/.factory-dev`)
@@ -12,7 +12,7 @@
 //! It covers everything the subscription reaches: the messages, the usage,
 //! plan and account reads, the resets and the sign-in's token.
 //!
-//! OpenRouter's model list (#185 U4) can come from qa-model the same way
+//! OpenRouter's model list can come from qa-model the same way
 //! (`MODELS_URL_VAR`, within the same guard), so a sandbox shows a list
 //! arriving, refreshing and changing without reaching openrouter.ai.
 

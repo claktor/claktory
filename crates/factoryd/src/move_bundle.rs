@@ -686,7 +686,10 @@ pub fn unpack(bundle: &Path, passphrase: &str, into: &Path) -> Result<Manifest, 
             }
             (Record::Symlink { path, target: link }, _) => {
                 let target = place(&root, path)?;
+                #[cfg(unix)]
                 std::os::unix::fs::symlink(link, &target)?;
+                #[cfg(windows)]
+                Err::<(), _>(no_links_on_windows(link))?;
                 made.push(target);
             }
             _ => {}
@@ -736,12 +739,33 @@ fn inside(root: &Path, path: &Path) -> Result<(), BundleError> {
     }
 }
 
+#[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o777))
 }
 
-#[cfg(test)]
+/// On Windows what's unpacked takes the private DACL of the home it goes
+/// into; only read-only carries over.
+#[cfg(windows)]
+fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+    if mode & 0o200 == 0 && !path.is_dir() {
+        let mut permissions = std::fs::metadata(path)?.permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
+}
+
+/// A link in a bundle, refused on Windows: making one takes Developer Mode
+/// there, and moving isn't on Windows yet.
+#[cfg(windows)]
+fn no_links_on_windows(link: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::Unsupported, format!("the bundle holds a link (to {link}), which Windows can't make here"))
+}
+
+// Moving isn't on Windows yet (`move_run::NOT_ON_WINDOWS`).
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

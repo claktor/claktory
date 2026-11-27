@@ -19,7 +19,7 @@ enum GraceKind {
   none,
 }
 
-/// A short grace after leaving the app (#413, iphone-battery.md §3): a
+/// A short grace after leaving the app: a
 /// connection that stayed alive through a quick trip to another app
 /// (Messages and back) is only checked on coming back, one message the
 /// backend answers, rather than made afresh, which costs a new endpoint

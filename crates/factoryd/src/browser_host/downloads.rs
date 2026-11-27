@@ -75,9 +75,9 @@ fn store(factory: &Factory) -> PathBuf {
 
 /// A channel 5 frame: to its read if factoryd asked for that GUID and
 /// still reads it, else dropped unread.
-pub(super) async fn chunk(factory: &Factory, payload: Vec<u8>) {
+pub(super) async fn chunk(one: &super::One, payload: Vec<u8>) {
     let Some(guid) = payload.get(..16).and_then(|guid| <[u8; 16]>::try_from(guid).ok()) else { return };
-    let Some(read) = factory.agent_browser.inner().reads.get(&guid).cloned() else { return };
+    let Some(read) = one.inner().reads.get(&guid).cloned() else { return };
     let piece = if payload.len() == 16 { Piece::End } else { Piece::Bytes(payload[16..].to_vec()) };
     // A read that stopped listening: it's ended anyway.
     let _ = tokio::time::timeout(QUIET, read.send(piece)).await;
@@ -92,30 +92,30 @@ pub(super) fn cancelled(inner: &mut super::Inner, guid: &str, why: &str) {
 }
 
 /// Deletes the runner's copy of `guid`, read or not.
-pub(super) fn drop_download(factory: &Factory, guid: &str) {
+pub(super) fn drop_download(one: &super::One, guid: &str) {
     let Some(bytes) = wire::guid_bytes(guid) else { return };
-    let mut inner = factory.agent_browser.inner();
+    let mut inner = one.inner();
     inner.reads.remove(&bytes);
     control(&inner, &Control::DownloadDrop { guid: guid.to_owned() });
 }
 
 /// Lands `download`: read, counted, hashed, kept and copied into its errand
 /// agent's folder; the runner's copy deleted either way.
-pub(super) fn land(factory: Weak<Factory>, download: Download) -> Landing {
+pub(super) fn land(factory: Weak<Factory>, one: Arc<super::One>, download: Download) -> Landing {
     Box::pin(async move {
         let factory = factory.upgrade().ok_or_else(|| "Claktory is stopping.".to_owned())?;
-        let landed = tokio::time::timeout(WHOLE, landing(&factory, &download))
+        let landed = tokio::time::timeout(WHOLE, landing(&factory, &one, &download))
             .await
             .unwrap_or_else(|_| Err("The download took more than 10 minutes to read, so Claktory didn't keep it.".to_owned()));
         if let Some(bytes) = wire::guid_bytes(&download.guid) {
-            factory.agent_browser.inner().reads.remove(&bytes);
+            one.inner().reads.remove(&bytes);
         }
-        drop_download(&factory, &download.guid);
+        drop_download(&one, &download.guid);
         landed
     })
 }
 
-async fn landing(factory: &Arc<Factory>, download: &Download) -> Result<Landed, String> {
+async fn landing(factory: &Arc<Factory>, one: &super::One, download: &Download) -> Result<Landed, String> {
     let guid = wire::guid_bytes(&download.guid).ok_or_else(|| "That isn't a download of Claktory's browser.".to_owned())?;
     if !id_ok(&download.agent) || !download.errand.starts_with("errand-") || !id_ok(&download.errand) {
         return Err("That isn't an errand's download.".to_owned());
@@ -141,8 +141,8 @@ async fn landing(factory: &Arc<Factory>, download: &Download) -> Result<Landed, 
     // Asked for: only now does channel 5 bring it here.
     let (send, mut pieces) = mpsc::channel(4);
     {
-        let mut inner = factory.agent_browser.inner();
-        if inner.errand != download.errand || inner.runner.is_none() {
+        let mut inner = one.inner();
+        if one.agent != download.agent || inner.errand != download.errand || inner.runner.is_none() {
             return Err("Claktory's browser isn't doing this errand now.".to_owned());
         }
         if inner.reads.len() >= READS || inner.reads.contains_key(&guid) {
@@ -296,6 +296,7 @@ pub(crate) fn copy_into(root: &Path, file: &Path, folder: &Path, name: &str) -> 
 /// part opened without following a symlink (one made in an agent's folder
 /// would send the copy elsewhere) and made when it isn't there: the last
 /// one, held open.
+#[cfg(unix)]
 fn real_folder(root: &Path, folder: &Path) -> Result<std::os::fd::OwnedFd, String> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
@@ -330,8 +331,21 @@ fn real_folder(root: &Path, folder: &Path) -> Result<std::os::fd::OwnedFd, Strin
     Ok(held)
 }
 
+/// Not on Windows, where Claktory's browser doesn't run yet (`setup`): no
+/// folder is held, so nothing is copied.
+#[cfg(windows)]
+fn real_folder(_root: &Path, _folder: &Path) -> Result<std::convert::Infallible, String> {
+    Err("Downloads from Claktory's browser aren't kept on Windows yet.".to_owned())
+}
+
+#[cfg(windows)]
+fn create_in(folder: &std::convert::Infallible, _name: &str) -> std::io::Result<std::fs::File> {
+    match *folder {}
+}
+
 /// Makes `name` in the folder held: afresh (O_EXCL), never through a
 /// symlink (O_NOFOLLOW), 0644.
+#[cfg(unix)]
 fn create_in(folder: &std::os::fd::OwnedFd, name: &str) -> std::io::Result<std::fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     let name = std::ffi::CString::new(name).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
@@ -346,6 +360,8 @@ fn create_in(folder: &std::os::fd::OwnedFd, name: &str) -> std::io::Result<std::
 }
 
 fn make_private_folder(folder: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    factory_agent::windows::private::create_dir_all(folder).map_err(|error| format!("Claktory couldn't make its downloads' folder: {error}"))?;
     std::fs::create_dir_all(folder).map_err(|error| format!("Claktory couldn't make its downloads' folder: {error}"))?;
     #[cfg(unix)]
     {
@@ -367,6 +383,13 @@ fn private_file(path: &Path) -> Result<std::fs::File, String> {
 }
 
 /// Free bytes on the disk `path` is on.
+#[cfg(windows)]
+fn free(path: &Path) -> Option<u64> {
+    crate::windows::fs::space(path).ok().map(|space| space.available)
+}
+
+/// Free bytes on the disk `path` is on.
+#[cfg(unix)]
 fn free(path: &Path) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
@@ -462,7 +485,8 @@ fn quarantine(path: &Path) {
 #[cfg(not(target_os = "macos"))]
 fn quarantine(_path: &Path) {}
 
-#[cfg(test)]
+// Claktory's browser isn't on Windows (`setup::check` says so).
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

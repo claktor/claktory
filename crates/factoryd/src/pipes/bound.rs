@@ -1,4 +1,4 @@
-//! A pipe's bound agent (#250): the liaison made for it lives in the pipe
+//! A pipe's bound agent: the liaison made for it lives in the pipe
 //! rather than beside it. The app shows it in the pipe's row and view, with
 //! no row of its own (Agent.pipe_id), and it goes with the pipe when the
 //! pipe is deleted, its conversation kept in the pipe's folder.
@@ -10,7 +10,7 @@ use super::{Record, change, folder, line};
 use crate::config::Config;
 use crate::factory::{Factory, host_event};
 
-/// The names a new liaison gets, in turn (Trish's: none of this team's).
+/// The names a new liaison gets, in turn (none of this team's).
 const NAMES: &[&str] = &[
     "Kai", "Mira", "Theo", "Nadia", "Lucia", "Jonas", "Amara", "Ravi", "Elena", "Ines", "Malik", "Sofia", "Leo", "Zara", "Mateo", "Aiko",
     "Nils", "Dario", "Leila", "Kofi", "Freya", "Hugo", "Asha", "Emil", "Noor", "Pablo", "Selin", "Idris", "Oskar", "Talia", "Ren", "Esme",

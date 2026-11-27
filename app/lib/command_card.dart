@@ -1,7 +1,6 @@
-// An Execute card (#494, AskPerson.command): an agent asks the person to
-// run a command on this Claktory's computer. What the card shows of it, in
-// Claktory's words above the agent's (Fugo 35295, 35326; Secco's contract,
-// 36076):
+// An Execute card (AskPerson.command): an agent asks the person to run a
+// command on this Claktory's computer. What the card shows of it, in
+// Claktory's words above the agent's:
 // - Claktory's heading, "Run this command on <machine>?", never the
 //   agent's title;
 // - the command whole, as code with every hidden character by its code,
@@ -45,7 +44,7 @@ String commandLimit(int seconds) {
 }
 
 /// A command as code, with Copy beside it: every hidden character shown by
-/// its code (Fugo); Copy copies it as it is.
+/// its code; Copy copies it as it is.
 class CommandBlock extends StatefulWidget {
   const CommandBlock(this.command, {super.key});
 
@@ -111,7 +110,7 @@ class CommandFacts extends StatelessWidget {
         const SizedBox(height: Space.xs),
         Text(
           [
-            // The agent chose it: hidden characters by their codes (Fugo).
+            // The agent chose it: hidden characters by their codes.
             if (command.cwd.isNotEmpty) 'In ${visibleCodes(command.cwd)}',
             if (limit > 0) 'Stops after ${commandLimit(limit)}',
           ].join(' · '),
@@ -196,7 +195,7 @@ String withoutTerminalCodes(String output) => output.replaceAll(
 
 /// A waiting Execute card in a line or two (Needs you, the agent's list):
 /// Claktory's heading, then the command's first line, so cards for one
-/// machine can be told apart (Zucchero's row 487), hidden characters by
+/// machine can be told apart, hidden characters by
 /// their codes.
 String commandSummary(AskCommand command) {
   final first = command.command
@@ -210,7 +209,7 @@ String commandSummary(AskCommand command) {
 
 /// How long [run] has gone so far, while it runs: counted here from when it
 /// started (the backend sends its own count only to the conversation
-/// showing, Secco's row 487), never less than what it last said.
+/// showing), never less than what it last said.
 Duration commandElapsed(CommandRun run, {DateTime? now}) {
   final since =
       (now ?? DateTime.now()).millisecondsSinceEpoch - run.startedMs.toInt();
@@ -269,7 +268,7 @@ class CommandRunView extends StatelessWidget {
             run.exitCode != 0);
     final backend = AppScope.of(context);
     // The app on the computer the command runs on: the sensor is right
-    // there, and only its own run should have it touched (Fugo 36019).
+    // there, and only its own run should have it touched.
     final here = backend.localBackend && backend.target == null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -325,7 +324,7 @@ class CommandRunView extends StatelessWidget {
           // The end first, where what it printed last is.
           // As printed, less its terminal codes (colors, titles), with every
           // hidden or reordering character by its code, so nothing in it can
-          // make a failure read as a success (Fugo).
+          // make a failure read as a success.
           MonoBlock(
             visibleCodes(withoutTerminalCodes(run.output)),
             maxHeight: outputHeight,

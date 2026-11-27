@@ -710,7 +710,7 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    // A typed comment is a reply (#370): one Submit, nothing connected.
+    // A typed comment is a reply: one Submit, nothing connected.
     await tester.enterText(find.byType(EditableText).last, 'Only DNS, please');
     await tester.pump();
     expect(find.text('Connect Cloudflare'), findsNothing);

@@ -1047,6 +1047,28 @@ void main() {
       expect(decided.approveOnly, isFalse);
     });
 
+    testWidgets('a website login is never offered for commands', (
+      tester,
+    ) async {
+      final harness = Harness(
+        _workspace(
+          secrets: [
+            _aws(),
+            SecretInfo(
+              id: 's3',
+              name: 'Shop login',
+              sites: ['https://shop.example.com'],
+            ),
+          ],
+        ),
+      );
+      await _show(tester, harness, SecretRequestCard(approval()));
+      await tester.tap(find.text('Other ways…'));
+      await pumpFrames(tester);
+      expect(find.text('AWS'), findsOneWidget);
+      expect(find.text('Shop login'), findsNothing);
+    });
+
     testWidgets('a connected service that can make it: Let Mike make it, and '
         'Mike makes one', (tester) async {
       final harness = Harness(

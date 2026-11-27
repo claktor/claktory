@@ -1,5 +1,5 @@
-// An agent's reasoning effort as a segmented control (Lucy's agent view
-// §3, the header's model popover): one press chooses, in place. A model
+// An agent's reasoning effort as a segmented control (the header's
+// model popover): one press chooses, in place. A model
 // has up to seven efforts (off to max), so where their words won't fit
 // across the popover they take as many rows as they need, each segment a
 // finger's 44pt on touch, 28px on a Mac.

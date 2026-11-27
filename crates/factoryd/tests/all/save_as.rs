@@ -1,4 +1,4 @@
-//! bash's save_as (Fugo's save-as-secret.md, Bruno 45874): an agent saves
+//! bash's save_as: an agent saves
 //! a command's whole output as a new secret, for a key it makes with one
 //! it holds. The output reaches the vault alone (never the agent, its
 //! conversation, factory.db or a log), the new secret is granted to that

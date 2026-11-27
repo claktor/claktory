@@ -10,6 +10,7 @@
 
 #include "core/connection_store.h"
 #include "core/json.h"
+#include "core/launcher_plan.h"
 #include "core/window_geometry.h"
 
 using claktory::ConnectionStore;
@@ -309,6 +310,82 @@ void SavedFrameMustStillBeOnAScreen() {
   CHECK(claktory::FrameStillFits(Rect{2000, 100, 3200, 900}, screens, 1.0));
 }
 
+// ---- the launcher's rules ----
+
+void LauncherVersionsAreDigitsAndDots() {
+  CHECK(claktory::IsAppVersion("0.1.27"));
+  CHECK(claktory::IsAppVersion("1"));
+  CHECK(claktory::IsAppVersion("2026.11.19.1958"));
+  CHECK(!claktory::IsAppVersion(""));
+  CHECK(!claktory::IsAppVersion("."));
+  CHECK(!claktory::IsAppVersion(".1"));
+  CHECK(!claktory::IsAppVersion("1."));
+  CHECK(!claktory::IsAppVersion("1..2"));
+  CHECK(!claktory::IsAppVersion(".."));
+  CHECK(!claktory::IsAppVersion("..\\..\\x"));
+  CHECK(!claktory::IsAppVersion("C:\\x"));
+  CHECK(!claktory::IsAppVersion("0.1.27\\..\\0.1.26"));
+  CHECK(!claktory::IsAppVersion("0.1.27 "));
+  CHECK(!claktory::IsAppVersion("v0.1.27"));
+  CHECK(!claktory::IsAppVersion(std::string(33, '1')));
+  CHECK(claktory::IsAppVersion(std::string(32, '1')));
+}
+
+void LauncherReadsOnlyAVersionFromItsPointer() {
+  CHECK(claktory::PointedVersion("0.1.27") == "0.1.27");
+  CHECK(claktory::PointedVersion("0.1.27\r\n") == "0.1.27");
+  CHECK(claktory::PointedVersion("  0.1.27\n\n") == "0.1.27");
+  CHECK(claktory::PointedVersion("").empty());
+  CHECK(claktory::PointedVersion("\n").empty());
+  CHECK(claktory::PointedVersion("0.1.27\n0.1.26").empty());
+  CHECK(claktory::PointedVersion("..").empty());
+  CHECK(claktory::PointedVersion(std::string("0.1\0.27", 7)).empty());
+  // A byte-order mark is no part of a version.
+  CHECK(claktory::PointedVersion("\xEF\xBB\xBF" "0.1.27").empty());
+}
+
+void LauncherCountsOnlyAFailedExitAsFailing() {
+  CHECK(!claktory::FailedToStart(false, 0));
+  CHECK(!claktory::FailedToStart(false, 1));
+  // Handed over to the app already running.
+  CHECK(!claktory::FailedToStart(true, 0));
+  CHECK(claktory::FailedToStart(true, 1));
+  CHECK(claktory::FailedToStart(true, 0xC0000005ul));
+}
+
+void LauncherTakesTheProcessToWaitFor() {
+  std::wstring arguments = L"--after 4321 claktory://open";
+  CHECK(claktory::TakeAfter(&arguments) == 4321);
+  CHECK(arguments == L"claktory://open");
+  arguments = L"--after 4321";
+  CHECK(claktory::TakeAfter(&arguments) == 4321);
+  CHECK(arguments.empty());
+  for (const wchar_t* kept :
+       {L"", L"claktory://open --after 4321", L"--after", L"--after x",
+        L"--after 0", L"--after 12x", L"--after 4294967296",
+        L"--after 99999999999", L"--afterward 12"}) {
+    arguments = kept;
+    CHECK(claktory::TakeAfter(&arguments) == 0);
+    CHECK(arguments == kept);
+  }
+  arguments = L"--after 4294967295";
+  CHECK(claktory::TakeAfter(&arguments) == 4294967295ul);
+}
+
+void LauncherDeletesOnlyVersionsNeitherPointerNames() {
+  auto stale = claktory::StaleVersions(
+      {"0.1.25", "0.1.26", "0.1.27", "launcher.log", "..", "x", "0.1.28.tmp"},
+      "0.1.27", "0.1.26");
+  CHECK(stale.size() == 1 && stale[0] == "0.1.25");
+  // With no previous, only current is kept.
+  stale = claktory::StaleVersions({"0.1.26", "0.1.27"}, "0.1.27", "");
+  CHECK(stale.size() == 1 && stale[0] == "0.1.26");
+  // With no current, the launcher deletes nothing (it isn't called), but
+  // the rule itself still never names a non-version.
+  stale = claktory::StaleVersions({"current", "previous"}, "", "");
+  CHECK(stale.empty());
+}
+
 }  // namespace
 
 int main() {
@@ -327,6 +404,11 @@ int main() {
   DefaultFrameIsCenteredAndCapped();
   SavedFrameRoundTrips();
   SavedFrameMustStillBeOnAScreen();
+  LauncherVersionsAreDigitsAndDots();
+  LauncherReadsOnlyAVersionFromItsPointer();
+  LauncherCountsOnlyAFailedExitAsFailing();
+  LauncherTakesTheProcessToWaitFor();
+  LauncherDeletesOnlyVersionsNeitherPointerNames();
   std::printf("%d checks, %d failed\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

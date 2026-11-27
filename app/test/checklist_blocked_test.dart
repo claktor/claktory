@@ -1,7 +1,7 @@
-// A blocked checklist item says what it waits on (#255): on you, as the
+// A blocked checklist item says what it waits on: on you, as the
 // agent's state (waiting for it to ask you) until a card asks, then See
 // question; else the blocker's few words. Nothing stands out: only a card
-// is something to do (Matt's ruling).
+// is something to do.
 import 'package:factory_app/extensions.dart' show blockedFor;
 import 'package:factory_app/identity.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';

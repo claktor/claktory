@@ -1,4 +1,4 @@
-//! `factoryd export` (#217): a Claktory into a move bundle (docs/MOVE.md),
+//! `factoryd export`: a Claktory into a move bundle (docs/MOVE.md),
 //! and with --final the tombstone, which --restore undoes and
 //! --delete-moved finishes.
 

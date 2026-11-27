@@ -12,13 +12,22 @@
 //! secret, and stopped with everything it started at its timeout. What it
 //! prints (secrets hidden) shows on the card and goes to the agent; it's
 //! kept in `ask_runs`, which db_query can't read, and goes with its card.
+//!
+//! Not on Windows yet: a card with a command is refused when
+//! it's asked for (`prepare`), so none runs there.
 //! A run Claktory stopped during (a restart, an update) is stopped too, and
 //! never run again.
 
+#![cfg_attr(windows, allow(dead_code, reason = "no card runs a command on Windows yet; see `prepare`"))]
+
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::os::fd::OwnedFd;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -253,6 +262,9 @@ fn hiding_in(what: &str, text: &str) -> Option<String> {
 /// The card's command, checked and with what the person should know of it,
 /// or why not. `cwd`: where it runs, absolute; `timeout`: in seconds.
 pub(crate) fn prepare(command: &str, cwd: &Path, timeout: Option<u32>) -> Result<Command, String> {
+    if cfg!(windows) {
+        return Err("A card can't run a command on Windows yet: give the person the command in a fenced block to run themselves.".to_owned());
+    }
     if let Some(why) = refused(command) {
         return Err(why);
     }
@@ -455,6 +467,7 @@ fn environment_of(
 
 /// The person's login shell, as the user database names it; /bin/sh when
 /// it names none that's there.
+#[cfg(unix)]
 fn login_shell() -> PathBuf {
     let mut buffer = vec![0_u8; 16 * 1024];
     let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
@@ -483,18 +496,50 @@ pub(crate) fn started_at(pid: i32) -> Option<String> {
         let got = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
         (got == size).then(|| format!("{}.{:06}", info.pbi_start_tvsec, info.pbi_start_tvusec))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         // Field 22, the start time in clock ticks: the 20th after the name.
         stat.rsplit_once(')')?.1.split_whitespace().nth(19).map(str::to_owned)
     }
+    // Its creation time, in FILETIME units.
+    #[cfg(windows)]
+    {
+        use factory_agent::windows::system::{creation_time, open_process};
+        creation_time(&open_process(u32::try_from(pid).ok()?).ok()?).ok().map(|started| started.to_string())
+    }
 }
 
+#[cfg(unix)]
 fn signal_group(pgid: i32, signal: i32) {
     if pgid > 1 {
         // SAFETY: a negative pid signals that process group only.
         unsafe { libc::kill(-pgid, signal) };
+    }
+}
+
+/// Asks a run's process group to stop (SIGTERM).
+#[cfg(unix)]
+fn terminate_group(pgid: i32) {
+    signal_group(pgid, libc::SIGTERM);
+}
+
+/// Stops a run's process group at once (SIGKILL).
+#[cfg(unix)]
+fn kill_group(pgid: i32) {
+    signal_group(pgid, libc::SIGKILL);
+}
+
+/// On Windows a run would be a job named for its shell's pid: ended whole.
+#[cfg(windows)]
+fn terminate_group(pgid: i32) {
+    kill_group(pgid);
+}
+
+#[cfg(windows)]
+fn kill_group(pgid: i32) {
+    if pgid > 1 {
+        factory_agent::windows::job::stop(pgid.unsigned_abs());
     }
 }
 
@@ -505,14 +550,11 @@ fn group_alive(pgid: i32) -> bool {
 /// Programs that ask who you are before running as someone else.
 const ASKING: [&str; 3] = ["sudo", "doas", "su"];
 
-/// One of `ASKING` running in process group `pgid`, by name, if any: the
-/// run waits for a fingerprint or a password. Once it runs as root its name
-/// can't be read, but the file it runs can.
+/// One of `ASKING` running in process group `pgid`, if any: the run waits
+/// for a fingerprint or a password.
 pub(crate) fn asking_in(pgid: i32) -> Option<&'static str> {
-    factory_agent::tools::asking::processes(pgid).iter().find_map(|process| {
-        let file = process.path.rsplit('/').next().unwrap_or_default();
-        ASKING.iter().find(|asking| process.name == **asking || file == **asking).copied()
-    })
+    use factory_agent::tools::asking;
+    asking::processes(pgid).iter().find_map(|process| ASKING.iter().find(|name| asking::known_as(process, name)).copied())
 }
 
 /// Card `ask`'s command as History shows it (NeedsYouRecord.command): as it
@@ -617,7 +659,17 @@ pub(crate) fn start(factory: &Arc<Factory>, agent: &str, ask: i64, command: Comm
     });
 }
 
+/// On Windows nothing runs: `prepare` refuses such a card (a card from
+/// another computer's Claktory, moved here, fails to start).
+#[cfg(windows)]
+async fn execute(_factory: &Arc<Factory>, _agent: &str, _ask: i64, _command: &Command, mut run: Run) -> Run {
+    run.state = State::FailedToStart;
+    run.error = "A card can't run a command on Windows yet.".to_owned();
+    run
+}
+
 /// Runs it, following it on the card, until it ends or its time is up.
+#[cfg(unix)]
 async fn execute(factory: &Arc<Factory>, agent: &str, ask: i64, command: &Command, mut run: Run) -> Run {
     let failed = |mut run: Run, why: String| {
         run.state = State::FailedToStart;
@@ -854,14 +906,14 @@ pub(crate) fn stop_all(factory: &Factory) {
         return;
     }
     for (_, pgid, _) in &running {
-        signal_group(*pgid, libc::SIGTERM);
+        terminate_group(*pgid);
     }
     let until = std::time::Instant::now() + Duration::from_secs(2);
     while running.iter().any(|(_, pgid, _)| group_alive(*pgid)) && std::time::Instant::now() < until {
         std::thread::sleep(Duration::from_millis(50));
     }
     for (ask, pgid, run) in running {
-        signal_group(pgid, libc::SIGKILL);
+        kill_group(pgid);
         let _ = factory.store.db().execute(
             "UPDATE ask_runs SET error = ?2, output = ?3, truncated = ?4, duration = ?5, pgid = NULL, leader_start = NULL WHERE ask = ?1 AND state = 'running'",
             params![ask, STOPPED, run.output, run.truncated, run.duration],
@@ -900,9 +952,9 @@ pub(crate) fn recover(factory: &Arc<Factory>) {
             // Stopped as Claktory stopped (`stop_all`).
             None if error == STOPPED => STOPPED,
             Some(pgid) => {
-                signal_group(pgid, libc::SIGTERM);
+                terminate_group(pgid);
                 std::thread::sleep(Duration::from_millis(200));
-                signal_group(pgid, libc::SIGKILL);
+                kill_group(pgid);
                 tracing::warn!(%agent, ask, pgid, "stopped a card's command a stopped Claktory left running");
                 STOPPED
             }
@@ -1015,14 +1067,19 @@ mod tests {
         assert_eq!(warnings("su -", "Matt's Mac", false)[0].kind, Kind::Admin);
     }
 
+    #[cfg(unix)]
     #[test]
     fn what_asks_who_you_are_is_seen_in_the_group() {
         let dir = std::env::temp_dir().join(format!("command-cards-asking-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
-        // Never the real one: /bin/sleep, named sudo, signed again ad hoc
-        // (macOS kills a copy of a system binary that keeps Apple's).
-        let sudo = dir.join("sudo");
-        std::fs::copy("/bin/sleep", &sudo).expect("copy");
+        // Never the real one, nor anything named sudo, which Claktory stops
+        // in the agent's command that runs these tests: /bin/sleep under
+        // sudo's stand-in name, signed again ad hoc (macOS kills a copy of a
+        // system binary that keeps Apple's). cp writes it, so no command
+        // started meanwhile holds it open for writing ("Text file busy").
+        factory_agent::tools::asking::stand_ins_for_test();
+        let sudo = dir.join(format!("{}sudo", factory_agent::tools::asking::STAND_IN));
+        assert!(std::process::Command::new("cp").arg("/bin/sleep").arg(&sudo).status().expect("cp").success());
         if cfg!(target_os = "macos") {
             assert!(std::process::Command::new("codesign").args(["-f", "-s", "-"]).arg(&sudo).output().expect("codesign").status.success());
         }

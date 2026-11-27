@@ -269,7 +269,7 @@ pub fn grouped(number: i64) -> String {
     if number < 0 { format!("-{out}") } else { out }
 }
 
-// ---- The export for Charts (#411) ----
+// ---- The export for Charts ----
 
 /// The export's schema: its columns and what they mean are API.md's
 /// "Usage export".
@@ -296,7 +296,7 @@ struct Row {
     status: String,
 }
 
-/// `claktory-account stats --format charts-json` (#411): Claktory's usage
+/// `claktory-account stats --format charts-json`: Claktory's usage
 /// as global counts per completed UTC day, the last [`EXPORT_DAYS`], for
 /// Charts: no identifier, label or record of any one Claktory, account or
 /// device, only totals over all of them. Read in one read transaction, so
@@ -358,7 +358,7 @@ fn export_rows(conn: &Connection, now: i64) -> rusqlite::Result<Vec<Row>> {
             })?
             .collect()
     };
-    // Claktories, and the accounts behind them (users, #411 follow-up).
+    // Claktories, and the accounts behind them (users).
     let in_touch = by_day(
         "SELECT day, count(DISTINCT claktory_id), count(DISTINCT account_id) FROM seen_days WHERE day >= ?1 AND day <= ?2 GROUP BY day",
         2,
@@ -386,7 +386,7 @@ fn export_rows(conn: &Connection, now: i64) -> rusqlite::Result<Vec<Row>> {
     )?;
 
     let mut rows = Vec::new();
-    // Today, so far (slice 3, Fugo 27512): its own window, `partial`,
+    // Today, so far (slice 3): its own window, `partial`,
     // never passed off as a completed day.
     let mut add = |start: i64, window: &str, metric: &str, value: i64| {
         let (window, status) = if start == today { ("today", "partial") } else { (window, "ok") };
@@ -476,7 +476,7 @@ fn export_rows(conn: &Connection, now: i64) -> rusqlite::Result<Vec<Row>> {
             status: "ok".into(),
         });
     }
-    // Users and Claktories by country now, for the map (Bruno 29945):
+    // Users and Claktories by country now, for the map:
     // those in touch in the 30 days ending yesterday, as rolling30's are
     // counted; a Claktory in its own country, a user in their Claktory's.
     // A Claktory no longer there (its account deleted, or moved to another
@@ -537,8 +537,7 @@ fn export_rows(conn: &Connection, now: i64) -> rusqlite::Result<Vec<Row>> {
 }
 
 /// Users by how many Claktories they have: `1`, `2`, `3-5` and `6+`,
-/// exact, small ones included (Matt's decision, Bruno 29945: the export
-/// is his alone).
+/// exact, small ones included (the export is his alone).
 fn claktory_counts(per_user: &[i64]) -> Vec<(&'static str, i64)> {
     let count = |range: std::ops::RangeInclusive<i64>| per_user.iter().filter(|n| range.contains(n)).count() as i64;
     vec![("1", count(1..=1)), ("2", count(2..=2)), ("3-5", count(3..=5)), ("6+", count(6..=i64::MAX))]
@@ -549,12 +548,12 @@ fn claktory_counts(per_user: &[i64]) -> Vec<(&'static str, i64)> {
 pub const EXPORT_HOURS: i64 = 28 * 24;
 const HOUR: i64 = 3_600;
 
-/// Each UTC hour of the last [`EXPORT_HOURS`] (#411 follow-up): Claktories
+/// Each UTC hour of the last [`EXPORT_HOURS`]: Claktories
 /// whose check-in reached the service in it, Claktories and users whose
 /// agents worked in it, and how many agents worked at once on average
 /// (agent minutes over 60, times 100), over all of them; exact, small
-/// numbers included (Matt, Bruno 29945). The two latest hours are partial:
-/// an hour's work reaches the service at the check-in after it.
+/// numbers included. The two latest hours are partial: an hour's work
+/// reaches the service at the check-in after it.
 fn hour_rows(conn: &Connection, now: i64) -> rusqlite::Result<Vec<Row>> {
     use std::collections::HashMap;
     let current = now - now.rem_euclid(HOUR);
@@ -606,7 +605,7 @@ fn hour_rows(conn: &Connection, now: i64) -> rusqlite::Result<Vec<Row>> {
     Ok(rows)
 }
 
-// ---- Monthly publications (#411, slice 2) ----
+// ---- Monthly publications (slice 2) ----
 
 /// The most labels a breakdown other than countries has, Other among
 /// them: the smallest past them are added up as Other.
@@ -667,7 +666,7 @@ const DELETED: &str = "Deleted";
 /// ("Netherlands"; the only place one comes from), Unknown when there's
 /// none, else Other when it isn't a country's name in form (letters,
 /// spaces and `.,'()-`, 60 characters at most). Every country gets its
-/// own, for the map (Matt, Bruno 29402); never a region or city.
+/// own, for the map; never a region or city.
 fn canonical_country(raw: Option<&str>) -> String {
     let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty() && *raw != "unknown") else { return "Unknown".to_owned() };
     let named = raw.chars().count() <= 60
@@ -703,9 +702,8 @@ impl Part {
 }
 
 /// A breakdown as published: every label with its exact amounts, small
-/// ones included, the largest first (Matt's decision, Bruno 29402 and
-/// 29945: the export is his alone). Past `most` labels, the smallest are
-/// added up as Other, last.
+/// ones included, the largest first (the export is his alone). Past
+/// `most` labels, the smallest are added up as Other, last.
 fn breakdown(parts: std::collections::BTreeMap<String, Part>, most: Option<usize>) -> Vec<(String, Part)> {
     let mut other: Option<Part> = None;
     let mut named: Vec<(String, Part)> = Vec::new();

@@ -91,7 +91,15 @@ fn volume_of(path: &Path) -> Option<(String, u64, u64)> {
     Some((mount, stats.f_blocks * block, stats.f_bavail * block))
 }
 
-#[cfg(not(target_os = "macos"))]
+/// On Windows: the volume's root (`C:\`), its size and room for this user.
+#[cfg(windows)]
+fn volume_of(path: &Path) -> Option<(String, u64, u64)> {
+    let space = crate::windows::fs::space(path).ok()?;
+    let mount = crate::windows::fs::volume_root(path).ok()?;
+    Some((mount.display().to_string(), space.total, space.available))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
 fn volume_of(path: &Path) -> Option<(String, u64, u64)> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
@@ -117,6 +125,25 @@ fn volume_of(path: &Path) -> Option<(String, u64, u64)> {
     Some((mount.display().to_string(), blocks * block, available * block))
 }
 
+/// Which of `groups` process `pid` is in, by its process group.
+#[cfg(unix)]
+fn groups_by_pid(groups: &[Group]) -> impl Fn(u32) -> Option<usize> + '_ {
+    move |pid| process_group(pid).and_then(|pgid| groups.iter().position(|group| group.pgid == pgid))
+}
+
+/// On Windows, by the job each group's command runs in (named for its
+/// shell's pid, as a process group is for its leader's), read once.
+#[cfg(windows)]
+fn groups_by_pid(groups: &[Group]) -> impl Fn(u32) -> Option<usize> + '_ {
+    let members: HashMap<u32, usize> = groups
+        .iter()
+        .enumerate()
+        .flat_map(|(index, group)| factory_agent::windows::job::processes(group.pgid).into_iter().map(move |(pid, _)| (pid, index)))
+        .collect();
+    move |pid| members.get(&pid).copied()
+}
+
+#[cfg(unix)]
 fn process_group(pid: u32) -> Option<u32> {
     let pid = libc::pid_t::try_from(pid).ok()?;
     // SAFETY: getpgid only reads the process table.
@@ -160,10 +187,16 @@ impl Sampler {
     pub(crate) fn sample(&mut self, known: &Known) -> Sample {
         self.refresh();
         let me = std::process::id();
+        #[cfg(unix)]
         let supervisor = std::env::var_os(crate::update::SUPERVISED).and_then(|_| {
             // SAFETY: getppid can't fail.
             u32::try_from(unsafe { libc::getppid() }).ok()
         });
+        #[cfg(windows)]
+        let supervisor = std::env::var_os(crate::update::SUPERVISED)
+            .and_then(|_| self.system.process(sysinfo::Pid::from_u32(me))?.parent())
+            .map(sysinfo::Pid::as_u32);
+        let group_of = groups_by_pid(&known.groups);
         let processes = self.system.processes();
         let parents: HashMap<u32, u32> =
             processes.iter().filter_map(|(pid, process)| Some((pid.as_u32(), process.parent()?.as_u32()))).collect();
@@ -195,7 +228,7 @@ impl Sampler {
             // watch's (its group) or a command running now: the agent sees those.
             if process.cpu_usage() >= BUSY.min(known.full_core)
                 && !under_me(pid)
-                && !process_group(pid).is_some_and(|pgid| known.groups.iter().any(|group| group.pgid == pgid))
+                && group_of(pid).is_none()
             {
                 let name = process.name().to_string_lossy().into_owned();
                 let (id, cpu_percent, cpu_ms) = ((pid, process.start_time()), process.cpu_usage(), process.accumulated_cpu_time());
@@ -214,7 +247,7 @@ impl Sampler {
                 add(app.get_or_insert_with(|| entry("App", "app", "", pid)), process);
                 continue;
             }
-            if let Some(index) = process_group(pid).and_then(|pgid| known.groups.iter().position(|group| group.pgid == pgid)) {
+            if let Some(index) = group_of(pid) {
                 add(&mut groups[index], process);
                 continue;
             }

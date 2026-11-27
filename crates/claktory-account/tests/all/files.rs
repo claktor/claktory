@@ -59,7 +59,7 @@ fn old_share_releases_and_their_ips_are_forgotten() {
     assert!(db::releases(&conn, "claktory-0123456789", 10).unwrap().is_empty());
 }
 
-/// #412: a database from before unlocks were emailed only when unusual
+/// A database from before unlocks were emailed only when unusual
 /// gains when each Claktory signed in (unknown for those before) and
 /// whether each unlock was emailed: all of those before were.
 #[test]

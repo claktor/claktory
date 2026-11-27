@@ -1,7 +1,8 @@
-//! What a model call holds in memory beyond the conversation itself (#454):
+//! What a model call holds in memory beyond the conversation itself:
 //! measured with a counting allocator, so a file of its own (the allocator
 //! is the process's), its tests one at a time (`one_at_a_time`). Each bound
-//! sits between what the code held before #454 and after, so a copy of the
+//! sits between what the code held before it stopped copying the conversation and
+//! after, so a copy of the
 //! conversation creeping back fails it; `--nocapture` prints the numbers.
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -256,7 +257,7 @@ async fn what_a_model_call_holds_beyond_its_conversation() {
     reset_peak();
     let stream = factory_agent::providers::anthropic::stream_simple(&model, context, options.clone()).expect("stream");
     let body = until_asked(&server).await;
-    // Before #454: 0.01× while streaming, 1.21× at its peak.
+    // Before it stopped copying: 0.01× while streaming, 1.21× at its peak.
     report("provider", size, live().saturating_sub(base), peak() - base, (0.5, 0.8));
     eprintln!("provider: request body {:.1} MB", body as f64 / MB);
     options.cancel.cancel();
@@ -475,7 +476,7 @@ async fn what_streaming_a_long_tool_call_copies() {
         copied as f64 / MB,
         copied as f64 / message as f64
     );
-    // Before #454: 3084×, each piece copied into the run's context and
+    // Before it stopped copying: 3084×, each piece copied into the run's context and
     // for each listener besides its update; 1560× after.
     assert!(copied < 2200 * message, "copied {copied} bytes");
 }

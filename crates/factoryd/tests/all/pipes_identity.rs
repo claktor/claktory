@@ -1,4 +1,4 @@
-//! Verified pipes (Fugo's list): whose Claktory the other side is, as the
+//! Verified pipes: whose Claktory the other side is, as the
 //! account service vouches, pinned with the pipe. Statements here are a
 //! test's ("account|email|iat|exp|endpoint"), checked the way the real
 //! verifier answers: what doesn't check is None.
@@ -162,10 +162,10 @@ async fn the_account_service_vouches_for_the_key_the_pipes_pin() {
     assert!(identity::check_for_test(&factory, &tampered, &endpoint).is_none());
 }
 
-/// What this side presents follows its sign-in at once (Abbacchio's row
-/// 1252): signed out and in again to another account, between two pings,
-/// it never presents the first account's statement, and presents the new
-/// one as soon as the service gives it, not a day later.
+/// What this side presents follows its sign-in at once: signed out and
+/// in again to another account, between two pings, it never presents the
+/// first account's statement, and presents the new one as soon as the
+/// service gives it, not a day later.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_new_sign_in_presents_its_own_statement_at_once() {
     let dir = crate::common::temp_dir();
@@ -196,7 +196,7 @@ async fn a_new_sign_in_presents_its_own_statement_at_once() {
     until(&factory, "bo@example.com").await;
 
     // Signed in again, even to the same account: nothing until the new
-    // sign-in's statement comes (Fugo), then that.
+    // sign-in's statement comes, then that.
     client.ok(client_message::Body::AccountSignOut(v1::AccountSignOut {})).await;
     crate::claktory_account::sign_in(&mut client, &service, "bo@example.com").await;
     assert_eq!(identity::own_for_test(&factory).as_deref(), Some(""), "the last sign-in's dropped at once");
@@ -204,10 +204,10 @@ async fn a_new_sign_in_presents_its_own_statement_at_once() {
 }
 
 /// A statement vouches for the other side only for a while after the
-/// account service made it (Fugo, row 1252: 25 hours for now, an hour
-/// later), however long it says it
-/// lasts: one kept on past a sign-out or another sign-in stops showing the
-/// pipe as verified, and one heard already stale changes nothing.
+/// account service made it (25 hours for now, an hour later), however long
+/// it says it lasts: one kept on past a sign-out or another sign-in stops
+/// showing the pipe as verified, and one heard already stale changes
+/// nothing.
 #[tokio::test]
 async fn a_statement_vouches_only_while_its_fresh() {
     let (_dir, factory, mut client, mut view, pipe) = setup(false).await;
@@ -230,7 +230,7 @@ async fn a_statement_vouches_only_while_its_fresh() {
     assert_eq!(peer_of(&view, &pipe), (false, String::new(), Change::Lapsed, "ana@example.com".into()));
 }
 
-/// Abbacchio's rows 1327 and 1328, Fugo: back to the account the person
+/// Back to the account the person
 /// accepted, with a statement made after the other account's, the change
 /// clears by itself; one kept from before can't clear it. What came
 /// meanwhile isn't let in but waits for the person. Another account with
@@ -252,7 +252,7 @@ async fn back_to_the_accepted_account_clears_the_change_only_with_a_newer_statem
     pipes::receive_for_test(&factory, &pipe, incoming("m1", "FROM-CYD")).expect("received");
     assert_eq!(state_of(&factory, &pipe, "FROM-CYD"), v1::PipeMessageState::HeldIncoming);
     let early = pipes::messages_for_test(&factory, &pipe).into_iter().find(|message| message.text == "FROM-CYD").expect("held").seq;
-    // Then another, after more than a page of the pipe (Fugo 37600): every
+    // Then another, after more than a page of the pipe: every
     // one held is relabelled, however far back.
     for n in 0..1001 {
         pipes::sent_for_test(&factory, &pipe, &format!("filler {n}"), true);
@@ -268,7 +268,7 @@ async fn back_to_the_accepted_account_clears_the_change_only_with_a_newer_statem
     }
 
     // Signed out there: another account with nothing presented can't be
-    // accepted (row 1328), and nothing is let in.
+    // accepted, and nothing is let in.
     hear("");
     view.follow(&mut client, |view| peer_of(view, &pipe).1.is_empty()).await;
     match apply_request(&mut client, &mut view, accept(&pipe)).await {

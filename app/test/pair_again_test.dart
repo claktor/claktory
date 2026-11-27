@@ -1,7 +1,7 @@
 import 'package:factory_app/connections.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-// Friend bug #38: a device paired again with a Claktory it already had
+// A device paired again with a Claktory it already had
 // (after that Claktory lost its sign-in, say) was listed there twice, and
 // kept both here, the old one knocking and turned away.
 

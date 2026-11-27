@@ -1,4 +1,4 @@
-// Cards their agents took back once they no longer applied (#407): in the
+// Cards their agents took back once they no longer applied: in the
 // conversation they say who withdrew them and why, with nothing to answer;
 // one being answered just closes; a late answer's refusal shows as it is;
 // and Needs you's History says the same.

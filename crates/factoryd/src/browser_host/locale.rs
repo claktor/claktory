@@ -139,6 +139,7 @@ fn system_languages() -> Vec<String> {
 
 /// `defaults read -g AppleLanguages`: a property list array, one quoted
 /// or bare tag a line ("(\n    \"en-GB\",\n    it\n)").
+#[cfg_attr(windows, allow(dead_code, reason = "read on a Mac only; its test runs everywhere"))]
 fn apple_languages(said: &str) -> Vec<String> {
     said.lines()
         .map(|line| line.trim().trim_end_matches(',').trim_matches('"'))

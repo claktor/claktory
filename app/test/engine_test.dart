@@ -1,4 +1,4 @@
-// Friend bug #27: what quitting the Mac app does to Claktory on its Mac
+// What quitting the Mac app does to Claktory on its Mac
 // (Settings.when_app_quits), turning it off now (StopEngine), and starting
 // it again (`factoryd install --start`): ⌘Q, the app menu's Stop or Start
 // Claktory, Settings → General's choice and switch, and the first launch's

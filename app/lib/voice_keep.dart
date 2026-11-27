@@ -54,25 +54,97 @@ class KeptFile {
   final int size;
   final String uploadId;
 
-  Map<String, Object?> toJson() => {
-    'path': path,
+  /// As kept beside its voice message in [folder]: by its name there when
+  /// it's kept with it ([keepWith]), so it's found again wherever the
+  /// system puts the app's folders after a relaunch or an update (#615);
+  /// by its path when it stayed where the person chose it.
+  Map<String, Object?> toJson({String? folder}) => {
+    if (folder != null && path.startsWith('$folder/'))
+      'file': path.substring(folder.length + 1)
+    else
+      'path': path,
     'name': name,
     'size': size,
     'upload_id': uploadId,
   };
 
-  static KeptFile? fromJson(Object? json) {
+  /// Read back from beside its voice message in [folder].
+  static KeptFile? fromJson(Object? json, {String? folder}) {
     if (json is! Map<String, Object?>) return null;
-    final path = json['path'];
+    final inFolder = json['file'];
     final name = json['name'];
     final upload = json['upload_id'];
-    if (path is! String || name is! String || upload is! String) return null;
+    final String path;
+    if (inFolder is String && folder != null && !inFolder.contains('/')) {
+      path = '$folder/$inFolder';
+    } else if (json['path'] case final String kept) {
+      path = _found(kept);
+    } else {
+      return null;
+    }
+    if (name is! String || upload is! String) return null;
     return KeptFile(
       path: path,
       name: name,
       size: (json['size'] as num?)?.toInt() ?? 0,
       uploadId: upload,
     );
+  }
+
+  /// [path], kept by an older app: a copy in the app's temporary folder
+  /// found again under that folder as it is now, when the system moved it.
+  static String _found(String path) {
+    if (File(path).existsSync()) return path;
+    const mark = '/$attachmentsFolder/';
+    final at = path.indexOf(mark);
+    if (at < 0) return path;
+    for (final folder in appCopyFolders()) {
+      final now = '${folder.path}${path.substring(at)}';
+      if (File(now).existsSync()) return now;
+    }
+    return path;
+  }
+}
+
+/// Where the iPhone's and Android's pickers put the copies they make
+/// (AppDelegate.swift's Attach, AttachmentPicker.kt), in one of
+/// [appCopyFolders].
+const attachmentsFolder = 'Attachments';
+
+/// The app's temporary folder, where its pickers' copies and pasted images
+/// go: the system may clear it while the app isn't running, and Android's
+/// picker prunes its copies after a day. Tests set another.
+Directory Function() appTempFolder = () => Directory.systemTemp;
+
+/// The folders the app's own copies are in: its temporary folder, and on
+/// Android the app's cache folder beside it (Context.getCacheDir), where
+/// its picker copies; Dart's temporary folder there is code_cache.
+List<Directory> appCopyFolders() => [
+  appTempFolder(),
+  if (defaultTargetPlatform == TargetPlatform.android)
+    Directory('${appTempFolder().parent.path}/cache'),
+];
+
+/// Moves [file], one of the app's own temporary copies (a photo picked or
+/// pasted), into [folder], a voice message's kept folder, as its [index]th
+/// file, so it stays until the Claktory has the message; answers
+/// where it is now. A file the person chose where it lives stays there.
+Future<String> keepWith(String file, String folder, int index) async {
+  final copy = appCopyFolders().any((temp) => file.startsWith('${temp.path}/'));
+  if (!copy || file.startsWith('$folder/')) return file;
+  final target = '$folder/$index-${file.split('/').last}';
+  try {
+    await File(file).rename(target);
+    return target;
+  } on FileSystemException {
+    try {
+      // Not on one disk: copied, then the copy left behind goes.
+      await File(file).copy(target);
+      await File(file).delete();
+      return target;
+    } on FileSystemException {
+      return file;
+    }
   }
 }
 
@@ -201,7 +273,8 @@ class KeptVoice extends Recording {
     'request_id': requestId,
     'uploaded': uploaded,
     if (text.isNotEmpty) 'text': text,
-    if (files.isNotEmpty) 'files': [for (final file in files) file.toJson()],
+    if (files.isNotEmpty)
+      'files': [for (final file in files) file.toJson(folder: folder.path)],
     if (draft) 'draft': true,
   };
 
@@ -237,7 +310,8 @@ class KeptVoice extends Recording {
         text: text('text'),
         files: [
           if (json['files'] case final List<Object?> files)
-            for (final file in files) ?KeptFile.fromJson(file),
+            for (final file in files)
+              ?KeptFile.fromJson(file, folder: folder.path),
         ],
         draft: json['draft'] == true,
       );
@@ -310,8 +384,7 @@ const _emptyAfter = Duration(minutes: 1);
 void _sweepStray(Directory entry) {
   try {
     final age = DateTime.now().difference(entry.statSync().modified);
-    if (age > _strayAfter ||
-        (age > _emptyAfter && entry.listSync().isEmpty)) {
+    if (age > _strayAfter || (age > _emptyAfter && entry.listSync().isEmpty)) {
       entry.deleteSync(recursive: true);
     }
   } on FileSystemException {

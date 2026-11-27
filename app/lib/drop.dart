@@ -29,15 +29,16 @@ enum DropWhere {
 /// Where files dragged over the window would go, and to whom.
 typedef DropPlace = ({DropWhere where, String name, Color? color});
 
-/// Over the whole Mac window while files from the Finder are dragged over
+/// Over the whole Mac or iPad window while files are dragged over
 /// it: the window dims under a 30% scrim, edged in the color of whoever
 /// they'd go to, and a card in its middle says where they'll go and how
 /// many ("Drop to add to your message to June", "3 files"), or why they
 /// can't go anywhere here (a chat takes text only; no conversation is
 /// open). It fades in and out in `fast`, never takes the pointer, and goes
 /// once they're dropped or leave; the window's drag is native, so crossing
-/// what's under it doesn't flicker it. Only a Mac's window takes drops
-/// ([FileDrop.windowDrops]); a phone, an iPad or Android shows nothing.
+/// what's under it doesn't flicker it. A Mac's and Windows' windows take drops
+/// ([FileDrop.windowDrops]), and an iPad's, from Files, Photos and other
+/// apps; an iPhone or Android shows nothing.
 class WindowDropOverlay extends StatefulWidget {
   const WindowDropOverlay({super.key});
 
@@ -78,7 +79,10 @@ class _WindowDropOverlayState extends State<WindowDropOverlay> {
 
   @override
   Widget build(BuildContext context) {
-    if (!FileDrop.windowDrops || isPhoneLayout(context)) {
+    // An iPad shows it at every width: in Split View and Slide Over its
+    // window takes the phone's layout, and still takes drops.
+    if (!FileDrop.windowDrops ||
+        (isPhoneLayout(context) && !FileDrop.iPadDrops)) {
       return const SizedBox.shrink();
     }
     return IgnorePointer(
@@ -146,6 +150,8 @@ class _WindowDropOverlayState extends State<WindowDropOverlay> {
         border: takes ? Border.all(color: color, width: 2) : null,
       ),
       alignment: Alignment.center,
+      // Clear of the window's edges in Slide Over's 320 points too.
+      padding: const EdgeInsets.all(Space.l),
       child: Container(
         constraints: const BoxConstraints(maxWidth: 420),
         padding: const EdgeInsets.symmetric(

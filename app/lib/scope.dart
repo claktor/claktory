@@ -40,6 +40,10 @@ enum AppPage {
   usage,
   inbox,
   monitors,
+
+  /// A project's Files on their own ([Backend.filesPage]), when the agent
+  /// shown isn't in it.
+  files,
 }
 
 /// What widgets below the app share: the backend with its stores, the
@@ -95,7 +99,7 @@ class AppScope extends InheritedWidget {
   /// Shows Settings at [section] (settings_view.dart's section ids, such as
   /// "general"), and [setting] in it (a SettingAnchor's id, such as "move")
   /// brought into view and glowing; wide, the section beside the index,
-  /// narrow, its page over the list (Lucy's Settings spec §5).
+  /// narrow, its page over the list.
   static void openSettingsAt(
     BuildContext context,
     String section, {
@@ -116,8 +120,8 @@ class AppScope extends InheritedWidget {
 
   /// The agent whose layout [page]s open in: the selected one on a Mac;
   /// none on a phone, where they're pages of their own, nor while a pipe or
-  /// a chat shows in its place, where they'd open out of sight beside it
-  /// (Abbacchio's row 638): they take the pipe's or chat's place instead.
+  /// a chat shows in its place, where they'd open out of sight beside it:
+  /// they take the pipe's or chat's place instead.
   static Agent? _besideAgent(BuildContext context) {
     if (isPhoneLayout(context)) return null;
     final store = scope(context).backend.workspace;

@@ -683,7 +683,13 @@ mod tests {
         );
         assert_eq!(
             read(serde_json::json!({"files": ["src/", "/abs/report.csv"]})),
-            Ok((When::Files { paths: vec!["/work/src/".into(), "/abs/report.csv".into()], glob: None }, None))
+            Ok((
+                When::Files {
+                    paths: vec![std::path::Path::new("/work").join("src/").to_string_lossy().into_owned(), "/abs/report.csv".into()],
+                    glob: None
+                },
+                None
+            ))
         );
         assert_eq!(
             read(serde_json::json!({"watch": "tail -F app.log"})),

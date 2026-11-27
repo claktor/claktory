@@ -1,12 +1,10 @@
-//! Downloads in an errand (#435 R9, agent-browser.md R9; Fugo 36893,
-//! 36912): a file Chrome downloads while the errand's agent drives it, from
-//! a page of the errand's sites, with `browser_download` or a click. It's a
-//! hostile page's bytes landing inside the boundary: Chrome saves it under
-//! its GUID in the runner's download folder; P4's host (`land`) reads it
-//! over C1, counts and hashes it itself, keeps it in a store by its hash
-//! and copies it, named by Claktory and inert, into the errand agent's
-//! folder. Anyone else gets it only with `errand_file`, which marks them as
-//! having read the page it came from.
+//! Downloads: a file
+//! Chrome downloads while its agent drives it, with `browser_download` or a
+//! click. It's a hostile page's bytes landing inside the boundary: Chrome
+//! saves it under its GUID in the runner's download folder; P4's host
+//! (`land`) reads it over C1, counts and hashes it itself, keeps it in a
+//! store by its hash and copies it, named by Claktory and inert, into the
+//! agent's own data folder.
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -239,29 +237,30 @@ pub(crate) fn size(bytes: u64) -> String {
 }
 
 /// A file tool (read_file, read_image, the edit tools, show) used `path`
-/// (relative to `folder`, `agent`'s): if it's a download, in an errand
-/// agent's folder or a copy errand_file made, `agent` has read the pages
-/// of its errand (R9, Fugo 4: depth on top of errand_file; bash isn't
-/// matched on paths).
+/// (relative to `folder`, `agent`'s): if it's a file Claktory's browser
+/// downloaded, `agent` has read something from outside, as a web page read
+/// marks it (R9, Fugo 4; bash isn't matched on paths).
 pub(crate) fn touched(factory: &crate::factory::Factory, agent: &str, folder: &Path, path: &str) {
     let path = Path::new(path);
     let full = if path.is_absolute() { path.to_path_buf() } else { folder.join(path) };
     let full = std::fs::canonicalize(&full).unwrap_or(full);
     let root = std::fs::canonicalize(factory.home.root()).unwrap_or_else(|_| factory.home.root().to_path_buf());
-    let Some(errand) = errand_of(&root, &full).and_then(|id| factory.errands.get(&id)) else { return };
-    for site in &errand.sites {
-        crate::pipes::agents::taint(factory, agent, &crate::pipes::agents::Kind::Browser(site).key());
+    if session_of(&root, &full).is_some() {
+        super::read_outside(factory, agent, "a file Claktory's browser downloaded");
     }
 }
 
-/// The errand whose download `path` is, by where it is under Claktory's
-/// folder `root`: <root>/errands/<agent>/downloads/<errand>/… (its agent's
-/// copy) or <root>/agents/<agent>/downloads/<errand>/… (errand_file's).
-fn errand_of(root: &Path, path: &Path) -> Option<String> {
+/// The browsing session whose download `path` is, by where it is under
+/// Claktory's folder `root`: <root>/agents/<agent>/downloads/<session>/…,
+/// or <root>/errands/<agent>/downloads/<errand>/… from before
+/// browser-simple.
+fn session_of(root: &Path, path: &Path) -> Option<String> {
     let rest = path.strip_prefix(root).ok()?;
     let parts: Vec<&str> = rest.components().map(|part| part.as_os_str().to_str()).collect::<Option<_>>()?;
     match parts.as_slice() {
-        ["errands" | "agents", _, "downloads", errand, ..] if errand.starts_with("errand-") => Some((*errand).to_owned()),
+        ["errands" | "agents", _, "downloads", session, ..] if session.starts_with("errand-") || session.starts_with("browse-") => {
+            Some((*session).to_owned())
+        }
         _ => None,
     }
 }
@@ -273,10 +272,11 @@ mod tests {
     #[test]
     fn downloads_are_known_by_where_they_are() {
         let root = Path::new("/h/.factory");
-        let of = |path: &str| errand_of(root, Path::new(path));
+        let of = |path: &str| session_of(root, Path::new(path));
         assert_eq!(of("/h/.factory/errands/runner/downloads/errand-1/a.zip").as_deref(), Some("errand-1"));
         assert_eq!(of("/h/.factory/agents/lead/downloads/errand-1/sub/a.zip").as_deref(), Some("errand-1"));
         assert_eq!(of("/h/.factory/agents/lead/downloads/errand-1").as_deref(), Some("errand-1"));
+        assert_eq!(of("/h/.factory/agents/yukako/downloads/browse-17/a.png").as_deref(), Some("browse-17"));
         for elsewhere in [
             "/h/.factory/agents/lead/uploads/a.zip",
             "/h/.factory/agents/lead/downloads/mine.zip",

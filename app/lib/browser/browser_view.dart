@@ -496,7 +496,8 @@ class BrowserControl {
 /// Whether browser control is on for some agent in [workspace]. A backend
 /// without it (FACTORY_BROWSER_PREVIEW off) has no such extension.
 bool browserWanted(Workspace workspace) => workspace.agents.any(
-  (agent) => agent.extensions.any((e) => e.id == 'browser' && e.enabled),
+  (agent) =>
+      agent.extensions.any((e) => e.id == 'browser_control' && e.enabled),
 );
 
 /// A Claktory this Mac's browser control could serve: its backend, the

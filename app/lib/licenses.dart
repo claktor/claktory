@@ -2,9 +2,9 @@ import 'package:flutter/foundation.dart';
 
 // Licences of code the app ships that isn't Dart's or Flutter's own, so
 // they show where the app lists its licences: ZXing core 3.5.3 (Apache
-// 2.0), which the Android app reads QR codes with (Doppio's, Risotto's
-// pin). Its jar holds no NOTICE file (Fugo checked), so the licence is
-// the Apache text with ZXing's copyright line from its source headers.
+// 2.0), which the Android app reads QR codes with. Its jar holds
+// no NOTICE file, so the licence is the Apache
+// text with ZXing's copyright line from its source headers.
 
 /// ZXing's copyright line, as its source headers give it.
 const zxingCopyright = 'Copyright (C) 2007 ZXing authors';

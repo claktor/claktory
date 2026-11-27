@@ -1,4 +1,4 @@
-//! Rivet's pipe cards (#471, pipes-rivet-stories.md, Fugo's rule C): new
+//! Rivet's pipe cards: new
 //! words for a pipe shown old beside new, its liaison's spending limit
 //! lowered at once or raised on a card, a closed pipe deleted on a card,
 //! narrowing after reading from outside labelled so, and what pipes_list
@@ -93,8 +93,7 @@ async fn rivet_changes_a_pipes_words_only_on_a_card_that_shows_them_old_beside_n
         call(&mut client, &mut view, "rivet", "pipes_settings", r#"{"pipe": "Site talk", "reason": "x", "name": "Site talk"}"#).await;
     assert_eq!(same, "Say what to change. Nothing was changed.");
 
-    // A review already as asked: nothing to say it turned on (Abbacchio
-    // row 1232).
+    // A review already as asked: nothing to say it turned on.
     let review = r#"{"pipe": "Site talk", "reason": "x", "review_incoming": true}"#;
     let said = call(&mut client, &mut view, "rivet", "pipes_settings", review).await;
     assert!(said.starts_with("Turned Review incoming on"), "{said}");
@@ -251,7 +250,7 @@ async fn rivet_deletes_a_closed_pipe_only_on_a_card() {
     view.follow(&mut client, |view| shown(view, &pipe).is_none()).await;
 }
 
-/// Abbacchio's row 1196: a pipe the other side paused, only they resume;
+/// A pipe the other side paused, only they resume;
 /// Rivet is told so at once, with no card.
 #[tokio::test]
 async fn a_pipe_the_other_side_paused_is_never_a_card_to_resume() {
@@ -275,7 +274,7 @@ async fn a_pipe_the_other_side_paused_is_never_a_card_to_resume() {
     }
 }
 
-/// #471 G11: pipes_list counts what waits on each pipe, never what it says.
+/// Pipes_list counts what waits on each pipe, never what it says.
 #[tokio::test]
 async fn pipes_list_counts_what_waits_for_the_person() {
     let (factory, mut client, mut view, pipe) = setup().await;

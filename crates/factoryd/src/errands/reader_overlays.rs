@@ -39,7 +39,7 @@ async fn a_cookie_notice_is_read_first_and_refused_with_its_most_private_choice(
     // What it covers says so.
     let under = element(&read, "Add to basket").reference.clone();
     let covered = page.act(&mut hands.hand(), &Op::on_element(&read.document, 0, &under, None).unwrap()).await.unwrap_err();
-    assert!(covered.1.starts_with("covered by a cookie notice: clear it with errand_act op dismiss"), "{covered:?}");
+    assert!(covered.1.starts_with("covered by a cookie notice: clear it with browser_act op dismiss"), "{covered:?}");
     // Its Accept all isn't the agent's to press while it offers a refusal.
     let accept = element(&read, "Accept all").reference.clone();
     let refused = page.act(&mut hands.hand(), &Op::on_element(&read.document, 0, &accept, None).unwrap()).await.unwrap_err();

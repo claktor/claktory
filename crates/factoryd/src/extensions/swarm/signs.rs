@@ -1,4 +1,4 @@
-//! The warning signs: the playbook's thresholds (§3) that the records can
+//! The warning signs: the playbook's thresholds that the records can
 //! show today, each evaluated at a moment over the windows it needs. A sign
 //! is red when it holds both now and 6 hours ago, two windows that don't
 //! overlap (`red`): two hourly checks of overlapping windows aren't two
@@ -156,7 +156,7 @@ pub(crate) fn signs(db: &Connection, team: &Team, end: i64, now: i64, names: &Ha
         }
     }
 
-    // Coordination concentrated at the hub (Narancia's middleman.md §3): a
+    // Coordination concentrated at the hub: a
     // screen, never a verdict that it only passes messages on.
     if traffic.messages >= 100 && traffic.hub_received >= 50 && traffic.hub_senders >= 5 && traffic.via_hub >= 0.35 {
         signs.push(Sign {

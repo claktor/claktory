@@ -1,4 +1,4 @@
-// Sale rows 8 and 7: a fresh Android tablet reaches the shared store welcome,
+// A fresh Android tablet reaches the shared store welcome,
 // not the Mac's ConnectStep, and its code field stays above the keyboard.
 // Recording backends and fake native channels, not camera/device acceptance.
 import 'package:factory_app/android/pair_step.dart';

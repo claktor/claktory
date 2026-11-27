@@ -1,4 +1,4 @@
-// Voice messages in the app (#197): recording one in an agent's message
+// Voice messages in the app: recording one in an agent's message
 // box (the waveform as it's heard, a timer, Cancel), which the composer
 // then sends as a voice message for the agent's Claktory to transcribe;
 // asking once before that Claktory downloads its speech model; how a voice
@@ -38,7 +38,7 @@ String micRefusedForGood() => switch (defaultTargetPlatform) {
     "Claktory can't use the microphone. Allow it in System Settings → "
         'Privacy & Security → Microphone.',
   TargetPlatform.iOS =>
-    // The system's Settings, not Claktory's own (Lucy's Settings spec §5).
+    // The system's Settings, not Claktory's own.
     "To record, allow microphone access in the $thisDeviceKind's Settings "
         'app.',
   TargetPlatform.android =>
@@ -124,7 +124,7 @@ class VoiceRecording extends ChangeNotifier {
       }
       _levels.clear();
       _elapsed = Duration.zero;
-      // Straight into the folder it's kept in until sent (#401).
+      // Straight into the folder it's kept in until sent.
       final into = await newRecordingPath(now());
       _into = into;
       // What earlier recordings left behind unknown to the app goes now.
@@ -239,7 +239,7 @@ String voiceDuration(Duration duration) {
   return '${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}';
 }
 
-/// A voice note waiting in a message box (#425), recorded while the box
+/// A voice note waiting in a message box, recorded while the box
 /// had something written: a chip over the text, as a file's is, with the
 /// mic, "Voice note" and its length, and × to take it out. It goes with
 /// the text when the box is sent.
@@ -670,7 +670,7 @@ class Waveform extends CustomPainter {
 }
 
 /// Whether voice messages are offered at all (the mic, Settings → Voice);
-/// on since Claktory transcribes them (#197 slice 3). Tests turn it off.
+/// on since Claktory transcribes them. Tests turn it off.
 bool voiceMessagesOn = true;
 
 /// Whether [workspace]'s Claktory knows voice messages: an older one
@@ -1142,7 +1142,7 @@ class _VoiceSettingsState extends State<VoiceSettings> with SettingRequests {
 }
 
 /// Settings → This iPhone (this device's own section): recordings said
-/// for an answer and not sent, kept on this device (#401), whose card has gone (answered elsewhere, say) or
+/// for an answer and not sent, kept on this device, whose card has gone (answered elsewhere, say) or
 /// isn't open now: each to play, or delete. One whose card opens goes back
 /// to it, and is sent.
 class KeptRecordings extends StatelessWidget {

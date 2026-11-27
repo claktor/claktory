@@ -30,7 +30,9 @@ void main() {
       final harness = Harness(_workspace(dms: dms));
       await harness.show(tester, size: const Size(1200, 900));
       await pumpFrames(tester);
-      final people = find.bySemanticsLabel('People');
+      await tester.tap(find.bySemanticsLabel(RegExp(r'^More$')).first);
+      await pumpFrames(tester);
+      final people = find.text('People');
       expect(people, dms ? findsOneWidget : findsNothing);
       if (!dms) return;
       await tester.tap(people);

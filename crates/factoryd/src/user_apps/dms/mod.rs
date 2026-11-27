@@ -1,4 +1,4 @@
-//! Agents in the person's direct messages (D4a, dms.md §7): an agent the
+//! Agents in the person's direct messages: an agent the
 //! person gave access to some of their conversations, through Rivet's card
 //! (`crate::user_apps`), reads them (dm_read), drafts replies for the
 //! person to send (dm_draft), proposes messages sent only once the person
@@ -27,7 +27,7 @@
 //!   drafts to 20 an hour a grant; wakes for a conversation wait until the
 //!   agent has read the last one, and come at most 20 an hour an agent.
 
-// H2, H3 and H5 call it as they land (#451).
+// H2, H3 and H5 call it as they land.
 #[allow(dead_code)]
 pub(crate) mod home;
 pub(crate) mod leaf;
@@ -587,7 +587,7 @@ async fn read_messages(factory: &Arc<Factory>, agent: &str, args: ReadArgs) -> R
         for conversation in &listed {
             let state = if conversation.active { "ongoing" } else { "ended" };
             let _ = write!(text, "\n- {}: with {}, {state}", conversation.id, who(&conversation.with));
-            // The service doesn't see the messages (#451): the last one
+            // The service doesn't see the messages: the last one
             // this Claktory kept.
             if let Some(last) = last_kept(factory, &conversation.group_id) {
                 let _ = write!(text, ", last message #{last}");
@@ -609,7 +609,7 @@ async fn read_messages(factory: &Arc<Factory>, agent: &str, args: ReadArgs) -> R
         return Err("Say after or before, not both.".to_owned());
     }
     // The service says first what the agent may read: its grant and where
-    // it starts (dms-e2ee.md §5.2). The messages are then read from this
+    // it starts. The messages are then read from this
     // Claktory's own store, from the grant's start on.
     let listed = conversations(factory, &actor).await?;
     let Some(entry) = listed.iter().find(|listed| listed.id == conversation) else {
@@ -648,7 +648,7 @@ async fn read_messages(factory: &Arc<Factory>, agent: &str, args: ReadArgs) -> R
             (_, false) => them.clone(),
             (_, true) => format!("{them} · an agent"),
         };
-        // Said by a device its person has since taken out (row 561).
+        // Said by a device its person has since taken out.
         let writer = if message.body.get("from_removed_device") == Some(&Value::Bool(true)) {
             format!("{writer} · from a device since removed")
         } else {
@@ -726,7 +726,7 @@ fn local_page(factory: &Factory, entry: &Conversation, after: Option<i64>, befor
                 by_agent: !content["by_agent"].is_null(),
                 accepted_ms: accepted,
                 body: if row["departed"] == json!(true) {
-                    // Said by a device its person has since taken out (row 561).
+                    // Said by a device its person has since taken out.
                     json!({"text": content["text"], "from_removed_device": true})
                 } else {
                     json!({"text": content["text"]})
@@ -822,7 +822,7 @@ struct SealedDraft<'a> {
 }
 
 /// Seals `draft` in this Claktory's channel, keeps its digest at the
-/// service and sends it into the channel through the person's home (#451).
+/// service and sends it into the channel through the person's home.
 /// Refused as out of date (the friendship's generation), or bounced by the
 /// home (the channel's epoch moved on), it's made again once, after
 /// catching up.

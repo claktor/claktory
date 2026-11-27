@@ -1,17 +1,22 @@
 //! The bash tool's shell on Windows: Git for Windows' Bash, a private copy
-//! Claktory ships beside its backend (windows.md §2, "Keep `bash` meaning
-//! Bash"), run by its absolute path, never whichever `bash` is on PATH (WSL's
+//! Claktory ships beside its backend, so `bash` means Bash, run by its absolute path, never whichever `bash` is on PATH (WSL's
 //! `bash.exe` in System32 among them).
 //!
-//! Layout, beside the backend (`tools` next to factoryd.exe), or where
-//! `FACTORY_WINDOWS_TOOLS` says for development and QA:
+//! Layout, in the home's `tools` (beside `bin`, where factoryd.exe is), or
+//! where `FACTORY_WINDOWS_TOOLS` says for development and QA:
 //!
 //! ```text
-//! tools\git\usr\bin\bash.exe     Bash and the Unix tools it comes with
-//! tools\git\ucrt64\bin           git and its native helpers (mingw64
+//! tools\git.txt                  the Git folder in use, such as git-2.51.0;
+//!                                `git` when there's no such file
+//! tools\<git>\usr\bin\bash.exe   Bash and the Unix tools it comes with
+//! tools\<git>\ucrt64\bin         git and its native helpers (mingw64
 //!                                before Git for Windows 2.50)
 //! tools\bin                      rg.exe, jq.exe
 //! ```
+//!
+//! Each Git goes in a folder of its own, named by its version, so an update
+//! puts a new one beside the one agents' commands may still be running
+//! from, and only the pointer changes.
 //!
 //! Commands run as on a Mac: `bash --noprofile --norc -e -o pipefail -c
 //! SCRIPT`, so no startup file (the person's or Git's) runs, and the agent's
@@ -57,6 +62,10 @@ const FILTERED_TASK_WRAPPER: &str = concat!(
     r#"( unset CLAKTORY_REDACT; exec "$BASH" --noprofile --norc -e -o pipefail -c "$s" ) 2>&1 | "$@"; echo "${PIPESTATUS[0]}" > "$f""#
 );
 
+/// Runs a monitor's check as a Mac's `bash -o pipefail -c` does: without
+/// -e, its stderr and stdout together.
+const CHECK_WRAPPER: &str = r#"s=$CLAKTORY_SCRIPT; unset CLAKTORY_SCRIPT; exec 2>&1; exec "$BASH" --noprofile --norc -o pipefail -c "$s""#;
+
 /// Runs the script with its output on pipes.
 const PIPED_WRAPPER: &str = r#"s=$CLAKTORY_SCRIPT; unset CLAKTORY_SCRIPT; exec "$BASH" --noprofile --norc -e -o pipefail -c "$s""#;
 
@@ -76,10 +85,34 @@ pub struct Shell {
     pub msystem: &'static str,
 }
 
+/// The file in `tools` that names the Git folder in use.
+pub const GIT_POINTER: &str = "git.txt";
+
+/// Whether `name` may be a Git folder's: `git`, or `git-` and a version,
+/// with nothing that could reach another folder.
+pub fn is_git_folder(name: &str) -> bool {
+    name == "git"
+        || name.strip_prefix("git-").is_some_and(|version| {
+            !version.is_empty()
+                && version.len() <= 64
+                && version.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+                && !version.starts_with('.')
+        })
+}
+
+/// The Git folder `tools` uses: the one GIT_POINTER names, or `git`.
+pub fn git_folder(tools: &Path) -> String {
+    std::fs::read_to_string(tools.join(GIT_POINTER))
+        .ok()
+        .map(|text| text.trim().to_owned())
+        .filter(|name| is_git_folder(name))
+        .unwrap_or_else(|| "git".to_owned())
+}
+
 impl Shell {
     /// The shell in `tools`, if it's all there.
     pub fn in_folder(tools: &Path) -> std::io::Result<Shell> {
-        let git = tools.join("git");
+        let git = tools.join(git_folder(tools));
         let bash = git.join("usr").join("bin").join("bash.exe");
         if !bash.is_file() {
             return Err(std::io::Error::new(
@@ -92,8 +125,9 @@ impl Shell {
         Ok(Shell { bash, path, msystem })
     }
 
-    /// The shell this backend uses: in FACTORY_WINDOWS_TOOLS, or in `tools`
-    /// beside the backend's executable. Looked for once.
+    /// The shell this backend uses: in FACTORY_WINDOWS_TOOLS, or in the
+    /// home's `tools`, beside the `bin` the backend runs from. Looked for
+    /// once.
     pub fn get() -> std::io::Result<&'static Shell> {
         static SHELL: OnceLock<Result<Shell, String>> = OnceLock::new();
         let found = SHELL.get_or_init(|| {
@@ -102,7 +136,8 @@ impl Shell {
                 None => std::env::current_exe()
                     .map_err(|error| error.to_string())?
                     .parent()
-                    .map(|folder| folder.join("tools"))
+                    .and_then(Path::parent)
+                    .map(|home| home.join("tools"))
                     .unwrap_or_default(),
             };
             Shell::in_folder(&tools).map_err(|error| error.to_string())
@@ -143,7 +178,7 @@ impl Shell {
         }
         // The private tools go first on whichever PATH won, the agent's
         // own too: `bash` in a command must be Git Bash's, never WSL's
-        // launcher in System32 (Hermes 47067).
+        // launcher in System32.
         let mut path: Vec<PathBuf> = self.path.clone();
         if let Some(theirs) = get(&environment, "PATH") {
             path.extend(std::env::split_paths(&theirs).filter(|entry| !self.path.contains(entry)));
@@ -180,6 +215,14 @@ impl Shell {
         set(&mut environment, SCRIPT.into(), script.into());
         let args: Vec<OsString> = ["--noprofile", "--norc", "-c", PIPED_WRAPPER, "factory"].map(OsString::from).to_vec();
         spawn::spawn(Command { program: &self.bash, args, environment, cwd, stdout: Output::Pipe, stderr: Some(Output::Pipe) })
+    }
+
+    /// Starts a monitor's check, `script`, in a job of its own, its output
+    /// and errors together on one pipe (`Child::stdout`).
+    pub fn spawn_check(&self, cwd: &Path, script: &str, mut environment: Vec<(OsString, OsString)>) -> std::io::Result<(Child, u32)> {
+        set(&mut environment, SCRIPT.into(), script.into());
+        let args: Vec<OsString> = ["--noprofile", "--norc", "-c", CHECK_WRAPPER, "factory-check"].map(OsString::from).to_vec();
+        spawn::spawn(Command { program: &self.bash, args, environment, cwd, stdout: Output::Pipe, stderr: None })
     }
 }
 
@@ -243,6 +286,28 @@ mod tests {
     #[test]
     fn paths_go_to_bash_with_forward_slashes() {
         assert_eq!(unix_style(Path::new(r"C:\Users\fred\task-1.status")), OsString::from("C:/Users/fred/task-1.status"));
+    }
+
+    #[test]
+    fn the_git_in_use_is_the_one_its_pointer_names_and_only_a_plain_name() {
+        let tools = std::env::temp_dir().join(format!("claktory-git-pointer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tools);
+        std::fs::create_dir_all(&tools).unwrap();
+        assert_eq!(git_folder(&tools), "git");
+        for (written, used) in [
+            ("git-2.51.0.windows.1\r\n", "git-2.51.0.windows.1"),
+            ("git", "git"),
+            ("..", "git"),
+            ("git-..\\x", "git"),
+            ("git-../x", "git"),
+            ("git-", "git"),
+            ("C:\\git", "git"),
+            ("other", "git"),
+        ] {
+            std::fs::write(tools.join(GIT_POINTER), written).unwrap();
+            assert_eq!(git_folder(&tools), used, "{written:?}");
+        }
+        let _ = std::fs::remove_dir_all(&tools);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-// An iPad's permissions (Lucy's permissions.md, area 5a; Bruno 48678):
+// An iPad's permissions:
 // - P7: the camera's first time on the pairing screen keeps its words and
 //   Continue together in the window's middle at every width, Slide Over's
 //   320 included, never at a phone's foot; refused, the same.

@@ -1,4 +1,4 @@
-// Row 208: the production PhoneClaktories root, not Shell's fallback drawer.
+// The production PhoneClaktories root, not Shell's fallback drawer.
 // Real product navigation with a recording backend; not native acceptance.
 import 'package:factory_app/agent_view.dart';
 import 'package:factory_app/account.dart' show SignInStep;

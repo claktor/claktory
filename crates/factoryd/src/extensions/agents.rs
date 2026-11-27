@@ -275,7 +275,7 @@ impl Extension for Agents {
             Some(me) => (sees_map(me), crate::proposals::is_admin(me), !agent_list(me, ID, "also").is_empty()),
             None => (false, false, false),
         };
-        // Giving up messaging an agent of another project (#236).
+        // Giving up messaging an agent of another project.
         if also && !admin {
             tools.push(crate::given_up::reach_tool(factory, agent));
         }
@@ -759,7 +759,7 @@ fn deliver(factory: &Arc<Factory>, sender: &str, targets: &[String], text: &str,
             });
         }
     }
-    // What the sender read never reaches them (#346): only its signature
+    // What the sender read never reaches them: only its signature
     // says it read a web page.
     let mut recorded = Vec::new();
     for (id, text, event) in letters {
@@ -777,7 +777,7 @@ fn deliver(factory: &Arc<Factory>, sender: &str, targets: &[String], text: &str,
         match provenance::record(&factory.store, &copy) {
             Ok(id) => {
                 // The lead reads it with agents_copies: what the sender read
-                // counts for its errands as a message's would (row 1721).
+                // counts for its errands as a message's would.
                 crate::errands::relayed(factory, &lead, sender);
                 factory.broadcast_workspace(&factory.lock());
                 Ok((id, name))
@@ -957,7 +957,7 @@ fn other_agent(factory: &Factory, admin: &str, wanted: &str, verb: &str, convers
 /// what's queued for it stays.
 fn stop(factory: &Arc<Factory>, admin: &str, args: TargetArgs) -> Result<ToolResult, String> {
     // A page or a pipe it read mustn't stop the person's agents mid-task
-    // (Fugo, Abbacchio's row 1047).
+    // .
     super::untainted(factory, admin, "stop other agents", "stop one with Stop in its conversation. Nothing was done.")?;
     let (id, name) = other_agent(factory, admin, &args.agent, "stop", false)?;
     let (running, queued) =

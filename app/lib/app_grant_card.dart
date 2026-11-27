@@ -45,7 +45,7 @@ String _agentName(AppGrantProposal grant, Workspace workspace) =>
 const appGrantSend = 'dm.send';
 
 /// What the warning says when the agent it would give access to has read
-/// a web page (grantee_read_pipes, agents_read_pipes: since #346 only a
+/// a web page (grantee_read_pipes, agents_read_pipes: only a
 /// page read through browser control marks an agent); more when it could
 /// send as the person.
 String appGrantReadPipes(String name, {required bool sends}) => sends
@@ -62,7 +62,7 @@ bool appGrantNamed(List<AppGrantResource> resources) => resources.every(
 );
 
 /// A resource that is one of the person's conversations, named on this
-/// device from People's friends, never from the card (Fugo F1).
+/// device from People's friends, never from the card.
 const appGrantConversation = 'conversation';
 
 /// A conversation the card would reach that isn't one of the person's
@@ -71,7 +71,7 @@ const appGrantUnknownConversation = "A conversation this device can't find";
 
 /// A conversation the card would reach, while People's friends can't be
 /// read: maybe the person's, maybe not, so neither named nor called
-/// unknown (Abbacchio).
+/// unknown.
 const appGrantUncheckedConversation =
     "A conversation that can't be checked right now";
 
@@ -153,7 +153,7 @@ class _AppGrantCardState extends State<AppGrantCard> with PublishesAnswer {
   final _comment = TextEditingController();
 
   /// Whose each conversation it reaches is, from People's friends on this
-  /// device (Fugo F1): null while they load; [_friendsFailed] when they
+  /// device: null while they load; [_friendsFailed] when they
   /// couldn't be read, so none is known.
   Map<String, String>? _friends;
   var _friendsFailed = false;
@@ -216,11 +216,11 @@ class _AppGrantCardState extends State<AppGrantCard> with PublishesAnswer {
     super.dispose();
   }
 
-  /// [reply]: Submit (#370), the comment going to Rivet as the person's
+  /// [reply]: Submit, the comment going to Rivet as the person's
   /// reply, and nothing given; Rivet can suggest it again. Sent with
   /// approve off, so a backend that doesn't know replies declines it.
   /// [reason]: the no's, from focus mode's dock, with the comment.
-  /// [rethrowing] for focus mode's keys (#514): refused, it throws too.
+  /// [rethrowing] for focus mode's keys: refused, it throws too.
   Future<void> _decide({
     required bool approve,
     bool reply = false,
@@ -251,7 +251,7 @@ class _AppGrantCardState extends State<AppGrantCard> with PublishesAnswer {
 
   void _submit() => unawaited(_decide(approve: false, reply: true));
 
-  /// Approve and Decline for focus mode's keys (#514), and Submit once a
+  /// Approve and Decline for focus mode's keys, and Submit once a
   /// comment's typed, as the card's buttons.
   @override
   CardAnswer? answerNow() {
@@ -342,7 +342,7 @@ class _AppGrantCardState extends State<AppGrantCard> with PublishesAnswer {
             ),
           ),
           // Before anything else it gives: whom it would give it to has
-          // read a web page (Fugo's condition; a pipe before #346).
+          // read a web page (or, in older versions, a pipe).
           if (grant.granteeReadPipes) ...[
             const SizedBox(height: Space.s),
             _ReadPipes(
@@ -358,7 +358,7 @@ class _AppGrantCardState extends State<AppGrantCard> with PublishesAnswer {
             _Reason(
               rivetName: rivetName,
               // Rivet's words, to decide on: what reorders text shows by
-              // its code (proseCodes, Fugo).
+              // its code (proseCodes).
               reason: proseCodes(grant.reason.trim()),
               color: color,
             ),
@@ -482,9 +482,8 @@ class _AppGrantCardState extends State<AppGrantCard> with PublishesAnswer {
     final loading = _reachesConversations && _friends == null;
     final unknown = !loading && !_known;
     return [
-      // The field, open from the start, above the row (Lucy's rules 2 and
-      // 4). Once something's typed, one Submit: a reply, giving nothing;
-      // Return too.
+      // The field, open from the start, above the row. Once something's
+      // typed, one Submit: a reply, giving nothing; Return too.
       CardAnswerBlock(
         field: (focus) => DecisionComment(
           controller: _comment,
@@ -575,7 +574,7 @@ class _AppGrantCardState extends State<AppGrantCard> with PublishesAnswer {
         "Approved, but couldn't give $name access",
         palette.danger,
       ),
-      // Answered with a comment (#370): nothing given.
+      // Answered with a comment: nothing given.
       _ when grant.replied => ('Replied', palette.textMuted),
       _ => ('Declined', palette.textMuted),
     };
@@ -624,7 +623,7 @@ class _AppGrantCardState extends State<AppGrantCard> with PublishesAnswer {
 /// Rivet's reason, set apart as its words, never as Claktory's: under
 /// "Rivet's reason", plain text (no Markdown or links, so nothing in it
 /// can look like the card's own lines or controls) beside a bar in
-/// Rivet's color, four lines and then Show more (Fugo's rule).
+/// Rivet's color, four lines and then Show more.
 class _Reason extends StatelessWidget {
   const _Reason({
     required this.rivetName,

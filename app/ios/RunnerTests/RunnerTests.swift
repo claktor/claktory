@@ -22,9 +22,17 @@ struct RunnerTests {
   }
 
   @MainActor @Test func attachMenuHasSomewhereToComeFrom() throws {
+    // An iPad's: on an iPhone the menu is a sheet from the bottom, with no
+    // popover to point (and RunnerTests run on an iPhone 16 Pro).
+    guard UIDevice.current.userInterfaceIdiom == .pad else { return }
     let view = UIView(frame: CGRect(x: 0, y: 0, width: 1024, height: 1366))
     let menu = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
     Attach.anchor(menu, in: view, rect: [900, 1300, 44, 44])
+    // An iPhone's action sheet rises from the bottom: no popover to place.
+    guard UIDevice.current.userInterfaceIdiom == .pad else {
+      #expect(menu.popoverPresentationController == nil)
+      return
+    }
     let popover = try #require(menu.popoverPresentationController)
     #expect(popover.sourceView === view)
     #expect(popover.sourceRect == CGRect(x: 900, y: 1300, width: 44, height: 44))
@@ -176,17 +184,19 @@ final class FakeMessenger: NSObject, FlutterBinaryMessenger {
 
   /// Calls [method] on [channel] as the app would; its result or error,
   /// or FlutterMethodNotImplemented for a method the channel doesn't have
-  /// (which replies with nothing at all).
+  /// (which replies with nothing at all). One never answered fails its test
+  /// after 30 s, naming the call, and gives nil.
   func call(_ channel: String, _ method: String, _ arguments: Any? = nil) async -> Any? {
     let codec = FlutterStandardMethodCodec.sharedInstance()
     let message = codec.encode(FlutterMethodCall(methodName: method, arguments: arguments))
     let handler = handlers[channel]!
-    return await withCheckedContinuation { done in
+    let answer: Any?? = await InkTests.answer("\(channel) \(method)") { done in
       handler(message) { reply in
-        guard let reply else { return done.resume(returning: FlutterMethodNotImplemented) }
-        done.resume(returning: Self.decode(reply))
+        guard let reply else { return done(FlutterMethodNotImplemented) }
+        done(Self.decode(reply))
       }
     }
+    return answer ?? nil
   }
 
   /// A result, or the FlutterError it failed with.
@@ -637,6 +647,46 @@ struct LinksTests {
     let unknown = await messenger.call("factory/links", "nonsense")
     #expect(unknown as? NSObject === FlutterMethodNotImplemented)
   }
+
+  /// Claktory's pairing page as a Universal Link (#352 P6): only
+  /// https://claktory.com/pair with a code in its fragment; any other page,
+  /// host, path, port, user or query is dropped.
+  @Test func onlyThePairingPageOpensTheApp() async throws {
+    let page = "https://claktory.com/pair#t=\(String(repeating: "0", count: 64))&name=mac"
+    #expect(Links.isPairPage(URL(string: page)!))
+    #expect(Links.isPairPage(URL(string: "https://CLAKTORY.com/pair#t=1")!))
+    for other in [
+      "https://claktory.com/pair",
+      "https://claktory.com/pair#",
+      "https://claktory.com/pairs#t=1",
+      "https://claktory.com/pair/x#t=1",
+      "https://claktory.com/pair?t=1#t=1",
+      "https://claktory.com:8443/pair#t=1",
+      "https://a@claktory.com/pair#t=1",
+      "https://www.claktory.com/pair#t=1",
+      "https://claktory.com.evil.example/pair#t=1",
+      "http://claktory.com/pair#t=1",
+    ] {
+      #expect(!Links.isPairPage(URL(string: other)!), "\(other)")
+    }
+    let links = Links()
+    let messenger = FakeMessenger()
+    links.register(with: messenger)
+    #expect(!links.open([URL(string: "https://claktory.com/download")!]))
+    #expect(links.open([URL(string: page)!]))
+    // As the system hands it over: a web-browsing activity.
+    let activity = NSUserActivity(activityType: NSUserActivityTypeBrowsingWeb)
+    activity.webpageURL = URL(string: page)
+    #expect(Links.page(activity) == URL(string: page))
+    let other = NSUserActivity(activityType: NSUserActivityTypeBrowsingWeb)
+    other.webpageURL = URL(string: "https://claktory.com/changelog")
+    #expect(Links.page(other) == nil)
+    let handoff = NSUserActivity(activityType: "com.claktory.something")
+    handoff.webpageURL = URL(string: page)
+    #expect(Links.page(handoff) == nil)
+    let waiting = await messenger.call("factory/links", "listen") as? [String]
+    #expect(waiting == [page])
+  }
 }
 
 @MainActor
@@ -687,6 +737,9 @@ struct KeptFilesTests {
 /// History's video export (#458 E1): the writer's channel. A bad argument
 /// is an error, never a crash; it writes only to a file it makes itself in
 /// the share folder, and deletes it when an export stops.
+// Serialized: the app keeps one writer, and registering a test's replaces
+// the other's, whose calls then go unanswered.
+@Suite(.serialized)
 @MainActor
 struct ReplayWriterTests {
   let channel = "claktory/replay-writer"
@@ -743,5 +796,24 @@ struct ReplayWriterTests {
     #expect(again != path)
     #expect(await messenger.call(channel, "cancel") == nil)
     #expect(!FileManager.default.fileExists(atPath: (again as NSString).deletingLastPathComponent))
+  }
+}
+
+struct VideoSoundTests {
+  /// A video playing is heard with the ring switch on silent, as in
+  /// Photos: the playback category while one plays, let go when none does.
+  @MainActor @Test func aPlayingVideoTakesThePlaybackCategory() {
+    let first = NSObject()
+    let second = NSObject()
+    VideoSound.playing(first, true)
+    #expect(AVAudioSession.sharedInstance().category == .playback)
+    #expect(AVAudioSession.sharedInstance().mode == .moviePlayback)
+    VideoSound.playing(second, true)
+    VideoSound.playing(first, false)
+    #expect(VideoSound.active)
+    VideoSound.playing(second, false)
+    #expect(!VideoSound.active)
+    VideoSound.playing(second, false)
+    #expect(!VideoSound.active)
   }
 }

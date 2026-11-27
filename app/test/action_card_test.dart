@@ -1,6 +1,6 @@
-// An admin agent's action card (#423 items 14–16, Fugo): what Approve does
-// in Claktory's own words, and the agent's reason apart, named as its, so
-// its words never read as part of what the card does.
+// An admin agent's action card: what Approve does in
+// Claktory's own words, and the agent's reason apart, named as its, so its
+// words never read as part of what the card does.
 import 'package:factory_app/ask_card.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';

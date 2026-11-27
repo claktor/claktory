@@ -16,6 +16,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -52,7 +53,11 @@ impl Stamp {
     pub(super) fn of(path: &Path) -> std::io::Result<Stamp> {
         let meta = std::fs::metadata(path)?;
         let modified = meta.modified()?.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_nanos() as u64);
-        Ok(Stamp { inode: meta.ino(), len: meta.len(), modified_ns: modified })
+        #[cfg(unix)]
+        let inode = meta.ino();
+        #[cfg(windows)]
+        let inode = crate::windows::fs::identity(path)?.index;
+        Ok(Stamp { inode, len: meta.len(), modified_ns: modified })
     }
 }
 

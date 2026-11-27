@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show ValueListenable;
@@ -18,10 +19,12 @@ import '../pinned_agents.dart' show openPinned, pinnedAgents;
 import '../protocol/factory/v1/factory.pb.dart';
 import '../scope.dart' show AppPage, AppScope;
 import '../selection.dart' show Unselectable;
+import '../sidebar.dart' show sidebarMove, undoSidebarMove;
 import 'columns.dart';
 import 'columns.dart' as columns show project;
 import 'commands.dart';
 import 'document_host.dart' show DocumentSurfaces;
+import 'pointer_highlights.dart';
 
 /// The iPad's window when it isn't compact (docs/ipad-workbench.md): the
 /// Mac's parts (the Claktories rail, the projects sidebar, the extension
@@ -324,7 +327,7 @@ Widget _aboveKeyboard(BuildContext context, Widget child) {
 const workbenchRailWidth = WorkbenchGeometry.rail;
 
 /// Above this the panel sits beside the content; narrower, it opens over
-/// it, so the paper isn't squeezed into a sliver (ipad.md §1).
+/// it, so the paper isn't squeezed into a sliver.
 const _contentMinWidth = 440.0;
 
 class Workbench extends StatefulWidget {
@@ -372,7 +375,7 @@ class _WorkbenchState extends State<Workbench> {
   WindowControls get _controls => windowControls.value;
 
   /// Asks from outside a screen (notifications after pairing) explain
-  /// themselves over the workbench (area 5a P3, Zucchero 44139).
+  /// themselves over the workbench.
   late final VoidCallback _unhostPermissions;
 
   @override
@@ -380,11 +383,71 @@ class _WorkbenchState extends State<Workbench> {
     super.initState();
     windowControls.addListener(_controlsChanged);
     _unhostPermissions = registerPermissionHost(context);
+    sidebarMove.addListener(_moveUndoChanged);
+    FocusManager.instance.addListener(_moveUndoChanged);
+    PointerHighlights.hold();
+  }
+
+  /// Whether ⌘Z puts back the sidebar's last move now.
+  var _moveUndo = MoveUndo.none;
+
+  MoveUndo _moveUndoNow() {
+    final move = sidebarMove.value;
+    if (!mounted ||
+        move == null ||
+        !move.live ||
+        move.backend != AppScope.of(context)) {
+      return MoveUndo.none;
+    }
+    final focused = FocusManager.instance.primaryFocus?.context;
+    final inField =
+        focused != null &&
+        (focused.widget is EditableText ||
+            focused.findAncestorWidgetOfExactType<EditableText>() != null);
+    return inField ? MoveUndo.inField : MoveUndo.offered;
+  }
+
+  /// When the move's Undo stops being offered, whether or not its row
+  /// shows to say so.
+  Timer? _moveEnds;
+
+  /// Whether a text field last had the system's undo.
+  var _fieldUndo = false;
+
+  /// A text field gives up the system's undo when it loses the keys, but
+  /// Flutter leaves the iPad's undo saying it can still undo: ⌘Z (and the
+  /// menu bar's Undo) then went to that field, gone, and did nothing,
+  /// never reaching Undo Move. Once no field has it, nothing can be undone
+  /// there.
+  void _releaseFieldUndo() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final field = UndoManager.client != null;
+      if (_fieldUndo && !field) UndoManager.setUndoState();
+      _fieldUndo = field;
+    });
+  }
+
+  void _moveUndoChanged() {
+    _releaseFieldUndo();
+    final now = _moveUndoNow();
+    _moveEnds?.cancel();
+    _moveEnds = null;
+    if (now != MoveUndo.none) {
+      _moveEnds = Timer(
+        sidebarMove.value!.until.difference(DateTime.now()),
+        _moveUndoChanged,
+      );
+    }
+    if (now != _moveUndo) setState(() => _moveUndo = now);
   }
 
   @override
   void dispose() {
     windowControls.removeListener(_controlsChanged);
+    sidebarMove.removeListener(_moveUndoChanged);
+    FocusManager.instance.removeListener(_moveUndoChanged);
+    _moveEnds?.cancel();
+    PointerHighlights.release();
     _focusMode?.removeListener(_focusModeChanged);
     _highlights?.removeListener(_glowed);
     _highlights?.pointedAt.removeListener(_pointedAt);
@@ -401,7 +464,7 @@ class _WorkbenchState extends State<Workbench> {
   HighlightStore? _highlights;
   var _lastGlow = 0;
 
-  /// Whether Needs you's focus mode is over the window (#514): leaving it,
+  /// Whether Needs you's focus mode is over the window: leaving it,
   /// the workbench's commands are the menu's again.
   ValueListenable<bool>? _focusMode;
 
@@ -514,6 +577,8 @@ class _WorkbenchState extends State<Workbench> {
         pins: pinnedAgents(AppScope.of(context).workspace.workspace),
         openPin: (pin) => openPinned(context, pin.id),
         openSettings: () => AppScope.openPage(context, AppPage.settings),
+        moveUndo: _moveUndo,
+        undoMove: () => undoSidebarMove(context),
       );
       final textFactor = textFactorOf(MediaQuery.textScalerOf(context).scale);
       // The agent's panes show what fits this window, focused as the person
@@ -542,7 +607,7 @@ class _WorkbenchState extends State<Workbench> {
         _ => _wide(context, focus, constraints, content, pinned: pinned),
       };
       // The system's menu lists them as they are now, with Needs you's
-      // focus mode to enter (#514). While it's on, the workbench waits
+      // focus mode to enter. While it's on, the workbench waits
       // under it, out of sight, and focus mode's commands are the menu's
       // (ipad/focus.dart): this one publishes nothing.
       final backend = AppScope.of(context);

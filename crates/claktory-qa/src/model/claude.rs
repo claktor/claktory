@@ -10,6 +10,14 @@
 //! is refused with a 429 and the usage-limit headers, saying when it resets,
 //! and the usage reads 100% until then. After that time, or once the limit
 //! is lifted (`limit --off`, as a plan upgrade would), it answers again.
+//! With `limit --reads-full` the usage reads its weekly window at 100% while
+//! messages are still answered, as Anthropic answers an account at a
+//! weekly 100%.
+//!
+//! `up --claude --claude-accounts 2` signs in a second fake account too
+//! (`claude2@example.test`), with a limit file of its own (`limit
+//! --account 2`), so a sandbox shows requests moving between accounts. Each
+//! answered message's log line says which account it came on (`account`).
 //!
 //! It keeps Anthropic's Files API too (#382), so a sandbox shows images
 //! going to Claude once, as files, and named after: an upload is kept in
@@ -33,6 +41,15 @@ pub const ACCESS: &str = "sk-ant-oat01-qa-fake-access";
 pub const REFRESH: &str = "sk-ant-ort01-qa-fake-refresh";
 /// Who the fake account is.
 pub const EMAIL: &str = "claude@example.test";
+/// The second fake account (`--claude-accounts 2`): its tokens and who it is.
+pub const ACCESS_2: &str = "sk-ant-oat01-qa-fake-access-2";
+pub const REFRESH_2: &str = "sk-ant-ort01-qa-fake-refresh-2";
+pub const EMAIL_2: &str = "claude2@example.test";
+
+/// The limit file of fake account `account` (1 or 2), given the first's.
+pub fn limit_file(first: &Path, account: u8) -> std::path::PathBuf {
+    if account == 2 { first.with_file_name("claude-2.json") } else { first.to_owned() }
+}
 
 /// The model a sandbox's agents use with `--claude`: Claude's, without
 /// reasoning.
@@ -43,28 +60,44 @@ fn now_ms() -> u64 {
 }
 
 /// The sandbox's auth.json: Claude signed in with the fake tokens, valid for
-/// ten years, so nothing ever refreshes them.
-pub fn credentials() -> Value {
-    json!({"anthropic": {
-        "type": "oauth",
-        "access": ACCESS,
-        "refresh": REFRESH,
-        "expires": now_ms() + 10 * 365 * 24 * 3600 * 1000,
-    }})
+/// ten years, so nothing ever refreshes them; with `second`, the second
+/// fake account after it.
+pub fn credentials(second: bool) -> Value {
+    let expires = now_ms() + 10 * 365 * 24 * 3600 * 1000;
+    let mut first = json!({"type": "oauth", "access": ACCESS, "refresh": REFRESH, "expires": expires});
+    if second {
+        first["factoryAccounts"] =
+            json!([{"type": "oauth", "access": ACCESS_2, "refresh": REFRESH_2, "expires": expires, "factoryAccount": "2"}]);
+    }
+    json!({ "anthropic": first })
 }
 
-/// Until when (ms since 1970) the account is at its limit, if it still is.
-pub fn limited_until(file: &Path) -> Option<u64> {
+/// The limit file's: until when (ms since 1970), if not past, and whether
+/// it only reads full (`--reads-full`) rather than refusing.
+fn limit_of(file: &Path) -> Option<(u64, bool)> {
     let text = std::fs::read_to_string(file).ok()?;
-    let until = serde_json::from_str::<Value>(&text).ok()?["until_ms"].as_u64()?;
-    (until > now_ms()).then_some(until)
+    let limit = serde_json::from_str::<Value>(&text).ok()?;
+    let until = limit["until_ms"].as_u64()?;
+    (until > now_ms()).then(|| (until, limit["reads_full"].as_bool().unwrap_or(false)))
+}
+
+/// Until when (ms since 1970) the account is at its limit, refusing
+/// messages, if it still is.
+pub fn limited_until(file: &Path) -> Option<u64> {
+    limit_of(file).filter(|(_, reads_full)| !reads_full).map(|(until, _)| until)
+}
+
+/// Until when the account's usage reads full while it still answers
+/// (`limit --reads-full`), if it still does.
+pub fn reads_full_until(file: &Path) -> Option<u64> {
+    limit_of(file).filter(|(_, reads_full)| *reads_full).map(|(until, _)| until)
 }
 
 /// Puts the account at its limit until `until` (ms since 1970), or lifts
-/// it with None.
-pub fn set_limit(file: &Path, until: Option<u64>) -> std::io::Result<()> {
+/// it with None; with `reads_full`, its usage only reads full meanwhile.
+pub fn set_limit(file: &Path, until: Option<u64>, reads_full: bool) -> std::io::Result<()> {
     let text = match until {
-        Some(until) => json!({"until_ms": until}).to_string(),
+        Some(until) => json!({"until_ms": until, "reads_full": reads_full}).to_string(),
         None => "{}".to_owned(),
     };
     std::fs::write(file, text)
@@ -88,16 +121,21 @@ fn rfc3339(ms: u64) -> String {
 }
 
 /// The usage the account reads: its five-hour window full while it's at its
-/// limit, resetting then; else 10% used.
-fn usage(limited: Option<u64>) -> Value {
+/// limit, resetting then; its weekly one full while it only reads full,
+/// resetting then; else 10% and 20% used.
+fn usage(limited: Option<u64>, reads_full: Option<u64>) -> Value {
     let now = now_ms();
     let (used, resets) = match limited {
         Some(until) => (100.0, until),
         None => (10.0, now + 5 * 3600 * 1000),
     };
+    let (weekly, weekly_resets) = match reads_full {
+        Some(until) => (100.0, until),
+        None => (20.0, now + 7 * 24 * 3600 * 1000),
+    };
     json!({
         "five_hour": {"utilization": used, "resets_at": rfc3339(resets)},
-        "seven_day": {"utilization": 20.0, "resets_at": rfc3339(now + 7 * 24 * 3600 * 1000)},
+        "seven_day": {"utilization": weekly, "resets_at": rfc3339(weekly_resets)},
     })
 }
 
@@ -122,6 +160,10 @@ pub(super) async fn handle(
     // The sign-in's token: only the fake refresh token gets the fake access token.
     if method == "POST" && path.starts_with("/v1/oauth/token") {
         let request: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+        if request["refresh_token"] == REFRESH_2 {
+            return respond(stream, 200, "", &json!({"access_token": ACCESS_2, "refresh_token": REFRESH_2, "expires_in": 31_536_000}))
+                .await;
+        }
         if request["refresh_token"] != REFRESH {
             return respond(
                 stream,
@@ -133,15 +175,22 @@ pub(super) async fn handle(
         }
         return respond(stream, 200, "", &json!({"access_token": ACCESS, "refresh_token": REFRESH, "expires_in": 31_536_000})).await;
     }
-    if header(head, "authorization") != Some(&format!("Bearer {ACCESS}")) {
-        return respond(stream, 401, "", &error("authentication_error", "qa-model answers only the sandbox's fake Claude sign-in")).await;
-    }
-    let limited = limited_until(limit);
+    let (number, email, uuid) = match header(head, "authorization") {
+        Some(auth) if auth == format!("Bearer {ACCESS}") => (1, EMAIL, "qa-claude-account"),
+        Some(auth) if auth == format!("Bearer {ACCESS_2}") => (2, EMAIL_2, "qa-claude-account-2"),
+        _ => {
+            return respond(stream, 401, "", &error("authentication_error", "qa-model answers only the sandbox's fake Claude sign-in"))
+                .await;
+        }
+    };
+    // The account's own limit; the files are the first's, kept beside it.
+    let account_limit = limit_file(limit, number);
+    let limited = limited_until(&account_limit);
     match (method, path.split('?').next().unwrap_or_default()) {
-        ("GET", "/api/oauth/usage") => respond(stream, 200, "", &usage(limited)).await,
+        ("GET", "/api/oauth/usage") => respond(stream, 200, "", &usage(limited, reads_full_until(&account_limit))).await,
         ("GET", "/api/oauth/profile") => {
             let profile = json!({
-                "account": {"uuid": "qa-claude-account", "email": EMAIL},
+                "account": {"uuid": uuid, "email": email},
                 "organization": {"uuid": "qa-claude-organization", "organization_type": "claude_max", "rate_limit_tier": "default_claude_max_5x"},
             });
             respond(stream, 200, "", &profile).await
@@ -189,7 +238,7 @@ pub(super) async fn handle(
                 log(
                     &model.log,
                     &json!({"wire": "anthropic", "agent": agent_of(&system), "last": {"role": last.role, "text": last.text, "tool": last.tool},
-                            "limited_until_ms": until, "status": 429}),
+                            "limited_until_ms": until, "status": 429, "account": email}),
                 );
                 let headers = format!(
                     "anthropic-ratelimit-unified-status: rejected\r\nanthropic-ratelimit-unified-reset: {}\r\n",
@@ -197,7 +246,7 @@ pub(super) async fn handle(
                 );
                 return respond(stream, 429, &headers, &error("rate_limit_error", "qa-model: this account is at its usage limit")).await;
             }
-            let (number, answer) = match answer(model, &system, &last, &tools, "anthropic", json!({})) {
+            let (number, answer) = match answer(model, &system, &last, &tools, "anthropic", json!({"account": email})) {
                 Ok(answered) => answered,
                 Err(problem) => return respond(stream, 400, "", &error("invalid_request_error", &format!("qa-model: {problem}"))).await,
             };
@@ -358,15 +407,33 @@ mod tests {
         let file = dir.join("claude.json");
         assert_eq!(limited_until(&file), None);
         let until = now_ms() + 60_000;
-        set_limit(&file, Some(until)).expect("set");
+        set_limit(&file, Some(until), false).expect("set");
         assert_eq!(limited_until(&file), Some(until));
-        assert_eq!(usage(Some(until))["five_hour"]["utilization"], 100.0);
-        set_limit(&file, Some(now_ms() - 1)).expect("past");
+        assert_eq!(reads_full_until(&file), None);
+        assert_eq!(usage(Some(until), None)["five_hour"]["utilization"], 100.0);
+        set_limit(&file, Some(now_ms() - 1), false).expect("past");
         assert_eq!(limited_until(&file), None, "past its reset");
-        set_limit(&file, None).expect("off");
+        set_limit(&file, None, false).expect("off");
         assert_eq!(limited_until(&file), None);
-        assert_eq!(usage(None)["five_hour"]["utilization"], 10.0);
+        assert_eq!(usage(None, None)["five_hour"]["utilization"], 10.0);
+        // Reading full only: it still answers, and its weekly window reads 100%.
+        set_limit(&file, Some(until), true).expect("reads full");
+        assert_eq!((limited_until(&file), reads_full_until(&file)), (None, Some(until)));
+        assert_eq!(usage(None, Some(until))["seven_day"]["utilization"], 100.0);
+        assert_eq!(usage(None, None)["seven_day"]["utilization"], 20.0);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_second_account_has_its_own_tokens_and_limit_file() {
+        let first = credentials(false);
+        assert!(first["anthropic"].get("factoryAccounts").is_none(), "one account unless asked");
+        let both = credentials(true);
+        assert_eq!(both["anthropic"]["access"], ACCESS);
+        assert_eq!(both["anthropic"]["factoryAccounts"][0]["access"], ACCESS_2);
+        let file = Path::new("/sandbox/claude.json");
+        assert_eq!(limit_file(file, 1), file);
+        assert_eq!(limit_file(file, 2), Path::new("/sandbox/claude-2.json"));
     }
 
     #[test]

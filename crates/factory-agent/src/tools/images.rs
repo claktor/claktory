@@ -107,7 +107,7 @@ pub async fn read_image(cwd: &Path, args: &Value, cancel: &CancellationToken) ->
 }
 
 /// An image's bytes as a tool result shows them to the model, as read_image
-/// sends a file (#403: an image an agent made): as they are when they fit
+/// sends a file (an image an agent made): as they are when they fit
 /// what models take, else scaled down; with the size it shows at when
 /// scaled. `width` and `height` are the image's own.
 pub async fn model_part(bytes: Vec<u8>, width: u32, height: u32) -> Result<(ToolResultPart, Option<(u32, u32)>), String> {
@@ -131,7 +131,7 @@ pub async fn model_part(bytes: Vec<u8>, width: u32, height: u32) -> Result<(Tool
 }
 
 /// The SHA-256 of an image's bytes, in hex: how a provider that keeps
-/// images as files (Anthropic's, #382) knows it has sent this one.
+/// images as files (Anthropic's) knows it has sent this one.
 pub fn digest(bytes: &[u8]) -> String {
     use sha2::Digest;
     sha2::Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()

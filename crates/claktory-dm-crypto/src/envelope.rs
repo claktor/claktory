@@ -1,4 +1,4 @@
-//! Mista's (dms-e2ee.md §4, "Formats"): the format-2 envelope the worker
+//! Formats: the format-2 envelope the worker
 //! stores and relays, what it reads from the MLS framing, and the caps by
 //! kind.
 //!

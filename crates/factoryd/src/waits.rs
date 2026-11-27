@@ -12,17 +12,17 @@
 //! backend restart resumes it, and it waits again.
 //!
 //! A run whose model calls can't connect waits the same way, for the
-//! network (#364 O2): after the quick retries, it looks every few seconds
+//! network: after the quick retries, it looks every few seconds
 //! until names resolve again, then asks again, each time a little later
 //! while it keeps failing. It waits for as long as the network is down (a
 //! night, say); only a provider that can't be reached for an hour while the
 //! network works ends the run.
 //!
-//! A run whose provider keeps answering with an error that passes (#490:
-//! overloaded, a server error, too many requests, an answer cut off) waits
+//! A run whose provider keeps answering with an error that passes
+//! (overloaded, a server error, too many requests, an answer cut off) waits
 //! for the provider too: after the quick retries, it asks again after 30 s,
-//! then twice as long each time, up to 15 min, for as long as 12 hours.
-//! A message from the person, Try now or Stop ends the wait sooner.
+//! then twice as long each time, up to 15 min, for as long as 12 hours. A
+//! message from the person, Try now or Stop ends the wait sooner.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
@@ -139,7 +139,7 @@ pub(crate) fn wait_provider(factory: Weak<Factory>, id: String, epoch: u64) -> f
 }
 
 impl Factory {
-    /// Waits for a provider whose answers keep failing (#490): 30 s, twice
+    /// Waits for a provider whose answers keep failing: 30 s, twice
     /// as long with each wait in a row up to 15 min, and at least as long as
     /// the provider asked (`asked`, its Retry-After in ms, within the 15
     /// min), or sooner when something changes (Try now, a message). Once it
@@ -222,7 +222,7 @@ impl Factory {
         self.provider_wait_ms.store(u64::try_from(least.as_millis()).unwrap_or(u64::MAX), Ordering::Relaxed);
     }
 
-    /// Waits for the network (#364 O2): until names resolve again, and at
+    /// Waits for the network: until names resolve again, and at
     /// least a while that grows with each wait in a row, or sooner when
     /// something changes (Try now, a message). However long the network is
     /// down; once the provider couldn't be reached for an hour while it was
@@ -362,7 +362,7 @@ impl Factory {
         // Its model moved to a provider with room while it asked (Continue
         // for all, say, whose first change woke it before its own): the
         // limit was another provider's, so it asks again now, on its new
-        // model, rather than wait under this one's name (row 736).
+        // model, rather than wait under this one's name.
         // Judged by the registry, which knows every pool's limits (an Opus
         // one alone, U11), not only those the providers' listing shows.
         if until.is_some() && self.models.room_for(&model).await {
@@ -461,7 +461,7 @@ impl Factory {
             self.broadcast_workspace(&inner);
             brief
         };
-        // Continue automatically (friend bug #8 A2): a wait on a usage limit
+        // Continue automatically: a wait on a usage limit
         // goes on elsewhere at once, when the person turned it on and
         // another provider can run the model; the switch wakes the wait.
         if until.is_some() && !brief {
@@ -545,7 +545,7 @@ impl Factory {
     pub(crate) async fn probe_accounts(self: Arc<Self>, provider: String) {
         match self.models.forget_spent(&provider, "").await {
             // Shown at once: its accounts have room, and agents switched
-            // away from it (#341) can go back.
+            // away from it can go back.
             Ok(true) => self.refresh_models().await,
             Ok(false) => {}
             Err(error) => tracing::warn!(%provider, %error, "could not forget the accounts' spent marks"),

@@ -1,7 +1,7 @@
 // Text in a file's pane is selected with a finger on an iPad, as on an
 // iPhone: touch and hold selects a word, and the system's menu offers
-// Comment and Suggest, with no second Comment and Suggest floating over it
-// (Prosciutto's S6). A trackpad's selection has no menu, so its Comment
+// Comment and Suggest, with no second Comment and Suggest floating over it.
+// A trackpad's selection has no menu, so its Comment
 // and Suggest still float at the selection.
 import 'dart:convert';
 

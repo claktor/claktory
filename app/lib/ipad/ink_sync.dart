@@ -6,7 +6,7 @@
 //
 // What's here:
 // - InkSaveState: what the document's status line says, one value for the
-//   whole surface (Sorbet's host shows it).
+//   whole surface (the document host shows it).
 // - InkBlobs: uploading a blob (UPLOAD_PURPOSE_INK, 1 MiB at a time,
 //   picking up where an upload stopped) and reading one back (ReadInkBlob).
 // - InkLayerUploader.prepare: a page's drawing exported by native
@@ -398,7 +398,7 @@ class _Page {
 }
 
 /// One surface's drawings kept as ink layers on the backend (contract §4),
-/// for Sorbet's document host: it calls [changed] for every drawingChanged,
+/// for the document host: it calls [changed] for every drawingChanged,
 /// [ready] for every ready, [reloaded] after a new version shows, [flush]
 /// before the view goes and [dispose] when the surface does, and shows
 /// [state]. Nothing is kept on the device: what's held here is what's on
@@ -1263,7 +1263,7 @@ class _Changes extends ChangeNotifier {
   void notify() => notifyListeners();
 }
 
-/// Trish's: the limit is per page (8 MiB of drawing).
+/// The limit is per page (8 MiB of drawing).
 const _pageTooLarge =
     "This page's drawing is too large to keep. Erase some of it to save it.";
 const _tooLarge =

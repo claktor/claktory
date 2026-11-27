@@ -174,7 +174,7 @@ void main() {
             seq: Int64(3),
             event: Event(
               source: EventSource.EVENT_SOURCE_AGENT,
-              // Signed as the agent read it (#251).
+              // Signed as the agent read it.
               from: 'Writer (Docs)',
               fromId: 'a2',
               text: 'The notes are ready.\n\nAlso sent to: Lena (Backend).',
@@ -390,7 +390,7 @@ void main() {
     final harness = Harness(workspace());
     harness.backend.appliesLayouts = true;
     await harness.show(tester);
-    await tester.tap(find.bySemanticsLabel('Marketplace'));
+    await openFromMore(tester, 'Marketplace');
     await settle(tester);
     expect(find.text('No agent templates yet.'), findsOneWidget);
     await tester.tap(find.text('Skills'));

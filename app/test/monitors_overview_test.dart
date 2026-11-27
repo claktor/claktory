@@ -1,4 +1,4 @@
-// The Monitors page (friend bug #10): every agent's monitors in one place,
+// The Monitors page: every agent's monitors in one place,
 // by agent, filtered by agent, project and state (ListMonitors), each
 // agent's name opening its conversation, a held one saying it isn't
 // running, and a monitor's history a page at a time.
@@ -87,7 +87,7 @@ void main() {
     await harness.show(tester, size: const Size(1200, 900));
     await settle(tester);
     // Beside the selected agent's conversation, as Usage opens.
-    await tester.tap(find.bySemanticsLabel('Monitors').first);
+    await openFromMore(tester, 'Monitors');
     await pumpFrames(tester);
     expect(
       harness.backend.sent

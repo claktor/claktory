@@ -237,7 +237,7 @@ fn the_recovery_predicate_recognizes_transport_failures_and_keeps_terminal_error
     }
 }
 
-/// #490: what an agent waits out at length, past the quick retries, and what
+/// What an agent waits out at length, past the quick retries, and what
 /// still fails at once.
 #[test]
 fn outages_are_waited_out_and_refused_requests_are_not() {

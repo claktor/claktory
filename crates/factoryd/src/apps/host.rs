@@ -41,12 +41,14 @@ pub(crate) fn launch_process() -> std::io::Result<AppsLink> {
     let Some(program) = program() else {
         return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Claktory's apps host isn't installed here."));
     };
-    let mut child = tokio::process::Command::new(&program)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+    let mut command = tokio::process::Command::new(&program);
+    command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+    // On Windows in the helpers' job, so it ends with factoryd however
+    // factoryd ends (`windows::helpers`).
+    #[cfg(windows)]
+    let mut child = crate::windows::helpers::spawn(&mut command)?;
+    #[cfg(unix)]
+    let mut child = command.spawn()?;
     let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
         return Err(std::io::Error::other("the apps host has no stdin or stdout"));
     };

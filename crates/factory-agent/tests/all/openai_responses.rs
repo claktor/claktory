@@ -10,7 +10,6 @@ use serde_json::{Value, json};
 #[test]
 fn short_hash_is_pi_s_hash() {
     assert_eq!(format!("fc_{}", short_hash("fc_9")), "fc_1tzgwmiy87leg");
-    assert_eq!(short_hash(""), short_hash(""));
     assert_ne!(short_hash("a"), short_hash("b"));
 }
 

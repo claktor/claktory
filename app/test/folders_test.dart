@@ -47,8 +47,12 @@ Future<Harness> showWith(WidgetTester tester, Workspace start) async {
 }
 
 /// Opens the focused project's settings from its heading.
+/// The focused project's heading opens its menu (§4); Project settings…
+/// in it, its settings.
 Future<void> openProjectSettings(WidgetTester tester) async {
   await tester.tap(find.text('Factory').first);
+  await pumpFrames(tester);
+  await tester.tap(find.text('Project settings…'));
   await pumpFrames(tester);
 }
 

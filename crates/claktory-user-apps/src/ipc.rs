@@ -255,6 +255,25 @@ pub async fn ask(socket: &Path, worker_uid: u32, request: &Request, body: &[u8])
     ask_within(socket, worker_uid, request, body, ANSWER_TIMEOUT).await
 }
 
+/// On Windows no worker is ever reached: it runs on the account service's
+/// Linux server, over a Unix socket. (A Windows build of the service is
+/// only for tests that don't ask it.)
+#[cfg(windows)]
+pub async fn ask(_socket: &Path, _worker_uid: u32, _request: &Request, _body: &[u8]) -> Result<(u16, Vec<u8>), IpcError> {
+    Err(IpcError::Unavailable(io::Error::new(io::ErrorKind::Unsupported, "the user-apps worker runs only on the account service's Linux server")))
+}
+
+#[cfg(windows)]
+pub async fn ask_within(
+    socket: &Path,
+    worker_uid: u32,
+    request: &Request,
+    body: &[u8],
+    _timeout: Duration,
+) -> Result<(u16, Vec<u8>), IpcError> {
+    ask(socket, worker_uid, request, body).await
+}
+
 #[cfg(unix)]
 pub async fn ask_within(
     socket: &Path,

@@ -1,10 +1,9 @@
-// Photos on a phone (Matt, via Bruno 46443 and 46560; Polpo's
-// photo-attach.md): what's chosen in the picker shows at once as "Adding
-// photo…" while it's copied for the app, in the message box and under a
-// card's field, and Send waits for it; a photo sent shows from this
-// device while it uploads and once it's sent, never read back over the
-// link; any other picture comes as a preview made for the screen, never
-// the whole original.
+// Photos on a phone: what's chosen in the
+// picker shows at once as "Adding photo…" while it's copied for the app,
+// in the message box and under a card's field, and Send waits for it; a
+// photo sent shows from this device while it uploads and once it's sent,
+// never read back over the link; any other picture comes as a preview
+// made for the screen, never the whole original.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';

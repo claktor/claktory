@@ -270,7 +270,7 @@ void main() {
     expect(player.state.value.playing, isTrue);
   });
 
-  // An agent showing a video that's already open (Abbacchio's row 1117):
+  // An agent showing a video that's already open:
   // the copy the player had open was written over and then deleted, so
   // every second show said "Claktory can't play this video."
   void showAgain(Harness harness) =>
@@ -329,7 +329,7 @@ void main() {
     expect(second, isNot(first));
     expect(await tester.runAsync(() => File(second).length()), 5 * 1024 * 1024);
     expect(await tester.runAsync(() => File(first).exists()), isFalse);
-    // From its beginning, not where the old one was (Abbacchio's 31289).
+    // From its beginning, not where the old one was.
     expect(FakePlayback.made.last.seeks, isEmpty);
   });
 
@@ -444,7 +444,7 @@ void main() {
       "the pane's corner, not squeezed into the frame (row 375)", (
     tester,
   ) async {
-    // As a 1080×1920 clip in a pane about 330 pt tall (Zucchero's): a
+    // As a 1080×1920 clip in a pane about 330 pt tall: a
     // frame some 45 pt wide.
     FakePlayback.size = const Size(270, 4800);
     await _showVideo(tester);
@@ -549,7 +549,7 @@ void main() {
   });
 
   // The click that opens the comment's editor gave the player the keys;
-  // the editor's field takes them all the same (Abbacchio, in the VM).
+  // the editor's field takes them all the same (in the VM).
   testWidgets("a comment's field opened from the player takes the keys at "
       'once: Space types, the video stays paused', (tester) async {
     await _showVideo(tester);
@@ -580,7 +580,7 @@ void main() {
   });
 
   // A click on the player takes its keys, as a person clicks it: nothing
-  // focused by hand (Abbacchio, in the VM).
+  // focused by hand (in the VM).
   testWidgets('after a click on the frame, Space pauses and plays', (
     tester,
   ) async {

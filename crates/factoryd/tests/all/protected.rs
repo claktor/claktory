@@ -9,8 +9,12 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::common::{Client, View, apply_request, create_agent, create_project, send_message, start, temp_dir};
-use factory_protocol::v1::{self, AgentStatus, client_message::Body as Request, server_message::Body};
+#[cfg(target_os = "macos")]
+use crate::common::{create_agent, send_message};
+use crate::common::{Client, View, apply_request, create_project, start, temp_dir};
+#[cfg(target_os = "macos")]
+use factory_protocol::v1::AgentStatus;
+use factory_protocol::v1::{self, client_message::Body as Request, server_message::Body};
 use factoryd::protected::Places;
 
 /// macOS as the test says: places under `home` (and, for an agent's bash on
@@ -44,14 +48,14 @@ impl Places for Mac {
     }
 
     fn all(&self) -> Vec<PathBuf> {
-        vec![self.home.join("Documents"), self.home.join("Library/Mobile Documents"), PathBuf::from("/Volumes/Backup")]
+        vec![self.home.join("Documents"), self.home.join("Library").join("Mobile Documents"), PathBuf::from("/Volumes/Backup")]
     }
 }
 
 async fn setup(dir: &Path) -> (Arc<factoryd::Factory>, Arc<Mac>, Client, View) {
     let (addr, factory) = start(dir).await;
     let mac = Arc::new(Mac { home: dir.join("user"), found: Mutex::default(), reads: Mutex::default() });
-    std::fs::create_dir_all(dir.join("user/Documents")).unwrap();
+    std::fs::create_dir_all(dir.join("user").join("Documents")).unwrap();
     factory.set_protected_places(mac.clone());
     let (client, workspace, _) = Client::connect(addr).await;
     (factory, mac, client, View { workspace, ..View::default() })
@@ -83,7 +87,7 @@ async fn the_workspace_lists_every_protected_place_with_its_name() {
         roots,
         [
             (user.join("Documents").display().to_string(), "Documents".to_owned()),
-            (user.join("Library/Mobile Documents").display().to_string(), "iCloud Drive".to_owned()),
+            (user.join("Library").join("Mobile Documents").display().to_string(), "iCloud Drive".to_owned()),
             ("/Volumes/Backup".to_owned(), "Backup".to_owned()),
         ]
     );
@@ -94,7 +98,7 @@ async fn the_workspace_lists_every_protected_place_with_its_name() {
 async fn a_folder_in_documents_is_read_at_once_and_a_refusal_waits_in_needs_you_until_ok() {
     let dir = temp_dir();
     let (_factory, mac, mut client, mut view) = setup(&dir).await;
-    let documents = dir.join("user/Documents");
+    let documents = dir.join("user").join("Documents");
     let site = dir.join("site");
     std::fs::create_dir_all(&site).unwrap();
     apply_request(&mut client, &mut view, create_project("Site", &site)).await;
@@ -161,7 +165,7 @@ async fn a_folder_in_documents_is_read_at_once_and_a_refusal_waits_in_needs_you_
 async fn the_app_checks_only_protected_places_and_a_place_never_checked_has_no_state() {
     let dir = temp_dir();
     let (_factory, mac, mut client, mut view) = setup(&dir).await;
-    let documents = dir.join("user/Documents");
+    let documents = dir.join("user").join("Documents");
     // A project already in Documents, as before this version: listed, never
     // checked (the app's one-time sheet shows it), and not read until the
     // app asks.

@@ -109,7 +109,7 @@ async fn an_hour_s_cache_compacts_after_58_idle_minutes_once_and_quietly() {
         assert!(matches!(&refused, Body::Error(_)), "{key} {ttl}: {refused:?}");
     }
     // OpenAI's own aren't written yet either: the backend a rollback goes
-    // back to refuses a config.json that has them (#281).
+    // back to refuses a config.json that has them.
     for (key, ttl) in [("openai", "12h"), ("openai", "30m"), ("openai/gpt-5.6-sol", "12h")] {
         let openai = v1::UpdateSettings { cache_ttl: Some(v1::CacheTtl { key: key.into(), ttl: ttl.into() }), ..Default::default() };
         let refused = apply_request(&mut client, &mut view, settings(openai)).await;

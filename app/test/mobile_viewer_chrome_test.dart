@@ -1,8 +1,8 @@
-// A viewer's page on a phone (Bruno's v0.1.22 task, Matt: a landscape
-// video showed less video than portrait): a picture or video fills the
-// screen with its chrome over it; a tap hides or shows the chrome, a
-// playing video fades it, placing a comment and VoiceOver keep it; a pull
-// down closes the page; turning the phone keeps the video playing; a
+// A viewer's page on a phone (a landscape video once showed less video
+// than portrait): a picture or video fills the screen
+// with its chrome over it; a tap hides or shows the chrome, a playing
+// video fades it, placing a comment and VoiceOver keep it; a pull down
+// closes the page; turning the phone keeps the video playing; a
 // document's header slides away while it's read.
 import 'package:factory_app/mobile/viewer_chrome.dart';
 import 'package:factory_app/pane_chrome.dart';
@@ -181,7 +181,7 @@ void main() {
     expect(find.byType(PhoneViewerScaffold), findsOneWidget);
   });
 
-  // Zucchero's note on #217: pinched smaller than fitting, it stayed so;
+  // Pinched smaller than fitting, it stayed so;
   // as in Photos, let go it goes back to fitted.
   testWidgets('pinched smaller than fitting, it springs back', (tester) async {
     await openOnPhone(tester, ViewerKind.image, phonePortrait);
@@ -205,7 +205,7 @@ void main() {
     expect(settled.center.dy, closeTo(picture.center.dy, 0.5));
   });
 
-  // Sale's Android row 113: a fast pull, its first move past both the
+  // On Android, a fast pull, its first move past both the
   // pull's slop and the viewer's pan's at once, went to the pan, which
   // didn't move the fitted picture: the page never closed.
   testWidgets('fitted, a pull in big steps closes a picture', (tester) async {
@@ -221,7 +221,7 @@ void main() {
     expect(find.byType(PhoneViewerScaffold), findsNothing);
   });
 
-  // Sale's row 113: on Android, hidden, the first swipe from the edge
+  // On Android, hidden, the first swipe from the edge
   // only brings the system's bars back; the chrome comes with them, so
   // the next swipe or Back closes it.
   testWidgets("the system's bars swiped back bring the chrome", (tester) async {
@@ -262,7 +262,7 @@ void main() {
     expect(_shows(tester, viewerTopBar), isTrue);
   });
 
-  // Sale's row 116: Android's hint says to swipe down from the top to
+  // Android's hint says to swipe down from the top to
   // bring its bars back; a long such swipe closed the video.
   testWidgets('a swipe down from the top edge never closes it', (tester) async {
     await openOnPhone(tester, ViewerKind.video, phonePortrait);

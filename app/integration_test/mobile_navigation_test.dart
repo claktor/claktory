@@ -1,12 +1,12 @@
-// Finding your way on an iPhone, end to end in the Simulator against the
-// dev Claktory (#198, phase 3B; docs/mobile.md §7, items 1–3, 8 and 9 as
-// far as the Simulator can show them): the drawer by its button, the
-// screen's edge and the dimmed conversation; each page from the drawer and
-// back again by Back or the edge; Settings' sections and a deep link; the
-// Map's Lines, Search, card and Fit, and its drags staying on the Map; a
-// project's Files; drafts kept with their agents across switches; the page
-// showing kept over the background and a reconnect; and a Claktory that
-// can't be reached never trapping the phone there.
+// Finding your way on an iPhone, end to end in the Simulator against the dev
+// Claktory (phase 3B; docs/mobile.md §7, items 1–3, 8 and 9 as far as the
+// Simulator can show them): the drawer by its button, the screen's edge and
+// the dimmed conversation; each page from the drawer and back again by Back
+// or the edge; Settings' sections and a deep link; the Map's Lines, Search,
+// card and Fit, and its drags staying on the Map; a project's Files; drafts
+// kept with their agents across switches; the page showing kept over the
+// background and a reconnect; and a Claktory that can't be reached never
+// trapping the phone there.
 //
 // It never sends anything and leaves things as it found them: the agent
 // shown, no drafts of its own, no extra Claktory.

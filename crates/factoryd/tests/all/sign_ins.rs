@@ -143,8 +143,7 @@ async fn sign_ins_move_into_the_vault_and_no_token_stays_in_plaintext() {
     view.follow(&mut client, |view| order(view) == ["a", "b"]).await;
     assert_eq!(tokens_in_plaintext(&dir), Vec::<String>::new());
     let outline = home(&dir).root().join("vault/sign-ins.json");
-    use std::os::unix::fs::PermissionsExt;
-    assert_eq!(std::fs::metadata(&outline).expect("outline").permissions().mode() & 0o777, 0o600);
+    assert_eq!(crate::common::mode(&outline), 0o600);
 
     // Agents run on them.
     create_builder(&mut client, &mut view).await;

@@ -146,7 +146,7 @@ async fn unknown_tools_invalid_arguments_and_truncated_calls_become_error_result
     assert!(tool_result_text(&agent.state.messages[3]).starts_with("Validation failed for tool \"edit_file\":\n  - path: must have required properties path, edits\n  - root: must not have additional properties"));
     assert_eq!(
         tool_result_text(&agent.state.messages[4]),
-        format!("ENOENT: no such file or directory, open '{}/missing.txt'", dir.path().display())
+        format!("ENOENT: no such file or directory, open '{}'", dir.path().join("missing.txt").display())
     );
     let ends: Vec<bool> = events
         .lock()

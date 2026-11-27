@@ -80,8 +80,8 @@ class FakeWorker {
   /// (POST /v1/devices/remove): the service answers them 401 since.
   final signedOut = <String, Set<String>>{};
 
-  /// The listed devices of each account that signed themselves out of it
-  /// (row 671): `GET keys/<own account>` marks them.
+  /// The listed devices of each account that signed themselves out of it:
+  /// `GET keys/<own account>` marks them.
   final accountSignOuts = <String, Set<String>>{};
 
   /// Each account's security keys before the one it has now: the worker
@@ -185,10 +185,10 @@ class FakeWorker {
         final now = keys[who] ?? _refuse(404, 'not_found');
         return {
           ...now,
-          // Oldest first (row 654).
+          // Oldest first.
           if (retired[who] case final old? when old.isNotEmpty)
             'replaced_identity_keys': [...old],
-          // Only to one of the account's own devices (row 671).
+          // Only to one of the account's own devices.
           if (who == account && (accountSignOuts[who]?.isNotEmpty ?? false))
             'signed_out': [...accountSignOuts[who]!],
         };
@@ -225,7 +225,7 @@ class FakeWorker {
           'version': body['version'],
         };
       case ('POST', ['me', 'keys', 'rotate']):
-        // A new key from a device signed in long ago (row 630, Fugo).
+        // A new key from a device signed in long ago.
         if (staleSignIn.contains('$account/$leaf')) {
           _refuse(403, 'sign_in_again');
         }
@@ -441,7 +441,7 @@ class FakeDmKeys implements DmKeys {
   Future<Uint8List?> get(DmKeyName name) async {
     if (unreadable.contains(name)) throw DmKeyUnreadable(name, 'damaged');
     // As the platform channel hands them over: a view nothing may change
-    // (Abbacchio: zeroing one threw after a restart).
+    // (zeroing one threw after a restart).
     return switch (kept[name]) {
       final bytes? => Uint8List.fromList(bytes).asUnmodifiableView(),
       null => null,
@@ -481,7 +481,7 @@ class _Here {
   bool moved = true;
   bool pendingMove = false;
 
-  /// Once this device reads the home (#451): where it is in the worker's
+  /// Once this device reads the home: where it is in the worker's
   /// feed, null for where it was before, and the proposals taken there
   /// (their 'p'), which a commit naming them in 'takes' needs.
   int? proposalSeq;
@@ -601,7 +601,7 @@ class FakeDmDevice implements DmDevice {
   /// The keys a start-over here retired before the one it replaced.
   List<Uint8List> replacedBefore = const [];
 
-  /// Keys retired here because a held commit proved them (row 654), by
+  /// Keys retired here because a held commit proved them, by
   /// account, base64url.
   final retiredHere = <String, Set<String>>{};
 
@@ -662,7 +662,7 @@ class FakeDmDevice implements DmDevice {
   DmDeviceList? deviceList({required String account}) => lists[account];
 
   /// The person's devices removed here or off a list this device took,
-  /// and the codes handed off to, as the Rust keeps them (row 612).
+  /// and the codes handed off to, as the Rust keeps them.
   final removedLeaves = <String>{};
   final usedCodes = <String>{};
 
@@ -691,7 +691,7 @@ class FakeDmDevice implements DmDevice {
     required List<DmListed> leaves,
   }) async {
     // Signed only: pinned once the worker takes it ([acceptList]), as the
-    // Rust (row 615).
+    // Rust.
     return _listBytes(
       DmDeviceList(version: version, createdMs: createdMs, leaves: leaves),
     );
@@ -712,7 +712,7 @@ class FakeDmDevice implements DmDevice {
     ),
   );
 
-  /// Whether this device went over to its home (#451): a new one has
+  /// Whether this device went over to its home: a new one has
   /// nothing at the worker to read first.
   var drained = false;
 
@@ -781,7 +781,7 @@ class FakeDmDevice implements DmDevice {
     if (body['for'] != offer['leaf'] || body['code'] != offer['n']) {
       throw StateError("doesn't open");
     }
-    // As the crate's: only the identity the account publishes (Melone F3).
+    // As the crate's: only the identity the account publishes.
     if (body['account'] != accountId ||
         !listEqualsInts(dmUnb64(body['identity']! as String), identityPublic)) {
       throw StateError("isn't the account's published identity");
@@ -991,7 +991,7 @@ class FakeDmDevice implements DmDevice {
   Object? sendFails;
 
   /// Accounts whose key changed here: their leaves the new list doesn't
-  /// name are dead (row 630), as are this device's own account's after it
+  /// name are dead, as are this device's own account's after it
   /// set up under a new key ([replacedKey]).
   final keyChangedFor = <String>{};
 
@@ -1052,7 +1052,7 @@ class FakeDmDevice implements DmDevice {
           member.split('/').last,
   ];
 
-  /// Groups a reinstalled device's former install holds here (row 202), by
+  /// Groups a reinstalled device's former install holds here, by
   /// group: whose, and the device's name.
   final reinstalledIn = <String, ({String account, String device})>{};
 
@@ -1061,7 +1061,7 @@ class FakeDmDevice implements DmDevice {
       reinstalledIn[dmB64(groupId)]?.device;
 
   /// In a conversation, the other person when none of their devices is
-  /// a member that passes ([members]) (row 676).
+  /// a member that passes ([members]).
   String? _notJoined(_Here here) {
     if (here.kind.kind != DmGroupType.conversation) return null;
     // A wait for a new security key says so first ([waitingFor]).
@@ -1400,7 +1400,7 @@ class FakeDmDevice implements DmDevice {
     }
     if (added.isEmpty) return null;
     // As Group::add: each against its account's list as this device took
-    // it (Fugo, row 676).
+    // it.
     for (final member in added) {
       if (!_listedHere(member)) {
         throw StateError("a device that isn't on its account's list");
@@ -1468,7 +1468,7 @@ class FakeDmDevice implements DmDevice {
     if (_outgoing[content.clientMessageId] case final kept?) {
       return kept.envelope;
     }
-    // The sender's clock inside, as the Rust puts it (row 556).
+    // The sender's clock inside, as the Rust puts it.
     final extra = content.extraJson.trim().isEmpty
         ? <String, Object?>{}
         : jsonDecode(content.extraJson) as Map<String, Object?>;
@@ -1635,7 +1635,7 @@ class FakeDmDevice implements DmDevice {
     final before = here.seq;
     here.seq = seq;
     final body = readFake(envelope);
-    // From an epoch past this one, as the Rust holds it (row 551).
+    // From an epoch past this one, as the Rust holds it.
     if ((body['epoch'] as int? ?? 0) > here.epoch &&
         envelope != here.pending &&
         !here.removed &&
@@ -1661,7 +1661,7 @@ class FakeDmDevice implements DmDevice {
       if (!takes.every(here.proposals.contains)) {
         return out(DmOutcome.dropped, handshake: true);
       }
-      // A leaf its account's newest list here doesn't name (row 561):
+      // A leaf its account's newest list here doesn't name:
       // held, the position kept.
       if (_unlistedIn(here, body) case final leaf?) {
         here.seq = before;
@@ -1758,7 +1758,7 @@ class FakeDmDevice implements DmDevice {
       }
     } else if (here.kind.kind == DmGroupType.channel &&
         (content.kind == 'proposal' || content.kind == 'agent_draft')) {
-      // Kept by its digest, as the Rust keeps it (#451).
+      // Kept by its digest, as the Rust keeps it.
       final leafId = from.split('/').last;
       _sideKept['$id/${sha256.convert(dmBytesOf(envelope))}'] = DmMessage(
         departed: false,
@@ -1777,7 +1777,7 @@ class FakeDmDevice implements DmDevice {
   }
 
   /// Leaves ("account/leaf") their account's newest list here doesn't
-  /// name (row 561): a commit bringing one in is held as unlisted.
+  /// name: a commit bringing one in is held as unlisted.
   final unlisted = <String>{};
 
   String? _unlistedIn(_Here here, Map<String, Object?> commit) => [
@@ -1789,7 +1789,7 @@ class FakeDmDevice implements DmDevice {
   /// Every processWindow call's items, for tests.
   final windows = <List<DmWindowItem>>[];
 
-  /// The window as the crate keeps it (row 561): [items] opens with a
+  /// The window as the crate keeps it: [items] opens with a
   /// commit held as unlisted; a later commit, by a member there before
   /// it, that takes its leaf out again closes it, and everything up to
   /// that is taken, the departed leaf's messages marked.
@@ -2167,7 +2167,7 @@ class FakeDmDevice implements DmDevice {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-/// Mista's transfer endpoint (E8), driven by the test: [progress] is what
+/// The transfer endpoint, driven by the test: [progress] is what
 /// the new device receives; what the old one sent is in [sent].
 class FakeTransfer implements DmTransferEndpoint {
   FakeTransfer(this.n);
@@ -2299,7 +2299,7 @@ class FakeEndpoint {
             retryAfter: retryAfter,
           )
           // The Claktory shown is the person's own: the account's word on it
-          // is dm_home_test's (Fugo 40182).
+          // is dm_home_test's.
           ..ungatedForTests = true;
     e2ee = _make();
   }
@@ -2315,7 +2315,7 @@ class FakeEndpoint {
   /// once removed or at a [reinstall].
   var storeKept = false;
 
-  /// The app deleted and installed again (row 202): its store gone, its
+  /// The app deleted and installed again: its store gone, its
   /// key store kept, as an iPhone's keychain keeps it.
   E2ee reinstall() {
     e2ee.dispose();
@@ -2348,7 +2348,7 @@ class FakeEndpoint {
   var _ids = 0;
 }
 
-/// The Claktory the app shows, as Ghiaccio's leaf answers: its offer, and
+/// The Claktory the app shows, as its leaf answers: its offer, and
 /// once enrolled, its key packages up at [worker].
 class FakeClaktoryLink implements DmClaktoryLink {
   FakeClaktoryLink(this.worker, this.account, {this.leafId = 'mini#1'});
@@ -2392,7 +2392,7 @@ class FakeClaktoryLink implements DmClaktoryLink {
   }
 }
 
-/// The person's home Claktory as the app's link to it (#451, Mista's H3):
+/// The person's home Claktory as the app's link to it:
 /// a log per group numbered from 2^32 + 1, receipts, a feed pushed to the
 /// device following it, deliveries the test says, and routes. What the
 /// person says (not commits, which go to the worker themselves) reaches
@@ -2409,7 +2409,7 @@ class FakeHome implements DmHomeLink {
   /// Whether the person's list makes it their home: NOT_HOME otherwise.
   var isHome = true;
 
-  /// When it became the person's home (row 595); 0 for not said.
+  /// When it became the person's home; 0 for not said.
   var homeSinceMs = 0;
   var endpointId = List<int>.filled(32, 5);
 
@@ -2486,7 +2486,7 @@ class FakeHome implements DmHomeLink {
   );
 
   /// Groups this home says it let go of past the follower's cursor, until
-  /// it follows from within what the home has (row 582).
+  /// it follows from within what the home has.
   final letGo = <String>{};
 
   /// Says what it has of [group] now, with nothing new.
@@ -2540,7 +2540,7 @@ class FakeHome implements DmHomeLink {
   }
 
   /// What's at the worker for [group] so far never comes here: a commit
-  /// no one handed this home (row 551).
+  /// no one handed this home.
   void passOver(String group) =>
       _pulled[group] = worker.mailboxOf(group).length;
 
@@ -2550,7 +2550,7 @@ class FakeHome implements DmHomeLink {
     final mailbox = worker.mailboxOf(group);
     final entries = <pb.DmEntry>[];
     for (final item in mailbox.skip(_pulled[group] ?? 0)) {
-      // Proposals stay at the worker (Mista 32950).
+      // Proposals stay at the worker.
       if (item['kind'] == 'proposal') continue;
       final bytes = dmBytesOf(jsonEncode(item['envelope']));
       if (_taken.contains(dmB64(bytes))) continue;

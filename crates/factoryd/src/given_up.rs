@@ -1,4 +1,4 @@
-//! Access agents gave up on their own (#236): a pipe, or only reading or
+//! Access agents gave up on their own: a pipe, or only reading or
 //! leading one (`pipes::leave`'s pipe_leave), an app (apps_give_up), or
 //! messaging an agent of another project (agents_give_up_reach). Giving
 //! access up only takes it away, so it asks no one; the person sees it in
@@ -7,7 +7,7 @@
 //!
 //! Each tool acts only on its caller (it has no agent parameter), and only
 //! on what it holds when the call runs, checked under the same lock the
-//! person's change takes (Fugo 43111, 43129): a frame keeps its tools, so a
+//! person's change takes: a frame keeps its tools, so a
 //! call may come after the access is gone, and is then refused, changing
 //! nothing. Contained agents (a pipe's liaison, one limited to a pipe, a
 //! curator, an errand agent) can't change their own access: that's the
@@ -268,7 +268,7 @@ fn apps_held(factory: &Factory, agent: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// apps_give_up (#236): the caller's own scopes of the app, and the events
+/// apps_give_up: the caller's own scopes of the app, and the events
 /// it hears of it, taken as the person's removal takes them
 /// (`changes::apply`, kept as the agent's change), with no card.
 async fn give_up_app(factory: Arc<Factory>, agent: String, args: AppArgs) -> Result<ToolResult, String> {
@@ -336,7 +336,7 @@ pub(crate) fn reach_tool(factory: &Arc<Factory>, agent: &str) -> Tool {
     )
 }
 
-/// agents_give_up_reach (#236): one entry of the caller's own `also`,
+/// agents_give_up_reach: one entry of the caller's own `also`,
 /// taken out under the settings' lock; an entry it doesn't have is
 /// refused, whoever it names.
 async fn give_up_reach(factory: Arc<Factory>, agent: String, args: ReachArgs) -> Result<ToolResult, String> {
@@ -399,7 +399,7 @@ mod tests {
     use super::*;
 
     /// History never names a pipe by its id, nor by a name the other side
-    /// chose (Trish 45527).
+    /// chose.
     #[test]
     fn a_pipe_is_named_by_this_sides_name_or_who_its_with() {
         assert_eq!(pipe_called("\"Launch\""), "the pipe \"Launch\"");

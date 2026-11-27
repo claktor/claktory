@@ -39,9 +39,9 @@ abstract class PhoneRoutes {
   /// Pops the page on top, with [result].
   void pop<T>([T? result]);
 
-  /// Focus mode on a screen of its own, over what shows (an iPhone's,
-  /// #599); false where the window lays it out itself (an iPad's, a Mac's)
-  /// or there's none.
+  /// Focus mode on a screen of its own, over what shows (an iPhone's);
+  /// false where the window lays it out itself (an iPad's, a Mac's) or
+  /// there's none.
   bool openFocus();
 
   /// Whether there's a page to go back from (rather than the conversation
@@ -54,7 +54,7 @@ abstract class PhoneRoutes {
   void openConversation(String agentId, {int? seq});
 
   /// Shows [path] in a viewer over [agentId]'s conversation, as a page:
-  /// a review the agent asked for (#275), say. The agent is chosen and the
+  /// a review the agent asked for, say. The agent is chosen and the
   /// file opened in its layout (its `show`), if it isn't already, then the
   /// viewer pushed once it's there. True when it's done here; false where
   /// these routes can't show it, for the caller to open it its own way.
@@ -91,10 +91,15 @@ class PhoneRoute<T> {
     required this.id,
     required this.builder,
     this.fullscreenDialog = false,
+    this.edgeToEdge = false,
   });
 
   final String id;
   final WidgetBuilder builder;
+
+  /// A file's viewer: it has the whole screen, its safe areas its own to
+  /// lay out (mobile/viewer_chrome.dart).
+  final bool edgeToEdge;
 
   /// Rises from the bottom and closes with Cancel or Done rather than Back
   /// (a long form), as iOS presents a task of its own.

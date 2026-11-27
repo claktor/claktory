@@ -1,4 +1,4 @@
-//! An agent takes back its own cards once they no longer apply (#407):
+//! An agent takes back its own cards once they no longer apply:
 //! ask_withdraw for its questions (procedures, review asks and agents_clear's
 //! cards too), proposal_withdraw for its proposals to Rivet. A withdrawn
 //! card leaves Needs you at once, frees its place, shows as withdrawn with

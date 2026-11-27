@@ -199,8 +199,7 @@ void main() {
     final copied = watchClipboard(tester);
     final harness = await show(tester, _workspace(omar: [2]));
     harness.backend.entriesById['omar/2'] = _proposal(2);
-    await tester.tap(find.text('Needs you'));
-    await settle(tester);
+    await openNeedsYouPage(tester);
     await settle(tester);
     // Folded, its line; open, the card's own words. (Nested shapes join
     // the selection a frame or two later.)
@@ -429,8 +428,7 @@ void main() {
     harness.backend.chatEntriesById['chat1/4'] = _proposal(4);
     await harness.show(tester, size: const Size(1180, 820));
     await settle(tester);
-    await tester.tap(find.text('Needs you'));
-    await settle(tester);
+    await openNeedsYouPage(tester);
     await settle(tester);
     await tester.tap(find.text('Proposes to Rivet: Add a designer agent'));
     await settle(tester);

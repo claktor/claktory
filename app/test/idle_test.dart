@@ -1,4 +1,4 @@
-// Polpo's idle-keepalive.md (Matt's call): a phone or tablet left alone,
+// A phone or tablet left alone,
 // with nothing arriving, rests its connection. The app pings every 25 s
 // instead of every 5, and the tunnel checks its paths every 25 s; a touch
 // ends it at once and the tunnel checks the link then. What arrives

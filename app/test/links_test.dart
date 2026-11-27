@@ -5,6 +5,7 @@ import 'package:factory_app/identity.dart' show Palette;
 import 'package:factory_app/mobile/drawer.dart'
     show PhoneDrawerHost, PhoneDrawerHostState;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/visible_codes.dart' show nameInText;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -47,6 +48,24 @@ void main() {
     );
   });
 
+  testWidgets("a code's name with hidden characters reads as one name, its "
+      'codes shown', (tester) async {
+    final harness = Harness(Workspace());
+    await harness.show(tester);
+    const name = 'Ana’s \u202EMac\u202C שלום';
+    appLinks.receive(
+      link(
+        'factory://?t=${'a' * 64}&name=${Uri.encodeQueryComponent(name)}'
+        '&e=${'c' * 64}',
+      ),
+    );
+    await settle(tester);
+    expect(
+      find.text('It calls itself “${nameInText(name)}”.', findRichText: true),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('a link asks before connecting, and Connect connects', (
     tester,
   ) async {
@@ -67,7 +86,7 @@ void main() {
       findsOneWidget,
     );
     // On this device's account, it lets this Mac in with no Allow
-    // (Abbacchio's row 1667).
+    // .
     expect(find.text('It calls itself “box”.'), findsOneWidget);
     expect(find.textContaining('still need to allow'), findsNothing);
     expect(find.textContaining("isn't on your Claktory account"), findsNothing);
@@ -185,8 +204,8 @@ void main() {
     });
   });
 
-  // #352 P6: a QR code may hold the pairing page's link, the code's query
-  // after its `#`, so a phone's camera opens Claktory (Fugo's rules).
+  // A QR code may hold the pairing page's link, the code's query
+  // after its `#`, so a phone's camera opens Claktory.
   group('the pairing page link', () {
     final query = 't=${'a' * 64}&name=box&e=${'c' * 64}&r=https%3A%2F%2Frelay';
     final page = 'https://claktory.com/pair#$query';

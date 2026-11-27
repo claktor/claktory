@@ -1,9 +1,8 @@
-// Take Photo from the paperclip (Matt, Bruno 46436): the device's menu
-// offers it first where a box or card takes photos (`camera`), and answers
-// `take_photo` when it's chosen; the camera is explained on the permission
-// sheet before the system asks, refused it says how to turn it on, and only
-// then does takePhoto open the camera. The same on an iPhone and Android
-// (Risotto 46470's cases), with the channel faked.
+// Take Photo from the paperclip: the device's menu offers it first where a
+// box or card takes photos (`camera`), and answers `take_photo` when it's
+// chosen; the camera is explained on the permission sheet before the system
+// asks, refused it says how to turn it on, and only then does takePhoto
+// open the camera. The same on an iPhone and Android with the channel faked.
 import 'dart:async';
 
 import 'package:factory_app/attachments.dart' show pickOnDevice;

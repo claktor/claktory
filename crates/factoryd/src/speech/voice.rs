@@ -548,15 +548,22 @@ struct Sidecar {
 
 impl Sidecar {
     async fn start(program: &Path, model: &Path) -> Result<Sidecar, Failure> {
-        let mut child = tokio::process::Command::new(program)
+        let mut command = tokio::process::Command::new(program);
+        command
             .arg("serve")
             .arg("--model")
             .arg(model)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
+            .kill_on_drop(true);
+        // On Windows in the helpers' job, so it ends with factoryd however
+        // factoryd ends (`windows::helpers`).
+        #[cfg(windows)]
+        let spawned = crate::windows::helpers::spawn(&mut command);
+        #[cfg(unix)]
+        let spawned = command.spawn();
+        let mut child = spawned
             .map_err(|error| Failure::dead("transcribe_failed", format!("Couldn't start speech recognition: {error}")))?;
         let (Some(input), Some(output)) = (child.stdin.take(), child.stdout.take()) else {
             return Err(Failure::dead("transcribe_failed", "Couldn't start speech recognition."));

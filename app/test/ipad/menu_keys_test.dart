@@ -36,7 +36,7 @@ Entry _ask(int seq, int minutesAgo) => Entry(
   askPerson: AskPerson(id: 'q$seq', title: 'Question $seq'),
 );
 
-/// June waits on two cards, Mista on one (the oldest).
+/// June waits on two cards, Mista on one (the newest).
 Workspace _waiting() => Workspace(
   agents: [
     Agent(
@@ -70,8 +70,8 @@ Future<(Harness, WorkbenchFocus)> _show(WidgetTester tester, Size size) async {
   final harness = Harness(_waiting());
   harness.backend.entriesById
     ..['june/1'] = _ask(1, 30)
-    ..['june/2'] = _ask(2, 5)
-    ..['mista/7'] = _ask(7, 60);
+    ..['june/2'] = _ask(2, 60)
+    ..['mista/7'] = _ask(7, 5);
   final focus = WorkbenchFocus();
   addTearDown(focus.dispose);
   await harness.show(

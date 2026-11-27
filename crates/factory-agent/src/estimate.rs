@@ -7,8 +7,8 @@ const CHARS_PER_TOKEN: u64 = 4;
 /// An image whose size can't be read: about what a full-size one costs.
 const ESTIMATED_IMAGE_TOKENS: u64 = 1200;
 
-/// How a provider charges an image: by its size, never its bytes (#490: a
-/// count of its base64 made three screenshots a million tokens).
+/// How a provider charges an image: by its size, never its bytes (a count
+/// of its base64 made three screenshots a million tokens).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ImageRule {
     /// Anthropic's: scaled to a long edge of 1568 and about 1600 tokens at

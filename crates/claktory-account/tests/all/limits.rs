@@ -218,11 +218,11 @@ async fn a_mail_outage_refuses_codes_but_still_unlocks() {
     instance.mail.fail.store(true, Ordering::SeqCst);
     let answer = instance.start_sign_in(&Claktory::new("198.51.106.2"), "p@example.com", "Mac").await;
     assert_eq!((answer.status, answer.error().as_str()), (503, "email_unavailable"));
-    // An unlock that's mailed (#412: later than just after signing in, from
-    // a new network) still gets its share while no mail goes.
+    // An unlock that's mailed (later than just after signing in, from a new
+    // network) still gets its share while no mail goes.
     instance.advance(16 * 60);
     assert!(instance.share(&claktory, None).await.is_ok());
-    // …and is recorded as not emailed, since it wasn't (Fugo's LOW on #412);
+    // …and is recorded as not emailed, since it wasn't;
     // once mail works again, the next unusual one is.
     instance.mail.fail.store(false, Ordering::SeqCst);
     claktory.ip = "203.0.113.9".into();

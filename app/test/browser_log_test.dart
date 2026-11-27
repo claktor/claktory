@@ -22,7 +22,7 @@ Workspace _workspace({bool browser = true}) => Workspace(
   version: '2026.11.22-0900',
   extensions: [
     Extension(id: 'memory', name: 'Memory'),
-    if (browser) Extension(id: 'browser', name: 'Browser'),
+    if (browser) Extension(id: 'browser_control', name: 'Browser'),
   ],
   remote: RemoteAccess(
     devices: [PairedDevice(id: 'mac', name: 'Studio')],

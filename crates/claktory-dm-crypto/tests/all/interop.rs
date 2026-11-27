@@ -1,7 +1,7 @@
 //! RFC 9420's interoperability vectors (github.com/mlswg/mls-implementations,
 //! test-vectors/, at 2034fe72), suite 0x0001 only, run against our backend
 //! (libcrux) and our storage: that it agrees with every other implementation
-//! on every derivation (Fugo's condition 2 for E1).
+//! on every derivation.
 //!
 //! The passive-client vectors join by a Welcome and process every proposal
 //! and commit after it, checking each epoch's authenticator: key schedule,

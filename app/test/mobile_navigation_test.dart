@@ -143,8 +143,9 @@ void main() {
     await pumpFrames(tester);
     await tester.tap(find.bySemanticsLabel('Factory options'));
     await pumpFrames(tester);
-    expect(find.text('Project settings'), findsOneWidget);
-    expect(find.text('Add an agent'), findsOneWidget);
+    expect(find.text('Project settings…'), findsOneWidget);
+    expect(find.text('Add an agent…'), findsOneWidget);
+    expect(find.text('Connect a pipe…'), findsOneWidget);
     await tester.tap(find.text('Files'));
     await pumpFrames(tester);
     expect(harness.last.watchFiles.projectId, 'p1');

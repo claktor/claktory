@@ -154,6 +154,68 @@ void main() {
     expect(find.text('Last checked 3 min ago'), findsOneWidget);
   });
 
+  testWidgets('hovering says what extra usage may spend past the limits', (
+    tester,
+  ) async {
+    await showProviders(tester, [
+      subscription(
+        usage: weekly(100)
+          ..extraUsage = ExtraUsage(
+            enabled: true,
+            usedMinor: Int64(80),
+            currency: 'USD',
+            decimalPlaces: 2,
+          ),
+      ),
+    ]);
+    await hover(tester, 'Anthropic');
+    expect(find.text('Extra usage on · used \$0.80 this month'), findsOne);
+  });
+
+  test('extra usage in a line: the amounts in their currency, the cap '
+      'when there is one', () {
+    String? line(ExtraUsage extra) =>
+        extraUsageLine(ProviderUsage(extraUsage: extra))?.text;
+    expect(extraUsageLine(ProviderUsage()), isNull);
+    expect(line(ExtraUsage()), 'Extra usage off');
+    expect(
+      line(
+        ExtraUsage(
+          enabled: true,
+          usedMinor: Int64(1205),
+          limitMinor: Int64(10000),
+          currency: 'GBP',
+          decimalPlaces: 2,
+        ),
+      ),
+      'Extra usage on · used £12.05 of £100 this month',
+    );
+    expect(
+      line(
+        ExtraUsage(
+          enabled: true,
+          usedMinor: Int64(1500),
+          limitMinor: Int64(1500),
+          currency: 'JPY',
+          limitReached: true,
+        ),
+      ),
+      'Extra usage limit reached · used ¥1500 of ¥1500 this month',
+    );
+    expect(
+      line(
+        ExtraUsage(
+          enabled: true,
+          usedMinor: Int64(0),
+          limitMinor: Int64(2550),
+          currency: 'CHF',
+          decimalPlaces: 2,
+        ),
+      ),
+      'Extra usage on · used 0.00 CHF of 25.50 CHF this month',
+    );
+  });
+
   testWidgets('usage never read says so, with no numbers', (tester) async {
     await showProviders(tester, [subscription(usage: ProviderUsage())]);
     await hover(tester, 'Anthropic');
@@ -207,7 +269,7 @@ void main() {
       formatReset(plus(const Duration(days: 1, hours: 2)), at),
       'resets in 1 day 2 h, Thu\u00A014:00',
     );
-    // Friend bug #16: Monday 10:00 to Thursday 06:00 is 2 days 20 h, not
+    // Monday 10:00 to Thursday 06:00 is 2 days 20 h, not
     // "2 days".
     final monday = DateTime(2026, 11, 16, 10);
     expect(
@@ -388,7 +450,7 @@ void main() {
     });
   });
 
-  // #343 U8: an OpenRouter key says what it has to spend.
+  // An OpenRouter key says what it has to spend.
   group('an API key with credit', () {
     Provider openrouter(AccountCredit credit) => Provider(
       id: 'openrouter',

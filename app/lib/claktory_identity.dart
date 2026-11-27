@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
@@ -35,10 +36,14 @@ String claktoryNameInSettings(Backend backend) {
 }
 
 /// [claktoryName] as it reads inside a sentence ("Save the recovery key
-/// for nixos"): "this Mac" while this Mac's own has no name yet.
+/// for nixos"): "this Mac" ("this PC" on Windows) while this computer's
+/// own has no name yet.
 String claktoryNameInText(Backend backend) {
   final name = claktoryName(backend);
-  return name == thisMacName ? 'this Mac' : name;
+  if (name != thisMacName) return name;
+  return defaultTargetPlatform == TargetPlatform.windows
+      ? 'this PC'
+      : 'this Mac';
 }
 
 /// A Claktory's color (`Settings.color`, one of the agent colors' names),

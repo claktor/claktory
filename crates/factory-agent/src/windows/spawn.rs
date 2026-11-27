@@ -1,6 +1,6 @@
 //! Starting a command's shell on Windows: CreateProcessW with an attribute
 //! list, because neither std's nor tokio's Command can say either thing that
-//! matters here (Fugo 44974):
+//! matters here:
 //!
 //! - PROC_THREAD_ATTRIBUTE_JOB_LIST: the process is in its job as it's
 //!   created, so nothing it runs is ever outside it, even for an instant.
@@ -18,10 +18,11 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 
 use windows_sys::Win32::Foundation::{
-    DUPLICATE_SAME_ACCESS, DuplicateHandle, GENERIC_READ, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation,
+    DUPLICATE_SAME_ACCESS, DuplicateHandle, GENERIC_READ, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
 };
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
+use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_HANDLE, STD_OUTPUT_HANDLE};
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CREATE_NEW_CONSOLE, CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
@@ -79,7 +80,7 @@ pub fn spawn(command: Command<'_>) -> std::io::Result<(Child, u32)> {
         handles.push(stderr_raw);
     }
     let job_handle = job.raw();
-    let attributes = Attributes::new(&handles, &job_handle)?;
+    let attributes = Attributes::new(&handles, Some(&job_handle))?;
 
     let application = wide(command.program)?;
     let mut line = wide(command_line(command.program.as_os_str(), &command.args)?)?;
@@ -127,6 +128,81 @@ pub fn spawn(command: Command<'_>) -> std::io::Result<(Child, u32)> {
     Ok((child, pid))
 }
 
+/// Starts one of Claktory's own processes (the supervisor's backend) the way
+/// it starts commands, without the job: it inherits exactly `inherit` (which
+/// the caller made inheritable) and its stdin (NUL), stdout and stderr (this
+/// process's, or NUL), never whatever else is inheritable here. It shares
+/// this process's console and folder; `environment` is its whole environment.
+///
+/// The handles the list names are inheritable until the caller closes them:
+/// it holds its own spawn lock across this call (`factoryd::windows::backend`),
+/// so no other spawn in the process picks them up meanwhile.
+pub fn spawn_helper(program: &Path, args: &[OsString], environment: &[(OsString, OsString)], inherit: &[HANDLE]) -> std::io::Result<Child> {
+    let stdin = inheritable(open_nul()?)?;
+    let stdout = standard(STD_OUTPUT_HANDLE)?;
+    let stderr = standard(STD_ERROR_HANDLE)?;
+    let mut handles: Vec<HANDLE> = vec![stdin.as_raw_handle(), stdout.as_raw_handle(), stderr.as_raw_handle()];
+    handles.extend_from_slice(inherit);
+    let attributes = Attributes::new(&handles, None)?;
+
+    let application = wide(program)?;
+    let mut line = wide(command_line(program.as_os_str(), args)?)?;
+    let block = environment_block(environment)?;
+
+    // SAFETY: an all-zero STARTUPINFOEXW is valid to fill in.
+    let mut startup: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+    startup.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = stdin.as_raw_handle();
+    startup.StartupInfo.hStdOutput = stdout.as_raw_handle();
+    startup.StartupInfo.hStdError = stderr.as_raw_handle();
+    startup.lpAttributeList = attributes.list;
+    // SAFETY: an all-zero PROCESS_INFORMATION is valid to write over.
+    let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: every pointer is to a live, NUL-terminated buffer or structure above;
+    // bInheritHandles is on only with the attribute list naming exactly what's inherited.
+    check(unsafe {
+        CreateProcessW(
+            application.as_ptr(),
+            line.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+            block.as_ptr().cast(),
+            std::ptr::null(),
+            &raw const startup.StartupInfo,
+            &raw mut info,
+        )
+    })?;
+    drop(attributes);
+    drop((stdin, stdout, stderr));
+    // SAFETY: fresh handles CreateProcessW gave us.
+    let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
+    // SAFETY: as above; the thread's handle isn't needed.
+    drop(unsafe { OwnedHandle::from_raw_handle(info.hThread) });
+    Child::new(process, info.dwProcessId, None, None)
+}
+
+/// An inheritable copy of this process's standard handle, or NUL when it
+/// has none (a process started without a console or redirection).
+fn standard(which: STD_HANDLE) -> std::io::Result<OwnedHandle> {
+    // SAFETY: only reads this process's standard handle; it isn't ours to close.
+    let handle = unsafe { GetStdHandle(which) };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return inheritable(open_nul()?);
+    }
+    let mut copy: HANDLE = std::ptr::null_mut();
+    // SAFETY: duplicating an open handle of this process into itself.
+    let duplicated =
+        unsafe { DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &raw mut copy, 0, 1, DUPLICATE_SAME_ACCESS) };
+    if duplicated == 0 {
+        return inheritable(open_nul()?);
+    }
+    // SAFETY: the fresh, inheritable copy, ours alone.
+    unsafe { owned(copy) }
+}
+
 fn reader(handle: OwnedHandle) -> tokio::fs::File {
     tokio::fs::File::from_std(std::fs::File::from(handle))
 }
@@ -144,7 +220,8 @@ fn end(output: Output) -> std::io::Result<(OwnedHandle, Option<OwnedHandle>)> {
             };
             // SAFETY: two handles to write; neither inheritable yet.
             check(unsafe { CreatePipe(&raw mut read, &raw mut write, &raw const attributes, 0) })?;
-            let (read, write) = (owned(read)?, owned(write)?);
+            // SAFETY: the pipe's two fresh handles, ours alone.
+            let (read, write) = unsafe { (owned(read)?, owned(write)?) };
             Ok((inheritable(write)?, Some(read)))
         }
     }
@@ -160,7 +237,8 @@ fn inheritable(handle: OwnedHandle) -> std::io::Result<OwnedHandle> {
     check(unsafe {
         DuplicateHandle(GetCurrentProcess(), handle.as_raw_handle(), GetCurrentProcess(), &raw mut copy, 0, 1, DUPLICATE_SAME_ACCESS)
     })?;
-    let copy = owned(copy)?;
+    // SAFETY: the fresh copy, ours alone.
+    let copy = unsafe { owned(copy) }?;
     // SAFETY: an open handle; the flag is already set by the duplicate, this only makes sure.
     check(unsafe { SetHandleInformation(copy.as_raw_handle(), HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) })?;
     Ok(copy)
@@ -169,8 +247,8 @@ fn inheritable(handle: OwnedHandle) -> std::io::Result<OwnedHandle> {
 fn open_nul() -> std::io::Result<OwnedHandle> {
     let name = wide("NUL")?;
     // SAFETY: a NUL-terminated name; the handle is checked and owned.
-    owned(unsafe {
-        CreateFileW(
+    unsafe {
+        owned(CreateFileW(
             name.as_ptr(),
             GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -178,8 +256,8 @@ fn open_nul() -> std::io::Result<OwnedHandle> {
             OPEN_EXISTING,
             FILE_ATTRIBUTE_NORMAL,
             std::ptr::null_mut(),
-        )
-    })
+        ))
+    }
 }
 
 /// The process attribute list: the handles to inherit and the job.
@@ -190,14 +268,15 @@ struct Attributes {
 
 impl Attributes {
     /// `handles` and `job` must outlive it (the list points at them).
-    fn new(handles: &[HANDLE], job: &HANDLE) -> std::io::Result<Attributes> {
+    fn new(handles: &[HANDLE], job: Option<&HANDLE>) -> std::io::Result<Attributes> {
+        let count = if job.is_some() { 2 } else { 1 };
         let mut size = 0usize;
         // SAFETY: asks only for the size; it "fails" with ERROR_INSUFFICIENT_BUFFER.
-        unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 2, 0, &raw mut size) };
+        unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), count, 0, &raw mut size) };
         let mut memory = vec![0u64; size.div_ceil(8)];
         let list: LPPROC_THREAD_ATTRIBUTE_LIST = memory.as_mut_ptr().cast();
         // SAFETY: `size` bytes of memory for the list.
-        check(unsafe { InitializeProcThreadAttributeList(list, 2, 0, &raw mut size) })?;
+        check(unsafe { InitializeProcThreadAttributeList(list, count, 0, &raw mut size) })?;
         let attributes = Attributes { list, _memory: memory };
         // SAFETY: the handles' array and its size in bytes, alive as long as the list.
         check(unsafe {
@@ -211,6 +290,7 @@ impl Attributes {
                 std::ptr::null(),
             )
         })?;
+        let Some(job) = job else { return Ok(attributes) };
         // SAFETY: one job handle, alive as long as the list.
         check(unsafe {
             UpdateProcThreadAttribute(

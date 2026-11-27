@@ -47,7 +47,7 @@ fn parts(result: &ToolResult) -> (String, Vec<u8>, String) {
         panic!("a text note then one image, got {:?}", result.content.len());
     };
     let bytes = data.bytes().expect("its bytes");
-    // Named by what it sends (#382), so Anthropic gets it once.
+    // Named by what it sends, so Anthropic gets it once.
     let hex: String = sha2::Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect();
     assert_eq!(digest.as_deref(), Some(hex.as_str()));
     (text.clone(), bytes, mime_type.clone())

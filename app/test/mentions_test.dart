@@ -1,4 +1,4 @@
-// Inline agent mentions (#233): "@Kenji" or "@frontend-2" in an agent's
+// Inline agent mentions: "@Kenji" or "@frontend-2" in an agent's
 // conversation is a tag with the agent's character, name and role in its
 // color; a click opens its conversation, and copied it's the name.
 import 'package:factory_app/markdown.dart' show markdownToPlain;

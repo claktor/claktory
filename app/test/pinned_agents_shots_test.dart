@@ -1,4 +1,4 @@
-// Pinned agents drawn for Lucy (ux/pinned-agents.md): the Mac's sidebar with
+// Pinned agents drawn to check by eye: the Mac's sidebar with
 // four pins, a right click's menu on a pin, a drag pinning an agent; the
 // iPhone's drawer with pins, at the default text and at AX5. Each checks
 // what it draws fits; with SHOTS set, drawn to PNGs there:
@@ -185,7 +185,7 @@ void main() {
       await finger.up();
       await settle(tester);
       await tester.pump(const Duration(seconds: 1));
-      // At most two lines: at AX5 the role gives way (Lucy 47558).
+      // At most two lines: at AX5 the role gives way.
       expect(
         find.text(
           factor > 2 ? 'Dana · Insights' : 'Dana · Product Insights · Insights',

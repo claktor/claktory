@@ -4,6 +4,12 @@
 ARG BASE
 FROM ${BASE}
 ARG VERSION
+# Safe Browsing's lists, fetched by this image's own Chrome as it's built:
+# every new profile starts from them. SEED_AT is new each build, so the
+# lists never come from a cached layer.
+ARG SEED_AT
+COPY --chmod=0755 seed.sh /usr/local/sbin/claktory-browser-seed
+RUN echo "seed at $SEED_AT" && /usr/local/sbin/claktory-browser-seed && rm /usr/local/sbin/claktory-browser-seed
 COPY --chmod=0755 runner /opt/claktory-browser/runner
 COPY --chmod=0755 entry.sh /usr/local/sbin/claktory-browser-entry
 LABEL org.opencontainers.image.source=https://github.com/claktory/claktory \

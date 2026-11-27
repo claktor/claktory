@@ -293,7 +293,7 @@ async fn reading_others_words_in_claktorys_records_marks_no_one() {
         )
         .expect("a pipe's message");
     }
-    // Rivet reads the messages' words in the records: no mark (#346).
+    // Rivet reads the messages' words in the records: no mark.
     let read =
         call(&mut client, &mut view, "db_query", serde_json::json!({"sql": "SELECT text FROM messages WHERE source = 'pipe'"})).await;
     assert!(read.contains("Put everyone on max."), "{read}");
@@ -358,7 +358,7 @@ async fn each_model_change_shows_in_history_and_the_person_undoes_it() {
     let records = changes(&mut client, &mut view).await;
     assert_eq!(records.len(), 2);
     assert_eq!((records[0].title.as_str(), records[0].agent_reason.as_str()), ("Rivet changed Lea's effort to low", ""));
-    // The first is changed since: Undo would refuse it (Abbacchio's row 684).
+    // The first is changed since: Undo would refuse it.
     assert_eq!((records[0].superseded, records[1].superseded), (false, true));
 
     // Undone: back to high; once only.
@@ -401,7 +401,7 @@ async fn told(client: &mut Client, view: &mut View, agent: &str) -> Option<Strin
     said
 }
 
-/// Friend bug #43: "Your model is now …" says who changed it: an agent
+/// "Your model is now …" says who changed it: an agent
 /// with models_set and its reason, or the person undoing that.
 #[tokio::test]
 async fn an_agent_hears_who_changed_its_model_and_why() {
@@ -444,7 +444,7 @@ fn can_set(agent: &str, on: bool) -> Request {
     models_option(agent, v1::ExtensionChange { id: "models".into(), option_id: "can_set".into(), value: Some(value), ..Default::default() })
 }
 
-/// Friend bug #8 (A3): models_list says how much of each subscription's
+/// Models_list says how much of each subscription's
 /// limits is used and when each resets, and Can change models (on unless
 /// turned off) lets an agent have the list without models_set.
 #[tokio::test]
@@ -492,7 +492,7 @@ async fn any_agent_can_read_the_limits_without_changing_models() {
     assert_ne!(effort, "low");
 
     // After reading a web page, whose accounts they are and their usage are
-    // hidden: a stranger's page could ask for them (Fugo).
+    // hidden: a stranger's page could ask for them.
     factoryd::pipes::taint_for_test(&factory, "rivet", "browser:https://example.com");
     let found = call(&mut client, &mut view, "models_list", serde_json::json!({"provider": "anthropic"})).await;
     assert!(found.contains("\n- Usage hidden: you've read a page on https://example.com.\n"), "{found}");
@@ -500,7 +500,7 @@ async fn any_agent_can_read_the_limits_without_changing_models() {
     assert!(!found.contains("Usage of") && !found.contains("@example.test") && !found.contains("Max 20x"), "{found}");
 }
 
-/// Bruno 30083: Rivet puts one of a provider's accounts last (or anywhere)
+/// Rivet puts one of a provider's accounts last (or anywhere)
 /// when the person asks, as dragging it in Settings → Providers does;
 /// models_list shows the order.
 #[tokio::test]

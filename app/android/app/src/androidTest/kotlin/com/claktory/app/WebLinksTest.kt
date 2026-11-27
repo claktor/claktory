@@ -76,6 +76,24 @@ class WebLinksTest {
         assertTrue(handlers("com.claktory.app:/callback?code=c1").isEmpty())
         // A Mac's QR code holds the pairing code itself: the phone's camera opens it here.
         assertEquals(listOf(LinkActivity::class.java.name), handlers("factory://?t=abc&e=def"))
+        assertTrue(handlers("https://claktory.com/pair#t=abc&e=def").isEmpty())
+    }
+
+    @Test
+    fun thePairingPagesLinkReachesTheApp() {
+        LinksChannel.heard = { heard += it }
+        Screen.launch().use {
+            val link = "https://claktory.com/pair#t=page&e=0123"
+            val elsewhere = "https://example.com/pair#t=page&e=0123"
+            for (address in listOf(elsewhere, link)) {
+                context.startActivity(
+                    Intent(context, MainActivity::class.java).setAction(Intent.ACTION_VIEW).setData(Uri.parse(address))
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP),
+                )
+            }
+            waitFor("the pairing page's link") { heard.contains(link) }
+            assertFalse("another site's link isn't taken", heard.contains(elsewhere))
+        }
     }
 
     @Test

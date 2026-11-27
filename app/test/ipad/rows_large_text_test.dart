@@ -1,4 +1,4 @@
-// Zucchero's row 140: at an iPad's largest text, rows of a fixed height
+// At an iPad's largest text, rows of a fixed height
 // cut their words to the top half: a tool's header in a conversation, and
 // the expanded pane's "Back to …" chip, an extension panel's title (the
 // Viewer's about panel) and the agent bar's back chip. They grow with the

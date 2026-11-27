@@ -1,4 +1,4 @@
-// Area 2 on the iPhone (Lucy's devices-signin.md §4, §8), drawn as it
+// Area 2 on the iPhone, drawn as it
 // looks for her to check, through the app itself (FactoryApp: its dark
 // theme, no debug banner, the drawer and the Claktories' screens), on an
 // SE and a Pro Max at the default and the largest text:

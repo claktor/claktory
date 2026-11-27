@@ -1,4 +1,4 @@
-// A chat waiting out its provider's usage (Squalo's U16) shows what it
+// A chat waiting out its provider's usage shows what it
 // waits for, as an agent does, and doesn't wave as if it replied.
 import 'package:factory_app/controls.dart' show LiveDot, WorkingWave;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';

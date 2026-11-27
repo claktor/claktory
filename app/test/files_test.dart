@@ -2,10 +2,14 @@ import 'package:factory_app/explorer.dart';
 import 'package:factory_app/layout.dart' show chatOnly, leaves, open;
 import 'package:factory_app/mobile/drawer.dart';
 import 'package:factory_app/panes.dart';
+import 'package:factory_app/identity.dart' show Space;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart' show AppPage;
+import 'package:factory_app/share_files.dart' show showInFinder;
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -99,6 +103,13 @@ Finder filesButtons() => find.byWidgetPredicate(
   (widget) => widget is Semantics && widget.properties.label == 'Show files',
 );
 
+/// Chooses Files in the project [name]'s ⋯ menu (its row hovered).
+Future<void> filesFromMenu(WidgetTester tester, String name) async {
+  await tester.tap(find.bySemanticsLabel('$name options').first);
+  await settle(tester);
+  await tester.tap(find.text('Files').last);
+}
+
 /// Hovers the sidebar row reading [text], so its buttons show.
 Future<TestGesture> hoverRow(WidgetTester tester, String text) async {
   FocusManager.instance.highlightStrategy =
@@ -127,12 +138,16 @@ void main() {
     expect(find.text('Show hidden files'), findsNothing);
   });
 
-  testWidgets("a project row's Files button opens its Files beside the "
-      'conversation, and glows it when open', (tester) async {
+  testWidgets("a project's menu opens its Files beside the conversation of "
+      'an agent in it, and while they show, its row has a glyph that closes '
+      'them', (tester) async {
     final harness = await showFiles(tester);
-    expect(filesButtons(), findsNothing, reason: 'shown on hover');
-    await hoverRow(tester, 'Site');
-    await tester.tap(filesButtons());
+    await hoverRow(tester, 'Factory');
+    expect(filesButtons(), findsNothing, reason: "Files is in ⋯ now");
+    expect(find.bySemanticsLabel('Hide files'), findsNothing);
+    await tester.tap(find.bySemanticsLabel('Factory options'));
+    await settle(tester);
+    await tester.tap(find.text('Files').last);
     await settle(tester);
     final sent = harness.last.setLayout;
     expect(sent.agentId, 'a1', reason: "in the selected agent's layout");
@@ -140,27 +155,172 @@ void main() {
     expect(split.children.first.leaf.kind, 'chat');
     expect(
       split.children.last.leaf,
-      ViewLeaf(kind: 'files', path: 'p2', title: 'Site'),
+      ViewLeaf(kind: 'files', path: 'p1', title: 'Factory'),
     );
     expect(split.weights, [closeTo(3 / 4, 1e-9), closeTo(1 / 4, 1e-9)]);
     expect(
       harness.backend.sent.where((message) => message.hasFocusProject()),
       isEmpty,
-      reason: 'the button only opens the Files',
+      reason: 'it only opens the Files',
+    );
+    expect(find.byType(FilesPage), findsNothing);
+
+    // Open: the row's glyph shows, tinted, hovered or not, and closes them.
+    await harness.apply(tester, snapshot(layout: withFilesOf('p1')));
+    await settle(tester);
+    final hide = find.byWidgetPredicate(
+      (widget) =>
+          widget is Semantics && widget.properties.label == 'Hide files',
+    );
+    expect(hide, findsOneWidget, reason: 'shown while open');
+    await tester.tap(hide);
+    await settle(tester);
+    expect(layoutsSent(harness), hasLength(2));
+    expect(harness.last.setLayout.root.hasLeaf(), isTrue);
+    expect(harness.last.setLayout.root.leaf.kind, 'chat');
+    await tester.pump(const Duration(seconds: 2));
+  });
+
+  testWidgets("another project's Files open as a page of their own, "
+      'selecting no one; a file opens on the page, and Back finds the list', (
+    tester,
+  ) async {
+    final harness = await showFiles(
+      tester,
+      explorers: [
+        tree(
+          projectId: 'p2',
+          entries: [
+            FileEntry(path: 'docs', name: 'docs', isDir: true),
+            FileEntry(path: 'index.md', name: 'index.md'),
+          ],
+        ),
+      ],
+    );
+    harness.backend.files['/Users/me/site/index.md'] = FileContent(
+      path: '/Users/me/site/index.md',
+      mime: 'text/plain',
+      size: Int64(5),
+      data: 'Hello'.codeUnits,
+    );
+    final mouse = await hoverRow(tester, 'Site');
+    await filesFromMenu(tester, 'Site');
+    await settle(tester);
+    expect(find.byType(FilesPage), findsOneWidget);
+    expect(find.byType(FilesPane), findsNothing);
+    expect(layoutsSent(harness), isEmpty, reason: 'a page, not a pane');
+    expect(
+      harness.backend.sent.where((message) => message.hasSelectAgent()),
+      isEmpty,
+      reason: 'no other agent is selected for it',
+    );
+    expect(harness.last.watchFiles, WatchFiles(projectId: 'p2'));
+    Finder onPage(String text) =>
+        find.descendant(of: find.byType(FilesPage), matching: find.text(text));
+    expect(onPage('Site'), findsOneWidget, reason: "the project's name");
+    expect(onPage('~/site'), findsOneWidget, reason: 'where its files are');
+    expect(
+      onPage('Show in Finder'),
+      findsNothing,
+      reason: 'only on the Mac that runs the agents',
+    );
+    // Done at the page's end, however short the title.
+    final page = tester.getRect(find.byType(FilesPage));
+    expect(
+      page.right - tester.getRect(onPage('Done')).right,
+      lessThanOrEqualTo(Space.xl * 2),
     );
 
-    // Open already: its pane glows instead, and the button stays tinted.
-    await harness.apply(tester, snapshot(layout: withFilesOf('p2')));
+    await tester.tap(onPage('docs'));
     await settle(tester);
-    expect(filesButtons(), findsOneWidget, reason: 'shown while open');
-    await tester.tap(filesButtons());
-    await settle(tester);
-    expect(layoutsSent(harness), hasLength(1));
     expect(
-      harness.backend.highlights.glows.map((glow) => glow.key),
-      contains('pane:a1:f1'),
+      harness.last.expandFolder,
+      ExpandFolder(projectId: 'p2', path: 'docs', expanded: true),
     );
-    await tester.pump(const Duration(seconds: 2));
+
+    await tester.tap(onPage('index.md'));
+    await pumpFrames(tester);
+    expect(find.text('Hello'), findsOneWidget, reason: 'on the page itself');
+    expect(find.bySemanticsLabel('Back to Files'), findsOneWidget);
+    expect(layoutsSent(harness), isEmpty);
+    await tester.tap(find.bySemanticsLabel('Back to Files'));
+    await settle(tester);
+    expect(find.text('Hello'), findsNothing);
+    expect(onPage('index.md'), findsOneWidget, reason: 'back to the list');
+
+    // Esc closes the file first, then the page.
+    await tester.tap(onPage('index.md'));
+    await pumpFrames(tester);
+    expect(find.text('Hello'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await settle(tester);
+    expect(find.text('Hello'), findsNothing);
+    expect(find.byType(FilesPage), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await settle(tester);
+    expect(find.byType(FilesPage), findsNothing);
+    expect(harness.last.watchFiles.projectId, '');
+
+    // Done closes the page, a file open on it too; opened again, the list.
+    await mouse.moveTo(Offset.zero);
+    await mouse.moveTo(tester.getCenter(find.text('Site').first));
+    await tester.pump();
+    await filesFromMenu(tester, 'Site');
+    await settle(tester);
+    await tester.tap(onPage('index.md'));
+    await settle(tester);
+    await tester.tap(find.text('Done'));
+    await settle(tester);
+    expect(find.byType(FilesPage), findsNothing);
+    await mouse.moveTo(Offset.zero);
+    await mouse.moveTo(tester.getCenter(find.text('Site').first));
+    await tester.pump();
+    await filesFromMenu(tester, 'Site');
+    await settle(tester);
+    expect(find.text('Hello'), findsNothing);
+    expect(onPage('index.md'), findsOneWidget);
+  });
+
+  testWidgets('with no agent selected, Files open as a page', (tester) async {
+    await showFiles(
+      tester,
+      workspace: snapshot(focused: 'p2')..selectedAgentId = '',
+      explorers: [tree(projectId: 'p2')],
+    );
+    await hoverRow(tester, 'Site');
+    await filesFromMenu(tester, 'Site');
+    await settle(tester);
+    expect(find.byType(FilesPage), findsOneWidget);
+  });
+
+  testWidgets('on the Mac that runs the agents, Files show the folder and '
+      'each file in the Finder', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    final shown = <List<String>>[];
+    final before = showInFinder;
+    showInFinder = (files) async =>
+        shown.add([for (final file in files) file.path]);
+    try {
+      await showFiles(tester, layout: withFilesOf('p1'), explorers: [tree()]);
+      await tester.tap(inFiles('Show in Finder'));
+      await settle(tester);
+      expect(shown.single, ['/Users/me/factory']);
+      final mouse = await tester.createGesture(
+        kind: PointerDeviceKind.mouse,
+        buttons: kSecondaryMouseButton,
+      );
+      await mouse.addPointer(location: tester.getCenter(inFiles('README.md')));
+      await mouse.down(tester.getCenter(inFiles('README.md')));
+      await mouse.up();
+      await mouse.removePointer();
+      await settle(tester);
+      await tester.tap(find.text('Show in Finder').last);
+      await settle(tester);
+      expect(shown.last, ['/Users/me/factory/README.md']);
+    } finally {
+      showInFinder = before;
+      debugDefaultTargetPlatformOverride = null;
+    }
   });
 
   testWidgets('opened Files and a file beside them fit a small window', (
@@ -183,12 +343,12 @@ void main() {
     );
   });
 
-  testWidgets("the focused project's heading has the Files button too", (
-    tester,
-  ) async {
+  testWidgets("the focused project's heading opens the same menu, Files "
+      'in it', (tester) async {
     final harness = await showFiles(tester, focused: 'p1');
-    await hoverRow(tester, 'Factory');
-    await tester.tap(filesButtons());
+    await tester.tap(find.text('Factory').first);
+    await settle(tester);
+    await tester.tap(find.text('Files'));
     await settle(tester);
     expect(harness.last.setLayout.root.split.children.last.leaf.path, 'p1');
   });
@@ -455,7 +615,7 @@ void main() {
     await pumpFrames(tester);
     await tester.longPress(find.text('Site'));
     await pumpFrames(tester);
-    expect(find.text('Project settings'), findsOneWidget);
+    expect(find.text('Project settings…'), findsOneWidget);
     await tester.tap(find.text('Files'));
     await pumpFrames(tester);
     expect(harness.last.watchFiles, WatchFiles(projectId: 'p2'));

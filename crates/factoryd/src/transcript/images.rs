@@ -1,4 +1,4 @@
-//! A conversation's images on disk, each once, as a file (#454 Part 1 #9).
+//! A conversation's images on disk, each once, as a file.
 //!
 //! A segment used to carry every image the agent read or was given as
 //! base64 inside its JSON: a third bigger than the image, and again for
@@ -11,10 +11,10 @@
 //! turns every copy of it (the transcript's, the run's context, a request's)
 //! into its file (`ImageData::store`), and reading a segment whole (the
 //! model's context, a fork) finds each file without reading it. A request
-//! reads the file when it sends the image, and holds nothing after (Polpo:
-//! the youtube agents' 200 MB of images took factoryd from 0.3 to 3.4 GB).
-//! Read without its images' data (an older segment, only shown), nothing
-//! is looked for.
+//! reads the file when it sends the image, and holds nothing after (the
+//! youtube agents' 200 MB of images took factoryd from 0.3 to 3.4 GB). Read
+//! without its images' data (an older segment, only shown), nothing is
+//! looked for.
 //!
 //! The name is the SHA-256 of the image's bytes, worked out here from
 //! them, never taken from the message: an image from elsewhere (a pipe's)

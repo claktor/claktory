@@ -1,4 +1,4 @@
-// The emailed sign-in code as six digit boxes (#242): one field underneath,
+// The emailed sign-in code as six digit boxes: one field underneath,
 // so typing fills the boxes from the left, Delete empties them from the
 // right, pasting the code fills all six and sends it, a paste with more or
 // other than six digits keeps the first six digits, a screen reader finds
@@ -201,7 +201,7 @@ void main() {
     await harness.show(tester, size: const Size(320, 568));
     await pumpFrames(tester);
     expect(find.byType(PairScreen), findsOneWidget);
-    // The first screen's own way in (#363).
+    // The first screen's own way in.
     await pastPairStart(tester, email: true);
     await pumpFrames(tester);
     await tester.enterText(

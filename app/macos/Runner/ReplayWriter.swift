@@ -392,8 +392,9 @@ final class ReplayWriter {
 #endif
 
 #if os(iOS) && canImport(Flutter)
-  /// The Files sheet exporting a copy of a video, under the name the app
-  /// gives it. Answers true once it's saved, false if cancelled.
+  /// The Files sheet exporting a copy of a file (a video, the recovery
+  /// key), under the name the app gives it. Answers true once it's saved,
+  /// false if cancelled.
   final class SaveToFiles: NSObject, UIDocumentPickerDelegate {
     /// The sheet showing now, kept until it answers.
     private static var current: SaveToFiles?

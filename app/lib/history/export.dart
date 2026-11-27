@@ -52,20 +52,72 @@ bool get canExportReplay =>
     (defaultTargetPlatform == TargetPlatform.macOS ||
         defaultTargetPlatform == TargetPlatform.iOS);
 
-/// The video's shape, and its size in pixels.
+/// Where the video is going ("Made for", history-video.md §2): each a
+/// fixed size in pixels and a box its words, its watermark and its Map stay
+/// inside, clear of where that place crops and puts its buttons (Narancia's
+/// §8); only the grid runs to the edges. Trish's words (53449).
 enum ReplayShape {
-  square('Square', 1080, 1080),
-  portrait('Portrait', 1080, 1920),
-  landscape('Landscape', 1920, 1080);
+  x(
+    'X',
+    "Square, 1080 × 1080. Words stay away from where X's feed crops and "
+        'puts its buttons.',
+    1080,
+    1080,
+    Rect.fromLTRB(120, 120, 960, 900),
+  ),
+  feed(
+    'Instagram or LinkedIn feed',
+    'Portrait, 1080 × 1350. Words stay away from where the feed crops and '
+        'puts its buttons.',
+    1080,
+    1350,
+    Rect.fromLTRB(120, 240, 840, 1020),
+  ),
+  vertical(
+    'Reels, TikTok or Shorts',
+    'Full screen, 1080 × 1920. Words stay away from where these apps put '
+        'their buttons and captions.',
+    1080,
+    1920,
+    Rect.fromLTRB(120, 420, 780, 1240),
+  ),
+  wide(
+    'Anywhere else',
+    'Wide, 1920 × 1080, for a website, a slide or a message.',
+    1920,
+    1080,
+    Rect.fromLTRB(192, 162, 1728, 864),
+    statLines: 1,
+  );
 
-  const ReplayShape(this.title, this.width, this.height);
+  const ReplayShape(
+    this.title,
+    this.caption,
+    this.width,
+    this.height,
+    this.box, {
+    this.statLines = 2,
+  });
 
   final String title;
+
+  /// What it makes and why, under the choice.
+  final String caption;
   final int width;
   final int height;
 
+  /// What stays inside, in pixels.
+  final Rect box;
+
+  /// The numbers on two lines in a social network's narrow box, or one.
+  final int statLines;
+
   /// Its size as laid out: half its pixels, drawn at twice.
   Size get logical => Size(width / 2, height / 2);
+
+  /// [box] as laid out.
+  Rect get safe =>
+      Rect.fromLTRB(box.left / 2, box.top / 2, box.right / 2, box.bottom / 2);
 }
 
 /// How long the video is.
@@ -286,12 +338,62 @@ class ReplayVideo {
 
     _sent = Int32List(log.length + 1);
     for (var i = 0; i < log.length; i++) {
-      _sent[i + 1] = _sent[i] + (counts(i) ? 1 : 0);
+      final counted = counts(i);
+      _sent[i + 1] = _sent[i] + (counted ? 1 : 0);
+      if (counted && !youTalk) {
+        youTalk =
+            log.from(i) == 0 ||
+            [for (var k = 0; k < log.toCount(i); k++) log.to(i, k)].contains(0);
+      }
     }
   }
 
+  /// You send or get a message in the video: then you're framed with the
+  /// team, else you're left out of the picture, rather than cut at its
+  /// edge, so a small team fills more of it.
+  var youTalk = false;
+
   /// The end, held this long.
   static const tail = 2.0;
+
+  /// The most agents and messages the video counts, which the stat line
+  /// keeps room for from its first frame, so nothing moves sideways as they
+  /// count up (Matt, Bruno 53194).
+  int get mostAgents => scene.agentCount;
+  int get mostMessages => _sent.last;
+  late final int mostTokens =
+      tokensAt(math.max(timeline.end, video.log.last)) ?? 0;
+
+  /// The tokens used before each hour of [HistoryTimeline.tokens].
+  late final Float64List _tokensBefore = () {
+    final hours = timeline.tokens;
+    final out = Float64List(hours.length + 1);
+    for (var k = 0; k < hours.length; k++) {
+      out[k + 1] = out[k] + hours[k];
+    }
+    return out;
+  }();
+
+  /// The tokens used by [t], counting up through each hour as it goes, so
+  /// the count runs rather than jumps; null when the Claktory doesn't count
+  /// them for History.
+  int? tokensAt(double t) {
+    final hours = timeline.tokens;
+    if (hours.isEmpty) return null;
+    final at = (t - timeline.histogramStart) / Duration.millisecondsPerHour;
+    if (at <= 0) return 0;
+    final k = at.floor();
+    if (k >= hours.length) return _tokensBefore.last.round();
+    return (_tokensBefore[k] + (at - k) * hours[k]).round();
+  }
+
+  /// The chapter at the frame stepped to, and the one before it while the
+  /// two crossfade, [chapterIn] of the way (0 to 1), in the video's own
+  /// time, so a frame made off the screen fades as one played does.
+  HistoryChapter? chapter;
+  HistoryChapter? chapterBefore;
+  var chapterIn = 1.0;
+  var _chapterSince = 0.0;
 
   final HistoryTimeline timeline;
   final HistoryScene scene;
@@ -318,6 +420,21 @@ class ReplayVideo {
     index = i;
     final t = video.historyAt(math.min(p, video.warp!.duration));
     video.time.value = t;
+    final chapter = chapterAt(video.chapters, t);
+    final fade = Motion.base.inMicroseconds / Duration.microsecondsPerSecond;
+    if (dt == null) {
+      // Put in place at once.
+      chapterBefore = null;
+      chapterIn = 1;
+    } else if (chapter != this.chapter) {
+      chapterBefore = this.chapter;
+      chapterIn = 0;
+      _chapterSince = p;
+    } else if (chapterBefore != null) {
+      chapterIn = ((p - _chapterSince) / fade).clamp(0.0, 1.0);
+      if (chapterIn >= 1) chapterBefore = null;
+    }
+    this.chapter = chapter;
     final frame = _team(scene.at(t, project: video.project));
     this.frame = frame;
 
@@ -362,6 +479,7 @@ class ReplayVideo {
       boxOpacity: [for (final box in _boxes) box.opacity],
       padOpacity: [for (final pad in _pads) pad.opacity],
       words: words,
+      you: youTalk,
     );
     // The camera eases toward what's there: out quickly, so what comes is
     // soon in the picture, and in slowly.
@@ -411,10 +529,10 @@ class ReplayVideo {
     return frame;
   }
 
-  /// What the video frames: the person, the agents, the boards and the
-  /// pads.
+  /// What the video frames: the agents, the boards and the pads, and you
+  /// when you take part.
   Rect? _bounds(SceneFrame frame) {
-    Rect? out = scene.layout.you;
+    Rect? out = youTalk ? scene.layout.you : null;
     void add(Rect rect) => out = out?.expandToInclude(rect) ?? rect;
     for (var c = 0; c < scene.chips.length; c++) {
       if (frame.chips[c] == hidden) continue;
@@ -470,6 +588,47 @@ String agentsWorking(({int working, int total}) agents) {
   return '${_grouped(working)} of ${_grouped(total)} agents working';
 }
 
+/// A count as History's video shows it (Trish, 53232): exact with a comma
+/// under 10,000 ("1,204"), then "12.4K", "124K", "2.3M", "23M", "1.2B",
+/// "12B", a whole number without ".0".
+String compactCount(int n) {
+  if (n < 10000) return _grouped(n);
+  const units = [(1e3, 'K'), (1e6, 'M'), (1e9, 'B')];
+  var u = n < 1e6
+      ? 0
+      : n < 1e9
+      ? 1
+      : 2;
+  while (true) {
+    final (size, letter) = units[u];
+    final v = n / size;
+    // K has a decimal under 100, M and B under 10.
+    final decimals = v < (u == 0 ? 100 : 10) ? 1 : 0;
+    final shown = decimals == 1 ? (v * 10).round() / 10 : v.roundToDouble();
+    // Rounded up to the next unit's start: "1M", not "1000K".
+    if (shown >= 1000 && u < units.length - 1) {
+      u++;
+      continue;
+    }
+    final text = shown == shown.roundToDouble()
+        ? '${shown.toInt()}'
+        : shown.toStringAsFixed(1);
+    return '$text$letter';
+  }
+}
+
+/// [n] and its word: "1 message", "0 messages", "12.4K messages".
+String countOf(int n, String one, String many) =>
+    '${compactCount(n)} ${n == 1 ? one : many}';
+
+/// What [compactCount] can show for a number up to [most]: the widest of
+/// them is the room a count keeps from the start.
+List<String> countShapes(int most) => [
+  compactCount(most),
+  for (final top in const [9999, 99949, 999499, 9949999, 999499999, 9949999999])
+    if (top < most) compactCount(top),
+];
+
 /// "1,204".
 String _grouped(int n) {
   final digits = '$n';
@@ -481,8 +640,10 @@ String _grouped(int n) {
   return out.toString();
 }
 
-/// One frame of the video, at its size as laid out: the board under its
-/// camera, when it is and how many, and the watermark.
+/// One frame of the video, at its size as laid out (history-video.md §3):
+/// at the top of its [ReplayShape.safe] box the project's name, the date
+/// and the numbers; at its foot the chapter over the watermark; the Map
+/// fitted between them. Only the grid runs to the frame's edges.
 class ReplayStage extends StatelessWidget {
   const ReplayStage({
     super.key,
@@ -497,20 +658,40 @@ class ReplayStage extends StatelessWidget {
   final ReplayPrivacy privacy;
   final Person person;
 
-  /// Room kept for the words at the top and the watermark at the foot.
-  static const _top = 64.0;
-  static const _foot = 48.0;
-  static const _side = 20.0;
+  // The words' sizes, the same in every shape (half the pixels'): bigger
+  // than the app's, since a 1080-wide video shows about 390 points wide on
+  // a phone (Lucy).
+  static const _sans = TextStyles.caption;
+  static const _date = 32.0;
 
-  Matrix4 _fit(Rect camera, Size size) {
-    final area = Rect.fromLTRB(
-      _side,
-      _top,
-      size.width - _side,
-      size.height - _foot,
-    );
+  /// The date shrinks to this at the least, never cut.
+  static const _dateLeast = 26.0;
+  static const _dateLine = _date * 1.15;
+  static const _named = 17.0;
+  static const _namedLine = _named * 1.3;
+  static const _stats = 20.0;
+  static const _statsLine = _stats * 1.3;
+  static const _mark = 22.0;
+  static const _words = 16.0;
+
+  /// The watermark's row: its mark, or its words' line when taller.
+  static const _markRow = _words * 1.45 > _mark ? _words * 1.45 : _mark;
+
+  /// The Map keeps this clear of the words above and below it.
+  static const _clear = 12.0;
+
+  /// How much larger than life a small team may be drawn, so its names
+  /// read on a phone rather than as a postage stamp (Lucy 53709).
+  static const _most = 2.5;
+
+  /// The camera's view fitted into [area]: a big team smaller, a small one
+  /// larger, up to [_most].
+  @visibleForTesting
+  static Matrix4 fit(Rect camera, Rect area) => _fit(camera, area);
+
+  static Matrix4 _fit(Rect camera, Rect area) {
     final scale = math.min(
-      1.0,
+      _most,
       math.min(
         area.width / math.max(1, camera.width),
         area.height / math.max(1, camera.height),
@@ -526,10 +707,48 @@ class ReplayStage extends StatelessWidget {
       ..scaleByDouble(scale, scale, 1, 1);
   }
 
+  /// The date's words and size for the whole video, decided once from its
+  /// first and last moments, so they never change while it plays: the
+  /// weekday dropped first when it's too wide, then smaller, to
+  /// [_dateLeast] at the least.
+  ({bool short, double size}) _dateFit(
+    BuildContext context,
+    TextStyle style,
+    double room,
+  ) {
+    final ends = [video.timeline.start, video.timeline.end];
+    double widest(bool short, double size) {
+      var widest = 0.0;
+      for (final t in ends) {
+        final painter = TextPainter(
+          text: TextSpan(
+            text: historyWhen(context, t, short: short),
+            style: style.copyWith(fontSize: size),
+          ),
+          textDirection: Directionality.of(context),
+          textScaler: TextScaler.noScaling,
+          maxLines: 1,
+        )..layout();
+        widest = math.max(widest, painter.width);
+        painter.dispose();
+      }
+      return widest;
+    }
+
+    if (widest(false, _date) <= room) return (short: false, size: _date);
+    final short = widest(true, _date);
+    if (short <= room) return (short: true, size: _date);
+    return (
+      short: true,
+      size: math.max(_dateLeast, (_date * room / short).floorToDouble()),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final size = shape.logical;
+    final safe = shape.safe;
     final frame = video.frame;
     final still = video.still;
     final camera = video.camera;
@@ -539,21 +758,118 @@ class ReplayStage extends StatelessWidget {
         child: ColoredBox(color: palette.canvas),
       );
     }
-    final transform = _fit(camera, size);
     final t = video.time;
     final day = replayDay(video.timeline.start, t);
     // One project's: only its own chapters (Abbacchio's row 1584).
-    final chapter = privacy.names && privacy.projects
-        ? chapterAt(video.video.chapters, t)
-        : null;
+    final chapters = privacy.names && privacy.projects;
     final agents = video.working;
     final messages = video.messages;
+    final tokens = video.tokensAt(t);
     // One project's video names it only when projects are named.
     final project = video.video.project;
     final box = project == null || !privacy.projects
         ? -1
         : video.scene.projectBox(project);
     final projectName = box < 0 ? null : video.scene.boxes[box].box.label;
+    const tabular = [ui.FontFeature.tabularFigures()];
+    final named = _sans.copyWith(
+      fontSize: _named,
+      height: 1.3,
+      color: palette.textMuted,
+    );
+    final dateStyle = _sans.copyWith(
+      fontSize: _date,
+      height: 1.15,
+      fontWeight: FontWeight.w600,
+      color: palette.text,
+      fontFeatures: tabular,
+    );
+    final fit = privacy.dates
+        ? _dateFit(context, dateStyle, safe.width)
+        : (short: false, size: _date);
+    final top = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (projectName != null)
+          SizedBox(
+            height: _namedLine,
+            child: Text(
+              projectName,
+              maxLines: 1,
+              softWrap: false,
+              overflow: TextOverflow.ellipsis,
+              style: named,
+            ),
+          ),
+        SizedBox(
+          height: _dateLine,
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              privacy.dates
+                  ? historyWhen(context, t, short: fit.short)
+                  : 'Day ${math.max(1, day)}',
+              maxLines: 1,
+              softWrap: false,
+              style: dateStyle.copyWith(fontSize: fit.size),
+            ),
+          ),
+        ),
+        const SizedBox(height: Space.xs),
+        ReplayStats(
+          working: agents.working,
+          agents: agents.total,
+          mostAgents: math.max(video.mostAgents, agents.total),
+          messages: messages,
+          mostMessages: math.max(video.mostMessages, messages),
+          tokens: tokens,
+          mostTokens: math.max(video.mostTokens, tokens ?? 0),
+          lines: shape.statLines,
+          style: _sans.copyWith(
+            fontSize: _stats,
+            height: 1.3,
+            fontWeight: FontWeight.w500,
+            color: palette.textMuted,
+            fontFeatures: tabular,
+          ),
+        ),
+      ],
+    );
+    final topHeight =
+        (projectName != null ? _namedLine : 0) +
+        _dateLine +
+        Space.xs +
+        _statsLine * shape.statLines;
+    // The chapter's line is kept when there's none, so nothing moves.
+    final foot = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SizedBox(
+          height: _namedLine,
+          child: chapters
+              ? _ChapterLine(
+                  now: video.chapter?.title,
+                  before: video.chapterBefore?.title,
+                  shown: video.chapterIn,
+                  style: named,
+                )
+              : null,
+        ),
+        const SizedBox(height: 6),
+        const Align(
+          alignment: Alignment.centerLeft,
+          child: ReplayWatermark(mark: _mark, words: _words),
+        ),
+      ],
+    );
+    const footHeight = _namedLine + 6 + _markRow;
+    final area = Rect.fromLTRB(
+      safe.left,
+      safe.top + topHeight + _clear,
+      safe.right,
+      safe.bottom - footHeight - _clear,
+    );
+    final transform = _fit(camera, area);
     return MediaQuery(
       data: MediaQuery.of(context)
           .copyWith(textScaler: TextScaler.noScaling, disableAnimations: true),
@@ -568,16 +884,19 @@ class ReplayStage extends StatelessWidget {
                   painter: MapGridPainter(transform, palette.hairline),
                 ),
               ),
-              // Above the watermark's own strip: the board never runs
-              // under it (Lucy).
+              // Between the words: the board never runs under them.
               Positioned(
                 left: 0,
-                top: 0,
+                top: area.top - _clear,
                 width: size.width,
-                height: size.height - _foot + Space.s,
+                height: area.height + 2 * _clear,
                 child: ClipRect(
                   child: Transform(
-                    transform: transform,
+                    transform: Matrix4.translationValues(
+                      0,
+                      _clear - area.top,
+                      0,
+                    )..multiply(transform),
                     child: OverflowBox(
                       alignment: Alignment.topLeft,
                       minWidth: video.scene.layout.size.width,
@@ -595,45 +914,17 @@ class ReplayStage extends StatelessWidget {
                 ),
               ),
               Positioned(
-                left: _side,
-                right: _side,
-                top: Space.m,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      privacy.dates
-                          ? historyWhen(context, t)
-                          : 'Day ${math.max(1, day)}',
-                      maxLines: 1,
-                      style: TextStyles.title.copyWith(
-                        color: palette.text,
-                        fontFeatures: const [ui.FontFeature.tabularFigures()],
-                      ),
-                    ),
-                    Text(
-                      [
-                        ?projectName,
-                        agentsWorking(agents),
-                        messages == 1
-                            ? '1 message'
-                            : '${_grouped(messages)} messages',
-                        if (chapter != null) chapter.title,
-                      ].join(' · '),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyles.caption.copyWith(
-                        color: palette.textMuted,
-                        fontFeatures: const [ui.FontFeature.tabularFigures()],
-                      ),
-                    ),
-                  ],
-                ),
+                left: safe.left,
+                top: safe.top,
+                width: safe.width,
+                child: top,
               ),
               Positioned(
-                right: _side,
-                bottom: Space.s,
-                child: const ReplayWatermark(),
+                left: safe.left,
+                top: safe.bottom - footHeight,
+                width: safe.width,
+                height: footHeight,
+                child: foot,
               ),
             ],
           ),
@@ -643,11 +934,170 @@ class ReplayStage extends StatelessWidget {
   }
 }
 
+/// The video's chapter at its foot: `textMuted` (faint grey turns to mush
+/// once a network re-encodes it), one line; a new one
+/// crossfades in over the one before, never slides (Lucy 53229).
+class _ChapterLine extends StatelessWidget {
+  const _ChapterLine({
+    required this.now,
+    required this.before,
+    required this.shown,
+    required this.style,
+  });
+
+  final String? now;
+  final String? before;
+
+  /// How far [now] has faded in over [before], 0 to 1.
+  final double shown;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    Widget line(String text, double opacity) => Opacity(
+      opacity: opacity,
+      child: Text(
+        text,
+        maxLines: 1,
+        softWrap: false,
+        overflow: TextOverflow.ellipsis,
+        style: style,
+      ),
+    );
+    final now = this.now, before = this.before;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (before != null && shown < 1) line(before, 1 - shown),
+        if (now != null) line(now, before == null ? 1 : shown),
+      ],
+    );
+  }
+}
+
+/// The video's numbers under its date: "4 of 23 agents working", then
+/// "1,204 messages · 2.3M tokens" on a line of its own in a social network's narrow box
+/// ([lines] 2), or after it on one line. Each number keeps room for the
+/// most it reaches over the whole video, right-aligned in tabular figures,
+/// and each word room for its plural, so neither line moves or changes
+/// length as they count (Matt, Bruno 53194); "0 of 23" included, so it
+/// never blinks.
+class ReplayStats extends StatelessWidget {
+  const ReplayStats({
+    super.key,
+    required this.working,
+    required this.agents,
+    required this.mostAgents,
+    required this.messages,
+    required this.mostMessages,
+    this.tokens,
+    this.mostTokens = 0,
+    this.lines = 1,
+    required this.style,
+  });
+
+  /// Each text's width in a style, measured once: the video asks every
+  /// frame.
+  static final _widths = <(String, double?, FontWeight?), double>{};
+
+  final int working;
+  final int agents;
+  final int mostAgents;
+  final int messages;
+  final int mostMessages;
+
+  /// The tokens used so far, after the messages; null where the Claktory
+  /// doesn't count them for History.
+  final int? tokens;
+  final int mostTokens;
+  final int lines;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    final direction = Directionality.of(context);
+    double width(String text) =>
+        _widths.putIfAbsent((text, style.fontSize, style.fontWeight), () {
+          final painter = TextPainter(
+            text: TextSpan(text: text, style: style),
+            textDirection: direction,
+            textScaler: TextScaler.noScaling,
+            maxLines: 1,
+          )..layout();
+          final width = painter.width;
+          painter.dispose();
+          return width;
+        });
+    double room(Iterable<String> texts) =>
+        texts.map(width).fold(0.0, math.max).ceilToDouble();
+
+    Widget text(String text) => Text(
+      text,
+      maxLines: 1,
+      softWrap: false,
+      textScaler: TextScaler.noScaling,
+      style: style,
+    );
+    Widget fixed(String shown, Iterable<String> widest, {bool end = false}) =>
+        SizedBox(
+          width: room(widest),
+          child: Align(
+            alignment: end ? Alignment.centerRight : Alignment.centerLeft,
+            widthFactor: 1,
+            child: text(shown),
+          ),
+        );
+    final agentsRoom = countShapes(mostAgents);
+    const dot = ' · ';
+    // A number starting a line takes its slack on its right, so the line
+    // starts flush with the date (Lucy 53733); inside a line, on its left.
+    final team = [
+      fixed(compactCount(working), agentsRoom),
+      text(' of '),
+      fixed(compactCount(agents), agentsRoom, end: true),
+      fixed(agents == 1 ? ' agent working' : ' agents working', const [
+        ' agent working',
+        ' agents working',
+      ]),
+    ];
+    final tokens = this.tokens;
+    final talk = [
+      fixed(compactCount(messages), countShapes(mostMessages), end: lines == 1),
+      fixed(messages == 1 ? ' message' : ' messages', const [
+        ' message',
+        ' messages',
+      ]),
+      if (tokens != null) ...[
+        text(dot),
+        fixed(compactCount(tokens), countShapes(mostTokens), end: true),
+        fixed(tokens == 1 ? ' token' : ' tokens', const [' token', ' tokens']),
+      ],
+    ];
+    // Clipped, never wrapped, should a box be narrower than its numbers.
+    Widget line(List<Widget> parts) => ClipRect(
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        physics: const NeverScrollableScrollPhysics(),
+        child: Row(mainAxisSize: MainAxisSize.min, children: parts),
+      ),
+    );
+    if (lines == 1) return line([...team, text(dot), ...talk]);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [line(team), line(talk)],
+    );
+  }
+}
+
 /// Whose video it is, at its foot: Claktory's mark, then "Made with
 /// Claktory · claktory.com", legible but quiet (Matt, through Bruno 44277;
 /// Trish's words, Bruno 46771: whoever watches it isn't its owner).
 class ReplayWatermark extends StatelessWidget {
-  const ReplayWatermark({super.key});
+  const ReplayWatermark({super.key, this.mark = 20, this.words = 12});
+
+  /// The mark's side and the words' size.
+  final double mark;
+  final double words;
 
   /// The app icon's colors: a white cog with a blue shadow on graphite.
   static const _graphite = Color(0xFF2A2D33);
@@ -658,50 +1108,60 @@ class ReplayWatermark extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final style = TextStyles.caption.copyWith(
+      fontSize: words,
       color: palette.textMuted,
       fontWeight: FontWeight.w500,
     );
+    // The icon's proportions at any size: a 14 cog in a 20 square.
+    final unit = mark / 20;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-          width: 20,
-          height: 20,
+          width: mark,
+          height: mark,
           decoration: BoxDecoration(
             color: _graphite,
-            borderRadius: BorderRadius.circular(5),
+            borderRadius: BorderRadius.circular(5 * unit),
           ),
-          child: const Stack(
+          child: Stack(
             children: [
               Positioned(
-                left: 3.5,
-                top: 3.5,
-                width: 14,
-                height: 14,
-                child: FittedBox(child: CogGlyph(color: _blue)),
+                left: 3.5 * unit,
+                top: 3.5 * unit,
+                width: 14 * unit,
+                height: 14 * unit,
+                child: const FittedBox(child: CogGlyph(color: _blue)),
               ),
               Positioned(
-                left: 3,
-                top: 3,
-                width: 14,
-                height: 14,
-                child: FittedBox(child: CogGlyph(color: _white)),
+                left: 3 * unit,
+                top: 3 * unit,
+                width: 14 * unit,
+                height: 14 * unit,
+                child: const FittedBox(child: CogGlyph(color: _white)),
               ),
             ],
           ),
         ),
         const SizedBox(width: Space.s),
-        Text.rich(
-          TextSpan(
-            children: [
+        // Smaller rather than cut, should its box be too narrow.
+        Flexible(
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text.rich(
               TextSpan(
-                text: 'Made with Claktory',
-                style: style.copyWith(color: palette.text),
+                children: [
+                  TextSpan(
+                    text: 'Made with Claktory',
+                    style: style.copyWith(color: palette.text),
+                  ),
+                  TextSpan(text: ' · claktory.com', style: style),
+                ],
               ),
-              TextSpan(text: ' · claktory.com', style: style),
-            ],
+              maxLines: 1,
+            ),
           ),
-          maxLines: 1,
         ),
       ],
     );
@@ -754,11 +1214,9 @@ class _ReplayExportState extends State<ReplayExport>
     _ticker.start();
   }
 
-  /// Portrait on a phone, square elsewhere, until one is chosen: the
-  /// board's natural shape is wide, so the others are offered.
-  ReplayShape get _shape =>
-      _chosenShape ??
-      (isPhoneLayout(context) ? ReplayShape.portrait : ReplayShape.square);
+  /// X until another place is chosen, on every device: what Matt posts
+  /// to, and square survives most feeds' previews (history-video.md §2).
+  ReplayShape get _shape => _chosenShape ?? ReplayShape.x;
 
   /// A video being made finished, or went: this one can be made now.
   void _jobs() {
@@ -903,16 +1361,21 @@ class _ReplayExportState extends State<ReplayExport>
         children: [
           Expanded(child: name),
           const SizedBox(width: Space.m),
-          SizedBox(width: 160, child: menu),
+          // Room for "Instagram or LinkedIn feed".
+          SizedBox(width: 220, child: menu),
         ],
       );
     }
 
     final fields = <Widget>[
       preview,
-      choice<ReplayShape>('Shape', _shape, [
+      choice<ReplayShape>('Made for', _shape, [
         for (final shape in ReplayShape.values) (shape, shape.title),
       ], (shape) => setState(() => _chosenShape = shape)),
+      Text(
+        _shape.caption,
+        style: type.caption.copyWith(color: palette.textMuted),
+      ),
       choice<ReplayLength>(
         'Length',
         _length,

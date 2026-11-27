@@ -130,14 +130,14 @@ async fn rivet_compacts_an_agent_when_asked_and_clears_one_only_with_the_persons
     assert_eq!(cards(&view).len(), 1, "one request per agent at a time");
 
     // Dismissed, it stays as it is.
-    // Without a comment, Rivet is told quietly (friend bug #19), with
+    // Without a comment, Rivet is told quietly, with
     // whatever next wakes it.
     apply_request(&mut client, &mut view, answer(*seq, true)).await;
     view.follow(&mut client, |view| view.agent("rivet").quiet_waiting == 1 && idle(view, "rivet")).await;
     apply_request(&mut client, &mut view, select("tiziano")).await;
     assert!(describe(&view.entries).starts_with(&["user: hello".to_owned()]), "{:?}", describe(&view.entries));
 
-    // Withdrawn by Rivet (#407), it closes and nothing is cleared.
+    // Withdrawn by Rivet, it closes and nothing is cleared.
     let said = call(&mut client, &mut view, "rivet", "agents_clear", r#"{"agent":"Tiziano"}"#).await;
     let text = told(&mut client, &mut view, 1).await;
     assert!(text.contains("dismissed your request to clear Tiziano's conversation, so it stays as it is."), "{text}");

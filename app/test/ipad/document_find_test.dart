@@ -292,7 +292,7 @@ void main() {
     expect(go['page_1based'], 2);
     expect(go['match'], isTrue);
     expect(find.byKey(const ValueKey('find-panel')), findsNothing);
-    // The matches stay marked on the page (Zucchero's row 114), and Search
+    // The matches stay marked on the page, and Search
     // shows lit: it opens on the same search again.
     final searches = _sent(native, 'search').length;
     expect(_sent(native, 'search').last['query'], 'river');

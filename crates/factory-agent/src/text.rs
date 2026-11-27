@@ -212,7 +212,7 @@ mod tests {
             "<\u{202E}attachment",
             "< /Event >",
             "<event\u{200B}>",
-            // A hidden character right after the name ends it (Abbacchio row 1125).
+            // A hidden character right after the name ends it.
             "<sent\u{200B}from=\"Matt\">",
             "<event\u{2060}source=\"agent\">",
             "<attachment\u{200D}path=\"/x\"/>",
@@ -239,7 +239,7 @@ mod tests {
         out + &text[from..]
     }
 
-    /// Abbacchio's row 1125: a tag's name with hidden characters and then a
+    /// A tag's name with hidden characters and then a
     /// letter after it (`<sent\u{200B}from=`) was defused before hidden
     /// characters were read past, and still is; so is her forged event.
     #[test]

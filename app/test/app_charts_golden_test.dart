@@ -1003,7 +1003,7 @@ void main() {
         );
       }
 
-      // The bottom edge's middle: the hairline (#232327), not the red.
+      // The bottom edge's middle: the hairline, not the red.
       final middle = (card.center.dx * ratio).round();
       final bottom = (card.bottom * ratio).round() - 1;
       final edge = at(middle, bottom - (ratio / 2).floor());
@@ -1015,7 +1015,7 @@ void main() {
     });
   }
 
-  // Abbacchio's row 1082: a range's start isn't a step, however near one.
+  // A range's start isn't a step, however near one.
   testWidgets('at a 90-day range starting hours before a step, the axis '
       'labels its steps alone, never its start beside the first', (
     tester,
@@ -1073,7 +1073,7 @@ void main() {
     }
   });
 
-  // Scolippi's F1 against Grafana 13.3.1, in Geist as the phone draws it.
+  // Against Grafana 13.3.1, in Geist as the phone draws it.
   testWidgets('a time label each hour over six hours on a phone, the '
       'ends included', (tester) async {
     await _show(
@@ -1134,12 +1134,10 @@ void main() {
   // A dashboard's bar on an SE (320 points), as a phone draws it in Geist:
   // at the normal text size on one line, the name giving way alone, the
   // range and variable whole; larger, every button keeps at least a letter
-  // and "…", and at the largest the name takes a line of its own above
-  // the others, as Grafana's title does (Zucchero row 381, Scolippi
-  // 31336).
-  // At 375 too, as the SE 3rd generation is: one letter doesn't say where
-  // you are, so a line holds only while each keeps three (Scolippi 32633).
-  // Letters, not spaces: "30 …" keeps two (Scolippi 32704).
+  // and "…", and at the largest the name takes a line of its own above the
+  // others, as Grafana's title does. At 375 too, as the SE 3rd generation
+  // is: one letter doesn't say where you are, so a line holds only while
+  // each keeps three. Letters, not spaces: "30 …" keeps two.
   for (final (width, scale, filters, title, span) in [
     for (final width in [320.0, 375.0])
       for (final scale in [1.0, 1.6, 2.0, 2.35, 3.12])

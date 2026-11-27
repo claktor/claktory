@@ -1,9 +1,10 @@
-//! Checks that the visitor is a person, which an errand can't pass (W5;
-//! Matt's card 222, Melone R12.4). The person never drives the browser, so
-//! there's no handoff: Claktory tries the page again about 2, 15 and 60
-//! minutes later, and the errand's steps wait meanwhile. When the check
-//! clears, the agent is told to read the page; after the last try, the
-//! errand fails, said in its log, and the agent is told to report it.
+//! Checks that the visitor is a person, which Claktory's browser can't
+//! pass. The person never drives the
+//! browser, so there's no handoff: Claktory tries the page again about 2,
+//! 15 and 60 minutes later, and the agent's browser steps wait meanwhile.
+//! When the check clears, the agent is told to read the page; after the
+//! last try, it's said in the log, the browser is the agent's again, and
+//! the agent is told to say it couldn't get past it.
 //!
 //! Kept in memory: after Claktory restarts, the agent's next step meets
 //! the check again and the tries start over.
@@ -66,7 +67,7 @@ impl Factory {
     /// The errand's wait, if it's waiting to try a check's page again:
     /// what its steps are told.
     pub(crate) fn check_waiting(&self, errand: &str) -> Option<String> {
-        let waiting = crate::locking::lock(&self.errands.checking).clone().filter(|waiting| waiting.errand == errand)?;
+        let waiting = crate::locking::lock(&self.errands.checking).get(errand).cloned()?;
         Some(format!(
             "Claktory tries {} again at {} for its check that you're a person: wait until you're told how it went",
             site(&waiting.origin),
@@ -87,7 +88,7 @@ impl Factory {
         self.wait_to_try(waiting, timing.after[0]);
         let minutes = timing.after[0].as_secs().div_ceil(60);
         format!(
-            "A check that you're a person came up on {}, which Claktory's browser can't pass and no one can do for it. Claktory tries the page again at {} (in about {minutes} minute{}), later again if it must, and tells you how it went. Until then the errand's steps wait: do nothing else for it.",
+            "A check that you're a person came up on {}, which Claktory's browser can't pass and no one can do for it. Claktory tries the page again at {} (in about {minutes} minute{}), later again if it must, and tells you how it went. Until then your browser's steps wait: do nothing else with it.",
             site(origin),
             at(next),
             if minutes == 1 { "" } else { "s" }
@@ -95,7 +96,7 @@ impl Factory {
     }
 
     fn wait_to_try(self: &Arc<Self>, waiting: Waiting, after: Duration) {
-        *crate::locking::lock(&self.errands.checking) = Some(waiting.clone());
+        crate::locking::lock(&self.errands.checking).insert(waiting.errand.clone(), waiting.clone());
         let factory = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(after).await;
@@ -105,13 +106,13 @@ impl Factory {
 
     /// One try: the page again, and whether its check clears.
     async fn try_again(self: &Arc<Self>, waiting: Waiting) {
-        let current = crate::locking::lock(&self.errands.checking).clone();
-        if !current.is_some_and(|current| current.errand == waiting.errand && current.tries == waiting.tries) {
+        let current = crate::locking::lock(&self.errands.checking).get(&waiting.errand).cloned();
+        if !current.is_some_and(|current| current.tries == waiting.tries) {
             return;
         }
         let errand = self.errands.get(&waiting.errand).filter(|errand| State::from_wire(errand.state) == State::Running);
         let Some(errand) = errand else {
-            *crate::locking::lock(&self.errands.checking) = None;
+            crate::locking::lock(&self.errands.checking).remove(&waiting.errand);
             return;
         };
         let timing = *crate::locking::lock(&self.errands.check_timing);
@@ -125,13 +126,13 @@ impl Factory {
             ..Default::default()
         };
         if cleared {
-            *crate::locking::lock(&self.errands.checking) = None;
+            crate::locking::lock(&self.errands.checking).remove(&waiting.errand);
             log::write(&self.store, &entry("The check that you're a person cleared when Claktory tried again"));
             let text = format!(
-                "The check that you're a person on {} cleared when Claktory tried the page again: read it with errand_read and carry on.",
+                "The check that you're a person on {} cleared when Claktory tried the page again: read it with browser_read and carry on.",
                 site(&waiting.origin)
             );
-            self.deliver_event(&waiting.agent, text, host_event(format!("Errand {}: the check cleared", errand.id)));
+            self.deliver_event(&waiting.agent, text, host_event("The check cleared".to_owned()));
             return;
         }
         if tries < timing.after.len() {
@@ -140,28 +141,27 @@ impl Factory {
             self.wait_to_try(Waiting { tries, at: now_ms() + after.as_millis() as i64, ..waiting }, after);
             return;
         }
-        *crate::locking::lock(&self.errands.checking) = None;
+        crate::locking::lock(&self.errands.checking).remove(&waiting.errand);
         log::write(&self.store, &entry("Gave up: the check that you're a person didn't clear"));
         let reason =
             format!("A check that you're a person kept showing on {}, which Claktory's browser can't pass.", site(&waiting.origin));
-        self.end_errand(&errand.id, State::Failed, &reason).await;
         let text = format!(
-            "{reason} Claktory tried the page {tries} more times and the check was still there, so errand {} failed. Tell your lead, or whoever opened it, what was done and what wasn't.",
-            errand.id
+            "{reason} Claktory tried the page {tries} more times and the check was still there. Your browser is yours again: go elsewhere with browser_open, or say in your reply that you couldn't get past it."
         );
-        self.deliver_event(&waiting.agent, text, host_event(format!("Errand {} failed", errand.id)));
+        self.deliver_event(&waiting.agent, text, host_event("The check didn't clear".to_owned()));
     }
 
     /// The page at `address` again (through the fence), and whether its
     /// check clears within `clears`. In the errand's lane, so no step of
     /// its runs meanwhile.
     async fn check_cleared(self: &Arc<Self>, errand: &v1::Errand, address: &str, clears: Duration) -> bool {
-        let _lane = self.errands.lane.lock().await;
-        let mut live = self.errands.live.lock().await;
-        let Ok(page) = self.page(&mut live, errand).await else { return false };
+        let Some(seat) = self.errands.seat_for(errand) else { return false };
+        let _lane = seat.lane.lock().await;
+        let mut live = seat.live.lock().await;
+        let Ok(page) = self.page(&seat, &mut live, errand).await else { return false };
         drop(live);
         if address.starts_with("https://") {
-            let _ = fence::go(&page, &errand.sites, address).await;
+            let _ = fence::go(&page, address).await;
         }
         let until = std::time::Instant::now() + clears;
         loop {

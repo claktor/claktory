@@ -237,7 +237,7 @@ void main() {
       _pairing(DevicePairingState.DEVICE_PAIRING_STATE_ASKING),
     );
     expect(find.text('Copy code'), findsNothing);
-    // Typed off its screen, never shown here (#352 P4).
+    // Typed off its screen, never shown here.
     expect(
       find.text(
         'Laptop used the code. To allow it, type the number its screen '
@@ -355,11 +355,11 @@ void main() {
     expect(_asks(harness), hasLength(2));
     expect(find.text('Copied'), findsNothing);
 
-    harness.backend.refuse = 'Not connected to the backend.';
+    harness.backend.refuse = "Can't reach your Claktory right now.";
     harness.backend.connected.value = false;
     harness.backend.connected.value = true;
     await pumpFrames(tester);
-    expect(find.text('Not connected to the backend.'), findsOneWidget);
+    expect(find.text("Can't reach your Claktory right now."), findsOneWidget);
     expect(
       tester
           .widget<DevicePairingCard>(find.byType(DevicePairingCard))

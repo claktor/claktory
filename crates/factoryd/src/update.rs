@@ -14,6 +14,7 @@
 //! staying up). If it dies first, however it dies, the supervisor puts the
 //! previous backend back, and Factory says the update failed.
 
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::sync::Arc;
@@ -55,6 +56,7 @@ const TRIAL: Duration = Duration::from_secs(30);
 /// Waits for the app to quit (forcing it after 10s), swaps the bundle (the
 /// old one moved aside until the new one is in place), and reopens it;
 /// Factory Dev in the background, as always.
+#[cfg(unix)]
 const SWAP_APP: &str = r#"app="$1"; new="$2"
 (
   for _ in $(seq 100); do pgrep -f "$app/Contents/MacOS/" >/dev/null || break; sleep 0.1; done
@@ -277,7 +279,7 @@ pub async fn latest(home: &Home) -> Release {
     let Ok(text) = tokio::fs::read_to_string(home.releases().join("latest")).await else { return Release::default() };
     let version = text.trim();
     let dir = home.releases().join(version);
-    if !plain(version) || !dir.join("factoryd").is_file() {
+    if !plain(version) || !dir.join(crate::home::program("factoryd")).is_file() {
         return Release::default();
     }
     let backend = match tokio::fs::read_to_string(dir.join("backend-version")).await {
@@ -647,6 +649,31 @@ impl Factory {
             return Err(RequestError::NoRelease);
         }
         let release = self.home.releases().join(&latest.version);
+        // On Windows the app names the folder it's installed in, which must
+        // be Claktory's own: the new version goes in beside the one running,
+        // and the launcher starts it once the app restarts.
+        #[cfg(windows)]
+        if !app_path.is_empty() {
+            let root = crate::windows::dirs::programs()?;
+            let same = |path: &Path| crate::windows::fs::canonical(path).ok().map(|path| path.to_string_lossy().to_lowercase());
+            if same(Path::new(app_path)).is_none() || same(Path::new(app_path)) != same(&root) {
+                return Err(RequestError::NotAnApp(app_path.to_owned()));
+            }
+            let (from, version) = (release.clone(), latest.version.clone());
+            tokio::task::spawn_blocking(move || {
+                crate::windows::app_install::install(
+                    &root,
+                    &from,
+                    &version,
+                    crate::windows::authenticode::check_release,
+                    crate::windows::authenticode::check_program,
+                )
+            })
+            .await
+            .map_err(std::io::Error::other)?
+            .map_err(|why| std::io::Error::other(format!("Claktory couldn't put the new app in: {why}")))?;
+        }
+        #[cfg(unix)]
         if !app_path.is_empty() {
             let app = Path::new(app_path);
             if !app.extension().is_some_and(|extension| extension == "app") || !app.is_dir() {
@@ -675,7 +702,7 @@ impl Factory {
             return Ok(false);
         }
         let backend = self.home.backend();
-        let new_backend = tokio::fs::read(release.join("factoryd")).await?;
+        let new_backend = tokio::fs::read(release.join(crate::home::program("factoryd"))).await?;
         let supervised = std::env::var_os(SUPERVISED).is_some();
         // The helpers first: the backend going in is what makes it count.
         let home = self.home.clone();
@@ -706,24 +733,46 @@ impl Factory {
             if supervised {
                 // The supervisor starts the new backend and watches it,
                 // handing it the open vault's key.
+                #[cfg(unix)]
                 factory.vault.hand_over(false);
+                #[cfg(windows)]
+                factory.vault.hand_over();
                 factory.store.write_calls();
                 crate::account::analytics::backend_stopped(&factory.home);
                 std::process::exit(0);
             }
+            // Nobody to watch over it, on Windows, where nothing replaces a
+            // process in place: the new backend is started, and this one
+            // exits once it has. The vault opens again by itself, or asks.
+            #[cfg(windows)]
+            {
+                factory.vault.hand_over();
+                factory.store.write_calls();
+                crate::account::analytics::backend_stopped(&factory.home);
+                match std::process::Command::new(&backend).args(std::env::args_os().skip(1)).spawn() {
+                    Ok(_) => std::process::exit(0),
+                    Err(error) => {
+                        crate::account::analytics::backend_started(&factory);
+                        tracing::error!(%error, backend = %backend.display(), "couldn't start the update");
+                    }
+                }
+            }
             // Nobody to watch over it: become the new backend in place, the
             // open vault's key handed over through an fd it keeps.
-            let mut command = std::process::Command::new(&backend);
-            command.args(std::env::args_os().skip(1));
-            let handed = factory.vault.hand_over(true);
-            if let Some(fd) = &handed {
-                command.env(crate::vault::handoff::FD_ENV, std::os::fd::AsRawFd::as_raw_fd(fd).to_string());
+            #[cfg(unix)]
+            {
+                let mut command = std::process::Command::new(&backend);
+                command.args(std::env::args_os().skip(1));
+                let handed = factory.vault.hand_over(true);
+                if let Some(fd) = &handed {
+                    command.env(crate::vault::handoff::FD_ENV, std::os::fd::AsRawFd::as_raw_fd(fd).to_string());
+                }
+                crate::account::analytics::backend_stopped(&factory.home);
+                let error = command.exec();
+                drop(handed);
+                crate::account::analytics::backend_started(&factory);
+                tracing::error!(%error, backend = %backend.display(), "couldn't start the update");
             }
-            crate::account::analytics::backend_stopped(&factory.home);
-            let error = command.exec();
-            drop(handed);
-            crate::account::analytics::backend_started(&factory);
-            tracing::error!(%error, backend = %backend.display(), "couldn't start the update");
         });
         Ok(true)
     }
@@ -733,6 +782,7 @@ impl Factory {
 /// else the one with its bundle id, so an app renamed where it's installed
 /// (Claktory.app from the disk image, where releases have Factory.app)
 /// still updates.
+#[cfg(unix)]
 fn release_app(release: &Path, installed: &Path) -> Option<std::path::PathBuf> {
     let same_name = release.join(installed.file_name()?);
     if same_name.is_dir() {
@@ -745,6 +795,7 @@ fn release_app(release: &Path, installed: &Path) -> Option<std::path::PathBuf> {
 }
 
 /// The app's CFBundleIdentifier.
+#[cfg(unix)]
 fn bundle_id(app: &Path) -> Option<String> {
     let output = std::process::Command::new("/usr/bin/plutil")
         .args(["-extract", "CFBundleIdentifier", "raw", "-o", "-"])
@@ -757,6 +808,7 @@ fn bundle_id(app: &Path) -> Option<String> {
 
 /// Whether this user may change what's in `folder` (/Applications isn't
 /// for one who isn't an administrator).
+#[cfg(unix)]
 fn writable(folder: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     let Ok(path) = std::ffi::CString::new(folder.as_os_str().as_bytes()) else { return false };
@@ -767,6 +819,7 @@ fn writable(folder: &Path) -> bool {
 /// Writes an executable that has to survive a power cut: the bytes and
 /// the rename reach the disk (`sync_all` is F_FULLFSYNC on macOS) before
 /// it counts as written, so `bin/factoryd` is never left empty.
+#[cfg(unix)]
 pub fn write_executable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -780,6 +833,28 @@ pub fn write_executable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)?;
     if let Some(dir) = path.parent() {
         std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
+}
+
+/// On Windows, where a running program's file can't be written over but can
+/// be renamed: the new one is written beside it and flushed, the one there
+/// is moved aside (`<name>.replaced-<random>`), and the new one renamed into
+/// its place, written through to the disk. What's moved aside is deleted
+/// when nothing runs it, now or by `sweep_replaced` later.
+#[cfg(windows)]
+pub fn write_executable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    drop(file);
+    let aside = crate::windows::fs::replace(&tmp, path)?;
+    if let Some(aside) = aside {
+        let _ = std::fs::remove_file(aside);
     }
     Ok(())
 }
@@ -807,7 +882,7 @@ pub fn running_exe() -> Option<std::path::PathBuf> {
 
 /// `name` (one of `HELPERS`) beside this backend's program, if it's there.
 pub(crate) fn beside_backend(name: &str) -> Option<std::path::PathBuf> {
-    let beside = running_exe()?.parent()?.join(name);
+    let beside = running_exe()?.parent()?.join(crate::home::program(name));
     beside.is_file().then_some(beside)
 }
 
@@ -833,7 +908,7 @@ pub const WSL_HELPER: &str = "claktory-wsl";
 pub const HELPERS: [&str; 4] = [APPS_HOST, SPEECH_HOST, VIDEO_PREVIEW, WSL_HELPER];
 
 fn helper(home: &Home, name: &str) -> std::path::PathBuf {
-    home.root().join("bin").join(name)
+    home.root().join("bin").join(crate::home::program(name))
 }
 
 fn previous_helper(home: &Home, name: &str) -> std::path::PathBuf {
@@ -884,15 +959,19 @@ struct Carried {
 fn carried(home: &Home, release: &Path) -> Vec<Carried> {
     let helpers = HELPERS.into_iter().map(|name| Carried {
         name,
-        new: release.join(name),
+        new: release.join(crate::home::program(name)),
         current: helper(home, name),
         previous: previous_helper(home, name),
     });
+    // On Windows in `tools\bin`, beside the Git folders.
+    let tool = |name: &str| {
+        if cfg!(windows) { Path::new("bin").join(crate::home::program(name)) } else { std::path::PathBuf::from(name) }
+    };
     let tools = TOOLS.into_iter().map(|name| Carried {
         name,
-        new: release.join("tools").join(name),
-        current: tools_dir(home).join(name),
-        previous: tools_dir(home).join(".previous").join(name),
+        new: release.join("tools").join(tool(name)),
+        current: tools_dir(home).join(tool(name)),
+        previous: tools_dir(home).join(".previous").join(tool(name)),
     });
     helpers.chain(tools).collect()
 }
@@ -941,6 +1020,8 @@ fn put_executable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// what's there alone, and forgets an older previous copy so a roll-back
 /// doesn't put back one from before.
 fn stage_helpers(home: &Home, release: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    crate::windows::tools::stage(home, release)?;
     for carried in carried(home, release) {
         stage_helper(&carried)?;
     }
@@ -966,6 +1047,9 @@ fn stage_helper(carried: &Carried) -> std::io::Result<()> {
 /// Puts each previous copy back, if the update kept one; tries them all
 /// before reporting the first failure.
 fn restore_helpers(home: &Home) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let mut failed = crate::windows::tools::restore(home);
+    #[cfg(unix)]
     let mut failed = Ok(());
     for Carried { current, previous, .. } in carried(home, Path::new("")) {
         let restored = match std::fs::read(&previous) {
@@ -996,6 +1080,8 @@ pub fn heal_helpers(home: &Home) {
     for name in heal(home, &home.releases().join(VERSION)) {
         tracing::warn!(helper = name, version = VERSION, "put in a helper the update to this version left out");
     }
+    #[cfg(windows)]
+    crate::windows::tools::heal_and_sweep(home, &home.releases().join(VERSION));
 }
 
 /// The helpers and tools `release` carries that aren't installed, copied
@@ -1146,6 +1232,22 @@ mod tests {
 mod helpers_tests {
     use super::*;
 
+    /// A release's or home's file as this system names it: `.exe` on
+    /// Windows, and the tools in `tools\bin` there.
+    fn file(path: &str) -> std::path::PathBuf {
+        if !cfg!(windows) {
+            return path.into();
+        }
+        let (folder, name) = path.rsplit_once('/').unwrap_or(("", path));
+        let tool = TOOLS.contains(&name);
+        let mut file = Path::new(folder).to_path_buf();
+        if tool {
+            file.push("bin");
+        }
+        file.push(if tool || HELPERS.contains(&name) || name == "factoryd" { crate::home::program(name) } else { name.to_owned() });
+        file
+    }
+
     fn home(name: &str) -> (Home, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("factoryd-helpers-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1164,23 +1266,26 @@ mod helpers_tests {
     #[test]
     fn the_wsl_helper_goes_in_where_a_release_carries_it_and_nothing_happens_where_it_doesnt() {
         let (home, dir) = home("wsl");
-        std::fs::write(dir.join("release/factoryd"), "backend 2").expect("release backend");
-        std::fs::write(dir.join("release/claktory-apps"), "host 2").expect("release host");
+        std::fs::write(dir.join(file("release/factoryd")), "backend 2").expect("release backend");
+        std::fs::write(dir.join(file("release/claktory-apps")), "host 2").expect("release host");
         std::fs::write(helper(&home, APPS_HOST), "host 2").expect("host");
         assert!(heal(&home, &dir.join("release")).is_empty(), "a Mac release, with no WSL helper");
         assert!(!helper(&home, WSL_HELPER).exists());
         stage_helpers(&home, &dir.join("release")).expect("staged");
         assert!(!helper(&home, WSL_HELPER).exists() && !previous_helper(&home, WSL_HELPER).exists());
 
-        std::fs::write(dir.join("release/claktory-wsl"), "wsl 1").expect("release wsl");
+        std::fs::write(dir.join(file("release/claktory-wsl")), "wsl 1").expect("release wsl");
         assert_eq!(heal(&home, &dir.join("release")), [WSL_HELPER]);
         assert_eq!(read(&helper(&home, WSL_HELPER)).as_deref(), Some("wsl 1"));
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(helper(&home, WSL_HELPER)).expect("meta").permissions().mode() & 0o777, 0o755);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(helper(&home, WSL_HELPER)).expect("meta").permissions().mode() & 0o777, 0o755);
+        }
 
         // The next update replaces it, keeping this one for a roll-back.
         std::fs::write(home.previous_backend(), "backend 1").expect("previous");
-        std::fs::write(dir.join("release/claktory-wsl"), "wsl 2").expect("release wsl");
+        std::fs::write(dir.join(file("release/claktory-wsl")), "wsl 2").expect("release wsl");
         stage_helpers(&home, &dir.join("release")).expect("staged");
         assert_eq!(read(&helper(&home, WSL_HELPER)).as_deref(), Some("wsl 2"));
         assert_eq!(read(&previous_helper(&home, WSL_HELPER)).as_deref(), Some("wsl 1"));
@@ -1197,13 +1302,16 @@ mod helpers_tests {
         let (home, dir) = home("heal");
         std::fs::write(home.backend(), "backend 2").expect("backend");
         std::fs::write(helper(&home, APPS_HOST), "host 1").expect("host");
-        std::fs::write(dir.join("release/factoryd"), "backend 2").expect("release backend");
-        std::fs::write(dir.join("release/claktory-apps"), "host 2").expect("release host");
-        std::fs::write(dir.join("release/claktory-speech"), "speech 2").expect("release speech");
+        std::fs::write(dir.join(file("release/factoryd")), "backend 2").expect("release backend");
+        std::fs::write(dir.join(file("release/claktory-apps")), "host 2").expect("release host");
+        std::fs::write(dir.join(file("release/claktory-speech")), "speech 2").expect("release speech");
         assert_eq!(heal(&home, &dir.join("release")), [SPEECH_HOST]);
         assert_eq!(read(&helper(&home, SPEECH_HOST)).as_deref(), Some("speech 2"));
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(helper(&home, SPEECH_HOST)).expect("meta").permissions().mode() & 0o777, 0o755);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(helper(&home, SPEECH_HOST)).expect("meta").permissions().mode() & 0o777, 0o755);
+        }
         assert_eq!(read(&helper(&home, APPS_HOST)).as_deref(), Some("host 1"), "left alone");
         assert!(!previous_helper(&home, SPEECH_HOST).exists(), "nothing to roll back to");
         // Once in, the next start has nothing to do; no release, nothing either.
@@ -1219,17 +1327,20 @@ mod helpers_tests {
         std::fs::write(helper(&home, SPEECH_HOST), "speech 1").expect("speech");
         std::fs::write(home.backend(), "backend 2").expect("backend");
         std::fs::write(home.previous_backend(), "backend 1").expect("previous");
-        std::fs::write(dir.join("release/claktory-apps"), "host 2").expect("new host");
-        std::fs::write(dir.join("release/claktory-speech"), "speech 2").expect("new speech");
+        std::fs::write(dir.join(file("release/claktory-apps")), "host 2").expect("new host");
+        std::fs::write(dir.join(file("release/claktory-speech")), "speech 2").expect("new speech");
 
         stage_helpers(&home, &dir.join("release")).expect("staged");
         assert_eq!(read(&helper(&home, APPS_HOST)).as_deref(), Some("host 2"));
         assert_eq!(read(&helper(&home, SPEECH_HOST)).as_deref(), Some("speech 2"));
         assert_eq!(read(&previous_helper(&home, APPS_HOST)).as_deref(), Some("host 1"));
         assert_eq!(read(&previous_helper(&home, SPEECH_HOST)).as_deref(), Some("speech 1"));
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(helper(&home, APPS_HOST)).expect("meta").permissions().mode() & 0o777, 0o755);
-        assert_eq!(std::fs::metadata(helper(&home, SPEECH_HOST)).expect("meta").permissions().mode() & 0o777, 0o755);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(helper(&home, APPS_HOST)).expect("meta").permissions().mode() & 0o777, 0o755);
+            assert_eq!(std::fs::metadata(helper(&home, SPEECH_HOST)).expect("meta").permissions().mode() & 0o777, 0o755);
+        }
 
         roll_back(&home, "It stopped.").expect("rolled back");
         assert_eq!(read(&home.backend()).as_deref(), Some("backend 1"));
@@ -1250,7 +1361,7 @@ mod helpers_tests {
     fn a_first_helper_has_nothing_to_go_back_to_and_a_release_without_one_leaves_it_alone() {
         let (home, dir) = home("first");
         std::fs::write(home.previous_backend(), "backend 1").expect("previous");
-        std::fs::write(dir.join("release/claktory-apps"), "host 1").expect("new host");
+        std::fs::write(dir.join(file("release/claktory-apps")), "host 1").expect("new host");
         // This release carries no claktory-speech, like ones from before it.
         stage_helpers(&home, &dir.join("release")).expect("staged");
         assert_eq!(read(&helper(&home, APPS_HOST)).as_deref(), Some("host 1"));
@@ -1264,7 +1375,7 @@ mod helpers_tests {
         std::fs::write(helper(&home, SPEECH_HOST), "speech 1").expect("speech");
         std::fs::write(previous_helper(&home, APPS_HOST), "host 0").expect("stale");
         std::fs::write(previous_helper(&home, SPEECH_HOST), "speech 0").expect("stale");
-        std::fs::remove_file(dir.join("release/claktory-apps")).expect("removed");
+        std::fs::remove_file(dir.join(file("release/claktory-apps"))).expect("removed");
         stage_helpers(&home, &dir.join("release")).expect("staged");
         assert_eq!(read(&helper(&home, APPS_HOST)).as_deref(), Some("host 1"));
         assert_eq!(read(&helper(&home, SPEECH_HOST)).as_deref(), Some("speech 1"));
@@ -1283,32 +1394,38 @@ mod helpers_tests {
     #[test]
     fn an_update_puts_the_agents_tools_in_and_a_roll_back_takes_them_back() {
         let (home, dir) = home("tools");
-        let rg = tools_dir(&home).join("rg");
+        let rg = tools_dir(&home).join(file("rg"));
         std::fs::write(home.backend(), "backend 2").expect("backend");
         std::fs::write(home.previous_backend(), "backend 1").expect("previous");
-        std::fs::create_dir_all(dir.join("release/tools")).expect("release tools");
-        std::fs::write(dir.join("release/tools/rg"), "rg 15").expect("release rg");
-        std::fs::write(dir.join("release/tools/jq"), "jq 1.8.1").expect("release jq");
+        std::fs::create_dir_all(dir.join("release/tools/bin")).expect("release tools");
+        std::fs::write(dir.join(file("release/tools/rg")), "rg 15").expect("release rg");
+        std::fs::write(dir.join(file("release/tools/jq")), "jq 1.8.1").expect("release jq");
         std::fs::create_dir_all(dir.join("release/tools/LICENSES/ripgrep")).expect("licenses");
         std::fs::write(dir.join("release/tools/LICENSES/ripgrep/LICENSE-MIT"), "MIT").expect("license");
         assert_eq!(heal(&home, &dir.join("release")), ["rg", "jq"], "a start after v0.1.20's update");
         assert_eq!(read(&tools_dir(&home).join("LICENSES/ripgrep/LICENSE-MIT")).as_deref(), Some("MIT"), "its license beside it");
         assert_eq!(read(&rg).as_deref(), Some("rg 15"));
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(&rg).expect("meta").permissions().mode() & 0o777, 0o755);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&rg).expect("meta").permissions().mode() & 0o777, 0o755);
+        }
 
-        std::fs::write(dir.join("release/tools/rg"), "rg 16").expect("newer rg");
-        std::fs::write(dir.join("release/tools/jq"), "jq 1.8.2").expect("newer jq");
+        std::fs::write(dir.join(file("release/tools/rg")), "rg 16").expect("newer rg");
+        std::fs::write(dir.join(file("release/tools/jq")), "jq 1.8.2").expect("newer jq");
         stage_helpers(&home, &dir.join("release")).expect("staged");
         assert_eq!(read(&rg).as_deref(), Some("rg 16"));
+        // On Windows the tools are in `tools\bin`, beside the Git folders.
+        let on_path = if cfg!(windows) { tools_dir(&home).join("bin") } else { tools_dir(&home) };
         let kept: Vec<String> =
-            std::fs::read_dir(tools_dir(&home)).expect("tools").filter_map(|entry| entry.ok()?.file_name().into_string().ok()).collect();
+            std::fs::read_dir(on_path).expect("tools").filter_map(|entry| entry.ok()?.file_name().into_string().ok()).collect();
         let mut programs: Vec<&String> = kept.iter().filter(|name| !name.starts_with('.') && *name != "LICENSES").collect();
         programs.sort();
-        assert_eq!(programs, ["jq", "rg"], "only the tools are on the PATH: {kept:?}");
+        let names: Vec<String> = ["jq", "rg"].map(crate::home::program).to_vec();
+        assert_eq!(programs, names.iter().collect::<Vec<_>>(), "only the tools are on the PATH: {kept:?}");
         roll_back(&home, "It stopped.").expect("rolled back");
         assert_eq!(read(&rg).as_deref(), Some("rg 15"), "the rg that went with the backend");
-        assert_eq!(read(&tools_dir(&home).join("jq")).as_deref(), Some("jq 1.8.1"), "and its jq");
+        assert_eq!(read(&tools_dir(&home).join(file("jq"))).as_deref(), Some("jq 1.8.1"), "and its jq");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1321,17 +1438,18 @@ mod helpers_tests {
         let (home, dir) = home("jq");
         let release = dir.join("release");
         std::fs::create_dir_all(release.join("tools/LICENSES/ripgrep")).expect("release tools");
-        std::fs::write(release.join("tools/rg"), "rg 15").expect("release rg");
+        std::fs::create_dir_all(release.join("tools/bin")).expect("release tools");
+        std::fs::write(release.join(file("tools/rg")), "rg 15").expect("release rg");
         std::fs::write(release.join("tools/LICENSES/ripgrep/UNLICENSE"), "ripgrep's").expect("license");
         assert_eq!(heal(&home, &release), ["rg"], "no jq in v0.1.21: passed over");
         stage_helpers(&home, &release).expect("an update without jq stages");
-        assert!(!tools_dir(&home).join("jq").exists());
+        assert!(!tools_dir(&home).join(file("jq")).exists());
 
         std::fs::create_dir_all(release.join("tools/LICENSES/jq")).expect("jq licenses");
-        std::fs::write(release.join("tools/jq"), "jq 1.8.2").expect("release jq");
+        std::fs::write(release.join(file("tools/jq")), "jq 1.8.2").expect("release jq");
         std::fs::write(release.join("tools/LICENSES/jq/COPYING"), "jq's").expect("license");
         assert_eq!(heal(&home, &release), ["jq"]);
-        assert_eq!(read(&tools_dir(&home).join("jq")).as_deref(), Some("jq 1.8.2"));
+        assert_eq!(read(&tools_dir(&home).join(file("jq"))).as_deref(), Some("jq 1.8.2"));
         assert_eq!(read(&tools_dir(&home).join("LICENSES/jq/COPYING")).as_deref(), Some("jq's"), "its license");
         assert_eq!(read(&tools_dir(&home).join("LICENSES/ripgrep/UNLICENSE")).as_deref(), Some("ripgrep's"), "ripgrep's kept");
         let _ = std::fs::remove_dir_all(&dir);

@@ -62,8 +62,7 @@ void main() {
     harness.backend.entriesById['omar/2'] = _ask(2, 'Ship the bucket now?');
     await harness.show(tester);
     await settle(tester);
-    await tester.tap(find.text('Needs you'));
-    await settle(tester);
+    await openNeedsYouPage(tester);
     await settle(tester);
 
     await tester.tap(find.textContaining('Which bucket', findRichText: true));

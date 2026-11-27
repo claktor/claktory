@@ -234,7 +234,7 @@ void main() {
     harness.backend
       ..files[_path] = file
       ..connected.value = false
-      ..refuse = 'Not connected to the backend.';
+      ..refuse = "Can't reach your Claktory right now.";
     final focus = WorkbenchFocus();
     addTearDown(focus.dispose);
     await harness.show(
@@ -262,7 +262,7 @@ void main() {
     for (var i = 0; i < 10; i++) {
       await tester.pump(const Duration(milliseconds: 20));
     }
-    expect(find.text('Not connected to the backend.'), findsOneWidget);
+    expect(find.text("Can't reach your Claktory right now."), findsOneWidget);
     expect(cache.kept, isNull);
 
     harness.backend
@@ -271,7 +271,7 @@ void main() {
     for (var i = 0; i < 20; i++) {
       await tester.pump(const Duration(milliseconds: 20));
     }
-    expect(find.text('Not connected to the backend.'), findsNothing);
+    expect(find.text("Can't reach your Claktory right now."), findsNothing);
     expect(cache.kept, utf8.decode(file.data));
   });
 

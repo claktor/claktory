@@ -1,4 +1,4 @@
-// A pipe's liaison is bound to it (#250): no row of its own in the sidebar
+// A pipe's liaison is bound to it: no row of its own in the sidebar
 // or the drawer; its pipe's row carries its face, its work and what it
 // waits on; a search for its name finds the pipe; on a phone, Needs you
 // lists the pipe, not the agent. The phone's box chooses whom it writes to

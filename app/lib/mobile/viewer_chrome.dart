@@ -1,6 +1,6 @@
-// A viewer's page on a phone (Bruno's v0.1.22 task, Matt: a landscape
-// video showed less video than portrait): the content first, as Photos and
-// the system's players have it.
+// A viewer's page on a phone (a landscape video once showed less video
+// than portrait): the content first, as Photos and the
+// system's players have it.
 //
 // - A picture or a video ([PhoneViewerKind.media]) fills the screen, edge
 //   to edge. Its header and its controls lie over it, inside the safe
@@ -8,7 +8,10 @@
 //   fade by themselves. Pulled down, it closes (mobile/swipe_close.dart).
 // - A document ([PhoneViewerKind.document]: text, a PDF) keeps its header
 //   above it, which slides away as it's read down and comes back as it's
-//   scrolled up or reaches its start.
+//   scrolled up or reaches its start. On a phone's whole screen
+//   ([ViewerScreen]) a tap on it hides or shows the header too, the status
+//   bar going with it, and its page runs to the screen's edges, its words
+//   inside the safe areas: turned, the document has the screen.
 //
 // Every utility stays one tap away: the header's comments and More (Share,
 // Show original, Reload, Close everywhere), the bar under the content. With
@@ -16,6 +19,8 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart'
+    show kDoubleTapTimeout, kLongPressTimeout, kTouchSlop;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -42,6 +47,115 @@ enum PhoneViewerKind {
   video,
 }
 
+/// A phone's viewer page has the whole screen ([PhoneViewerScaffold]
+/// lays out the safe areas itself), as a phone's own pages do; an iPad's
+/// narrow window gives it the space inside them, as it was.
+class ViewerScreen extends InheritedWidget {
+  const ViewerScreen({super.key, required super.child});
+
+  static bool wholeOf(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<ViewerScreen>() != null;
+
+  @override
+  bool updateShouldNotify(ViewerScreen oldWidget) => false;
+}
+
+/// A lone tap on a document ([child]): no double tap, drag or touch and
+/// hold, nor one that stops a scroll. It shows or hides the page's chrome
+/// once a double tap can't follow, unless [taken] says what's under the
+/// finger took it (a link, a comment's passage, ending a selection).
+/// Nothing outside a phone's whole-screen viewer page.
+class ChromeTap extends StatefulWidget {
+  const ChromeTap({super.key, this.taken, required this.child});
+
+  /// Whether the tap at this global position was something else's.
+  final bool Function(Offset global)? taken;
+  final Widget child;
+
+  @override
+  State<ChromeTap> createState() => ChromeTapState();
+}
+
+class ChromeTapState extends State<ChromeTap> {
+  var _pointers = 0;
+  Offset? _down;
+  Duration _downAt = Duration.zero;
+  Timer? _pending;
+
+  @override
+  void dispose() {
+    _pending?.cancel();
+    super.dispose();
+  }
+
+  /// The tap waiting to show or hide the chrome was something else's
+  /// after all (a link in a PDF, heard of after the finger lifted).
+  void cancel() {
+    _pending?.cancel();
+    _pending = null;
+  }
+
+  bool get _active {
+    final chrome = ViewerChrome.maybeOf(context);
+    return chrome != null && chrome.documentTaps;
+  }
+
+  void _pointerDown(PointerDownEvent event) {
+    _pointers++;
+    if (!_active) return;
+    ViewerChrome.maybeOf(context)?.touched();
+    // A second tap: a double tap (a word selected, a page zoomed).
+    if (_pending != null) {
+      _pending!.cancel();
+      _pending = null;
+      _down = null;
+      return;
+    }
+    // A finger stopping a scroll that was still moving.
+    final scrollable = Scrollable.maybeOf(context);
+    final moving =
+        scrollable != null && scrollable.position.isScrollingNotifier.value;
+    _down = _pointers == 1 && !moving ? event.position : null;
+    _downAt = event.timeStamp;
+  }
+
+  void _pointerMove(PointerMoveEvent event) {
+    final down = _down;
+    if (down != null && (event.position - down).distance > kTouchSlop) {
+      _down = null;
+    }
+  }
+
+  void _pointerUp(PointerUpEvent event) {
+    _pointers = math.max(0, _pointers - 1);
+    final down = _down;
+    _down = null;
+    if (down == null || event.timeStamp - _downAt > kLongPressTimeout) return;
+    if (widget.taken?.call(event.position) ?? false) return;
+    _pending = Timer(kDoubleTapTimeout, () {
+      _pending = null;
+      // Not when it opened a page over this one (a picture in the text).
+      if (!mounted || ModalRoute.of(context)?.isCurrent == false) return;
+      ViewerChrome.maybeOf(context)?.toggle();
+    });
+  }
+
+  void _pointerCancel(PointerCancelEvent event) {
+    _pointers = math.max(0, _pointers - 1);
+    _down = null;
+  }
+
+  @override
+  Widget build(BuildContext context) => Listener(
+    behavior: HitTestBehavior.translucent,
+    onPointerDown: _pointerDown,
+    onPointerMove: _pointerMove,
+    onPointerUp: _pointerUp,
+    onPointerCancel: _pointerCancel,
+    child: widget.child,
+  );
+}
+
 /// Whether a viewer's chrome (its header, its bars) shows: a tap on the
 /// content toggles it, a playing video fades it, and what needs it (a
 /// comment being placed, a sheet open, VoiceOver) holds it.
@@ -50,6 +164,10 @@ class ViewerChrome extends ChangeNotifier {
 
   /// How long it stays after the last touch while it fades by itself.
   final Duration fadeAfter;
+
+  /// Whether a tap on a document shows or hides it ([ChromeTap]): on a
+  /// phone's whole screen.
+  var documentTaps = false;
 
   var _shown = true;
   final _holds = <Object>{};
@@ -292,30 +410,61 @@ class _PhoneViewerScaffoldState extends State<PhoneViewerScaffold> {
   /// Answering an agent's review of the file: a pull doesn't close it.
   static const _review = #review;
 
-  /// The system's bars hidden with the chrome (a picture or video only).
-  var _systemHidden = false;
+  /// Whether the system's bars are hidden now, and by which page: they
+  /// follow the page in front (a picture opened from a document whose
+  /// header is hidden shows them; back on the document, they go again).
+  static var _systemHidden = false;
+  static _PhoneViewerScaffoldState? _hiddenBy;
+
+  /// The page is the one in front, not one under another.
+  var _current = true;
+
+  /// The page has the phone's whole screen ([ViewerScreen]).
+  var _whole = false;
+
+  /// Its chrome takes the system's bars with it.
+  bool get _immersive => widget.kind != PhoneViewerKind.document || _whole;
+  var _listening = false;
 
   @override
   void initState() {
     super.initState();
     _chrome.addListener(_changed);
-    if (widget.kind != PhoneViewerKind.document) {
-      // Android: a swipe from the edge brings its bars back (the first
-      // swipe only shows them, as the system has it); the chrome comes
-      // with them, so Back is there for the next.
-      unawaited(
-        SystemChrome.setSystemUIChangeCallback((visible) async {
-          if (visible && mounted && _systemHidden) _chrome.show();
-        }),
-      );
-    }
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    _whole = ViewerScreen.wholeOf(context);
+    _chrome.documentTaps = _whole && widget.kind == PhoneViewerKind.document;
+    // A document on a turned phone: its header goes a moment after the
+    // last touch, as a playing video's controls do, so the page has the
+    // short screen; a tap brings it back.
+    final size = MediaQuery.sizeOf(context);
+    _chrome.fading = _chrome.documentTaps && size.width > size.height;
     _chrome.hold(_reader, MediaQuery.accessibleNavigationOf(context));
     _chrome.keepStill(_review, ReviewAnswering.of(context));
+    final current = ModalRoute.isCurrentOf(context) ?? true;
+    final came = current && (!_current || !_listening);
+    // Another page in front: the bars it hid are that page's to say.
+    if (!current && identical(_hiddenBy, this)) {
+      _hiddenBy = null;
+      _systemHidden = false;
+      unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
+    }
+    _current = current;
+    if (came && _immersive) {
+      _listening = true;
+      // Android: a swipe from the edge brings its bars back (the first
+      // swipe only shows them, as the system has it); the chrome comes
+      // with them, so Back is there for the next.
+      unawaited(
+        SystemChrome.setSystemUIChangeCallback((visible) async {
+          if (visible && mounted && identical(_hiddenBy, this)) _chrome.show();
+        }),
+      );
+    }
+    if (came) _syncSystemBars();
   }
 
   void _changed() {
@@ -327,7 +476,9 @@ class _PhoneViewerScaffoldState extends State<PhoneViewerScaffold> {
   /// With the chrome gone from a picture or video, the status bar (and
   /// Android's navigation bar) go too, as in Photos; back with it.
   void _syncSystemBars() {
-    final hide = widget.kind != PhoneViewerKind.document && !_chrome.shown;
+    if (!_current) return;
+    final hide = _immersive && !_chrome.shown;
+    _hiddenBy = hide ? this : null;
     if (hide == _systemHidden) return;
     _systemHidden = hide;
     unawaited(
@@ -340,10 +491,12 @@ class _PhoneViewerScaffoldState extends State<PhoneViewerScaffold> {
   @override
   void dispose() {
     _chrome.removeListener(_changed);
-    if (widget.kind != PhoneViewerKind.document) {
+    if (_listening && _current) {
       unawaited(SystemChrome.setSystemUIChangeCallback(null));
     }
-    if (_systemHidden) {
+    if (identical(_hiddenBy, this)) {
+      _hiddenBy = null;
+      _systemHidden = false;
       unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
     }
     _chrome.dispose();
@@ -359,29 +512,90 @@ class _PhoneViewerScaffoldState extends State<PhoneViewerScaffold> {
   );
 
   /// The header above, sliding away as it's read down; back on the way up
-  /// or at the start.
+  /// or at the start. On a phone's whole screen the header's fill runs
+  /// under the status bar and to the screen's sides, the page to its
+  /// sides, the words inside the safe areas; the page gets the bottom's
+  /// inset to scroll its end clear of the home indicator.
   Widget _document(BuildContext context) {
     final shown = _chrome.shown;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        ClipRect(
-          child: AnimatedAlign(
-            duration: Motion.base,
-            curve: Curves.easeOutCubic,
-            alignment: Alignment.bottomCenter,
-            heightFactor: shown ? 1 : 0,
-            child: widget.header,
+    final palette = Palette.of(context);
+    final safe = _whole ? MediaQuery.paddingOf(context) : EdgeInsets.zero;
+    final toolbar = widget.toolbar;
+    Widget header = widget.header;
+    if (_whole) {
+      header = ColoredBox(
+        color: palette.sidebar,
+        child: Padding(
+          padding: EdgeInsets.only(
+            top: safe.top,
+            left: safe.left,
+            right: safe.right,
+          ),
+          child: MediaQuery.removePadding(
+            context: context,
+            removeTop: true,
+            removeLeft: true,
+            removeRight: true,
+            child: header,
           ),
         ),
-        Expanded(
-          child: NotificationListener<ScrollUpdateNotification>(
-            onNotification: _scrolled,
-            child: widget.body,
+      );
+    }
+    return ColoredBox(
+      color: palette.canvas,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ClipRect(
+            child: AnimatedAlign(
+              duration: Motion.base,
+              curve: Curves.easeOutCubic,
+              alignment: Alignment.bottomCenter,
+              heightFactor: shown ? 1 : 0,
+              child: header,
+            ),
           ),
-        ),
-        ?widget.toolbar,
-      ],
+          // Hidden, the header leaves what of the top no page should be
+          // under (a Dynamic Island's).
+          if (_whole)
+            AnimatedContainer(
+              duration: Motion.base,
+              curve: Curves.easeOutCubic,
+              height: shown ? 0 : safe.top,
+            ),
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(left: safe.left, right: safe.right),
+              child: MediaQuery.removePadding(
+                context: context,
+                removeTop: true,
+                removeLeft: true,
+                removeRight: true,
+                removeBottom: toolbar != null,
+                child: NotificationListener<ScrollUpdateNotification>(
+                  onNotification: _scrolled,
+                  child: widget.body,
+                ),
+              ),
+            ),
+          ),
+          if (toolbar != null)
+            Padding(
+              padding: EdgeInsets.only(
+                left: safe.left,
+                right: safe.right,
+                bottom: safe.bottom,
+              ),
+              child: MediaQuery.removePadding(
+                context: context,
+                removeBottom: true,
+                removeLeft: true,
+                removeRight: true,
+                child: toolbar,
+              ),
+            ),
+        ],
+      ),
     );
   }
 

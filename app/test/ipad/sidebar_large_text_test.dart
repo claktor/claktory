@@ -1,5 +1,5 @@
-// The sidebar at an iPad's largest text (Illuso's find, a 1024×768 iPad
-// on its side at 3.1x): with a workspace
+// The sidebar at an iPad's largest text (a 1024×768 iPad on its side at
+// 3.1x): with a workspace
 // that has more in it and a short room, its top rows and headings alone
 // are taller than the room. It then scrolls as one list, its last heading
 // a scroll away, rather than spilling; with room, it keeps its sections.
@@ -42,7 +42,7 @@ void main() {
   for (final window in const [Size(1366, 1024), Size(1024, 1366)]) {
     testWidgets('at the largest text in a $window window, a short sidebar '
         'scrolls as one list and Chats is a scroll away', (tester) async {
-      // Its sections get 331pt, as in Illuso's run.
+      // Its sections get 331pt, as on that iPad.
       await _show(tester, window, text: TextFactor.ax5, height: 772);
       expect(tester.takeException(), isNull);
       expect(_oneList, findsOneWidget);

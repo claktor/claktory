@@ -1,4 +1,4 @@
-// Drawing on an image in an iPad pane (#362 I2): the image's own viewer,
+// Drawing on an image in an iPad pane: the image's own viewer,
 // with the ink saved on it laid over it read-only (ink_preview.dart) and
 // Draw, which turns the pane into the document host on an image surface,
 // where Apple Pencil draws and what's drawn is kept as the image's ink

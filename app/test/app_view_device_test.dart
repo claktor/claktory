@@ -1,4 +1,4 @@
-// Each device opens an app's view as its own surface (Bruno 28314): the
+// Each device opens an app's view as its own surface: the
 // device's id goes with the view's params, so what one device picks there
 // isn't another's.
 import 'dart:convert';

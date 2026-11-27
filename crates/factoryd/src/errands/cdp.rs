@@ -264,8 +264,16 @@ impl Local {
         Local::start_with(chrome, profile, &[])
     }
 
+    /// Not on Windows yet, where Chrome takes its DevTools pipe as handles
+    /// rather than descriptors 3 and 4.
+    #[cfg(windows)]
+    pub(crate) fn start_with(_chrome: &Path, _profile: &Path, _more: &[String]) -> std::io::Result<Local> {
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "a headless Chrome isn't driven on Windows yet"))
+    }
+
     /// Starts it with `more` switches too (tests: names resolved to this
     /// machine, its own certificates taken).
+    #[cfg(unix)]
     pub(crate) fn start_with(chrome: &Path, profile: &Path, more: &[String]) -> std::io::Result<Local> {
         use std::os::fd::{AsRawFd, OwnedFd};
 
@@ -364,6 +372,7 @@ impl Transport for Local {
 
 impl Drop for Local {
     fn drop(&mut self) {
+        #[cfg(unix)]
         if self.group > 0 {
             // SAFETY: a plain signal to the group Chrome leads.
             unsafe {
@@ -448,6 +457,7 @@ mod tests {
 
     /// Drives a real headless Chrome over its pipe: skipped where there's
     /// none (CHROME names one).
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_local_chrome_is_driven_over_its_pipe() {
         let Some(chrome) = find_chrome() else {

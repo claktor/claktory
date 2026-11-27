@@ -43,7 +43,7 @@ class _ScrollsWithFadeState extends State<ScrollsWithFade> {
   @override
   Widget build(BuildContext context) {
     // Always the mask, only its gradient changing: the scroll under it
-    // keeps its place (Sorbet 43852).
+    // keeps its place.
     return ShaderMask(
       blendMode: BlendMode.dstIn,
       shaderCallback: (bounds) => LinearGradient(

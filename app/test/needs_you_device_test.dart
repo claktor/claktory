@@ -1,7 +1,7 @@
-// A device waiting to be allowed on this Claktory is in Needs you (#352
-// P4, Fugo's rules): named as it calls itself, with what to do if it
-// isn't the person's, and allowed only with the number its screen shows,
-// typed here and checked by the backend.
+// A device waiting to be allowed on this Claktory is in Needs you: named
+// as it calls itself, with what to do if it isn't the person's, and
+// allowed only with the number its screen shows, typed here and checked
+// by the backend.
 import 'package:factory_app/controls.dart' show Button, ExtensionGlyph;
 import 'package:factory_app/inbox.dart';
 import 'package:factory_app/pairing.dart' show DeviceNumberField;

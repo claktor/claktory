@@ -317,6 +317,15 @@ class NeedsYouAlert extends StatelessWidget {
   }
 }
 
+/// "Also from Fugo and Pericolo", "Also from Fugo, Pericolo and June": the
+/// agents whose alerts about the same thing folded into [alert], in the
+/// order they came.
+String alsoFromLine(Alert alert) => switch (alert.alsoFrom) {
+  [] => '',
+  [final one] => 'Also from $one',
+  [...final rest, final last] => 'Also from ${rest.join(', ')} and $last',
+};
+
 /// The role of the agent [agentId] that sent an alert, to show beside its
 /// name (§3.10); empty for Claktory's own, and an agent with none.
 String alertRole(BuildContext context, String agentId) {
@@ -472,6 +481,16 @@ class _AlertLine extends StatelessWidget {
             Text(
               alert.text,
               style: TextStyles.body.copyWith(color: palette.textMuted),
+            ),
+          // Others' alerts about the same thing, folded into this one
+          // Their words aren't kept, only who.
+          if (alert.alsoFrom.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                alsoFromLine(alert),
+                style: TextStyles.caption.copyWith(color: palette.textFaint),
+              ),
             ),
         ],
       ],

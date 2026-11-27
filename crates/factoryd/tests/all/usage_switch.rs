@@ -1,4 +1,4 @@
-//! Continue on another provider (#341): agents and a chat waiting out their
+//! Continue on another provider: agents and a chat waiting out their
 //! Claude usage limit offer to continue on OpenRouter (the same model, or
 //! the closest), switch at the person's tap, carry on there, and offer to
 //! go back once Claude has room again. Against one mock server for both
@@ -423,7 +423,7 @@ async fn with_no_other_provider_signed_in_the_wait_says_another_would_carry_it()
     );
 }
 
-/// Row 227: once Claude answers again (Try now here; a usage read showing
+/// Once Claude answers again (Try now here; a usage read showing
 /// room does the same), its account's limit mark is gone from the
 /// workspace at once, so agents switched away are offered Back to Claude
 /// then, not at the old reset time.
@@ -460,7 +460,7 @@ fn notices(view: &View) -> Vec<String> {
     crate::common::describe(&view.entries).into_iter().filter(|entry| entry.starts_with("notice: ")).collect()
 }
 
-/// Friend bug #8 A1: a switched agent goes back to Claude by itself once
+/// A switched agent goes back to Claude by itself once
 /// Claude has room, and says so; one that reaches the limit again within
 /// minutes of going back stays on OpenRouter until that limit resets.
 #[tokio::test]
@@ -481,7 +481,7 @@ async fn goes_back_by_itself_once_claude_has_room_and_stays_when_it_bounces() {
     let switched = view.agent("builder").usage_switch.clone().expect("switched");
     assert!(switched.goes_back && !switched.ready, "{switched:?}");
     assert_eq!(switched.goes_back_at_ms, resets_at, "when Claude's limit resets");
-    // Friend bug #43: it hears who moved it, and why.
+    // It hears who moved it, and why.
     let told = || crate::common::describe(&view.entries).into_iter().filter(|line| line.starts_with("event from Claktory")).collect::<Vec<_>>();
     assert!(
         told().iter().any(|line| line.contains(" (the person chose OpenRouter on ") && line.contains(", while your Claude usage is at its limit)")),
@@ -528,7 +528,7 @@ async fn goes_back_by_itself_once_claude_has_room_and_stays_when_it_bounces() {
     assert_eq!(models_asked(&seen, "/chat/completions").len(), 2);
 }
 
-/// Friend bug #8 A2: with Continue automatically on (kept in factory.db),
+/// With Continue automatically on (kept in factory.db),
 /// an agent whose wait on Claude's limit starts continues on OpenRouter by
 /// itself, says so, and is a switch like any other; off, nothing moves.
 #[tokio::test]
@@ -574,7 +574,7 @@ async fn with_continue_automatically_on_a_wait_on_the_limit_continues_by_itself(
     assert_eq!(models_asked(&seen, "/chat/completions"), Vec::<String>::new());
 }
 
-/// U19 (#343): while agents are switched away from Claude and it still has
+/// U19: while agents are switched away from Claude and it still has
 /// no room, a new chat, and a new agent on the default model, start where
 /// they are, each as a switch that goes back with them; an agent given
 /// another model starts on it as asked.
@@ -608,10 +608,10 @@ async fn new_chats_and_agents_start_where_the_switched_ones_are() {
 }
 
 /// A chat put on another provider's model while its request to Claude is
-/// still out (row 736: Continue for all wakes it with the first one's
-/// change, before its own): refused by Claude once its model is
-/// OpenRouter's, it carries on there at once, rather than wait out
-/// Claude's limit under OpenRouter's name.
+/// still out (Continue for all wakes it with the first one's change,
+/// before its own): refused by Claude once its model is OpenRouter's, it
+/// carries on there at once, rather than wait out Claude's limit under
+/// OpenRouter's name.
 #[tokio::test]
 async fn a_chat_moved_while_it_asks_carries_on_without_a_false_wait() {
     let dir = temp_dir();

@@ -22,7 +22,7 @@ enum AccountCheck {
   bool get marked => this != theirs;
 
   /// Whether it's marked in `danger`: known not to be theirs, or signed in
-  /// and still unchecked. Signed out is marked neutrally (Fugo): on a
+  /// and still unchecked. Signed out is marked neutrally: on a
   /// device never signed in, red on every Claktory would tell nothing.
   bool get alarming => this == notTheirs || this == unreadable;
 }
@@ -30,8 +30,7 @@ enum AccountCheck {
 /// Which of the app's Claktories are on the person's Claktory account, by
 /// the endpoint the app dials each by (never by what one says of itself),
 /// as browser control and the pairing confirmation match them: so one that
-/// isn't stays marked as such, and can't later pass as one of theirs
-/// (Fugo's pairing condition 4).
+/// isn't stays marked as such, and can't later pass as one of theirs.
 class AccountMatch extends ChangeNotifier {
   AccountMatch({
     required this.remotes,
@@ -53,7 +52,7 @@ class AccountMatch extends ChangeNotifier {
 
   /// How long reads of a list never read may fail before the Claktories
   /// are marked as unchecked: just launched, the network may still be
-  /// coming up, which isn't an account that can't be read (#388). Until
+  /// coming up, which isn't an account that can't be read. Until
   /// then nothing is marked, as while the first read is under way.
   static const unsureFor = Duration(seconds: 30);
 
@@ -124,7 +123,7 @@ class AccountMatch extends ChangeNotifier {
 
   /// When the Claktory dialled by [endpointId] last checked in with the
   /// person's account, as its list last said; null when it isn't on it,
-  /// never did, or nothing is known (friend bug #37).
+  /// never did, or nothing is known.
   DateTime? checkedIn(String? endpointId) {
     if (endpointId == null || endpointId.isEmpty) return null;
     if (check(endpointId) != AccountCheck.theirs) return null;

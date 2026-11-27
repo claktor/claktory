@@ -1,4 +1,4 @@
-// #529, S2 (Squalo's multi-claktory-stories.md, Fugo's conditions): a
+// A
 // Claktory is marked only once the account's list was read and lacks it.
 // Signed out, or the list unreadable, nothing is known: nothing is marked
 // at a glance, and only its details (its form) say what's known.

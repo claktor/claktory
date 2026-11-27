@@ -1,10 +1,10 @@
-// The voice message or spoken answer being recorded now, app-wide (#409,
-// Matt's: "you should be able to go literally anywhere else in the app …
-// and then just click send"). A recording started in a message box or a
-// field outlives it: away from it, a floating bar (VoiceBar) says what
-// it's for, how long it's run and how loud, with Cancel and Send (Done, for
-// an answer); back at it, the box or field shows it again in place. There's
-// one microphone, so one recording at a time.
+// The voice message or spoken answer being recorded now, app-wide ("you
+// should be able to go literally anywhere else in the app … and then just
+// click send"). A recording started in a message box or a field outlives
+// it: away from it, a floating bar (VoiceBar) says what it's for, how long
+// it's run and how loud, with Cancel and Send (Done, for an answer); back
+// at it, the box or field shows it again in place. There's one microphone,
+// so one recording at a time.
 import 'dart:async';
 
 import 'package:flutter/semantics.dart';
@@ -571,7 +571,7 @@ class _Recording extends StatelessWidget {
     );
     // Narrow (a small phone, large text), the time goes down beside the
     // buttons and the waveform steps aside, so the name has the line, on
-    // two if need be, rather than losing whose it is (Zucchero's row 347).
+    // two if need be, rather than losing whose it is.
     Widget status(bool narrow) => Semantics(
       container: true,
       button: open != null,

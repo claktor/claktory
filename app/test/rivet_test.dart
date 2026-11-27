@@ -1,5 +1,6 @@
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/forms.dart';
+import 'package:factory_app/sidebar.dart' show rivetPausedLine;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -100,7 +101,7 @@ void main() {
     final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
     await mouse.addPointer(location: tester.getCenter(askRivetButtons().first));
     await tester.pump(const Duration(milliseconds: 400));
-    expect(find.text('Ask Rivet to set it up'), findsOneWidget);
+    expect(find.text('New project'), findsOneWidget);
     await mouse.removePointer();
     await tester.pump();
   });
@@ -115,5 +116,90 @@ void main() {
       'rivet',
     );
     expect(rivetIn(with_([Agent(id: 'a1')])), isNull);
+  });
+
+  group('Rivet paused on a usage limit', () {
+    Agent paused({UsageWaitAlternative? alternative}) {
+      final rivet = admin()
+        ..usageWait = 'Waiting for your Claude usage to reset'
+        ..status = AgentStatus.AGENT_STATUS_WORKING;
+      if (alternative != null) rivet.usageWaitAlternative = alternative;
+      return rivet;
+    }
+
+    testWidgets('a "+" opens the form, saying why at its top', (tester) async {
+      final harness = selecting(
+        snapshot(
+          selected: 'a1',
+          agents: [
+            paused(),
+            Agent(id: 'a1', projectId: 'p1', name: 'Builder'),
+          ],
+        ),
+      );
+      await harness.show(tester);
+      await tester.tap(askRivetButtons().first);
+      await settle(tester);
+      expect(find.byType(CreateProjectForm), findsOneWidget);
+      expect(
+        find.text(
+          'Rivet is paused until your Claude limit resets. Set it up here '
+          'instead.',
+        ),
+        findsOneWidget,
+      );
+      expect(harness.backend.sent.where((m) => m.hasSelectAgent()), isEmpty);
+    });
+
+    testWidgets('where its wait offers another provider, so does the form, '
+        'and carrying on there asks Rivet after all', (tester) async {
+      final harness = selecting(
+        snapshot(
+          selected: 'a1',
+          agents: [
+            paused(
+              alternative: UsageWaitAlternative(
+                providerName: 'OpenRouter',
+                model: 'openrouter/claude',
+                sameModel: true,
+              ),
+            ),
+            Agent(id: 'a1', projectId: 'p1', name: 'Builder'),
+          ],
+        ),
+      );
+      await harness.show(tester);
+      await tester.tap(askRivetButtons().first);
+      await settle(tester);
+      await tester.tap(find.text('Continue on OpenRouter'));
+      await settle(tester);
+      expect(
+        harness.backend.sent
+            .where((m) => m.hasContinueOnAlternative())
+            .single
+            .continueOnAlternative
+            .agentId,
+        'rivet',
+      );
+      expect(find.byType(CreateProjectForm), findsNothing);
+      expect(harness.last.selectAgent.agentId, 'rivet');
+      expect(box(tester).controller.text, 'Set up a new project for ');
+    });
+
+    test('its line names the provider, or says the wait as it is', () {
+      expect(
+        rivetPausedLine(
+          'Rivet',
+          'Waiting for your OpenAI spending limit to reset at 18:00',
+        ),
+        'Rivet is paused until your OpenAI limit resets. Set it up here '
+        'instead.',
+      );
+      expect(
+        rivetPausedLine('Rivet', 'Waiting for you to sign in to Claude'),
+        'Rivet is paused: waiting for you to sign in to Claude. Set it up '
+        'here instead.',
+      );
+    });
   });
 }

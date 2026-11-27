@@ -72,7 +72,7 @@ fn part(selectors: &str, name: &str) -> Option<String> {
 }
 
 /// A place on a PDF's page: RFC 8118's `page=N`, refined by a
-/// `ClaktoryPageRegion` version 1 (#209 phase 3): normalized x, y, w, h from
+/// `ClaktoryPageRegion` version 1: normalized x, y, w, h from
 /// the top left of the page's crop box, unrotated.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct PageRegion {

@@ -1,5 +1,5 @@
 // What asks the person to decide or connect, on a phone at the largest
-// text (#198, phase 2A): a secret asked for, a service an agent proposes
+// text: a secret asked for, a service an agent proposes
 // to connect, a connection's details, a new device's code. Nothing runs
 // off the screen or overflows.
 import 'package:factory_app/connectors.dart';

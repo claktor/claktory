@@ -51,6 +51,22 @@ final _tokens = _table(
 );
 
 /// A dashboard's row of panels side by side.
+/// The numbers on [chart]'s value axis, least first, each with the
+/// height of its centre.
+List<(double, double)> _valueLabels(WidgetTester tester, Finder chart) => [
+  for (final e
+      in find.descendant(of: chart, matching: find.byType(Text)).evaluate())
+    if (double.tryParse((e.widget as Text).data ?? '') case final value?)
+      (
+        value,
+        (e.renderObject! as RenderBox)
+            .localToGlobal(
+              (e.renderObject! as RenderBox).size.center(Offset.zero),
+            )
+            .dy,
+      ),
+]..sort((a, b) => a.$1.compareTo(b.$1));
+
 final _evenRow = find.byWidgetPredicate(
   (widget) => widget.runtimeType.toString() == '_EvenRow',
 );
@@ -1503,6 +1519,42 @@ void main() {
     final chart = tester.widget<LineChart>(find.byType(LineChart));
     expect(chart.data.lineBarsData.single.color, const Color(0xFF56A64B));
     expect(find.text('user'), findsOneWidget);
+  });
+
+  testWidgets('the value axis\'s bottom label sits on its line, with a '
+      'gridline at the foot, as Grafana keeps 0 on the baseline; the top one '
+      'stays inside (Zucchero row 794)', (tester) async {
+    await _show(tester, [
+      _root(['cpu']),
+      cpu(more: {'min': 0, 'max': 100, 'legend': false}),
+    ], cpuData);
+    final line = find.byType(LineChart);
+    final labels = _valueLabels(tester, line);
+    expect(labels.first.$1, 0);
+    expect(labels.last.$1, 100);
+    final gap = labels[2].$2 - labels[1].$2;
+    // On its line: as far from the next as each is from the one after.
+    expect(labels[1].$2 - labels[0].$2, closeTo(gap, 0.5));
+    // The plot's foot: the chart less the time axis's room (to a point:
+    // every label's centre is as near its line, the text's own rounding).
+    expect(labels.first.$2, closeTo(tester.getRect(line).bottom - 22, 1));
+    // The top one is moved down inside, never over the panel's title.
+    expect(
+      labels.last.$2 - tester.getRect(line).top,
+      greaterThan(tester.getSize(find.text('100')).height / 2),
+    );
+    final border = tester.widget<LineChart>(line).data.borderData;
+    expect(border.show, isTrue);
+    expect(border.border.bottom.width, greaterThan(0));
+    expect(border.border.top.width, 0);
+  });
+
+  testWidgets("bars' bottom value label sits on its line too "
+      '(Zucchero row 794)', (tester) async {
+    await showBars(tester, ['2026-10-27', '2026-10-28', '2026-10-29']);
+    final bars = _valueLabels(tester, find.byType(BarChart));
+    expect(bars.first.$1, 0);
+    expect(bars[1].$2 - bars[0].$2, closeTo(bars[2].$2 - bars[1].$2, 0.5));
   });
 
   testWidgets("a panel's own settings: line width, fill, points, axis ends, "

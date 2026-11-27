@@ -33,7 +33,7 @@ class PhoneExtensionList extends StatefulWidget {
 
   final Agent agent;
 
-  /// Opens the agent's other versions of its conversation (friend bug #9):
+  /// Opens the agent's other versions of its conversation:
   /// a row after Search while it has any.
   final VoidCallback? onVersions;
 
@@ -239,7 +239,7 @@ class _Heading extends StatelessWidget {
   );
 }
 
-/// [panes] newest first (#347, Matt): the file an agent most recently
+/// [panes] newest first: the file an agent most recently
 /// showed, or the person most recently opened, on top, the one most
 /// likely wanted. Equal times (all 0, from before the backend kept them)
 /// keep their layout order.

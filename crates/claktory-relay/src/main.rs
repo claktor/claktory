@@ -1,5 +1,5 @@
 //! claktory-relay: Claktory's relay (relay.claktory.com), iroh-relay's
-//! server with Claktory's access rule (#450, `access.rs`).
+//! server with Claktory's access rule (`access.rs`).
 //!
 //! This is iroh-relay 1.5.0's own `src/main.rs` (its CLI and config file),
 //! changed only where marked `Claktory:`: the access control is always

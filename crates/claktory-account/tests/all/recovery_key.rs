@@ -1,7 +1,6 @@
-//! The account's recovery key (#239): a signed-in Claktory sets its public
-//! half, every key needs a device's approval, the first too (Fugo 47881,
-//! 48996), and replaces only the key it names, and every Claktory of the account gets it, with the
-//! chain before it, at sign-in and check-in.
+//! The account's recovery key: a signed-in Claktory sets its public half, every key needs a
+//! device's approval, the first too, and replaces only the key it names, and every Claktory of the
+//! account gets it, with the chain before it, at sign-in and check-in.
 
 use claktory_account::protocol::*;
 use serde_json::json;
@@ -68,7 +67,7 @@ async fn the_first_claktory_sets_it_and_every_claktory_of_the_account_gets_it() 
     assert_eq!(instance.sign_in(&mut Claktory::new("198.51.100.31"), "eve@example.com", "Eve's").await.recovery_key, None);
     assert_eq!(checked_in(&instance, &studio).await, None, "none yet");
 
-    // Fugo 48996: the first key needs a device's approval too, so one
+    // The first key needs a device's approval too, so one
     // Claktory's backend key alone can't plant it.
     let first = public_key();
     let alone = statement(&instance, &studio, &account, &first, "", None);
@@ -113,7 +112,7 @@ async fn a_new_key_needs_a_devices_approval_and_replaces_only_the_key_it_names()
     let (first, second) = (public_key(), public_key());
     set(&instance, &studio, &statement(&instance, &studio, &account, &first, "", Some(&phone))).await;
 
-    // Fugo 47881: whoever holds one Claktory's backend key can't change it
+    // Whoever holds one Claktory's backend key can't change it
     // alone; a device's signature that doesn't check is refused too.
     let alone = statement(&instance, &server, &account, &second, &first, None);
     assert_eq!(put(&instance, &server, &alone).await.error(), "invalid_request");

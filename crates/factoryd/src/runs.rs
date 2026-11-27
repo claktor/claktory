@@ -140,8 +140,8 @@ impl Factory {
         let mut waiting = self.store.waiting()?;
         // Background tasks the restart ended while nothing watched them (the
         // computer's restart, a Linux shut down): none starts again, and
-        // each agent is told of its own once, all in one note (friend bug
-        // #44). The others are watched until they end, as before.
+        // each agent is told of its own once, all in one note. The others
+        // are watched until they end, as before.
         let mut lost: BTreeMap<String, Vec<(Task, Finished)>> = BTreeMap::new();
         let mut watched = Vec::new();
         for (agent, task) in self.store.running_tasks()? {
@@ -257,7 +257,7 @@ fn lost_summary(ended: &[(Task, Finished)]) -> String {
 /// What an agent is told of its background tasks a restart ended: each
 /// task's command as given, the folder it ran in, when it started, how
 /// long it ran as far as its log shows, and its log; that none started
-/// again, and to start again only what's still needed (friend bug #44).
+/// again, and to start again only what's still needed.
 fn lost_note(ended: &[(Task, Finished)]) -> String {
     let one = ended.len() == 1;
     let mut text = if rebooted(ended) {

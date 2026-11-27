@@ -122,7 +122,7 @@ Future<T?> presentPopover<T>(
   );
   overlay.insert(entry);
   // Android's Back closes it, as a tap outside does, before anything
-  // under it; never leaving the app with it still up (Risotto 49784).
+  // under it; never leaving the app with it still up.
   back = PhoneBack.maybeOf(context)
       ?.register(CallbackBackToken(onBack: close, onRetired: gone));
   return done.future;

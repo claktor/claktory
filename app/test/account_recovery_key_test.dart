@@ -1,4 +1,4 @@
-// The account's recovery key in Settings → Secrets (#239, main's half):
+// The account's recovery key in Settings → Secrets (main's half):
 // covered, made on which Claktory and when; a new key on the account to
 // use here only if the person made it (UseRecoveryKey); Account's Show
 // recovery key… gone once no Claktory keeps the key; and never Make a new

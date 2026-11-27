@@ -1122,7 +1122,7 @@ fn what_a_number_shows_is_kept_when_its_panel_is_saved_as_another_kind() {
     model::save(&mut host, dashboard, Some(1), "rivet").unwrap();
     host.now += 30_000;
     app.on_timer(&mut host, REFRESH);
-    // Abbacchio's row 1050: Min while it's a number, then saved as a line.
+    // Min while it's a number, then saved as a line.
     host.press(&mut app, "s1", "Edit");
     host.press_id(&mut app, "s1", "p0_edit");
     host.enter("s1", "/editor/reduce", json!(["min"]));
@@ -1360,7 +1360,7 @@ fn every_kind() -> Dashboard {
 /// each change checked: a stat no longer says signal (orange) for want of
 /// a color: it says one threshold, green, instead (its total in one color,
 /// as before, not the renderer's default red from 80); and it says its
-/// height, so its number fills it (#380 step 2). A row of panels says
+/// height, so its number fills it. A row of panels says
 /// below what width they go one under another (step 4).
 fn since_0_4_0(was: &Value, is: &Value) -> Value {
     let mut was = was.clone();
@@ -1665,7 +1665,7 @@ fn saved_stats_keep_their_total_and_new_ones_show_the_last_number() {
     assert_eq!(reduce("new_stat").as_deref(), Some("last"));
     assert_eq!(reduce("said").as_deref(), Some("max"));
     assert_eq!(reduce("tokens_by_agent").as_deref(), Some("last"), "a chart turned into a stat is a new stat");
-    // Put again without saying: each keeps what it showed (Scolippi 24818).
+    // Put again without saying: each keeps what it showed.
     let mut again = kept.clone();
     for panel in &mut again.panels {
         panel.viz.reduce = None;

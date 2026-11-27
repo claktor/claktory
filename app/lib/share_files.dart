@@ -1,4 +1,4 @@
-// Sharing files from the device (#418, Matt): "my phone already can
+// Sharing files from the device: "my phone already can
 // preview things, so there's no reason why it shouldn't be able to share
 // it to somebody with AirDrop." A file is on the machine Claktory runs on,
 // so the app first fetches the whole original, in pieces sized to the link
@@ -35,7 +35,7 @@ const _device = MethodChannel('factory/device');
 
 /// How much one read asks for: it comes in pieces sized to the link, but a
 /// read given up on (the connection gone over a minute) keeps none of it,
-/// so Try again carries on from the last whole one (Abbacchio's row 1024).
+/// so Try again carries on from the last whole one.
 const _piece = 1024 * 1024;
 
 /// Where shares are fetched to, a folder for each. On Android the cache
@@ -60,8 +60,8 @@ Directory? debugSharesFolder;
 
 /// How long a share that went somewhere is kept: the app it went to may
 /// read it well after the sheet answers, for as long as its screen lives
-/// (a mail draft, Messages, AirDrop; Risotto), and Copy leaves only where
-/// it is on the clipboard, read when it's pasted (Abbacchio's row 1023).
+/// (a mail draft, Messages, AirDrop), and Copy leaves only where
+/// it is on the clipboard, read when it's pasted.
 const _keep = Duration(hours: 24);
 
 /// In a share's folder once it went somewhere: kept [_keep] from then,
@@ -74,8 +74,8 @@ const _keptMark = '.keep';
 const _keepUnsaved = Duration(days: 7);
 
 /// Characters that would make a name read as another in the share sheet:
-/// controls, and invisible or reordering formatting (Fugo: an agent's file
-/// named from web text, `invoice\u202Efdp.exe`).
+/// controls, and invisible or reordering formatting (an agent's file named
+/// from web text, `invoice\u202Efdp.exe`).
 final _hidden = RegExp(
   '[\\x00-\\x1F\\x7F-\\x9F\\u200B-\\u200F\\u202A-\\u202E\\u2066-\\u2069'
   '\\uFEFF]',
@@ -109,7 +109,7 @@ bool get canShareFiles =>
         defaultTargetPlatform == TargetPlatform.macOS);
 
 /// Whether this device saves files straight to its Downloads folder, with
-/// Download beside Share… (Matt, Bruno 41308): the Mac. A phone or iPad
+/// Download beside Share…: the Mac. A phone or iPad
 /// saves with Share… → Save to Files.
 bool get canDownloadFiles =>
     !kIsWeb &&
@@ -163,7 +163,7 @@ Future<bool> shareFiles(
   Rect? from,
 }) async {
   if (paths.isEmpty || !canShareFiles) return false;
-  // A device that's never relaunched doesn't keep old shares (Fugo); one
+  // A device that's never relaunched doesn't keep old shares; one
   // cut short an hour ago isn't still being made.
   await _sweep(cutShort: const Duration(hours: 1));
   if (!context.mounted) return false;
@@ -446,7 +446,7 @@ class ShareUnavailable implements Exception {
 /// video, saved), pointing at [from]; it's never deleted here. True once it
 /// was sent somewhere, false when the person closed the sheet. Throws
 /// [ShareUnavailable] when the sheet can't open at all, so the person is
-/// told why rather than seeing nothing (Matt's export, Bruno 44170).
+/// told why rather than seeing nothing (Matt's export).
 Future<bool> shareFile(File file, {required String mime, Rect? from}) async {
   if (!canShareFiles) {
     throw const ShareUnavailable("this device can't share files.");
@@ -652,8 +652,7 @@ class _FetchingState extends State<_Fetching> {
 
   /// Back after a read was given up on (a drop of over a minute): it
   /// carries on by itself from where it got, rather than waiting for Try
-  /// again under words saying the connection hasn't come back (Sale's
-  /// row 91).
+  /// again under words saying the connection hasn't come back.
   void _connectedChanged() {
     final now = _backend.connected.value;
     final back = now && !_wasConnected;
@@ -691,8 +690,8 @@ class _FetchingState extends State<_Fetching> {
         setState(() {
           // Offline when it started, or when Try again was pressed: the
           // Claktory by its name, not the request's generic words
-          // (Abbacchio's row 1065). It carries on once it's back.
-          _error = failure.message == 'Not connected to the backend.'
+          // . It carries on once it's back.
+          _error = failure.message == "Can't reach your Claktory right now."
               ? 'Not connected to ${claktoryName(_backend)}.'
               : failure.message;
           _received = _written;
@@ -714,7 +713,7 @@ class _FetchingState extends State<_Fetching> {
     final path = widget.paths[_index];
     final file = _file;
     await file.parent.create(recursive: true);
-    // Kept on this device and still the file (#446): from there.
+    // Kept on this device and still the file: from there.
     if (_written == 0) {
       final found = await FileCache.of(_backend)
           ?.lookup(_backend, path, [originalVariant]);
@@ -804,15 +803,15 @@ class _FetchingState extends State<_Fetching> {
       body: many ? 'File ${index + 1} of ${paths.length}' : null,
       fields: [
         // Failed before anything came (offline from the start): only the
-        // error, not an empty bar under it (Sale's row 104).
+        // error, not an empty bar under it.
         if (_error == null || _size > 0)
           LoadingProgress(
             name: many ? _name(paths[index]) : null,
             label: 'Loading…',
             received: _received,
             size: _size,
-            // Given up on, it says so and nothing else (Abbacchio's row
-            // 1024: "carries on from here" beside it).
+            // Given up on, it says so and nothing else ("carries on
+            // from here" beside it).
             connected: _error == null ? _backend.connected : _given,
           ),
       ],

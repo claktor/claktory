@@ -1,6 +1,6 @@
 //! How agents are arranged in the sidebar: within each project (or the
 //! workspace) they come in config.json's order, and an agent is nested under
-//! its lead (`lead`, #234) when the lead is in the same place. One led by an
+//! its lead (`lead`) when the lead is in the same place. One led by an
 //! admin agent elsewhere, such as Rivet, shows at the top level.
 //!
 //! The nesting is the hierarchy: dropping an agent onto another makes it
@@ -23,7 +23,7 @@ pub(crate) fn parent_of<'a>(config: &'a Config, id: &str) -> Option<&'a str> {
 }
 
 /// The agent and everything nested under it, in config order.
-fn subtree(config: &Config, id: &str) -> Vec<String> {
+pub(crate) fn subtree(config: &Config, id: &str) -> Vec<String> {
     let mut members = vec![id.to_owned()];
     // Each pass adds the children of what's in already, until nothing new.
     loop {
@@ -104,11 +104,11 @@ pub(crate) fn arrange(
             return Err(RequestError::Lead(why));
         }
     }
-    // At the top level, a lead that would nest it there goes; an admin
-    // agent's from elsewhere stays.
+    // At the top level only an admin agent's lead from elsewhere stays:
+    // any other would nest it there, or is one the settings drop.
     let lead = match parent {
         Some(parent) => Some(parent.id.clone()),
-        None => agent.lead.clone().filter(|lead| config.agent(lead).is_some_and(|lead| lead.project != destination)),
+        None => agent.lead.clone().filter(|lead| config.agent(lead).is_some_and(|lead| lead.project != destination && crate::proposals::is_admin(lead))),
     };
     let parent = parent.map(|parent| parent.id.clone());
     if let Some(folder) = folder
@@ -169,7 +169,7 @@ pub(crate) fn check_folder(config: &Config, id: &str, folder: &str) -> Result<()
 const FOLDER_GONE: &str = "That folder no longer exists.";
 
 /// Moves a project's folder `id` before the folder `before`, or last with
-/// "" (#248): `folders` is the order the sidebar shows, config.json's.
+/// "": `folders` is the order the sidebar shows, config.json's.
 /// Before itself changes nothing.
 pub(crate) fn move_folder(folders: &mut Vec<FolderConfig>, id: &str, before: &str) -> Result<(), RequestError> {
     move_before(folders, |folder| &folder.id, id, before, FOLDER_GONE)
@@ -178,8 +178,8 @@ pub(crate) fn move_folder(folders: &mut Vec<FolderConfig>, id: &str, before: &st
 /// A dragged project that's gone (deleted on another device, say).
 const PROJECT_GONE: &str = "That project no longer exists.";
 
-/// Moves the project `id` before the project `before`, or last with ""
-/// (friend bug #12): `projects` is the order the sidebar shows, config.json's.
+/// Moves the project `id` before the project `before`, or last with "":
+/// `projects` is the order the sidebar shows, config.json's.
 /// Before itself changes nothing.
 pub(crate) fn move_project(projects: &mut Vec<ProjectConfig>, id: &str, before: &str) -> Result<(), RequestError> {
     move_before(projects, |project| &project.id, id, before, PROJECT_GONE)
@@ -319,6 +319,19 @@ mod tests {
         config.agents[0].extensions = serde_json::from_value(serde_json::json!({"agents": {"admin": true}})).unwrap();
         config.agent_mut("writer").unwrap().lead = Some("rivet".into());
         arrange(&mut config, "writer", None, None, None, None).expect("arrange");
+        assert_eq!(config.agent("writer").unwrap().lead.as_deref(), Some("rivet"));
+        // Moved to another project's top level: a lead left behind goes, as
+        // the settings would drop it, and only an admin agent's stays.
+        let mut config = factory();
+        arrange(&mut config, "backend", None, None, Some("app"), None).expect("arrange");
+        assert_eq!(config.agent("backend").unwrap().lead, None);
+        let arranged = config.clone();
+        config.forget_stale_leads();
+        assert_eq!(ids(&config), ids(&arranged));
+        assert_eq!(config.agent("backend").unwrap().lead, arranged.agent("backend").unwrap().lead);
+        config.agents[0].extensions = serde_json::from_value(serde_json::json!({"agents": {"admin": true}})).unwrap();
+        config.agent_mut("writer").unwrap().lead = Some("rivet".into());
+        arrange(&mut config, "writer", None, None, Some("app"), None).expect("arrange");
         assert_eq!(config.agent("writer").unwrap().lead.as_deref(), Some("rivet"));
         // Cycles are refused in UpdateAgent's words.
         let refused = arrange(&mut config, "coordinator", Some("tester"), None, None, None).expect_err("a loop");

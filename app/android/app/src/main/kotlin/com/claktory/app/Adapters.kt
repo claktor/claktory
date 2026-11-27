@@ -79,6 +79,8 @@ class Adapters private constructor(private val all: List<AutoCloseable>) : AutoC
             val webAuth = WebAuth(activity)
             // The system's share sheet, for text.
             val share = ShareSheet(activity)
+            // The system's save dialog, for a text file.
+            val saves = TextSave(activity)
             return Adapters(
                 listOf(
                     // No channel: the system bars' icons, dark on light and light on dark.
@@ -86,13 +88,14 @@ class Adapters private constructor(private val all: List<AutoCloseable>) : AutoC
                     // factory/network: iroh can't see network moves on Android.
                     NetworkPath(messenger, context),
                     // factory/device: what this phone keeps and what it is.
-                    DeviceChannel(messenger, context, attachments, camera, webAuth, share, photos),
+                    DeviceChannel(messenger, context, attachments, camera, webAuth, share, photos, saves),
                     // factory/dm-keys: the keys of end-to-end direct messages.
                     DmKeysChannel(messenger, context),
                     // factory/secret-clipboard: Copy code's secret, cleared only if still there.
                     SecretClipboardChannel(messenger, context),
                     webAuth,
                     share,
+                    saves,
                     // factory/back-gesture: where the system's Back swipe doesn't start (the mic).
                     BackGestureExclusion(messenger, activity),
                     // factory/links: claktory://add?code=… opens the app.

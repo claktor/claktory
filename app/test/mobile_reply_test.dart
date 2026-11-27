@@ -1,4 +1,4 @@
-// Reply on a phone (#228): a message's hold sheet offers Reply first where
+// Reply on a phone: a message's hold sheet offers Reply first where
 // there's a message box to reply in, and VoiceOver finds it among the
 // message's actions.
 import 'package:cupertino_ui/cupertino_ui.dart'

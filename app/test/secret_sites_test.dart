@@ -1,4 +1,4 @@
-// #435 W7 (Ghiaccio 41158): where Claktory's browser may fill a secret in
+// Where Claktory's browser may fill a secret in
 // for an agent's errand (its sites, exact https origins), giving it to an
 // agent to fill in only, and how such a grant and a fill read.
 import 'package:factory_app/backend.dart';
@@ -73,7 +73,7 @@ void main() {
       find.textContaining("Claktory's browser doesn't fill it in anywhere"),
       findsOneWidget,
     );
-    expect(find.text('Let errands fill it in…'), findsNothing);
+    expect(find.text("Let Claktory's browser fill it in…"), findsNothing);
 
     harness.backend.onSend = (sent) {
       if (sent.hasSetSecretSites() && sent.setSecretSites.sites.first == 'x') {
@@ -128,8 +128,10 @@ void main() {
     );
   });
 
-  testWidgets('Let errands fill it in… gives it for errands alone, an agent '
-      'that has it in full can be picked; the grant says so', (tester) async {
+  testWidgets("Let Claktory's browser fill it in… gives it for the browser "
+      'alone, an agent that has it in full can be picked; the grant says so', (
+    tester,
+  ) async {
     final harness = await _show(
       tester,
       _shop(
@@ -138,9 +140,9 @@ void main() {
       ),
     );
     await _open(tester);
-    await tester.tap(find.text('Let errands fill it in…'));
+    await tester.tap(find.text("Let Claktory's browser fill it in…"));
     await pumpFrames(tester);
-    expect(find.text('Whose errands may fill in Shop login?'), findsOneWidget);
+    expect(find.text('Whose browser may fill in Shop login?'), findsOneWidget);
     await tester.tap(_labeled('June').last);
     await pumpFrames(tester);
     final given = _sent(harness, (m) => m.hasGrantSecret()).single.grantSecret;
@@ -174,6 +176,52 @@ void main() {
     expect(
       _sent(harness, (m) => m.hasGrantSecret()).last.grantSecret.fillOnly,
       isFalse,
+    );
+  });
+
+  testWidgets("an agent that can't have the browser is shown, greyed, with "
+      "why, and can't be picked; taking a fill-only grant back says so", (
+    tester,
+  ) async {
+    final secret = _shop(
+      sites: ['https://shop.example'],
+      grants: [SecretGrant(agentId: 'mike', fillOnly: true)],
+    );
+    final snapshot = _workspace(secret)
+      ..agents.add(
+        Agent(
+          id: 'rivet',
+          name: 'Rivet',
+          modelAvailable: true,
+          extensions: [
+            AgentExtension(
+              id: 'agents',
+              enabled: true,
+              options: {'admin': OptionValue(on: true)}.entries,
+            ),
+          ],
+        ),
+      );
+    final harness = Harness(snapshot);
+    await _showWith(tester, harness);
+    await _open(tester);
+    await tester.tap(find.text("Let Claktory's browser fill it in…"));
+    await pumpFrames(tester);
+    expect(
+      find.bySemanticsLabel("Rivet, Admin agents can't use the browser."),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Rivet').last);
+    await pumpFrames(tester);
+    expect(_sent(harness, (m) => m.hasGrantSecret()), isEmpty);
+    await tester.tap(find.text('Cancel').last);
+    await pumpFrames(tester);
+
+    await tester.tap(find.text('Take back').first);
+    await pumpFrames(tester);
+    expect(
+      find.text("Mike's browser can't fill it in from now on."),
+      findsOneWidget,
     );
   });
 

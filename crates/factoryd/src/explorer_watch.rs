@@ -1,4 +1,4 @@
-//! The explorers' folders, watched for changes (Polpo's explorer.md): each
+//! The explorers' folders, watched for changes: each
 //! folder an explorer lists (its roots and their open folders) and each
 //! root's `.factoryignore`, without what's below them, so a project's tree
 //! is listed again when something in it changes instead of twice a second.

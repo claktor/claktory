@@ -48,7 +48,7 @@ class _DevicePairingCardState extends State<DevicePairingCard>
   var _deciding = false;
   String? _error;
 
-  /// The number typed off the device's screen to allow it (#352 P4).
+  /// The number typed off the device's screen to allow it.
   final _number = TextEditingController();
 
   DevicePairing get pairing => widget.pairing;
@@ -138,7 +138,7 @@ class _DevicePairingCardState extends State<DevicePairingCard>
     if (mounted) setState(() => _copied = true);
   }
 
-  /// [rethrowing] for focus mode's keys (#514): refused, it throws too.
+  /// [rethrowing] for focus mode's keys: refused, it throws too.
   Future<void> _decide(
     Future<void> Function(Backend backend) send, {
     bool rethrowing = false,
@@ -168,7 +168,7 @@ class _DevicePairingCardState extends State<DevicePairingCard>
   /// The device asking, once it used the code.
   PendingDevice? _asking;
 
-  /// For focus mode's keys (#514): while it waits, Cancel; once the device
+  /// For focus mode's keys: while it waits, Cancel; once the device
   /// asks, Allow only with its number typed (never a quick yes, FS14), and
   /// Don't allow.
   @override
@@ -342,7 +342,7 @@ class _DevicePairingCardState extends State<DevicePairingCard>
       (backend) => backend.approveDevice(asking!.deviceId, _number.text),
     );
     return [
-      // Typed off its screen, never shown here (#352 P4): only someone
+      // Typed off its screen, never shown here: only someone
       // who can see the device lets it in.
       Text(
         '$device used the code. To allow it, type the number its screen '

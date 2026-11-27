@@ -58,20 +58,24 @@ async fn an_agent_works_in_its_own_checkout_and_lands_its_work() {
 
     // Its first run makes the checkout, and it works there.
     let tree = dir.join("home/trees/builder/site");
-    let here = call(&mut client, &mut view, "builder", "bash", r#"{"command":"pwd; ls target || echo no build output"}"#).await;
-    assert!(here.contains("home/trees/builder/site\n"), "{here}");
+    // Git Bash's pwd is a POSIX path; cygpath names it as Windows does.
+    let pwd = if cfg!(windows) { r#"cygpath -w "$PWD""# } else { "pwd" };
+    let command = format!("{pwd}; ls target || echo no build output");
+    let here = call(&mut client, &mut view, "builder", "bash", &serde_json::json!({ "command": command }).to_string()).await;
+    let tail = Path::new("home").join("trees").join("builder").join("site").display().to_string();
+    assert!(here.contains(&format!("{tail}\n")), "{here}");
     assert!(here.contains("no build output"), "only what git tracks: {here}");
     let notices: Vec<String> = describe(&view.entries).into_iter().filter(|line| line.starts_with("notice")).collect();
     assert!(notices[0].starts_with("notice: Making Builder's own checkout of "), "{notices:?}");
     assert!(notices[0].ends_with("Builder starts as soon as it's ready."), "{notices:?}");
     assert!(
-        notices[1].starts_with("notice: Builder's own checkout is ready: ") && notices[1].ends_with("home/trees/builder/site."),
+        notices[1].starts_with("notice: Builder's own checkout is ready") && notices[1].ends_with(&format!("{tail}.")),
         "{notices:?}"
     );
     assert_eq!(git(&tree, &["branch", "--show-current"]), "home/builder");
 
     // The main checkout is only to read.
-    let main_file = repo.join("lib.rs").display().to_string();
+    let main_file = crate::common::json_text(repo.join("lib.rs").display());
     let refused = call(&mut client, &mut view, "builder", "write_file", &format!(r#"{{"path":"{main_file}","content":"mine"}}"#)).await;
     assert!(refused.contains("read only"), "{refused}");
 
@@ -80,7 +84,7 @@ async fn an_agent_works_in_its_own_checkout_and_lands_its_work() {
     call(&mut client, &mut view, "builder", "bash", r#"{"command":"git -c user.name=T -c user.email=t@t commit -qam work"}"#).await;
     let landed = call(&mut client, &mut view, "builder", "tree_land", "{}").await;
     assert!(landed.starts_with("Landed 1 commit on main"), "{landed}");
-    assert_eq!(std::fs::read_to_string(repo.join("lib.rs")).expect("landed"), "two\n");
+    assert_eq!(text(&repo.join("lib.rs")), "two\n");
 
     // The explorer shows its checkout.
     apply_request(&mut client, &mut view, client_message::Body::FocusProject(v1::FocusProject { project_id: "site".into() })).await;
@@ -148,6 +152,12 @@ async fn a_checkout_with_work_not_landed_is_kept_when_the_extension_goes_off() {
     assert!(told.contains("## Own checkout") && told.contains("on the branch home/builder"), "{told}");
 }
 
+/// A text file git wrote, with plain newlines: Git for Windows writes its
+/// checkouts with CRLF (core.autocrlf).
+fn text(path: &Path) -> String {
+    std::fs::read_to_string(path).expect("read").replace("\r\n", "\n")
+}
+
 /// Commits everything in `dir`, as `message`.
 fn commit_all(dir: &Path, message: &str) {
     git(dir, &["add", "-A"]);
@@ -202,13 +212,13 @@ async fn a_landing_that_puts_others_work_back_is_refused_unless_meant() {
     assert_eq!(git(&repo, &["rev-parse", "HEAD"]), main_before);
 
     // Squashed as it says, then rebased: it lands, and others' work stays.
-    let redo = "git reset -q --hard HEAD@{2} && git reset -q --soft $(git merge-base HEAD main) && git -c user.name=T -c user.email=t@t commit -qm squashed && git rebase -q main";
-    call(&mut client, &mut view, "builder", "bash", &bash(redo)).await;
+    let redo = "git reset -q --hard HEAD@{2} && git reset -q --soft $(git merge-base HEAD main) && git -c user.name=T -c user.email=t@t commit -qm squashed && git -c user.name=T -c user.email=t@t rebase -q main";
+    let redone = call(&mut client, &mut view, "builder", "bash", &bash(&format!("git reflog -5; {redo}"))).await;
     let landed = call(&mut client, &mut view, "builder", "tree_land", "{}").await;
-    assert!(landed.starts_with("Landed 1 commit on main"), "{landed}");
-    assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "a2\n");
+    assert!(landed.starts_with("Landed 1 commit on main"), "{landed}\n{redone}");
+    assert_eq!(text(&repo.join("a.txt")), "a2\n");
     assert!(repo.join("new.txt").exists() && !repo.join("c.txt").exists());
-    assert_eq!(std::fs::read_to_string(repo.join("mine.txt")).unwrap(), "mine\nmore\n");
+    assert_eq!(text(&repo.join("mine.txt")), "mine\nmore\n");
 
     // A revert meant as one: refused until it says so.
     let revert = format!("git -c user.name=T -c user.email=t@t revert --no-edit {main_before}");
@@ -217,5 +227,5 @@ async fn a_landing_that_puts_others_work_back_is_refused_unless_meant() {
     assert!(refused.contains("put 3 files back") && refused.contains("allow_rewinds: true"), "{refused}");
     let landed = call(&mut client, &mut view, "builder", "tree_land", r#"{"allow_rewinds":true}"#).await;
     assert!(landed.starts_with("Landed 1 commit on main"), "{landed}");
-    assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "a1\n");
+    assert_eq!(text(&repo.join("a.txt")), "a1\n");
 }

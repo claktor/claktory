@@ -1,4 +1,4 @@
-//! Hostile tests (dms-e2ee.md §9, E9) at the worker: what a stale or
+//! Hostile tests at the worker: what a stale or
 //! removed device, an old copy of a Claktory, or a Claktory's leaf in a
 //! conversation sends, and what the worker does with it. The person's
 //! devices' own checks are in app/rust/src/dm/hostile.rs, the crate's in
@@ -158,8 +158,8 @@ fn forced_rejoin(person: &Person, leaf: usize, info: &[u8]) -> Outgoing {
 }
 
 /// Test 3: what a device sent, sent again: a commit at an epoch the group
-/// left is refused with the epoch now. (A message isn't taken here at all
-/// since #451: it goes through the home.)
+/// left is refused with the epoch now. (A message isn't taken here at all:
+/// it goes through the home.)
 #[test]
 fn test_3_a_replayed_commit_or_old_message_is_refused_by_epoch() {
     let mut world = World::new();
@@ -206,7 +206,7 @@ fn test_4_format_1_is_refused_on_every_route() {
     let id = [3; 16];
     let said = ana.with(0, |provider, me| group.send(provider, me, &Pins::default(), b"hi").expect("sent"));
     let path = format!("groups/{}/messages", b64(&id));
-    // No message is taken here since #451, in any format.
+    // No message is taken here, in any format.
     for envelope in [format_1(&env(said)), old.clone()] {
         assert_eq!(call(&mut world, &phone, "POST", &path, json!({"client_message_id": "m-1", "envelope": envelope})).0, 410);
     }
@@ -385,7 +385,7 @@ fn test_17_an_old_copy_of_a_claktory_has_no_way_back() {
     assert!(grants.is_empty());
 }
 
-/// Test 18, the worker's part (an honest service: Fugo's ruling, §7): a
+/// Test 18, the worker's part (an honest service): a
 /// Claktory's mailbox for a conversation starts at its agents' earliest
 /// live grant there, so a later grant, once the earlier one ends, shows
 /// nothing from before it. Inside the Claktory, the leaf keeps the same
@@ -566,7 +566,7 @@ fn test_25_after_a_new_key_nothing_under_the_old_one_is_taken() {
     assert_eq!(upload(&mut world, &ana.caller(mac), vec![fresh], None).0, 200);
 }
 
-/// Tests 26 and 27, the worker's part (R3, Fugo's three tightenings): in
+/// Tests 26 and 27, the worker's part (R3): in
 /// a group, a leaf under the replaced key does one thing, move itself to
 /// the new key, keeping its signature key, with nothing else in the
 /// commit; its proposals and other commits are refused, and so is a

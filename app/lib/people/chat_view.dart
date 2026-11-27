@@ -36,10 +36,10 @@ import 'verify.dart';
 // stands; then the box to write in, whose draft is the person's on all
 // their devices. An ended conversation reads the same with no box. People
 // opens it: Message on a friend, Open on a past conversation. On a phone
-// it's a page of its own (Prosciutto's routes), Back at its top and the
+// it's a page of its own, Back at its top and the
 // phone's composer above the keyboard.
 
-/// Who can read direct messages (dms-e2ee §7, Trish's words), in one
+/// Who can read direct messages (dms-e2ee §7), in one
 /// place: the chat's top, Add a friend and People's Friends say it.
 const dmDisclosure =
     'End-to-end encrypted: only you and your friends can read these '
@@ -137,7 +137,7 @@ String shownClaktoryName(BuildContext context) {
 String _whose(String name) => name.isEmpty ? 'their' : "${nameInText(name)}'s";
 
 /// What's said under the person's own message of where it stands past
-/// their home (#451); null when nothing is ([DmDelivered.sent] on any but
+/// their home; null when nothing is ([DmDelivered.sent] on any but
 /// the newest, and [DmDelivered.askResend], which asks instead).
 String? deliveredLine(
   ({DmDelivered state, int sinceMs}) delivered, {
@@ -169,16 +169,16 @@ String? deliveredLine(
 }
 
 /// The question under the person's message the friend's Claktory
-/// couldn't read, their conversation having gained someone since (Fugo:
-/// never sent again without asking).
+/// couldn't read, their conversation having gained someone since (never
+/// sent again without asking).
 String resendQuestion(String friend) {
   if (friend.isEmpty) return 'Resend? Their conversation has changed since.';
   final name = nameInText(friend);
   return "Resend to $name? $name's conversation has changed since.";
 }
 
-/// What a change in who can read a chat says, one line per leaf (Trish's
-/// words): [me] is the person's account, [friend] the friend's name.
+/// What a change in who can read a chat says, one line per leaf: [me] is
+/// the person's account, [friend] the friend's name.
 List<String> memberLines(
   dm.DmMembers members, {
   required String me,
@@ -188,9 +188,9 @@ List<String> memberLines(
   final who = friend.isEmpty ? 'They' : nameInText(friend);
   String line(dm.DmMember member, bool added) {
     final mine = member.account == me;
-    // This device itself, removed by another of the person's (row 199):
+    // This device itself, removed by another of the person's:
     // never "You removed a device" with its own name. Its account and id
-    // both (row 671): a friend's leaf under the same id is the friend's.
+    // both: a friend's leaf under the same id is the friend's.
     if (!added && mine && here.isNotEmpty && member.leafId == here) {
       return 'This device was removed from your account';
     }
@@ -204,31 +204,31 @@ List<String> memberLines(
   }
 
   return [
-    // Before anything they said under it (Fugo): only the friend's, in a
+    // Before anything they said under it: only the friend's, in a
     // chat of two.
     for (final account in members.keyChanged)
       if (account != me)
         "${friend.isEmpty ? 'Their' : "$who's"} security key changed",
-    // A friend's first device here: they joined (Bruno 33634), said for
-    // each leaf all the same (Fugo).
+    // A friend's first device here: they joined, said for
+    // each leaf all the same.
     for (final member in members.joined)
       member.account == me
           ? line(member, true)
           : '$who joined on ${nameInText(member.name)}',
     for (final member in members.added) line(member, true),
-    // Back with a new key: the device installed again (row 202, Trish).
+    // Back with a new key: the device installed again.
     for (final member in members.setUpAgain)
       '${member.account == me ? 'You' : who} set up a device again: '
           '${nameInText(member.name)}',
     for (final member in members.removed) line(member, false),
-    // This device joined again past messages it can't read (row 654).
+    // This device joined again past messages it can't read.
     if (members.skipped case final because?)
       switch (because) {
         '' =>
           "Some messages sent while this device was away can't be shown "
               'on it.',
         // Sent while a device they've since taken off their list was in
-        // the chat (row 561, Trish 40465).
+        // the chat.
         _ when because.startsWith('device:') =>
           "Some earlier messages can't be shown here: they were sent while "
               '${because == 'device:$me'
@@ -380,7 +380,7 @@ class _ChatViewState extends State<ChatView> {
                   ),
                 ),
               // Listed by the service, not here yet from the agent's
-              // Claktory (#451): never its text until it is.
+              // Claktory: never its text until it is.
               if (_thread.arriving > 0)
                 Padding(
                   padding: const EdgeInsets.only(top: Space.xs),
@@ -516,7 +516,7 @@ class _ChatViewState extends State<ChatView> {
           ),
         ),
         // Signed out (removed by another of the person's devices, say):
-        // why nothing can be sent, over what was typed (row 199).
+        // why nothing can be sent, over what was typed.
         if (_thread.writable &&
             (_thread.e2ee.setup == DmSetup.signedOut ||
                 problem?.problem == UserAppProblem.notSignedIn))
@@ -783,7 +783,7 @@ class _Message extends StatelessWidget {
   final String friend;
 
   /// The person's newest, which came back: says Sent, or Delivered to
-  /// their friend's Claktory (#451). Never more than that: nothing says
+  /// their friend's Claktory. Never more than that: nothing says
   /// whether they read it.
   final bool newest;
 
@@ -809,7 +809,7 @@ class _Message extends StatelessWidget {
             sentMs: message.shownMs,
             timeColor: mine ? const Color(0xB3FFFFFF) : null,
             // Theirs, or an agent's: what reorders text shows by its code
-            // (proseCodes, Fugo). The person's own, as they wrote it.
+            // (proseCodes). The person's own, as they wrote it.
             child: Text(
               mine && !message.byAgent
                   ? message.text
@@ -831,7 +831,7 @@ class _Message extends StatelessWidget {
               ),
             ),
           // From a device since taken off its person's list, read because
-          // one of theirs that was there all along took it out (row 561).
+          // one of theirs that was there all along took it out.
           if (message.departed)
             Padding(
               padding: const EdgeInsets.symmetric(
@@ -844,7 +844,7 @@ class _Message extends StatelessWidget {
               ),
             ),
           // Held up on the way (a Claktory offline, say): when it came too
-          // (row 556).
+          // .
           if (message.arrivedLate case final arrived?)
             Padding(
               padding: const EdgeInsets.symmetric(
@@ -923,7 +923,7 @@ class _Outgoing extends StatelessWidget {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     // Waiting for the person's home goes by itself: said quietly, and
-    // only Remove (#451).
+    // only Remove.
     final waiting = message.state == OutgoingState.waiting;
     final stuck = message.state != OutgoingState.sending && !waiting;
     final actions = stuck || waiting;
@@ -1017,7 +1017,7 @@ class _QuietLine extends StatelessWidget {
 /// The friend's security key changed: what that means, and OK, which
 /// lets sending go on (until then nothing is encrypted to them).
 /// The feed waits at a change made under a security key this device
-/// doesn't have yet (Ghiaccio, Fugo: held, never dropped); after a day,
+/// doesn't have yet (held, never dropped); after a day,
 /// Join again.
 class _Held extends StatelessWidget {
   const _Held({this.onRejoin});
@@ -1067,7 +1067,7 @@ class _Held extends StatelessWidget {
   }
 }
 
-/// When a message held up on the way arrived, under it (row 556):
+/// When a message held up on the way arrived, under it:
 /// "Arrived 06:56", or with its day when that isn't the day it was sent
 /// ("Arrived yesterday at 23:10", "Arrived Monday at 09:02").
 String arrivedLine(int sentMs, int arrivedMs, DateTime now, {bool h24 = true}) {
@@ -1081,7 +1081,7 @@ String arrivedLine(int sentMs, int arrivedMs, DateTime now, {bool h24 = true}) {
   return 'Arrived $day at $time';
 }
 
-/// Under a message from a device its person has since removed (row 561):
+/// Under a message from a device its person has since removed:
 /// [mine] when that's the person, [friend] the friend's name.
 String departedLine({required bool mine, required String friend}) => mine
     ? "From a device you've since removed"
@@ -1089,7 +1089,7 @@ String departedLine({required bool mine, required String friend}) => mine
     ? "From a device they've since removed"
     : 'From a device ${nameInText(friend)} has since removed';
 
-/// A message waits until this device catches up with the chat (row 551):
+/// A message waits until this device catches up with the chat:
 /// Claktory tries again by itself.
 class _Behind extends StatelessWidget {
   const _Behind();
@@ -1126,7 +1126,7 @@ class _Behind extends StatelessWidget {
   }
 }
 
-/// The friend isn't in the conversation yet (row 676): nothing is sent
+/// The friend isn't in the conversation yet: nothing is sent
 /// until a device of theirs is. [name] is the friend's.
 class _WaitingToJoin extends StatelessWidget {
   const _WaitingToJoin({required this.name});
@@ -1166,7 +1166,7 @@ class _WaitingToJoin extends StatelessWidget {
   }
 }
 
-/// Someone started over on a new security key (row 630, Fugo): the
+/// Someone started over on a new security key: the
 /// group waits until their new device takes the devices under the old
 /// one out, and sending waits with it. [name] is the friend's; null for
 /// the person's own.
@@ -1242,7 +1242,7 @@ class _KeyChanged extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    // Their name inside these sentences (nameInText; Fugo 51059).
+    // Their name inside these sentences (nameInText).
     final name = nameInText(this.name);
     final who = name.isEmpty ? 'Their' : "$name's";
     final them = name.isEmpty ? 'they' : name;

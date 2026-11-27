@@ -1,8 +1,8 @@
-// A card's answer, wherever the card shows: what's typed in it, one draft
-// per card, so a card's words stay with that card while the app runs (Bruno's
-// Q11), in its review bar, on its card and in focus mode (#514), and never
-// in another card's field. Kept on the device in memory only, as drafts
-// are, and dropped once the answer's sent.
+// A card's answer, wherever the card shows: what's typed in it, one draft per
+// card, so a card's words stay with that card while the app runs, in its
+// review bar, on its card and in focus mode, and never in another card's
+// field. Kept on the device in memory only, as drafts are, and dropped once
+// the answer's sent.
 import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/widgets.dart';
 
@@ -44,7 +44,7 @@ class AnswerNotSent implements Exception {
 }
 
 /// A card's answer as data, for a dock outside the card that draws or binds
-/// it: focus mode's stage (its answer bar, ⌘↩ and ⌘⌫, #514) and the
+/// it: focus mode's stage (its answer bar, ⌘↩ and ⌘⌫) and the
 /// phone's thumb row. The card publishes it into the [AnswerDock] above it
 /// as it changes; its own controls stay the source of what's sent.
 @immutable
@@ -97,13 +97,13 @@ class CardAnswer {
   final String no;
 
   /// Words are typed: on a card that doesn't ask for them, Submit takes
-  /// the place of yes and no (#370).
+  /// the place of yes and no.
   final bool typed;
 
-  /// What [onSubmit]'s button and ⌘↩ are called once [typed]: 'Submit'
-  /// (#370), or the card's own word where words alone answer it. A
+  /// What [onSubmit]'s button and ⌘↩ are called once [typed]: 'Submit',
+  /// or the card's own word where words alone answer it. A
   /// written answer's words are its yes ([wantsText], never [typed]); a
-  /// step's ⌘↩ stays Done (Lucy's §4.2), its Send being ↩ in the field.
+  /// step's ⌘↩ stays Done, its Send being ↩ in the field.
   final String submit;
 
   /// Its answer is on its way.
@@ -125,13 +125,13 @@ class CardAnswer {
   final Future<void> Function()? onSubmit;
   final Future<void> Function(String? reason)? onNo;
 
-  /// Where files to go with the answer wait (#511, card_files.dart's
-  /// card key), on a card that takes them: a dock drawing the field puts
+  /// Where files to go with the answer wait (card_files.dart's card key),
+  /// on a card that takes them: a dock drawing the field puts
   /// CardAttachButton, CardFileChips and CardFileDrop on it with this key,
   /// and the card sends them with its answer. Null: no files.
   final String? filesKey;
 
-  /// The yes runs something on this computer (Execute, #494): from a key
+  /// The yes runs something on this computer (Execute): from a key
   /// it takes a second press within a few seconds, said meanwhile ("Press
   /// ⌘↩ again to run"); a click or tap on the dock's button runs it at
   /// once, as the card's does. Its own warnings may then ask again
@@ -339,14 +339,14 @@ mixin PublishesAnswer<T extends StatefulWidget> on State<T> {
   }
 }
 
-// The words every card's field and line share (Lucy's Needs you cards,
-// Trish's words §8), so a card, its review bar and focus mode say the same.
+// The words every card's field and line share, so
+// a card, its review bar and focus mode say the same.
 
 /// A card's field before anything's typed: where the words go.
 String replyPlaceholder(String agent) => 'Reply to $agent';
 
 /// The line once words are typed on a plain card, whose buttons gave way to
-/// Submit (#370): [verbing] is the card's own yes ("approving", "allowing",
+/// Submit: [verbing] is the card's own yes ("approving", "allowing",
 /// "sending").
 String insteadLine(String verbing) =>
     'Submit sends your words instead of $verbing.';

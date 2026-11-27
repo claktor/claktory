@@ -7,7 +7,11 @@ mod annotations;
 mod app_archive;
 pub mod apps;
 mod arrange;
+mod arrange_undo;
 pub mod browser;
+// On Windows only what the browser's host reads of it: its wire and the
+// input lease (the runner itself runs on Linux).
+#[cfg_attr(windows, path = "windows/browser_runner.rs")]
 pub mod browser_runner;
 pub mod browser_host;
 mod calls;
@@ -37,6 +41,7 @@ mod explorer;
 mod explorer_watch;
 mod file_watch;
 pub mod log_file;
+mod browser_switches;
 mod extensions;
 pub mod factory;
 mod find;
@@ -120,6 +125,9 @@ pub use account::analytics::{backend_started, backend_stopped};
 /// For tests: anchors a test's own account service to roots of its own.
 #[doc(hidden)]
 pub use account::anchor::anchor_for_tests as anchor_account_for_tests;
+/// For tests: a Factory done with, whose home another now uses.
+#[doc(hidden)]
+pub use account::stop_for_tests as stop_account_for_tests;
 /// For tests: Execute cards' runs left going as if Claktory had died.
 #[doc(hidden)]
 pub use command_cards::abandon_runs_for_test;

@@ -92,8 +92,8 @@ String platformOf(TargetPlatform platform, DeviceKind kind) =>
 
 /// Whether this iOS device is an iPad: from the native idiom, never the
 /// window, which Split View and Slide Over narrow to a phone's width (an
-/// iPad waiting to be let in read as an iPhone, Sale's row 198). A side
-/// given (a test's) decides by it instead: an iPad's is 744 points or more.
+/// iPad waiting to be let in read as an iPhone). A side given (a test's)
+/// decides by it instead: an iPad's is 744 points or more.
 bool _iPad(double? shortestSide) => shortestSide == null
     ? deviceCapabilities.idiom == Idiom.pad
     : shortestSide >= 600;

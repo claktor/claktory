@@ -4,7 +4,7 @@
 //! A conversation is a friendship's (`dm_contacts.conversation_id`): one per
 //! contact generation, so reconnecting starts a new one.
 //!
-//! Since #451 claktory.com keeps no messages: a device sends through the
+//! claktory.com keeps no messages: a device sends through the
 //! person's home Claktory, which delivers to the friend's home, and a send
 //! here is refused with `410 moved_to_home`. What it kept from before
 //! (`dm_messages`, numbered per conversation, both people's outbox events)
@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS dm_account_events (
 const PAGE: usize = 100;
 const PAGE_DEFAULT: usize = 50;
 const PAGE_BYTES: usize = 256 * 1024;
-/// A send to claktory.com since #451, from an app that hasn't moved to
+/// A send to claktory.com from an app that hasn't moved to
 /// the home: the same for a conversation, a self group or a channel.
 pub(super) fn moved_to_home() -> Refusal {
     Refusal(410, "moved_to_home", "Messages go through your home Claktory now. Update Claktory to send this.".to_owned())
@@ -176,7 +176,7 @@ pub fn answer(
         }
         ("POST", ["conversations", conversation, "delete"]) => sync::delete(&transaction, &account, conversation, bytes, now_ms)?,
         ("GET", ["conversations"]) => conversations(&transaction, keys, &account, now_ms)?,
-        // Sent through the person's home now (#451); what was kept here
+        // Sent through the person's home now; what was kept here
         // before stays readable below until it's gone.
         ("POST", ["conversations", _, "messages"]) => return Err(moved_to_home()),
         ("GET", ["conversations", conversation, "messages"]) => history(&transaction, &account, conversation, query)?,
@@ -346,7 +346,7 @@ pub(super) mod tests {
     use serde::Deserialize;
     use sha2::Digest as _;
 
-    // How messages were kept before #451, when claktory.com took them: what
+    // How messages were kept when claktory.com took them: what
     // the tests of what's left of them (history, sync, deletes) start from.
 
     /// Messages a person may send a minute, and an hour.
@@ -476,7 +476,7 @@ pub(super) mod tests {
         let mut group = groups::of_conversation(transaction, conversation, generation)?
             .ok_or_else(|| Refusal(409, "not_set_up", "This conversation isn't set up for end-to-end encryption yet.".to_owned()))?;
         let epoch = groups::fits(&group, submitted)?;
-        // Nothing goes in that the friend can't read (row 676): refused before
+        // Nothing goes in that the friend can't read: refused before
         // anything is counted or kept.
         if !groups::both_in(transaction, &group, epoch)? {
             return Err(groups::waiting_for_friend());
@@ -561,7 +561,7 @@ pub(super) mod tests {
         }
     }
 
-    /// A send as claktory.com took it before #451 (`POST
+    /// A send as claktory.com took it before (`POST
     /// conversations/<id>/messages`, refused now): kept, or refused.
     pub(in crate::dms) fn send_as(world: &mut World, caller: &Caller, conversation: &str, send: Value) -> (u16, Value) {
         let kept = (|| {
@@ -635,7 +635,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    /// What claktory.com kept before #451 stays readable, in order, for
+    /// What claktory.com kept before it stopped keeping messages stays readable, in order, for
     /// both; a send now is refused, kept nowhere.
     fn what_was_kept_stays_readable_and_a_send_moved_to_the_home() {
         let mut world = World::new();

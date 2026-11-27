@@ -64,6 +64,13 @@ pub(crate) fn staging(home: &crate::home::Home) -> std::io::Result<PathBuf> {
 }
 
 /// Makes `dir`, 0700.
+#[cfg(windows)]
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    factory_agent::windows::private::create_dir_all(dir)
+}
+
+/// Makes `dir`, 0700.
+#[cfg(unix)]
 fn private_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt as _;
     match std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir) {
@@ -107,8 +114,16 @@ pub(crate) fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
     (width > 0 && height > 0).then_some((width, height))
 }
 
+#[cfg(unix)]
 fn sync_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::File::open(dir)?.sync_all()
+}
+
+/// Nothing on Windows: a folder can't be opened as a file to flush, and
+/// NTFS journals what's made and renamed in it.
+#[cfg(windows)]
+fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Keeps a finished upload, `partial` (whose SHA-256 is `sha`, of type
@@ -140,11 +155,19 @@ pub(crate) fn keep(home: &crate::home::Home, partial: &Path, sha: &str, mime: &s
         std::fs::File::options().write(true).open(&path)?.set_modified(std::time::SystemTime::now())?;
         return Ok(());
     }
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         let file = std::fs::OpenOptions::new().append(true).open(partial)?;
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         file.sync_all()?;
+    }
+    // 0600 on Windows: this user and SYSTEM only (nothing to do when it was
+    // made in a private folder, as uploads are).
+    #[cfg(windows)]
+    {
+        factory_agent::windows::private::protect(partial)?;
+        std::fs::OpenOptions::new().append(true).open(partial)?.sync_all()?;
     }
     std::fs::rename(partial, &path)?;
     sync_dir(&dir)?;

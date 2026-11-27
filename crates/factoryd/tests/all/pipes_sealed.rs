@@ -1,4 +1,4 @@
-//! #414's boundary (Fugo 31931, 32063): a pipe's liaison uses no other pipe
+//! A pipe's liaison uses no other pipe
 //! in any role; whoever asks, it's refused with why, and the pipe says
 //! who's held. Agents in two ordinary pipes stay allowed, and so does one
 //! limited to several. A Claktory from before takes a liaison off its other
@@ -113,7 +113,7 @@ async fn a_pipes_liaison_is_refused_on_another_pipe_whoever_asks() {
     view.follow(&mut client, |view| shown(view, &launch).is_some_and(|pipe| pipe.member_ids == ["bo", "freya"])).await;
 }
 
-/// Limiting is the person's containment, built to span pipes (Fugo 32063):
+/// Limiting is the person's containment, built to span pipes:
 /// never refused, and kept across a restart.
 #[tokio::test]
 async fn an_agent_on_another_pipe_can_be_limited_to_this_one_too() {

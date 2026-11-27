@@ -212,6 +212,12 @@ async fn sol_medium_sends_tools_and_preserves_the_returned_call() {
     assert!(request.tools.iter().any(|tool| tool.function.name == "bash"));
 }
 
+#[cfg(windows)]
+fn thread_cpu_time() -> Duration {
+    factory_agent::windows::system::thread_cpu_time().expect("this thread's processor time")
+}
+
+#[cfg(unix)]
 fn thread_cpu_time() -> Duration {
     let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
     // SAFETY: clock_gettime only writes the timespec it's given.

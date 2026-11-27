@@ -39,7 +39,7 @@ fn build(target: &str, features: &[&str]) -> PathBuf {
 
 /// A fresh folder for one test, removed when the test's thread ends;
 /// the first one a process makes sweeps those of test processes no longer
-/// running (#369). CLAKTORY_TEST_KEEP=1 keeps them.
+/// running. CLAKTORY_TEST_KEEP=1 keeps them.
 pub fn temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("claktory-apps-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

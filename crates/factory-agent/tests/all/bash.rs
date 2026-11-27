@@ -71,7 +71,16 @@ async fn the_shell_reports_exit_status_signals_and_interleaved_output() {
     assert_eq!(killed.details["exitSignal"], "SIGTERM");
     assert_eq!(killed.details["exitCode"], Value::Null);
     let both = run(dir.path(), json!({"command": "printf 'a\\nb'; printf 'c' >&2", "timeout": null})).await.unwrap();
-    assert_eq!(shown(&both), "a\nbc\n[exit 0]");
+    // On Windows each stream has its own reader thread, and Git Bash's
+    // printf writes a line at a time, so where stderr's write lands among
+    // stdout's isn't fixed: stdout's own order is.
+    if cfg!(windows) {
+        let text = shown(&both);
+        let output = text.strip_suffix("\n[exit 0]").unwrap_or_else(|| panic!("{text}"));
+        assert!(output.replace('c', "") == "a\nb" && output.matches('c').count() == 1, "{text}");
+    } else {
+        assert_eq!(shown(&both), "a\nbc\n[exit 0]");
+    }
     assert_eq!(both.details["characters"], 4);
 }
 
@@ -314,6 +323,8 @@ async fn a_background_task_outlives_whoever_started_it_and_can_be_picked_up_agai
     assert_eq!(done.tail, "late\n");
 }
 
+// A process group as the pid; on Windows a task is its job.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_task_from_before_the_computer_restarted_has_ended_whatever_has_its_pid_now() {
     use factory_agent::tools::bash::{boot_time_ms, started_before_boot};
@@ -353,7 +364,10 @@ impl Drop for Reaper {
                 && group > 1
             {
                 // SAFETY: killpg only sends a signal.
+                #[cfg(unix)]
                 unsafe { libc::killpg(group, libc::SIGKILL) };
+                #[cfg(windows)]
+                factory_agent::windows::job::stop(group as u32);
             }
         }
     }
@@ -431,8 +445,10 @@ async fn a_command_past_its_timeout_moves_to_the_background_and_reports_when_it_
     let mut watched = watched(dir.path());
     let bash = bash_with(dir.path(), &watched.background);
     let command = &format!("echo first; {}; echo second; exit 4", until_file("go"));
+    // Git Bash takes longer than that to start on Windows.
+    let timeout = if cfg!(windows) { 3.0 } else { 0.3 };
     let result =
-        tokio::time::timeout(HANG, bash.execute(&json!({"command": command, "timeout": 0.3}), &CancellationToken::new(), &no_update))
+        tokio::time::timeout(HANG, bash.execute(&json!({"command": command, "timeout": timeout}), &CancellationToken::new(), &no_update))
             .await
             .expect("it didn't wait for the command")
             .expect("moved");
@@ -584,7 +600,8 @@ async fn detaching_moves_a_running_command_to_the_background_so_a_message_can_re
     let detach = CancellationToken::new();
     let later = detach.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Git Bash takes longer than that to start on Windows.
+        tokio::time::sleep(Duration::from_millis(if cfg!(windows) { 3000 } else { 300 })).await;
         later.cancel();
     });
     let command = &format!("echo first; {}; echo second", until_file("go"));

@@ -398,6 +398,19 @@ class HistoryScene {
     return best;
   }
 
+  /// How many agents the history has all told: the most there can be at
+  /// once, which a video's count is given room for.
+  late final int agentCount = () {
+    var count = 0;
+    for (final MapEntry(key: node, value: list) in _chipsOf.entries) {
+      if (node <= 0 || list.isEmpty) continue;
+      if (chips[list.first].chip.node.kind == MapNodeKind.MAP_NODE_KIND_AGENT) {
+        count++;
+      }
+    }
+    return count;
+  }();
+
   /// How many agents were there at [t], and how many of them were working
   /// then ([log]'s runs): in [project] only, when given.
   ({int working, int total}) agentsAt(

@@ -45,8 +45,10 @@ pub(crate) enum Power {
     #[default]
     Mains,
     /// `pmset -g ps`: "AC Power" or "Battery Power".
+    #[cfg_attr(windows, allow(dead_code, reason = "keeping awake is a Mac's (`Machine::this`)"))]
     Pmset,
     /// A laptop QA simulates: plugged in while the file says "ac".
+    #[cfg_attr(windows, allow(dead_code, reason = "keeping awake is a Mac's (`Machine::this`)"))]
     File(std::path::PathBuf),
 }
 

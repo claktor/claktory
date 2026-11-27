@@ -105,7 +105,7 @@ class PaneScaffold extends StatelessWidget {
   final Widget? phoneOverlay;
 
   /// The file it shows, which Share… fetches and sends with the system's
-  /// share sheet (#418): in More on a phone, in the header elsewhere.
+  /// share sheet: in More on a phone, in the header elsewhere.
   /// Null where there's nothing to share.
   final String? share;
 
@@ -164,7 +164,7 @@ class PaneScaffold extends StatelessWidget {
             ),
           );
     // On a Mac, Download beside it: the file saved to Downloads, at once
-    // (Matt, Bruno 41308).
+    // .
     final download = canDownloadFiles ? this.share : null;
     final downloadButton = download == null
         ? null
@@ -174,7 +174,7 @@ class PaneScaffold extends StatelessWidget {
             onTap: () => downloadFiles(context, [download]),
             glyph: (color) => DownloadGlyph(color: color),
           );
-    // On an iPad it's how a file is saved or sent on (Bruno 27653): never
+    // On an iPad it's how a file is saved or sent on: never
     // clipped, as the viewer's controls are from their end on a narrow
     // pane beside the conversation. On a Mac, last of them.
     final touch = touchFirst(context);
@@ -214,7 +214,7 @@ class PhonePaneHeader extends StatelessWidget {
   /// Its fill, the sidebar's unless given ([PhoneHeader.background]).
   final Color? background;
 
-  /// Shares the file shown (#418): Save Video, Save to Files, AirDrop…
+  /// Shares the file shown: Save Video, Save to Files, AirDrop…
   final VoidCallback? share;
 
   static Widget _shareGlyph(Color color, double size) =>
@@ -227,7 +227,7 @@ class PhonePaneHeader extends StatelessWidget {
     final chosen = await showActions<int>(
       context,
       actions: [
-        // First: what Matt looked for to save a video (Bruno 27653).
+        // First: what Matt looked for to save a video.
         if (share != null)
           SheetAction(
             shareLabel(),

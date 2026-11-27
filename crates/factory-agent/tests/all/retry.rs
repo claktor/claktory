@@ -250,7 +250,7 @@ async fn stopping_a_wait_ends_the_run_as_aborted() {
     assert_eq!(aborted.stop_reason, StopReason::Aborted);
 }
 
-/// A wait for the provider (#490) that records why it waited and ends at
+/// A wait for the provider that records why it waited and ends at
 /// once (Ok), or gives up with `give_up` from the `n`-th wait on.
 fn provider_waits(give_up: Option<(usize, &'static str)>) -> (factory_agent::WaitProvider, Arc<Mutex<Vec<String>>>) {
     let (wait, seen, _) = provider_waits_asked(give_up);
@@ -276,7 +276,7 @@ fn provider_waits_asked(give_up: Option<(usize, &'static str)>) -> (factory_agen
     (wait, seen, asked)
 }
 
-/// #490: past the quick retries, a provider that keeps failing in a way
+/// Past the quick retries, a provider that keeps failing in a way
 /// that passes is waited for, each wait followed by one request (no quick
 /// retries again), until it answers.
 #[tokio::test(start_paused = true)]
@@ -348,7 +348,7 @@ async fn an_answer_cut_off_mid_stream_is_retried() {
 
 /// A failure whose answer said how long to wait (Retry-After) is retried no
 /// sooner, the quick retries and the long wait alike, at most 15 minutes
-/// (Abbacchio's row 1249).
+/// .
 #[tokio::test(start_paused = true)]
 async fn retry_after_holds_retries_and_waits_back() {
     for (after, held) in [(60_000, 60_000), (3_600_000, 900_000)] {

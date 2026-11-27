@@ -51,15 +51,14 @@ class _ConnectStepState extends State<ConnectStep> {
 
   /// One of the person's own, from their account: connects, the first
   /// Claktory on an iPad asking for Local Network first, as every way in
-  /// does (devices-signin.md §8.8).
+  /// does.
   void _connect(RemoteFactory target) =>
       unawaited(connectNewClaktory(context, target));
 
   /// A pasted code connects only once the person says so, as every way a
-  /// code comes in does (confirmPairing, Fugo).
+  /// code comes in does (confirmPairing).
   Future<void> _connectPasted(RemoteFactory target) async {
-    // One question at a time: a second click while it asks does nothing
-    // (Abbacchio).
+    // One question at a time: a second click while it asks does nothing.
     if (_asking) return;
     _asking = true;
     final bool yes;

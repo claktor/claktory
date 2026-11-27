@@ -2,7 +2,7 @@
 // Slide Over or Stage Manager, or another app using it): the scanner's
 // square has nothing to show, so it shrinks to a band that holds what keeps
 // the camera away, and the way on (Paste code instead) stays in sight
-// under it at every text size (Lucy's permissions.md P7, her 48961).
+// under it at every text size.
 import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
