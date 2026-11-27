@@ -430,6 +430,7 @@ class _Row extends StatelessWidget {
       button: true,
       selected: checked,
       label: label,
+      onTap: onTap,
       excludeSemantics: true,
       child: Pressable(
         onTap: onTap,

@@ -642,9 +642,13 @@ Future<void> showAccountSignIn(BuildContext context) => showModal(
   ),
 );
 
-/// Up to two letters for [name]: "mac-mini" is "MM", "nixos" "N".
+/// Up to two letters for [name]: "mac-mini" is "MM", "nixos" "N". The
+/// invisible characters around and in a name (the isolate nameInText puts
+/// a name in, direction marks, zero-width spaces) are no letters: "Bad
+/// Name two" in an isolate is still "BT" (Abbacchio's row 1748).
 String claktoryInitials(String name) {
   final words = name
+      .replaceAll(RegExp('[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]'), '')
       .split(RegExp(r'[\s\-_.]+'))
       .where((word) => word.isNotEmpty)
       .toList();
@@ -1869,6 +1873,7 @@ class PhoneClaktoryRail extends StatelessWidget {
           Semantics(
             button: true,
             label: 'Add a Claktory',
+            onTap: onAdd,
             excludeSemantics: true,
             child: Pressable(
               onTap: onAdd,

@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'approve_elsewhere.dart';
 import 'backend.dart';
 import 'claktory_identity.dart' show claktoryName, claktoryNameInText;
 import 'devices.dart' show thisDeviceKind;
@@ -814,7 +815,16 @@ class _AccountSettingsState extends State<AccountSettings>
                   stack: stack,
                   children: [
                     Text('Not signed in', style: muted),
-                    Button(label: 'Sign in…', onPressed: _signIn),
+                    // On Windows only a first sign-in, never signing in
+                    // again, maybe to another account (Fugo 51974;
+                    // approve_elsewhere.dart).
+                    // A check-in sent: it was signed in before. Whether it
+                    // may sign in is its backend's to enforce; this only
+                    // doesn't offer it.
+                    if (approvesElsewhere && account.lastCheckInMs > 0)
+                      const ApproveElsewhere(text: signInElsewhereText)
+                    else
+                      Button(label: 'Sign in…', onPressed: _signIn),
                   ],
                 )
               : Column(
@@ -847,7 +857,10 @@ class _AccountSettingsState extends State<AccountSettings>
                   style: type.body.copyWith(color: palette.danger),
                 ),
                 const SizedBox(height: Space.s),
-                Button(label: 'Sign in again', onPressed: _signInAgain),
+                if (approvesElsewhere)
+                  const ApproveElsewhere(text: signInElsewhereText)
+                else
+                  Button(label: 'Sign in again', onPressed: _signInAgain),
               ],
             ),
           ),
@@ -972,7 +985,9 @@ class _AccountSettingsState extends State<AccountSettings>
             ),
             // No Claktory keeps the account's key once it covers the vault
             // (#239): nothing to show then.
+            // Never shown on Windows (approve_elsewhere.dart).
             if (!signedOut &&
+                !approvesElsewhere &&
                 !(vault.recoveryKeyCovered && !vault.recoveryKeyShowable))
               Button(
                 label: 'Show recovery key…',
@@ -981,7 +996,10 @@ class _AccountSettingsState extends State<AccountSettings>
                   (context, close) => _RecoveryKey(close: close),
                 ),
               ),
-            if (!signedOut && !revoked)
+            // Switching would take this Claktory, and the devices that
+            // come through it, to another account: never on Windows (Fugo
+            // 51974; approve_elsewhere.dart).
+            if (!signedOut && !revoked && !approvesElsewhere)
               Button(
                 label: account.switchingTo.isEmpty
                     ? 'Switch account…'
@@ -991,7 +1009,9 @@ class _AccountSettingsState extends State<AccountSettings>
                   (context, close) => SwitchAccountForm(close: close),
                 ),
               ),
-            if (!signedOut)
+            // Account changes are the person's, from a phone or Mac (Fugo
+            // 51978; approve_elsewhere.dart).
+            if (!signedOut && !approvesElsewhere)
               Button(
                 label: 'Sign out…',
                 onPressed: () => showModal(

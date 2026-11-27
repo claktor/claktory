@@ -31,6 +31,7 @@ import 'paced.dart';
 import 'pairing.dart';
 import 'state.dart';
 import 'tunnel_client.dart';
+import 'user_input.dart';
 import 'waiting.dart' show EntryReveal;
 import 'windows_local.dart';
 import 'workspace_patch.dart';
@@ -1012,6 +1013,8 @@ class Backend implements AppViewTransport {
   /// check goes unanswered.
   void resumed({DateTime? now}) {
     _android?.resumed();
+    // Back: input, which ends idleness ([_idle]).
+    UserInput.instance.touched();
     final hiddenAt = _hiddenAt;
     _hiddenAt = null;
     final kept = _keptWhileHidden;
@@ -2130,6 +2133,22 @@ class Backend implements AppViewTransport {
     pairing.value = PairingWait(pending, number);
   }
 
+  /// Cancel on the waiting page (#603): takes back this device's request
+  /// on that Claktory, on the connection that made it (the backend knows it
+  /// by the key it came with), so it leaves the list there at once. That
+  /// Claktory then closes the connection, which the caller is leaving
+  /// anyway. Best effort: unsent, the request runs out there as before.
+  void withdrawPairing() {
+    if (pairing.value == null || refused.value != null) return;
+    try {
+      _send(
+        ClientMessage(id: Int64(_nextId++), withdrawPairing: WithdrawPairing()),
+      );
+    } on StateError {
+      // Closed already: it runs out there.
+    }
+  }
+
   /// Connects to [target] instead (null for this Mac's Factory). What the
   /// old one showed goes at once, so nothing of it shows as the new one's.
   void connectTo(RemoteFactory? target) {
@@ -2288,7 +2307,7 @@ class Backend implements AppViewTransport {
     if (status.received != _tunnelReceived) {
       _tunnelReceived = status.received;
       _tunnelMovedAt = now;
-      _socket?.pingInterval = _pingEvery;
+      _socket?.pingInterval = _ping;
     }
     // On a weak link the connection can hold its data back for longer than
     // the ping allows (QUIC backing off behind a deep queue), while its
@@ -2301,7 +2320,7 @@ class Backend implements AppViewTransport {
       _tunnelLinkMovedAt = now;
       final data = _tunnelMovedAt;
       if (data != null && now.difference(data) < _transferPause) {
-        _socket?.pingInterval = _pingEvery;
+        _socket?.pingInterval = _ping;
       }
     }
     final shown = tunnel.value;
@@ -2441,6 +2460,8 @@ class Backend implements AppViewTransport {
   Future<void> close() async {
     _android?.dispose();
     _closed = true;
+    _idleTimer?.cancel();
+    if (_followingInput) UserInput.instance.removeListener(_touched);
     _diagnosticsTimer?.cancel();
     _tunnelBack?.cancel();
     _backWatch?.cancel();
@@ -5078,17 +5099,111 @@ class Backend implements AppViewTransport {
     return completer.future;
   }
 
-  void _send(ClientMessage message) => _socket?.add(message.writeToBuffer());
+  void _send(ClientMessage message) {
+    _socket?.add(message.writeToBuffer());
+    _traffic();
+  }
 
   /// How often the connection is checked: a ping after this long with
   /// nothing heard, and closed when its pong isn't back this long after.
   static const _pingEvery = Duration(seconds: 5);
 
+  /// [_pingEvery] while the app is idle ([_idle]).
+  static const _pingIdle = Duration(seconds: 25);
+
+  /// How long a phone or tablet goes with no input ([UserInput]), nothing
+  /// arriving or sent and no request waiting for its answer before it's
+  /// idle.
+  @visibleForTesting
+  static Duration idleAfter = const Duration(seconds: 60);
+
+  /// Whether this device rests its connection when idle: phones and
+  /// tablets, where keeping the radio awake is the cost.
+  @visibleForTesting
+  static bool idleOnThisDevice = Platform.isIOS || Platform.isAndroid;
+
+  /// Idle (Polpo's idle-keepalive.md, Matt's call): the connection is
+  /// checked every [_pingIdle], and the tunnel's paths every 25 s, instead
+  /// of every few seconds, so an open phone left alone lets its radio rest;
+  /// a link that died silently meanwhile is noticed within about a minute.
+  /// A touch, a key or the app coming back ends it at once, and the tunnel
+  /// checks the link then. What arrives meanwhile doesn't: it keeps the
+  /// link checked by itself.
+  var _idle = false;
+
+  /// When something last went either way on the connection.
+  var _lastTraffic = DateTime.now();
+
+  /// Due when the app may next be idle.
+  Timer? _idleTimer;
+
+  var _followingInput = false;
+
+  /// The connection's ping now.
+  Duration get _ping => _idle ? _pingIdle : _pingEvery;
+
+  /// The ping the connection has now: [_pingIdle] while idle.
+  @visibleForTesting
+  Duration? get pingInterval => _socket?.pingInterval;
+
+  /// Something went either way: the app may be idle [idleAfter] from now.
+  void _traffic() {
+    _lastTraffic = DateTime.now();
+    _idleLater();
+  }
+
+  /// Makes sure [_idleDue] looks again: when the last traffic or input is
+  /// [idleAfter] old, or [after].
+  void _idleLater({Duration? after}) {
+    if (!idleOnThisDevice || _idle || _closed || _idleTimer != null) return;
+    if (!_followingInput) {
+      _followingInput = true;
+      UserInput.instance
+        ..watch()
+        ..addListener(_touched);
+    }
+    final input = UserInput.instance.last;
+    final last = input.isAfter(_lastTraffic) ? input : _lastTraffic;
+    _idleTimer = Timer(
+      after ?? last.add(idleAfter).difference(DateTime.now()),
+      _idleDue,
+    );
+  }
+
+  void _idleDue() {
+    _idleTimer = null;
+    if (_closed || _idle) return;
+    final input = UserInput.instance.last;
+    final last = input.isAfter(_lastTraffic) ? input : _lastTraffic;
+    if (DateTime.now().difference(last) < idleAfter) return _idleLater();
+    // An answer on its way, or not connected: not idle, so look again
+    // later; neither counts as traffic.
+    if (_pending.isNotEmpty || !connected.value) {
+      return _idleLater(after: idleAfter);
+    }
+    _idle = true;
+    _socket?.pingInterval = _pingIdle;
+    _tunnel?.setIdle(true);
+  }
+
+  /// The person did something: idle no longer.
+  void _touched() {
+    if (_idle) _leaveIdle();
+  }
+
+  void _leaveIdle() {
+    _idle = false;
+    _socket?.pingInterval = _pingEvery;
+    _tunnel?.setIdle(false);
+    _idleLater();
+  }
+
   void _receive(List<int> frame) {
     // Heard from: the link is alive, so the next ping waits from now. A
     // pong queued behind a long frame no longer closes a connection that's
     // busy bringing it (#375).
-    _socket?.pingInterval = _pingEvery;
+    _socket?.pingInterval = _ping;
+    _traffic();
     final ServerMessage message;
     try {
       message = ServerMessage.fromBuffer(frame);
@@ -5100,6 +5215,8 @@ class Backend implements AppViewTransport {
     switch (message.whichBody()) {
       case ServerMessage_Body.welcome:
         _welcomed = true;
+        // A connection made afresh starts awake: its tunnel may be new.
+        if (_idle) _leaveIdle();
         _slowTries = 0;
         // Back: the tunnel's time to bring it back is over.
         _tunnelBack?.cancel();
@@ -5325,6 +5442,8 @@ class Backend implements AppViewTransport {
       case ServerMessage_Body.agentBrowserViewMoved:
       case ServerMessage_Body.errandLog:
       case ServerMessage_Body.timeZones:
+      // PreviewProjectFolder's answer (New project's caption), to the asker.
+      case ServerMessage_Body.projectFolderPreview:
       // A recovery-codes card's, to this connection only (#435 W8b): to
       // the card that asked, never kept here.
       case ServerMessage_Body.recoveryCodes:

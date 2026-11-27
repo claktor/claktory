@@ -189,15 +189,15 @@ void main() {
   });
 
   testWidgets('its secrets stay given, each saying what it can still do '
-      'with it while it runs errands (row 1711, Ghiaccio 50734)', (
+      'with it while it runs errands (row 1711, Ghiaccio 50734, 51137)', (
     tester,
   ) async {
     const fills =
-        "June can only fill it in on its sites in Claktory's browser while "
-        "it's used for errands.";
+        "While June runs errands, it can fill this in only on the secret's "
+        'sites.';
     const cant =
-        "June can't use it while it's used for errands: only a secret with "
-        'sites, and without Ask each time, can be filled in.';
+        "While June runs errands, it can't use this. To let it fill this in, "
+        'add sites to the secret and turn off Ask each time.';
     Workspace withSecrets({required bool contained}) =>
         _workspace(contained: contained, errandsOn: contained)
           ..vault = VaultState(

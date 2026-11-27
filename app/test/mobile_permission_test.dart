@@ -6,6 +6,7 @@
 import 'dart:async';
 
 import 'package:factory_app/controls.dart' show Button;
+import 'package:factory_app/mobile/back.dart' show PhoneBack, PhoneBackScope;
 import 'package:factory_app/mobile/device_permissions.dart';
 import 'package:factory_app/mobile/permission.dart';
 import 'package:factory_app/mobile/scroll_fade.dart';
@@ -136,14 +137,17 @@ void main() {
       size: size,
       home: MediaQuery(
         data: MediaQueryData(size: size, textScaler: TextScaler.linear(text)),
-        child: Builder(
-          builder: (c) {
-            context = c;
-            return const Align(
-              alignment: Alignment.bottomRight,
-              child: SizedBox(width: 44, height: 44),
-            );
-          },
+        child: PhoneBackScope(
+          back: PhoneBack.root(),
+          child: Builder(
+            builder: (c) {
+              context = c;
+              return const Align(
+                alignment: Alignment.bottomRight,
+                child: SizedBox(width: 44, height: 44),
+              );
+            },
+          ),
         ),
       ),
     );
@@ -257,10 +261,9 @@ void main() {
     }
   });
 
-  testWidgets('on a phone: Before is held with Continue only; declined, '
-      'Open Settings and Not now; back from Settings with it on, it closes', (
-    tester,
-  ) async {
+  testWidgets('on a phone: Before has Continue only, held only while the '
+      'system asks; declined, Open Settings and Not now; back from Settings '
+      'with it on, it closes', (tester) async {
     onIphone();
     final semantics = tester.ensureSemantics();
     final context = await screen(tester);
@@ -271,11 +274,16 @@ void main() {
     expect(find.text('Before title'), findsOneWidget);
     expect(_button('Continue'), findsOneWidget);
     expect(find.text('Not now'), findsNothing);
-    expect(find.bySemanticsLabel('Close'), findsNothing, reason: 'held');
+    expect(
+      find.bySemanticsLabel('Close'),
+      findsOneWidget,
+      reason: 'it can be left (row 206)',
+    );
 
     await tester.tap(_button('Continue'));
     await pumpFrames(tester);
     expect(permission.asking, isTrue);
+    expect(find.bySemanticsLabel('Close'), findsNothing, reason: 'held');
     expect(tester.widget<Button>(_button('Continue')).onPressed, isNull);
     // Dimmed, Continue is read as itself, not over the whole sheet.
     final dimmed = tester.getSemantics(_button('Continue'));
@@ -298,6 +306,42 @@ void main() {
     expect(answer, PermissionAccess.granted);
     semantics.dispose();
   });
+
+  for (final android in [false, true]) {
+    testWidgets('on ${android ? 'Android' : 'an iPhone'}, Before left (Back, '
+        'a swipe down, a tap above it, Esc) is Not now: the system asked '
+        'nothing, still undetermined (row 206)', (tester) async {
+      debugDefaultTargetPlatformOverride = android
+          ? TargetPlatform.android
+          : TargetPlatform.iOS;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final context = await screen(tester);
+      final permission = _Fake(PermissionAccess.undetermined);
+      final ways = <String, Future<void> Function()>{
+        'Back': () async {
+          final back = PhoneBack.maybeOf(
+            tester.element(find.text('Before title')),
+          )!;
+          expect(back.commit(back.target!), isTrue);
+        },
+        'a swipe down': () =>
+            tester.fling(find.text('Before title'), const Offset(0, 400), 1500),
+        'a tap above it': () => tester.tapAt(const Offset(195, 60)),
+        'Esc': () => tester.sendKeyEvent(LogicalKeyboardKey.escape),
+      };
+      for (final MapEntry(key: way, value: leave) in ways.entries) {
+        PermissionAccess? answer;
+        unawaited(askPermission(context, permission).then((a) => answer = a));
+        await pumpFrames(tester, const Duration(seconds: 1));
+        expect(find.text('Before title'), findsOneWidget, reason: way);
+        await leave();
+        await pumpFrames(tester, const Duration(seconds: 1));
+        expect(find.text('Before title'), findsNothing, reason: way);
+        expect(answer, PermissionAccess.undetermined, reason: way);
+        expect(permission.requests, 0, reason: way);
+      }
+    });
+  }
 
   testWidgets('scrolled down in Before at a large size, Declined opens at '
       'its top, title in sight (Zucchero row 619)', (tester) async {
@@ -397,8 +441,8 @@ void main() {
     }
   });
 
-  testWidgets('on an iPad, a dialog: Return presses the way on; Esc does '
-      'nothing while it explains, and is Not now once declined', (
+  testWidgets('on an iPad, a dialog: Return presses the way on; Esc is Not '
+      'now, asking nothing before Continue (row 206), and once declined', (
     tester,
   ) async {
     asIPad();
@@ -409,7 +453,10 @@ void main() {
     expect(find.text('Before title'), findsOneWidget);
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await pumpFrames(tester);
-    expect(find.text('Before title'), findsOneWidget);
+    expect(find.text('Before title'), findsNothing);
+    expect(permission.requests, 0);
+    unawaited(askPermission(context, permission));
+    await pumpFrames(tester, const Duration(seconds: 1));
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await pumpFrames(tester);
     expect(permission.requests, 1);

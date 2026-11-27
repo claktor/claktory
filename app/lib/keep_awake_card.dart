@@ -113,15 +113,17 @@ class _KeepAwakeCardState extends State<KeepAwakeCard> with PublishesAnswer {
         Wrap(
           spacing: Space.s,
           runSpacing: Space.s,
+          // The no first, the primary filled at the end (Lucy's
+          // needs-you-cards rule 2).
           children: [
+            Button(
+              label: 'Let it sleep',
+              onPressed: _busy ? null : () => _answer(false),
+            ),
             Button(
               label: 'Keep it awake',
               primary: true,
               onPressed: _busy ? null : () => _answer(true),
-            ),
-            Button(
-              label: 'Let it sleep',
-              onPressed: _busy ? null : () => _answer(false),
             ),
           ],
         ),

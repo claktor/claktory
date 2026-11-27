@@ -1318,6 +1318,7 @@ class _ChoiceChip extends StatelessWidget {
           Semantics(
             button: true,
             label: 'Remove ${choiceLabel(label)}',
+            onTap: onRemove,
             excludeSemantics: true,
             child: Pressable(
               onTap: onRemove,

@@ -1155,8 +1155,21 @@ async fn a_key_at_claktory_com_covers_the_vault_once_the_person_chooses_it() {
         .query_row("SELECT COUNT(*) FROM recovery_key_changes", [], |row| row.get(0))
         .expect("count");
     assert_eq!(changes, 1, "a record in History");
+    assert!(
+        !workspace.alerts.iter().any(|alert| alert.title.starts_with("Your account has a new recovery key")),
+        "its alert was read when the key was used (row 1729b)"
+    );
     let again = client.request(Request::UseRecoveryKey(v1::UseRecoveryKey {})).await;
     assert_eq!(failure(&again.body).0, ErrorCode::InvalidRequest, "nothing waits now");
+
+    // A newer key at claktory.com waits beside the one that still covers
+    // the vault (row 1729a).
+    put_recovery_key(&instance, &dir, &ed25519_dalek::SigningKey::from_bytes(&[5; 32]), &[43u8; 20], &recovery_public(&bytes)).await;
+    factory.check_in_now();
+    let both = |workspace: &v1::Workspace| {
+        workspace.vault.as_ref().is_some_and(|vault| vault.recovery_key_covered && vault.recovery_key_change_waiting && !vault.recovery_key_made_on.is_empty())
+    };
+    wait_for(&mut client, both).await;
     drop(client);
     drop(factory);
 

@@ -497,12 +497,11 @@ fn remember(factory: &Factory, conversations: &[Conversation]) {
     }
 }
 
-/// `text` on one line, cut to `max` characters, without control or
-/// direction-changing characters.
+/// `text` on one line, cut to `max` characters, without control,
+/// direction-changing or invisible characters (`config::clean_name`).
 fn one_line(text: &str, max: usize) -> String {
-    text.chars()
-        .filter(|c| !matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}'))
-        .map(|c| if c.is_control() { ' ' } else { c })
+    crate::config::clean_name(text)
+        .chars()
         .take(max)
         .collect::<String>()
         .trim()

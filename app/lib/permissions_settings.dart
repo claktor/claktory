@@ -27,7 +27,7 @@ import 'mobile/device_permissions.dart'
 import 'mobile/lines.dart' show ActionLine;
 import 'mobile/metrics.dart' show TypeScale;
 import 'mobile/permission.dart';
-import 'mobile/push.dart' show PushRegistrar;
+import 'mobile/push.dart' show PushRegistrar, notificationsRefusedOnce;
 import 'notification_settings.dart' show DeviceNotifications;
 import 'protected_places.dart'
     show ProtectedPlacePermission, protectedPlacesAskHere;
@@ -111,7 +111,7 @@ class _DevicePermissionsState extends State<DevicePermissions>
           label: 'Notifications',
           permission: NotificationsPermission(registrar),
           stops: _notificationsStop,
-          refusedOnce: null,
+          refusedOnce: notificationsRefusedOnce,
         )
       else if (notifications != null)
         (

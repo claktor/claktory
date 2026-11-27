@@ -1039,6 +1039,10 @@ class _QueueRow extends StatelessWidget {
       button: true,
       selected: current,
       label: '$who, $what',
+      onTap: () {
+        session.select(item.key);
+        onPicked?.call();
+      },
       excludeSemantics: true,
       child: Pressable(
         onTap: () {
@@ -1758,6 +1762,21 @@ class _AnswerBarState extends State<_AnswerBar> {
     }
   }
 
+  /// Shift-Return: a new line where the cursor is, replacing what's
+  /// selected.
+  void _newLine(TextEditingController field) {
+    final value = field.value;
+    final selection = value.selection;
+    if (!selection.isValid) {
+      field.value = TextEditingValue(
+        text: '${value.text}\n',
+        selection: TextSelection.collapsed(offset: value.text.length + 1),
+      );
+      return;
+    }
+    field.value = value.replaced(selection, '\n');
+  }
+
   @override
   Widget build(BuildContext context) {
     final answer = _session.answer.value;
@@ -1880,6 +1899,9 @@ class _AnswerBarState extends State<_AnswerBar> {
         bindings: {
           const SingleActivator(LogicalKeyboardKey.enter): _return,
           const SingleActivator(LogicalKeyboardKey.numpadEnter): _return,
+          // A new line, typed here: the field's action is Send.
+          const SingleActivator(LogicalKeyboardKey.enter, shift: true): () =>
+              _newLine(field),
         },
         child: TextField(
           controller: field,
@@ -1887,6 +1909,11 @@ class _AnswerBarState extends State<_AnswerBar> {
           placeholder: placeholder,
           minLines: 1,
           maxLines: 6,
+          // Return sends through the text input too: an iPad's text view
+          // can keep Return from Flutter's keys (Zucchero's row 730), and
+          // a software keyboard's Return reads Send, as Return does here.
+          textInputAction: TextInputAction.send,
+          onSubmitted: (_) => _return(),
           semanticsLabel: placeholder,
         ),
       ),

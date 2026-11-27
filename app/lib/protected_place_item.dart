@@ -124,14 +124,16 @@ class _ProtectedPlaceCardState extends State<ProtectedPlaceCard>
         Wrap(
           spacing: Space.s,
           runSpacing: Space.s,
+          // Quiet first, the primary filled at the end (Lucy's
+          // needs-you-cards rule 2).
           children: [
+            Button(label: 'OK', onPressed: _busy ? null : _ok),
             if (here)
               Button(
                 label: 'Open System Settings',
                 primary: true,
                 onPressed: openFilesAndFolders,
               ),
-            Button(label: 'OK', onPressed: _busy ? null : _ok),
           ],
         ),
         if (_failure case final failure?) ...[

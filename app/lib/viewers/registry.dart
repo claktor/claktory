@@ -621,6 +621,7 @@ class HeaderTextButton extends StatelessWidget {
       child: Semantics(
         button: true,
         label: label,
+        onTap: onTap,
         excludeSemantics: true,
         child: Pressable(
           onTap: onTap,

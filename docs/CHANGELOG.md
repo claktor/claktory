@@ -6,12 +6,28 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.26
+Released 2026-11-27 09:54 UTC.
+Let your agents run errands on websites in a browser of their own, while your phone uses less battery when you leave Claktory open.
+- Added: Agents can run errands on websites for you in Claktory's browser, kept apart from your own, and hand you what only you may do, such as paying or signing in. Set it up in Settings → Claktory's browser, then choose Use for errands in an agent's settings.
+- Added: On an iPad with a keyboard, ⌘, opens Settings where you left it, and Settings is in the menu you see when you hold ⌘.
+- Changed: When an urgent alert and a request come in together, the pill at the top of Needs you names both, such as ↑ 1 urgent · 1 new. On your iPhone, touching and holding a row in Needs you no longer selects its words.
+- Changed: In Settings → Secrets, a new recovery key on your account shows in the Recovery key row, with Use the key here. Once your account's key opens your secrets, unlocking them asks for that key, not this Claktory's own.
+- Changed: On your phone, the sheet that explains why Claktory asks for a permission can be closed with Back, a swipe down or a tap beside it, the same as Not now: nothing is asked and nothing changes. When it comes up before you connect to your first Claktory, closing it doesn't connect, so you can connect again when you're ready.
+- Changed: Claktory on your iPhone, iPad or Android device uses less battery and data while you leave it open and untouched. A dropped connection can then take up to a minute to show; touch the screen to check right away.
+- Fixed: Hidden characters that change the text's direction can no longer turn Claktory's sentences backwards around a name, such as a Claktory's, a device's or a pipe's. Claktory refuses them in the names you give your Claktory, agents, projects and folders, and takes them out of names from other Claktories and devices.
+- Fixed: On your phone, Settings and other pages no longer open with the menu covering them after you finish connecting to a Claktory.
+- Fixed: When you tap Cancel while a device waits to be allowed, its request goes away at once, so it no longer lingers in Devices and Needs you on your other devices.
+- Fixed: In focus mode on an iPad, Return in the answer field sends what you typed, and the on-screen keyboard's Return key reads Send. Shift-Return still starts a new line.
+- Fixed: A long secret made of the same few characters over and over no longer makes every command that uses it wait minutes to start.
+- Fixed: On an iMac, a Mac mini or a Mac Studio, this Mac's section in Settings now shows a desktop, as its tile does, instead of a laptop.
+
 ## v0.1.25
 Released 2026-11-27 06:29 UTC.
 Pin the agents you use most, search Settings for anything, and answer requests that all work the same way across Claktory.
 - Added: Pin the agents you talk to most under Rivet in the sidebar, whatever project they're in. Right click or touch and hold an agent for Pin or Unpin; reorder pins by dragging or with Move up and Move down, and on a Mac or an iPad with a keyboard open them with ⌘1 to ⌘9. On an iPad, the menu opens beside the row.
 - Added: Agents can save a key they make with one of your secrets straight to Secrets, without the key ever showing in their conversation. Each one shows in History and in Settings → Secrets as saved by that agent, where you can delete it.
-- Added: Settings shows whether Claktory may use notifications, the microphone and the camera on this device, under This Mac, This iPhone or This iPad, with a way to turn each on. The first time you use the mic, Claktory says what it's for before your device asks.
+- Added: Settings shows whether Claktory may use notifications, the microphone and the camera on this device, under This Mac, This iPhone, This iPad or This phone, with a way to turn each on. The first time you use the mic, Claktory says what it's for before your device asks.
 - Added: When a project's folder is in Documents, Desktop, Downloads, iCloud Drive or another disk, Claktory says first why your Mac will ask about it, so you can let your agents work there before they need it. If you said no, Needs you tells you how to turn it on in System Settings, and Settings → This Mac → Permissions shows each of these folders as On or Off.
 - Added: Switch account… in Settings → Account moves a Claktory to another Claktory account. It stays signed in as it is until you enter the code sent to the new address. If your device connects to it through your account, switching or signing out warns first that it may disconnect, and says how to connect again.
 - Added: Needs you has a Focus mode button at the end of its Waiting tab, so you can go through what waits one request at a time without remembering ⌘⇧N.

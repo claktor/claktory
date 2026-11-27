@@ -126,6 +126,7 @@ class _ModelSelectState extends State<ModelSelect> {
         label: provider.isEmpty
             ? '${widget.title}: $label'
             : '${widget.title}: $label, $provider',
+        onTap: _open,
         excludeSemantics: true,
         child: Focus(
           focusNode: _focus,

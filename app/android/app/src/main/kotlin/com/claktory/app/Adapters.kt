@@ -107,6 +107,9 @@ class Adapters private constructor(private val all: List<AutoCloseable>) : AutoC
                     scanner,
                     // factory/recorder: voice messages.
                     RecorderChannel(messenger, activity),
+                    // factory/notifications and factory/push: notifications, and this phone's registration for pushes.
+                    NotificationsChannel(messenger, activity),
+                    PushChannel(messenger, activity),
                     // factory/audio: voice messages played back.
                     AudioChannel(messenger, context),
                     // claktory/video: the video viewer's players, on the engine's textures.

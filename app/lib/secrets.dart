@@ -174,6 +174,13 @@ class _Locked extends StatelessWidget {
     final account = this.account;
     final removed =
         account?.state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_REVOKED;
+    // Covered by the account's key (#239): that's the one that opens them
+    // (Abbacchio's row 1727).
+    final covered = AppScope.of(context)
+        .workspace
+        .workspace
+        .vault
+        .recoveryKeyCovered;
     final why = removed || this.why.isEmpty
         ? null
         : 'Secrets are locked. ${this.why}';
@@ -183,8 +190,9 @@ class _Locked extends StatelessWidget {
             ? "Secrets are locked. Agents can't use them until you unlock them."
             : removed
             ? 'Secrets are locked because this Claktory was removed from your '
-                  'account. Sign in again to unlock them, or use this '
-                  'Claktory\'s recovery key.'
+                  'account. Sign in again to unlock them, or use '
+                  '${covered ? "your account's" : "this Claktory's"} recovery '
+                  'key.'
             // Signed in: the backend's own words; none while it's asking.
             : 'Secrets are locked. '
                   '${account.problem.isEmpty ? 'Opening them…' : account.problem}');
@@ -277,10 +285,14 @@ class _UnlockSecretsFormState extends State<UnlockSecretsForm> {
   @override
   Widget build(BuildContext context) => FormFrame(
     title: 'Unlock with recovery key',
-    body:
-        'Enter the recovery key saved for '
-        '${claktoryNameInText(AppScope.of(context))}. Each Claktory has its '
-        'own.',
+    // Covered by the account's key (#239), that one opens them; else each
+    // Claktory has its own (Abbacchio's row 1727).
+    body: AppScope.of(context).workspace.workspace.vault.recoveryKeyCovered
+        ? "Enter your account's recovery key. It opens the secrets on "
+              '${claktoryNameInText(AppScope.of(context))}.'
+        : 'Enter the recovery key saved for '
+              '${claktoryNameInText(AppScope.of(context))}. Each Claktory has '
+              'its own.',
     fields: [
       Field(
         label: 'Recovery key',
@@ -1900,19 +1912,19 @@ class _AgentSecretsFieldState extends State<AgentSecretsField> {
                           value: secret.grants.any(
                             (grant) => grant.agentId == widget.agent.id,
                           ),
-                          // What it can do with it while it runs errands,
-                          // in the backend's words, each naming it
-                          // (Ghiaccio 50734): the grant stays, and comes
-                          // back whole once it stops.
-                          limits: widget.agent.contained
-                              ? [
+                          // The backend's warnings that name it, such as
+                          // what it can still do with it while it runs
+                          // errands (Ghiaccio 50734, 51137): the grant
+                          // stays, and comes back whole once it stops. Not
+                          // while it's limited to a pipe, which its
+                          // settings say once, above.
+                          limits: widget.agent.quarantined
+                              ? const []
+                              : [
                                   for (final warning in secret.warnings)
-                                    if (warning.startsWith(
-                                      '${widget.agent.name} ',
-                                    ))
+                                    if (_names(warning, widget.agent.name))
                                       warning,
-                                ]
-                              : const [],
+                                ],
                           // Off while it's limited to a pipe, which its
                           // settings say above: nothing to change here.
                           onChanged:
@@ -1935,6 +1947,12 @@ class _AgentSecretsFieldState extends State<AgentSecretsField> {
     );
   }
 }
+
+/// Whether [warning] names [name] as a whole word ("While June runs
+/// errands, …", "A grant to June was changed …").
+bool _names(String warning, String name) =>
+    name.isNotEmpty &&
+    RegExp('(^|\\W)${RegExp.escape(name)}(\\W|\$)').hasMatch(warning);
 
 /// The Secrets extension's panel beside an agent: the secrets it has, from
 /// the vault the backend sends with the workspace (the extension has no

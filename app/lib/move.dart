@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'approve_elsewhere.dart';
 import 'backend.dart';
 import 'backend_service.dart' show BackendServiceRestore;
 import 'claktory_identity.dart' show claktoryName;
@@ -1408,6 +1409,11 @@ class MoveSettingRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // A move takes or shows a code both ways: never on Windows
+    // (approve_elsewhere.dart).
+    if (approvesElsewhere) {
+      return const ApproveElsewhere(text: moveElsewhereText);
+    }
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     return ValueListenableBuilder<MoveStatus>(
@@ -1568,6 +1574,31 @@ class _MoveConfirmCardState extends State<MoveConfirmCard> {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
     final machine = move.target;
+    // Neither the digits nor Confirm on Windows (approve_elsewhere.dart).
+    if (approvesElsewhere) {
+      return Container(
+        padding: const EdgeInsets.all(Space.l),
+        decoration: BoxDecoration(
+          color: palette.sidebar,
+          border: Border.all(color: palette.hairline),
+          borderRadius: BorderRadius.circular(Radii.panel),
+        ),
+        child: Column(
+          spacing: Space.s,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Semantics(
+              header: true,
+              child: Text(
+                'Move this Claktory to the computer named $machine?',
+                style: type.emphasis.copyWith(color: palette.text),
+              ),
+            ),
+            const ApproveElsewhere(),
+          ],
+        ),
+      );
+    }
     final system = move.targetSystem;
     final who = widget.agentName.isEmpty ? 'An agent' : widget.agentName;
     final confirmed = move.confirmedHere;

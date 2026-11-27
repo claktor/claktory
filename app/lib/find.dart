@@ -722,6 +722,7 @@ class _Done extends StatelessWidget {
     return Semantics(
       button: true,
       label: 'Done',
+      onTap: onTap,
       excludeSemantics: true,
       child: Pressable(
         onTap: onTap,

@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import '../user_apps/session.dart';
-import '../visible_codes.dart' show proseCodes;
+import '../visible_codes.dart' show nameInText, proseCodes;
 
 // D3b: friend requests, friends and blocks, as the account service keeps
 // them (D1b, crates/claktory-user-apps/README.md, "Requests, friends and
@@ -46,6 +46,14 @@ class PeoplePerson {
   /// tag when they have no name.
   String get label {
     final shown = name.isEmpty ? 'No name' : name;
+    return tag.isEmpty ? shown : '$shown · $tag';
+  }
+
+  /// [label] inside a sentence ("Block Ana · K7QF2M?"): the name, which
+  /// they chose, shown so it can't reorder the words around it
+  /// (nameInText; Fugo 51059), the tag as it is.
+  String get labelInText {
+    final shown = name.isEmpty ? 'No name' : nameInText(name);
     return tag.isEmpty ? shown : '$shown · $tag';
   }
 }

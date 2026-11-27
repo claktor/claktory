@@ -123,32 +123,32 @@ void main() {
     expect(find.textContaining('On your Mac, open Claktory'), findsOneWidget);
   });
 
-  testWidgets('on Android: a Mac or a Linux server, or Windows in preview, and that this phone '
-      "doesn't get notifications yet", (tester) async {
-    await _show(tester, TargetPlatform.android, camera: CameraAccess.granted);
-    expect(
-      find.text(
-        'Claktory runs on a Mac or a Linux server (or Windows, in '
-        'preview). Set it up there, then '
-        'connect this phone to it.',
-      ),
-      findsOneWidget,
-    );
-    expect(
-      find.text(
-        "This phone doesn't get notifications yet. Keep Claktory open to "
-        'see what your agents need.',
-      ),
-      findsOneWidget,
-    );
-    // Still there once a way is chosen: it's the end of pairing.
-    await tester.tap(find.text('Paste code instead'));
-    await pumpFrames(tester);
-    expect(
-      find.textContaining("doesn't get notifications yet"),
-      findsOneWidget,
-    );
-  });
+  testWidgets(
+    'on Android: a Mac or a Linux server, or Windows in preview, and, '
+    "with nothing to push to it, that this phone can't get notifications",
+    (tester) async {
+      await _show(tester, TargetPlatform.android, camera: CameraAccess.granted);
+      expect(
+        find.text(
+          'Claktory runs on a Mac or a Linux server (or Windows, in '
+          'preview). Set it up there, then '
+          'connect this phone to it.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          "This phone can't get notifications without Google Play services. "
+          'Keep Claktory open to see what your agents need.',
+        ),
+        findsOneWidget,
+      );
+      // Still there once a way is chosen: it's the end of pairing.
+      await tester.tap(find.text('Paste code instead'));
+      await pumpFrames(tester);
+      expect(find.textContaining("can't get notifications"), findsOneWidget);
+    },
+  );
 
   testWidgets('a way chosen has Back to the first screen; pasting says '
       'paste (Sale, #363)', (tester) async {

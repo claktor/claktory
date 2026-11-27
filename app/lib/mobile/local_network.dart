@@ -3,7 +3,9 @@
 // iOS's prompt; declined, it says what that means (Claktory still connects
 // through its relay, only more slowly on the same Wi-Fi, and not at all
 // where the Claktory's network has no internet) and how to turn it on,
-// noticing on its own when it is. Never a dead end: Not now goes on.
+// noticing on its own when it is. Never a dead end: Not now goes on. Left
+// before Continue (Back, a swipe down, a tap beside it), it asks iOS
+// nothing and the connection it came before doesn't go on (row 206).
 //
 // iOS has no API that reads the permission, and any check asks the person
 // when they haven't answered (ios/Runner/LocalNetwork.swift), so it's
@@ -73,26 +75,34 @@ LocalNetwork? localNetwork;
 
 /// Before this device's first connection to a Claktory (a code scanned or
 /// pasted, one of the person's own from their account, a link): the
-/// Local Network sheet, once it's answered or set aside. Nothing when the
-/// device has a Claktory already (it was asked then, or iOS asks as it
-/// always did) or no Local Network to ask for.
-Future<void> localNetworkBeforeFirst(BuildContext context) async {
+/// Local Network sheet, until it closes. Answers whether the connection
+/// goes on: once iOS has answered, whatever it said, but not when the sheet
+/// was left before Continue (Lucy 51006: it never connects without the
+/// sheet answered). Nothing to ask, and it goes on: the device has a
+/// Claktory already (it was asked then, or iOS asks as it always did) or no
+/// Local Network to ask for.
+Future<bool> localNetworkBeforeFirst(BuildContext context) async {
   final network = localNetwork;
-  if (network == null) return;
-  if (AppScope.scope(context).connections.saved.isNotEmpty) return;
-  await showLocalNetwork(context, network);
+  if (network == null) return true;
+  if (AppScope.scope(context).connections.saved.isNotEmpty) return true;
+  return showLocalNetwork(context, network);
 }
 
 /// Connects this device to [target], a Claktory it's just been given (a
 /// code scanned or pasted, one of the person's own from their account, a
 /// link), once the person said so: the one way a first connection is made,
 /// so the Local Network sheet comes before it wherever it comes from.
-Future<void> connectNewClaktory(
+/// Answers whether it connected: not when that sheet was left unanswered,
+/// and the person stays where they were.
+Future<bool> connectNewClaktory(
   BuildContext context,
   RemoteFactory target,
 ) async {
-  await localNetworkBeforeFirst(context);
-  if (context.mounted) AppScope.switchFactory(context, target);
+  if (!await localNetworkBeforeFirst(context) || !context.mounted) {
+    return false;
+  }
+  AppScope.switchFactory(context, target);
+  return true;
 }
 
 /// Local Network as a [Permission]: iOS can't say without asking, so it's
@@ -140,12 +150,13 @@ class LocalNetworkPermission extends Permission {
   Future<void> openSettings() => network.openSettings();
 }
 
-/// The sheet itself, until it's done. Why Claktory asks has one way on,
+/// The sheet itself, until it closes. Why Claktory asks has one way on,
 /// Continue, which brings iOS's prompt (Apple's rule for a screen before
-/// a system prompt); where a dialog can be set aside anyway (an iPad's,
-/// with a tap beside it), iOS asks all the same. Declined, the sheet says
-/// so, and setting it aside is Not now.
-Future<void> showLocalNetwork(
+/// a system prompt); left before it (Back, a swipe down, a tap beside it,
+/// Esc), it's Not now and iOS is asked nothing (row 206). Declined, the
+/// sheet says so, and setting it aside is Not now. Answers whether iOS
+/// answered.
+Future<bool> showLocalNetwork(
   BuildContext context,
   LocalNetwork network,
 ) async {
@@ -156,12 +167,5 @@ Future<void> showLocalNetwork(
     from: PermissionAccess.unknown,
   );
   await presentPermission(context, flow);
-  if (flow.stage == PermissionStage.before && context.mounted) {
-    // Set aside before Continue: iOS asks now, and declined, the sheet
-    // says what that means.
-    await flow.proceed();
-    if (flow.stage == PermissionStage.declined && context.mounted) {
-      await presentPermission(context, flow);
-    }
-  }
+  return flow.answered;
 }

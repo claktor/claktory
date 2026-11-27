@@ -494,6 +494,38 @@ impl<'conn> Path<'conn> {
     pub fn rtt(&self) -> Duration {
         self.stats().rtt
     }
+
+    /// Claktory: sets how long this path may stay quiet before it's sent a
+    /// keep-alive (noq's `Path::set_keep_alive_interval`), from the next
+    /// packet it receives on. A Claktory phone left untouched checks its
+    /// paths less often, and so does its Claktory once it's let in (Polpo's
+    /// idle-keepalive.md). False once the path closed.
+    pub fn set_keep_alive_interval(&self, interval: Option<Duration>) -> bool {
+        self.data
+            .handle
+            .upgrade()
+            .is_some_and(|path| path.set_keep_alive_interval(interval).is_ok())
+    }
+
+    /// Claktory: sets how long this path may stay silent before it's
+    /// abandoned (noq's `Path::set_max_idle_timeout`), counted from now. False
+    /// once the path closed.
+    pub fn set_max_idle_timeout(&self, timeout: Option<Duration>) -> bool {
+        self.data
+            .handle
+            .upgrade()
+            .is_some_and(|path| path.set_max_idle_timeout(timeout).is_ok())
+    }
+
+    /// Claktory: pings the remote over this path now, so a path that died
+    /// while it was checked rarely is found out without waiting for its
+    /// next keep-alive. False once the path closed.
+    pub fn ping(&self) -> bool {
+        self.data
+            .handle
+            .upgrade()
+            .is_some_and(|path| path.ping().is_ok())
+    }
 }
 
 /// A stream of [`PathList`] snapshots for a connection.

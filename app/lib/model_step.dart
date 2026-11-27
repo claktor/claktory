@@ -393,6 +393,7 @@ class _Choice extends StatelessWidget {
       child: Semantics(
         button: true,
         label: title,
+        onTap: onTap,
         excludeSemantics: true,
         child: Pressable(
           onTap: onTap,

@@ -776,6 +776,9 @@ fn deliver(factory: &Arc<Factory>, sender: &str, targets: &[String], text: &str,
         let copy = provenance::Copy { lead: &lead, sender, signature: &signature, text, to: &recorded, said, sent: &sent };
         match provenance::record(&factory.store, &copy) {
             Ok(id) => {
+                // The lead reads it with agents_copies: what the sender read
+                // counts for its errands as a message's would (row 1721).
+                crate::errands::relayed(factory, &lead, sender);
                 factory.broadcast_workspace(&factory.lock());
                 Ok((id, name))
             }

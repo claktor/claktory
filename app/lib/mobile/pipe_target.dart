@@ -68,6 +68,7 @@ class PhonePipeTarget extends StatelessWidget {
           button: true,
           label: label,
           hint: 'Choose whom to write to',
+          onTap: () => _choose(context),
           excludeSemantics: true,
           child: Pressable(
             onTap: () => _choose(context),

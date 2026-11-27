@@ -10,7 +10,13 @@
 # (tools/lint.sh) runs first over the exported source, and any error stops
 # the build.
 #
-#   app/android/tools/release_apk.sh v0.1.15 [REBUILD] --key FILE [--keystore P12] --out DIR [--bundle [--upload-key FILE]]
+#   app/android/tools/release_apk.sh v0.1.15 [REBUILD] --key FILE [--keystore P12] --firebase JSON --out DIR [--bundle [--upload-key FILE]]
+#
+# JSON is Firebase's google-services.json with com.claktory.app's client
+# (the vault's FIREBASE_PROD_JSON), for notifications through FCM
+# (DESIGN.md §10, Notifications); never copied anywhere. A release without
+# it would get no notifications, so it's refused unless --no-firebase says
+# that's meant; the APK is checked to carry Firebase's app id.
 #
 # VERSION is Claktory's (vMAJOR.MINOR.PATCH), stamped into the app
 # (FACTORY_VERSION, which its version checks and footer read) and its
@@ -40,11 +46,13 @@
 # the bundletool-all-*.jar beside the SDK folder.
 set -euo pipefail
 
-usage="usage: release_apk.sh vMAJOR.MINOR.PATCH [REBUILD] --key FILE [--keystore P12] --out DIR [--bundle [--upload-key FILE]]"
-version="" rebuild=0 key="" keystore="" out="" bundle=0 upload_key="" 
+usage="usage: release_apk.sh vMAJOR.MINOR.PATCH [REBUILD] --key FILE [--keystore P12] (--firebase JSON | --no-firebase) --out DIR [--bundle [--upload-key FILE]]"
+version="" rebuild=0 key="" keystore="" out="" bundle=0 upload_key="" firebase="" no_firebase=0
 while (($#)); do
   case "$1" in
     --key) key="$2"; shift 2 ;;
+    --firebase) firebase="$2"; shift 2 ;;
+    --no-firebase) no_firebase=1; shift ;;
     --keystore) keystore="$2"; shift 2 ;;
     --out) out="$2"; shift 2 ;;
     --bundle) bundle=1; shift ;;
@@ -55,6 +63,13 @@ while (($#)); do
   esac
 done
 [[ -n "$version" && -n "$key" && -n "$out" ]] || { echo "$usage" >&2; exit 2; }
+if [[ -n "$firebase" ]]; then
+  ((!no_firebase)) || { echo "--firebase or --no-firebase, not both" >&2; exit 2; }
+  [[ -f "$firebase" ]] || { echo "No Firebase config at $firebase" >&2; exit 2; }
+  firebase="$(cd "$(dirname "$firebase")" && pwd)/$(basename "$firebase")"
+else
+  ((no_firebase)) || { echo "No --firebase JSON: this release would get no notifications. Give the vault's FIREBASE_PROD_JSON, or --no-firebase if that's meant." >&2; exit 2; }
+fi
 # arm64 and x86_64: nothing is built for x86 on an Apple-silicon Mac (Matt's
 # rule), so a release is built on prime (DESIGN.md, "Where builds run").
 if [[ "$(uname -s)/$(uname -m)" == Darwin/arm64 ]]; then
@@ -98,7 +113,9 @@ commit="$(git -C "$root" rev-parse --short=10 HEAD)"
 build_root=/tmp/claktory-android-release
 umask 077
 [[ -e "$build_root" || -L "$build_root" ]] || mkdir -m 700 "$build_root"
-owner_mode() { stat -f '%u %Lp' "$1" 2>/dev/null || stat -c '%u %a' "$1"; }
+# GNU's stat first: its -f is filesystem status, which succeeds with the
+# wrong output (Linux, prime); BSD's (macOS) refuses -c and falls through.
+owner_mode() { stat -c '%u %a' "$1" 2>/dev/null || stat -f '%u %Lp' "$1"; }
 if [[ ! -d "$build_root" || -L "$build_root" || "$(owner_mode "$build_root")" != "$(id -u) 700" ]]; then
   echo "$build_root isn't a folder of this user's alone (mode 700): refusing to build in it. Move it away." >&2
   exit 1
@@ -113,17 +130,32 @@ app="$build_root/factory/app"
 build_tools="$ANDROID_HOME/build-tools/$(sed -n 's/^android.buildTools=//p' "$app/android/toolchain.properties")"
 
 echo "Building Claktory $version (versionCode $code) from $commit"
+# Only what the lock files name (Fugo, #349): pub refuses a lock that would
+# change, and after each build both locks must still be the commit's.
+# native_toolchain_rust runs cargo without --locked, so a rewritten
+# Cargo.lock is the only sign of a fresh resolution from crates.io.
+(cd "$app" && flutter pub get --enforce-lockfile >/dev/null) \
+  || { echo "app/pubspec.lock doesn't match pubspec.yaml: not building." >&2; exit 1; }
+locks_unchanged() {
+  local lock
+  for lock in app/pubspec.lock app/rust/Cargo.lock; do
+    cmp -s "$build_root/factory/$lock" <(git -C "$root" show "$commit:$lock") \
+      || { echo "The build changed $lock: it resolved something the commit's lock doesn't name. Not shipping it." >&2; exit 1; }
+  done
+}
 # Lint is a gate (DESIGN.md §1): all of it, over the exported source, not
 # only the release build's fatal checks.
 "$app/android/tools/lint.sh" || { echo "Lint found errors: not building." >&2; exit 1; }
 build() { # apk | appbundle, KEY[, KEYSTORE]
   (cd "$app" && ORG_GRADLE_PROJECT_claktoryKeyProperties="$2" ORG_GRADLE_PROJECT_claktoryKeyStore="${3:-}" \
+    ORG_GRADLE_PROJECT_claktoryFirebaseConfig="$firebase" \
     flutter build "$1" --release \
     --flavor prod --target-platform android-arm64,android-x64 \
     --build-name "${version#v}" --build-number "$code" \
     --dart-define=FACTORY_VERSION="$version")
 }
 build apk "$key" "$keystore"
+locks_unchanged
 apk="$app/build/app/outputs/flutter-apk/app-prod-release.apk"
 
 python3 "$app/android/tools/check_artifact.py" "$apk"
@@ -131,6 +163,10 @@ python3 "$app/android/tools/check_artifact.py" "$apk"
 badging="$("$build_tools/aapt2" dump badging "$apk" | sed -n 1p)"
 [[ "$badging" == *"versionCode='$code'"* && "$badging" == *"versionName='${version#v}'"* ]] \
   || { echo "The APK says otherwise: $badging" >&2; exit 1; }
+if [[ -n "$firebase" ]]; then
+  "$build_tools/aapt2" dump resources "$apk" | grep -q 'string/google_app_id' \
+    || { echo "The APK has no Firebase app id: is com.claktory.app's client in $firebase?" >&2; exit 1; }
+fi
 
 mkdir -p "$out"
 name="claktory-${version#v}-$code.apk"
@@ -142,6 +178,7 @@ cat "$out/$name.sha256"
 
 if ((bundle)); then
   if [[ -n "$upload_key" ]]; then build appbundle "$upload_key"; else build appbundle "$key" "$keystore"; fi
+  locks_unchanged
   aab="$app/build/app/outputs/bundle/prodRelease/app-prod-release.aab"
   python3 "$app/android/tools/check_artifact.py" --bundletool "$bundletool" "$aab"
   # Not -strict: a self-signed key (the release key is one) with no

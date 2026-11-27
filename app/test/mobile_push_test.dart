@@ -509,6 +509,25 @@ void main() {
       expect(studio().said, hasLength(before));
     });
 
+    testWidgets("an Android phone pushes can't reach says it can't show "
+        'them, asks nothing and registers nothing', (tester) async {
+      final registrar = await start(tester);
+      device.permission = 'unavailable';
+      await registrar.refresh();
+      await tester.pump();
+      expect(
+        Backend.notificationPermission(),
+        NotificationPermission.NOTIFICATION_PERMISSION_UNSUPPORTED,
+      );
+      expect(registrar.permissionNow.value, 'unavailable');
+      await connect(tester, studio());
+      await registrar.askInContext();
+      await tester.pump();
+      expect(device.asked, 0);
+      expect(studio().registered, isEmpty);
+      expect(relay.asked, isEmpty);
+    });
+
     testWidgets('turned off in the system, then back in the app: said at '
         'once', (tester) async {
       await start(tester);

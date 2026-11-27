@@ -3,7 +3,7 @@
   "channel": "factory/commands",
   "direction": "dart_to_native",
   "method": "setCommands",
-  "note": "Sent whenever the commands change (titles, enabled). Native answers true when it shows them as UIKeyCommands (the iPadOS menu bar's View menu and the list shown while ⌘ is held) and runs them itself; Flutter then stops binding their keys. input is UIKeyCommand's input (a lowercase letter, or a tab character); modifiers are UIKeyModifierFlags' names. Titles are in title case, as the system's menus are.",
+  "note": "Sent whenever the commands change (titles, enabled). The command with id settings goes in the app menu's Settings place (UIMenu.Identifier.preferences, replacing iPadOS's own ⌘,), the rest at the end of View. Native answers true when it shows them as UIKeyCommands (the iPadOS menu bar's View menu and the list shown while ⌘ is held) and runs them itself; Flutter then stops binding their keys. input is UIKeyCommand's input (a lowercase letter, or a tab character); modifiers are UIKeyModifierFlags' names. Titles are in title case, as the system's menus are.",
   "arguments": {
     "schema_version": 1,
     "commands": [
@@ -39,6 +39,13 @@
         "id": "find",
         "title": "Find",
         "input": "f",
+        "modifiers": ["command"],
+        "enabled": true
+      },
+      {
+        "id": "settings",
+        "title": "Settings",
+        "input": ",",
         "modifiers": ["command"],
         "enabled": true
       }

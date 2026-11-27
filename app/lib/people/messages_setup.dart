@@ -16,7 +16,7 @@ import '../scanner.dart';
 import '../scope.dart';
 import '../tunnel/api/dm.dart' show DmHandoffSealed;
 import '../tunnel/api/dm_transfer.dart';
-import '../visible_codes.dart' show proseCodes;
+import '../visible_codes.dart' show nameInText, proseCodes;
 import '../your_claktories.dart' show DeviceSignInForm;
 import 'e2ee.dart';
 import '../user_apps/session.dart' show UserAppError, UserAppProblem;
@@ -794,7 +794,7 @@ class _DevicesState extends State<_Devices> {
     if (removal == null || removal.remove.isEmpty) return null;
     final names = [
       for (final name in removal.names)
-        name.isEmpty ? 'A device' : proseCodes(name),
+        name.isEmpty ? 'A device' : nameInText(name),
     ];
     final who = switch (names) {
       [] => 'A device',
@@ -1185,7 +1185,7 @@ class _AddDeviceState extends State<_AddDevice> with WidgetsBindingObserver {
     final type = TypeScale.of(context);
     final found = _found;
     if (found != null) {
-      final name = found.name.isEmpty ? 'This device' : found.name;
+      final name = found.name.isEmpty ? 'This device' : nameInText(found.name);
       final platform = found.platform.isEmpty ? '' : ' (${found.platform})';
       return FormFrame(
         title: 'Add this device to your messages?',
@@ -1337,8 +1337,10 @@ class _RemoveDeviceState extends State<_RemoveDevice> {
     });
     // One with no name is "that device", never "this device", the one in
     // hand (Abbacchio's row 1464).
-    final name = widget.name.isEmpty ? 'That device' : widget.name;
-    final nameIn = widget.name.isEmpty ? 'that device' : widget.name;
+    final name = widget.name.isEmpty ? 'That device' : nameInText(widget.name);
+    final nameIn = widget.name.isEmpty
+        ? 'that device'
+        : nameInText(widget.name);
     // Kept as under way from here: closed part-way, it carries on at the
     // next launch, and Your devices offers Try again meanwhile.
     final stopped = await widget.e2ee.remove(widget.leafId, widget.name);
@@ -1365,7 +1367,7 @@ class _RemoveDeviceState extends State<_RemoveDevice> {
   @override
   Widget build(BuildContext context) => FormFrame(
     title:
-        'Remove ${widget.name.isEmpty ? 'the unnamed device' : proseCodes(widget.name)}?',
+        'Remove ${widget.name.isEmpty ? 'the unnamed device' : nameInText(widget.name)}?',
     body:
         '${widget.since.isEmpty ? '' : '${widget.since}.\n\n'}'
         'It stops getting new messages and is signed out of your '
@@ -1420,11 +1422,11 @@ class _ChangeKeyState extends State<_ChangeKey> {
   /// "That device", never "This device", which is the one in hand
   /// (Abbacchio's row 1464).
   String get _name =>
-      widget.lost.name.isEmpty ? 'That device' : widget.lost.name;
+      widget.lost.name.isEmpty ? 'That device' : nameInText(widget.lost.name);
 
   /// [_name] inside a sentence.
   String get _nameIn =>
-      widget.lost.name.isEmpty ? 'that device' : widget.lost.name;
+      widget.lost.name.isEmpty ? 'that device' : nameInText(widget.lost.name);
 
   /// Since when the lost device has been the person's, to tell it from
   /// another of the same name.
@@ -1508,7 +1510,7 @@ class _ChangeKeyState extends State<_ChangeKey> {
     final type = TypeScale.of(context);
     return FormFrame(
       title:
-          'Lock out ${widget.lost.name.isEmpty ? 'the unnamed device' : proseCodes(_name)}?',
+          'Lock out ${widget.lost.name.isEmpty ? 'the unnamed device' : _name}?',
       body:
           '${_lostSince.isEmpty ? '' : '$_lostSince.\n\n'}'
           '$_name is removed and signed out of your Claktory account, and '

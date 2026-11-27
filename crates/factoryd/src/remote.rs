@@ -661,9 +661,8 @@ const WRONG_NUMBERS: u32 = 3;
 /// reorder or hide text (bidi controls, zero widths, the BOM), at most 40
 /// characters. A device found through the account chose it itself.
 pub fn shown_name(name: &str) -> String {
-    let invisible = |char: char| matches!(char, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}');
-    let name: String = name.chars().filter(|char| !char.is_control() && !invisible(*char)).collect();
-    let name = name.trim();
+    let name = crate::config::clean_name(name).split_whitespace().collect::<Vec<_>>().join(" ");
+    let name = name.as_str();
     if name.chars().count() <= 40 { name.to_owned() } else { format!("{}…", name.chars().take(39).collect::<String>().trim_end()) }
 }
 
@@ -742,6 +741,30 @@ pub fn deny(home: &Home, device: &str) -> Result<Device, RemoteError> {
 /// Ends a code that hasn't let a device in, and forgets its device.
 pub fn cancel(home: &Home, device: &str) -> Result<Device, RemoteError> {
     settle(home, device, Err(Ended::Cancelled)).map(|(ended, _)| ended)
+}
+
+/// The device waiting under `device` with the key `endpoint_id` takes back
+/// its own request (#603): a code's goes back to waiting for a device to
+/// use the code, while it runs; one that came through the account is
+/// forgotten. Err(NotWaiting) when no request is waiting so.
+pub fn withdraw(home: &Home, device: &str, endpoint_id: &str) -> Result<(), RemoteError> {
+    let _changing = devices_lock();
+    let mut devices = devices(home)?;
+    let now = now_ms();
+    let waiting = |known: &Device| known.id == device && known.is_pending(now) && known.pending_endpoint_id == endpoint_id;
+    let Some(index) = devices.iter().position(waiting) else {
+        return Err(RemoteError::NotWaiting(device.to_owned()));
+    };
+    if devices[index].discovered {
+        devices.remove(index);
+    } else {
+        let request = &mut devices[index];
+        request.pending_endpoint_id.clear();
+        request.pending_kind = 0;
+        request.pending_since = None;
+        request.pending_signed_in = false;
+    }
+    save_devices(home, &devices)
 }
 
 /// Drops every other device that connects with the key `devices[keep]` was
@@ -1091,6 +1114,9 @@ pub(crate) struct State {
     listener_port: AtomicU64,
     /// Pipes to other Claktories, their transport's (`pipe_link`).
     pub(crate) pipes: crate::pipe_link::State,
+    /// Told whenever a session starts or ends, for each device connection's
+    /// keep-alives to follow whether its key is let in (`pace_admitted`).
+    sessions_changed: tokio::sync::watch::Sender<()>,
 }
 
 impl State {
@@ -1238,6 +1264,10 @@ fn device_word(platform: &str) -> &'static str {
 /// changed, not the device.
 fn claktory_switched(platform: &str, name: &str, email: &str) -> String {
     let device = device_word(platform);
+    // Kept whole at a narrow width: "m…" never apart from its "@example.com"
+    // (Zucchero's row 727 NIT).
+    let email = email.replace("…@", "…\u{2060}@");
+    let email = email.as_str();
     if email.is_empty() {
         format!(
             "{name} is now signed in to a different account, so it no longer lets this {device} in. To connect again, sign in here with the \
@@ -1263,10 +1293,11 @@ fn other_account(known: bool, platform: &str, name: &str) -> String {
     }
 }
 
-/// A device's own name, as it gives it: whitespace squeezed, at most
-/// `NAME_CHARS`.
+/// A device's own name, as it gives it: without what could hide or reorder
+/// text (`config::clean_name`), whitespace squeezed, at most `NAME_CHARS`.
 fn own_name(name: &str) -> String {
-    name.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(NAME_CHARS).collect()
+    crate::config::clean_name(name)
+        .split_whitespace().collect::<Vec<_>>().join(" ").chars().take(NAME_CHARS).collect()
 }
 
 /// A device whose code is `knock`'s, bound to `peer`'s key, let in and
@@ -1635,6 +1666,7 @@ impl Drop for Connected {
                 }
             }
         }
+        factory.remote.sessions_changed.send_replace(());
         factory.broadcast_workspace(&factory.lock());
     }
 }
@@ -1783,6 +1815,7 @@ impl Factory {
             refusal: refusal.clone(),
         };
         lock(&self.remote.connected).entry(device.id.clone()).or_default().push(session);
+        self.remote.sessions_changed.send_replace(());
         self.refresh_remote();
         Authorized::Connected(Connected { device, closed, refusal, factory: Arc::downgrade(self) })
     }
@@ -2045,6 +2078,26 @@ impl Factory {
         Ok(())
     }
 
+    /// The device waiting under `id` with the key `endpoint_id` took back
+    /// its request (#603), from its waiting connection: it leaves the
+    /// Workspace's pending devices at once.
+    pub(crate) fn withdraw_pairing(&self, id: &str, endpoint_id: &str) {
+        match withdraw(&self.home, id, endpoint_id) {
+            Ok(()) => {
+                tracing::info!(device = %id, "a device took back its request to be allowed");
+                lock(&self.remote.wrong_numbers).remove(id);
+                self.refresh_remote();
+            }
+            Err(RemoteError::NotWaiting(_)) => {}
+            Err(error) => tracing::warn!(device = %id, %error, "could not take back a device's request"),
+        }
+    }
+
+    /// Whether a session was let in with key `endpoint_id` and is still open.
+    fn admitted(&self, endpoint_id: &str) -> bool {
+        lock(&self.remote.connected).values().flatten().any(|session| session.endpoint_id == endpoint_id)
+    }
+
     /// Closes a device's sessions and its tunnel connections.
     fn close_device(&self, id: &str, endpoint_id: &str) {
         self.close_sessions(id, endpoint_id, true);
@@ -2054,6 +2107,7 @@ impl Factory {
     /// (by the keys its sessions came with and `endpoint_id`).
     fn close_sessions(&self, id: &str, endpoint_id: &str, links: bool) {
         let sessions = lock(&self.remote.connected).remove(id).unwrap_or_default();
+        self.remote.sessions_changed.send_replace(());
         let mut keys: Vec<&str> = sessions.iter().map(|session| session.endpoint_id.as_str()).collect();
         keys.push(endpoint_id);
         keys.retain(|key| links && !key.is_empty());
@@ -3047,10 +3101,84 @@ async fn bind(
 /// on Wi-Fi; and where a queue is deep it keeps the round trip near the
 /// link's own (about 0.1 s where Cubic filled it to 3 s), so a message
 /// isn't stuck behind a video. The rest stays iroh's.
+///
+/// The connection's own keep-alive is [ADMITTED_KEEP_ALIVE]: every path has
+/// one of its own (iroh's 5 s until its device is let in, see
+/// [pace_admitted]), which is what checks the link, and the connection's
+/// would only ping on top of a let-in device's slower ones.
 fn transport() -> iroh::endpoint::QuicTransportConfig {
     iroh::endpoint::QuicTransportConfig::builder()
         .congestion_controller_factory(Arc::new(noq_proto::congestion::Bbr3Config::default()))
+        .keep_alive_interval(ADMITTED_KEEP_ALIVE)
         .build()
+}
+
+/// How often this Claktory checks each path of a device connection whose key
+/// a session was let in with (Polpo's idle-keepalive.md, Matt's call). The
+/// device checks its own paths every 2 to 5 s while it's in use and every 25
+/// s once it's left untouched (app/rust's tunnel.rs), and any packet either
+/// way resets both ends' keep-alives, so a check of this Claktory's own every
+/// 5 s would keep an idle phone's radio from ever resting.
+pub const ADMITTED_KEEP_ALIVE: Duration = Duration::from_secs(25);
+
+/// How long a let-in device's path may stay silent before this Claktory
+/// abandons it: two of [ADMITTED_KEEP_ALIVE], and the most it ever gives,
+/// whatever the device does (Fugo 51818). The connection as a whole still
+/// ends after 30 s with nothing on any path (QUIC's idle timeout), and a
+/// device that's unpaired, removed or turned away is closed at once, never
+/// left to time out.
+pub const ADMITTED_PATH_TIMEOUT: Duration = Duration::from_secs(50);
+
+/// iroh's own keep-alive and idle timeouts (vendor/iroh's `HEARTBEAT_INTERVAL`,
+/// `PATH_MAX_IDLE_TIMEOUT`, `RELAY_PATH_MAX_IDLE_TIMEOUT`), which a connection
+/// keeps until its key is let in, and gets back once no session is.
+const PATH_KEEP_ALIVE: Duration = Duration::from_secs(5);
+const PATH_TIMEOUT: Duration = Duration::from_secs(15);
+const RELAY_PATH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A path's keep-alive and idle timeout: slower for a device let in.
+fn path_timers(admitted: bool, relay: bool) -> (Duration, Duration) {
+    match (admitted, relay) {
+        (true, _) => (ADMITTED_KEEP_ALIVE, ADMITTED_PATH_TIMEOUT),
+        (false, true) => (PATH_KEEP_ALIVE, RELAY_PATH_TIMEOUT),
+        (false, false) => (PATH_KEEP_ALIVE, PATH_TIMEOUT),
+    }
+}
+
+/// Paces a device connection's keep-alives while it lives: iroh's own until a
+/// session is let in with its key (Fugo 51818: a connection still waiting to
+/// be allowed, or turned away, can't hold a path open any longer than
+/// before), [ADMITTED_KEEP_ALIVE] and [ADMITTED_PATH_TIMEOUT] while one is,
+/// and iroh's again once none is. Paths that open meanwhile follow.
+async fn pace_admitted(connection: Connection, factory: Weak<Factory>, endpoint_id: String) {
+    let Some(mut changed) = factory.upgrade().map(|strong| strong.remote.sessions_changed.subscribe()) else { return };
+    let mut paths = std::pin::pin!(connection.paths_stream());
+    let mut given: HashMap<iroh::endpoint::PathId, bool> = HashMap::new();
+    loop {
+        let Some(strong) = factory.upgrade() else { return };
+        let admitted = strong.admitted(&endpoint_id);
+        drop(strong);
+        let open = connection.paths();
+        given.retain(|id, _| open.get(*id).is_some());
+        for path in &open {
+            // A path shows up with iroh's timers already set (vendor/iroh's
+            // `register_and_configure_path`).
+            let slow = given.entry(path.id()).or_insert(false);
+            if *slow == admitted {
+                continue;
+            }
+            let (keep_alive, timeout) = path_timers(admitted, path.is_relay());
+            if path.set_keep_alive_interval(Some(keep_alive)) && path.set_max_idle_timeout(Some(timeout)) {
+                *slow = admitted;
+            }
+        }
+        drop(open);
+        tokio::select! {
+            _ = connection.closed() => return,
+            moved = changed.changed() => if moved.is_err() { return },
+            next = futures_util::StreamExt::next(&mut paths) => if next.is_none() { return },
+        }
+    }
 }
 
 /// Serves each connection the gate let in until the endpoint closes.
@@ -3094,6 +3222,7 @@ async fn serve_link(connection: Connection, factory: Weak<Factory>) {
     }
     let compress = connection.alpn() == ALPN_COMPRESSED;
     tracing::info!(endpoint = %endpoint_id, compressed = compress, "tunnel connection opened");
+    tokio::spawn(pace_admitted(connection.clone(), factory.clone(), endpoint_id.clone()));
     // A connection that drops (the device slept, or its network changed)
     // ends all its streams at once: said once, not once each.
     let dropped = Arc::new(AtomicBool::new(false));
@@ -3499,6 +3628,47 @@ mod tests {
         assert!(matches!(turned, Admission::Turned(v1::ErrorCode::SignInRequired, _)));
     }
 
+    /// A waiting device takes back only its own request, by the key it
+    /// waits with (#603): a code's goes back to waiting for its code, one
+    /// that came through the account is forgotten.
+    #[test]
+    fn a_waiting_device_takes_back_only_its_own_request() {
+        let root = std::env::temp_dir().join(format!("factoryd-withdraw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let home = Home::new(root.clone());
+        let (_, coded) = pair(&home, "iPad").expect("a code");
+        let now = now_ms();
+        let mut saved = devices(&home).expect("devices");
+        let at = saved.iter().position(|known| known.id == coded.id).expect("there");
+        (saved[at].pending_endpoint_id, saved[at].pending_kind, saved[at].pending_since) = ("k".into(), 2, Some(now));
+        saved.push(Device {
+            id: "mac".into(),
+            name: "Mac".into(),
+            discovered: true,
+            code_expires: Some(now + 60_000),
+            pending_endpoint_id: "m".into(),
+            pending_signed_in: true,
+            ..Device::default()
+        });
+        save_devices(&home, &saved).expect("save");
+
+        // Another key, or another device's id, takes back nothing.
+        assert!(matches!(withdraw(&home, &coded.id, "m"), Err(RemoteError::NotWaiting(_))));
+        assert!(matches!(withdraw(&home, "mac", "k"), Err(RemoteError::NotWaiting(_))));
+        assert!(matches!(withdraw(&home, &coded.id, ""), Err(RemoteError::NotWaiting(_))));
+        assert_eq!(devices(&home).expect("devices").iter().filter(|known| known.is_pending(now)).count(), 2);
+
+        withdraw(&home, &coded.id, "k").expect("its own");
+        let after = devices(&home).expect("devices");
+        let back = after.iter().find(|known| known.id == coded.id).expect("kept");
+        assert!(!back.is_pending(now) && back.awaiting(now), "its code waits again: {back:?}");
+        assert!(back.pending_since.is_none() && back.pending_kind == 0);
+        withdraw(&home, "mac", "m").expect("its own");
+        assert!(!devices(&home).expect("devices").iter().any(|known| known.id == "mac"), "forgotten");
+        assert!(matches!(withdraw(&home, "mac", "m"), Err(RemoteError::NotWaiting(_))), "once");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_device_paired_again_with_its_key_replaces_its_earlier_pairing_once_allowed() {
         let root = std::env::temp_dir().join(format!("factoryd-pair-again-{}", std::process::id()));
@@ -3772,6 +3942,8 @@ mod tests {
     fn a_waiting_devices_name_shows_without_control_characters_and_cut_to_40() {
         assert_eq!(shown_name("Laptop\u{7}\u{1b}[31m"), "Laptop[31m");
         assert_eq!(shown_name("\u{202E}enohP\u{2066}x\u{2069}\u{200B}\u{FEFF}\u{2060}"), "enohPx");
+        assert_eq!(shown_name("i\u{061C}Pad\u{2061}\u{206A}"), "iPad", "row 1730: every character that hides or reorders text");
+        assert_eq!(own_name(" Matt's\u{202E}  iPhone\u{200B}\n"), "Matt's iPhone", "a device's own name is kept so too");
         let long = "x".repeat(60);
         assert_eq!(shown_name(&long), format!("{}…", "x".repeat(39)));
         assert_eq!(shown_name(&"y".repeat(40)), "y".repeat(40));

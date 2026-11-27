@@ -417,6 +417,65 @@ async fn paired_devices_connect_through_the_tunnel_unknown_keys_are_turned_away_
     assert!(matches!(apply_request(&mut client, &mut view, unknown).await, Body::Error(error) if error.code() == ErrorCode::NotFound));
 }
 
+/// A device that checks none of its paths itself, so that every ping it
+/// hears is Claktory's own keep-alive.
+async fn device_that_never_checks() -> Endpoint {
+    let transport = iroh::endpoint::QuicTransportConfig::builder().keep_alive_interval(Duration::from_secs(600)).build();
+    Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).transport_config(transport).bind().await.expect("device endpoint")
+}
+
+/// Polpo's idle-keepalive.md, Fugo 51818: a device still waiting to be
+/// allowed keeps iroh's keep-alives, so Claktory pings it every 5 s as
+/// before; let in, it's checked only every 25 s, which leaves an idle phone's
+/// radio alone; and unpaired then, its session and connection still close at
+/// once, without waiting for any timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn claktory_checks_a_device_rarely_only_once_its_let_in_and_still_closes_it_at_once_when_unpaired() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    factory.set_tunnel_online_wait(Duration::from_millis(100));
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    let relays = v1::SetRemoteAccess { relays: vec!["http://127.0.0.1:9/".into()], set_relays: true, ..Default::default() };
+    assert!(matches!(apply_request(&mut client, &mut view, client_message::Body::SetRemoteAccess(relays)).await, Body::Ack(_)));
+    let pairing = client_message::Body::CreatePairing(v1::CreatePairing { name: "Phone".into(), host: String::new() });
+    let Body::PairingCode(made) = apply_request(&mut client, &mut view, pairing).await else { panic!("a pairing code") };
+    let code = parse(&made.code);
+
+    let phone = device_that_never_checks().await;
+    let connection = dial(&phone, &code, &code.addresses).await.expect("a code is waiting: let in");
+    for path in &connection.paths() {
+        assert!(path.set_keep_alive_interval(None), "the path is open");
+    }
+    let pings = || connection.stats().frame_rx.ping;
+    let mut socket = open(&connection).await;
+    assert!(matches!(hello(&mut socket, &code.token).await, Body::PairingPending(_)));
+    let before = pings();
+    tokio::time::sleep(Duration::from_millis(6_000)).await;
+    assert!(pings() > before, "waiting to be allowed: Claktory checks it every 5 s, as before");
+
+    let remote = |view: &View| view.workspace.remote.clone().expect("remote access");
+    view.follow(&mut client, |view| !remote(view).pending_devices.is_empty()).await;
+    let number = remote(&view).pending_devices[0].number.clone();
+    let allow = client_message::Body::ApproveDevice(v1::ApproveDevice { device_id: "phone".into(), number, ..Default::default() });
+    assert!(matches!(apply_request(&mut client, &mut view, allow).await, Body::Ack(_)));
+    assert!(matches!(next(&mut socket).await, Some(Body::Welcome(_))));
+    // The check already due goes once more.
+    tokio::time::sleep(Duration::from_millis(5_500)).await;
+    let before = pings();
+    tokio::time::sleep(Duration::from_millis(6_000)).await;
+    assert_eq!(pings(), before, "let in: Claktory leaves the checking to the device");
+
+    let unpair = client_message::Body::UnpairDevice(v1::UnpairDevice { device_id: "phone".into() });
+    let asked = std::time::Instant::now();
+    assert!(matches!(apply_request(&mut client, &mut view, unpair).await, Body::Ack(_)));
+    match tokio::time::timeout(WAIT, connection.closed()).await.expect("closed in time") {
+        ConnectionError::ApplicationClosed(close) => assert_eq!(String::from_utf8_lossy(&close.reason), "this device was unpaired"),
+        other => panic!("expected an unpaired close, got {other:?}"),
+    }
+    assert!(asked.elapsed() < Duration::from_secs(2), "at once: {:?}", asked.elapsed());
+}
+
 /// Friend bug #38: a disk that turns read-only or fails unpairs nobody. A
 /// paired device still comes in (only when it came isn't noted), one that
 /// would be new is told it's the disk, a devices file that can't be read

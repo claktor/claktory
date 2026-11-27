@@ -134,13 +134,9 @@ void main() {
       ]) {
         expect(find.text(text), findsOneWidget);
       }
-      final noun = name == 'phone' ? 'phone' : 'tablet';
-      expect(
-        find.text(
-          "This $noun doesn't get notifications yet. Keep Claktory open to see what your agents need.",
-        ),
-        findsOneWidget,
-      );
+      // Its pushes not unavailable (Google Play services there): no line
+      // saying it can't get notifications (pair_start_test has the words).
+      expect(find.textContaining("can't get notifications"), findsNothing);
       expect(
         find.textContaining('Mac or a Linux server (or Windows, in preview)'),
         findsOneWidget,

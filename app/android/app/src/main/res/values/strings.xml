@@ -6,4 +6,13 @@
     <string name="attach_files">Choose files</string>
     <string name="attach_paste">Paste image</string>
     <string name="attach_cancel">Cancel</string>
+    <!-- Notifications: the line a push shows when it can't be opened
+         (as on the iPhone), and the categories in Android's Settings
+         (Trish's words). -->
+    <string name="push_generic">Claktory has something for you</string>
+    <string name="channel_needs_you">Needs you</string>
+    <string name="channel_alerts">Alerts</string>
+    <string name="channel_replies">Replies</string>
+    <string name="channel_tests">Tests</string>
+    <string name="channel_other">Other</string>
 </resources>

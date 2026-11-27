@@ -1010,7 +1010,10 @@ impl State {
             path_id=%path.id(),
             %network_path,
         );
-        conn_state.add_open_path(network_path.clone(), path.id(), &self.metrics);
+        // Claktory: configured before it's recorded as open, where
+        // `Connection::paths` shows it, so whatever sets its timers from
+        // there (an idle phone's, an admitted device's Claktory) comes after
+        // these, never between them.
         if network_path.is_relay()
             && let Err(e) = path.set_max_idle_timeout(Some(RELAY_PATH_MAX_IDLE_TIMEOUT))
         {
@@ -1026,6 +1029,7 @@ impl State {
         {
             debug!(?e, "failed to set relay path keep-alive");
         }
+        conn_state.add_open_path(network_path.clone(), path.id(), &self.metrics);
 
         self.set_path_status(conn_id, path, &network_path);
         self.paths

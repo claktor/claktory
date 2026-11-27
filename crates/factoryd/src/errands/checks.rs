@@ -87,8 +87,8 @@ impl Factory {
         self.wait_to_try(waiting, timing.after[0]);
         let minutes = timing.after[0].as_secs().div_ceil(60);
         format!(
-            "{} put up a check that you're a person, which Claktory's browser can't pass and no one can do for it. Claktory tries the page again at {} (in about {minutes} minute{}), later again if it must, and tells you how it went. Until then the errand's steps wait: do nothing else for it.",
-            capitalized(site(origin)),
+            "A check that you're a person came up on {}, which Claktory's browser can't pass and no one can do for it. Claktory tries the page again at {} (in about {minutes} minute{}), later again if it must, and tells you how it went. Until then the errand's steps wait: do nothing else for it.",
+            site(origin),
             at(next),
             if minutes == 1 { "" } else { "s" }
         )
@@ -128,8 +128,8 @@ impl Factory {
             *crate::locking::lock(&self.errands.checking) = None;
             log::write(&self.store, &entry("The check that you're a person cleared when Claktory tried again"));
             let text = format!(
-                "{}'s check that you're a person cleared when Claktory tried the page again: read it with errand_read and carry on.",
-                capitalized(site(&waiting.origin))
+                "The check that you're a person on {} cleared when Claktory tried the page again: read it with errand_read and carry on.",
+                site(&waiting.origin)
             );
             self.deliver_event(&waiting.agent, text, host_event(format!("Errand {}: the check cleared", errand.id)));
             return;
@@ -142,7 +142,8 @@ impl Factory {
         }
         *crate::locking::lock(&self.errands.checking) = None;
         log::write(&self.store, &entry("Gave up: the check that you're a person didn't clear"));
-        let reason = format!("{} kept showing a check that you're a person, which Claktory's browser can't pass.", capitalized(site(&waiting.origin)));
+        let reason =
+            format!("A check that you're a person kept showing on {}, which Claktory's browser can't pass.", site(&waiting.origin));
         self.end_errand(&errand.id, State::Failed, &reason).await;
         let text = format!(
             "{reason} Claktory tried the page {tries} more times and the check was still there, so errand {} failed. Tell your lead, or whoever opened it, what was done and what wasn't.",
@@ -173,11 +174,6 @@ impl Factory {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }
-}
-
-fn capitalized(text: &str) -> String {
-    let mut chars = text.chars();
-    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
 /// Tests: tries again after `after` each, a check given `clears`.

@@ -11,6 +11,7 @@ import 'package:factory_app/ipad/effort_segments.dart';
 import 'package:factory_app/model_select.dart' show ModelChooser;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -312,6 +313,31 @@ void main() {
     await settle(tester);
     expect(harness.last.pinAgent.agentId, 'a1');
     expect(harness.last.pinAgent.beforeId, '');
+  });
+
+  // Abbacchio's row 1716: VoiceOver's VO-Space is the item's semantics
+  // tap, which did nothing.
+  testWidgets("⋯'s items do what they say from VoiceOver's tap", (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    final pinned = header()
+      ..agents.add(Agent(id: 'a2', name: 'Fred', projectId: 'p1'))
+      ..settings = Settings(pinnedAgents: ['a2', 'a1']);
+    final harness = await showHeader(tester, pinned);
+    await tester.tap(said('More options for June'));
+    await settle(tester);
+    final node = tester.getSemantics(find.bySemanticsLabel('Move up').last);
+    expect(node.getSemanticsData().hasAction(SemanticsAction.tap), isTrue);
+    tester.binding.renderViews.first.owner!.semanticsOwner!.performAction(
+      node.id,
+      SemanticsAction.tap,
+    );
+    await settle(tester);
+    expect(harness.last.pinAgent.agentId, 'a1');
+    expect(harness.last.pinAgent.beforeId, 'a2');
+    expect(find.text('Move up'), findsNothing, reason: 'closed');
+    semantics.dispose();
   });
 
   // Abbacchio's row 1647: Extensions… opened the settings at the top with

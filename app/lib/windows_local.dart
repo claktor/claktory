@@ -81,10 +81,18 @@ Future<String?> readAppToken({required bool dev}) async {
 /// A WebSocket to [endpoint] (`ws://127.0.0.1:<port>`), with the port its
 /// own end has on this PC: what the server end's owner is looked up by.
 Future<(WebSocket, int)> connectLoopback(String endpoint) async {
+  // 127.0.0.1 itself, never a name: "localhost" can resolve to [::1], where
+  // any account can listen beside the backend (Fugo 51162).
+  if (Uri.parse(endpoint).host != '127.0.0.1') {
+    throw ArgumentError.value(endpoint, 'endpoint', 'not 127.0.0.1');
+  }
   Socket? opened;
   final client = HttpClient()
     ..connectionFactory = (uri, proxyHost, proxyPort) async {
-      final task = await Socket.startConnect(uri.host, uri.port);
+      final task = await Socket.startConnect(
+        InternetAddress.loopbackIPv4,
+        uri.port,
+      );
       unawaited(
         task.socket.then((socket) => opened = socket, onError: (Object _) {}),
       );

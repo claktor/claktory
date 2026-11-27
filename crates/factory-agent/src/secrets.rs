@@ -204,6 +204,8 @@ pub struct Redactor {
     prefixes: Option<Arc<aho_corasick::nfa::contiguous::NFA>>,
     /// The long forms.
     pieces: Arc<Pieces>,
+    /// The long forms with no piece to index them by.
+    plain: Arc<Plain>,
     /// The longest pattern, in bytes.
     longest: usize,
 }
@@ -214,6 +216,7 @@ impl fmt::Debug for Redactor {
             .field("values", &self.values.len())
             .field("patterns", &self.replacements.len())
             .field("long", &self.pieces.forms.len())
+            .field("plain", &self.plain.forms.len())
             .finish()
     }
 }
@@ -340,6 +343,82 @@ impl Pieces {
     }
 }
 
+/// The long forms with no piece worth indexing (a run of one byte,
+/// "abab…"): each found whole by a substring search that reads the text
+/// once, never a pattern of the automaton, which took minutes and tens of
+/// MB to build for one 64 KiB run of a byte.
+#[derive(Default)]
+struct Plain {
+    forms: Vec<PlainForm>,
+}
+
+struct PlainForm {
+    form: Zeroizing<Vec<u8>>,
+    replacement: Arc<str>,
+    /// For each of its beginnings, the length of the longest shorter one
+    /// that also ends it (Knuth–Morris–Pratt), to find how much of the end
+    /// of a stream could still become it.
+    borders: Zeroizing<Vec<u32>>,
+}
+
+impl Plain {
+    fn add(&mut self, form: Zeroizing<Vec<u8>>, replacement: Arc<str>) {
+        let mut borders = Zeroizing::new(vec![0_u32; form.len()]);
+        let mut length = 0_usize;
+        for at in 1..form.len() {
+            while length > 0 && form[at] != form[length] {
+                length = borders[length - 1] as usize;
+            }
+            if form[at] == form[length] {
+                length += 1;
+            }
+            borders[at] = u32::try_from(length).unwrap_or(0);
+        }
+        self.forms.push(PlainForm { form, replacement, borders });
+    }
+
+    fn is_empty(&self) -> bool {
+        self.forms.is_empty()
+    }
+
+    fn longest(&self) -> usize {
+        self.forms.iter().map(|form| form.form.len()).max().unwrap_or(0)
+    }
+
+    /// Each whole form in `bytes`.
+    fn spans<'r>(&'r self, bytes: &[u8]) -> Vec<Span<'r>> {
+        let mut spans = Vec::new();
+        for plain in &self.forms {
+            for start in memchr::memmem::find_iter(bytes, plain.form.as_slice()) {
+                spans.push(Span { start, end: start + plain.form.len(), replacement: &plain.replacement, open: false });
+            }
+        }
+        spans
+    }
+
+    /// Where the end of `bytes` could still become one of the forms: the
+    /// start of the longest end that's one's beginning, or `bytes.len()`.
+    fn undecided(&self, bytes: &[u8]) -> usize {
+        let mut held = bytes.len();
+        for plain in &self.forms {
+            let form = plain.form.as_slice();
+            // At most one byte short of it: a whole one is found, not held.
+            let from = bytes.len().saturating_sub(form.len().saturating_sub(1));
+            let mut length = 0_usize;
+            for &byte in &bytes[from..] {
+                while length > 0 && form[length] != byte {
+                    length = plain.borders[length - 1] as usize;
+                }
+                if form[length] == byte {
+                    length += 1;
+                }
+            }
+            held = held.min(bytes.len() - length);
+        }
+        held
+    }
+}
+
 impl Redactor {
     /// Hides every value of `variables`. Build it from every value there is,
     /// not only those an agent was given, so a value it found some other way
@@ -368,6 +447,7 @@ impl Redactor {
     fn build(values: Vec<Hidden>) -> Redactor {
         let mut short: Vec<(Zeroizing<Vec<u8>>, Arc<str>)> = Vec::new();
         let mut pieces = Pieces::default();
+        let mut plain = Plain::default();
         let mut seen = hashbrown::HashSet::new();
         for (label, value, text) in &values {
             let replacement: Arc<str> = format!("[secret {label}]").into();
@@ -377,8 +457,8 @@ impl Redactor {
                 }
                 if form.len() < LONG {
                     short.push((form, replacement.clone()));
-                } else if let Some(plain) = pieces.add(form, replacement.clone()) {
-                    short.push(plain);
+                } else if let Some((form, replacement)) = pieces.add(form, replacement.clone()) {
+                    plain.add(form, replacement);
                 }
             }
         }
@@ -410,7 +490,15 @@ impl Redactor {
         } else {
             aho_corasick::nfa::contiguous::NFA::new(patterns.iter().map(|pattern| pattern.as_slice())).ok().map(Arc::new)
         };
-        Redactor { values: Arc::new(values), automaton, replacements: Arc::new(replacements), prefixes, pieces: Arc::new(pieces), longest }
+        Redactor {
+            values: Arc::new(values),
+            automaton,
+            replacements: Arc::new(replacements),
+            prefixes,
+            pieces: Arc::new(pieces),
+            plain: Arc::new(plain),
+            longest,
+        }
     }
 
     /// Where the end of `bytes` could still turn into a value it hides,
@@ -421,7 +509,10 @@ impl Redactor {
     fn undecided(&self, bytes: &[u8]) -> usize {
         use aho_corasick::Anchored;
         use aho_corasick::automaton::Automaton;
-        let held = if self.pieces.is_empty() { bytes.len() } else { bytes.len().saturating_sub(2 * PIECE) };
+        let mut held = if self.pieces.is_empty() { bytes.len() } else { bytes.len().saturating_sub(2 * PIECE) };
+        if !self.plain.is_empty() {
+            held = held.min(self.plain.undecided(bytes));
+        }
         let Some(prefixes) = &self.prefixes else { return held };
         let Ok(start) = prefixes.start_state(Anchored::Yes) else {
             return held.min(bytes.len().saturating_sub(self.longest.saturating_sub(1)));
@@ -441,7 +532,7 @@ impl Redactor {
 
     /// Whether it hides anything.
     pub fn is_empty(&self) -> bool {
-        self.automaton.is_none() && self.pieces.is_empty()
+        self.automaton.is_none() && self.pieces.is_empty() && self.plain.is_empty()
     }
 
     /// What to hide in `bytes`, in order and apart. `text`: `bytes` is
@@ -459,7 +550,8 @@ impl Redactor {
                 .collect(),
             None => Vec::new(),
         };
-        if self.pieces.is_empty() && !text {
+        spans.extend(self.plain.spans(bytes));
+        if self.pieces.is_empty() && self.plain.is_empty() && !text {
             return spans;
         }
         spans.extend(self.pieces.runs(bytes));
@@ -563,7 +655,8 @@ impl Redactor {
     /// The longest form of a value it hides, in bytes: a stream holds back
     /// one less, so a value split across chunks is still caught.
     pub fn longest(&self) -> usize {
-        if self.pieces.is_empty() { self.longest } else { self.longest.max(2 * PIECE) }
+        let longest = self.longest.max(self.plain.longest());
+        if self.pieces.is_empty() { longest } else { longest.max(2 * PIECE) }
     }
 }
 
@@ -1213,6 +1306,53 @@ mod tests {
         }
         shown.push_str(&stream.finish());
         assert_eq!(shown, format!("hex: {hidden} done\n"));
+    }
+
+    /// A long value with nothing to index (a run of one byte, "abab…") is
+    /// found whole by a search, not built into the automaton, which took
+    /// minutes for one 64 KiB run; and it's hidden all the same, in a
+    /// stream too, split anywhere.
+    #[test]
+    fn a_long_value_with_nothing_to_index_is_quick_to_take_in_and_hidden() {
+        use base64::Engine as _;
+        for value in ["a".repeat(65_536), "ab".repeat(32_768), "xyz".repeat(2_000)] {
+            let began = std::time::Instant::now();
+            let redactor = Redactor::new(&[variable("Low", "LOW", &value)]);
+            assert!(began.elapsed() < std::time::Duration::from_secs(5), "{:?}", began.elapsed());
+            let automaton = redactor.automaton.as_ref().map_or(0, AhoCorasick::memory_usage);
+            assert!(automaton < 64 * 1024, "{automaton} bytes");
+            assert!(!redactor.plain.is_empty(), "{redactor:?}");
+            let hidden = "[secret Low/LOW]";
+            assert_eq!(redactor.redact(&format!("x {value} y")), format!("x {hidden} y"));
+            let encoded = base64::engine::general_purpose::STANDARD_NO_PAD.encode(&value);
+            // Its base64 as any value's: the characters it fixes, not a last
+            // one that's partly whatever follows.
+            let text = format!("b64 {encoded}.");
+            let shown = redactor.redact(&text);
+            assert!(shown.starts_with(&format!("b64 {hidden}")) && shown.len() < 30, "{shown}");
+            // Short of the whole, it isn't the value.
+            let part = &value[..value.len() - 1];
+            assert_eq!(redactor.redact(part), part);
+            assert!(redactor.longest() >= value.len(), "{}", redactor.longest());
+
+            // Split anywhere, a stream holds back only an end that could
+            // still become it, and shows it hidden once whole.
+            let redactor = Arc::new(redactor);
+            for chunk in [333, 4096, 70_000] {
+                let mut stream = StreamRedactor::new(redactor.clone());
+                let text = format!("start {value} end\n");
+                let mut shown = String::new();
+                for piece in text.as_bytes().chunks(chunk) {
+                    shown.push_str(&stream.push(std::str::from_utf8(piece).unwrap()));
+                    assert!(stream.held() < value.len(), "{} held", stream.held());
+                }
+                shown.push_str(&stream.finish());
+                assert_eq!(shown, format!("start {hidden} end\n"), "{chunk}");
+            }
+            // An end that can't become it isn't held.
+            let mut stream = StreamRedactor::new(redactor.clone());
+            assert_eq!(stream.push("nothing like it\n"), "nothing like it\n");
+        }
     }
 
     #[test]

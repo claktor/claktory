@@ -465,12 +465,23 @@ message ClientMessage {
     // RemoteAccess.local_notifications_offer_dismissed for this computer's
     // own app). Answered with Ack.
     DismissNotificationsOffer dismiss_notifications_offer = 267;
+    // A device waiting to be allowed (its Hello answered with
+    // PairingPending) takes back its own request, when the person taps
+    // Cancel on it (#603). Sent on that waiting connection only.
+    WithdrawPairing withdraw_pairing = 268;
     // The person's device asks factoryd to read macOS's protected places
     // now (Workspace.protected_places); the person's only.
     CheckProtectedPlaces check_protected_places = 258;
     // The person's OK on a protected place's Needs you item; the person's
     // only.
     DismissProtectedPlace dismiss_protected_place = 259;
+    // Folds a project in the sidebar, or unfolds it (Project.collapsed).
+    // Answered with Ack.
+    SetProjectCollapsed set_project_collapsed = 269;
+    // Where a new project with this name would be kept, as CreateProject
+    // with no path would make it (New project's caption). Answered with
+    // ProjectFolderPreview, to the asker only.
+    PreviewProjectFolder preview_project_folder = 271;
   }
 }
 
@@ -909,6 +920,8 @@ message ServerMessage {
     DeviceVouched device_vouched = 91;
     // 94: RecoveryKeyToSign (#239), the answer to NewRecoveryKey with an
     // account, comes with v0.2.0; reserved for it.
+    // The answer to PreviewProjectFolder, to the asker only.
+    ProjectFolderPreview project_folder_preview = 96;
   }
   // Resuming the Workspace on reconnect (#378), only to an app whose Hello
   // has workspace_patches. On a message carrying a Workspace or a
@@ -1129,6 +1142,20 @@ message ShowPairingCode {
 message CancelPairing {
   string device_id = 1;
 }
+
+// A device waiting to be allowed takes back its own request (#603), when
+// the person taps Cancel on its waiting page: sent on the connection whose
+// Hello was answered with PairingPending, and taken only there, for the
+// request that connection made (by the key it connected with, never by an
+// id). Its request leaves RemoteAccess.pending_devices at once, and Allow
+// with it. A request a pairing code made goes back to waiting for a device
+// to use that code, while it runs (the person can scan it again); one that
+// came through the account is forgotten. Answered with Ack, also when the
+// request was already allowed, turned away or ended (nothing changes then),
+// and the connection closes. Sent on any other connection it's refused with
+// ERROR_CODE_INVALID_REQUEST. Best effort: a device that leaves without it
+// is forgotten once its request runs out, as before.
+message WithdrawPairing {}
 
 // The answer to a device's Hello while it waits to be allowed. The
 // connection stays open: Welcome follows (replying to the Hello) once the
@@ -1940,6 +1967,30 @@ message SetFolderCollapsed {
   string project_id = 1;
   string folder_id = 2;
   bool collapsed = 3;
+}
+
+// Folds a project in the sidebar, or unfolds it (Project.collapsed).
+message SetProjectCollapsed {
+  string project_id = 1;
+  bool collapsed = 2;
+}
+
+// Where a new project named `name` would be kept (New project's caption,
+// asked as the name is typed): the app never works the rule out itself.
+message PreviewProjectFolder {
+  string name = 1;
+}
+
+// The answer to PreviewProjectFolder.
+message ProjectFolderPreview {
+  // The name it was asked for, as sent, so an answer to an older keystroke
+  // can be told apart.
+  string name = 1;
+  // The absolute path CreateProject with no path would give it now: the
+  // workspace folder and the project's id, with -2, -3… when one is taken
+  // ("/Users/me/.factory/workspace/bakery-website"). "" for a name a
+  // project can't have (empty).
+  string path = 2;
 }
 
 // Runs one of the agent's slash commands (`Agent.commands`), as the person
@@ -4616,6 +4667,11 @@ message Project {
   // pipe takes it as its own PipeForward (revision 1). Unset or an empty
   // recipient: no one. Its revision is 0.
   PipeForward report_forward = 6;
+  // Folded in the sidebar: its pipes and agents hidden under its row, which
+  // shows their needs-you count and working wave instead
+  // (SetProjectCollapsed; Lucy's ux/projects-sidebar.md §4). Not the whole
+  // Projects section (Workspace.projects_collapsed).
+  bool collapsed = 7;
 }
 
 // A folder that some of a project's agents work in. It only scopes where they
@@ -6112,7 +6168,9 @@ message VaultState {
   // recovery key, which matched claktory.com's at the last check-in. "Covered
   // by your account's recovery key": nothing to save here (the device that
   // made the key showed it, and no Claktory keeps it), and
-  // recovery_key_unconfirmed is false.
+  // recovery_key_unconfirmed is false. It stays while a newer key waits
+  // (recovery_key_change_waiting) or one that doesn't check came: the vault
+  // is still sealed to this one, which still opens it.
   bool recovery_key_covered = 12;
   // With recovery_key_covered: the Claktory where the account's current key
   // was made, by its name as claktory.com last gave it (not signed:
@@ -9852,6 +9910,24 @@ message NeedsYouRecord {
   // output left empty here): draw its heading and first line as the card
   // does. Unset for every other kind.
   AskCommand command = 35;
+  // QUESTION that was an errand's handoff (#435, AskPerson.handoff): the
+  // handoff as it was asked (kind, origin, title, what; `agreement`, the
+  // site's words, left empty here), to say what it was and what became of
+  // it as the card did ("Your turn: a payment on https://shop.example",
+  // then Done or Couldn't do it, I saved them or Kept in Secrets) rather
+  // than "Answered". Unset for every other card.
+  ErrandHandoff handoff = 38;
+  // QUESTION approved whose action Claktory couldn't carry out, as on its
+  // card (AskPerson.action_error), such as a code that wasn't filled in
+  // ("It wasn't filled in: the page changed."): Claktory's words, to show
+  // under the outcome. Empty when it went through, and for every other
+  // kind.
+  string action_error = 39;
+  // A recovery-codes handoff (handoff.kind RECOVERY_CODES) closed with
+  // Keep in Secrets: the name of the secret the codes became, given to no
+  // agent ("Kept in Secrets as shop.example recovery codes"). Empty when
+  // the person chose I saved them, and for every other card.
+  string codes_kept_as = 40;
 }
 
 enum NeedsYouRecordKind {

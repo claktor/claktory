@@ -1,0 +1,23 @@
+{
+  "project_info": {
+    "project_number": "000000000000",
+    "project_id": "claktory-device-tests",
+    "storage_bucket": "claktory-device-tests.example"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
+        "android_client_info": { "package_name": "com.claktory.app.dev" }
+      },
+      "api_key": [{ "current_key": "not-a-real-key-device-tests-only" }]
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:000000000000:android:1111111111111111111111",
+        "android_client_info": { "package_name": "com.claktory.app" }
+      },
+      "api_key": [{ "current_key": "not-a-real-key-device-tests-only" }]
+    }
+  ]
+}

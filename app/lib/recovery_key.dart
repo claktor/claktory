@@ -1,6 +1,7 @@
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'approve_elsewhere.dart';
 import 'backend.dart';
 import 'claktory_identity.dart' show claktoryNameInText;
 import 'controls.dart';
@@ -91,6 +92,18 @@ class _SaveRecoveryKeyFormState extends State<SaveRecoveryKeyForm> {
 
   @override
   Widget build(BuildContext context) {
+    // The key never shows on Windows (approve_elsewhere.dart).
+    if (approvesElsewhere) {
+      return FormFrame(
+        title: 'Save the recovery key',
+        body: recoveryElsewhereText,
+        fields: const [],
+        error: null,
+        submitLabel: 'Close',
+        onSubmit: widget.close,
+        onCancel: widget.close,
+      );
+    }
     final check = _check;
     if (check != null) return _checking(check);
     final key = _key;
@@ -179,6 +192,9 @@ class RecoveryKeyBox extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (approvesElsewhere) {
+      return const ApproveElsewhere(text: recoveryElsewhereText);
+    }
     final palette = Palette.of(context);
     return Container(
       padding: const EdgeInsets.symmetric(
@@ -270,79 +286,64 @@ class _AccountRecoveryKeyState extends State<AccountRecoveryKey> {
               final day => day,
             },
         ].join(', ');
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (vault.recoveryKeyChangeWaiting) ...[
-              Container(
-                key: const ValueKey('recovery-key-change'),
-                padding: const EdgeInsets.all(Space.m),
-                decoration: BoxDecoration(
-                  color: palette.signal.withValues(alpha: 0.06),
-                  border: Border.all(
-                    color: palette.signal.withValues(alpha: 0.4),
+        final caption = type.caption.copyWith(color: palette.textMuted);
+        // One row (Lucy 50829): the key that covers this vault, and under
+        // it a new one waiting, to use only if the person made it. Nothing
+        // tinted, and a plain button: it's a caution, not a call.
+        return SettingRow(
+          label: 'Recovery key',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (vault.recoveryKeyCovered) ...[
+                Text(
+                  "Covered by your account's recovery key",
+                  style: type.body.copyWith(color: palette.text),
+                ),
+                const SizedBox(height: Space.xs),
+                Text(
+                  [
+                    '${made(vault.recoveryKeyMadeOn, vault.recoveryKeyMadeMs.toInt())}.',
+                    if (vault.recoveryKeyUsed)
+                      'You used it here to open your secrets.',
+                  ].join(' '),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: caption,
+                ),
+              ],
+              if (vault.recoveryKeyChangeWaiting) ...[
+                if (vault.recoveryKeyCovered) const SizedBox(height: Space.m),
+                Text(
+                  'Your account has a new recovery key',
+                  key: const ValueKey('recovery-key-change'),
+                  style: type.body.copyWith(color: palette.text),
+                ),
+                const SizedBox(height: Space.xs),
+                Text(
+                  '${made(vault.recoveryKeyChangeMadeOn, vault.recoveryKeyChangeMadeMs.toInt())}. '
+                  'Use it here only if you made it. Until you do, the key '
+                  'you saved before still opens your secrets here.',
+                  style: caption,
+                ),
+                const SizedBox(height: Space.s),
+                if (approvesElsewhere)
+                  const ApproveElsewhere(text: recoveryElsewhereText)
+                else
+                  Button(
+                    label: _busy ? 'Using…' : 'Use the key here',
+                    onPressed: _busy ? null : _use,
                   ),
-                  borderRadius: BorderRadius.circular(Radii.panel),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Your account has a new recovery key',
-                      style: type.body.copyWith(
-                        color: palette.text,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: Space.xs),
-                    Text(
-                      '${made(vault.recoveryKeyChangeMadeOn, vault.recoveryKeyChangeMadeMs.toInt())}. '
-                      'Use it here only if you made it. Until you do, the key '
-                      'you saved before still opens your secrets here.',
-                      style: type.body.copyWith(color: palette.textMuted),
-                    ),
-                    const SizedBox(height: Space.m),
-                    Button(
-                      label: _busy ? 'Using…' : 'Use the key here',
-                      onPressed: _busy ? null : _use,
-                    ),
-                    if (_error case final error?) ...[
-                      const SizedBox(height: Space.xs),
-                      Text(
-                        error,
-                        style: type.caption.copyWith(color: palette.danger),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              const SizedBox(height: Space.l),
+                if (_error case final error?) ...[
+                  const SizedBox(height: Space.xs),
+                  Text(
+                    error,
+                    style: type.caption.copyWith(color: palette.danger),
+                  ),
+                ],
+              ],
             ],
-            if (vault.recoveryKeyCovered)
-              SettingRow(
-                label: 'Recovery key',
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      "Covered by your account's recovery key",
-                      style: type.body.copyWith(color: palette.text),
-                    ),
-                    const SizedBox(height: Space.xs),
-                    Text(
-                      [
-                        '${made(vault.recoveryKeyMadeOn, vault.recoveryKeyMadeMs.toInt())}.',
-                        if (vault.recoveryKeyUsed)
-                          'You used it here to open your secrets.',
-                      ].join(' '),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: type.caption.copyWith(color: palette.textMuted),
-                    ),
-                  ],
-                ),
-              ),
-          ],
+          ),
         );
       },
     );

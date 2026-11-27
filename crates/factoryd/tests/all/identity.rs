@@ -86,3 +86,61 @@ async fn a_claktory_has_one_name_and_color_for_every_device() {
     view.follow(&mut client, |view| view.workspace.settings.as_ref().is_some_and(|settings| settings.name == "Lee's Mac")).await;
     assert_eq!(identity(&view.workspace), ("Lee's Mac".to_owned(), "amber".to_owned()));
 }
+
+/// Row 1730 (Fugo): a name that could reorder or hide what's around it where
+/// it shows (bidi controls, zero widths, the BOM) is refused from a device,
+/// and taken out of one written in config.json, which still reads; an
+/// emoji's own variation selector stays.
+#[tokio::test]
+async fn names_that_hide_or_reorder_text_are_refused_or_cleaned() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let config = || std::fs::read_to_string(dir.join("home/config.json")).expect("config.json");
+    let (mut client, _, _) = Client::connect(addr).await;
+
+    let person = |name: &str| client_message::Body::UpdateSettings(v1::UpdateSettings { user_name: Some(name.into()), ..Default::default() });
+    let agent = |name: Option<&str>, role: Option<&str>| {
+        client_message::Body::UpdateAgent(v1::UpdateAgent {
+            agent_id: "rivet".into(),
+            name: name.map(str::to_owned),
+            role: role.map(str::to_owned),
+            ..Default::default()
+        })
+    };
+    let project = |name: &str| client_message::Body::CreateProject(v1::CreateProject { name: name.into(), path: String::new() });
+    for refused in [
+        set(Some("Studio\u{202E}gpj.exe"), None),
+        set(Some("Stu\u{200B}dio"), None),
+        set(Some("\u{2066}Studio\u{2069}"), None),
+        person("Ma\u{FEFF}tt"),
+        person("Matt\u{061C}"),
+        agent(Some("Ri\u{200D}vet"), None),
+        agent(None, Some("Admin\u{200E}")),
+        agent(Some("Rivet\u{2060}"), None),
+        project("Site\u{202A}"),
+    ] {
+        let reply = client.request(refused.clone()).await;
+        let Body::Error(error) = &reply.body else { panic!("{refused:?} wasn't refused: {:?}", reply.body) };
+        assert!(error.message.contains("hide or reorder text"), "{}", error.message);
+        assert!(!error.message.chars().any(factory_agent::text::hidden), "the refusal shows the name without them: {:?}", error.message);
+    }
+    let saved: serde_json::Value = serde_json::from_str(&config()).expect("json");
+    assert!(saved.get("name").is_none(), "nothing was written");
+
+    // An emoji keeps its own variation selector.
+    let events = client.ok(set(Some("Studio \u{2764}\u{FE0F}"), None)).await;
+    assert_eq!(identity(last_workspace(&events).expect("workspace")).0, "Studio \u{2764}\u{FE0F}");
+
+    // Written in the file, they're taken out, and the file still reads.
+    let mut edited: serde_json::Value = serde_json::from_str(&config()).expect("json");
+    edited["name"] = "Lee\u{202E}'s\u{200B} Mac".into();
+    let at = edited["agents"].as_array().expect("agents").iter().position(|agent| agent["id"] == "rivet").expect("rivet");
+    edited["agents"][at]["name"] = "Ri\u{2067}vet\u{FEFF}".into();
+    edited["agents"][at]["role"] = "\u{200F}Admin\nhelper".into();
+    std::fs::write(dir.join("home/config.json"), serde_json::to_string_pretty(&edited).expect("json")).expect("write");
+    let mut view = View::default();
+    view.follow(&mut client, |view| view.workspace.settings.as_ref().is_some_and(|settings| settings.name == "Lee's Mac")).await;
+    let rivet = view.workspace.agents.iter().find(|agent| agent.id == "rivet").expect("rivet");
+    assert_eq!((rivet.name.as_str(), rivet.role.as_str()), ("Rivet", "Admin helper"));
+    assert!(view.workspace.config_error.is_empty(), "{}", view.workspace.config_error);
+}

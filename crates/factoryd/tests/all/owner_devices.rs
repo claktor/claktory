@@ -318,7 +318,7 @@ async fn switching_accounts_closes_the_connections_the_account_before_let_in() {
     let switched = |why: &v1::Error| {
         why.code() == ErrorCode::OtherAccount
             && why.other_account_before
-            && why.message.contains("is now signed in as a…@example.com, a different account, so it no longer lets this device in")
+            && why.message.contains("is now signed in as a…\u{2060}@example.com, a different account, so it no longer lets this device in")
     };
     let why = turned_away(&mut phone).await;
     assert!(switched(&why), "{why:?}");

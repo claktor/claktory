@@ -139,11 +139,12 @@ abstract class Permission {
 
 /// Where a permission's sheet is.
 enum PermissionStage {
-  /// Why Claktory asks, with Continue: held, nothing sets it aside on a
-  /// phone.
+  /// Why Claktory asks, with Continue. Left (Back, a swipe down, a tap
+  /// beside it, Esc), it's Not now: the system is asked nothing (row 206).
   before,
 
-  /// The system's prompt is up: Continue is inactive.
+  /// The system's prompt is up: Continue is inactive, and nothing sets it
+  /// aside on a phone.
   asking,
 
   /// Refused: Open Settings, and the quiet way out.
@@ -164,7 +165,8 @@ class PermissionFlow extends ChangeNotifier {
     this.permission, {
     PermissionAccess from = PermissionAccess.undetermined,
   }) : _stage = stageFor(from) ?? PermissionStage.done,
-       _result = from;
+       _result = from,
+       _answered = stageFor(from) != PermissionStage.before;
 
   final Permission permission;
 
@@ -194,9 +196,20 @@ class PermissionFlow extends ChangeNotifier {
   /// Completes with [result] once it's done.
   Future<PermissionAccess> get done => _done.future;
 
-  /// Why it asks, or the system asking: nothing sets it aside on a phone.
+  /// Not answered yet: why it asks, or the system asking.
   bool get held =>
       _stage == PermissionStage.before || _stage == PermissionStage.asking;
+
+  /// The system's prompt is up: the one time nothing sets it aside on a
+  /// phone.
+  bool get asking => _stage == PermissionStage.asking;
+
+  bool _answered;
+
+  /// Whether the system has said (it had before this flow, or answered its
+  /// Continue, "can't tell" too): false when it was left before Continue,
+  /// asking nothing (a first connection then doesn't go on; row 206).
+  bool get answered => _answered;
 
   var _disposed = false;
 
@@ -220,6 +233,7 @@ class PermissionFlow extends ChangeNotifier {
     _checking = true;
     _go(PermissionStage.asking, _result);
     var answer = await permission.request();
+    _answered = true;
     if (answer != PermissionAccess.granted) {
       final now = await permission.access();
       if (now != PermissionAccess.unknown) answer = now;
@@ -331,9 +345,12 @@ Future<PermissionAccess> askPermission(
   return flow.result;
 }
 
-/// Shows [flow] until it's done or set aside: a sheet on a phone (held
-/// while it explains or the system asks: no grabber, no swipe, no Close),
-/// a dialog elsewhere (an iPad's at every width). Completes as it closes.
+/// Shows [flow] until it's done or set aside: a sheet on a phone, a dialog
+/// elsewhere (an iPad's at every width). Completes as it closes. Leaving
+/// it (Back, edge-back, a swipe down, a tap beside it) is Not now at every
+/// stage but while the system's prompt is up, when a phone's sheet is held
+/// (no grabber, no swipe, no Close) and nothing changes (row 206, Lucy
+/// 51006): before Continue it asks the system nothing.
 ///
 /// [untilAnswered]: it closes once the system has answered, whatever it
 /// said, for a feature that says a no in its own place (the mic's line).
@@ -356,22 +373,22 @@ Future<void> presentPermission(
     return presentSheet<void>(
       context,
       closeButton: false,
-      shouldClose: () async => !flow.held,
-      held: _Held(flow),
+      shouldClose: () async => !flow.asking,
+      held: _Asking(flow),
       builder: (context, close) => content(close),
     );
   }
   return showModal(context, (context, close) => content(close), dialog: true);
 }
 
-/// The sheet is held while the flow is.
-class _Held implements ValueListenable<bool> {
-  _Held(this.flow);
+/// The sheet is held while the system's prompt is up.
+class _Asking implements ValueListenable<bool> {
+  _Asking(this.flow);
 
   final PermissionFlow flow;
 
   @override
-  bool get value => flow.held;
+  bool get value => flow.asking;
 
   @override
   void addListener(VoidCallback listener) => flow.addListener(listener);
@@ -396,8 +413,7 @@ String get appSettingsName => kReleaseMode ? 'Claktory' : 'Claktory Dev';
 
 /// A permission's stage, as words and buttons: [compact] in a popover (no
 /// glyph, read from the start), otherwise as #543's sheet. Keys: Return
-/// presses the way on; Esc does nothing while it explains, and is the way
-/// out after.
+/// presses the way on; Esc is Not now, but while the system asks.
 class PermissionContent extends StatefulWidget {
   const PermissionContent({
     super.key,
@@ -619,14 +635,19 @@ class _PermissionContentState extends State<PermissionContent>
     }
 
     // A keyboard's Return presses the way on, as an alert's default button
-    // does; Esc, which closes a dialog, does nothing while it explains (the
-    // way on is Continue) and is the way out once it's off.
+    // does; Esc, which closes a dialog, is Not now as a tap beside it is:
+    // the way out once it's off, and before Continue, asking nothing (row
+    // 206). While the system asks, nothing.
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.enter): primary,
         const SingleActivator(LogicalKeyboardKey.numpadEnter): primary,
         const SingleActivator(LogicalKeyboardKey.escape): () {
-          if (off) _wayOut();
+          if (off) {
+            _wayOut();
+          } else if (stage == PermissionStage.before) {
+            _flow.setAside();
+          }
         },
       },
       child: Focus(

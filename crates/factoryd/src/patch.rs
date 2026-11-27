@@ -461,19 +461,30 @@ fn waiting_changed(last: Option<&Parsed>, next: Option<&Parsed>) -> bool {
 #[derive(Default)]
 pub(crate) struct Tally {
     counts: [(u64, u64); KINDS.len()],
+    /// Until when a whole Transcript counts as asked for by this
+    /// connection (its SelectAgent, Hello or resync); any other is
+    /// `transcript_unasked` (Polpo 50160): sent because another device
+    /// selected an agent (selection is shared), or the conversation was
+    /// compacted or cleared.
+    asked_until: Option<std::time::Instant>,
 }
+
+/// How long after this connection asked a whole Transcript still counts as
+/// its own.
+const ASKED_FOR: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The kinds counted, and the ServerMessage bodies each is (Polpo 47790):
 /// a Transcript whole or resumed (#413), an agent's earlier entries (page),
 /// a chat's transcript and pages; and, before any of them, whatever came
 /// for the conversation the connection watches (#514).
-const KINDS: [(&str, &[u32]); 11] = [
+const KINDS: [(&str, &[u32]); 12] = [
     ("workspace", &[WORKSPACE]),
     ("patch", &[27]),
     ("entry", &[7, 46]),
     ("delta", &[8, 47]),
     ("transcript", &[TRANSCRIPT]),
     (TRANSCRIPT_RESUMED, &[]),
+    (TRANSCRIPT_UNASKED, &[]),
     ("page", &[26]),
     ("chat", &[45, 48]),
     (WATCHED_KIND, &[]),
@@ -484,6 +495,7 @@ const KINDS: [(&str, &[u32]); 11] = [
 const TRANSCRIPT: u32 = 6;
 const RESUMED: u32 = 4;
 const TRANSCRIPT_RESUMED: &str = "transcript_resumed";
+const TRANSCRIPT_UNASKED: &str = "transcript_unasked";
 /// ServerMessage.watched (#514).
 const WATCHED: u32 = 90;
 const WATCHED_KIND: &str = "watched";
@@ -494,6 +506,12 @@ fn flag(message: &[u8], fields: &[Field], number: u32) -> bool {
 }
 
 impl Tally {
+    /// This connection asked for a conversation: the whole Transcript that
+    /// follows within `ASKED_FOR` is its own.
+    pub(crate) fn asked(&mut self) {
+        self.asked_until = Some(std::time::Instant::now() + ASKED_FOR);
+    }
+
     /// Counts `frame`, an encoded ServerMessage.
     pub(crate) fn count(&mut self, frame: &[u8]) {
         let fields = Field::all(frame).unwrap_or_default();
@@ -507,6 +525,9 @@ impl Tally {
             named(WATCHED_KIND)
         } else if resumed {
             named(TRANSCRIPT_RESUMED)
+        } else if body.is_some_and(|body| body.number == TRANSCRIPT) {
+            let asked = self.asked_until.take().is_some_and(|until| std::time::Instant::now() <= until);
+            named(if asked { "transcript" } else { TRANSCRIPT_UNASKED })
         } else {
             let body = body.map(|body| body.number);
             KINDS.iter().position(|(_, bodies)| body.is_some_and(|body| bodies.contains(&body))).unwrap_or(KINDS.len() - 1)
@@ -1150,6 +1171,29 @@ mod tests {
         );
     }
 
+    /// Polpo 50160: a whole Transcript this connection didn't ask for (by
+    /// its SelectAgent, Hello or resync within two seconds before) is
+    /// counted apart, as `transcript_unasked`; one ask covers one.
+    #[test]
+    fn a_tally_tells_a_transcript_this_connection_asked_for_from_one_it_didnt() {
+        let whole = ServerMessage {
+            body: Some(Body::Transcript(v1::Transcript { agent_id: "sam".into(), ..Default::default() })),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let mut tally = Tally::default();
+        tally.count(&whole);
+        tally.asked();
+        tally.count(&whole);
+        tally.count(&whole);
+        tally.asked_until = Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+        tally.count(&whole);
+        assert_eq!(
+            tally.words(),
+            format!("frames=transcript:1,transcript_unasked:3 bytes=transcript:{},transcript_unasked:{}", whole.len(), 3 * whole.len())
+        );
+    }
+
     /// Polpo 47790: what used to be one "transcript" kind, apart: a whole
     /// Transcript, a resumed one (#413), an agent's earlier entries, a
     /// chat's, and anything for the watched conversation (#514).
@@ -1164,6 +1208,7 @@ mod tests {
         let watched = encode(Body::Transcript(v1::Transcript { agent_id: "ana".into(), resumed: true, ..Default::default() }), true);
         let watched_delta = encode(Body::Delta(v1::EntryDelta { text: "hi".into(), ..Default::default() }), true);
         let mut tally = Tally::default();
+        tally.asked();
         for frame in [&whole, &resumed, &resumed, &page, &chat, &chat_page, &watched, &watched_delta] {
             tally.count(frame);
         }

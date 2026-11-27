@@ -213,10 +213,22 @@ class RenderHeldBox extends RenderSliverSingleBoxAdapter {
   }
 }
 
-/// What the pill says of what came in above: "↑ 1 new", "↑ 3 new"; an
-/// urgent alert among them, only those: "↑ 1 urgent" (Trish 48801).
-String newAboveWords({required int count, required int urgent}) =>
-    urgent > 0 ? '↑ $urgent urgent' : '↑ $count new';
+/// What the pill says of what came in above, in its two parts: the urgent
+/// alerts among them first, then the rest ("↑ 1 urgent · 1 new", "↑ 3
+/// new"; Trish 48801, 50648); each null when there are none.
+({String? urgent, String? rest}) newAboveParts({
+  required int count,
+  required int urgent,
+}) => (
+  urgent: urgent > 0 ? '$urgent urgent' : null,
+  rest: count > urgent ? '${count - urgent} new' : null,
+);
+
+/// The pill's words whole: "↑ 1 new", "↑ 1 urgent", "↑ 1 urgent · 2 new".
+String newAboveWords({required int count, required int urgent}) {
+  final parts = newAboveParts(count: count, urgent: urgent);
+  return '↑ ${[?parts.urgent, ?parts.rest].join(' · ')}';
+}
 
 /// What VoiceOver says of it, once: "1 new request above", "3 new
 /// requests above", "1 new alert above", "2 new above" when they're mixed,
@@ -226,11 +238,19 @@ String newAboveSpoken({
   required int alerts,
   required int urgent,
 }) {
-  String many(int n, String one) => '$n $one${n == 1 ? '' : 's'} above';
-  if (urgent > 0) return many(urgent, 'urgent alert');
-  if (alerts == 0) return many(requests, 'new request');
-  if (requests == 0) return many(alerts, 'new alert');
-  return '${requests + alerts} new above';
+  String many(int n, String one) => '$n $one${n == 1 ? '' : 's'}';
+  // The urgent alerts first, then the rest: "1 urgent alert and 1 new
+  // request above" (Trish 50648).
+  final plain = alerts - urgent;
+  final rest = alerts == urgent && requests > 0
+      ? many(requests, 'new request')
+      : requests == 0 && plain > 0
+      ? many(plain, 'new alert')
+      : requests + plain > 0
+      ? '${requests + plain} new'
+      : null;
+  final said = [if (urgent > 0) many(urgent, 'urgent alert'), ?rest];
+  return '${said.join(' and ')} above';
 }
 
 /// The pill at the top of the list while something new is above what
@@ -258,7 +278,7 @@ class _NewAbovePillState extends State<NewAbovePill> {
   var _said = '';
 
   /// What it last said, kept as it fades once nothing is above.
-  var _words = '';
+  var _words = (urgent: null as String?, rest: null as String?);
 
   int get _count => widget.requests + widget.alerts;
 
@@ -297,7 +317,7 @@ class _NewAbovePillState extends State<NewAbovePill> {
   Widget build(BuildContext context) {
     final shown = _count > 0;
     if (shown) {
-      _words = newAboveWords(count: _count, urgent: widget.urgent);
+      _words = newAboveParts(count: _count, urgent: widget.urgent);
     }
     final palette = Palette.of(context);
     final urgent = widget.urgent > 0;
@@ -305,7 +325,7 @@ class _NewAbovePillState extends State<NewAbovePill> {
     final target = phone
         ? PhonePlatformPolicy.of(context).touchTarget
         : Metrics.of(context).target;
-    final color = urgent ? palette.danger : palette.text;
+    final (urgent: urgentWords, rest: restWords) = _words;
     return IgnorePointer(
       ignoring: !shown,
       child: AnimatedOpacity(
@@ -352,14 +372,34 @@ class _NewAbovePillState extends State<NewAbovePill> {
                   ),
                   child: Center(
                     widthFactor: 1,
-                    child: Text(
-                      _words,
+                    // Only the urgent part in danger.
+                    child: Text.rich(
+                      TextSpan(
+                        children: [
+                          TextSpan(
+                            text: '↑ ',
+                            style: TextStyle(
+                              color: urgentWords != null
+                                  ? palette.danger
+                                  : palette.text,
+                            ),
+                          ),
+                          if (urgentWords != null)
+                            TextSpan(
+                              text: urgentWords,
+                              style: TextStyle(color: palette.danger),
+                            ),
+                          if (urgentWords != null && restWords != null)
+                            const TextSpan(text: ' · '),
+                          if (restWords != null) TextSpan(text: restWords),
+                        ],
+                      ),
                       style:
                           (phone
                                   ? TypeScale.of(context).label
                                   : TextStyles.label)
                               .copyWith(
-                                color: color,
+                                color: palette.text,
                                 fontWeight: FontWeight.w500,
                                 fontFeatures: const [
                                   FontFeature.tabularFigures(),

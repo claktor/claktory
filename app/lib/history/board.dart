@@ -705,19 +705,24 @@ class _LinesPainter extends CustomPainter {
         }
       }
     }
+    // The wires' junction dots, by the thousand at a year or more: one
+    // call a color, as the pulses (Polpo 51196: one circle each was 78% of
+    // the raster thread's samples).
+    // Those out of focus under those in it.
+    final dim = _Dots();
+    final dots = _Dots();
     for (var i = 0; i < scene.dots.length; i++) {
       if (frame.dots[i] == hidden) continue;
       final dot = scene.dots[i].dot;
       final color = mapLayerColor(dot.layer, palette);
-      canvas.drawCircle(
-        dot.at,
-        2.75,
-        Paint()
-          ..color = focus == null || dot.ends.contains(_idOf(focus))
-              ? color
-              : color.withValues(alpha: 0.22),
-      );
+      if (focus == null || dot.ends.contains(_idOf(focus))) {
+        dots.add(dot.at, 2.75, color);
+      } else {
+        dim.add(dot.at, 2.75, color.withValues(alpha: 0.22));
+      }
     }
+    dim.draw(canvas);
+    dots.draw(canvas);
     canvas.restore();
   }
 

@@ -16,7 +16,7 @@ import '../needs_you_focus.dart' show focusModeKey, focusModeOf, setFocusMode;
 import '../panes.dart' show PaneProjection, paneTitle, paneGlyph;
 import '../pinned_agents.dart' show openPinned, pinnedAgents;
 import '../protocol/factory/v1/factory.pb.dart';
-import '../scope.dart' show AppScope;
+import '../scope.dart' show AppPage, AppScope;
 import '../selection.dart' show Unselectable;
 import 'columns.dart';
 import 'columns.dart' as columns show project;
@@ -513,6 +513,7 @@ class _WorkbenchState extends State<Workbench> {
         showPanes: showPanes,
         pins: pinnedAgents(AppScope.of(context).workspace.workspace),
         openPin: (pin) => openPinned(context, pin.id),
+        openSettings: () => AppScope.openPage(context, AppPage.settings),
       );
       final textFactor = textFactorOf(MediaQuery.textScalerOf(context).scale);
       // The agent's panes show what fits this window, focused as the person
@@ -916,6 +917,7 @@ class _PaneRow extends StatelessWidget {
       button: true,
       selected: focused,
       label: shown ? title : '$title, not shown',
+      onTap: onTap,
       excludeSemantics: true,
       child: Pressable(
         onTap: onTap,
@@ -1114,6 +1116,7 @@ class PaneSwitch extends StatelessWidget {
             button: true,
             selected: selected,
             label: label,
+            onTap: onTap,
             excludeSemantics: true,
             child: Pressable(
               key: key,

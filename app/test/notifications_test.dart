@@ -381,6 +381,7 @@ void main() {
         body: 'Which project?',
         thread: 'local',
         urgent: false,
+        kind: NotifyKind.NOTIFY_KIND_NEEDS_YOU,
         target: NotificationTarget(claktory: 'local', agentId: 'rivet'),
       ),
     );
@@ -391,6 +392,7 @@ void main() {
       'body': 'Which project?',
       'thread': 'local',
       'urgent': false,
+      'kind': 'needs_you',
       'target': {
         'claktory': 'local',
         'agentId': 'rivet',

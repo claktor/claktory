@@ -33,7 +33,8 @@ import '../diagnostics_record.dart'
 import '../notifications.dart' show claktoryId;
 import '../protocol/factory/v1/factory.pb.dart';
 import '../rail.dart' show Claktories, Claktory;
-import 'device_permissions.dart' show NotificationsPermission;
+import 'device_permissions.dart'
+    show NotificationsPermission, openAppSettingsPage;
 import 'permission.dart'
     show
         PermissionFlow,
@@ -96,7 +97,9 @@ class PushState {
     required this.platform,
   });
 
-  /// "not_determined", "denied" or "allowed".
+  /// "not_determined", "denied" or "allowed"; "unavailable" on an Android
+  /// phone that can't get pushes (a build without Firebase, a phone without
+  /// Google Play services).
   final String permission;
   final String token;
 
@@ -111,6 +114,7 @@ class PushState {
   NotificationPermission get notificationPermission => switch (permission) {
     'allowed' => NotificationPermission.NOTIFICATION_PERMISSION_ALLOWED,
     'denied' => NotificationPermission.NOTIFICATION_PERMISSION_DENIED,
+    'unavailable' => NotificationPermission.NOTIFICATION_PERMISSION_UNSUPPORTED,
     _ => NotificationPermission.NOTIFICATION_PERMISSION_NOT_ASKED,
   };
 
@@ -283,11 +287,17 @@ class PushRegistrar {
 
   PushState? get _state => _current;
 
+  /// The permission as last read ([PushState.permission]); null until it
+  /// is. The pairing screen says an Android phone that can't get pushes
+  /// gets no notifications yet.
+  final permissionNow = ValueNotifier<String?>(null);
+
   /// A permission that changed (allowed or turned off in the system's
   /// Settings, the person's answer) is said to every Claktory connected.
   set _state(PushState? next) {
     final before = _current?.permission;
     _current = next;
+    if (next != null) permissionNow.value = next.permission;
     if (next == null || next.permission == before) return;
     for (final claktory in claktories.all) {
       claktory.backend.resendActive();
@@ -602,10 +612,40 @@ class PushRegistrar {
     }
     _followed.clear();
     unawaited(_tokens.cancel());
+    permissionNow.dispose();
   }
 }
 
-/// The iPhone's side, through factory/push (Notifications.swift).
+/// Android's notification settings for Claktory (factory/push, Android
+/// only); the app's page in Settings where there's no such call.
+Future<void> openNotificationSettings() async {
+  try {
+    await const MethodChannel('factory/push')
+        .invokeMethod<void>('openSettings');
+  } on MissingPluginException {
+    await openAppSettingsPage();
+  } on PlatformException {
+    await openAppSettingsPage();
+  }
+}
+
+/// Whether Android said a first no left it still to ask (factory/push
+/// "state" refusedOnce): This phone's Permissions row reads Off with
+/// Turn on… (Lucy's ruling 6). False elsewhere.
+Future<bool> notificationsRefusedOnce() async {
+  try {
+    final state = await const MethodChannel('factory/push')
+        .invokeMethod<Object?>('state');
+    return state is Map && state['refusedOnce'] == true;
+  } on MissingPluginException {
+    return false;
+  } on PlatformException {
+    return false;
+  }
+}
+
+/// The iPhone's side, through factory/push (Notifications.swift), and an
+/// Android phone's (PushChannel.kt), which answers the same calls.
 class IosPushDevice implements PushDevice {
   IosPushDevice({this.channel = const MethodChannel('factory/push')}) {
     channel.setMethodCallHandler((call) async {

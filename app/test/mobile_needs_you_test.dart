@@ -152,6 +152,26 @@ void main() {
       expect(harness.page.value, AppPage.inbox);
     });
 
+    testWidgets("a long press selects none of a row's words: the rows are "
+        "places to go (Zucchero's row 715)", (tester) async {
+      await _open(tester);
+      expect(
+        find.ancestor(
+          of: _row('Turn on the relay rule?'),
+          matching: find.byType(SelectableRegion),
+        ),
+        findsNothing,
+      );
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.textContaining('min ago').first),
+      );
+      await tester.pump(const Duration(seconds: 1));
+      await gesture.up();
+      await pumpFrames(tester);
+      expect(find.text('Select All'), findsNothing);
+      expect(find.text('Copy'), findsNothing);
+    });
+
     testWidgets('a request tapped opens alone: titled with who asks, no '
         'place among the rest nor ˄ ˅; Back, the list', (tester) async {
       final harness = await _open(tester);

@@ -51,6 +51,9 @@ Workspace _workspace() => Workspace(
     ),
   ],
   selectedAgentId: 'june',
+  // Voice on, as a Claktory that has its speech model: the field sits
+  // with its mic in a column of its own (Zucchero's row 726).
+  speechModel: SpeechModel(state: SpeechModelState.SPEECH_MODEL_STATE_READY),
 );
 
 Future<Harness> _show(
@@ -203,7 +206,7 @@ void main() {
     await _comment(tester);
     await tester.enterText(
       _field,
-      'Use the read and write token from the shared project please',
+      'Use the staging project first please',
     );
     await pumpFrames(tester, const Duration(milliseconds: 1200));
     expect(tester.takeException(), isNull);

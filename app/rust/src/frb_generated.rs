@@ -42,7 +42,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1974264993;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 2068277092;
 
 // Section: executor
 
@@ -3910,6 +3910,44 @@ fn wire__crate__api__tunnel__TunnelHandle_reconnect_impl(
         },
     )
 }
+fn wire__crate__api__tunnel__TunnelHandle_set_idle_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "TunnelHandle_set_idle",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe { flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(ptr_, rust_vec_len_, data_len_) };
+            let mut deserializer = flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that =
+                <RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<TunnelHandle>>>::sse_decode(&mut deserializer);
+            let api_idle = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let mut api_that_guard = None;
+                let decode_indices_ = flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
+                    flutter_rust_bridge::for_generated::LockableOrderInfo::new(&api_that, 0, false),
+                ]);
+                for i in decode_indices_ {
+                    match i {
+                        0 => api_that_guard = Some(api_that.lockable_decode_sync_ref()),
+                        _ => unreachable!(),
+                    }
+                }
+                let api_that_guard = api_that_guard.unwrap();
+                let output_ok = Ok::<_, ()>({
+                    crate::api::tunnel::TunnelHandle::set_idle(&*api_that_guard, api_idle);
+                })?;
+                std::result::Result::Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__tunnel__TunnelHandle_set_relays_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -5441,12 +5479,12 @@ fn pde_ffi_dispatcher_primary_impl(
         93 => wire__crate__api__tunnel__TunnelHandle_forward_port_impl(port, ptr, rust_vec_len, data_len),
         94 => wire__crate__api__tunnel__TunnelHandle_forward_port_to_impl(port, ptr, rust_vec_len, data_len),
         97 => wire__crate__api__tunnel__TunnelHandle_reconnect_impl(port, ptr, rust_vec_len, data_len),
-        104 => wire__crate__api__dm__dm_removal_default_impl(port, ptr, rust_vec_len, data_len),
-        105 => wire__crate__api__dm__dm_remove_store_impl(port, ptr, rust_vec_len, data_len),
-        106 => wire__crate__api__dm__dm_view_default_impl(port, ptr, rust_vec_len, data_len),
-        108 => wire__crate__api__windows__loopback_peer_same_user_impl(port, ptr, rust_vec_len, data_len),
-        109 => wire__crate__api__tunnel__open_tunnel_impl(port, ptr, rust_vec_len, data_len),
-        111 => wire__crate__api__tunnel__runtime_answers_impl(port, ptr, rust_vec_len, data_len),
+        105 => wire__crate__api__dm__dm_removal_default_impl(port, ptr, rust_vec_len, data_len),
+        106 => wire__crate__api__dm__dm_remove_store_impl(port, ptr, rust_vec_len, data_len),
+        107 => wire__crate__api__dm__dm_view_default_impl(port, ptr, rust_vec_len, data_len),
+        109 => wire__crate__api__windows__loopback_peer_same_user_impl(port, ptr, rust_vec_len, data_len),
+        110 => wire__crate__api__tunnel__open_tunnel_impl(port, ptr, rust_vec_len, data_len),
+        112 => wire__crate__api__tunnel__runtime_answers_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -5477,14 +5515,15 @@ fn pde_ffi_dispatcher_sync_impl(
         90 => wire__crate__api__tunnel__ForwardHandle_status_impl(ptr, rust_vec_len, data_len),
         95 => wire__crate__api__tunnel__TunnelHandle_path_impl(ptr, rust_vec_len, data_len),
         96 => wire__crate__api__tunnel__TunnelHandle_port_impl(ptr, rust_vec_len, data_len),
-        98 => wire__crate__api__tunnel__TunnelHandle_set_relays_impl(ptr, rust_vec_len, data_len),
-        99 => wire__crate__api__tunnel__TunnelHandle_status_impl(ptr, rust_vec_len, data_len),
-        100 => wire__crate__api__account__account_public_key_impl(ptr, rust_vec_len, data_len),
-        101 => wire__crate__api__account__account_sign_impl(ptr, rust_vec_len, data_len),
-        102 => wire__crate__api__dm__dm_new_secret_impl(ptr, rust_vec_len, data_len),
-        103 => wire__crate__api__dm__dm_public_key_impl(ptr, rust_vec_len, data_len),
-        107 => wire__crate__api__tunnel__fresh_runtime_impl(ptr, rust_vec_len, data_len),
-        110 => wire__crate__api__tunnel__pairing_ids_impl(ptr, rust_vec_len, data_len),
+        98 => wire__crate__api__tunnel__TunnelHandle_set_idle_impl(ptr, rust_vec_len, data_len),
+        99 => wire__crate__api__tunnel__TunnelHandle_set_relays_impl(ptr, rust_vec_len, data_len),
+        100 => wire__crate__api__tunnel__TunnelHandle_status_impl(ptr, rust_vec_len, data_len),
+        101 => wire__crate__api__account__account_public_key_impl(ptr, rust_vec_len, data_len),
+        102 => wire__crate__api__account__account_sign_impl(ptr, rust_vec_len, data_len),
+        103 => wire__crate__api__dm__dm_new_secret_impl(ptr, rust_vec_len, data_len),
+        104 => wire__crate__api__dm__dm_public_key_impl(ptr, rust_vec_len, data_len),
+        108 => wire__crate__api__tunnel__fresh_runtime_impl(ptr, rust_vec_len, data_len),
+        111 => wire__crate__api__tunnel__pairing_ids_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }

@@ -15,7 +15,7 @@ import '../recorder.dart' show MicAccess, VoiceRecorder, deviceRecorder;
 import '../scanner.dart' show Camera, CameraAccess;
 import 'permission.dart';
 import 'popover.dart' show presentPopover;
-import 'push.dart' show PushRegistrar;
+import 'push.dart' show PushRegistrar, openNotificationSettings;
 
 /// Where the person turns a permission on, in a sentence: "Settings on
 /// this iPhone" (Trish 44387), "Android's Settings", "System Settings".
@@ -187,17 +187,18 @@ class CameraPermission extends Permission {
   Future<void> openSettings() => camera.openSettings();
 }
 
-/// Notifications (P3), after the device's first pairing: an iPhone's or
-/// iPad's, through its push registrar.
+/// Notifications (P3), after the device's first pairing: an iPhone's,
+/// iPad's or Android phone's, through its push registrar.
 class NotificationsPermission extends Permission {
   const NotificationsPermission(
     this.pushes, {
-    this.openAppSettings = openAppSettingsPage,
+    this.openAppSettings = openNotificationSettings,
   });
 
   final PushRegistrar pushes;
 
-  /// The app's page in Settings, where its Notifications are.
+  /// The app's page in Settings, where its Notifications are (Android's
+  /// own notification settings for Claktory there).
   final Future<void> Function() openAppSettings;
 
   @override

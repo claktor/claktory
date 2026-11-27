@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Firebase reads its start values by name (FirebaseOptions.fromResource),
+     which the resource shrinker can't see: kept in a release build when the
+     build was given them (build.gradle.kts, firebaseClients). -->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@string/google_app_id,@string/gcm_defaultSenderId,@string/google_api_key,@string/project_id,@string/google_storage_bucket" />

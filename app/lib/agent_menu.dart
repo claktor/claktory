@@ -395,6 +395,9 @@ class _MenuRow extends StatelessWidget {
       selected: item.checked,
       label: item.semanticsLabel ?? item.label,
       value: item.count > 0 ? '${item.count}' : null,
+      // Its own tap: excluding the row's semantics drops the Pressable's,
+      // and VoiceOver's VO-Space then did nothing (Abbacchio's row 1716).
+      onTap: onTap,
       excludeSemantics: true,
       child: MouseRegion(
         onEnter: (_) => onHover(),

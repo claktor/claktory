@@ -46,6 +46,7 @@ const CODES: &str = "a site's recovery codes are the person's alone: shown only 
 const ALERTS: &str = "reading an alert is the person's: an agent never clears one from their Needs you (Bruno 44235)";
 const OFFER: &str = "what a device offers the person is theirs to dismiss, on that device";
 const PROTECTED: &str = "macOS's Files and Folders prompts and their Needs you items are the person's: an agent never brings a prompt up nor clears one (item 12, Bruno 45729)";
+const WAITING: &str = "a waiting device's own request: only that device takes it back, on its waiting connection (#603)";
 const HISTORY: &str = "History is the person's own, on their devices: never an agent's or a pipe's (Fugo, #458)";
 
 /// Everything a request can change, and how Rivet does it. Only the tests
@@ -68,6 +69,7 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         Body::GetHistoryOverview(_) | Body::GetHistoryEvents(_) | Body::WatchHistory(_) => vec![Person(HISTORY)],
         Body::ReadAlerts(_) => vec![Person(ALERTS)],
         Body::DismissNotificationsOffer(_) => vec![Person(OFFER)],
+        Body::WithdrawPairing(_) => vec![Person(WAITING)],
         Body::CheckProtectedPlaces(_) | Body::DismissProtectedPlace(_) => vec![Person(PROTECTED)],
         Body::WatchAgentBrowser(_)
         | Body::AgentBrowserFrameAck(_)
@@ -85,9 +87,9 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         Body::ShowRecoveryCodes(_) | Body::KeepRecoveryCodes(_) => vec![Person(CODES)],
         // Page text (Fugo 36686): never read untainted through View.
         Body::ListErrandLog(_) => vec![Person(BROWSER)],
-        // The person's while Claktory's browser is off for everyone (#435):
-        // once it ships, the manual names errand_open, the lead's tool for
-        // it, and this says so.
+        // The person's (#435 W12, Bruno 49773): agents open errands only
+        // with errand_open, a lead's tool for the agent it leads, refused
+        // while that lead is tainted.
         Body::OpenErrand(_) => vec![Person(BROWSER)],
         // Fugo's condition 6: only the person contains an agent or lifts it.
         Body::SetAgentContained(_) => vec![Person(BROWSER)],
@@ -103,6 +105,8 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         | Body::OpenPanel(_)
         | Body::SetAgentCollapsed(_)
         | Body::SetFolderCollapsed(_)
+        | Body::SetProjectCollapsed(_)
+        | Body::PreviewProjectFolder(_)
         | Body::SetPipeGroupCollapsed(_)
         | Body::SetLayout(_)
         | Body::PaneOpened(_)

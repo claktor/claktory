@@ -340,6 +340,7 @@ class _MenuRowState extends State<_MenuRow> {
       button: true,
       enabled: enabled,
       label: widget.label,
+      onTap: widget.onTap,
       excludeSemantics: true,
       child: MouseRegion(
         cursor: enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,

@@ -80,8 +80,9 @@ fi
 source "$ROOT/scripts/lib.sh"
 container_for "$ARCH"
 PLATFORM="$CONTAINER_PLATFORM"
-# Parallel jobs: 2 in this Mac's small VM; more on the x86_64 host.
-JOBS="${FACTORY_LINUX_JOBS:-2}"; [[ -z "$X86_REMOTE" || -n "${FACTORY_LINUX_JOBS:-}" ]] || JOBS=16
+# Parallel jobs: 2 in this Mac's small VM; on the x86_64 host, the cores
+# x86_room lets it have (scripts/lib.sh).
+JOBS="${FACTORY_LINUX_JOBS:-2}"; [[ -z "$X86_REMOTE" || -n "${FACTORY_LINUX_JOBS:-}" ]] || JOBS="${FACTORY_X86_CPUS:-8}"
 TARGET="$ARCH-unknown-linux-musl"
 
 mkdir -p "$(dirname "$OUT")"

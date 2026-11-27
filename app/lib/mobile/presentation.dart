@@ -756,7 +756,8 @@ class PhoneSheet extends StatelessWidget {
     final keyboard = media.viewInsets.bottom;
     final room = media.size.height - media.padding.top - Space.s - keyboard;
     final host = _SheetDrag.of(context);
-    // Dragging the grabber or the title moves the sheet.
+    // Dragging the grabber, the title, or content that doesn't scroll
+    // moves the sheet.
     Widget draggable(Widget child) => host == null
         ? child
         : GestureDetector(
@@ -832,6 +833,10 @@ class PhoneSheet extends StatelessWidget {
       ),
     );
     if (host != null) {
+      // Content that doesn't scroll (a short sheet's words: a scroll view
+      // that fits takes no drag) is dragged away anywhere, as iOS's sheets
+      // are (row 206); one that scrolls takes the drag first, its own.
+      body = draggable(body);
       // Pulled down past its top, the content takes the sheet with it: so
       // it doesn't bounce there, and the pull reaches the sheet instead.
       body = NotificationListener<ScrollNotification>(

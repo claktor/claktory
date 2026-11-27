@@ -75,6 +75,12 @@ class FakeTunnel implements Tunnel {
   @override
   void setRelays(List<String> relays) => relaysTold.add(relays);
 
+  /// What [setIdle] was told, in order.
+  final idleTold = <bool>[];
+
+  @override
+  void setIdle(bool idle) => idleTold.add(idle);
+
   /// The ports asked for; [forwardPort] answers what [forwarded] makes.
   final forwards = <int>[];
   Future<PortForward> Function(int port) forwarded = (_) async =>

@@ -210,6 +210,11 @@ struct Row {
     secret: SecretOutcome,
     /// COMMAND: the card's command, with how it ran.
     command: Option<v1::AskCommand>,
+    /// QUESTION from an errand's handoff: what it was, whether its action
+    /// failed, and the secret its recovery codes were kept as (row 1645).
+    handoff: Option<v1::ErrandHandoff>,
+    action_error: String,
+    codes_kept_as: String,
     /// All the text a search looks in, lowercase.
     search: String,
 }
@@ -372,6 +377,9 @@ impl Row {
             procedure: Procedure::default(),
             secret: SecretOutcome::default(),
             command: None,
+            handoff: None,
+            action_error: String::new(),
+            codes_kept_as: String::new(),
             search: String::new(),
         }
     }
@@ -503,14 +511,15 @@ fn from_factory(
 ) -> rusqlite::Result<()> {
     found.add(rows(
         db,
-        "SELECT id, agent, title, answer, state, created, decided, taint, review, body, replied, reason, revision, resolved, steps, action FROM asks
+        "SELECT id, agent, title, answer, state, created, decided, taint, review, body, replied, reason, revision, resolved, steps, action, action_error FROM asks
          WHERE state IN ('answered', 'dismissed', 'withdrawn') AND decided >= ?1 AND decided < ?2 ORDER BY decided DESC LIMIT ?3",
         window,
         |row| {
             let review: String = row.get(8)?;
             let id: i64 = row.get(0)?;
             // An Execute card: Claktory's heading, its command, how it ran.
-            let command = crate::command_cards::in_history(db, id, &row.get::<_, Option<String>>(15)?.unwrap_or_default());
+            let action = row.get::<_, Option<String>>(15)?.unwrap_or_default();
+            let command = crate::command_cards::in_history(db, id, &action);
             let kind = match (&command, review.is_empty()) {
                 (Some(_), _) => Kind::Command,
                 (None, true) => Kind::Question,
@@ -531,6 +540,14 @@ fn from_factory(
             found.procedure = Procedure::of(row.get::<_, Option<String>>(14)?.as_deref(), row.get(10)?, row.get(13)?);
             let words = command.as_ref().map(|command| command.command.clone()).unwrap_or_default();
             found.command = command;
+            // An errand's handoff: what it was, as History says it (row 1645).
+            if let Ok(crate::card_actions::Action::Handoff { handoff }) = serde_json::from_str(&action) {
+                if handoff.kind == v1::ErrandHandoffKind::RecoveryCodes as i32 {
+                    found.codes_kept_as = crate::extensions::ask::kept_as(&found.reply).unwrap_or_default().to_owned();
+                }
+                found.handoff = Some(v1::ErrandHandoff { agreement: String::new(), ..handoff.wire() });
+            }
+            found.action_error = cut(&row.get::<_, String>(16)?, MAX_REPLY);
             Ok(found.searched(&[&row.get::<_, String>(9)?, &row.get::<_, String>(3)?, &reason, &agents_title, &words]))
         },
     )?);
@@ -1319,6 +1336,9 @@ impl Factory {
                     secret_given_name: row.secret.given_name,
                     secret_to_no_one: row.secret.to_no_one,
                     command: row.command,
+                    handoff: row.handoff,
+                    action_error: row.action_error,
+                    codes_kept_as: row.codes_kept_as,
                 }
             })
             .collect();

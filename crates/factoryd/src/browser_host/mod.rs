@@ -12,8 +12,9 @@
 //! hostile page's after a Chrome escape: capped and checked before it
 //! reaches anything (Fugo 36537, 36598).
 //!
-//! Off unless FACTORY_AGENT_BROWSER=1 (until slice 1 ships): the
-//! Workspace leaves it unset and every request is refused.
+//! On in release builds (#435 W12), off in debug builds and tests unless
+//! FACTORY_AGENT_BROWSER=1; FACTORY_AGENT_BROWSER=0 turns it off anywhere.
+//! Off, the Workspace leaves it unset and every request is refused.
 
 pub(crate) mod downloads;
 mod image;
@@ -57,10 +58,24 @@ const STARTING: Duration = Duration::from_secs(60);
 /// Turned on by a test, whatever the environment says.
 static TURNED_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Whether Claktory's browser is on here (off until slice 1 ships).
+/// Whether Claktory's browser is on here: in a release build unless
+/// FACTORY_AGENT_BROWSER=0, in a debug build (the dev backend, tests) only
+/// with FACTORY_AGENT_BROWSER=1 (#435 W12). Whether it can run on this
+/// computer is setup's to say (`setup`), on the browser's card.
 pub(crate) fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    TURNED_ON.load(Ordering::Relaxed) || *ON.get_or_init(|| std::env::var("FACTORY_AGENT_BROWSER").is_ok_and(|value| value == "1"))
+    TURNED_ON.load(Ordering::Relaxed)
+        || *ON.get_or_init(|| on_by(std::env::var("FACTORY_AGENT_BROWSER").ok().as_deref(), cfg!(debug_assertions)))
+}
+
+/// `enabled`'s rule: what FACTORY_AGENT_BROWSER says, else on unless this
+/// is a debug build.
+fn on_by(said: Option<&str>, debug: bool) -> bool {
+    match said {
+        Some("1") => true,
+        Some("0") => false,
+        _ => !debug,
+    }
 }
 
 /// Turned on by a test: the stand-in rather than the Mac's VM.
@@ -1755,7 +1770,7 @@ pub fn signing_out_for_test(factory: &Arc<Factory>, provider: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{dev_home, home_id};
+    use super::{dev_home, home_id, on_by};
     use std::path::Path;
 
     /// Fugo 50272: each Claktory home has its own browser id, the same each
@@ -1774,5 +1789,17 @@ mod tests {
             assert!(dev_home(&account.join(".factory-dev")));
             assert!(!dev_home(&account.join(".factory")));
         }
+    }
+
+    /// #435 W12: on in a release build unless turned off, off in a debug
+    /// build (the dev backend, tests) unless turned on.
+    #[test]
+    fn the_browser_is_on_in_releases_and_off_in_debug_builds_unless_said() {
+        assert!(on_by(None, false));
+        assert!(!on_by(Some("0"), false));
+        assert!(on_by(Some("anything"), false));
+        assert!(!on_by(None, true));
+        assert!(on_by(Some("1"), true));
+        assert!(!on_by(Some("true"), true));
     }
 }

@@ -84,6 +84,11 @@ void main() {
       find.textContaining('On Studio, open System Settings'),
       findsNothing,
     );
+    // OK quiet first, Open System Settings filled at the end (Lucy 51316).
+    expect(
+      tester.getTopLeft(_button('OK')).dx,
+      lessThan(tester.getTopLeft(_button('Open System Settings')).dx),
+    );
     await tester.tap(_button('Open System Settings'));
     await settle(tester);
     expect(opened.single.toString(), contains('Privacy_FilesAndFolders'));

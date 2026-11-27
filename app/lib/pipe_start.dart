@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'approve_elsewhere.dart';
 import 'backend.dart';
 import 'card_answer.dart' show CardAnswer, PublishesAnswer, noComment;
 import 'characters/character.dart';
@@ -43,8 +44,7 @@ class PipeStartCard extends StatefulWidget {
   State<PipeStartCard> createState() => _PipeStartCardState();
 }
 
-class _PipeStartCardState extends State<PipeStartCard>
-    with PublishesAnswer {
+class _PipeStartCardState extends State<PipeStartCard> with PublishesAnswer {
   PipeStart get start => widget.start;
 
   bool get _accept => start.kind == PipeStartKind.PIPE_START_KIND_ACCEPT;
@@ -140,43 +140,37 @@ class _PipeStartCardState extends State<PipeStartCard>
     }
   }
 
-  Future<void> _createInvite({required bool rethrowing}) => _run(
-    rethrowing: rethrowing,
-    (backend) async {
-    final invite = await backend.createPipeInvite(
-      _project,
-      _name.text.trim(),
-      _purpose.text.trim(),
-      startId: start.id,
-    );
-    if (mounted) setState(() => _invite = invite);
-    },
-  );
+  Future<void> _createInvite({required bool rethrowing}) =>
+      _run(rethrowing: rethrowing, (backend) async {
+        final invite = await backend.createPipeInvite(
+          _project,
+          _name.text.trim(),
+          _purpose.text.trim(),
+          startId: start.id,
+        );
+        if (mounted) setState(() => _invite = invite);
+      });
 
-  Future<void> _read({bool rethrowing = false}) => _run(
-    rethrowing: rethrowing,
-    (backend) async {
-      final preview = await backend.readPipeInvite(_code.text.trim());
-      if (!mounted) return;
-      setState(() => _preview = preview);
-    },
-  );
+  Future<void> _read({bool rethrowing = false}) =>
+      _run(rethrowing: rethrowing, (backend) async {
+        final preview = await backend.readPipeInvite(_code.text.trim());
+        if (!mounted) return;
+        setState(() => _preview = preview);
+      });
 
-  Future<void> _connect({bool rethrowing = false}) => _run(
-    rethrowing: rethrowing,
-    (backend) async {
-      final preview = _preview;
-      if (preview == null) return;
-      // The backend opens the new pipe itself, where both approve.
-      await backend.acceptPipeInvite(
-        preview.code,
-        _project,
-        name: _name.text.trim(),
-        purpose: _purpose.text.trim(),
-        startId: start.id,
-      );
-    },
-  );
+  Future<void> _connect({bool rethrowing = false}) =>
+      _run(rethrowing: rethrowing, (backend) async {
+        final preview = _preview;
+        if (preview == null) return;
+        // The backend opens the new pipe itself, where both approve.
+        await backend.acceptPipeInvite(
+          preview.code,
+          _project,
+          name: _name.text.trim(),
+          purpose: _purpose.text.trim(),
+          startId: start.id,
+        );
+      });
 
   Future<void> _dismiss({String? reason, bool rethrowing = false}) => _run(
     rethrowing: rethrowing,
@@ -193,6 +187,7 @@ class _PipeStartCardState extends State<PipeStartCard>
   /// it's made; a dismissal moves on.
   @override
   CardAnswer? answerNow() {
+    if (approvesElsewhere) return null;
     if (_invite != null) {
       return CardAnswer(
         key: 'pipeStart/${start.id}',
@@ -215,7 +210,10 @@ class _PipeStartCardState extends State<PipeStartCard>
             'Continue',
             _code.text.trim().isEmpty ? null : () => _read(rethrowing: true),
           )
-        : ('Connect', _project.isEmpty ? null : () => _connect(rethrowing: true));
+        : (
+            'Connect',
+            _project.isEmpty ? null : () => _connect(rethrowing: true),
+          );
     return CardAnswer(
       key: 'pipeStart/${start.id}',
       docked: false,
@@ -305,6 +303,10 @@ class _PipeStartCardState extends State<PipeStartCard>
   ) {
     if (_invite case final invite?) return _made(context, store, invite);
     if (!_waiting) return [_ended(context, store, palette)];
+    // No invite code made, shown or taken on Windows (approve_elsewhere.dart).
+    if (approvesElsewhere) {
+      return [const ApproveElsewhere(text: pipeElsewhereText)];
+    }
     if (!_accept) {
       return [
         ..._fields(store, theySee: true),
@@ -685,6 +687,9 @@ class PipeInviteQr extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (approvesElsewhere) {
+      return const ApproveElsewhere(text: pipeElsewhereText);
+    }
     final palette = Palette.of(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

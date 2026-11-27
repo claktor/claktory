@@ -52,6 +52,27 @@ regexTarget = "match"
 regexes = ['''^/Users/matt$''']
 
 [[rules.allowlists]]
+description = "ProjectFolderPreview as first committed (30a7b762): a made-up /Users/matt home in the protocol's example path (factory.proto's comment and the generated factory.pb.dart), not this machine's home, nothing real behind it. That commit only: fixed to /Users/me before v0.1.26"
+condition = "AND"
+commits = ["30a7b76277113573d4cf57492d53386d6e2c3a98"]
+paths = ['''^proto/factory/v1/factory\.proto$''', '''^app/lib/protocol/factory/v1/factory\.pb\.dart$''']
+regexTarget = "match"
+regexes = ['''^/Users/matt$''']
+
+[[rules.allowlists]]
+description = "The Recovery key row's settings shots as first committed (365b4de6): made-up /Users/matt/Documents and /Users/matt/Desktop protected places in app/test/settings_shots_test.dart, not this machine's home, nothing real behind it. That commit only: fixed to /Users/me before v0.1.26"
+condition = "AND"
+commits = ["365b4de61364408a13767465b968286f963c83b0"]
+paths = ['''^app/test/settings_shots_test\.dart$''']
+regexTarget = "match"
+regexes = ['''^/Users/matt$''']
+
+[[rules.allowlists]]
+description = "9c271e18's commit message names the made-up home its fix replaced (the protocol's example path and the settings shots): that one subject line, exactly"
+regexTarget = "line"
+regexes = ['''Secret scan \(Bruno 52986\): no real person's home folder in examples\. The PreviewProjectFolder example path and two ProtectedPlace roots in settings_shots_test say /Users/me, not /Users/matt; factory\.pb\.dart regenerated''']
+
+[[rules.allowlists]]
 description = "c3f3577f's commit message names the made-up home its fix replaced in those fixtures: that one subject line, exactly"
 regexTarget = "line"
 regexes = ['''secrets_test: import-card fixtures use the placeholder home /Users/me, not /Users/matt \(check-secrets home-path rule\)''']

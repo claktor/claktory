@@ -200,10 +200,11 @@ const EMAIL_CHARS: usize = 120;
 const PURPOSE_CHARS: usize = 300;
 
 /// Text the other side wrote about itself, as kept: one line, no control
-/// characters, at most `cap` characters (cut with "…").
+/// characters nor any that hide or reorder text (`config::clean_name`), at
+/// most `cap` characters (cut with "…").
 pub(crate) fn clean(text: &str, cap: usize) -> String {
     let mut line = String::new();
-    for character in text.chars() {
+    for character in crate::config::clean_name(text).chars() {
         let character = if character.is_control() || character.is_whitespace() { ' ' } else { character };
         if character == ' ' && (line.is_empty() || line.ends_with(' ')) {
             continue;
@@ -3160,6 +3161,26 @@ pub fn messages_for_test(factory: &Factory, pipe: &str) -> Vec<v1::PipeMessage> 
 
 #[cfg(test)]
 mod tests {
+    /// Row 1730: the other side's words about itself arrive without what
+    /// could hide or reorder text where they show.
+    #[test]
+    fn the_other_side_s_names_arrive_without_hidden_characters() {
+        let side = crate::pipe_link::Side {
+            claktory: "Lee\u{202E}gpj.exe".into(),
+            owner_name: "Le\u{200B}e\u{FEFF}".into(),
+            owner_email: "lee@\u{2066}example.com\u{2069}".into(),
+            project: "\u{061C}Site\u{200D}".into(),
+            pipe_name: "Q4\u{2060} plan\u{200E}".into(),
+            purpose: "Share\u{202A} the\nplan".into(),
+        };
+        let peer = super::PeerRecord::from_side(&side, "").to_proto();
+        assert_eq!(
+            (peer.claktory_name.as_str(), peer.owner_name.as_str(), peer.owner_email.as_str(), peer.project_name.as_str(), peer.purpose.as_str()),
+            ("Leegpj.exe", "Lee", "lee@example.com", "Site", "Share the plan")
+        );
+        assert_eq!(super::clean("Q4\u{2060} plan\u{200E}", 80), "Q4 plan");
+    }
+
     #[test]
     fn a_name_the_other_side_chose_is_kept_only_when_claktory_can_show_it_as_its_own() {
         let now = 1_795_000_000_000;

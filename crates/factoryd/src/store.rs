@@ -785,6 +785,11 @@ impl Store {
             open_panels: BTreeMap::new(),
             collapsed: BTreeSet::new(),
             collapsed_folders: BTreeSet::new(),
+            // One project id a line, in the key-value table: no table of its
+            // own, so nothing changes for a backend rolled back to.
+            collapsed_projects: value("collapsed_projects")?
+                .map(|ids| ids.lines().filter(|id| !id.is_empty()).map(str::to_owned).collect())
+                .unwrap_or_default(),
             projects_collapsed: value("projects_collapsed")?.as_deref() == Some("1"),
             chats_collapsed: value("chats_collapsed")?.as_deref() == Some("1"),
             max_open_panes: value("max_open_panes")?.and_then(|value| value.parse().ok()).unwrap_or(0),
@@ -833,6 +838,8 @@ impl Store {
         let folded = |collapsed: bool| collapsed.then(|| "1".to_owned());
         let (projects_collapsed, chats_collapsed) = (folded(state.projects_collapsed), folded(state.chats_collapsed));
         let max_open_panes = (state.max_open_panes != 0).then(|| state.max_open_panes.to_string());
+        let collapsed_projects =
+            (!state.collapsed_projects.is_empty()).then(|| state.collapsed_projects.iter().cloned().collect::<Vec<_>>().join("\n"));
         for (key, value) in [
             ("selected_agent", &state.selected_agent),
             ("focused_project", &state.focused_project),
@@ -840,6 +847,7 @@ impl Store {
             ("projects_collapsed", &projects_collapsed),
             ("chats_collapsed", &chats_collapsed),
             ("max_open_panes", &max_open_panes),
+            ("collapsed_projects", &collapsed_projects),
         ] {
             if let Some(value) = value {
                 transaction.execute("INSERT INTO state (key, value) VALUES (?1, ?2)", [key, value])?;

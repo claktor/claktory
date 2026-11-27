@@ -360,8 +360,8 @@ void main() {
     );
     expect(
       testSentTo(devices: devices.skip(2), thisDevice: 'd4'),
-      'No device gets notifications yet. Turn them on in Claktory on an '
-      'iPhone, iPad or Mac.',
+      'No device gets notifications yet. Turn them on in Claktory on your '
+      'phone, tablet or Mac.',
     );
   });
 
@@ -391,6 +391,25 @@ void main() {
     await _tap(tester, find.text('Send a test notification'));
     expect(find.text("Sent to Matt's iPhone."), findsOneWidget);
     expect(find.text('Sent.'), findsNothing);
+  });
+
+  testWidgets("an Android phone pushes can't reach says why it gets no "
+      'notifications, with nothing to turn on', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    await _show(
+      tester,
+      device: _FakeDevice('unavailable', pushes: true, name: 'This phone'),
+    );
+    await reveal(tester, find.text('Send a test notification'));
+    expect(
+      find.textContaining(
+        "can't get notifications without Google Play services.",
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Turn on'), findsNothing);
+    expect(find.text('Open Settings'), findsNothing);
   });
 
   testWidgets('a backend without them: no Notifications section', (

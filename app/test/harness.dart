@@ -1481,6 +1481,10 @@ class RecordingBackend extends Backend {
       _record(ClientMessage(setReportReader: ask));
 
   @override
+  void withdrawPairing() =>
+      unawaited(_record(ClientMessage(withdrawPairing: WithdrawPairing())));
+
+  @override
   Future<void> setAgentContained(String agentId, {required bool contained}) =>
       _record(
         ClientMessage(

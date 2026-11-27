@@ -19,6 +19,8 @@ http = "1"
 httpdate = "1"
 indexmap = { version = "2", features = ["serde"] }
 libc = "0.2"
+# The secrets redactor's search for long values with nothing to index (secrets.rs `Plain`).
+memchr = "2"
 parking_lot = "0.12"
 rand = "0.10"
 regex = "1"

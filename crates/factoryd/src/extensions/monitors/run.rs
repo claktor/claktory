@@ -325,6 +325,8 @@ fn trigger(factory: &Arc<Factory>, monitor: &mut Monitor, trigger: Trigger, now:
         pipe_seqs: Vec::new(),
         provenance: None,
     };
+    // Another agent's prompt carries what that agent read (row 1721).
+    crate::errands::relayed(factory, &monitor.agent, &monitor.created_by);
     factory.deliver_event(&monitor.agent, text, event);
     monitor.last_fired = Some(now);
     monitor.carry.clear();

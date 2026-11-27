@@ -10,7 +10,7 @@ import '../identity.dart';
 import '../mobile/metrics.dart';
 import '../user_apps/session.dart';
 import '../tunnel/api/dm.dart' show DmMessage;
-import '../visible_codes.dart' show proseCodes;
+import '../visible_codes.dart' show nameInText, proseCodes;
 import 'contacts.dart';
 import 'e2ee.dart';
 import 'problems.dart';
@@ -206,7 +206,7 @@ class _ReportFormState extends State<ReportForm> {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    final title = 'Report ${widget.person.label}';
+    final title = 'Report ${widget.person.labelInText}';
     final sent = _sent;
     if (sent != null) {
       return FormFrame(
@@ -225,7 +225,7 @@ class _ReportFormState extends State<ReportForm> {
       title: title,
       body:
           "Claktory's team will look at it. "
-          "${widget.person.name.isEmpty ? 'They' : widget.person.name} won't "
+          "${widget.person.name.isEmpty ? 'They' : nameInText(widget.person.name)} won't "
           "know you reported them. Reporting doesn't block them or decline "
           'their request: do that too, if you want.',
       // Ticked messages are work too: Cancel or a swipe asks first
@@ -310,10 +310,9 @@ extension on _ReportFormState {
                 child: _CheckRow(
                   on: _picked.contains(message.seq),
                   // Their words: what reorders text shows by its code.
-                  label: proseCodes(
-                    '${message.fromAccount == me ? 'You' : name}: '
-                    '${message.content.text}',
-                  ),
+                  label:
+                      '${message.fromAccount == me ? 'You' : nameInText(name)}: '
+                      '${proseCodes(message.content.text ?? '')}',
                   // A few lines each, so a long one doesn't fill screens
                   // (row 200); the whole text goes with the report.
                   maxLines: 4,

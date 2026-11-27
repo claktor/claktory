@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
+import 'approve_elsewhere.dart';
 import 'account.dart'
     show
         CodeBoxes,
@@ -1683,9 +1684,14 @@ class _DiscoveredDeviceState extends State<_DiscoveredDevice> {
               style: type.body.copyWith(color: palette.text),
             ),
             Text(
-              'To allow it, type the number its screen shows. If you '
-              "didn't just set up a new device, don't allow it. Someone "
-              'may be using your email: secure it.',
+              // Allowed on a phone or Mac, never here (approve_elsewhere.dart).
+              approvesElsewhere
+                  ? "$approveElsewhereText If you didn't just set up a new "
+                        "device, don't allow it. Someone may be using your "
+                        'email: secure it.'
+                  : 'To allow it, type the number its screen shows. If you '
+                        "didn't just set up a new device, don't allow it. "
+                        'Someone may be using your email: secure it.',
               style: type.caption.copyWith(color: palette.textMuted),
             ),
             if (_error != null)
@@ -1696,24 +1702,26 @@ class _DiscoveredDeviceState extends State<_DiscoveredDevice> {
           ],
         ),
         actions: [
-          SizedBox(
-            width: DeviceNumberField.widthFor(context),
-            child: DeviceNumberField(
-              controller: _number,
-              onSubmitted: (_) {
-                if (ready) _decide(device, allow: true);
-              },
+          if (!approvesElsewhere) ...[
+            SizedBox(
+              width: DeviceNumberField.widthFor(context),
+              child: DeviceNumberField(
+                controller: _number,
+                onSubmitted: (_) {
+                  if (ready) _decide(device, allow: true);
+                },
+              ),
             ),
-          ),
-          Button(
-            label: "Don't allow",
-            onPressed: _deciding ? null : () => _decide(device, allow: false),
-          ),
-          Button(
-            label: 'Allow',
-            primary: true,
-            onPressed: ready ? () => _decide(device, allow: true) : null,
-          ),
+            Button(
+              label: "Don't allow",
+              onPressed: _deciding ? null : () => _decide(device, allow: false),
+            ),
+            Button(
+              label: 'Allow',
+              primary: true,
+              onPressed: ready ? () => _decide(device, allow: true) : null,
+            ),
+          ],
         ],
       ),
     );

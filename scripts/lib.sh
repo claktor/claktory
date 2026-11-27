@@ -696,9 +696,48 @@ x86_ssh() { # ARGS... (the remote command, already quoted)
   ssh "${opts[@]}" "$X86_REMOTE" "$@"
 }
 
+# The x86_64 host is someone's own machine with its own work, which comes
+# first (Matt, 27 Nov): a build starts there only when it fits well inside
+# what's free right then, and is held to that size.
+#
+#   x86_room MEM_GB CPUS DISK_GB   waits until the host has no other build of
+#       ours running, MEM_GB is at most half its MemAvailable, CPUS at most
+#       half its idle cores, and DISK_GB still leaves 100 GB free; then sets
+#       X86_CPUS to CPUS. It checks every minute for FACTORY_X86_WAIT seconds
+#       (1800 unless set) and then refuses, saying why.
+#
+# engine run on the host passes x86_room (FACTORY_X86_MEM_GB, 16 unless set;
+# FACTORY_X86_CPUS, 8; FACTORY_X86_DISK_GB, 20) and caps the container at
+# that memory, with no swap, and those cores.
+x86_room() { # MEM_GB CPUS DISK_GB
+  local mem="$1" cpus="$2" disk="$3" waited=0 wait="${FACTORY_X86_WAIT:-1800}" probe why
+  while :; do
+    # One line: MemAvailable (kB), cores, load 1 and 5 min, free kB in $HOME
+    # (podman's storage) and /tmp (a run's mounts), our containers and builds.
+    probe="$(x86_ssh 'printf "%s %s %s %s %s %s\n" "$(sed -n "s/^MemAvailable: *\([0-9]*\) kB/\1/p" /proc/meminfo)" "$(nproc)" "$(cut -d" " -f1,2 /proc/loadavg)" "$(df -Pk "$HOME" | awk "NR==2{print \$4}") $(df -Pk /tmp | awk "NR==2{print \$4}")" "$(podman ps -q | wc -l)" "$(pgrep -u "$(id -u)" -cf "^podman (build|run)" || true)"' </dev/null)" || {
+      echo "the x86_64 host $X86_REMOTE doesn't answer: nothing started there" >&2; return 1; }
+    why="$(awk -v m="$mem" -v c="$cpus" -v d="$disk" '
+      NF != 8 { print "its resources could not be read (" $0 ")"; exit }
+      { avail = $1 / 1048576; load = ($3 > $4 ? $3 : $4); idle = $2 - load; free = ($5 < $6 ? $5 : $6) / 1048576 }
+      $7 + $8 > 0 { print "another build is running there"; exit }
+      m > avail / 2 { printf "%d GB is more than half its available memory (%.0f GB)\n", m, avail; exit }
+      c > idle / 2 { printf "%d cores is more than half its idle ones (%.1f of %d, load %.1f)\n", c, idle, $2, load; exit }
+      free - d < 100 { printf "%d GB would leave under 100 GB of its %.0f GB free disk\n", d, free; exit }' <<<"$probe")"
+    [[ -n "$why" ]] || { X86_CPUS="$cpus"; return 0; }
+    if ((waited >= wait)); then
+      echo "the x86_64 host $X86_REMOTE has no room for this build ($mem GB, $cpus cores, $disk GB): $why; nothing started there" >&2
+      return 1
+    fi
+    ((waited > 0)) || echo "waiting for room on $X86_REMOTE: $why" >&2
+    sleep 60; waited=$((waited + 60))
+  done
+}
+
 engine() {
   if [[ -z "${X86_REMOTE:-}" ]]; then "$ENGINE" "$@"; return; fi
-  local dir args=() arg spec path inside mode n=0 code=0 writable=() name
+  local dir args=() arg spec path inside mode n=0 code=0 writable=() name mem="${FACTORY_X86_MEM_GB:-16}"
+  # A container starts only when the host has room for it, before anything is copied there.
+  [[ "$1" != run ]] || x86_room "$mem" "${FACTORY_X86_CPUS:-8}" "${FACTORY_X86_DISK_GB:-20}" || return 1
   # A run's own folder; any a killed run left behind over a day ago goes.
   dir="$(x86_ssh "find /tmp -maxdepth 1 -name 'claktory-x86.*' -user \"\$(id -un)\" -mmin +1440 -exec podman unshare rm -rf {} + 2>/dev/null; mktemp -d /tmp/claktory-x86.XXXXXX")" || return 1
   [[ "$dir" =~ ^/tmp/claktory-x86\.[A-Za-z0-9]+$ ]] || { echo "the x86_64 host gave no folder for the run" >&2; return 1; }
@@ -711,7 +750,11 @@ engine() {
       n=$((n + 1))
       x86_ssh "mkdir $dir/m$n" || { code=1; break; }
       if [[ "$mode" == ro ]]; then
-        COPYFILE_DISABLE=1 tar --no-xattrs --exclude=./target --exclude=./app --exclude=./.git -C "$path" -cf - . |
+        # target, app and .git left out at its top only: bsdtar's
+        # --exclude=./app matches at any depth, and dropped app/ from a
+        # mount whose top was a folder holding the repository (#349).
+        (cd "$path" && find . -mindepth 1 -maxdepth 1 ! -name target ! -name app ! -name .git -print0 |
+          COPYFILE_DISABLE=1 tar --no-xattrs --null -T - -cf -) |
           x86_ssh "tar -xf - -C $dir/m$n" || { code=1; break; }
         args+=(-v "$dir/m$n:$inside:ro")
       else
@@ -725,6 +768,8 @@ engine() {
       args+=("$arg")
     fi
   done
+  # Held to the size x86_room let in: that memory, no swap, those cores.
+  [[ "${args[0]}" != run ]] || args=(run --memory "${mem}g" --memory-swap "${mem}g" --cpus "$X86_CPUS" "${args[@]:1}")
   if ((code == 0)); then
     x86_ssh "$(printf '%q ' podman "${args[@]}")" </dev/null || code=$?
     # What the container wrote comes back, and only that.

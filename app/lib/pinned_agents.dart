@@ -333,6 +333,9 @@ class _PointerMenuRowState<T> extends State<_PointerMenuRow<T>> {
     return Semantics(
       button: true,
       label: item.label,
+      // Its own tap, as excluding drops the row's: VoiceOver's VO-Space
+      // (Abbacchio's row 1716).
+      onTap: _choose,
       excludeSemantics: true,
       child: FocusableActionDetector(
         mouseCursor: SystemMouseCursors.click,

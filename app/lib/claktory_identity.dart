@@ -10,15 +10,17 @@ import 'mobile/metrics.dart' show TypeScale;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'settings_view.dart' show SettingRequests, SettingRow;
+import 'visible_codes.dart' show nameInText;
 
 /// A Claktory's name, the same on every device (`Settings.name`): as it
 /// said on connecting until its Settings come, and before that as its
 /// pairing code says ("This Mac" for this Mac's own).
 String claktoryName(Backend backend) {
   final name = backend.workspace.workspace.settings.name;
-  if (name.isNotEmpty) return name;
-  if (backend.welcomeName.isNotEmpty) return backend.welcomeName;
-  return backend.target?.label ?? thisMacName;
+  // Whatever it holds, it never reorders the words around it (row 1730).
+  if (name.isNotEmpty) return nameInText(name);
+  if (backend.welcomeName.isNotEmpty) return nameInText(backend.welcomeName);
+  return nameInText(backend.target?.label ?? thisMacName);
 }
 
 /// [claktoryName] where Settings heads the Claktory's sections or names

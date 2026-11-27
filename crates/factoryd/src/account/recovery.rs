@@ -59,6 +59,9 @@ pub(super) struct Waiting {
     pub seen_ms: i64,
     /// Its statements check (`checked`): the person may choose to use it.
     pub checked: bool,
+    /// Claktory's alert about it in Needs you, read once the person uses
+    /// it (Abbacchio's row 1729b); empty when none was kept.
+    pub alert_id: String,
 }
 
 /// What VaultState says of the account's key.
@@ -106,7 +109,11 @@ fn view(factory: &Factory, config: &Config) -> View {
         view.waiting = true;
         view.waiting_made_on = name_of(config, &saved.claktory_id, &waiting.made_by, &waiting.made_name);
         view.waiting_made_ms = waiting.made_ms;
-    } else if sealed.is_some() && !saved.recovery_made_by.is_empty() && factory.vault.account_covered_now() {
+    }
+    // Still covered while a newer key waits, or one that doesn't check
+    // came: the vault stays sealed to the key that covered it, which still
+    // opens it (Abbacchio's row 1729a).
+    if sealed.is_some() && !saved.recovery_made_by.is_empty() && factory.vault.account_covered_now() {
         view.covered = true;
         view.made_on = name_of(config, &saved.claktory_id, &saved.recovery_made_by, &saved.recovery_made_name);
         view.made_ms = saved.recovery_made_ms;
@@ -187,7 +194,9 @@ pub(super) async fn compare(factory: &Arc<Factory>, given: Option<RecoveryKey>) 
                 inner.saved.recovery_made_by.clear();
                 inner.saved.recovery_waiting = None;
             }
-            (Some(_), _) => inner.saved.recovery_made_by.clear(),
+            // Another key: the vault stays sealed to the one it was, and
+            // who made that one stays known (row 1729a).
+            (Some(_), _) => {}
         }
     }
     if let Some(key) = given.filter(|key| sealed.as_deref() != Some(key.public_key.as_str())) {
@@ -213,6 +222,7 @@ fn wait(factory: &Factory, account_id: &str, key: &RecoveryKey, checked: bool) {
                 made_ms: key.set_at.saturating_mul(1000),
                 seen_ms: now_ms(),
                 checked,
+                alert_id: String::new(),
             });
         }
         new
@@ -223,7 +233,11 @@ fn wait(factory: &Factory, account_id: &str, key: &RecoveryKey, checked: bool) {
         let ours = factory.account.lock().saved.claktory_id.clone();
         let made_on = name_of(&config, &ours, &key.claktory_id, &key.claktory_name);
         let made_on = if made_on.is_empty() { NO_LONGER.to_owned() } else { made_on };
-        crate::notify::host_alert(factory, &config, &alert(checked, &made_on, key.set_at.saturating_mul(1000)));
+        let alert_id = crate::notify::host_alert_kept(factory, &config, &alert(checked, &made_on, key.set_at.saturating_mul(1000)));
+        let mut inner = factory.account.lock();
+        if let Some(waiting) = inner.saved.recovery_waiting.as_mut().filter(|waiting| waiting.public_key == key.public_key) {
+            waiting.alert_id = alert_id;
+        }
     }
 }
 
@@ -247,7 +261,7 @@ fn alert(checked: bool, made_on: &str, made_ms: i64) -> String {
 
 /// UseRecoveryKey: the person chose to seal the vault to claktory.com's
 /// current key, from a device paired here (or this computer's own app).
-pub(crate) async fn use_new(factory: &Arc<Factory>, device: &str, tool: bool) -> Result<(), RequestError> {
+pub(crate) async fn use_new(factory: &Arc<Factory>, device: &str, device_name: &str, tool: bool) -> Result<(), RequestError> {
     super::enabled(factory)?;
     let account_config = factory.lock().config.account.clone();
     let owner = super::owner(factory, &account_config).map(|owner| owner.account_id);
@@ -285,6 +299,10 @@ pub(crate) async fn use_new(factory: &Arc<Factory>, device: &str, tool: bool) ->
     }
     account.save();
     record(factory, "You chose to use your account's new recovery key here", waiting.seen_ms);
+    // Its alert is done with: read, on the device that chose.
+    if !waiting.alert_id.is_empty() {
+        crate::notify::alerts::read(factory, std::slice::from_ref(&waiting.alert_id), device, device_name)?;
+    }
     factory.vault_changed();
     changed(factory);
     Ok(())
@@ -405,7 +423,7 @@ mod tests {
 
     #[test]
     fn a_name_from_claktory_com_shows_on_one_line_with_nothing_hidden() {
-        assert_eq!(name("Mac\u{202e}mini\nOne"), "MacminiOne");
+        assert_eq!(name("Mac\u{202e}mini\nOne"), "Macmini One");
         assert_eq!(name(&"x".repeat(100)).chars().count(), 40);
         assert_eq!(name(""), "");
     }

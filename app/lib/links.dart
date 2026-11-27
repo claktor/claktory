@@ -15,6 +15,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'approve_elsewhere.dart';
 import 'connections.dart';
 import 'controls.dart' show showModal;
 import 'devices.dart' show thisDeviceKind;
@@ -323,6 +324,23 @@ class _LinkOpenerState extends State<LinkOpener> {
     if (link == null) return;
     final asked = parseLink(link);
     if (asked == null) return;
+    // Windows takes no code, a link's included: refused, unread, with where
+    // it's done (approve_elsewhere.dart).
+    if (approvesElsewhere) {
+      showModal(
+        context,
+        (context, close) => FormFrame(
+          title: "Can't use this link",
+          body: addClaktoryElsewhereText,
+          fields: const [],
+          error: null,
+          submitLabel: 'OK',
+          onSubmit: close,
+          onCancel: close,
+        ),
+      );
+      return;
+    }
     // A link takes the person out of the phone's menu, as a deep link
     // dismisses what's open; what it asks in a sheet would otherwise open
     // behind the menu.

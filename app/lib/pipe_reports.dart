@@ -1311,6 +1311,7 @@ class ReadsReportsMark extends StatelessWidget {
     return Semantics(
       button: true,
       label: text,
+      onTap: () => showReports(context, reader: agent),
       excludeSemantics: true,
       child: Pressable(
         onTap: () => showReports(context, reader: agent),

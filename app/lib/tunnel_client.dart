@@ -69,6 +69,12 @@ abstract interface class Tunnel {
   /// device homes on them from its next endpoint on, and dials through them.
   void setRelays(List<String> relays);
 
+  /// Whether the app is idle: a phone or tablet left untouched for a
+  /// minute with nothing arriving. While it is, the connection's paths are
+  /// checked every 25 s instead of every 2 to 5, so the radio can rest; back
+  /// from idle they're pinged at once and checked as before.
+  void setIdle(bool idle);
+
   /// Listens on this device's 127.0.0.1 and ::1 at [port] and forwards
   /// each connection to that port on the backend's machine, or to [target]
   /// there when given (a website shared over a pipe, #503) (ALPN
@@ -174,6 +180,9 @@ class _RustTunnel implements Tunnel {
 
   @override
   void setRelays(List<String> relays) => _handle.setRelays(relays: relays);
+
+  @override
+  void setIdle(bool idle) => _handle.setIdle(idle: idle);
 
   @override
   Future<PortForward> forwardPort(int port, {int? target}) async {

@@ -626,7 +626,7 @@ fn last_shipped_rivet_prompt(current: &str) -> String {
         .lines()
         .filter(|line| {
             !line.starts_with("- A connected service")
-                && !line.starts_with("- Ask {{user}} one thing per card")
+                && !line.starts_with("- Ask {{user}} one thing per request")
                 && !line.starts_with("- Scheduled jobs, recurring chores")
                 && !line.starts_with("- You look after this machine's health")
                 && !line.starts_with("- When Claktory tells you a newer version of a model")
@@ -634,8 +634,8 @@ fn last_shipped_rivet_prompt(current: &str) -> String {
                 && !line.starts_with("- Proposals from agents say what's needed")
         })
         .collect();
-    let approved = " When {{user}} approves an agent's request for a secret, you're told what it needs and why: give it one of the vault's secrets that fits (secrets_grant with request, and aliases when the variable names differ), or, when none fits, ask {{user}} to add one with secrets_collect, which opens a filled-in card in your conversation. Hold these to the same bar: check the request's reason against the agent's work, and give the narrower thing when in doubt.";
-    let import = " When a secret is a file already on this computer (a keystore, a credentials file), never ask {{user}} to copy its contents into the vault by hand; have the agent that needs it ask to import it (secrets_request with import), which {{user}} approves on a card that shows exactly which file.";
+    let approved = " When {{user}} approves an agent's request for a secret, you're told what it needs and why: give it one of the vault's secrets that fits (secrets_grant with request, and aliases when the variable names differ), or, when none fits, ask {{user}} to add one with secrets_collect, which opens a filled-in request in your conversation. Hold these to the same bar: check the request's reason against the agent's work, and give the narrower thing when in doubt.";
+    let import = " When a secret is a file already on this computer (a keystore, a credentials file), never ask {{user}} to copy its contents into the vault by hand; have the agent that needs it ask to import it (secrets_request with import), which {{user}} approves in a request that shows exactly which file.";
     before.join("\n").replace(import, "").replace(approved, "").replace("{{user}}", "the person").replace("{{User}}", "The person")
 }
 

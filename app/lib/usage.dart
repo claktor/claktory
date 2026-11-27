@@ -129,6 +129,10 @@ class AddProviderButton extends StatelessWidget {
       container: true,
       button: true,
       label: addProviderLabel,
+      // Pointer only for now: its 24pt is short of a finger's target, which
+      // a tap of its own would claim for VoiceOver on a phone (until it
+      // grows, VoiceOver's touch there reaches it as a tap).
+      onTap: touchFirst(context) ? null : onTap,
       excludeSemantics: true,
       child: HoverCard(
         card: (context) => const Text(addProviderLabel),

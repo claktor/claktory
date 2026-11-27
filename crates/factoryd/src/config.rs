@@ -57,6 +57,8 @@ const SHIPPED_RIVET_PROMPTS: &[&str] = &[
     // Approved proposals' grants: review before passing the id.
     "5956a04b1a664ec031dc4c546b0ba7b365f0d19f0b3e4152e6b9ffce2d021d72",
     "5db56c606e08b97af5b757b7f6b4ceff0cb31f3e27dfa18e3e6e8d6120ab0080",
+    // What an agent asks of the person is a request (#588).
+    "99b17df7a53525dc507dcd12c697581a3ebd25ad082ebc77d2caac41a693ed73",
 ];
 /// Rivet is interactive, so it gets medium effort, the Opus 5.5 default.
 const RIVET_EFFORT: &str = "medium";
@@ -810,7 +812,7 @@ pub enum Invalid {
     PromptCacheNotOffered(String),
     #[error("color \"{0}\" must be one of blue, violet, green, pink, teal, amber, red, slate")]
     BadColor(String),
-    #[error("name \"{0}\" can't have line breaks or other control characters")]
+    #[error("name \"{0}\" can't have line breaks, or characters that hide or reorder text")]
     BadName(String),
     #[error("agent \"{agent}\": extensions setting \"{setting}\" must be {expected}")]
     BadExtensionSetting { agent: String, setting: String, expected: String },
@@ -833,8 +835,37 @@ impl Config {
                 resolve(&mut folder.path, root);
             }
         }
+        config.clean_names();
         config.validate()?;
         Ok(config)
+    }
+
+    /// Takes out of every name the file holds what `validate` refuses in
+    /// one (`clean_name`): a file someone or an agent edited, or one kept
+    /// before names were checked so, still reads, and no name can reorder
+    /// or hide what's around it where it shows (row 1730, Fugo). A name
+    /// left empty is its entry's id.
+    fn clean_names(&mut self) {
+        let clean = |name: &mut String, id: &str| {
+            if name_hides(name) {
+                *name = clean_name(name);
+                if name.is_empty() {
+                    id.clone_into(name);
+                }
+            }
+        };
+        clean(&mut self.name, "");
+        clean(&mut self.user.name, "");
+        for project in &mut self.projects {
+            clean(&mut project.name, &project.id);
+            for folder in &mut project.folders {
+                clean(&mut folder.name, &folder.id);
+            }
+        }
+        for agent in &mut self.agents {
+            clean(&mut agent.name, &agent.id);
+            clean(&mut agent.role, "");
+        }
     }
 
     /// This Claktory's name: as set, or this computer's.
@@ -988,15 +1019,15 @@ impl Config {
                 }
             }
         }
-        if self.name.chars().any(char::is_control) {
-            return Err(Invalid::BadName(self.name.clone()));
-        }
+        check_name(&self.name)?;
+        check_name(&self.user.name)?;
         if !self.color.is_empty() && !AGENT_COLORS.contains(&self.color.as_str()) {
             return Err(Invalid::BadColor(self.color.clone()));
         }
         let mut agent_ids = HashSet::new();
         for agent in &self.agents {
             check_entry(&agent.id, &agent.name, &mut agent_ids)?;
+            check_name(&agent.role)?;
             if let Some(project) = &agent.project
                 && self.project(project).is_none()
             {
@@ -1138,6 +1169,44 @@ impl Config {
     }
 }
 
+/// Whether `name` holds a character no name may: a line break or other
+/// control, or one that shows nothing or reorders the text around it (bidi
+/// controls, zero widths and joiners, the BOM: the set DM certificates'
+/// names are checked against, `certificate::hidden_in`), but for an emoji's
+/// own variation selector, right after it (❤️).
+pub(crate) fn name_hides(name: &str) -> bool {
+    claktory_dm_crypto::certificate::hidden_in(name).next().is_some()
+}
+
+/// `name` without what `name_hides` finds: line breaks and tabs as spaces,
+/// the rest left out, trimmed. For names that come from outside
+/// (a pipe's other side, a device's own name, a friend's) and names in a
+/// file.
+pub(crate) fn clean_name(name: &str) -> String {
+    let mut after_visible = false;
+    let mut kept = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_whitespace() {
+            kept.push(' ');
+            after_visible = false;
+        } else if ('\u{FE00}'..='\u{FE0F}').contains(&c) {
+            if after_visible {
+                kept.push(c);
+            }
+            after_visible = false;
+        } else if !claktory_dm_crypto::certificate::hidden(c) {
+            kept.push(c);
+            after_visible = true;
+        }
+    }
+    kept.trim().to_owned()
+}
+
+/// Refuses a name `name_hides` finds something in, saying it without it.
+fn check_name(name: &str) -> Result<(), Invalid> {
+    if name_hides(name) { Err(Invalid::BadName(clean_name(name))) } else { Ok(()) }
+}
+
 fn check_entry(id: &str, name: &str, seen: &mut HashSet<String>) -> Result<(), Invalid> {
     // Ids name folders on disk, so they must not be able to escape them.
     if id.is_empty() || !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
@@ -1149,7 +1218,7 @@ fn check_entry(id: &str, name: &str, seen: &mut HashSet<String>) -> Result<(), I
     if name.trim().is_empty() {
         return Err(Invalid::EmptyName(id.to_owned()));
     }
-    Ok(())
+    check_name(name)
 }
 
 /// Whether `prompt` is a Rivet prompt some version of Claktory shipped.
@@ -1434,6 +1503,9 @@ pub struct State {
     /// Project folders (project id, folder id) whose agents are folded away in the sidebar.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub collapsed_folders: std::collections::BTreeSet<(String, String)>,
+    /// Projects folded in the sidebar (Lucy's ux/projects-sidebar.md §4).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub collapsed_projects: std::collections::BTreeSet<String>,
     /// The sidebar's Projects and Chats sections, folded away.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub projects_collapsed: bool,
@@ -1460,6 +1532,42 @@ pub struct FolderView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Row 1730: what a name may not hold, and the same name without it.
+    #[test]
+    fn a_name_holds_nothing_that_hides_or_reorders_text() {
+        for hiding in ["Ana\u{202E}", "A\u{2066}na\u{2069}", "A\u{200E}na", "Ana\u{061C}", "A\u{200B}na", "A\u{200D}na", "\u{FEFF}Ana", "An\u{2060}a", "Ana\n", "A\u{7}na", "\u{FE0F}Ana"] {
+            assert!(name_hides(hiding), "{hiding:?}");
+        }
+        for fine in ["Ana", "Ana Lee", "Ana \u{2764}\u{FE0F}", "Zoë", "Студия", "スタジオ", ""] {
+            assert!(!name_hides(fine), "{fine:?}");
+        }
+        assert_eq!(clean_name("\u{202E}Mac\u{200B} mini\u{2066}\u{2069}\u{FEFF}"), "Mac mini");
+        assert_eq!(clean_name("Two\nlines\u{7}"), "Two lines");
+        assert_eq!(clean_name("\u{2764}\u{200B}\u{FE0F}\u{FE0F} \u{FE0F}x"), "\u{2764}\u{FE0F} x");
+        assert!(!name_hides(&clean_name("\u{2764}\u{200B}\u{FE0F}\u{FE0F} \u{FE0F}x")));
+        assert_eq!(clean_name("\u{200B}\u{202E}"), "");
+    }
+
+    /// A file's names are cleaned, not refused, so a file kept before still
+    /// reads; one left empty is its entry's id. A device's are refused.
+    #[test]
+    fn names_in_the_file_are_cleaned_and_from_a_device_refused() {
+        let text = r#"{"name": "Studio\u202e", "user": {"name": "Ma\u200btt"},
+            "projects": [{"id": "site", "name": "\u200b", "path": "/tmp/site", "folders": [{"id": "app", "name": "App\u2066", "path": "/tmp/app"}]}],
+            "agents": [{"id": "ana", "name": "A\u202ana", "role": "Back\u200dend", "project": "site",
+                "prompt": "", "model": "anthropic/claude-haiku-4-5", "effort": "low"}]}"#;
+        let config = Config::parse(text, Path::new("/tmp")).expect("reads");
+        assert_eq!((config.name.as_str(), config.user.name.as_str()), ("Studio", "Matt"));
+        assert_eq!((config.projects[0].name.as_str(), config.projects[0].folders[0].name.as_str()), ("site", "App"));
+        assert_eq!((config.agents[0].name.as_str(), config.agents[0].role.as_str()), ("Ana", "Backend"));
+        let mut renamed = config.clone();
+        renamed.agents[0].name = "A\u{202E}na".into();
+        assert!(matches!(renamed.validate(), Err(Invalid::BadName(name)) if name == "Ana"));
+        let mut renamed = config;
+        renamed.projects[0].folders[0].name = "App\u{FEFF}".into();
+        assert!(matches!(renamed.validate(), Err(Invalid::BadName(_))));
+    }
 
     /// How long each model's cache lasts: Anthropic's an hour unless set;
     /// OpenAI's from GPT-5.6 on 30 minutes unless set, the subscription's

@@ -16,7 +16,7 @@ import 'diagnostics_record.dart' show PushStep;
 import 'identity.dart';
 import 'mobile/lines.dart' show ActionLine;
 import 'mobile/metrics.dart';
-import 'mobile/push.dart' show PushRegistrar;
+import 'mobile/push.dart' show PushRegistrar, openNotificationSettings;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'settings_view.dart' show SettingRequests, SettingRow, controlWidth;
@@ -383,8 +383,8 @@ String testSentTo({
   ];
   return switch (names) {
     [] =>
-      'No device gets notifications yet. Turn them on in Claktory on an '
-          'iPhone, iPad or Mac.',
+      'No device gets notifications yet. Turn them on in Claktory on your '
+          'phone, tablet or Mac.',
     [final one] => 'Sent to $one.',
     [...final rest, final last] => 'Sent to ${rest.join(', ')} and $last.',
   };
@@ -427,7 +427,9 @@ abstract interface class DeviceNotifications {
       return PushNotifications(
         registrar: registrar,
         name: 'This $thisDeviceKind',
-        openSettings: camera.openSettings,
+        openSettings: defaultTargetPlatform == TargetPlatform.android
+            ? openNotificationSettings
+            : camera.openSettings,
       );
     }
     // Windows' runner answers the same channel
@@ -653,6 +655,13 @@ class _ThisDeviceNotificationsState extends State<ThisDeviceNotifications>
       'not_determined' => (
         'Not turned on yet.',
         Button(label: 'Turn on', onPressed: _ask),
+      ),
+      // An Android phone pushes can't reach (no Google Play services; a
+      // build without Firebase reads the same). Trish 50964.
+      'unavailable' => (
+        "This $thisDeviceKind can't get notifications without Google Play "
+            "services. Open Claktory to see what's new.",
+        null,
       ),
       _ when failed && !registered => (
         "Couldn't set up notifications. Claktory tries again each time it "

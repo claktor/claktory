@@ -660,6 +660,9 @@ class _WhoAsks extends StatelessWidget {
         if (agent?.role case final role? when role.isNotEmpty) role,
       ].join(', '),
       hint: "Opens $who's conversation",
+      // Its own tap, since excludeSemantics drops the Pressable's (VoiceOver
+      // on a Mac; Abbacchio's row 1716, Illuso 50971).
+      onTap: open,
       excludeSemantics: true,
       child: Pressable(onTap: open, builder: (context, _) => clamped),
     );
@@ -1088,6 +1091,7 @@ class _QueueRow extends StatelessWidget {
       button: true,
       selected: current,
       label: [who, what, ?ending].join(', '),
+      onTap: onTap,
       excludeSemantics: true,
       child: Pressable(
         onTap: onTap,

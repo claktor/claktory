@@ -52,6 +52,39 @@ val flutterTargets = providers.gradleProperty("target-platform").orNull?.split("
     ?: listOf("android-arm", "android-arm64", "android-x64")
 val compilesX86 = "android-x64" in flutterTargets
 
+/// Firebase's Android app configs (google-services.json, one per app:
+/// com.claktory.app, com.claktory.app.dev), for notifications through FCM
+/// (PushChannel.kt): -PclaktoryFirebaseConfig=FILE[,FILE] or
+/// CLAKTORY_FIREBASE_CONFIG, never committed (the API key in them would
+/// stop the secrets check; the vault hands them to the build). Each
+/// variant gets the values Firebase starts from (google_app_id and the
+/// rest, as Google's plugin would write them) from the client for its
+/// application id; without one it has none, Firebase doesn't start, and
+/// the phone reads as getting no notifications (DESIGN.md, Notifications).
+val firebaseClients: Map<String, Map<String, String>> = (
+    providers.gradleProperty("claktoryFirebaseConfig").orNull
+        ?: providers.environmentVariable("CLAKTORY_FIREBASE_CONFIG").orNull
+    ).orEmpty().split(",").map { it.trim() }.filter { it.isNotEmpty() }.flatMap { path ->
+        val file = File(path)
+        require(file.isFile) { "No Firebase config at $path" }
+        @Suppress("UNCHECKED_CAST")
+        val json = groovy.json.JsonSlurper().parse(file) as Map<String, Any?>
+        val project = json["project_info"] as? Map<String, Any?> ?: emptyMap()
+        (json["client"] as? List<Map<String, Any?>> ?: emptyList()).mapNotNull { client ->
+            val info = client["client_info"] as? Map<String, Any?> ?: return@mapNotNull null
+            val packageName = (info["android_client_info"] as? Map<String, Any?>)?.get("package_name") as? String
+                ?: return@mapNotNull null
+            val apiKey = (client["api_key"] as? List<Map<String, Any?>>)?.firstOrNull()?.get("current_key") as? String
+            packageName to listOfNotNull(
+                (info["mobilesdk_app_id"] as? String)?.let { "google_app_id" to it },
+                (project["project_number"] as? String)?.let { "gcm_defaultSenderId" to it },
+                apiKey?.let { "google_api_key" to it },
+                (project["project_id"] as? String)?.let { "project_id" to it },
+                (project["storage_bucket"] as? String)?.let { "google_storage_bucket" to it },
+            ).toMap()
+        }
+    }.toMap()
+
 android {
     namespace = "com.claktory.app"
     compileSdk = pin("android.compileSdk").toInt()
@@ -130,7 +163,16 @@ android {
 
     packaging {
         // Libraries load straight from the APK: stored, 16 KiB-aligned.
-        jniLibs { useLegacyPackaging = false }
+        jniLibs {
+            useLegacyPackaging = false
+            // Only the ABIs shipped, whatever a library brings: Flutter's
+            // plugin adds its own default ABI filters to a release build,
+            // so a dependency's native library (Firebase's datastore) came
+            // in for 32-bit ARM too, and Play would offer the app to phones
+            // it can't run on. check_artifact.py refuses one as well.
+            excludes += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64", "armeabi", "mips", "mips64")
+                .filter { it !in shippedAbis }.map { "/lib/$it/**" }
+        }
     }
 
     // AGP's dependency list, encrypted to Google, goes into the APK's
@@ -164,6 +206,12 @@ dependencies {
     // the version url_launcher_android already puts in every build, whose
     // dependencies (androidx.core and the rest) come with it.
     implementation("androidx.browser:browser:1.9.0") { isTransitive = false }
+    // Notifications through Firebase Cloud Messaging (PushChannel.kt,
+    // ClaktoryMessagingService.kt): the token, and the pushes Claktory's
+    // relay sends, sealed end to end. Exact version, from Google's Maven;
+    // it brings Firebase's common parts and Google Play services' messaging
+    // client with it. Started only once the person allows notifications.
+    implementation("com.google.firebase:firebase-messaging:26.0.2")
     testImplementation("junit:junit:4.13.2")
     // Android's org.json is a stub in local unit tests; the stores' tests
     // run against the reference implementation of the same API.
@@ -200,6 +248,18 @@ androidComponents {
             variant.makeResValueKey("string", "link_scheme"),
             com.android.build.api.variant.ResValue(scheme),
         )
+        // Firebase's start values for this variant's app, when the build was given them.
+        val applicationId = if (variant.flavorName == "dev") "com.claktory.app.dev" else "com.claktory.app"
+        val firebase = firebaseClients[applicationId]
+        if (firebaseClients.isNotEmpty() && firebase == null) {
+            logger.warn("No Firebase config for $applicationId: ${variant.name} gets no notifications.")
+        }
+        firebase?.forEach { (name, value) ->
+            variant.resValues.put(
+                variant.makeResValueKey("string", name),
+                com.android.build.api.variant.ResValue(value),
+            )
+        }
     }
 }
 

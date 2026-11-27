@@ -1265,6 +1265,7 @@ class _Toggle extends StatelessWidget {
                 button: true,
                 selected: i == selected,
                 label: options[i],
+                onTap: () => onChanged(i),
                 excludeSemantics: true,
                 child: Pressable(
                   onTap: () => onChanged(i),

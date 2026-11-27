@@ -269,8 +269,8 @@ fn actor(caller: &Caller) -> Option<String> {
 /// direction-changing characters, at most 64 characters.
 fn shown_name(name: &str) -> String {
     name.chars()
-        .filter(|c| !matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}'))
         .map(|c| if c.is_control() { ' ' } else { c })
+        .filter(|c| !claktory_dm_crypto::certificate::hidden(*c))
         .take(MAX_AGENT_NAME)
         .collect::<String>()
         .trim()

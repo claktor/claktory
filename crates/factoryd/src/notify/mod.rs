@@ -1214,11 +1214,21 @@ pub(crate) fn alert(
 /// title), when no admin agent can take it: the machine running short, a
 /// newer model. Kept in Needs you like an agent's.
 pub(crate) fn host_alert(factory: &Factory, config: &Config, what: &str) -> Delivered {
+    host_alert_with_id(factory, config, what).1
+}
+
+/// `host_alert`, giving the id it's kept by in Needs you, for marking it
+/// read once what it's about is done.
+pub(crate) fn host_alert_kept(factory: &Factory, config: &Config, what: &str) -> String {
+    host_alert_with_id(factory, config, what).0
+}
+
+fn host_alert_with_id(factory: &Factory, config: &Config, what: &str) -> (String, Delivered) {
     let settings = settings(factory);
     let note = Note::new(Kind::Alert, "host".to_owned(), config.claktory_name());
     let (title, text) = what.trim().split_once(". ").map_or((what.trim(), ""), |(title, text)| (title, text.trim()));
     let title = if text.is_empty() { title.to_owned() } else { format!("{title}.") };
-    alert(factory, config, &settings, note, &title, text).1
+    alert(factory, config, &settings, note, &title, text)
 }
 
 /// Tells the person `note`, if their settings, their presence and its

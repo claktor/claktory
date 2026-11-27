@@ -54,6 +54,7 @@ void main() {
       focus: focus,
       agent: _wren(),
       showPanes: () {},
+      openSettings: () {},
     );
     final fixture = _fixture('set_commands.json');
     expect(fixture['method'], 'setCommands');
@@ -103,6 +104,7 @@ void main() {
     }
     expect(keyCommandInput(LogicalKeyboardKey.keyJ), 'j');
     expect(keyCommandInput(LogicalKeyboardKey.digit1), '1');
+    expect(keyCommandInput(LogicalKeyboardKey.comma), ',');
   });
 
   test('with nothing to cycle, the pane commands are disabled, not left '
@@ -110,13 +112,18 @@ void main() {
     final focus = WorkbenchFocus(menu: CommandMenu());
     addTearDown(focus.dispose);
     final encoded = encodeCommands(
-      workbenchCommands(tier: WorkbenchTier.full, focus: focus, agent: null),
+      workbenchCommands(
+        tier: WorkbenchTier.full,
+        focus: focus,
+        agent: null,
+        openSettings: () {},
+      ),
     );
     final commands = encoded['commands']! as List;
-    expect(commands, hasLength(5));
+    expect(commands, hasLength(6));
     expect(
       [for (final c in commands) (c as Map)['enabled']],
-      [true, false, false, false, false],
+      [true, false, false, false, false, true],
     );
   });
 

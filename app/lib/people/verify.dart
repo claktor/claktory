@@ -10,6 +10,7 @@ import '../identity.dart';
 import '../mobile/metrics.dart' show TypeScale;
 import '../scanner.dart';
 import '../scope.dart';
+import '../visible_codes.dart' show nameInText;
 import 'e2ee.dart';
 
 // E5, Verify (dms-e2ee §2, Trish's words): the security code two friends
@@ -61,8 +62,11 @@ class _VerifyViewState extends State<VerifyView> with WidgetsBindingObserver {
   /// undone (E11-3).
   var _undone = false;
 
-  String get _them => widget.name.isEmpty ? 'them' : widget.name;
-  String get _their => widget.name.isEmpty ? 'their' : "${widget.name}'s";
+  // Their name inside a sentence: shown so it can't reorder the words
+  // around it (nameInText; Fugo 51059).
+  String get _name => nameInText(widget.name);
+  String get _them => widget.name.isEmpty ? 'them' : _name;
+  String get _their => widget.name.isEmpty ? 'their' : "$_name's";
 
   @override
   void initState() {
@@ -155,7 +159,7 @@ class _VerifyViewState extends State<VerifyView> with WidgetsBindingObserver {
         _access == CameraAccess.granted || _access == CameraAccess.undetermined;
     final refused = _access == CameraAccess.denied;
     return FormFrame(
-      title: 'Verify ${widget.name.isEmpty ? 'your friend' : widget.name}',
+      title: 'Verify ${widget.name.isEmpty ? 'your friend' : _name}',
       body:
           "Compare these numbers with the ones on $_their device, in person "
           "or on a call, or scan the code on $_their device.",

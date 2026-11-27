@@ -65,8 +65,8 @@ pub(super) fn main(args: &[String]) -> ExitCode {
     }
 
     let root = std::path::Path::new(super::PROFILES).join(format!("u{}-selftest", std::env::var("SUDO_UID").unwrap_or_default()));
-    let tmp = match super::private_folder(&root).map_err(|e| e.to_string()).and_then(|()| super::own_tmp()) {
-        Ok(tmp) => tmp,
+    let (tmp, _tmp_lock) = match super::private_folder(&root).map_err(|e| e.to_string()).and_then(|()| super::own_tmp(&std::env::temp_dir())) {
+        Ok(made) => made,
         Err(why) => {
             println!("{}", json!({"ok": false, "setup": why}));
             return ExitCode::FAILURE;
@@ -95,7 +95,7 @@ pub(super) fn main(args: &[String]) -> ExitCode {
 
     // The rest from a fenced child of the runner's, as Chrome is.
     let results = fenced(fence_fd, &root, &secrets);
-    let _ = std::fs::remove_dir_all(&tmp);
+    super::remove_tmp(&tmp);
     let _ = std::fs::remove_dir_all(&root);
     match results {
         Ok(results) => {

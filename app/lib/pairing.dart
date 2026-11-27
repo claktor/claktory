@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'approve_elsewhere.dart';
 import 'backend.dart' show Backend, RequestFailure;
 import 'claktory_problem.dart'
     show ClaktoryProblemPage, ProblemAction, ProblemText;
@@ -16,7 +17,7 @@ import 'mobile/input.dart' show InputKind;
 import 'mobile/metrics.dart' show TypeScale;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
-import 'visible_codes.dart' show proseCodes;
+import 'visible_codes.dart' show nameInText;
 
 /// The four digits a new device shows while it waits to be allowed, and
 /// the Claktory it asks shows too (PendingDevice.number): worked out on
@@ -55,6 +56,8 @@ class PairingDigits extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // A waiting device's digits never show on Windows (approve_elsewhere.dart).
+    if (approvesElsewhere) return const ApproveElsewhere();
     final palette = Palette.of(context);
     return Semantics(
       label: 'Number ${number.split('').join(' ')}',
@@ -240,7 +243,14 @@ class _PairingWaitViewState extends State<PairingWaitView> {
               ],
             ],
           ],
-          quiet: [ProblemAction('Cancel', widget.onCancel)],
+          // Taken back there too, so it leaves that Claktory's list at
+          // once rather than when it runs out (#603).
+          quiet: [
+            ProblemAction('Cancel', () {
+              backend.withdrawPairing();
+              widget.onCancel();
+            }),
+          ],
         );
       },
     );
@@ -255,7 +265,7 @@ bool isDeviceNumber(String number) => RegExp(r'^\d{4}$').hasMatch(number);
 /// itself “Ana's iPhone”").
 String deviceCallingItself(PendingDevice device) => device.name.isEmpty
     ? 'A device'
-    : 'A device that calls itself “${proseCodes(device.name)}”';
+    : 'A device that calls itself “${nameInText(device.name)}”';
 
 /// The four digits a waiting device shows, typed here to allow it (#352
 /// P4): the backend compares them with the device's own, so only someone
@@ -440,39 +450,46 @@ class _AllowDeviceCardState extends State<AllowDeviceCard> {
           'may be using your email: secure it.',
           style: type.body.copyWith(color: palette.textMuted),
         ),
-        Field(
-          label: 'Number on its screen',
-          child: Align(
-            alignment: AlignmentDirectional.centerStart,
-            child: SizedBox(
-              width: DeviceNumberField.widthFor(context, least: 120),
-              child: DeviceNumberField(
-                controller: _number,
-                onSubmitted: (_) {
-                  if (ready) _decide(device, allow: true);
-                },
+        // Allowed on a phone or Mac, never here (approve_elsewhere.dart).
+        if (approvesElsewhere)
+          const ApproveElsewhere()
+        else ...[
+          Field(
+            label: 'Number on its screen',
+            child: Align(
+              alignment: AlignmentDirectional.centerStart,
+              child: SizedBox(
+                width: DeviceNumberField.widthFor(context, least: 120),
+                child: DeviceNumberField(
+                  controller: _number,
+                  onSubmitted: (_) {
+                    if (ready) _decide(device, allow: true);
+                  },
+                ),
               ),
             ),
           ),
-        ),
-        if (_error case final error?)
-          Text(error, style: type.caption.copyWith(color: palette.danger)),
-        Wrap(
-          alignment: WrapAlignment.end,
-          spacing: Space.s,
-          runSpacing: Space.s,
-          children: [
-            Button(
-              label: "Don't allow",
-              onPressed: _deciding ? null : () => _decide(device, allow: false),
-            ),
-            Button(
-              label: 'Allow',
-              primary: true,
-              onPressed: ready ? () => _decide(device, allow: true) : null,
-            ),
-          ],
-        ),
+          if (_error case final error?)
+            Text(error, style: type.caption.copyWith(color: palette.danger)),
+          Wrap(
+            alignment: WrapAlignment.end,
+            spacing: Space.s,
+            runSpacing: Space.s,
+            children: [
+              Button(
+                label: "Don't allow",
+                onPressed: _deciding
+                    ? null
+                    : () => _decide(device, allow: false),
+              ),
+              Button(
+                label: 'Allow',
+                primary: true,
+                onPressed: ready ? () => _decide(device, allow: true) : null,
+              ),
+            ],
+          ),
+        ],
       ],
     );
   }

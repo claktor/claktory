@@ -856,6 +856,7 @@ class _ChatRow extends StatelessWidget {
         if (wait.isNotEmpty) wait else if (when.isNotEmpty) when,
         if (waiting > 0) '$waiting waiting for your answer',
       ].join(', '),
+      onTap: onOpen,
       excludeSemantics: true,
       child: GestureDetector(
         onSecondaryTap: () => chatActions(context, chat),

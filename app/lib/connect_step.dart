@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 
+import 'approve_elsewhere.dart';
 import 'connections.dart';
 import 'controls.dart';
 import 'devices.dart' show thisDeviceKind;
@@ -82,7 +83,9 @@ class _ConnectStepState extends State<ConnectStep> {
         .connections
         .account
         .signedIn;
-    if (withAccount) {
+    // Windows connects from the account only, never by a code
+    // (approve_elsewhere.dart).
+    if (withAccount || approvesElsewhere) {
       return StepCard(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -94,14 +97,16 @@ class _ConnectStepState extends State<ConnectStep> {
             ),
             const SizedBox(height: Space.xl),
             YourClaktories(onConnect: _connect),
-            const SizedBox(height: Space.l),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Button(
-                label: 'Use a code instead',
-                onPressed: () => setState(() => _withAccount = false),
+            if (!approvesElsewhere) ...[
+              const SizedBox(height: Space.l),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Button(
+                  label: 'Use a code instead',
+                  onPressed: () => setState(() => _withAccount = false),
+                ),
               ),
-            ),
+            ],
           ],
         ),
       );

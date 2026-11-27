@@ -11,6 +11,7 @@ import 'package:factory_app/ipad/workbench.dart'
     show WorkbenchFocus, WorkbenchScope;
 import 'package:factory_app/needs_you_focus.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/scope.dart' show AppPage;
 import 'package:factory_app/shell.dart' show Shell;
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart';
@@ -148,13 +149,14 @@ void main() {
     final (harness, _) = await _show(tester, const Size(834, 1194));
     setFocusMode(harness.backend, true);
     await settle(tester);
-    final session = tester
-        .widget<FocusStage>(find.byType(FocusStage))
-        .session;
+    final session = tester.widget<FocusStage>(find.byType(FocusStage)).session;
     expect(_menu['focus.context'], isTrue);
     expect(session.contextOpen, isFalse);
 
-    const shiftCommand = [LogicalKeyboardKey.metaLeft, LogicalKeyboardKey.shiftLeft];
+    const shiftCommand = [
+      LogicalKeyboardKey.metaLeft,
+      LogicalKeyboardKey.shiftLeft,
+    ];
     await _press(tester, LogicalKeyboardKey.keyC, modifiers: shiftCommand);
     expect(session.contextOpen, isTrue);
     expect(find.byType(FocusContext), findsOneWidget);
@@ -163,7 +165,10 @@ void main() {
     await _press(tester, LogicalKeyboardKey.keyC, modifiers: shiftCommand);
     expect(session.contextOpen, isFalse);
 
-    const altCommand = [LogicalKeyboardKey.metaLeft, LogicalKeyboardKey.altLeft];
+    const altCommand = [
+      LogicalKeyboardKey.metaLeft,
+      LogicalKeyboardKey.altLeft,
+    ];
     final first = session.current?.key;
     await _press(tester, LogicalKeyboardKey.arrowDown, modifiers: altCommand);
     final second = session.current?.key;
@@ -204,5 +209,24 @@ void main() {
     expect(_menu['focus.context'], isFalse);
     await _press(tester, LogicalKeyboardKey.keyC, modifiers: shiftCommand);
     expect(session.contextOpen, isFalse);
+  });
+
+  testWidgets('⌘, opens Settings, from the keyboard or the system\'s menu '
+      '(projects-sidebar.md §9)', (tester) async {
+    final (harness, _) = await _show(tester, const Size(1194, 834));
+    expect(_menu['settings'], isTrue, reason: 'the menu lists Settings');
+    expect(harness.page.value, isNot(AppPage.settings));
+
+    await _press(tester, LogicalKeyboardKey.comma);
+    expect(harness.page.value, AppPage.settings);
+    // The menu's run for that same press isn't a second one.
+    await _menuRuns(tester, 'settings');
+    expect(harness.page.value, AppPage.settings);
+
+    harness.page.value = AppPage.agent;
+    await settle(tester);
+    // Chosen in the menu bar later: that opens it.
+    await _menuRuns(tester, 'settings');
+    expect(harness.page.value, AppPage.settings);
   });
 }

@@ -264,6 +264,10 @@ void main() {
       expect(claktoryInitials('nixos'), 'N');
       expect(claktoryInitials('home server box'), 'HS');
       expect(claktoryInitials(''), '?');
+      // A name as nameInText shows it, in an isolate with a zero-width
+      // space kept: its letters only (Abbacchio's row 1748).
+      expect(claktoryInitials('\u2068Bad\\u{202E}Name\u200B two\u2069'), 'BT');
+      expect(claktoryInitials('\u2068\u2069'), '?');
     });
   });
 

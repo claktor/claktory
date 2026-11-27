@@ -1755,12 +1755,20 @@ class _MenuIntent extends Intent {
 class _RowState extends State<_Row> {
   var _hovered = false;
   var _focused = false;
+  final _focus = FocusNode(debugLabel: 'sidebar row');
+
+  @override
+  void dispose() {
+    _focus.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final phone = touchFirst(context);
     return FocusableActionDetector(
+      focusNode: _focus,
       mouseCursor: SystemMouseCursors.click,
       // Not while an agent is dragged over it: only where it can land
       // says so (Abbacchio's pinned-agents NIT).
@@ -1789,60 +1797,71 @@ class _RowState extends State<_Row> {
           },
         ),
       },
-      child: GestureDetector(
-        onTap: widget.onTap,
-        onSecondaryTap: widget.onSecondaryTap,
-        // A phone's right click.
-        onLongPress: widget.holdForMenu ? widget.onSecondaryTap : null,
-        child: AnimatedContainer(
-          duration: Motion.fast,
-          curve: Curves.easeOut,
-          // On a phone, a finger's size at least, growing with the text.
-          height: phone ? null : widget.height,
-          constraints: phone
-              ? BoxConstraints(
-                  minHeight: PhonePlatformPolicy.least(
-                    context,
-                    DenseList.of(context)
-                        ? (widget.height > 28
-                              ? Touch.denseRow
-                              : Touch.denseLine)
-                        : (widget.height > 28 ? Touch.row : Touch.target),
-                  ),
-                )
-              : null,
-          padding: const EdgeInsets.symmetric(horizontal: Space.s),
-          decoration: BoxDecoration(
-            color: widget.selected
-                ? palette.selected
-                : _hovered
-                ? palette.hover
-                : const Color(0x00000000),
-            borderRadius: BorderRadius.circular(Radii.control),
-            border: Border.all(
-              color: _focused ? palette.signal : const Color(0x00000000),
-            ),
-          ),
-          child: widget.underlay == null
-              ? widget.builder(context, _hovered)
-              : Stack(
-                  clipBehavior: Clip.none,
-                  // A phone's row grows: its content stays in the middle.
-                  alignment: phone
-                      ? AlignmentDirectional.centerStart
-                      : AlignmentDirectional.topStart,
-                  children: [
-                    // Out to the row's edges, through its padding.
-                    Positioned(
-                      left: -Space.s,
-                      right: -Space.s,
-                      top: 0,
-                      bottom: 0,
-                      child: widget.underlay!,
+      // VoiceOver on a Mac moving the keyboard's focus to its cursor
+      // (VO-Command-F4, or keyboard focus following it) tells the app only
+      // that the row gained VoiceOver's focus: the row takes the
+      // keyboard's then, so Shift-F10 opens its menu (Abbacchio's row
+      // 1716).
+      child: Semantics(
+        onDidGainAccessibilityFocus:
+            defaultTargetPlatform == TargetPlatform.macOS
+            ? _focus.requestFocus
+            : null,
+        child: GestureDetector(
+          onTap: widget.onTap,
+          onSecondaryTap: widget.onSecondaryTap,
+          // A phone's right click.
+          onLongPress: widget.holdForMenu ? widget.onSecondaryTap : null,
+          child: AnimatedContainer(
+            duration: Motion.fast,
+            curve: Curves.easeOut,
+            // On a phone, a finger's size at least, growing with the text.
+            height: phone ? null : widget.height,
+            constraints: phone
+                ? BoxConstraints(
+                    minHeight: PhonePlatformPolicy.least(
+                      context,
+                      DenseList.of(context)
+                          ? (widget.height > 28
+                                ? Touch.denseRow
+                                : Touch.denseLine)
+                          : (widget.height > 28 ? Touch.row : Touch.target),
                     ),
-                    widget.builder(context, _hovered),
-                  ],
-                ),
+                  )
+                : null,
+            padding: const EdgeInsets.symmetric(horizontal: Space.s),
+            decoration: BoxDecoration(
+              color: widget.selected
+                  ? palette.selected
+                  : _hovered
+                  ? palette.hover
+                  : const Color(0x00000000),
+              borderRadius: BorderRadius.circular(Radii.control),
+              border: Border.all(
+                color: _focused ? palette.signal : const Color(0x00000000),
+              ),
+            ),
+            child: widget.underlay == null
+                ? widget.builder(context, _hovered)
+                : Stack(
+                    clipBehavior: Clip.none,
+                    // A phone's row grows: its content stays in the middle.
+                    alignment: phone
+                        ? AlignmentDirectional.centerStart
+                        : AlignmentDirectional.topStart,
+                    children: [
+                      // Out to the row's edges, through its padding.
+                      Positioned(
+                        left: -Space.s,
+                        right: -Space.s,
+                        top: 0,
+                        bottom: 0,
+                        child: widget.underlay!,
+                      ),
+                      widget.builder(context, _hovered),
+                    ],
+                  ),
+          ),
         ),
       ),
     );

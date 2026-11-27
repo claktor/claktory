@@ -2309,6 +2309,37 @@ void main() {
     expect(find.text('Unlock with recovery key…'), findsOneWidget);
   });
 
+  testWidgets("covered by the account's recovery key, locked and removed: "
+      "both say the account's key (Abbacchio's row 1727)", (tester) async {
+    final workspace = _workspace()
+      ..account = ClaktoryAccount(
+        state: ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_REVOKED,
+      );
+    workspace.vault
+      ..unlocked = false
+      ..recoveryKeyCovered = true;
+    final harness = Harness(workspace);
+    await _show(tester, harness, const SecretsSettings());
+    expect(
+      find.text(
+        'Secrets are locked because this Claktory was removed from your '
+        "account. Sign in again to unlock them, or use your account's "
+        'recovery key.',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Use recovery key…'));
+    await pumpFrames(tester);
+    expect(
+      find.textContaining(
+        "Enter your account's recovery key. It opens the "
+        'secrets on',
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Each Claktory has its own'), findsNothing);
+  });
+
   testWidgets("with a Claktory account: the backend's reason, or signing in "
       'again when this Claktory was removed', (tester) async {
     final workspace = _workspace()

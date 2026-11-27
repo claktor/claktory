@@ -200,3 +200,19 @@ const proseKeys = {
   'rule',
   'question',
 };
+
+/// A name as text shows it, whoever chose it (a Claktory's, a device's, a
+/// pipe's other side; Fugo 50896, Abbacchio's row 1730): what reorders it
+/// shown by its code ([proseCodes]), line breaks as spaces, and anything
+/// but plain ASCII set apart in a first-strong isolate (U+2068…U+2069), so
+/// no name can turn the words around it ("since 06:10. Private and
+/// encrypted.") backwards, right-to-left names included. Marks and joiners
+/// stay, for the scripts that need them.
+String nameInText(String name) {
+  final shown = proseCodes(
+    name.replaceAll(RegExp('[\r\n\t\u0085\u2028\u2029]+'), ' '),
+  );
+  return shown.runes.every((rune) => rune >= 0x20 && rune < 0x7f)
+      ? shown
+      : '\u2068$shown\u2069';
+}

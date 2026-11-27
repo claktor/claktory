@@ -166,8 +166,12 @@ struct Session {
     /// `PROFILES/u<uid>-<name>`: Chrome's data, its HOME and its last log.
     root: PathBuf,
     /// The runner's private folder for this session (0700): the screen's
-    /// cookie and logs.
+    /// cookie, logs and Chrome's disk cache.
     tmp: PathBuf,
+    /// Its lock (`tmp_lock`), held while the session lasts, so another
+    /// runner's sweep leaves the folder alone.
+    #[allow(dead_code)]
+    tmp_lock: std::fs::File,
     screen: xvfb::Screen,
     /// The live view of the screen: frames, the person's input and the
     /// clipboard (P2); None when it couldn't start, which was said.
@@ -499,16 +503,17 @@ impl Runner {
         private_folder(&home).map_err(|error| format!("couldn't make the browser's profile: {error}"))?;
         chrome::first_preferences(&root.join("chrome")).map_err(|error| format!("couldn't make the browser's profile: {error}"))?;
         let binary = chrome::binary()?;
-        let tmp = own_tmp()?;
+        sweep_tmp(&std::env::temp_dir());
+        let (tmp, tmp_lock) = own_tmp(&std::env::temp_dir())?;
         let screen = match xvfb::Screen::start(&tmp, width, height) {
             Ok(screen) => screen,
             Err(why) => {
-                let _ = std::fs::remove_dir_all(&tmp);
+                remove_tmp(&tmp);
                 return Err(why);
             }
         };
         let mut session =
-            Session { name: profile.to_owned(), root, tmp, screen, live: None, chrome: None, binary, lock, fence_version: 0, person, downloads: None, width, height };
+            Session { name: profile.to_owned(), root, tmp, tmp_lock, screen, live: None, chrome: None, binary, lock, fence_version: 0, person, downloads: None, width, height };
         match downloads::Downloads::new(&session.tmp) {
             Ok(downloads) => session.downloads = Some(downloads),
             Err(error) => self.error(&format!("the browser's downloads folder couldn't be made, so nothing can be downloaded: {error}")),
@@ -807,7 +812,7 @@ fn finish(mut session: Session) {
         let _ = std::fs::write(session.root.join("chrome-last.log"), tail);
     }
     session.screen.stop();
-    let _ = std::fs::remove_dir_all(&session.tmp);
+    remove_tmp(&session.tmp);
 }
 
 /// Applies the fence made beforehand to this process, in Chrome's child
@@ -891,15 +896,105 @@ pub(crate) fn private_folder(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// A new 0700 folder in /tmp, only this session's.
-fn own_tmp() -> Result<PathBuf, String> {
-    use std::os::unix::fs::DirBuilderExt;
+/// A session's folders in /tmp: `claktory-browser-<16 hex>`.
+const TMP_PREFIX: &str = "claktory-browser-";
+
+/// A new 0700 folder in `dir` (/tmp), only this session's, and its lock
+/// beside it, `<folder>.lock`, out of Chrome's fence. The lock is taken
+/// before the folder is made and held while the session lasts, so a
+/// folder whose lock is free is a session that's gone (`sweep_tmp`).
+fn own_tmp(dir: &Path) -> Result<(PathBuf, std::fs::File), String> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     let mut name = [0u8; 8];
     getrandom::fill(&mut name).map_err(|error| format!("no random name: {error}"))?;
     let hex: String = name.iter().map(|byte| format!("{byte:02x}")).collect();
-    let path = std::env::temp_dir().join(format!("claktory-browser-{hex}"));
-    std::fs::DirBuilder::new().mode(0o700).create(&path).map_err(|error| format!("couldn't make the browser's folder: {error}"))?;
-    Ok(path)
+    let path = dir.join(format!("{TMP_PREFIX}{hex}"));
+    let made = |error: std::io::Error| format!("couldn't make the browser's folder: {error}");
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(tmp_lock(&path))
+        .map_err(made)?;
+    if !locked(&lock) {
+        return Err("couldn't make the browser's folder: its lock is taken".to_owned());
+    }
+    if let Err(error) = std::fs::DirBuilder::new().mode(0o700).create(&path) {
+        let _ = std::fs::remove_file(tmp_lock(&path));
+        return Err(made(error));
+    }
+    Ok((path, lock))
+}
+
+/// `tmp`'s lock: `<tmp>.lock` beside it.
+fn tmp_lock(tmp: &Path) -> PathBuf {
+    let mut name = tmp.as_os_str().to_owned();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+/// Whether `file`'s lock was taken now, without waiting.
+fn locked(file: &std::fs::File) -> bool {
+    // SAFETY: flock on a descriptor we own.
+    unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(file), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+
+/// Whether `path` was last changed more than `age` ago.
+fn older(path: &Path, age: std::time::Duration) -> bool {
+    std::fs::symlink_metadata(path).and_then(|found| found.modified()).is_ok_and(|changed| changed.elapsed().is_ok_and(|elapsed| elapsed > age))
+}
+
+/// A session's folder gone, then its lock.
+fn remove_tmp(tmp: &Path) {
+    let _ = std::fs::remove_dir_all(tmp);
+    let _ = std::fs::remove_file(tmp_lock(tmp));
+}
+
+/// The folders in `dir` (/tmp) of sessions that are gone without their
+/// `finish` (the runner killed, the computer's power): this user's, by
+/// their exact names, whose lock is free or missing. What they kept
+/// (Chrome's disk cache, a page it showed) goes at the next start, not
+/// only at the next reboot (Fugo 50646). Another runner's live session
+/// holds its lock, so it stays.
+fn sweep_tmp(dir: &Path) {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    // SAFETY: geteuid has no preconditions.
+    let me = unsafe { libc::geteuid() };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let (hex, is_lock) = match name.strip_prefix(TMP_PREFIX) {
+            Some(rest) => rest.strip_suffix(".lock").map_or((rest, false), |hex| (hex, true)),
+            None => continue,
+        };
+        if hex.len() != 16 || !hex.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+            continue;
+        }
+        let path = dir.join(format!("{TMP_PREFIX}{hex}"));
+        let ours = |path: &Path, folder: bool| {
+            std::fs::symlink_metadata(path).is_ok_and(|found| found.uid() == me && if folder { found.is_dir() } else { found.is_file() })
+        };
+        // Each session once: by its folder, or by a lock left alone. A
+        // lock without its folder may be a start's that hasn't made the
+        // folder yet (and whose flock is a moment away), so only a
+        // minute's.
+        if (is_lock && (path.exists() || !older(&tmp_lock(&path), std::time::Duration::from_secs(60))))
+            || !ours(&if is_lock { tmp_lock(&path) } else { path.clone() }, !is_lock)
+        {
+            continue;
+        }
+        let lock = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(tmp_lock(&path));
+        let gone = match &lock {
+            Ok(lock) => lock.metadata().is_ok_and(|found| found.uid() == me) && locked(lock),
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        };
+        if gone {
+            remove_tmp(&path);
+        }
+    }
 }
 
 /// The runner is PID 1 of its namespace: processes of Chrome's whose
@@ -966,6 +1061,41 @@ fn write_out(outgoing: Receiver<(Channel, Vec<u8>)>, tell: Sender<Event>, out: O
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, SocketAddr};
+
+    /// A session gone without its finish leaves its folder (Chrome's disk
+    /// cache in it) only until the next start: its lock is free, while a
+    /// live session's is held (Fugo 50646).
+    #[test]
+    fn a_start_sweeps_the_folders_of_sessions_that_are_gone_and_only_those() {
+        let dir = std::env::temp_dir().join(format!("claktory-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let (live, _held) = super::own_tmp(&dir).unwrap();
+        let (dead, lock) = super::own_tmp(&dir).unwrap();
+        std::fs::create_dir_all(dead.join("cache")).unwrap();
+        std::fs::write(dead.join("cache").join("page"), "codes").unwrap();
+        drop(lock);
+        let lockless = dir.join("claktory-browser-00112233aabbccdd");
+        std::fs::create_dir(&lockless).unwrap();
+        let fresh_lock = dir.join("claktory-browser-0000000000000001.lock");
+        std::fs::write(&fresh_lock, "").unwrap();
+        let old_lock = dir.join("claktory-browser-0000000000000002.lock");
+        std::fs::File::create(&old_lock).unwrap().set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120)).unwrap();
+        let others = [dir.join("claktory-browser-selftest"), dir.join("claktory-browser-FFEEDDCC00112233"), dir.join("claktory-browser-00112233aabbccd")];
+        for other in &others {
+            std::fs::create_dir(other).unwrap();
+        }
+        super::sweep_tmp(&dir);
+        assert!(live.is_dir() && super::tmp_lock(&live).is_file(), "a live session's folder stays");
+        assert!(!dead.exists() && !super::tmp_lock(&dead).exists(), "a gone session's folder and lock go");
+        assert!(!lockless.exists());
+        assert!(fresh_lock.exists(), "a start's lock before its folder stays");
+        assert!(!old_lock.exists());
+        for other in &others {
+            assert!(other.is_dir(), "{} isn't a session's", other.display());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// v4 addresses are checked at the v4 listener and v6 at the v6 one,
     /// never a v4 one at a [::] that may take IPv6 only (Fugo 37547).

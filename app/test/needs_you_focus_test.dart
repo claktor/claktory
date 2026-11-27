@@ -822,6 +822,34 @@ void main() {
       expect(field.text, isNot('Use the 2nd'));
     });
 
+    testWidgets('typed: the text input\'s Send submits the words (an iPad\'s '
+        'text view can keep Return from the keys: row 730); empty sends '
+        'nothing; Shift-Return types a new line', (tester) async {
+      await show(tester);
+      await focusKey(tester);
+      final (did, field) = await publish(tester);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyR);
+      await tester.pump();
+      final text = tester.widget<EditableText>(find.byType(EditableText));
+      expect(text.textInputAction, TextInputAction.send);
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await tester.pump();
+      expect(did, isEmpty);
+      await tester.enterText(find.byType(EditableText), 'One');
+      await tester.pump();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+      expect(did, isEmpty);
+      expect(field.text, 'One\n');
+      await tester.enterText(find.byType(EditableText), 'One\nTwo');
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await tester.pump();
+      expect(did, ['submit One\nTwo']);
+    });
+
     testWidgets('held, ⌘↩ records into the field instead, and sends nothing', (
       tester,
     ) async {

@@ -175,6 +175,35 @@ void main() {
     await server.server.close(force: true);
   });
 
+  test(
+    'the app dials 127.0.0.1 itself, never a name that could be [::1]',
+    () async {
+      final backend = Backend(
+        workspace: WorkspaceStore(),
+        transcript: TranscriptStore(),
+        explorer: ExplorerStore(),
+        extensionView: ExtensionViewStore(),
+        tunnels: _NoTunnels(),
+        localPairing: () async => null,
+      );
+      expect(Uri.parse(backend.localEndpoint).host, '127.0.0.1');
+      // A name is refused before anything is dialled.
+      final listener = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      var accepted = 0;
+      listener.listen((socket) {
+        accepted++;
+        socket.destroy();
+      });
+      await expectLater(
+        connectLoopback('ws://localhost:${listener.port}'),
+        throwsArgumentError,
+      );
+      await listener.close();
+      expect(accepted, 0);
+      await backend.close();
+    },
+  );
+
   test("the default check, off Windows, says no (the Rust's Err)", () async {
     expect(await loopbackSameUser(7420, 50000), isFalse);
   });

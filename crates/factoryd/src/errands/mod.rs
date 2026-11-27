@@ -125,6 +125,56 @@ pub(crate) fn read_outside(factory: &Factory, agent: &str, what: &str) {
     }
 }
 
+/// Claktory's tools whose results carry another person's words, and those
+/// words for the refusal: called with `args` before the tool runs, it
+/// marks the agent (`read_outside`) through `pipes::agents::gate`, which
+/// every agent's tool call passes (Fugo 50817, row 1721). The web's tools
+/// and apps mark in their own handlers (row 1695).
+pub(crate) fn outside_tool(tool: &str, args: &serde_json::Value) -> Option<&'static str> {
+    match tool {
+        "pipe_read" => Some("a pipe's messages"),
+        "pipe_status" => Some("a pipe's status, with what its other side shares"),
+        // text: false gives only a report's facts, without their words,
+        // unless it opens a file.
+        "handoff_read" if args.get("text").and_then(serde_json::Value::as_bool) != Some(false) || args.get("file").is_some_and(|file| !file.is_null()) => {
+            Some("reports from a pipe")
+        }
+        "dm_read" => Some("a direct message from another Claktory"),
+        _ => None,
+    }
+}
+
+/// The events that bring another person's words, or what an agent that
+/// read them says, mark the agent they're given to (Fugo 50817, row 1721),
+/// from `Factory::deliver_queued`, which every event passes: a pipe's
+/// messages, an app's events, and an agent's message whose sender has read
+/// something from outside.
+pub(crate) fn heard(factory: &Factory, recipient: &str, event: &factory_agent::Event) {
+    match event.source {
+        factory_agent::EventSource::Pipe => read_outside(factory, recipient, &format!("a message from the pipe {}", event.from)),
+        // An app's events may carry anyone's words (a bot's messages, an
+        // email, a webhook): every app's, the simplest (Fugo 51140).
+        factory_agent::EventSource::App => read_outside(factory, recipient, &format!("a message from the app {}", event.from)),
+        factory_agent::EventSource::Agent => relayed(factory, recipient, &event.id),
+        _ => {}
+    }
+}
+
+/// `recipient` was given `sender`'s words (its message, a quiet copy of
+/// one, a monitor it set): when `sender` has read something from outside
+/// (the errand mark, or pipes' taint), so has `recipient`, for errands
+/// only (Fugo 50817 #3: nothing more asks for its secrets).
+pub(crate) fn relayed(factory: &Factory, recipient: &str, sender: &str) {
+    if sender.is_empty() || recipient == sender {
+        return;
+    }
+    if factory.pipes.tainted(sender).is_empty() && outside_read(factory, sender).is_none() {
+        return;
+    }
+    let name = factory.lock().config.agent(sender).map_or_else(|| sender.to_owned(), |agent| agent.name.clone());
+    read_outside(factory, recipient, &format!("a message from {name}, who read outside content"));
+}
+
 /// What `agent` read from outside since its conversation started afresh,
 /// if it did. An unreadable record counts as read.
 fn outside_read(factory: &Factory, agent: &str) -> Option<String> {
@@ -653,7 +703,9 @@ impl Factory {
         record.ended_ms = now_ms();
         record.end_reason = reason.to_owned();
         let handoff = record.handoff.take();
+        let ended = record.clone();
         self.save_errand(record, None);
+        withdraw_handoffs(self, &ended);
         let mut live = self.errands.live.lock().await;
         if live.as_ref().is_some_and(|live| live.errand == errand) {
             // A recovery-codes or two-step card still waiting: what its page
@@ -1730,6 +1782,23 @@ pub fn read_outside_for_test(factory: &Factory, agent: &str, what: &str) {
     read_outside(factory, agent, what);
 }
 
+/// Tests: a message on a pipe reaches its lead `agent`, as a pipe's
+/// messages do (an event from the pipe `from`), or with `app` an app's
+/// event (from the app `from`).
+#[doc(hidden)]
+pub fn pipe_message_for_test(factory: &Arc<Factory>, agent: &str, from: &str, text: &str, app: bool) {
+    let event = factory_agent::Event {
+        source: if app { factory_agent::EventSource::App } else { factory_agent::EventSource::Pipe },
+        from: from.to_owned(),
+        id: "pipe:test".to_owned(),
+        summary: "A message on the pipe".to_owned(),
+        transient: false,
+        pipe_seqs: Vec::new(),
+        provenance: None,
+    };
+    factory.deliver_event(agent, text.to_owned(), event);
+}
+
 /// Tests: `factory`'s code and agreement cards may be asked on pages
 /// `show_for_test` showed, which have no https origin (shown as
 /// https://shown.test).
@@ -1765,6 +1834,27 @@ pub(crate) fn places(factory: &Factory, agent: &str) -> crate::runner::Places {
     crate::runner::Places { folder, extra_dirs: Vec::new(), read_only: Vec::new() }
 }
 
+/// The cards an ended errand's handoffs still wait on, withdrawn with why
+/// (Fugo 50825, Abbacchio 1719): once the errand is over, approving one
+/// does nothing. A recovery-codes card stays: its codes wait for the
+/// person's I saved them, whatever became of the errand.
+fn withdraw_handoffs(factory: &Factory, errand: &v1::Errand) {
+    let pending: Vec<(i64, String)> = crate::store::query(
+        &factory.store.db(),
+        "SELECT id, action FROM asks WHERE agent = ?1 AND state = 'pending' AND action != ''",
+        [&errand.agent_id],
+        crate::store::row2,
+    )
+    .unwrap_or_default();
+    let reason = format!("Errand {} ended: {}", errand.id, errand.end_reason);
+    for (id, action) in pending {
+        let Ok(crate::card_actions::Action::Handoff { handoff }) = serde_json::from_str(&action) else { continue };
+        if handoff.errand == errand.id && handoff.kind != v1::ErrandHandoffKind::RecoveryCodes as i32 {
+            crate::extensions::ask::withdraw_for(factory, id, reason.trim_end());
+        }
+    }
+}
+
 /// The errand agents, at start.
 /// At start: reads the errands kept, and tells each agent whose errand
 /// Claktory's restart ended, so it reports to its lead rather than wait.
@@ -1772,6 +1862,7 @@ pub(crate) fn places(factory: &Factory, agent: &str) -> crate::runner::Places {
 pub(crate) fn recover(factory: &Arc<Factory>) {
     code::sweep_codes(factory);
     for errand in factory.errands.load(&factory.store) {
+        withdraw_handoffs(factory, &errand);
         let told = format!(
             "{RESTARTED} Your errand {} ({}) ended there. Tell your lead with errand_report what was done and what's left; it can open the errand again.",
             errand.id, errand.purpose

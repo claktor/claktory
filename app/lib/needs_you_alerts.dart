@@ -585,6 +585,7 @@ class _QuietButton extends StatelessWidget {
     return Semantics(
       button: true,
       label: label,
+      onTap: onPressed,
       excludeSemantics: true,
       child: Pressable(
         onTap: onPressed,

@@ -207,10 +207,18 @@ class Dictation extends StatefulWidget {
     this.enabled = true,
     this.trailing,
     this.keep,
+    this.shrinks = false,
   });
 
   final TextEditingController controller;
   final Widget child;
+
+  /// The field shrinks to a limit on its height, scrolling inside (a
+  /// card's field over a phone's keyboard, CardFieldRoom): its line is
+  /// flexible in the column it shares with a recording's notes, so the
+  /// parent must bound the height. Else that column gave it all it wanted,
+  /// and it grew over the card's buttons (Zucchero's row 726).
+  final bool shrinks;
 
   /// What it's for: a recording not sent yet comes back to the field with
   /// this key after a relaunch. Without it, it's listed in Settings →
@@ -677,7 +685,7 @@ class DictationFieldState extends State<Dictation> implements DictationHold {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            line,
+            if (widget.shrinks) Flexible(child: line) else line,
             if (note != null) ...[
               const SizedBox(height: Space.xs),
               Semantics(

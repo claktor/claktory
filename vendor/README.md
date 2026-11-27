@@ -145,6 +145,20 @@ every Claktory endpoint, phone, Mac app and backend, has the same fixes.
   connection for dead (Matt's MacBook, Bruno 36927); the relay path needs
   none of that, and more keep-alives on it would only cost an idle phone
   data. A backend's paths keep iroh's defaults, so nothing changes there.
+  Both are set before the path is recorded as open (`add_open_path`, where
+  `Connection::paths` shows it), so whatever changes them from there comes
+  after, never between (below).
+- `src/socket/remote_map/remote_state/path_watcher.rs` (`Path`): an open
+  path's keep-alive and idle timeout can be changed and the path pinged
+  (`set_keep_alive_interval`, `set_max_idle_timeout`, `ping`: noq's own on
+  the path, which upstream's `Path` doesn't reach). A phone or tablet left
+  untouched checks its paths every 25 s, and is pinged at once when touched
+  again (app/rust's `Tunnel::set_idle`), and a Claktory checks a let-in
+  device's paths every 25 s (factoryd's `pace_admitted`; Polpo's
+  idle-keepalive.md). Their tests: app/rust's
+  `tunnel::tests::an_idle_app_has_its_paths_checked_rarely_and_pinged_at_once_when_it_wakes`
+  and factoryd's
+  `remote::claktory_checks_a_device_rarely_only_once_its_let_in_and_still_closes_it_at_once_when_unpaired`.
 - `Cargo.toml`: its examples, tests and dev-dependencies are gone, since they
   aren't copied.
 - Not copied: `examples/`, `tests/`, `Cargo.toml.orig`, `Cargo.lock`,
@@ -173,7 +187,8 @@ releases and advisories by hand while this copy is here.
 
 **Drop this copy** for the first iroh release with #4523's fix that also
 reads a relay's auth token at each dial (and sets a relay path's keep-alive
-apart from the default's, or lets an endpoint do so): remove the `iroh` line from both
+apart from the default's, or lets an endpoint do so, and lets an open path's
+keep-alive and idle timeout change): remove the `iroh` line from both
 `[patch.crates-io]` tables (root and `app/rust`) and this folder. If that
 release still gives the relay's health ping 0.5 s, or still reads the token
 once, keep the copy for what it lacks, or ask upstream for it first.

@@ -84,6 +84,12 @@ abstract class TunnelHandle implements RustOpaqueInterface {
   /// again.
   Future<void> reconnect();
 
+  /// Whether the app is idle: a phone or tablet left untouched for a
+  /// minute with nothing arriving. While it is, the connection's paths are
+  /// checked every 25 s instead of every 2 to 5, so the radio can rest;
+  /// back from idle they're pinged at once and checked as before.
+  void setIdle({required bool idle});
+
   /// The relays its Claktory uses now, as its Workspace says
   /// (`RemoteAccess.relays`, #450): the device homes on them from its next
   /// endpoint on, and dials through them. Those that aren't http(s) URLs

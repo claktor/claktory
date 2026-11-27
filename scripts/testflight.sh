@@ -290,7 +290,12 @@ cat >"$options" <<EOF
 </plist>
 EOF
 
-xcodebuild -exportArchive -quiet \
+# Xcode packages the .ipa with /usr/bin/rsync (Apple's openrsync), which
+# starts its other half as the first `rsync` on PATH: Homebrew's rsync 3.x
+# there refuses openrsync's options ("--extended-attributes: unknown
+# option", EXPORT FAILED, v0.1.25's first upload). Apple's own goes first.
+mkdir "$signing/rsync" && ln -s /usr/bin/rsync "$signing/rsync/rsync"
+PATH="$signing/rsync:$PATH" xcodebuild -exportArchive -quiet \
   -archivePath "$archive" -exportOptionsPlist "$options" -exportPath "$out" \
   "${auth[@]}"
 

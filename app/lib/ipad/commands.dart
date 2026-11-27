@@ -58,6 +58,7 @@ List<WorkbenchCommand> workbenchCommands({
   VoidCallback? showPanes,
   List<Agent> pins = const [],
   void Function(Agent agent)? openPin,
+  VoidCallback? openSettings,
 }) {
   final pinned = tier == WorkbenchTier.full && !focus.sidebarHidden;
   final sidebarShown = pinned || focus.overlayOpen;
@@ -148,6 +149,15 @@ List<WorkbenchCommand> workbenchCommands({
           : () => focus.documents
                 .of(agent.id, document)
                 .openPanel(DocumentPanel.search),
+    ),
+    // ⌘, opens Settings at its last section, the platform's own key
+    // (projects-sidebar.md §9): native puts it in the app menu's Settings
+    // place, over iPadOS's own (which opens the system's Settings app).
+    WorkbenchCommand(
+      id: 'settings',
+      title: 'Settings',
+      keys: const SingleActivator(LogicalKeyboardKey.comma, meta: true),
+      run: openSettings,
     ),
     // The person's pinned agents (pinned-agents.md §7b): ⌘1 to ⌘9 open the
     // first nine, named, as clicking a pin does. Only the pins there are:

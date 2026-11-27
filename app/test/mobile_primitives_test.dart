@@ -3,6 +3,8 @@
 // selection with our own items, the header, haptics and the drawer's
 // gesture hold. Each is checked on an iPhone and, where it differs, on a
 // Mac, which must stay as it was.
+import 'dart:async';
+
 import 'package:cupertino_ui/cupertino_ui.dart'
     show
         CupertinoAdaptiveTextSelectionToolbar,
@@ -697,6 +699,66 @@ void main() {
         tester.getRect(find.byType(PhoneSheet)),
         resting,
         reason: 'it never moved; it only faded in',
+      );
+    });
+
+    testWidgets('a short sheet is dragged away from its words, as iOS\'s '
+        'are; a field in it keeps its own drags (row 206)', (tester) async {
+      late BuildContext context;
+      await _show(tester, _Context((found) => context = found));
+      Future<void> open(Widget body) async {
+        unawaited(presentSheet<void>(context, builder: (_, _) => body));
+        await pumpFrames(tester);
+      }
+
+      await open(const Text('Body'));
+      await tester.fling(find.text('Body'), const Offset(0, 300), 1500);
+      await pumpFrames(tester);
+      expect(find.text('Body'), findsNothing, reason: 'dragged away');
+
+      final line = TextEditingController(text: 'hello world, a long line');
+      final lines = TextEditingController(
+        text: List.generate(12, (i) => 'line $i').join('\n'),
+      );
+      await open(
+        Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(controller: line),
+            TextField(controller: lines, maxLines: 4),
+          ],
+        ),
+      );
+      final sheet = find.byType(PhoneSheet);
+      final field = find.byType(EditableText).first;
+      // Moving the cursor along the line.
+      await tester.tap(field);
+      await pumpFrames(tester);
+      await tester.drag(field, const Offset(-150, 0));
+      await pumpFrames(tester);
+      expect(sheet, findsOneWidget, reason: 'the cursor moved');
+      // Touch and hold, then down: selecting.
+      final hold = await tester.startGesture(tester.getCenter(field));
+      await tester.pump(const Duration(milliseconds: 700));
+      for (var i = 0; i < 10; i++) {
+        await hold.moveBy(const Offset(0, 30));
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      await hold.up();
+      await pumpFrames(tester);
+      expect(sheet, findsOneWidget, reason: 'it selected');
+      // A field that holds more scrolls its own lines.
+      final more = find.byType(EditableText).last;
+      final scroll = find.descendant(
+        of: more,
+        matching: find.byType(Scrollable),
+      );
+      await tester.fling(more, const Offset(0, -200), 1500);
+      await pumpFrames(tester);
+      expect(sheet, findsOneWidget, reason: 'its lines scrolled');
+      expect(
+        tester.state<ScrollableState>(scroll.first).position.pixels,
+        greaterThan(0),
       );
     });
 

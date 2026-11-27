@@ -1412,6 +1412,12 @@ class _NeedsYouListState extends State<NeedsYouList> {
     if (_fresh.isNotEmpty || _above.requests + _above.alerts > 0) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _seeAbove());
     }
+    // Rows that open alone (an iPhone's, a narrow iPad's) are a list of
+    // places to go, as Mail's are: a long press selects none of their words
+    // (Zucchero's row 715). Opened in place, their cards' words select.
+    Widget selectable(Widget child) => widget.onOpen != null
+        ? SelectionContainer.disabled(child: child)
+        : SelectableArea(child: child);
     return FindScope(
       target: _find,
       // A finger down holds the rows that left until it lifts.
@@ -1421,8 +1427,8 @@ class _NeedsYouListState extends State<NeedsYouList> {
         onPointerCancel: (_) => _touched(-1),
         child: Stack(
           children: [
-            SelectableArea(
-              child: CustomScrollView(
+            selectable(
+              CustomScrollView(
                 controller: _scroll,
                 shrinkWrap: widget.shrinkWrap,
                 slivers: [

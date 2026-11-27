@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'approve_elsewhere.dart';
 import 'avatar.dart';
 import 'backend.dart';
 import 'card_answer.dart' show CardAnswer, PublishesAnswer;
@@ -87,7 +88,8 @@ class _DevicePairingCardState extends State<DevicePairingCard>
   /// doesn't.
   void _sync() {
     if (_waiting) {
-      if (_code == null) unawaited(_fetch());
+      // Windows never asks for the code (approve_elsewhere.dart).
+      if (_code == null && !approvesElsewhere) unawaited(_fetch());
       _tick ??= Timer.periodic(const Duration(seconds: 1), (_) {
         if (mounted) setState(() {});
       });
@@ -103,7 +105,9 @@ class _DevicePairingCardState extends State<DevicePairingCard>
   /// Connected again: a backend that restarted has a new code, which
   /// replaces the one shown.
   void _connectedChanged() {
-    if (_backend?.connected.value == true && _waiting) unawaited(_fetch());
+    if (_backend?.connected.value == true && _waiting && !approvesElsewhere) {
+      unawaited(_fetch());
+    }
   }
 
   Future<void> _fetch() async {
@@ -169,6 +173,7 @@ class _DevicePairingCardState extends State<DevicePairingCard>
   /// Don't allow.
   @override
   CardAnswer? answerNow() {
+    if (approvesElsewhere) return null;
     final key = 'agent:${pairing.agentId}/pairing/${pairing.id}';
     if (_waiting) {
       return CardAnswer(
@@ -264,7 +269,11 @@ class _DevicePairingCardState extends State<DevicePairingCard>
             ],
           ),
           const SizedBox(height: Space.m),
-          if (_waiting)
+          // Neither the code nor Allow on Windows: a phone or Mac adds it
+          // (approve_elsewhere.dart).
+          if (open && approvesElsewhere)
+            const ApproveElsewhere()
+          else if (_waiting)
             ..._waitingParts(palette, device)
           else if (pairing.state ==
               DevicePairingState.DEVICE_PAIRING_STATE_ASKING)

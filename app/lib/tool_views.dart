@@ -1196,6 +1196,7 @@ class _TalkButton extends StatelessWidget {
     return Semantics(
       button: true,
       label: label,
+      onTap: onTap,
       excludeSemantics: true,
       child: Unselectable(
         child: Pressable(
@@ -2065,6 +2066,7 @@ class _MadeImageState extends State<MadeImage> {
         image: true,
         button: true,
         label: widget.label,
+        onTap: _open,
         excludeSemantics: true,
         child: Pressable(
           onTap: _open,

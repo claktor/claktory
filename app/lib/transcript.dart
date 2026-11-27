@@ -4454,6 +4454,7 @@ class _ReplyQuoteState extends State<ReplyQuote> {
               label:
                   'In reply to ${name ?? 'an earlier message'}'
                   '${words.isEmpty ? '' : ': $words'}. Go to that message',
+              onTap: _go,
               excludeSemantics: true,
               child: GestureDetector(
                 behavior: HitTestBehavior.opaque,
@@ -5165,6 +5166,7 @@ class _ThinkingRunRow extends StatelessWidget {
       expanded: open,
       // What a tap does, after what it is.
       label: '$label. ${open ? 'Hide' : 'Show'} thoughts.',
+      onTap: onToggle,
       excludeSemantics: true,
       child: Pressable(
         onTap: onToggle,
@@ -6048,6 +6050,7 @@ class _RefusedLineState extends State<RefusedLine> {
             Semantics(
               button: true,
               label: action,
+              onTap: () => _fix(provider, method),
               excludeSemantics: true,
               child: Pressable(
                 onTap: () => _fix(provider, method),

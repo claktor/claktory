@@ -1195,6 +1195,7 @@ class _QuietButton extends StatelessWidget {
       button: true,
       enabled: onPressed != null,
       label: label,
+      onTap: onPressed,
       excludeSemantics: true,
       child: Pressable(
         onTap: onPressed,

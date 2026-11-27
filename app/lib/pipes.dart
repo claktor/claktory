@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'agent_name.dart';
+import 'approve_elsewhere.dart';
 import 'avatar.dart';
 import 'backend.dart';
 import 'card_answer.dart'
@@ -41,7 +42,7 @@ import 'state.dart' show PipeChat;
 import 'taint_label.dart' show TaintLabel, taintPages, taintRead;
 import 'transcript.dart' show Bubble, userAvatarSize;
 import 'usage.dart' show formatUntil;
-import 'visible_codes.dart' show proseCodes, visibleCodes;
+import 'visible_codes.dart' show nameInText, proseCodes, visibleCodes;
 import 'waiting.dart' show EntryReveal;
 
 /// A pipe's color: its portal glyph, its header's bar and its line on the
@@ -69,8 +70,8 @@ List<Pipe> pipesIn(Workspace workspace, String projectId) => [
 String pipePeerName(Pipe pipe, {bool start = false}) {
   final peer = pipe.peer;
   // Their own words: what reorders text shows by its code (Fugo).
-  if (peer.ownerName.isNotEmpty) return proseCodes(peer.ownerName);
-  if (peer.claktoryName.isNotEmpty) return proseCodes(peer.claktoryName);
+  if (peer.ownerName.isNotEmpty) return nameInText(peer.ownerName);
+  if (peer.claktoryName.isNotEmpty) return nameInText(peer.claktoryName);
   // At the start of a sentence, capitalized (Zucchero's row 175: a pipe
   // whose invite isn't used yet has no name for them).
   return start ? 'The other side' : 'the other side';
@@ -116,7 +117,7 @@ String pipeLeadFor(
 /// else its person's name: the words for what an agent read or is limited
 /// to.
 String pipePeerClaktory(Pipe pipe) => pipe.peer.claktoryName.isNotEmpty
-    ? proseCodes(pipe.peer.claktoryName)
+    ? nameInText(pipe.peer.claktoryName)
     : pipePeerName(pipe);
 
 /// The pipes [agentId] is limited to (Pipe.quarantined_ids).
@@ -957,6 +958,7 @@ class _ExplainedMark extends StatelessWidget {
         button: true,
         label: text,
         hint: 'Says what this means',
+        onTap: open,
         excludeSemantics: true,
         child: Pressable(
           onTap: open,
@@ -1062,7 +1064,7 @@ class _PipeIdentityNoticeState extends State<PipeIdentityNotice>
   @override
   CardAnswer? answerNow() {
     final (title, _, danger) = pipeIdentityNoticeText(widget.pipe);
-    if (title.isEmpty) return null;
+    if (title.isEmpty || approvesElsewhere) return null;
     return CardAnswer(
       key: 'pipe:${widget.pipe.id}/identity',
       docked: false,
@@ -1087,28 +1089,28 @@ class _PipeIdentityNoticeState extends State<PipeIdentityNotice>
     await showModal(
       context,
       (context, close) => FormFrame(
-                      title: now.isEmpty
-                          ? 'Trust this Claktory?'
-                          : "Trust this Claktory as $now's?",
-                      body: [
-                        'Messages waiting from it go through, and your '
-                            'agents can send here again.',
-                        // Nothing vouched for it: trusting it pins nothing.
-                        if (now.isEmpty)
-                          'The pipe then shows Not verified, since nothing '
-                              'confirms whose Claktory it is now.',
-                        'Do this only if ${pipePeerName(pipe)} told you '
-                            'about the change.',
-                      ].join(' '),
-                      error: null,
-                      fields: const [],
-                      submitLabel: 'Trust',
-                      onSubmit: () {
-                        close();
-                        accepting = _accept(rethrowing: rethrowing);
-                      },
-                      onCancel: close,
-                    ),
+        title: now.isEmpty
+            ? 'Trust this Claktory?'
+            : "Trust this Claktory as $now's?",
+        body: [
+          'Messages waiting from it go through, and your '
+              'agents can send here again.',
+          // Nothing vouched for it: trusting it pins nothing.
+          if (now.isEmpty)
+            'The pipe then shows Not verified, since nothing '
+                'confirms whose Claktory it is now.',
+          'Do this only if ${pipePeerName(pipe)} told you '
+              'about the change.',
+        ].join(' '),
+        error: null,
+        fields: const [],
+        submitLabel: 'Trust',
+        onSubmit: () {
+          close();
+          accepting = _accept(rethrowing: rethrowing);
+        },
+        onCancel: close,
+      ),
     );
     final accepted = accepting;
     if (accepted == null) {
@@ -1126,7 +1128,11 @@ class _PipeIdentityNoticeState extends State<PipeIdentityNotice>
     final type = TypeScale.of(context);
     final (title, body, danger) = pipeIdentityNoticeText(pipe);
     if (title.isEmpty) return const SizedBox.shrink();
-    final Widget action = danger
+    // Accepting an outside Claktory's new key is the boundary itself: done
+    // on a phone or Mac (Fugo 51978; approve_elsewhere.dart).
+    final Widget action = approvesElsewhere
+        ? const ApproveElsewhere()
+        : danger
         ? Button(
             label: 'Trust this Claktory…',
             onPressed: _busy ? null : () => unawaited(_trust()),
@@ -1965,7 +1971,9 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
   @override
   CardAnswer? answerNow() {
     final pipe = widget.pipe;
-    if (widget.ask != null || pipe.state != PipeState.PIPE_STATE_APPROVAL) {
+    if (widget.ask != null ||
+        pipe.state != PipeState.PIPE_STATE_APPROVAL ||
+        approvesElsewhere) {
       return null;
     }
     final replyTo = pipe.replyAgentId.isEmpty
@@ -2523,7 +2531,10 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
                 spacing: Space.s,
                 runSpacing: Space.xs,
                 children: [
-                  if (replying)
+                  // Approved on a phone or Mac (approve_elsewhere.dart).
+                  if (approvesElsewhere)
+                    const ApproveElsewhere(text: pipeElsewhereText)
+                  else if (replying)
                     SubmitButton(
                       onPressed: busy
                           ? null
@@ -2556,7 +2567,10 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
               // room; narrower, above them, whole (Zucchero's row 535).
               return LayoutBuilder(
                 builder: (context, box) {
-                  final beside = box.maxWidth >= _approvalBesideAt;
+                  // The note in place of the buttons goes under the words
+                  // (approve_elsewhere.dart).
+                  final beside =
+                      !approvesElsewhere && box.maxWidth >= _approvalBesideAt;
                   if (beside) {
                     return Row(
                       children: [
@@ -2958,8 +2972,10 @@ class _PipeMessageViewState extends State<PipeMessageView>
   CardAnswer? answerNow() {
     final message = widget.message;
     final held = message.state == PipeMessageState.PIPE_MESSAGE_STATE_HELD;
-    if (!held &&
-        message.state != PipeMessageState.PIPE_MESSAGE_STATE_HELD_INCOMING) {
+    if (approvesElsewhere ||
+        (!held &&
+            message.state !=
+                PipeMessageState.PIPE_MESSAGE_STATE_HELD_INCOMING)) {
       return null;
     }
     final replies =
@@ -3309,6 +3325,23 @@ class _PipeMessageViewState extends State<PipeMessageView>
     };
     if (decide != null) {
       final held = message.state == PipeMessageState.PIPE_MESSAGE_STATE_HELD;
+      // Sending, letting in or discarding it is the person's, from a phone
+      // or Mac (DecidePipeMessage, Fugo 52031; approve_elsewhere.dart).
+      if (approvesElsewhere) {
+        return Column(
+          crossAxisAlignment: held && !start
+              ? CrossAxisAlignment.end
+              : CrossAxisAlignment.start,
+          children: [
+            line(
+              held ? 'Waiting to be sent · $time' : 'Held · $time',
+              color: palette.textMuted,
+            ),
+            const SizedBox(height: Space.xs),
+            const ApproveElsewhere(text: pipeElsewhereText),
+          ],
+        );
+      }
       final hearer = pipeDecisionHearer(
         AppScope.of(context).workspace.workspace,
         widget.pipe,
@@ -4784,6 +4817,18 @@ class _ConnectPipeFormState extends State<ConnectPipeForm> {
 
   @override
   Widget build(BuildContext context) {
+    // No invite made, shown or taken on Windows (approve_elsewhere.dart).
+    if (approvesElsewhere) {
+      return FormFrame(
+        title: 'Connect a pipe',
+        body: pipeElsewhereText,
+        error: null,
+        fields: const [],
+        submitLabel: 'Close',
+        onSubmit: widget.close,
+        onCancel: widget.close,
+      );
+    }
     final palette = Palette.of(context);
     final project = widget.project;
     switch (_step) {

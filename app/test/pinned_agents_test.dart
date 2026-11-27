@@ -162,6 +162,43 @@ void main() {
     expect(find.text('Agent settings…'), findsOneWidget);
   });
 
+  // Abbacchio's row 1716, VoiceOver on a Mac: moving the keyboard's focus
+  // to its cursor tells the app only that the row gained its focus; the
+  // row takes the keys then, so Shift-F10 opens its menu, and its items
+  // work from VoiceOver's tap.
+  testWidgets("on a Mac, VoiceOver's focus on a row takes the keys; the "
+      "menu's items work from VoiceOver's tap", (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final semantics = tester.ensureSemantics();
+    final harness = await _show(tester, _workspace());
+    final owner = tester.binding.renderViews.first.owner!.semanticsOwner!;
+    final row = tester.getSemantics(
+      find.bySemanticsLabel(RegExp('Dana, .*pinned')),
+    );
+    expect(
+      row.getSemanticsData().hasAction(
+        SemanticsAction.didGainAccessibilityFocus,
+      ),
+      isTrue,
+    );
+    owner.performAction(row.id, SemanticsAction.didGainAccessibilityFocus);
+    await settle(tester);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.f10);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await settle(tester);
+    expect(find.text('Unpin'), findsOneWidget);
+    final up = tester.getSemantics(find.bySemanticsLabel('Move up').last);
+    owner.performAction(up.id, SemanticsAction.tap);
+    await settle(tester);
+    expect(
+      (harness.last.pinAgent.agentId, harness.last.pinAgent.beforeId),
+      ('dana', 'bruno'),
+    );
+    semantics.dispose();
+  });
+
   testWidgets("a pin's menu: Unpin, Move up and Move down where they go", (
     tester,
   ) async {

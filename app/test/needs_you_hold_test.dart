@@ -88,7 +88,9 @@ void main() {
   test('the words, as Trish wrote them', () {
     expect(newAboveWords(count: 1, urgent: 0), '↑ 1 new');
     expect(newAboveWords(count: 3, urgent: 0), '↑ 3 new');
-    expect(newAboveWords(count: 3, urgent: 1), '↑ 1 urgent');
+    expect(newAboveWords(count: 1, urgent: 1), '↑ 1 urgent');
+    // Both, the urgent first (Trish 50648).
+    expect(newAboveWords(count: 3, urgent: 1), '↑ 1 urgent · 2 new');
     expect(
       newAboveSpoken(requests: 1, alerts: 0, urgent: 0),
       '1 new request above',
@@ -105,6 +107,14 @@ void main() {
     expect(
       newAboveSpoken(requests: 0, alerts: 1, urgent: 1),
       '1 urgent alert above',
+    );
+    expect(
+      newAboveSpoken(requests: 1, alerts: 1, urgent: 1),
+      '1 urgent alert and 1 new request above',
+    );
+    expect(
+      newAboveSpoken(requests: 2, alerts: 3, urgent: 2),
+      '2 urgent alerts and 3 new above',
     );
   });
 
@@ -188,9 +198,9 @@ void main() {
       tester.getRect(_row('Publish the notes')).bottom,
       lessThanOrEqualTo(lea.top),
     );
-    // The alert went up past the top to make room: the pill says so
-    // (Lucy 50118), until it's back in view.
-    expect(find.text('↑ 1 urgent'), findsOneWidget);
+    // The alert went up past the top to make room, and Kai's top with it:
+    // the pill says so (Lucy 50118; Trish 50648), until they're in view.
+    expect(find.text('↑ 1 urgent · 1 new'), findsOneWidget);
     await tester.tap(_pill);
     await pumpFrames(tester);
     expect(_pillShown(tester), isFalse);

@@ -70,6 +70,7 @@ class TellRivet extends StatelessWidget {
         return Semantics(
           button: true,
           label: label,
+          onTap: tell,
           excludeSemantics: true,
           child: Pressable(
             onTap: tell,
@@ -164,6 +165,7 @@ class _RivetWaitsState extends State<_RivetWaits> {
             Semantics(
               button: true,
               label: label,
+              onTap: onTap,
               excludeSemantics: true,
               child: Pressable(
                 onTap: onTap,

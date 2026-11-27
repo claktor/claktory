@@ -178,6 +178,7 @@ object DeviceStores {
     private var credentials: CredentialStore? = null
     private var drafts: DraftStore? = null
     private var dmKeys: DmKeyStore? = null
+    private var push: PushStore? = null
 
     @Synchronized
     fun credentials(context: Context): CredentialStore = credentials ?: run {
@@ -210,6 +211,18 @@ object DeviceStores {
             KeystoreSealer(context.applicationContext, DM_KEY_ALIAS, log),
             log,
         ).also { dmKeys = it }
+    }
+
+    /** The push keys (PushStore.kt), read by the app and the messaging service alike. */
+    @Synchronized
+    fun push(context: Context): PushStore = push ?: run {
+        val log = { message: String -> Log.i(TAG, message); Unit }
+        PushStore(
+            File(context.noBackupFilesDir, PushStore.FILE_NAME),
+            context.packageName,
+            KeystoreSealer(context.applicationContext, PushStore.ALIAS, log),
+            log,
+        ).also { push = it }
     }
 
     private const val TAG = "Claktory"

@@ -18,9 +18,11 @@ final _token = 'c' * 64;
 final _code = 'factory://?t=$_token&name=mac-mini&e=${'a' * 64}';
 
 /// A backend that answers a Hello with PairingPending and keeps the
-/// connection open; [say] sends it what it says next.
-Future<(HttpServer, Future<void> Function(ServerMessage) say)>
-pendingServer() async {
+/// connection open; [say] sends it what it says next. What else it's sent
+/// goes in [heard].
+Future<(HttpServer, Future<void> Function(ServerMessage) say)> pendingServer({
+  List<ClientMessage>? heard,
+}) async {
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   final socket = Completer<WebSocket>();
   var hello = Int64.ZERO;
@@ -42,6 +44,8 @@ pendingServer() async {
           ).writeToBuffer(),
         );
         if (!socket.isCompleted) socket.complete(ws);
+      } else {
+        heard?.add(message);
       }
     });
   });
@@ -111,6 +115,26 @@ void main() {
     await server.close(force: true);
   });
 
+  test('Cancel takes the request back on the connection that made it '
+      '(#603)', () async {
+    final heard = <ClientMessage>[];
+    final (server, _) = await pendingServer(heard: heard);
+    final backend = backendWith(FakeTunnels(FakeTunnel(server.port)))
+      ..deviceKey = ((_) => 'k' * 64)
+      ..connectWithin = const Duration(seconds: 1);
+    backend.connectTo(parsePairingCode(_code));
+    unawaited(backend.run());
+    await until(() => backend.pairing.value != null);
+    backend.withdrawPairing();
+    await until(() => heard.any((message) => message.hasWithdrawPairing()));
+    expect(
+      heard.where((message) => message.hasWithdrawPairing()),
+      hasLength(1),
+    );
+    await backend.close();
+    await server.close(force: true);
+  });
+
   test('turned away while waiting, it says why and stops', () async {
     final (server, say) = await pendingServer();
     final backend = backendWith(FakeTunnels(FakeTunnel(server.port)))
@@ -166,8 +190,15 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('0427'), findsOneWidget);
+    expect(harness.backend.sent, isEmpty);
     await tester.tap(find.text('Cancel'));
     await pumpFrames(tester);
+    // Taken back there too, so it leaves that Claktory's list at once
+    // (#603).
+    expect(
+      harness.backend.sent.where((message) => message.hasWithdrawPairing()),
+      hasLength(1),
+    );
     expect(harness.connections.current, isNull);
     expect(find.byType(PairScreen), findsOneWidget);
     debugDefaultTargetPlatformOverride = null;
@@ -187,6 +218,11 @@ void main() {
     await tester.tap(find.text('Use a new code'));
     await pumpFrames(tester);
     expect(find.byType(PairScreen), findsOneWidget);
+    // Turned away, there's nothing there to take back.
+    expect(
+      harness.backend.sent.where((message) => message.hasWithdrawPairing()),
+      isEmpty,
+    );
     debugDefaultTargetPlatformOverride = null;
   });
 

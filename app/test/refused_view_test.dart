@@ -271,10 +271,11 @@ void main() {
     expect(copied, [signIn]);
   });
 
-  // Zucchero's row 720: at the largest text a way out grows no more than
-  // the button above it (2×).
-  testWidgets("on a phone at the largest text, the problem page's links "
-      'grow no more than its button', (tester) async {
+  // Lucy 50760/50830: at the largest text, the primary and the links under
+  // it grow in full and wrap, never clamped; a word too wide alone shrinks
+  // to fit rather than break.
+  testWidgets("on a phone at the largest text, the problem page's primary "
+      'and links grow in full, no word broken', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     tester.platformDispatcher.textScaleFactorTestValue = 3.12;
@@ -283,16 +284,26 @@ void main() {
     harness.connections.use(
       parsePairingCode('factory://?t=${'b' * 64}&name=desktop&e=${'d' * 64}'),
     );
-    await harness.show(tester, size: const Size(430, 932));
+    await harness.show(tester, size: const Size(320, 568));
     await pumpFrames(tester);
     harness.backend
       ..connected.value = false
       ..refused.value = 'unknown device';
     await pumpFrames(tester);
-    double scaleOf(String text) =>
-        MediaQuery.textScalerOf(tester.element(find.text(text))).scale(10) / 10;
-    expect(scaleOf('Remove…'), scaleOf('Use a new code'));
-    expect(scaleOf('Remove…'), lessThanOrEqualTo(2));
+    expect(tester.takeException(), isNull);
+    Text text(String words) => tester.widget<Text>(find.text(words));
+    double scaleOf(String words) => text(words).textScaler!.scale(10) / 10;
+    // "Use a new code": every word fits whole, so it's the full 3.12×.
+    expect(scaleOf('Use a new code'), closeTo(3.12, 0.01));
+    // "Remove…", one word wider than an SE at 3.12× in the test's font:
+    // shrunk to one line, within the screen.
+    await tester.ensureVisible(find.text('Remove…'));
+    await pumpFrames(tester);
+    final remove = tester.getRect(find.text('Remove…'));
+    final size = text('Remove…').style!.fontSize!;
+    expect(remove.width, lessThanOrEqualTo(320 - 2 * 16));
+    expect(remove.height, lessThan(2 * size * scaleOf('Remove…')));
+    expect(scaleOf('Remove…'), greaterThan(2));
   });
 
   // Abbacchio's 1676: a Claktory reached by code, signed out of its

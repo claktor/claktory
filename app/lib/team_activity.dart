@@ -42,6 +42,12 @@ class TeamActivity extends StatelessWidget {
     return Semantics(
       button: true,
       label: '$count of $total agents working. Open the Map',
+      // Pointer only for now: its 24pt is short of a finger's target, which
+      // a tap of its own would claim for VoiceOver on a phone (until it
+      // grows, VoiceOver's touch there reaches it as a tap).
+      onTap: touchFirst(context)
+          ? null
+          : () => AppScope.togglePage(context, AppPage.map),
       excludeSemantics: true,
       child: HoverCard(
         holdToShow: true,

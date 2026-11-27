@@ -137,6 +137,15 @@ impl TunnelHandle {
         *self.homes.lock().unwrap() = urls;
     }
 
+    /// Whether the app is idle: a phone or tablet left untouched for a
+    /// minute with nothing arriving. While it is, the connection's paths are
+    /// checked every 25 s instead of every 2 to 5, so the radio can rest;
+    /// back from idle they're pinged at once and checked as before.
+    #[frb(sync)]
+    pub fn set_idle(&self, idle: bool) {
+        self.tunnel.set_idle(idle);
+    }
+
     #[frb(sync)]
     pub fn status(&self) -> TunnelStatus {
         let status = self.tunnel.status();

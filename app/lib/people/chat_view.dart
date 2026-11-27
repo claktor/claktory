@@ -20,7 +20,7 @@ import '../mobile/presentation.dart' show SheetAction, showActions;
 import '../scope.dart';
 import '../transcript.dart' show Bubble;
 import '../user_apps/session.dart';
-import '../visible_codes.dart' show proseCodes;
+import '../visible_codes.dart' show nameInText, proseCodes;
 import '../tunnel/api/dm.dart' as dm;
 import 'chat.dart';
 import 'e2ee.dart';
@@ -102,7 +102,7 @@ String outgoingLine(
     'closed' => "Not sent: you're no longer friends.",
     'stale' => 'Not sent: this conversation changed. Open it again.',
     'waitingForFriend' =>
-      "Not sent: ${friend.isEmpty ? 'they' : friend} can't get messages "
+      "Not sent: ${friend.isEmpty ? 'they' : nameInText(friend)} can't get messages "
           'in this chat yet. Send it again once they can.',
     'rateLimited' => 'Not sent: too many messages for now. Try again later.',
     'storageFull' =>
@@ -134,7 +134,7 @@ String shownClaktoryName(BuildContext context) {
   return backend == null ? 'this Claktory' : claktoryName(backend);
 }
 
-String _whose(String name) => name.isEmpty ? 'their' : "$name's";
+String _whose(String name) => name.isEmpty ? 'their' : "${nameInText(name)}'s";
 
 /// What's said under the person's own message of where it stands past
 /// their home (#451); null when nothing is ([DmDelivered.sent] on any but
@@ -146,8 +146,9 @@ String? deliveredLine(
   bool byAgent = false,
   DateTime? now,
 }) {
-  final claktory = "${friend.isEmpty ? 'Their' : "$friend's"} Claktory";
-  final to = "${friend.isEmpty ? 'their' : "$friend's"} Claktory";
+  final name = nameInText(friend);
+  final claktory = "${friend.isEmpty ? 'Their' : "$name's"} Claktory";
+  final to = "${friend.isEmpty ? 'their' : "$name's"} Claktory";
   return switch (delivered.state) {
     // An agent's says Sent by your agent instead.
     DmDelivered.sent => newest && !byAgent ? 'Sent' : null,
@@ -170,9 +171,11 @@ String? deliveredLine(
 /// The question under the person's message the friend's Claktory
 /// couldn't read, their conversation having gained someone since (Fugo:
 /// never sent again without asking).
-String resendQuestion(String friend) => friend.isEmpty
-    ? "Resend? Their conversation has changed since."
-    : "Resend to $friend? $friend's conversation has changed since.";
+String resendQuestion(String friend) {
+  if (friend.isEmpty) return 'Resend? Their conversation has changed since.';
+  final name = nameInText(friend);
+  return "Resend to $name? $name's conversation has changed since.";
+}
 
 /// What a change in who can read a chat says, one line per leaf (Trish's
 /// words): [me] is the person's account, [friend] the friend's name.
@@ -182,7 +185,7 @@ List<String> memberLines(
   required String friend,
   String here = '',
 }) {
-  final who = friend.isEmpty ? 'They' : friend;
+  final who = friend.isEmpty ? 'They' : nameInText(friend);
   String line(dm.DmMember member, bool added) {
     final mine = member.account == me;
     // This device itself, removed by another of the person's (row 199):
@@ -193,11 +196,11 @@ List<String> memberLines(
     }
     if (member.kind == dm.DmLeafKind.claktory) {
       final whose = mine ? 'Your' : "$who's";
-      return '$whose Claktory ${proseCodes(member.name)} can '
+      return '$whose Claktory ${nameInText(member.name)} can '
           '${added ? 'now' : 'no longer'} read this chat';
     }
     return '${mine ? 'You' : who} ${added ? 'added' : 'removed'} a device: '
-        '${proseCodes(member.name)}';
+        '${nameInText(member.name)}';
   }
 
   return [
@@ -205,18 +208,18 @@ List<String> memberLines(
     // chat of two.
     for (final account in members.keyChanged)
       if (account != me)
-        "${friend.isEmpty ? 'Their' : "$friend's"} security key changed",
+        "${friend.isEmpty ? 'Their' : "$who's"} security key changed",
     // A friend's first device here: they joined (Bruno 33634), said for
     // each leaf all the same (Fugo).
     for (final member in members.joined)
       member.account == me
           ? line(member, true)
-          : '$who joined on ${proseCodes(member.name)}',
+          : '$who joined on ${nameInText(member.name)}',
     for (final member in members.added) line(member, true),
     // Back with a new key: the device installed again (row 202, Trish).
     for (final member in members.setUpAgain)
       '${member.account == me ? 'You' : who} set up a device again: '
-          '${proseCodes(member.name)}',
+          '${nameInText(member.name)}',
     for (final member in members.removed) line(member, false),
     // This device joined again past messages it can't read (row 654).
     if (members.skipped case final because?)
@@ -232,7 +235,7 @@ List<String> memberLines(
                   ? "a device you've since removed"
                   : friend.isEmpty
                   ? "a device that's since been removed"
-                  : 'a device $friend has since removed'} '
+                  : 'a device ${nameInText(friend)} has since removed'} '
               'was in this chat.',
         _ =>
           'Some messages sent when '
@@ -240,7 +243,7 @@ List<String> memberLines(
                   ? 'your'
                   : friend.isEmpty
                   ? 'their'
-                  : "$friend's"} '
+                  : "$who's"} '
               "security key changed can't be shown on this device.",
       },
   ];
@@ -323,7 +326,7 @@ class _ChatViewState extends State<ChatView> {
   }
 
   Future<void> _delete() async {
-    final name = _thread.conversation.person.name;
+    final name = nameInText(_thread.conversation.person.name);
     var sure = false;
     await showModal(
       context,
@@ -1084,7 +1087,7 @@ String departedLine({required bool mine, required String friend}) => mine
     ? "From a device you've since removed"
     : friend.isEmpty
     ? "From a device they've since removed"
-    : 'From a device $friend has since removed';
+    : 'From a device ${nameInText(friend)} has since removed';
 
 /// A message waits until this device catches up with the chat (row 551):
 /// Claktory tries again by itself.
@@ -1134,7 +1137,7 @@ class _WaitingToJoin extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    final who = name.isEmpty ? 'your friend' : proseCodes(name);
+    final who = name.isEmpty ? 'your friend' : nameInText(name);
     return Padding(
       padding: const EdgeInsets.only(top: Space.s),
       child: Container(
@@ -1183,7 +1186,7 @@ class _WaitingForKey extends StatelessWidget {
     final whose = switch (name) {
       null => 'your',
       '' => 'their',
-      final name => "${proseCodes(name)}'s",
+      final name => "${nameInText(name)}'s",
     };
     return Padding(
       padding: const EdgeInsets.only(top: Space.s),
@@ -1199,7 +1202,7 @@ class _WaitingForKey extends StatelessWidget {
             Text(switch (device) {
               null => 'Waiting for $whose new security key to finish.',
               final device =>
-                'Waiting for $whose ${proseCodes(device)} to finish setting '
+                'Waiting for $whose ${nameInText(device)} to finish setting '
                     'up again.',
             }, style: type.body.copyWith(color: palette.text)),
             const SizedBox(height: Space.xs),
@@ -1239,6 +1242,8 @@ class _KeyChanged extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
+    // Their name inside these sentences (nameInText; Fugo 51059).
+    final name = nameInText(this.name);
     final who = name.isEmpty ? 'Their' : "$name's";
     final them = name.isEmpty ? 'they' : name;
     return Padding(

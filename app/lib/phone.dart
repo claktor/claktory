@@ -56,6 +56,7 @@ import 'mobile/quick_actions.dart' show PhoneQuickActions;
 import 'mobile/review_bar.dart';
 import 'mobile/scroll_fade.dart' show ScrollsWithFade;
 import 'mobile/share.dart' show globalRectOf, shareText;
+import 'mobile/push.dart' show PushRegistrar;
 import 'mobile/presentation.dart'
     show PhoneSheetHost, SheetOverlay, presentSheet;
 import 'pairing.dart';
@@ -928,15 +929,21 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
         final agent = pipe == null && chat == null
             ? backend.workspace.selectedAgent
             : null;
-        // Nothing chosen yet: the drawer offers what there is, once.
-        if (pipe == null &&
+        // Nothing chosen yet: the drawer offers what there is, once. A
+        // first-launch step can replace these screens after a page was
+        // chosen in the drawer; don't offer the drawer over that page.
+        if (_stack.isEmpty &&
+            pipe == null &&
             chat == null &&
             agent == null &&
             !_offered &&
             backend.connected.value &&
             workspace.agents.isNotEmpty) {
           _offered = true;
-          _soon(() => _host?.openDrawer());
+          _soon(() {
+            // A page may have been chosen since this offer was queued.
+            if (_stack.isEmpty) _host?.openDrawer();
+          });
         }
         if (agent != null) _takeUpFocus(agent);
         final panel = _stack.isEmpty ? openPanelOf(workspace, agent) : null;
@@ -1827,17 +1834,28 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
                   'Sign in with your email instead',
                   onTap: () => setState(() => _withAccount = true),
                 ),
-              // Until Android gets notifications (Pesci's P2 takes this
-              // line away): what its people need to know first.
-              if (defaultTargetPlatform == TargetPlatform.android) ...[
-                const SizedBox(height: Space.l),
-                Text(
-                  "This $thisDeviceKind doesn't get notifications yet. Keep "
-                  'Claktory open to see what your agents need.',
-                  style: TypeScale.of(context).caption
-                      .copyWith(color: palette.textMuted),
+              // An Android phone pushes can't reach (no Google Play
+              // services, a build without Firebase): what its people need
+              // to know first. Every other phone gets notifications.
+              if (defaultTargetPlatform == TargetPlatform.android)
+                ValueListenableBuilder<String?>(
+                  valueListenable:
+                      PushRegistrar.current?.permissionNow ??
+                      const AlwaysStoppedAnimation<String?>('unavailable'),
+                  builder: (context, permission, _) =>
+                      permission != 'unavailable'
+                      ? const SizedBox.shrink()
+                      : Padding(
+                          padding: const EdgeInsets.only(top: Space.l),
+                          child: Text(
+                            "This $thisDeviceKind can't get notifications "
+                            'without Google Play services. Keep Claktory '
+                            'open to see what your agents need.',
+                            style: TypeScale.of(context).caption
+                                .copyWith(color: palette.textMuted),
+                          ),
+                        ),
                 ),
-              ],
             ],
           ),
         ),

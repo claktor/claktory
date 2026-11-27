@@ -7,6 +7,7 @@ import 'package:flutter/widgets.dart';
 import 'package:url_launcher/url_launcher.dart' show launchUrl;
 
 import 'android/device_identity.dart';
+import 'approve_elsewhere.dart';
 import 'backend.dart';
 import 'claktory_identity.dart' show claktoryName;
 import 'connections.dart';
@@ -34,7 +35,7 @@ import 'settings_view.dart';
 import 'setup.dart' show downloadMacUrl;
 import 'usage.dart';
 import 'tell_rivet.dart';
-import 'visible_codes.dart' show proseCodes;
+import 'visible_codes.dart' show nameInText;
 import 'your_claktories.dart'
     show YourClaktories, deadlineDay, showConfirmSignIn;
 
@@ -98,16 +99,20 @@ class _DevicesSettingsState extends State<DevicesSettings>
           ),
         failureLine(palette),
         const SizedBox(height: Space.m),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: Button(
-            label: 'Add a device…',
-            onPressed: () => showModal(
-              context,
-              (context, close) => PairDeviceForm(close: close),
+        // A device joins through a phone or Mac (approve_elsewhere.dart).
+        if (approvesElsewhere)
+          const ApproveElsewhere(text: addDeviceElsewhereText)
+        else
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Button(
+              label: 'Add a device…',
+              onPressed: () => showModal(
+                context,
+                (context, close) => PairDeviceForm(close: close),
+              ),
             ),
           ),
-        ),
         // macOS 15 asks before letting the backend take connections from
         // this network; denied, devices at home go through a relay (#543).
         if (backendOnMac(widget.workspace)) ...[
@@ -211,7 +216,10 @@ class _DeviceRowState extends State<_DeviceRow> with SettingRequests {
     final stacked =
         largeText(context) || (isPhoneLayout(context) && confirmBy != null);
     final actions = [
-      if (confirmBy != null)
+      // Confirming a device is the owner's, this one too, is an approval
+      // made on a phone or Mac (ConfirmDevice, Fugo 52031;
+      // approve_elsewhere.dart).
+      if (confirmBy != null && !approvesElsewhere)
         Button(
           label: widget.thisDevice ? 'Confirm…' : "Confirm it's yours",
           onPressed: widget.thisDevice
@@ -221,7 +229,9 @@ class _DeviceRowState extends State<_DeviceRow> with SettingRequests {
                 )
               : () => run(() => AppScope.of(context).confirmDevice(device.id)),
         ),
-      Button(label: 'Remove', onPressed: _unpair),
+      // Removing a device could leave the person no phone or Mac to approve
+      // with (Fugo 51974): done there, never on Windows.
+      if (!approvesElsewhere) Button(label: 'Remove', onPressed: _unpair),
     ];
     return Container(
       padding: const EdgeInsets.symmetric(vertical: Space.s),
@@ -389,7 +399,7 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
       number: _number.text,
       // The device the person just named.
       stoppedWaiting:
-          '${proseCodes(device.name)} stopped waiting. To add it, make a new '
+          '${nameInText(device.name)} stopped waiting. To add it, make a new '
           'code.',
     );
     if (error == null) {
@@ -407,6 +417,18 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
 
   @override
   Widget build(BuildContext context) {
+    // Never a code or a device's number here (approve_elsewhere.dart).
+    if (approvesElsewhere) {
+      return FormFrame(
+        title: 'Add a device',
+        body: addDeviceElsewhereText,
+        fields: const [],
+        error: null,
+        submitLabel: 'Close',
+        onSubmit: widget.close,
+        onCancel: widget.close,
+      );
+    }
     final code = _code;
     if (code != null) {
       return ListenableBuilder(
@@ -424,7 +446,7 @@ class _PairDeviceFormState extends State<PairDeviceForm> {
             return FormFrame(
               // The name the device gave itself: what reorders text shows
               // by its code (proseCodes, Fugo).
-              title: 'Allow ${proseCodes(device.name)} to connect?',
+              title: 'Allow ${nameInText(device.name)} to connect?',
               // Typed off its screen, never shown here (#352 P4): only
               // someone who can see the device lets it in.
               body: 'To allow it, type the number its screen shows.',
@@ -645,6 +667,9 @@ class _PairingInstructionsState extends State<PairingInstructions> {
 
   @override
   Widget build(BuildContext context) {
+    if (approvesElsewhere) {
+      return const ApproveElsewhere(text: codeElsewhereText);
+    }
     final palette = Palette.of(context);
     final body = TypeScale.of(context).body.copyWith(color: palette.textMuted);
     final device = widget.device;
@@ -818,6 +843,9 @@ class _PairingCodeViewState extends State<PairingCodeView> {
 
   @override
   Widget build(BuildContext context) {
+    if (approvesElsewhere) {
+      return const ApproveElsewhere(text: codeElsewhereText);
+    }
     final palette = Palette.of(context);
     final device = widget.device.isEmpty ? 'the device' : widget.device;
     // A computer can't scan: copying is what it takes.
@@ -910,6 +938,9 @@ class _QrCodeState extends State<QrCode> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    // Every QR code holds a code to let something in: none on Windows
+    // (approve_elsewhere.dart).
+    if (approvesElsewhere) return;
     _modules ??= AppScope.scope(context).connections.qrCode(widget.text);
   }
 
@@ -1002,8 +1033,9 @@ class _FactoryChooserState extends State<FactoryChooser> {
   /// (friend bug #2).
   var _canScan = false;
 
-  /// With a code, rather than from the account.
-  late var _withCode = widget.code;
+  /// With a code, rather than from the account: never on Windows, which
+  /// adds only from the account (approve_elsewhere.dart).
+  late var _withCode = widget.code && !approvesElsewhere;
 
   /// On an iPad, iPhone or Android device with a camera, a code is
   /// scanned first (§7: Scan code is the primary); Paste code brings the
@@ -1107,15 +1139,18 @@ class _FactoryChooserState extends State<FactoryChooser> {
             onPrimary: () => unawaited(_connect(target)),
           );
         }
-        if (_withCode) return _codeForm(context);
+        if (_withCode && !approvesElsewhere) return _codeForm(context);
         final account = connections.account;
+        final codes = !approvesElsewhere;
         return _AddFrame(
           title: 'Add a Claktory',
           body: !account.signedIn
               ? null
               : _nothingLeft
-              ? 'All your Claktories are already here. To add one that '
-                    "isn't on your account yet, use its code."
+              ? codes
+                    ? 'All your Claktories are already here. To add one that '
+                          "isn't on your account yet, use its code."
+                    : 'All your Claktories are already here.'
               : 'On your account · ${account.email}',
           fields: [
             YourClaktories(
@@ -1130,7 +1165,7 @@ class _FactoryChooserState extends State<FactoryChooser> {
             ),
           ],
           quiet: [
-            if (!_nothingLeft)
+            if (!_nothingLeft && codes)
               QuietLink(
                 label: 'Use a code instead',
                 onTap: () => setState(() => _withCode = true),
@@ -1138,7 +1173,7 @@ class _FactoryChooserState extends State<FactoryChooser> {
             ?setUpHere,
           ],
           onCancel: _asking ? null : widget.close,
-          primary: _nothingLeft ? 'Use a code' : null,
+          primary: _nothingLeft && codes ? 'Use a code' : null,
           onPrimary: () => setState(() => _withCode = true),
         );
       },

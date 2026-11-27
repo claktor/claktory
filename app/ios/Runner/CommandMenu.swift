@@ -3,8 +3,8 @@ import UIKit
 
 /// The iPad workbench's commands in the system's menu, on
 /// `factory/commands` (app/lib/ipad/commands.dart; the messages are in
-/// app/test/ipad/fixtures/commands/): the iPadOS menu bar's View menu and the
-/// list shown while ⌘ is held.
+/// app/test/ipad/fixtures/commands/): the iPadOS menu bar's View menu (and
+/// its app menu's Settings) and the list shown while ⌘ is held.
 ///
 /// Dart sends `setCommands` whenever they change; this answers true and
 /// shows them as UIKeyCommands, so Dart's own key bindings stand down. A
@@ -119,12 +119,27 @@ final class CommandMenu {
     }
   }
 
-  /// Adds the commands to the end of the View menu, set apart inline.
+  /// The command that takes the app menu's Settings place.
+  static let settingsID = "settings"
+
+  /// Adds the commands to the end of the View menu, set apart inline;
+  /// Settings (⌘,) instead takes the app menu's Settings place, over
+  /// iPadOS 26's own, which opens the system's Settings app on the same
+  /// keys (projects-sidebar.md §9). Where the menu has no such place, it
+  /// joins the others in View.
   func build(_ builder: UIMenuBuilder, action: Selector) {
     guard builder.system == .main, !commands.isEmpty else { return }
+    var keys = keyCommands(action: action)
+    if builder.menu(for: .preferences) != nil,
+      let at = keys.firstIndex(where: { $0.propertyList as? String == Self.settingsID })
+    {
+      let settings = keys.remove(at: at)
+      builder.replaceChildren(ofMenu: .preferences) { _ in [settings] }
+    }
+    guard !keys.isEmpty else { return }
     let menu = UIMenu(
       title: "", identifier: Self.menuIdentifier, options: .displayInline,
-      children: keyCommands(action: action))
+      children: keys)
     builder.insertChild(menu, atEndOfMenu: .view)
   }
 

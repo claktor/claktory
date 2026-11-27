@@ -2020,6 +2020,11 @@ impl Factory {
     }
 
     fn deliver_queued(self: &Arc<Self>, id: &str, queued: Queued) -> bool {
+        // Outside words, or a sender's that read them: no errand from it
+        // until it starts afresh (row 1721).
+        if let Some(event) = &queued.event {
+            crate::errands::heard(self, id, event);
+        }
         let mut inner = self.lock();
         let from = queued.event.as_ref().map(|event| event.from.clone()).unwrap_or_default();
         if inner.config.agent(id).is_none() && !crate::chats::kept(self, id) {
@@ -2388,7 +2393,12 @@ impl Factory {
         }
         let selected_gone = inner.state.selected_agent.as_deref().is_some_and(|id| config.agent(id).is_none());
         let marks = |state: &crate::config::State| {
-            state.unseen.len() + state.collapsed.len() + state.explorer.len() + state.collapsed_folders.len() + state.open_panels.len()
+            state.unseen.len()
+                + state.collapsed.len()
+                + state.explorer.len()
+                + state.collapsed_folders.len()
+                + state.collapsed_projects.len()
+                + state.open_panels.len()
         };
         let before = marks(&inner.state);
         inner.state.unseen.retain(|id| config.agent(id).is_some());
@@ -2398,6 +2408,7 @@ impl Factory {
         // Views of folders (and agents' checkouts) that are gone.
         inner.state.explorer.retain(|key, _| crate::explorer::view_exists(&config, key));
         inner.state.collapsed_folders.retain(|(project, folder)| folder_exists(project, folder));
+        inner.state.collapsed_projects.retain(|project| config.project(project).is_some());
         let pruned = before != marks(&inner.state);
         self.retire_checkouts(&inner.config, &config);
         // A removed agent's grants go with it, so one added later with its id
@@ -2646,6 +2657,36 @@ impl Factory {
         Ok(())
     }
 
+    /// Folds a project in the sidebar, or unfolds it.
+    pub fn set_project_collapsed(&self, project: &str, collapsed: bool) -> Result<(), RequestError> {
+        let mut inner = self.lock();
+        if inner.config.project(project).is_none() {
+            return Err(RequestError::UnknownProject(project.to_owned()));
+        }
+        let changed = if collapsed {
+            inner.state.collapsed_projects.insert(project.to_owned())
+        } else {
+            inner.state.collapsed_projects.remove(project)
+        };
+        if changed {
+            self.broadcast_workspace(&inner);
+            self.store.save_state(&inner.state)?;
+        }
+        Ok(())
+    }
+
+    /// Where CreateProject with no path would keep a project named `name`
+    /// now (New project's caption): None for a name it refuses.
+    pub fn project_folder_preview(&self, name: &str) -> Option<std::path::PathBuf> {
+        let name = name.trim();
+        if name.is_empty() {
+            return None;
+        }
+        let inner = self.lock();
+        let id = config::unique_id(name, "project", |id| inner.config.project(id).is_some());
+        Some(self.home.workspace().join(id))
+    }
+
     /// Folds the sidebar's Projects or Chats section away, or opens it; None
     /// leaves one as it is.
     fn set_sections_collapsed(&self, projects: Option<bool>, chats: Option<bool>) -> Result<(), RequestError> {
@@ -2833,6 +2874,7 @@ impl Factory {
                 folders,
                 archived: project.archived,
                 report_forward: crate::pipes::handoff::project_view(self, &project.id),
+                collapsed: inner.state.collapsed_projects.contains(&project.id),
             });
         }
         let mut agents = Vec::new();
@@ -2948,12 +2990,19 @@ impl Factory {
             let problem = self.account.view(&inner.config.account).map(|account| account.problem).unwrap_or_default();
             vault.locked_why = crate::vault::signins::locked_why(&self.vault, problem);
         }
-        // Given to an agent quarantined for a pipe, a secret isn't usable by it.
+        // Given to a contained agent, a secret is out of its commands (it has
+        // none): one used for errands may only have it filled in Claktory's
+        // browser, on its sites; one limited to a pipe can't use it at all.
         for secret in &mut vault.secrets {
+            let fillable = !secret.sites.is_empty() && !secret.ask_each_time && secret.connection.is_none();
             for grant in &secret.grants {
                 if self.pipes.contained(&grant.agent_id) {
                     let name = config.agent(&grant.agent_id).map_or(grant.agent_id.as_str(), |agent| agent.name.as_str());
-                    secret.warnings.push(format!("{name} can't use it while it's limited to a pipe."));
+                    secret.warnings.push(match (self.pipes.errand_agent(&grant.agent_id), fillable) {
+                        (true, true) => format!("While {name} runs errands, it can fill this in only on the secret's sites."),
+                        (true, false) => format!("While {name} runs errands, it can't use this. To let it fill this in, add sites to the secret and turn off Ask each time."),
+                        (false, _) => format!("{name} can't use it while it's limited to a pipe."),
+                    });
                 }
             }
         }

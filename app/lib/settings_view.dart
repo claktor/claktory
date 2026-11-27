@@ -20,6 +20,7 @@ import 'claktory_identity.dart'
         claktoryNameInSettings,
         claktoryNameInText;
 import 'controls.dart';
+import 'device_kind.dart' show thisDeviceKindForHello;
 import 'devices.dart';
 import 'diagnostics.dart' show DiagnosticsSettings;
 import 'find.dart' show FindScope;
@@ -1038,14 +1039,16 @@ SettingsSection _deviceSection(BuildContext context, Workspace workspace) {
   final icon = switch (thisDeviceKind) {
     'iPhone' || 'phone' => 'smartphone',
     'iPad' || 'tablet' => 'tablet',
-    _ => 'laptop-minimal',
+    _ => null,
   };
   return SettingsSection(
     title: thisDeviceTitle,
     id: 'device',
     group: 4,
     device: true,
-    glyph: (color) => ExtensionGlyph(icon: icon, name: '', color: color),
+    glyph: (color) => icon == null
+        ? _ThisMacGlyph(color: color)
+        : ExtensionGlyph(icon: icon, name: '', color: color),
     summary: ownMac ? '' : versionLabel(version),
     entries: [
       // This device's own sign-in, first (area 2, 8.5; Lucy 49738): on one
@@ -3131,4 +3134,47 @@ int? parseTokens(String text) {
   final number = double.tryParse(value);
   if (number == null || number.isNaN || number.isInfinite) return null;
   return (number * scale).round();
+}
+
+/// This Mac's section glyph: a monitor on a Mac Studio, iMac or Mac mini,
+/// a laptop otherwise, as its tile in the rail (area 2, 8.7; Abbacchio's
+/// 8.8). The kind is worked out once and kept, so the glyph doesn't
+/// flicker when the section is drawn again; a laptop until it's known.
+class _ThisMacGlyph extends StatefulWidget {
+  const _ThisMacGlyph({required this.color});
+
+  final Color color;
+
+  @override
+  State<_ThisMacGlyph> createState() => _ThisMacGlyphState();
+}
+
+class _ThisMacGlyphState extends State<_ThisMacGlyph> {
+  // The last answer and the future it came from: a test that sets another
+  // kind gives a new future, worked out again.
+  static Future<DeviceKind>? _of;
+  static DeviceKind? _known;
+
+  @override
+  void initState() {
+    super.initState();
+    final kind = thisDeviceKindForHello();
+    if (identical(kind, _of)) return;
+    _of = kind;
+    _known = null;
+    kind.then((value) {
+      if (!identical(kind, _of)) return;
+      _known = value;
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => ExtensionGlyph(
+    icon: _known == DeviceKind.DEVICE_KIND_DESKTOP
+        ? 'monitor'
+        : 'laptop-minimal',
+    name: '',
+    color: widget.color,
+  );
 }

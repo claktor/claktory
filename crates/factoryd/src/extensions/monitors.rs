@@ -734,6 +734,9 @@ fn add_monitors(factory: &Arc<Factory>, asker: &str, wanted: Vec<AddOne>) -> Res
     let mut lines = Vec::new();
     let mut added = Vec::new();
     for (monitor, id) in new.iter().zip(&ids) {
+        // A prompt for another agent carries what its writer read, now as
+        // much as when it fires (row 1721).
+        crate::errands::relayed(factory, &monitor.agent, asker);
         run::added(factory, &monitor.agent, *id);
         let whose = if monitor.agent == asker { String::new() } else { format!(" for {}", monitor.agent) };
         let first = match (&monitor.when, monitor.next_due) {

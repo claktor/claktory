@@ -64,14 +64,15 @@ P="-Pflutter.androidSdkRoot=$ANDROID_HOME -Pflutter.installedNdkVersions=28.2.13
 # Builds, tests and their tools, for the ABIs the app ships:
 ./gradlew --write-verification-metadata sha256 assembleProdRelease assembleProdProfile \
   assembleDevDebug testDevDebugUnitTest assembleDevDebugAndroidTest connectedDevDebugAndroidTest \
-  -PclaktoryDebugSignedRelease=true $P -Ptarget-platform=android-arm64,android-x64
-# Without a target platform Flutter asks for every ABI's engine (32-bit ARM too),
-# as a plain `gradlew test` does: record those as well.
-./gradlew --write-verification-metadata sha256 testDevDebugUnitTest $P
+  -PclaktoryDebugSignedRelease=true $P -Ptarget-platform=android-arm64
 ```
 
 (`connectedDevDebugAndroidTest` needs an emulator or phone; its test
-runners are what it adds.)
+runners are what it adds.) On this Mac that's arm64 only (Where builds
+run, below): Gradle keeps the entries already in the file, so the x86_64
+and 32-bit ARM engines recorded before stay; when Flutter's engine
+changes, prime records the x86_64 one with
+`-Ptarget-platform=android-arm64,android-x64`.
 
 **Lint is a gate.** `tools/lint.sh` runs Android lint over the app and
 its tests and fails on any error; run it before landing anything in
@@ -1114,6 +1115,7 @@ on a phone, still owed for every item.
 | `factory/audio` (+`/events`) | `AudioPlayback.kt`: `MediaPlayer`, transient audio focus; a call, unplugged headphones or leaving the screen pause | `AudioPlayer.swift` |
 | `claktory/video` | `VideoPlayback.kt`: `MediaPlayer` into a `SurfaceProducer` texture; the file's turn reported as `quarterTurns` unless the texture turns frames itself | `VideoPlayers.swift` |
 | `factory/device` `cameraAccess`, `cameraRefusedOnce`, `requestCamera`, `openCameraSettings`, `qrCode`; `claktory/scanner` view | `QrScanner.kt`: Camera2 into a `TextureView`, frames read with ZXing core 3.5.3 (Apache-2.0, Fugo's review; pinned, Maven Central only); the camera open only while the view shows and the app is on screen; frames in memory only, nothing read logged, codes over 4 KB ignored | `Scanner.swift`, `AppDelegate.qrCode` |
+| `factory/push`, `factory/notifications` | `PushChannel.kt` and the rest (Notifications, below): Firebase Cloud Messaging's token, the per-Claktory keys sealed in `no_backup/`, pushes opened and shown without Flutter | `Notifications.swift`, `Push.swift` |
 | `factory/links`; `factory/device` `webAuth`, `cancelWebAuth` | `WebLinks.kt`: `LinkActivity` takes `claktory[-dev\|-debug]://` links and sign-in redirects on the application id's scheme; a Custom Tab (no library) for the page | Mac `Links`, iPhone `WebAuth` |
 
 - **Permissions** are asked on use, never at launch: `RECORD_AUDIO` and
@@ -1143,6 +1145,87 @@ on a phone, still owed for every item.
   Turn on…; Lucy's ruling in permissions.md §2.1); `access` stays
   `undetermined` then, so the sheet's Continue still asks. Elsewhere the
   methods are missing, which reads as false.
+- **Notifications** (`factory/push`, `factory/notifications`;
+  `PushChannel.kt`, `PushCore.kt`, `PushStore.kt`, `PushNotifications.kt`,
+  `ClaktoryMessagingService.kt`), the iPhone's design (notifications.md,
+  `Notifications.swift`, `Push.swift`) through Firebase Cloud Messaging:
+  - **Firebase's config isn't in the repository.** The build takes
+    google-services.json (one file or several, comma-separated) from
+    `-PclaktoryFirebaseConfig=FILE` or `CLAKTORY_FIREBASE_CONFIG`, and
+    gives each variant the start values for its application id
+    (`google_app_id`, `gcm_defaultSenderId`, `google_api_key`,
+    `project_id`, `google_storage_bucket`, as Google's plugin would; no
+    plugin, so nothing else in the build changes). Without one Firebase
+    doesn't start, `state` says `unavailable` and the app keeps its line
+    that this phone gets no notifications yet. `tools/release_apk.sh`
+    takes `--firebase JSON` (the vault's FIREBASE_PROD_JSON, on prime),
+    refuses to build without it unless `--no-firebase` says so, and checks
+    the APK carries Firebase's app id; the device tests use
+    `src/androidTest/firebase-test-config.json`, a made-up project.
+  - **Nothing reaches Google before the person allows notifications.**
+    `firebase_messaging_auto_init_enabled` and analytics are off in the
+    manifest; the token is asked for only once they allow (and at each
+    start after), and goes to Dart as `token` {token, platform: "fcm"}.
+    `unavailable` also covers a phone without Google Play services.
+  - **Asking** (`ask`, Android 13+): the permission rules above
+    (`PermissionState`, `Refusals`), `refusedOnce` beside `permission`.
+    Below 13 there's nothing to ask: off is `denied`, and `openSettings`
+    opens the app's notification settings.
+  - **A push** (`ClaktoryMessagingService` → `PushReceiver`, without
+    starting Flutter) is a data message `{c, t, u}` from the push relay.
+    `c` is opened with the key kept for each Claktory (AES-256-GCM,
+    `nonce ‖ ct ‖ tag`, the backend's vectors in `PushCoreTest`): a
+    counter no higher than the last one kept, or one past its time to live
+    (five minutes' slack), or one no key opens, shows the generic line
+    ("Claktory has something for you"), never its words. The counter and
+    the push's digest are kept before it shows. While the app is in front
+    nothing shows: the open connection already brought it. `t` arrives
+    unsealed, so it's only a group key: letters, digits, `-` and `_`, at
+    most 64, never shown and never what a tap opens.
+  - **Firebase never shows a notification by itself** (Fugo 50974). A
+    message with a notification payload would go straight to the tray in
+    its sender's words, so whoever held the relay's FCM credentials could
+    put any text on every lock screen under Claktory's name.
+    `ClaktoryMessagingService.handleIntent` takes the `gcm.n.*` and
+    `gcm.notification.*` keys off before Firebase reads the message, which
+    leaves plain data (so the generic line). Play services posting for the
+    app, notification delegation (on by default from Android 10 in
+    firebase-messaging 26), is off in the manifest, and there's no default
+    channel or icon for an auto-shown one. `PushTest` pins it against
+    Firebase itself: the same message to Firebase's plain service shows its
+    words (the control), to Claktory's only the generic line; and the
+    phone has no notification delegate.
+  - **Lock screen:** what a push or the app says is `VISIBILITY_PRIVATE`,
+    with the generic line as its public version, so Android's "hide
+    sensitive content" shows only that.
+  - **A tap** opens what the push is about only when its digest is one
+    this phone showed (the last 64), so an intent made up by another app
+    opens nothing; `MainActivity` is found by `CLEAR_TOP | SINGLE_TOP |
+    NEW_TASK` and hands it to Dart as `clicked`, queued until `listen`.
+  - **The app's own** (`post`): Android keeps the app connected a while
+    behind other apps, and a Claktory pushes only to devices that aren't
+    connected, so what Flutter posts always shows, in its kind's channel.
+    Its target stays in this process under a random id only the tap
+    carries.
+  - **The keys** (one 32-byte key per Claktory, its counter and the
+    digests shown, beside the relay's handle and token) are one sealed
+    file, `no_backup/push-keys.bin` (header `CLPN`, AES-GCM with the
+    Keystore key `claktory.push.v1`, the header and application id as
+    AAD), the way §5's files are; an unreadable file reads as none, so
+    the next registration makes a new key.
+  - **Channels:** Needs you, Alerts, Replies, Tests and
+    Other, each high importance, so the person can silence one kind in
+    Android's Settings.
+  - **Firebase's dependency** (`firebase-messaging`, exact version, Google's
+    Maven, checksums in the verification file) brings Firebase's common
+    parts, Play services' messaging client and Google's data transport,
+    which sends nothing unless BigQuery delivery export is turned on (it
+    isn't). The debug APK grew by ~38 MB (unshrunk); the arm64 release
+    (R8) is 47.7 MB, classes.dex 1.3 MB. Its datastore brings a small
+    native library for every ABI, which Flutter's release ABI filters let
+    through for 32-bit ARM too: the build now packages only the shipped
+    ABIs' libraries (`packaging.jniLibs.excludes`), and check_artifact.py
+    refused the 32-bit one before that fix.
 - **Links** never become Flutter routes (`flutter_deeplinking_enabled`
   false); `LinkActivity` hands each to the one `MainActivity`, found in
   its own task by `CLEAR_TOP | SINGLE_TOP | NEW_TASK`, never a second.
@@ -1204,19 +1287,30 @@ watching the network to reconnect); `RECORD_AUDIO` and `CAMERA`, each asked
 for when first used (recording a voice message; scanning a pairing code),
 never at launch; the camera and the microphone are optional features, so Play offers the app to devices without them (pairing by paste works there). AndroidX adds its own
 `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`, which only guards the app's own
-receivers. No storage, contacts, location, phone, notification or
-account permissions.
+receivers. `POST_NOTIFICATIONS` (Android 13+), asked for in context, never
+at launch; Firebase's library adds `WAKE_LOCK` and
+`com.google.android.c2dm.permission.RECEIVE` (receiving pushes through
+Google Play services; §10, Notifications). No storage, contacts, location, phone or account
+permissions.
 
 **Components:** `MainActivity`, `LinkActivity` (links and the sign-in
 redirect, §10), url_launcher's `WebViewActivity` (unused by the app, from
-the plugin), AndroidX's startup provider and profile installer receiver.
-No services, no background work, no push.
+the plugin), AndroidX's startup provider and profile installer receiver;
+`ClaktoryMessagingService` (pushes, not exported) and what Firebase's
+library declares with it: `FirebaseInstanceIdReceiver` (exported, but
+only to holders of Google's `c2dm.permission.SEND`, which is Play
+services), its own messaging service, component discovery service and init
+provider, and the data transport's scheduler service and receiver (not
+exported).
+No other background work.
 
 **Libraries with code on the phone:** Flutter's engine and the app's Dart,
 the tunnel (Rust: iroh, the app's own code), url_launcher, AndroidX (core,
 startup, profile installer, as Flutter brings them) and ZXing core (QR
-codes, on the phone only). No analytics, advertising, crash reporting,
-attribution or Google Play services SDK. Every dependency is checked
+codes, on the phone only), and Firebase Cloud Messaging with the Google
+Play services parts it needs (notifications, §10; started only once the
+person allows them, its analytics off). No analytics, advertising, crash
+reporting or attribution. Every dependency is checked
 against its checksum at build time (§1).
 
 **What each feature does with data:**
@@ -1230,6 +1324,7 @@ against its checksum at build time (§1).
 | Attachments | only the photos, videos and files the person picks (system pickers, no storage permission), or the image they paste | Copied into the app's cache, uploaded to their Claktory. |
 | Voice messages | a recording made while the person holds record | A file in the app's cache, sent to their Claktory, which transcribes it on its own machine. |
 | Camera | frames while the pairing screen's scanner shows | In memory only, read for a QR code on the phone; never stored, logged or sent. Only the code's text goes to the app. |
+| Notifications | this phone's FCM token (from Google, once the person allows notifications); one key per Claktory (made on the phone) | The token to the person's own Claktory and Claktory's push relay, which sends through Google; the key to the person's own Claktory only, kept on the phone in `no_backup/`, encrypted with a Keystore key. What a notification says is sealed with that key end to end: Google and the relay see only that something came. |
 | Clipboard | read only when the person taps Paste or Paste image; written when they tap Copy (Copy code's secret marked sensitive, cleared later if it's still there) | As above. |
 | Share sheet | the text the person chose to share | To the app they pick. |
 | Web sign-in for a service | the service's page, in a Custom Tab (the browser's) | The redirect's code goes to the person's Claktory, which finishes the sign-in. |

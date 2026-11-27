@@ -367,6 +367,14 @@ class MacNotifications implements SystemNotifications {
         'body': notification.body,
         'thread': notification.thread,
         'urgent': notification.urgent,
+        // Android's channel for it (the person tunes each kind there).
+        'kind': switch (notification.kind) {
+          NotifyKind.NOTIFY_KIND_NEEDS_YOU => 'needs_you',
+          NotifyKind.NOTIFY_KIND_ALERT => 'alert',
+          NotifyKind.NOTIFY_KIND_REPLY => 'reply',
+          NotifyKind.NOTIFY_KIND_TEST => 'test',
+          _ => '',
+        },
         'target': notification.target.toMap(),
       });
     } on MissingPluginException {

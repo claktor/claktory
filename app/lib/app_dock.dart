@@ -400,6 +400,7 @@ class _DockTile extends StatelessWidget {
               button: true,
               selected: shown,
               label: '${app.name}, ${appCaption(app)}',
+              onTap: () => openApp(context, app),
               excludeSemantics: true,
               child: Pressable(
                 onTap: () => openApp(context, app),
@@ -864,6 +865,7 @@ class _Chip extends StatelessWidget {
       button: true,
       selected: selected,
       label: semantics,
+      onTap: onTap,
       excludeSemantics: true,
       child: GestureDetector(
         onLongPress: onLongPress,

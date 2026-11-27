@@ -497,14 +497,15 @@ struct CommandMenuTests {
     #expect(rebuilds() == 1)
 
     let keys = menu.keyCommands(action: #selector(AppDelegate.runWorkbenchCommand(_:)))
-    #expect(keys.map(\.title) == ["Hide Sidebar", "Next Pane", "Previous Pane", "Panes…", "Find"])
-    #expect(keys.map { $0.propertyList as? String } == ["sidebar", "next-pane", "previous-pane", "panes", "find"])
-    #expect(keys.map(\.input) == ["s", "\t", "\t", "p", "f"])
+    #expect(keys.map(\.title) == ["Hide Sidebar", "Next Pane", "Previous Pane", "Panes…", "Find", "Settings"])
+    #expect(keys.map { $0.propertyList as? String } == ["sidebar", "next-pane", "previous-pane", "panes", "find", "settings"])
+    #expect(keys.map(\.input) == ["s", "\t", "\t", "p", "f", ","])
     #expect(keys[0].modifierFlags == [.command, .control])
     #expect(keys[1].modifierFlags == [.control])
     #expect(keys[2].modifierFlags == [.control, .shift])
     #expect(keys[3].modifierFlags == [.command, .alternate])
     #expect(keys[4].modifierFlags == [.command])
+    #expect(keys[5].modifierFlags == [.command])
     #expect(keys.filter { !$0.wantsPriorityOverSystemBehavior }.isEmpty)
     #expect(menu.isEnabled("sidebar"))
     #expect(!menu.isEnabled("nonsense"))
@@ -591,7 +592,7 @@ struct CommandMenuTests {
       #expect(answer as? Bool == false)
     }
     // What it showed stays.
-    #expect(menu.commands.count == 5)
+    #expect(menu.commands.count == 6)
     #expect(rebuilds() == 1)
     // None at all is fine: the menu goes.
     let none = await messenger.call(

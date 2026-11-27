@@ -17,6 +17,9 @@
          which would make Play hide the app from devices without one. -->
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+    <!-- Notifications (Android 13+), asked for in context: after the first
+         pairing, or from Settings, never at launch (PushChannel.kt). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:name=".ClaktoryApplication"
@@ -47,6 +50,26 @@
             <!-- Links reach the app through LinkActivity, never as Flutter routes. -->
             <meta-data android:name="flutter_deeplinking_enabled" android:value="false" />
         </activity>
+        <!-- Pushes from Claktory's push relay through Firebase: opened and
+             shown here, without starting Flutter (ClaktoryMessagingService.kt).
+             Only Firebase's own service can reach it. -->
+        <service
+            android:name=".ClaktoryMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+        <!-- Firebase asks for no token until the person allows
+             notifications (PushChannel.kt), and collects nothing of its own.
+             It never shows a notification by itself: Play services doesn't
+             post for the app (delegation, on by default from Android 10),
+             and the service takes notification payloads off
+             (ClaktoryMessagingService.kt, Fugo 50974); so no default
+             channel or icon for one either. -->
+        <meta-data android:name="firebase_messaging_auto_init_enabled" android:value="false" />
+        <meta-data android:name="firebase_analytics_collection_enabled" android:value="false" />
+        <meta-data android:name="firebase_messaging_notification_delegation_enabled" android:value="false" />
         <!-- Links that open Claktory (factory/links): claktory://add?code=…,
              claktory-dev:// for Claktory Dev, claktory-debug:// for debug
              builds; and where a service's sign-in page sends the browser

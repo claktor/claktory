@@ -8,15 +8,17 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 
+import 'approve_elsewhere.dart';
 import 'backend.dart' show Backend;
 import 'claktory_identity.dart' show claktoryName;
 import 'connection.dart' show Connection, ConnectionDialog;
 import 'connections.dart' show RemoteFactory;
 import 'controls.dart';
 import 'devices.dart' show FactoryChooser, thisDeviceKind;
+import 'forms.dart' show FittedHeading;
 import 'identity.dart';
 import 'mobile/local_network.dart' show localNetwork, showLocalNetwork;
-import 'mobile/metrics.dart' show TypeScale;
+import 'mobile/metrics.dart' show Metrics, PhoneType, Touch, TypeScale;
 import 'pairing.dart' show AllowCommand;
 import 'rail.dart' show ClaktoriesScope, PhoneClaktories, confirmRemoveClaktory;
 import 'scope.dart';
@@ -83,12 +85,7 @@ class ClaktoryProblemPage extends StatelessWidget {
               ],
               const SizedBox(height: Space.xl),
               if (phone) ...[
-                if (primary != null)
-                  Button(
-                    label: primary.label,
-                    primary: true,
-                    onPressed: primary.onPressed,
-                  ),
+                if (primary != null) _ProblemPrimary(primary),
                 for (final action in quiet) Center(child: _ProblemLink(action)),
               ] else
                 Wrap(
@@ -151,18 +148,64 @@ class _ProblemLink extends StatelessWidget {
           constraints: const BoxConstraints(minHeight: 44),
           child: Align(
             widthFactor: 1,
-            // Grown no more than the button above it (2×), so a way out
-            // never reads bigger than the way on (Zucchero's row 720).
-            child: MediaQuery.withClampedTextScaling(
-              maxScaleFactor: 2,
-              child: Text(
-                action.label,
-                textAlign: TextAlign.center,
-                style: TypeScale.of(context).body.copyWith(
-                  color: hovered ? palette.text : palette.textMuted,
-                  fontWeight: FontWeight.w500,
-                ),
+            // At the full text size, as the primary above it, wrapping;
+            // a word shrinks only when it alone can't fit (Lucy 50830).
+            child: FittedHeading(
+              action.label,
+              textAlign: TextAlign.center,
+              style: TypeScale.of(context).body.copyWith(
+                color: hovered ? palette.text : palette.textMuted,
+                fontWeight: FontWeight.w500,
               ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The way on, on a phone: the full width, filled as a primary [Button],
+/// its label at the full text size (never clamped) and wrapping, the
+/// button growing with it; a word shrinks only when it alone can't fit
+/// the width, so none breaks mid-word (Lucy 50760, 50830).
+class _ProblemPrimary extends StatelessWidget {
+  const _ProblemPrimary(this.action);
+
+  final ProblemAction action;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final onTap = action.onPressed;
+    final enabled = onTap != null;
+    return Semantics(
+      button: true,
+      enabled: enabled,
+      label: action.label,
+      onTap: onTap,
+      excludeSemantics: true,
+      child: Pressable(
+        onTap: onTap,
+        builder: (context, pressed) => Container(
+          constraints: BoxConstraints(minHeight: Metrics.of(context).target),
+          padding: const EdgeInsets.symmetric(
+            horizontal: Touch.gutter,
+            vertical: Space.s,
+          ),
+          decoration: BoxDecoration(
+            color: enabled
+                ? palette.text.withValues(alpha: pressed ? 0.88 : 1)
+                : palette.selected,
+            borderRadius: BorderRadius.circular(Radii.control),
+          ),
+          alignment: Alignment.center,
+          child: FittedHeading(
+            action.label,
+            textAlign: TextAlign.center,
+            style: PhoneType.label.copyWith(
+              color: enabled ? palette.canvas : palette.textFaint,
+              fontWeight: FontWeight.w600,
             ),
           ),
         ),
@@ -273,6 +316,31 @@ class NoLongerAllowedPage extends StatelessWidget {
     final target = backend.target;
     final others = _othersThere;
     final removed = 'This $device was removed on $name.';
+    // No code on Windows: it comes back through the account, approved on a
+    // phone or Mac (approve_elsewhere.dart).
+    if (approvesElsewhere) {
+      return ClaktoryProblemPage(
+        title: connection.notAllowed(device),
+        body: [
+          ProblemText(
+            '${others == null ? '' : '$removed '}To use $name on this $device '
+            'again, add it from your Claktory account, then approve it on your '
+            'phone or Mac.',
+          ),
+        ],
+        quiet: [
+          if (target != null)
+            ProblemAction(
+              'Remove…',
+              () => unawaited(removeClaktory(context, target)),
+            ),
+        ],
+        primary: ProblemAction(
+          'Add a Claktory',
+          () => showAddClaktory(context),
+        ),
+      );
+    }
     return ClaktoryProblemPage(
       title: connection.notAllowed(device),
       body: [
@@ -331,12 +399,15 @@ class ClaktorySignedOutPage extends StatelessWidget {
           'Sign $name in to your Claktory account again, in Settings → '
           'Account on $name. Then try again here.',
         ),
-        ProblemText(
-          'No screen on $name? Run this in a terminal there and connect '
-          'this $thisDeviceKind with the code it shows. Then sign $name in '
-          'from here, in its Settings → Account.',
-        ),
-        const AllowCommand('factoryd pair'),
+        // A code to connect with: never on Windows (approve_elsewhere.dart).
+        if (!approvesElsewhere) ...[
+          ProblemText(
+            'No screen on $name? Run this in a terminal there and connect '
+            'this $thisDeviceKind with the code it shows. Then sign $name in '
+            'from here, in its Settings → Account.',
+          ),
+          const AllowCommand('factoryd pair'),
+        ],
       ],
       quiet: quiet,
       primary: ProblemAction('Try again', backend.retry),

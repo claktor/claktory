@@ -1007,6 +1007,7 @@ class _ClaktoriesRow extends StatelessWidget {
     return Semantics(
       button: true,
       label: 'Claktories',
+      onTap: onTap,
       excludeSemantics: true,
       child: Pressable(
         onTap: onTap,

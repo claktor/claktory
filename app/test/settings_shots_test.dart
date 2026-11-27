@@ -18,6 +18,7 @@ import 'package:factory_app/recorder.dart';
 import 'package:factory_app/scanner.dart' show CameraAccess;
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/shell.dart' show Shell;
+import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -156,6 +157,107 @@ void main() {
     harness.page.value = AppPage.settings;
     await pumpFrames(tester);
     await at(tester, harness, 'defaults', 'mac-8-defaults-no-model');
+  });
+
+  testWidgets("a Mac, Secrets: the account's recovery key (#239)", (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    DeviceNotifications.debugOverride = FakeNotifications('allowed');
+    final now = Int64(DateTime.now().millisecondsSinceEpoch);
+    Workspace vault({bool change = false}) => _workspace()
+      ..vault = VaultState(
+        exists: true,
+        unlocked: true,
+        recoveryKeyCovered: true,
+        recoveryKeyMadeOn: 'Mac Studio',
+        recoveryKeyMadeMs: now,
+        recoveryKeyChangeWaiting: change,
+        recoveryKeyChangeMadeOn: change ? 'Work Laptop' : '',
+        recoveryKeyChangeMadeMs: change ? now : Int64.ZERO,
+        secrets: [
+          SecretInfo(
+            id: 's1',
+            name: 'AWS',
+            description: "Matt's deploy account, eu-west-1",
+          ),
+        ],
+      );
+    final harness = await open(
+      tester,
+      const Size(1200, 800),
+      snapshot: vault(),
+    );
+    await at(tester, harness, 'secrets', 'mac-10-secrets-covered');
+    await harness.apply(tester, vault(change: true));
+    await at(tester, harness, 'secrets', 'mac-11-secrets-new-key');
+  });
+
+  testWidgets("an iPhone, Secrets with a new recovery key (#239)", (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final now = Int64(DateTime.now().millisecondsSinceEpoch);
+    final snapshot = _workspace()
+      ..vault = VaultState(
+        exists: true,
+        unlocked: true,
+        recoveryKeyCovered: true,
+        recoveryKeyMadeOn: 'Mac Studio',
+        recoveryKeyMadeMs: now,
+        recoveryKeyChangeWaiting: true,
+        recoveryKeyChangeMadeOn: 'Work Laptop',
+        recoveryKeyChangeMadeMs: now,
+      );
+    final harness = await open(
+      tester,
+      const Size(393, 852),
+      snapshot: snapshot,
+      local: false,
+    );
+    await at(tester, harness, 'secrets', 'iphone-3-secrets-new-key');
+  });
+
+  testWidgets('a Mac, places macOS protects (item 12)', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    DeviceNotifications.debugOverride = FakeNotifications('allowed');
+    final snapshot = _workspace()
+      ..protectedPlaces.addAll([
+        ProtectedPlace(
+          root: '/Users/me/Documents',
+          name: 'Documents',
+          state: ProtectedPlaceState.PROTECTED_PLACE_STATE_REFUSED,
+          checkedMs: Int64(1000),
+          usedBy: ['nixos-site'],
+          needsYou: true,
+          title: "Your agents can't work in Documents",
+          text:
+              "macOS hasn't let Claktory Agents into Documents, so commands "
+              'in nixos-site fail. Turn it on for Claktory Agents in System '
+              'Settings.',
+        ),
+        ProtectedPlace(
+          root: '/Users/me/Desktop',
+          name: 'Desktop',
+          state: ProtectedPlaceState.PROTECTED_PLACE_STATE_ALLOWED,
+          checkedMs: Int64(1000),
+          usedBy: ['blog'],
+        ),
+      ]);
+    final harness = await open(
+      tester,
+      const Size(1200, 800),
+      snapshot: snapshot,
+    );
+    await at(tester, harness, 'device#permissions', 'mac-12-this-mac-places');
+    harness.page.value = AppPage.inbox;
+    await pumpFrames(tester);
+    await tester.tap(find.text("Your agents can't work in Documents").first);
+    await pumpFrames(tester, const Duration(seconds: 1));
+    await _shot(tester, 'mac-13-needs-you-place');
   });
 
   testWidgets('a Mac, Settings in a pane beside the conversation', (

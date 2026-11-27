@@ -461,6 +461,11 @@ async fn session<S: Stream>(
                     }
                     body => body,
                 };
+                // A whole Transcript that follows soon is this connection's own
+                // (Polpo 50160): any other is counted as unasked.
+                if matches!(body, Some(client_message::Body::SelectAgent(_))) {
+                    sent.tally.asked();
+                }
                 // What it decides is noted as decided from this device (#514).
                 let deciding = crate::answered_on::before(factory, body.as_ref());
                 let reply = handle(factory, body, &connection, &mut vault_session).await;
@@ -522,6 +527,8 @@ async fn sync<S: Stream>(
             ..Default::default()
         };
         let frame: bytes::Bytes = message.encode_to_vec().into();
+        // The conversation it holds, for its own Hello or resync: asked.
+        sent.tally.asked();
         sent.tally.count(&frame);
         socket.send(Message::Binary(frame)).await?;
     }
@@ -585,6 +592,10 @@ async fn handle(
     use client_message::Body as Request;
     let result = match body {
         Some(Request::Hello(_)) => return error(ErrorCode::InvalidRequest, "already connected"),
+        // Only a device's waiting connection takes back its request (`wait_to_be_allowed`).
+        Some(Request::WithdrawPairing(_)) => {
+            return error(ErrorCode::InvalidRequest, "Only a device waiting to be allowed can take back its request.");
+        }
         Some(Request::CreateProject(request)) => factory.create_project(&request.name, &request.path).await,
         Some(Request::CreateAgent(request)) => factory.create_agent(&request).await,
         Some(Request::UpdateAgent(request)) => {
@@ -736,6 +747,7 @@ async fn handle(
         Some(Request::SetFolderCollapsed(request)) => {
             factory.set_folder_collapsed(&request.project_id, &request.folder_id, request.collapsed)
         }
+        Some(Request::SetProjectCollapsed(request)) => factory.set_project_collapsed(&request.project_id, request.collapsed),
         Some(Request::RunCommand(request)) => factory.run_command(&request.agent_id, &request.name, &request.args).await,
         Some(Request::StartLogin(request)) => factory.start_login(&request.provider_id, &request.method_id, request.add_account).await,
         Some(Request::AnswerLogin(request)) => factory.answer_login(&request.text),
@@ -924,7 +936,7 @@ async fn handle(
             ErrorCode::InvalidRequest,
             "This version of Claktory can't make a new recovery key for your account yet.".to_owned(),
         )),
-        Some(Request::UseRecoveryKey(_)) => crate::account::recovery::use_new(factory, &connection.zoom_device, connection.tool).await,
+        Some(Request::UseRecoveryKey(_)) => crate::account::recovery::use_new(factory, &connection.zoom_device, &connection.device, connection.tool).await,
         Some(Request::AccountSignOut(_)) => crate::account::sign_out(factory).await,
         Some(Request::SkipAccountSignIn(_)) => crate::account::skip(factory),
         // Pipes (#196): `crate::pipes`.
@@ -1081,6 +1093,10 @@ async fn handle(
         Some(Request::SetAgentBrowserLocale(request)) => crate::browser_host::locale::set(factory, &request).await,
         Some(Request::SignOutAgentBrowserAccount(request)) => crate::errands::code::sign_out_request(factory, &request).await,
         Some(Request::ListTimeZones(_)) => return Body::TimeZones(crate::browser_host::locale::time_zones()),
+        Some(Request::PreviewProjectFolder(request)) => {
+            let path = factory.project_folder_preview(&request.name).map(|path| path.display().to_string()).unwrap_or_default();
+            return Body::ProjectFolderPreview(v1::ProjectFolderPreview { name: request.name.clone(), path });
+        }
         // A recovery-codes card's codes (#435 W8b): to this connection only.
         Some(Request::ShowRecoveryCodes(request)) => {
             return answer(crate::extensions::ask::show_recovery_codes(factory, &request).await, Body::RecoveryCodes);
@@ -1386,7 +1402,8 @@ async fn send<S: Stream>(socket: &mut Socket<S>, reply_to: u64, body: Body) -> R
 
 /// A device that used a pairing code first waits here, its Hello answered
 /// with PairingPending, until the person allows it (`Allowed`), its code
-/// ends (`Ended`, with why), or it goes away (`Waiting`).
+/// ends (`Ended`, with why), or it goes away or takes back its request
+/// (`Waiting`).
 async fn wait_to_be_allowed<S: Stream>(
     socket: &mut Socket<S>,
     factory: &Factory,
@@ -1409,12 +1426,19 @@ async fn wait_to_be_allowed<S: Stream>(
         }
         tokio::select! {
             () = factory.pairing_changed() => {}
-            frame = socket.next() => {
-                // Nothing it sends counts until it's allowed.
-                if let Frame::Closed = read(socket, frame).await? {
+            frame = socket.next() => match read(socket, frame).await? {
+                Frame::Closed => return Ok(Pairing::Waiting),
+                // It takes back its own request (#603): this connection's,
+                // by the key it connected with, never by an id it sends.
+                Frame::Message(message) if matches!(message.body, Some(client_message::Body::WithdrawPairing(_))) => {
+                    factory.withdraw_pairing(&waiting.id, &peer.endpoint_id);
+                    send(socket, message.id, Body::Ack(v1::Ack {})).await?;
+                    socket.close(None).await?;
                     return Ok(Pairing::Waiting);
                 }
-            }
+                // Nothing else it sends counts until it's allowed.
+                Frame::Message(_) | Frame::Skip => {}
+            },
         }
     }
 }

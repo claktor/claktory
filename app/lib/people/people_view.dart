@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/widgets.dart';
 
+import '../approve_elsewhere.dart';
 import '../avatar.dart';
 import '../controls.dart';
 import '../forms.dart';
@@ -37,7 +38,12 @@ import 'review.dart';
 /// Whether People shows: only where the backend offers direct messages
 /// (its preview, FACTORY_DMS_PREVIEW, until People ships), which it says
 /// by listing their extension.
+///
+/// Never on Windows: under position B it holds no DM keys and takes or
+/// shows no friend or device code; direct messages come there later
+/// (approve_elsewhere.dart, windows.md's dm-keys row).
 bool peopleAvailable(Workspace workspace) =>
+    !approvesElsewhere &&
     workspace.extensions.any((extension) => extension.id == 'dm');
 
 /// Opens People.
@@ -234,7 +240,7 @@ class _PeopleViewState extends State<PeopleView> {
     String? contact,
   }) async {
     if (!await _confirm(
-      'Block ${person.label}?',
+      'Block ${person.labelInText}?',
       "They can't send you friend requests anymore, and if you're friends, "
           "you won't be. Unblocking later doesn't make you friends again.",
       'Block',
@@ -246,7 +252,7 @@ class _PeopleViewState extends State<PeopleView> {
 
   Future<void> _remove(Friend friend) async {
     if (!await _confirm(
-      'Remove ${friend.person.label}?',
+      'Remove ${friend.person.labelInText}?',
       'You stop being friends. Either of you can send a new request later.',
       'Remove',
     )) {

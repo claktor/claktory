@@ -275,6 +275,10 @@ fn transport_for(android: bool) -> iroh::endpoint::QuicTransportConfig {
         .congestion_controller_factory(Arc::new(noq_proto::congestion::Bbr3Config::default()))
         .default_path_keep_alive_interval(PATH_KEEP_ALIVE)
         .default_path_max_idle_timeout(PATH_IDLE_TIMEOUT)
+        // Every path has a keep-alive of its own, which is what checks the
+        // link; the connection's (iroh's 5 s) would only ping on top of
+        // them while the paths are idle ([IDLE_KEEP_ALIVE]).
+        .keep_alive_interval(IDLE_KEEP_ALIVE)
         .build()
 }
 
@@ -292,6 +296,35 @@ pub const PATH_IDLE_TIMEOUT: Duration = Duration::from_secs(6);
 /// How often a quiet direct path is checked, so a working one is never
 /// taken for silent ([PATH_IDLE_TIMEOUT]).
 pub const PATH_KEEP_ALIVE: Duration = Duration::from_secs(2);
+
+/// A relay path's keep-alive and idle timeout as iroh sets them (vendor/iroh's
+/// `HEARTBEAT_INTERVAL`, `RELAY_PATH_MAX_IDLE_TIMEOUT`), put back when an idle
+/// phone is touched again.
+const RELAY_KEEP_ALIVE: Duration = Duration::from_secs(5);
+const RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often each path is checked while the app is idle ([Tunnel::set_idle]:
+/// a phone or tablet left untouched, with nothing arriving; Polpo's
+/// idle-keepalive.md, Matt's call): WireGuard's interval for keeping a NAT's
+/// binding open, where every 2 to 5 s kept a phone's cellular radio from ever
+/// going idle while Claktory was open.
+pub const IDLE_KEEP_ALIVE: Duration = Duration::from_secs(25);
+
+/// How long a path may stay silent while the app is idle: two of
+/// [IDLE_KEEP_ALIVE]. The connection as a whole still ends after 30 s with
+/// nothing at all (QUIC's idle timeout, both ends'), so a link that died
+/// silently is noticed within about a minute, and within seconds of a touch.
+pub const IDLE_PATH_TIMEOUT: Duration = Duration::from_secs(50);
+
+/// A path's keep-alive and idle timeout, for whether the app is idle and
+/// whether the path goes through a relay.
+fn path_timers(idle: bool, relay: bool) -> (Duration, Duration) {
+    match (idle, relay) {
+        (true, _) => (IDLE_KEEP_ALIVE, IDLE_PATH_TIMEOUT),
+        (false, true) => (RELAY_KEEP_ALIVE, RELAY_IDLE_TIMEOUT),
+        (false, false) => (PATH_KEEP_ALIVE, PATH_IDLE_TIMEOUT),
+    }
+}
 
 /// What the tunnel is doing, for the app to show.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -519,6 +552,15 @@ struct Shared {
     /// [Status::link_received]: the open connection's, as [follow] last
     /// read it.
     link_received: AtomicU32,
+    /// The app is idle ([Tunnel::set_idle]): the connection's paths are
+    /// checked every [IDLE_KEEP_ALIVE].
+    idle: AtomicBool,
+    /// Set when the app stops being idle: [follow] pings every path once, at
+    /// once.
+    wake_ping: AtomicBool,
+    /// Tells [follow] the app's idleness changed, so it needn't wait for its
+    /// next look.
+    idle_changed: tokio::sync::Notify,
 }
 
 /// Closes [endpoint], waiting [CLOSE_TIMEOUT] at most. One that takes
@@ -591,6 +633,9 @@ impl Tunnel {
             cancel_dials: tokio::sync::Notify::new(),
             received: AtomicU32::new(0),
             link_received: AtomicU32::new(0),
+            idle: AtomicBool::new(false),
+            wake_ping: AtomicBool::new(false),
+            idle_changed: tokio::sync::Notify::new(),
         });
         shared.watch_relay(&endpoint);
         let accept = tokio::spawn({
@@ -641,6 +686,24 @@ impl Tunnel {
         let direct = backend.ip_addrs().copied().map(iroh::TransportAddr::Ip);
         let relayed = relays.iter().cloned().map(iroh::TransportAddr::Relay);
         *backend = EndpointAddr::from_parts(backend.id, direct.chain(relayed).collect::<Vec<_>>());
+    }
+
+    /// Whether the app is idle: on a phone or tablet, a minute with no
+    /// touch and nothing arriving (the app decides). While it is, every path
+    /// of the connection is checked every [IDLE_KEEP_ALIVE] and given
+    /// [IDLE_PATH_TIMEOUT], so the radio can rest between checks; paths that
+    /// open meanwhile follow. Back from idle, each path gets its own timers
+    /// again and is pinged at once, so a link that died meanwhile is found
+    /// out within seconds. Its Claktory slows its own checks of an admitted
+    /// device's connection whatever this says (factoryd's remote.rs).
+    pub fn set_idle(&self, idle: bool) {
+        if self.shared.idle.swap(idle, Ordering::Relaxed) == idle {
+            return;
+        }
+        if !idle {
+            self.shared.wake_ping.store(true, Ordering::Relaxed);
+        }
+        self.shared.idle_changed.notify_one();
     }
 
     pub fn status(&self) -> Status {
@@ -1082,13 +1145,15 @@ async fn connection(shared: &Arc<Shared>) -> Option<Connection> {
     Some(connection)
 }
 
-/// Keeps the status's path up to date while [connection] lives, and says
+/// Keeps the status's path up to date while [connection] lives, and its
+/// paths' timers as the app's idleness says ([Tunnel::set_idle]), and says
 /// why it closed.
 async fn follow(connection: Connection, shared: Arc<Shared>) {
     let update = {
         let connection = connection.clone();
         let shared = shared.clone();
         async move {
+            let mut paced = Paced::default();
             loop {
                 let (path, reach) = (path_of(&connection), reach_of(&connection));
                 {
@@ -1098,7 +1163,12 @@ async fn follow(connection: Connection, shared: Arc<Shared>) {
                 }
                 // Wrapping: only whether it moved matters.
                 shared.link_received.store(connection.stats().udp_rx.bytes as u32, Ordering::Relaxed);
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                let ping = shared.wake_ping.swap(false, Ordering::Relaxed);
+                paced.pace(&connection, shared.idle.load(Ordering::Relaxed), ping);
+                tokio::select! {
+                    () = tokio::time::sleep(Duration::from_millis(500)) => {}
+                    () = shared.idle_changed.notified() => {}
+                }
             }
         }
     };
@@ -1118,6 +1188,33 @@ async fn follow(connection: Connection, shared: Arc<Shared>) {
             }
         }
         _ = update => {}
+    }
+}
+
+/// Whether [follow] gave each of a connection's paths the idle timers. iroh
+/// has set a path's own before it shows up (vendor/iroh's
+/// `register_and_configure_path`), so a path that opens while the app isn't
+/// idle already has them.
+#[derive(Default)]
+struct Paced(std::collections::HashMap<iroh::endpoint::PathId, bool>);
+
+impl Paced {
+    fn pace(&mut self, connection: &Connection, idle: bool, ping: bool) {
+        let paths = connection.paths();
+        self.0.retain(|id, _| paths.get(*id).is_some());
+        for path in &paths {
+            if ping {
+                path.ping();
+            }
+            let given = self.0.entry(path.id()).or_insert(false);
+            if *given == idle {
+                continue;
+            }
+            let (keep_alive, timeout) = path_timers(idle, path.is_relay());
+            if path.set_keep_alive_interval(Some(keep_alive)) && path.set_max_idle_timeout(Some(timeout)) {
+                *given = idle;
+            }
+        }
     }
 }
 
@@ -1821,8 +1918,8 @@ mod tests {
         assert!(!offload(transport_for(true)), "Android: no GSO");
         assert!(offload(transport_for(false)), "elsewhere: iroh's default, GSO allowed");
         // The congestion controller isn't in what Debug shows: see below.
-        // Apart from it and the paths' keep-alive and idle timeout, iroh's
-        // defaults.
+        // Apart from it, the paths' keep-alive and idle timeout and the
+        // connection's keep-alive, iroh's defaults.
         assert_eq!(
             format!("{:?}", transport_for(false)),
             format!(
@@ -1830,6 +1927,7 @@ mod tests {
                 iroh::endpoint::QuicTransportConfig::builder()
                     .default_path_keep_alive_interval(PATH_KEEP_ALIVE)
                     .default_path_max_idle_timeout(PATH_IDLE_TIMEOUT)
+                    .keep_alive_interval(IDLE_KEEP_ALIVE)
                     .build()
             ),
             "elsewhere iroh's defaults otherwise"
@@ -1838,6 +1936,7 @@ mod tests {
             let shown = format!("{config:?}");
             assert!(shown.contains("default_path_max_idle_timeout: Some(6s)"), "{shown}");
             assert!(shown.contains("default_path_keep_alive_interval: Some(2s)"), "{shown}");
+            assert!(shown.contains("keep_alive_interval: Some(25s)"), "{shown}");
         }
         assert_eq!(offload(device_transport()), !cfg!(target_os = "android"));
     }
@@ -1860,6 +1959,61 @@ mod tests {
             connection.close(0u32.into(), b"");
             device.close().await;
         }
+    }
+
+    /// Polpo's idle-keepalive.md: while the app is idle the device checks
+    /// its path every [IDLE_KEEP_ALIVE], not every [PATH_KEEP_ALIVE]; touched
+    /// again, it pings at once and checks as often as before. Counted as the
+    /// pings the backend gets.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_idle_app_has_its_paths_checked_rarely_and_pinged_at_once_when_it_wakes() {
+        let backend = Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).alpns(vec![ALPN.to_vec()]).bind().await.unwrap();
+        let (heard, mut connections) = tokio::sync::mpsc::unbounded_channel();
+        let server = backend.clone();
+        tokio::spawn(async move {
+            while let Some(incoming) = server.accept().await {
+                let Ok(connection) = incoming.await else { continue };
+                let _ = heard.send(connection.clone());
+                tokio::spawn(async move {
+                    while let Ok((mut send, mut receive)) = connection.accept_bi().await {
+                        tokio::spawn(async move {
+                            let _ = copy(&mut receive, &mut send).await;
+                            let _ = send.finish();
+                        });
+                    }
+                });
+            }
+        });
+        let device =
+            Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Disabled).transport_config(transport_for(false)).bind().await.unwrap();
+        let tunnel = Tunnel::open(device, backend.addr()).await.unwrap();
+        round_trip(&tunnel).await;
+        let connection = tokio::time::timeout(Duration::from_secs(5), connections.recv()).await.expect("in time").expect("a connection");
+        let pings = || connection.stats().frame_rx.ping;
+
+        let before = pings();
+        tokio::time::sleep(Duration::from_millis(5_000)).await;
+        assert!(pings() - before >= 2, "not idle: every 2 s ({} in 5 s)", pings() - before);
+
+        tunnel.set_idle(true);
+        // The check already due goes once more.
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        let before = pings();
+        tokio::time::sleep(Duration::from_millis(6_000)).await;
+        assert_eq!(pings() - before, 0, "idle: none within 6 s");
+
+        let before = pings();
+        tunnel.set_idle(false);
+        let woke = Instant::now();
+        while pings() == before && woke.elapsed() < Duration::from_secs(2) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(pings() > before, "woken: a ping at once");
+        assert!(woke.elapsed() < Duration::from_secs(1), "at once: {:?}", woke.elapsed());
+        let before = pings();
+        tokio::time::sleep(Duration::from_millis(5_000)).await;
+        assert!(pings() - before >= 2, "woken: every 2 s again ({} in 5 s)", pings() - before);
+        tunnel.close().await;
     }
 
     #[tokio::test]

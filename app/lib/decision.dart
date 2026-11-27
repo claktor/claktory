@@ -207,6 +207,8 @@ class _DecisionCommentState extends State<DecisionComment> {
                 enabled: widget.enabled,
                 keep: widget.keep,
                 trailing: widget.attach,
+                // Bounded above: a far bound with no limit.
+                shrinks: true,
                 child: CallbackShortcuts(
                   bindings: {
                     if (submit != null) ...{

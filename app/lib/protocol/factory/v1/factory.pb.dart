@@ -275,6 +275,9 @@ enum ClientMessage_Body {
   publishRecoveryKey,
   useRecoveryKey,
   dismissNotificationsOffer,
+  withdrawPairing,
+  setProjectCollapsed,
+  previewProjectFolder,
   notSet
 }
 
@@ -534,6 +537,9 @@ class ClientMessage extends $pb.GeneratedMessage {
     PublishRecoveryKey? publishRecoveryKey,
     UseRecoveryKey? useRecoveryKey,
     DismissNotificationsOffer? dismissNotificationsOffer,
+    WithdrawPairing? withdrawPairing,
+    SetProjectCollapsed? setProjectCollapsed,
+    PreviewProjectFolder? previewProjectFolder,
   }) {
     final result = ClientMessage._();
     if (id != null) result.id = id;
@@ -826,6 +832,11 @@ class ClientMessage extends $pb.GeneratedMessage {
     if (useRecoveryKey != null) result.useRecoveryKey = useRecoveryKey;
     if (dismissNotificationsOffer != null)
       result.dismissNotificationsOffer = dismissNotificationsOffer;
+    if (withdrawPairing != null) result.withdrawPairing = withdrawPairing;
+    if (setProjectCollapsed != null)
+      result.setProjectCollapsed = setProjectCollapsed;
+    if (previewProjectFolder != null)
+      result.previewProjectFolder = previewProjectFolder;
     return result;
   }
 
@@ -1093,6 +1104,9 @@ class ClientMessage extends $pb.GeneratedMessage {
     265: ClientMessage_Body.publishRecoveryKey,
     266: ClientMessage_Body.useRecoveryKey,
     267: ClientMessage_Body.dismissNotificationsOffer,
+    268: ClientMessage_Body.withdrawPairing,
+    269: ClientMessage_Body.setProjectCollapsed,
+    271: ClientMessage_Body.previewProjectFolder,
     0: ClientMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -1352,7 +1366,10 @@ class ClientMessage extends $pb.GeneratedMessage {
       264,
       265,
       266,
-      267
+      267,
+      268,
+      269,
+      271
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'id', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -1884,6 +1901,14 @@ class ClientMessage extends $pb.GeneratedMessage {
     ..aOM<DismissNotificationsOffer>(
         267, _omitFieldNames ? '' : 'dismissNotificationsOffer',
         subBuilder: DismissNotificationsOffer.$_createMessage)
+    ..aOM<WithdrawPairing>(268, _omitFieldNames ? '' : 'withdrawPairing',
+        subBuilder: WithdrawPairing.$_createMessage)
+    ..aOM<SetProjectCollapsed>(
+        269, _omitFieldNames ? '' : 'setProjectCollapsed',
+        subBuilder: SetProjectCollapsed.$_createMessage)
+    ..aOM<PreviewProjectFolder>(
+        271, _omitFieldNames ? '' : 'previewProjectFolder',
+        subBuilder: PreviewProjectFolder.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -2161,6 +2186,9 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(265)
   @$pb.TagNumber(266)
   @$pb.TagNumber(267)
+  @$pb.TagNumber(268)
+  @$pb.TagNumber(269)
+  @$pb.TagNumber(271)
   ClientMessage_Body whichBody() => _ClientMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -2415,6 +2443,9 @@ class ClientMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(265)
   @$pb.TagNumber(266)
   @$pb.TagNumber(267)
+  @$pb.TagNumber(268)
+  @$pb.TagNumber(269)
+  @$pb.TagNumber(271)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -5417,6 +5448,48 @@ class ClientMessage extends $pb.GeneratedMessage {
   void clearDismissNotificationsOffer() => $_clearField(267);
   @$pb.TagNumber(267)
   DismissNotificationsOffer ensureDismissNotificationsOffer() => $_ensure(253);
+
+  /// A device waiting to be allowed (its Hello answered with
+  /// PairingPending) takes back its own request, when the person taps
+  /// Cancel on it (#603). Sent on that waiting connection only.
+  @$pb.TagNumber(268)
+  WithdrawPairing get withdrawPairing => $_getN(254);
+  @$pb.TagNumber(268)
+  set withdrawPairing(WithdrawPairing value) => $_setField(268, value);
+  @$pb.TagNumber(268)
+  $core.bool hasWithdrawPairing() => $_has(254);
+  @$pb.TagNumber(268)
+  void clearWithdrawPairing() => $_clearField(268);
+  @$pb.TagNumber(268)
+  WithdrawPairing ensureWithdrawPairing() => $_ensure(254);
+
+  /// Folds a project in the sidebar, or unfolds it (Project.collapsed).
+  /// Answered with Ack.
+  @$pb.TagNumber(269)
+  SetProjectCollapsed get setProjectCollapsed => $_getN(255);
+  @$pb.TagNumber(269)
+  set setProjectCollapsed(SetProjectCollapsed value) => $_setField(269, value);
+  @$pb.TagNumber(269)
+  $core.bool hasSetProjectCollapsed() => $_has(255);
+  @$pb.TagNumber(269)
+  void clearSetProjectCollapsed() => $_clearField(269);
+  @$pb.TagNumber(269)
+  SetProjectCollapsed ensureSetProjectCollapsed() => $_ensure(255);
+
+  /// Where a new project with this name would be kept, as CreateProject
+  /// with no path would make it (New project's caption). Answered with
+  /// ProjectFolderPreview, to the asker only.
+  @$pb.TagNumber(271)
+  PreviewProjectFolder get previewProjectFolder => $_getN(256);
+  @$pb.TagNumber(271)
+  set previewProjectFolder(PreviewProjectFolder value) =>
+      $_setField(271, value);
+  @$pb.TagNumber(271)
+  $core.bool hasPreviewProjectFolder() => $_has(256);
+  @$pb.TagNumber(271)
+  void clearPreviewProjectFolder() => $_clearField(271);
+  @$pb.TagNumber(271)
+  PreviewProjectFolder ensurePreviewProjectFolder() => $_ensure(256);
 }
 
 /// Reads each place (ProtectedPlace.root; others are skipped) now, and keeps
@@ -7372,6 +7445,7 @@ enum ServerMessage_Body {
   timeZones,
   deviceVouched,
   recoveryCodes,
+  projectFolderPreview,
   notSet
 }
 
@@ -7465,6 +7539,7 @@ class ServerMessage extends $pb.GeneratedMessage {
     $core.bool? watched,
     DeviceVouched? deviceVouched,
     RecoveryCodes? recoveryCodes,
+    ProjectFolderPreview? projectFolderPreview,
   }) {
     final result = ServerMessage._();
     if (replyTo != null) result.replyTo = replyTo;
@@ -7561,6 +7636,8 @@ class ServerMessage extends $pb.GeneratedMessage {
     if (watched != null) result.watched = watched;
     if (deviceVouched != null) result.deviceVouched = deviceVouched;
     if (recoveryCodes != null) result.recoveryCodes = recoveryCodes;
+    if (projectFolderPreview != null)
+      result.projectFolderPreview = projectFolderPreview;
     return result;
   }
 
@@ -7658,6 +7735,7 @@ class ServerMessage extends $pb.GeneratedMessage {
     89: ServerMessage_Body.timeZones,
     91: ServerMessage_Body.deviceVouched,
     92: ServerMessage_Body.recoveryCodes,
+    96: ServerMessage_Body.projectFolderPreview,
     0: ServerMessage_Body.notSet
   };
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(
@@ -7747,7 +7825,8 @@ class ServerMessage extends $pb.GeneratedMessage {
       88,
       89,
       91,
-      92
+      92,
+      96
     ])
     ..a<$fixnum.Int64>(1, _omitFieldNames ? '' : 'replyTo', $pb.PbFieldType.OU6,
         defaultOrMaker: $fixnum.Int64.ZERO)
@@ -7922,6 +8001,9 @@ class ServerMessage extends $pb.GeneratedMessage {
         subBuilder: DeviceVouched.$_createMessage)
     ..aOM<RecoveryCodes>(92, _omitFieldNames ? '' : 'recoveryCodes',
         subBuilder: RecoveryCodes.$_createMessage)
+    ..aOM<ProjectFolderPreview>(
+        96, _omitFieldNames ? '' : 'projectFolderPreview',
+        subBuilder: ProjectFolderPreview.$_createMessage)
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -8029,6 +8111,7 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(89)
   @$pb.TagNumber(91)
   @$pb.TagNumber(92)
+  @$pb.TagNumber(96)
   ServerMessage_Body whichBody() => _ServerMessage_BodyByTag[$_whichOneof(0)]!;
   @$pb.TagNumber(2)
   @$pb.TagNumber(3)
@@ -8113,6 +8196,7 @@ class ServerMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(89)
   @$pb.TagNumber(91)
   @$pb.TagNumber(92)
+  @$pb.TagNumber(96)
   void clearBody() => $_clearField($_whichOneof(0));
 
   @$pb.TagNumber(1)
@@ -9180,6 +9264,20 @@ class ServerMessage extends $pb.GeneratedMessage {
   void clearRecoveryCodes() => $_clearField(92);
   @$pb.TagNumber(92)
   RecoveryCodes ensureRecoveryCodes() => $_ensure(87);
+
+  /// 94: RecoveryKeyToSign (#239), the answer to NewRecoveryKey with an
+  /// account, comes with v0.2.0; reserved for it.
+  /// The answer to PreviewProjectFolder, to the asker only.
+  @$pb.TagNumber(96)
+  ProjectFolderPreview get projectFolderPreview => $_getN(88);
+  @$pb.TagNumber(96)
+  set projectFolderPreview(ProjectFolderPreview value) => $_setField(96, value);
+  @$pb.TagNumber(96)
+  $core.bool hasProjectFolderPreview() => $_has(88);
+  @$pb.TagNumber(96)
+  void clearProjectFolderPreview() => $_clearField(96);
+  @$pb.TagNumber(96)
+  ProjectFolderPreview ensureProjectFolderPreview() => $_ensure(88);
 }
 
 class Hello extends $pb.GeneratedMessage {
@@ -10181,6 +10279,59 @@ class CancelPairing extends $pb.GeneratedMessage {
   $core.bool hasDeviceId() => $_has(0);
   @$pb.TagNumber(1)
   void clearDeviceId() => $_clearField(1);
+}
+
+/// A device waiting to be allowed takes back its own request (#603), when
+/// the person taps Cancel on its waiting page: sent on the connection whose
+/// Hello was answered with PairingPending, and taken only there, for the
+/// request that connection made (by the key it connected with, never by an
+/// id). Its request leaves RemoteAccess.pending_devices at once, and Allow
+/// with it. A request a pairing code made goes back to waiting for a device
+/// to use that code, while it runs (the person can scan it again); one that
+/// came through the account is forgotten. Answered with Ack, also when the
+/// request was already allowed, turned away or ended (nothing changes then),
+/// and the connection closes. Sent on any other connection it's refused with
+/// ERROR_CODE_INVALID_REQUEST. Best effort: a device that leaves without it
+/// is forgotten once its request runs out, as before.
+class WithdrawPairing extends $pb.GeneratedMessage {
+  factory WithdrawPairing() => WithdrawPairing._();
+
+  WithdrawPairing._();
+
+  factory WithdrawPairing.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      WithdrawPairing()..mergeFromBuffer(data, registry);
+  factory WithdrawPairing.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      WithdrawPairing()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'WithdrawPairing',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: WithdrawPairing.$_createMessage)
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  WithdrawPairing clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  WithdrawPairing copyWith(void Function(WithdrawPairing) updates) =>
+      super.copyWith((message) => updates(message as WithdrawPairing))
+          as WithdrawPairing;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated('Use WithdrawPairing() / WithdrawPairing.new instead')
+  static WithdrawPairing create() => WithdrawPairing._();
+  static $pb.GeneratedMessage $_createMessage() => WithdrawPairing._();
+  @$core.override
+  WithdrawPairing createEmptyInstance() => WithdrawPairing._();
+  @$core.pragma('dart2js:noInline')
+  static WithdrawPairing getDefault() =>
+      _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<WithdrawPairing>(
+          WithdrawPairing.$_createMessage);
+  static WithdrawPairing? _defaultInstance;
 }
 
 /// The answer to a device's Hello while it waits to be allowed. The
@@ -15230,6 +15381,214 @@ class SetFolderCollapsed extends $pb.GeneratedMessage {
   $core.bool hasCollapsed() => $_has(2);
   @$pb.TagNumber(3)
   void clearCollapsed() => $_clearField(3);
+}
+
+/// Folds a project in the sidebar, or unfolds it (Project.collapsed).
+class SetProjectCollapsed extends $pb.GeneratedMessage {
+  factory SetProjectCollapsed({
+    $core.String? projectId,
+    $core.bool? collapsed,
+  }) {
+    final result = SetProjectCollapsed._();
+    if (projectId != null) result.projectId = projectId;
+    if (collapsed != null) result.collapsed = collapsed;
+    return result;
+  }
+
+  SetProjectCollapsed._();
+
+  factory SetProjectCollapsed.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetProjectCollapsed()..mergeFromBuffer(data, registry);
+  factory SetProjectCollapsed.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      SetProjectCollapsed()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'SetProjectCollapsed',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: SetProjectCollapsed.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'projectId')
+    ..aOB(2, _omitFieldNames ? '' : 'collapsed')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetProjectCollapsed clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  SetProjectCollapsed copyWith(void Function(SetProjectCollapsed) updates) =>
+      super.copyWith((message) => updates(message as SetProjectCollapsed))
+          as SetProjectCollapsed;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core
+      .Deprecated('Use SetProjectCollapsed() / SetProjectCollapsed.new instead')
+  static SetProjectCollapsed create() => SetProjectCollapsed._();
+  static $pb.GeneratedMessage $_createMessage() => SetProjectCollapsed._();
+  @$core.override
+  SetProjectCollapsed createEmptyInstance() => SetProjectCollapsed._();
+  @$core.pragma('dart2js:noInline')
+  static SetProjectCollapsed getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<SetProjectCollapsed>(
+          SetProjectCollapsed.$_createMessage);
+  static SetProjectCollapsed? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get projectId => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set projectId($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasProjectId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearProjectId() => $_clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.bool get collapsed => $_getBF(1);
+  @$pb.TagNumber(2)
+  set collapsed($core.bool value) => $_setBool(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasCollapsed() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearCollapsed() => $_clearField(2);
+}
+
+/// Where a new project named `name` would be kept (New project's caption,
+/// asked as the name is typed): the app never works the rule out itself.
+class PreviewProjectFolder extends $pb.GeneratedMessage {
+  factory PreviewProjectFolder({
+    $core.String? name,
+  }) {
+    final result = PreviewProjectFolder._();
+    if (name != null) result.name = name;
+    return result;
+  }
+
+  PreviewProjectFolder._();
+
+  factory PreviewProjectFolder.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PreviewProjectFolder()..mergeFromBuffer(data, registry);
+  factory PreviewProjectFolder.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      PreviewProjectFolder()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'PreviewProjectFolder',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: PreviewProjectFolder.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'name')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PreviewProjectFolder clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  PreviewProjectFolder copyWith(void Function(PreviewProjectFolder) updates) =>
+      super.copyWith((message) => updates(message as PreviewProjectFolder))
+          as PreviewProjectFolder;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated(
+      'Use PreviewProjectFolder() / PreviewProjectFolder.new instead')
+  static PreviewProjectFolder create() => PreviewProjectFolder._();
+  static $pb.GeneratedMessage $_createMessage() => PreviewProjectFolder._();
+  @$core.override
+  PreviewProjectFolder createEmptyInstance() => PreviewProjectFolder._();
+  @$core.pragma('dart2js:noInline')
+  static PreviewProjectFolder getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<PreviewProjectFolder>(
+          PreviewProjectFolder.$_createMessage);
+  static PreviewProjectFolder? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get name => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set name($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearName() => $_clearField(1);
+}
+
+/// The answer to PreviewProjectFolder.
+class ProjectFolderPreview extends $pb.GeneratedMessage {
+  factory ProjectFolderPreview({
+    $core.String? name,
+    $core.String? path,
+  }) {
+    final result = ProjectFolderPreview._();
+    if (name != null) result.name = name;
+    if (path != null) result.path = path;
+    return result;
+  }
+
+  ProjectFolderPreview._();
+
+  factory ProjectFolderPreview.fromBuffer($core.List<$core.int> data,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ProjectFolderPreview()..mergeFromBuffer(data, registry);
+  factory ProjectFolderPreview.fromJson($core.String json,
+          [$pb.ExtensionRegistry registry = $pb.ExtensionRegistry.EMPTY]) =>
+      ProjectFolderPreview()..mergeFromJson(json, registry);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(
+      _omitMessageNames ? '' : 'ProjectFolderPreview',
+      package: const $pb.PackageName(_omitMessageNames ? '' : 'factory.v1'),
+      createEmptyInstance: ProjectFolderPreview.$_createMessage)
+    ..aOS(1, _omitFieldNames ? '' : 'name')
+    ..aOS(2, _omitFieldNames ? '' : 'path')
+    ..hasRequiredFields = false;
+
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ProjectFolderPreview clone() => deepCopy();
+  @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
+  ProjectFolderPreview copyWith(void Function(ProjectFolderPreview) updates) =>
+      super.copyWith((message) => updates(message as ProjectFolderPreview))
+          as ProjectFolderPreview;
+
+  @$core.override
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  @$core.Deprecated(
+      'Use ProjectFolderPreview() / ProjectFolderPreview.new instead')
+  static ProjectFolderPreview create() => ProjectFolderPreview._();
+  static $pb.GeneratedMessage $_createMessage() => ProjectFolderPreview._();
+  @$core.override
+  ProjectFolderPreview createEmptyInstance() => ProjectFolderPreview._();
+  @$core.pragma('dart2js:noInline')
+  static ProjectFolderPreview getDefault() => _defaultInstance ??=
+      $pb.GeneratedMessage.$_defaultFor<ProjectFolderPreview>(
+          ProjectFolderPreview.$_createMessage);
+  static ProjectFolderPreview? _defaultInstance;
+
+  /// The name it was asked for, as sent, so an answer to an older keystroke
+  /// can be told apart.
+  @$pb.TagNumber(1)
+  $core.String get name => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set name($core.String value) => $_setString(0, value);
+  @$pb.TagNumber(1)
+  $core.bool hasName() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearName() => $_clearField(1);
+
+  /// The absolute path CreateProject with no path would give it now: the
+  /// workspace folder and the project's id, with -2, -3… when one is taken
+  /// ("/Users/me/.factory/workspace/bakery-website"). "" for a name a
+  /// project can't have (empty).
+  @$pb.TagNumber(2)
+  $core.String get path => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set path($core.String value) => $_setString(1, value);
+  @$pb.TagNumber(2)
+  $core.bool hasPath() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearPath() => $_clearField(2);
 }
 
 /// Runs one of the agent's slash commands (`Agent.commands`), as the person
@@ -30254,6 +30613,7 @@ class Project extends $pb.GeneratedMessage {
     $core.Iterable<ProjectFolder>? folders,
     $core.bool? archived,
     PipeForward? reportForward,
+    $core.bool? collapsed,
   }) {
     final result = Project._();
     if (id != null) result.id = id;
@@ -30262,6 +30622,7 @@ class Project extends $pb.GeneratedMessage {
     if (folders != null) result.folders.addAll(folders);
     if (archived != null) result.archived = archived;
     if (reportForward != null) result.reportForward = reportForward;
+    if (collapsed != null) result.collapsed = collapsed;
     return result;
   }
 
@@ -30286,6 +30647,7 @@ class Project extends $pb.GeneratedMessage {
     ..aOB(5, _omitFieldNames ? '' : 'archived')
     ..aOM<PipeForward>(6, _omitFieldNames ? '' : 'reportForward',
         subBuilder: PipeForward.$_createMessage)
+    ..aOB(7, _omitFieldNames ? '' : 'collapsed')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -30369,6 +30731,19 @@ class Project extends $pb.GeneratedMessage {
   void clearReportForward() => $_clearField(6);
   @$pb.TagNumber(6)
   PipeForward ensureReportForward() => $_ensure(5);
+
+  /// Folded in the sidebar: its pipes and agents hidden under its row, which
+  /// shows their needs-you count and working wave instead
+  /// (SetProjectCollapsed; Lucy's ux/projects-sidebar.md §4). Not the whole
+  /// Projects section (Workspace.projects_collapsed).
+  @$pb.TagNumber(7)
+  $core.bool get collapsed => $_getBF(6);
+  @$pb.TagNumber(7)
+  set collapsed($core.bool value) => $_setBool(6, value);
+  @$pb.TagNumber(7)
+  $core.bool hasCollapsed() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearCollapsed() => $_clearField(7);
 }
 
 /// A folder that some of a project's agents work in. It only scopes where they
@@ -38415,7 +38790,9 @@ class VaultState extends $pb.GeneratedMessage {
   /// recovery key, which matched claktory.com's at the last check-in. "Covered
   /// by your account's recovery key": nothing to save here (the device that
   /// made the key showed it, and no Claktory keeps it), and
-  /// recovery_key_unconfirmed is false.
+  /// recovery_key_unconfirmed is false. It stays while a newer key waits
+  /// (recovery_key_change_waiting) or one that doesn't check came: the vault
+  /// is still sealed to this one, which still opens it.
   @$pb.TagNumber(12)
   $core.bool get recoveryKeyCovered => $_getBF(11);
   @$pb.TagNumber(12)
@@ -59084,6 +59461,9 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
     AskCommand? command,
     Alert? alert,
     $core.int? step,
+    ErrandHandoff? handoff,
+    $core.String? actionError,
+    $core.String? codesKeptAs,
   }) {
     final result = NeedsYouRecord._();
     if (kind != null) result.kind = kind;
@@ -59123,6 +59503,9 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
     if (command != null) result.command = command;
     if (alert != null) result.alert = alert;
     if (step != null) result.step = step;
+    if (handoff != null) result.handoff = handoff;
+    if (actionError != null) result.actionError = actionError;
+    if (codesKeptAs != null) result.codesKeptAs = codesKeptAs;
     return result;
   }
 
@@ -59189,6 +59572,10 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
     ..aOM<Alert>(36, _omitFieldNames ? '' : 'alert',
         subBuilder: Alert.$_createMessage)
     ..aI(37, _omitFieldNames ? '' : 'step', fieldType: $pb.PbFieldType.OU3)
+    ..aOM<ErrandHandoff>(38, _omitFieldNames ? '' : 'handoff',
+        subBuilder: ErrandHandoff.$_createMessage)
+    ..aOS(39, _omitFieldNames ? '' : 'actionError')
+    ..aOS(40, _omitFieldNames ? '' : 'codesKeptAs')
     ..hasRequiredFields = false;
 
   @$core.Deprecated('See https://github.com/google/protobuf.dart/issues/998.')
@@ -59630,6 +60017,50 @@ class NeedsYouRecord extends $pb.GeneratedMessage {
   $core.bool hasStep() => $_has(36);
   @$pb.TagNumber(37)
   void clearStep() => $_clearField(37);
+
+  /// QUESTION that was an errand's handoff (#435, AskPerson.handoff): the
+  /// handoff as it was asked (kind, origin, title, what; `agreement`, the
+  /// site's words, left empty here), to say what it was and what became of
+  /// it as the card did ("Your turn: a payment on https://shop.example",
+  /// then Done or Couldn't do it, I saved them or Kept in Secrets) rather
+  /// than "Answered". Unset for every other card.
+  @$pb.TagNumber(38)
+  ErrandHandoff get handoff => $_getN(37);
+  @$pb.TagNumber(38)
+  set handoff(ErrandHandoff value) => $_setField(38, value);
+  @$pb.TagNumber(38)
+  $core.bool hasHandoff() => $_has(37);
+  @$pb.TagNumber(38)
+  void clearHandoff() => $_clearField(38);
+  @$pb.TagNumber(38)
+  ErrandHandoff ensureHandoff() => $_ensure(37);
+
+  /// QUESTION approved whose action Claktory couldn't carry out, as on its
+  /// card (AskPerson.action_error), such as a code that wasn't filled in
+  /// ("It wasn't filled in: the page changed."): Claktory's words, to show
+  /// under the outcome. Empty when it went through, and for every other
+  /// kind.
+  @$pb.TagNumber(39)
+  $core.String get actionError => $_getSZ(38);
+  @$pb.TagNumber(39)
+  set actionError($core.String value) => $_setString(38, value);
+  @$pb.TagNumber(39)
+  $core.bool hasActionError() => $_has(38);
+  @$pb.TagNumber(39)
+  void clearActionError() => $_clearField(39);
+
+  /// A recovery-codes handoff (handoff.kind RECOVERY_CODES) closed with
+  /// Keep in Secrets: the name of the secret the codes became, given to no
+  /// agent ("Kept in Secrets as shop.example recovery codes"). Empty when
+  /// the person chose I saved them, and for every other card.
+  @$pb.TagNumber(40)
+  $core.String get codesKeptAs => $_getSZ(39);
+  @$pb.TagNumber(40)
+  set codesKeptAs($core.String value) => $_setString(39, value);
+  @$pb.TagNumber(40)
+  $core.bool hasCodesKeptAs() => $_has(39);
+  @$pb.TagNumber(40)
+  void clearCodesKeptAs() => $_clearField(40);
 }
 
 /// A Mac app can broker for its Chrome. Sent on every connection, and again

@@ -1397,6 +1397,18 @@ pub(crate) async fn show_recovery_codes(factory: &Arc<Factory>, request: &v1::Sh
     Ok(v1::RecoveryCodes { agent_id: request.agent_id.clone(), seq: request.seq, codes: codes.to_vec() })
 }
 
+/// A recovery-codes card's answer once the codes were kept in Secrets as
+/// the secret `name` (`keep_recovery_codes`).
+fn kept_answer(name: &str) -> String {
+    format!("Kept in Secrets as {name}, given to no agent.")
+}
+
+/// The secret a recovery-codes card's codes were kept as, from its answer
+/// (`kept_answer`); None when the person chose I saved them.
+pub(crate) fn kept_as(answer: &str) -> Option<&str> {
+    answer.strip_prefix("Kept in Secrets as ")?.strip_suffix(", given to no agent.").filter(|name| !name.is_empty())
+}
+
 /// KeepRecoveryCodes (#435 W8b): the codes become a secret given to no
 /// agent, Claktory's copy goes, and the card closes; the agent is told.
 pub(crate) async fn keep_recovery_codes(factory: &Arc<Factory>, request: &v1::KeepRecoveryCodes) -> Result<(), RequestError> {
@@ -1415,7 +1427,7 @@ pub(crate) async fn keep_recovery_codes(factory: &Arc<Factory>, request: &v1::Ke
         ),
         error => RequestError::Ask(format!("The codes weren't kept: {error}")),
     })?;
-    let answer = format!("Kept in Secrets as {name}, given to no agent.");
+    let answer = kept_answer(&name);
     let decided = now_ms();
     let claimed = factory.store.db().execute(
         "UPDATE asks SET state = 'answered', answer = ?2, decided = ?3 WHERE id = ?1 AND state = 'pending'",

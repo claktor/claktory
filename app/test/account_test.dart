@@ -6,7 +6,8 @@ import 'package:factory_app/device_account.dart'
     show AccountClaktory, DeviceAccount;
 import 'package:factory_app/devices.dart' show thisDeviceKind;
 import 'package:factory_app/name_step.dart' show nameFromEmail;
-import 'package:factory_app/controls.dart' show Field;
+import 'package:factory_app/controls.dart' show ExtensionGlyph, Field;
+import 'package:factory_app/device_kind.dart' show thisDeviceKindForTests;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/settings_shell.dart' show SettingAnchor;
@@ -735,6 +736,34 @@ void main() {
     await pumpFrames(tester);
     expect(find.text('Sign in on this $thisDeviceKind'), findsOneWidget);
     expect(find.byKey(const ValueKey('device-email')), findsOneWidget);
+  });
+
+  testWidgets("This Mac's section glyph is a monitor on a desktop Mac and a "
+      "laptop on a laptop, as its tile in the rail (8.8)", (tester) async {
+    addTearDown(() => thisDeviceKindForTests = null);
+    // A Mac's Settings: tests run as Android otherwise.
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    Future<String?> glyphOn(DeviceKind kind) async {
+      await tester.pumpWidget(const SizedBox());
+      thisDeviceKindForTests = kind;
+      final harness = Harness(withAccount(signedIn), localBackend: true);
+      // Tall enough that the section list shows This Mac at its end.
+      await harness.show(tester, size: const Size(1200, 3000));
+      await pumpFrames(tester);
+      await openSettings(tester, harness);
+      await pumpFrames(tester);
+      final glyph = find.descendant(
+        of: find.byWidgetPredicate(
+          (widget) => widget.runtimeType.toString() == '_ThisMacGlyph',
+        ),
+        matching: find.byType(ExtensionGlyph),
+      );
+      return tester.widgetList<ExtensionGlyph>(glyph).first.icon;
+    }
+
+    expect(await glyphOn(DeviceKind.DEVICE_KIND_DESKTOP), 'monitor');
+    expect(await glyphOn(DeviceKind.DEVICE_KIND_LAPTOP), 'laptop-minimal');
+    debugDefaultTargetPlatformOverride = null;
   });
 
   testWidgets("a Mac with its own Claktory says nothing of this device's "

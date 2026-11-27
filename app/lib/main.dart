@@ -204,6 +204,7 @@ class _FactoryAppState extends State<FactoryApp> {
     _startSetup();
     if (defaultTargetPlatform == TargetPlatform.macOS ||
         defaultTargetPlatform == TargetPlatform.iOS ||
+        defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.windows) {
       _notifications = ClaktoryNotifications(
         claktories: _claktories,
@@ -227,14 +228,19 @@ class _FactoryAppState extends State<FactoryApp> {
         ],
       );
     }
-    // An iPhone registers with each Claktory for pushes, once the person
-    // allows notifications (mobile/push.dart).
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
+    // An iPhone or an Android phone registers with each Claktory for
+    // pushes, once the person allows notifications (mobile/push.dart):
+    // the same factory/push channel, APNs on one, FCM on the other
+    // (app/android/.../PushChannel.kt).
+    if (defaultTargetPlatform == TargetPlatform.iOS ||
+        defaultTargetPlatform == TargetPlatform.android) {
       _pushes = PushRegistrar.current = PushRegistrar(
         claktories: _claktories,
         device: IosPushDevice(),
         relay: HttpPushRelay(),
       );
+    }
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
       // Asked for before the first connection (mobile/local_network.dart).
       localNetwork = const DeviceLocalNetwork();
     }

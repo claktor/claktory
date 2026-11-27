@@ -35,7 +35,18 @@ fn copy_named(dir: &Path, program: &str, name: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::copy(program, &path).expect("copy");
     if cfg!(target_os = "macos") {
-        let signed = std::process::Command::new("codesign").args(["-f", "-s", "-"]).arg(&path).output().expect("codesign");
+        // codesign fails now and then on a busy Mac: tried 3 times.
+        let mut signed = None;
+        for _ in 0..3 {
+            let output = std::process::Command::new("codesign").args(["-f", "-s", "-"]).arg(&path).output().expect("codesign");
+            let done = output.status.success();
+            signed = Some(output);
+            if done {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let signed = signed.expect("tried");
         assert!(signed.status.success(), "{signed:?}");
     }
     path

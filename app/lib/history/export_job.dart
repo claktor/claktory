@@ -252,8 +252,8 @@ class ReplayJob extends ChangeNotifier {
     }
   }
 
-  /// Changes each frame made: [ReplayJobBanner] draws a pixel from it, so
-  /// the screen has something to draw (below).
+  /// Changes each frame on screen: [ReplayJobBanner] draws a pixel from
+  /// it, so the screen has something to draw (below).
   final made = ValueNotifier<int>(0);
 
   /// Whether the last frame on screen came in time; when it didn't, it's
@@ -274,7 +274,9 @@ class ReplayJob extends ChangeNotifier {
   /// buffer grows by only a few such frames meanwhile.
   Future<void> _screenFrame(int i) async {
     if (i % _screenEvery != 0) return;
-    made.value = i;
+    // Its pixel changes with each: every [_screenEvery]th frame's number
+    // is even.
+    made.value = i ~/ _screenEvery;
     if (!_screenOn && i % (_screenEvery * 4) != 0) return;
     final binding = SchedulerBinding.instance;
     binding.scheduleFrame();
@@ -813,9 +815,9 @@ class _Line extends StatelessWidget {
   }
 }
 
-/// A pixel that changes, unseen, with every frame of the video made: so an
-/// iPhone, which draws only what changed, still draws a frame on screen
-/// between two of the video's ([ReplayJob._screenFrame]).
+/// A pixel that changes, unseen, with every frame on screen while a video
+/// is made: so an iPhone, which draws only what changed, still draws one
+/// ([ReplayJob._screenFrame]).
 class _FramePixel extends StatelessWidget {
   const _FramePixel({required this.job});
 
@@ -854,6 +856,7 @@ class _StripButton extends StatelessWidget {
     return Semantics(
       button: true,
       label: label,
+      onTap: onPressed,
       excludeSemantics: true,
       child: Pressable(
         onTap: onPressed,
