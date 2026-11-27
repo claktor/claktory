@@ -218,6 +218,7 @@ pub(crate) fn view(factory: &Factory, inner: &Inner, switching: &crate::usage_sw
                 unseen: meta.unseen,
                 model: meta.model.clone(),
                 waiting_seqs: transcript.map(Transcript::waiting_seqs).unwrap_or_default(),
+                waiting_versions: transcript.map(Transcript::waiting_versions).unwrap_or_default(),
                 queued_messages: runtime.map_or(0, |runtime| runtime.queue.len() as u32),
                 model_available: inner.models.iter().any(|model| model.id == meta.model),
                 usage_wait: wait.map(|wait| wait.text.clone()).unwrap_or_default(),

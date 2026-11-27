@@ -2,7 +2,7 @@
 // person types in it: "Latest" and the message box step aside, and the
 // field shows whole above the keyboard (Zucchero's #321, sa-23; the box,
 // Lucy's needs-you-cards.md §5.2).
-import 'package:factory_app/controls.dart' show TextField;
+import 'package:factory_app/decision.dart' show DecisionComment;
 import 'package:factory_app/identity.dart' show Space;
 import 'package:factory_app/message_box.dart' show MessageBox;
 import 'package:factory_app/mobile/header.dart' show PhoneHeader;
@@ -53,7 +53,11 @@ Workspace _workspace() => Workspace(
   selectedAgentId: 'june',
 );
 
-Future<Harness> _show(WidgetTester tester, {double scale = 1}) async {
+Future<Harness> _show(
+  WidgetTester tester, {
+  double scale = 1,
+  Entry? card,
+}) async {
   tester.platformDispatcher.textScaleFactorTestValue = scale;
   addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
   final harness = Harness(_workspace());
@@ -61,7 +65,12 @@ Future<Harness> _show(WidgetTester tester, {double scale = 1}) async {
     Transcript(
       agentId: 'june',
       entries: [
-        Entry(seq: Int64(7), timestampMs: Int64(1000), askPerson: _procedure()),
+        card ??
+            Entry(
+              seq: Int64(7),
+              timestampMs: Int64(1000),
+              askPerson: _procedure(),
+            ),
         // Enough after it that the card isn't the conversation's end.
         for (var i = 8; i < 14; i++)
           Entry(
@@ -86,15 +95,15 @@ Finder get _latest => find.bySemanticsLabel(RegExp('latest'));
 Finder get _field => find.descendant(
   of: find.descendant(
     of: find.byType(TranscriptView),
-    matching: find.byType(TextField),
+    matching: find.byType(DecisionComment),
   ),
   matching: find.byType(EditableText),
 );
 
-/// Scrolls up the conversation until the card's Add a comment shows.
+/// Scrolls up the conversation until the card's field shows.
 Future<void> _toCard(WidgetTester tester) async {
   for (var i = 0; i < 60; i++) {
-    final add = find.text('Add a comment').hitTestable();
+    final add = _field.hitTestable();
     if (add.evaluate().isNotEmpty &&
         tester.getRect(add).bottom <
             tester.getRect(find.byType(MessageBox)).top) {
@@ -106,20 +115,14 @@ Future<void> _toCard(WidgetTester tester) async {
   await pumpFrames(tester);
 }
 
-/// Opens the card's Add a comment and brings the keyboard up, as a finger
+/// Puts the keys in the card's field and brings the keyboard up, as a finger
 /// would.
 Future<void> _comment(WidgetTester tester) async {
   // Low on the screen, just above the message box, as it was in sa-22.
-  final gap =
-      tester.getRect(find.byType(MessageBox)).top -
-      tester.getRect(find.text('Add a comment')).bottom;
-  await tester.drag(
-    find.byType(TranscriptView),
-    Offset(0, gap - Space.s),
-    touchSlopY: 0,
-  );
+  await Scrollable.ensureVisible(tester.element(_field), alignment: 1);
   await pumpFrames(tester);
-  await tester.tap(find.text('Add a comment'));
+  // The keys to the field, as a finger's tap gives them.
+  await tester.showKeyboard(_field);
   await pumpFrames(tester);
   tester.view.viewInsets = const FakeViewPadding(bottom: _keyboard);
   addTearDown(tester.view.resetViewInsets);
@@ -170,4 +173,62 @@ void main() {
       expect(find.byType(MessageBox), findsOneWidget);
     });
   }
+
+  // Zucchero's row 706: a secret request's comment on an SE at AX3. Once
+  // typed, its line ("Lea gets your words either way, and never sees the
+  // value.") stays; the field takes only the room left under it.
+  testWidgets('a secret request typed in at AX3: buttons, the line, then '
+      'the field, none over another, nothing overflowing', (tester) async {
+    await _show(
+      tester,
+      scale: 2.35,
+      card: Entry(
+        seq: Int64(7),
+        timestampMs: Int64(1000),
+        secretRequest: SecretRequest(
+          id: 'r1',
+          agentId: 'june',
+          adminAgentId: 'rivet',
+          secretName: 'Hetzner token',
+          newSecret: NewSecret(
+            name: 'Hetzner token',
+            variables: [SecretVariable(name: 'HCLOUD_TOKEN')],
+          ),
+          reason: 'To make the build server.',
+          state: SecretRequestState.SECRET_REQUEST_STATE_PENDING,
+        ),
+      ),
+    );
+    await _toCard(tester);
+    await _comment(tester);
+    await tester.enterText(
+      _field,
+      'Use the read and write token from the shared project please',
+    );
+    await pumpFrames(tester, const Duration(milliseconds: 1200));
+    expect(tester.takeException(), isNull);
+    final keyboardTop = _se.height - _keyboard;
+    final field = tester.getRect(_field);
+    final header = tester.getRect(find.byType(PhoneHeader)).bottom;
+    expect(field.top, greaterThanOrEqualTo(header));
+    // The field, then its line (cut to one, or stepped aside while there's
+    // no room for it), then the buttons, all above the keyboard.
+    final dismiss = tester.getRect(find.text('Dismiss').last);
+    final give = tester.getRect(find.textContaining('Add and give').last);
+    expect(field.bottom, lessThanOrEqualTo(dismiss.top));
+    expect(give.bottom, lessThanOrEqualTo(keyboardTop + 0.5));
+    final line = find.textContaining(
+      'gets your words either way',
+      findRichText: true,
+    );
+    if (line.evaluate().isNotEmpty) {
+      expect(tester.getRect(line).top, greaterThanOrEqualTo(field.bottom));
+      expect(tester.getRect(line).bottom, lessThanOrEqualTo(dismiss.top));
+    }
+    // The keyboard down: the line whole again.
+    FocusManager.instance.primaryFocus?.unfocus();
+    tester.view.resetViewInsets();
+    await pumpFrames(tester);
+    expect(line, findsOneWidget);
+  });
 }

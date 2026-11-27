@@ -6,22 +6,30 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'account.dart';
+import 'app_source.dart' show AppSourceButton;
 import 'avatar.dart';
 import 'backend.dart';
+import 'errands/browser_session.dart' show agentBrowserAvailable;
+import 'errands/browser_settings.dart' show AgentBrowserSettings;
 import 'browser/browser_log.dart'
     show BrowserLogSettings, browserControlAvailable;
 import 'claktory_identity.dart'
-    show ClaktoryIdentity, claktoryName, claktoryNameInText;
+    show
+        ClaktoryIdentity,
+        claktoryColor,
+        claktoryNameInSettings,
+        claktoryNameInText;
 import 'controls.dart';
 import 'devices.dart';
 import 'diagnostics.dart' show DiagnosticsSettings;
-import 'find.dart' show RenderedFindScope;
-import 'forms.dart' show AgentListField, FittedHeading;
+import 'find.dart' show FindScope;
+import 'ipad/settings_keys.dart'
+    show FocusSettingsSearchIntent, WorkbenchSettings;
+import 'forms.dart' show AgentListField;
 import 'identity.dart';
 import 'keep_awake_card.dart'
     show keepAwakeHolding, keepAwakeLabel, keepAwakeNote, keepAwakeOnBattery;
 import 'lid_closed.dart';
-import 'mobile/drawer.dart' show largeText;
 import 'mobile/header.dart';
 import 'mobile/input.dart' show InputKind;
 import 'mobile/platform_policy.dart' show PhonePlatformPolicy;
@@ -39,121 +47,594 @@ import 'provider_picker.dart' show ProviderSettings;
 import 'remove_mac.dart';
 import 'report_types.dart' show ReportTypesSettings, reportTypesAvailable;
 import 'scope.dart';
-import 'screens.dart' show SettingsScroller, SettingsSectionAnchor;
 import 'secrets.dart';
 import 'transcript.dart';
 import 'tell_rivet.dart';
 import 'update_check.dart' show UpdateCheckRow;
 import 'viewers/file_cache.dart' show keepsFiles;
 import 'viewers/file_cache_setting.dart' show FileCacheSetting;
+import 'rail.dart' show ClaktoriesScope;
 import 'selection.dart';
-import 'voice.dart' show VoiceSettings, voiceKnown;
-import 'zoom.dart' show ZoomSetting;
+import 'settings_search.dart';
+import 'permissions_settings.dart' show DevicePermissions;
+import 'settings_shell.dart';
+import 'voice.dart' show KeptRecordings, VoiceSettings, voiceKnown;
+import 'zoom.dart' show ZoomSetting, zoomsHere;
 
-/// Factory-wide settings: provider sign-in and the defaults for new agents.
-/// On a Mac, a pane beside the conversation ([InPane]); on a phone, or with
-/// no agent to show it beside, it replaces the agent view until closed with
-/// Done or Esc.
+/// Settings (Lucy's Settings spec, area 3): the Claktory's sections under
+/// its name, then this device's own, with search always on screen. Wide
+/// enough ([settingsWide]), an index on the left and one section beside
+/// it; narrower (a phone, or a pane beside a conversation), the sections
+/// as a list, each a page with Back. On a Mac, a pane beside the
+/// conversation ([InPane]); on a phone, or with no agent to show it beside,
+/// it replaces the agent view until closed with Done or Esc.
 class SettingsView extends StatelessWidget {
-  const SettingsView({super.key, this.section});
+  const SettingsView({super.key, this.section, this.setting = ''});
 
   /// On a phone, the section this page shows (its id, "devices"); null
   /// lists them all.
   final String? section;
 
+  /// On a phone's section page, the setting brought into view and glowed
+  /// as it opens ("zoom"); empty for none.
+  final String setting;
+
   @override
   Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    final scope = AppScope.scope(context);
-    void close() => scope.page.value = AppPage.agent;
-    // Beside a conversation, the pane's header names and closes it.
     final inPane = InPane.of(context);
     // A phone lists the sections, each a page of its own.
     if (!inPane && isPhoneLayout(context)) {
       final section = this.section;
       return section == null
           ? const _PhoneSettings()
-          : _PhoneSettingsPage(id: section);
+          : _PhoneSettingsPage(id: section, setting: setting);
     }
+    return _SettingsFrame(inPane: inPane);
+  }
+}
+
+/// Whether Settings, [width] wide, shows the index beside one section
+/// (§4.1): room for the index (220px × the text factor, up to 1.6×) and
+/// 420px × the text factor for the section; 640px at the standard size.
+bool settingsWide(BuildContext context, double width) {
+  final scale = _textScale(context);
+  return width >= 220 * (scale > 1.6 ? 1.6 : scale) + 420 * scale;
+}
+
+/// How many Claktories this device has saved: their pages name theirs
+/// (§4.2) when there's more than one.
+int _claktoriesSaved(BuildContext context) =>
+    ClaktoriesScope.of(context)?.all.length ?? 1;
+
+/// The section each Claktory's Settings last showed in this session, which
+/// it opens on again (§4.1): nothing kept once the app quits.
+final _settingsShown = Expando<String>('settings shown');
+
+/// The device's own kind, as Settings names its row: "This Mac".
+String get thisDeviceTitle => 'This $thisDeviceKind';
+
+/// Settings on a Mac or an iPad, as a page or a pane: wide, the index and
+/// one section; narrow, the list, then a section with Back.
+class _SettingsFrame extends StatefulWidget {
+  const _SettingsFrame({required this.inPane});
+
+  final bool inPane;
+
+  @override
+  State<_SettingsFrame> createState() => _SettingsFrameState();
+}
+
+class _SettingsFrameState extends State<_SettingsFrame> {
+  final _query = TextEditingController();
+  final _searchFocus = FocusNode(debugLabel: 'Search Settings');
+  final _indexFocus = FocusNode(debugLabel: 'Settings index');
+  final _anchors = GlobalKey<SettingAnchorsState>();
+  ValueNotifier<String?>? _place;
+
+  /// The section shown, by id.
+  late String _selected;
+
+  /// Narrow: a section's page is shown over the list.
+  var _paged = false;
+
+  /// Wide or narrow at the last layout.
+  var _wide = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _query.addListener(_queried);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final backend = AppScope.of(context);
+    final place = backend.settingsSection;
+    if (place == _place) return;
+    _place?.removeListener(_wanted);
+    // Opens on the section last shown in this session, else Profile.
+    _selected = _settingsShown[backend] ?? 'profile';
+    _place = place..addListener(_wanted);
+    _wanted();
+  }
+
+  @override
+  void dispose() {
+    _place?.removeListener(_wanted);
+    _query.dispose();
+    _searchFocus.dispose();
+    _indexFocus.dispose();
+    super.dispose();
+  }
+
+  void _queried() => setState(() {});
+
+  /// A link or an agent asked for a place in Settings
+  /// ([Backend.settingsSection]): its section, its setting glowing.
+  void _wanted() {
+    final place = _place?.value;
+    if (place == null) return;
+    _place!.value = null;
+    final wanted = settingsPlaceOf(place);
+    final workspace = AppScope.of(context).workspace.workspace;
+    // Not in Settings now (Account while signed out, say): Settings as it
+    // was.
+    if (!settingsSectionsOf(
+      context,
+      workspace,
+    ).any((section) => section.id == wanted.section)) {
+      return;
+    }
+    _open(wanted.section, wanted.setting);
+  }
+
+  /// Shows [section], and [setting] in it glowing.
+  void _open(String section, [String setting = '']) {
+    _settingsShown[AppScope.of(context)] = section;
+    setState(() {
+      _selected = section;
+      _paged = true;
+    });
+    SettingAnchors.revealWhenReady(_anchors, setting);
+  }
+
+  void _close() => AppScope.scope(context).page.value = AppPage.agent;
+
+  /// Esc: clears search, then goes back to the list from a section's
+  /// page, then closes Settings.
+  void _escape() {
+    if (_query.text.isNotEmpty) {
+      _query.clear();
+      return;
+    }
+    if (!_wide && _paged) {
+      setState(() => _paged = false);
+      return;
+    }
+    _close();
+  }
+
+  /// ↑/↓ in the index: the section before or after the one shown.
+  void _step(List<SettingsSection> sections, int by) {
+    final at = sections.indexWhere((section) => section.id == _selected);
+    final next = (at < 0 ? 0 : at + by).clamp(0, sections.length - 1);
+    _open(sections[next].id);
+  }
+
+  void _focusSearch() {
+    _searchFocus.requestFocus();
+    _query.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: _query.text.length,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final scope = AppScope.scope(context);
     return CallbackShortcuts(
-      bindings: {const SingleActivator(LogicalKeyboardKey.escape): close},
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.escape): _escape,
+        const SingleActivator(LogicalKeyboardKey.keyF, meta: true):
+            _focusSearch,
+        const SingleActivator(LogicalKeyboardKey.keyF, control: true):
+            _focusSearch,
+      },
       child: FocusScope(
-        autofocus: !inPane,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (!inPane)
-              WindowDrag(
-                child: Container(
-                  height: titleBarHeight,
-                  padding: const EdgeInsets.only(
-                    left: Space.xl,
-                    right: Space.m,
-                  ),
-                  decoration: BoxDecoration(
-                    border: Border(bottom: BorderSide(color: palette.hairline)),
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          'Settings',
-                          style: TypeScale.of(context).label.copyWith(
-                            color: palette.text,
-                            fontWeight: FontWeight.w600,
+        autofocus: !widget.inPane,
+        // On an iPad, the system's menu's Search Settings (hold ⌘; ⌘F)
+        // while Settings is shown (ipad/settings_keys.dart, Sorbet's).
+        child: Actions(
+          actions: {
+            FocusSettingsSearchIntent:
+                CallbackAction<FocusSettingsSearchIntent>(
+                  onInvoke: (_) {
+                    _focusSearch();
+                    return null;
+                  },
+                ),
+          },
+          child: WorkbenchSettings(
+            // Find (⌘F, the iPad header's magnifier) goes to the search field,
+            // what's in it selected (§4.3, ST14).
+            child: FindScope.field(
+              field: _searchFocus,
+              words: _query,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (!widget.inPane)
+                    WindowDrag(
+                      child: Container(
+                        height: titleBarHeight,
+                        padding: const EdgeInsets.only(
+                          left: Space.xl,
+                          right: Space.m,
+                        ),
+                        decoration: BoxDecoration(
+                          border: Border(
+                            bottom: BorderSide(color: palette.hairline),
                           ),
                         ),
-                      ),
-                      Button(label: 'Done', onPressed: close),
-                    ],
-                  ),
-                ),
-              ),
-            Expanded(
-              child: ListenableBuilder(
-                listenable: scope.backend.workspace,
-                builder: (context, _) {
-                  final workspace = scope.backend.workspace.workspace;
-                  return SelectableArea(
-                    // Scrolls to the section an agent opens (screens.dart).
-                    child: SettingsScroller(
-                      builder: (context, controller) => RenderedFindScope(
-                        placeholder: 'Search Settings',
-                        child: ListView(
-                          controller: controller,
-                          // Every section laid out, so find sees all of it.
-                          scrollCacheExtent: RenderedFindScope.everything,
-                          padding: const EdgeInsets.symmetric(
-                            vertical: Space.xl,
-                          ),
+                        child: Row(
                           children: [
-                            // Each selectable where the pointer is at any zoom.
-                            for (final child in <Widget>[
-                              for (final (i, section) in settingsSectionsOf(
-                                context,
-                                workspace,
-                              ).indexed) ...[
-                                if (i > 0) const SizedBox(height: Space.xxl),
-                                _Section(
-                                  title: section.title,
-                                  children: section.children,
+                            Expanded(
+                              child: Text(
+                                'Settings',
+                                style: TypeScale.of(context).label.copyWith(
+                                  color: palette.text,
+                                  fontWeight: FontWeight.w600,
                                 ),
-                              ],
-                            ])
-                              ScrolledSelection(
-                                key: child.key == null
-                                    ? null
-                                    : ValueKey(child.key),
-                                child: child,
                               ),
+                            ),
+                            Button(label: 'Done', onPressed: _close),
                           ],
                         ),
                       ),
                     ),
-                  );
-                },
+                  Expanded(
+                    child: ListenableBuilder(
+                      listenable: scope.backend.workspace,
+                      builder: (context, _) {
+                        final sections = settingsSectionsOf(
+                          context,
+                          scope.backend.workspace.workspace,
+                        );
+                        return LayoutBuilder(
+                          builder: (context, constraints) {
+                            _wide = settingsWide(context, constraints.maxWidth);
+                            return _wide
+                                ? _wideLayout(context, sections)
+                                : _narrowLayout(context, sections);
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                ],
               ),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  SettingsSection _shown(List<SettingsSection> sections) =>
+      sections.where((section) => section.id == _selected).firstOrNull ??
+      sections.first;
+
+  Widget _search(List<SettingsSection> sections, List<SettingsResult> found) =>
+      SettingsSearchField(
+        controller: _query,
+        focusNode: _searchFocus,
+        onSubmitted: () {
+          final first = found.where((each) => !each.isAnswer).firstOrNull;
+          if (first != null) _open(first.section, first.setting);
+        },
+      );
+
+  List<SettingsResult> _found(List<SettingsSection> sections) => searchSettings(
+    [for (final section in sections) section.searchable],
+    _query.text,
+    device: thisDeviceKind,
+  );
+
+  /// The index's or the list's rows: search results while something's
+  /// typed; else the Claktory's heading, its sections, a gap and the
+  /// device's row.
+  List<Widget> _rows(
+    BuildContext context,
+    List<SettingsSection> sections,
+    List<SettingsResult> found, {
+    required bool list,
+  }) {
+    if (_query.text.trim().isNotEmpty) {
+      return [
+        if (found.isEmpty) SettingsNoResults(query: _query.text),
+        for (final (i, result) in found.indexed)
+          SettingsResultRow(
+            result: result,
+            first: i == 0,
+            onTap: () => _open(result.section, result.setting),
+          ),
+      ];
+    }
+    final palette = Palette.of(context);
+    final claktory = sections.where((section) => !section.device).toList();
+    return [
+      const Padding(
+        padding: EdgeInsets.fromLTRB(Space.s, Space.s, Space.s, Space.xs),
+        child: SettingsClaktoryHeading(),
+      ),
+      for (final (i, section) in claktory.indexed) ...[
+        if (list && i > 0 && claktory[i - 1].group != section.group)
+          Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: Space.s,
+              vertical: Space.xs,
+            ),
+            child: Container(height: 1, color: palette.hairline),
+          ),
+        _row(section, list: list),
+      ],
+      // This device's row, a hairline apart from the Claktory's (§3).
+      for (final section in sections.where((section) => section.device)) ...[
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            Space.s,
+            Space.m,
+            Space.s,
+            Space.m,
+          ),
+          child: Container(height: 1, color: palette.hairline),
+        ),
+        _row(section, list: list),
+      ],
+    ];
+  }
+
+  Widget _row(SettingsSection section, {required bool list}) =>
+      SettingsSectionRow(
+        key: ValueKey('settings-row:${section.id}'),
+        title: section.title,
+        glyph: section.glyph,
+        summary: section.summary,
+        selected: !list && section.id == _selected,
+        list: list,
+        onTap: () {
+          // A row tapped in the index gives the index the keys, so ↑/↓
+          // step on from there (§4.1; an iPad's keyboard, line 128).
+          if (!list) _indexFocus.requestFocus();
+          _open(section.id);
+        },
+      );
+
+  Widget _wideLayout(BuildContext context, List<SettingsSection> sections) {
+    final palette = Palette.of(context);
+    final scale = _textScale(context);
+    final found = _found(sections);
+    final shown = _shown(sections);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          width: 220 * (scale > 1.6 ? 1.6 : scale),
+          decoration: BoxDecoration(
+            color: palette.sidebar,
+            border: Border(right: BorderSide(color: palette.hairline)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  Space.s,
+                  Space.m,
+                  Space.s,
+                  Space.s,
+                ),
+                child: _search(sections, found),
+              ),
+              Expanded(
+                child: CallbackShortcuts(
+                  bindings: {
+                    const SingleActivator(LogicalKeyboardKey.arrowUp): () =>
+                        _step(sections, -1),
+                    const SingleActivator(LogicalKeyboardKey.arrowDown): () =>
+                        _step(sections, 1),
+                  },
+                  child: Focus(
+                    focusNode: _indexFocus,
+                    skipTraversal: true,
+                    child: ListView(
+                      padding: const EdgeInsets.fromLTRB(
+                        Space.s,
+                        0,
+                        Space.s,
+                        Space.l,
+                      ),
+                      children: _rows(context, sections, found, list: false),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: _SectionBody(
+            key: ValueKey('settings-section:${shown.id}'),
+            anchors: _anchors,
+            section: shown,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _narrowLayout(BuildContext context, List<SettingsSection> sections) {
+    final palette = Palette.of(context);
+    if (_paged) {
+      final shown = _shown(sections);
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Back and the section's title, where the list was.
+          Container(
+            padding: const EdgeInsets.symmetric(
+              horizontal: Space.s,
+              vertical: Space.xs,
+            ),
+            decoration: BoxDecoration(
+              border: Border(bottom: BorderSide(color: palette.hairline)),
+            ),
+            child: Row(
+              children: [
+                GlyphButton(
+                  label: 'Back',
+                  active: false,
+                  onTap: () => setState(() => _paged = false),
+                  glyph: (color) => ExtensionGlyph(
+                    icon: 'chevron-left',
+                    name: '',
+                    color: color,
+                  ),
+                ),
+                const SizedBox(width: Space.xs),
+                Expanded(
+                  child: Text(
+                    shown.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TypeScale.of(context).emphasis
+                        .copyWith(color: palette.text),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: _SectionBody(
+              key: ValueKey('settings-page:${shown.id}'),
+              anchors: _anchors,
+              section: shown,
+              titled: false,
+              claktoryLine: !shown.device && _claktoriesSaved(context) > 1,
+            ),
+          ),
+        ],
+      );
+    }
+    final found = _found(sections);
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(Space.s, Space.m, Space.s, Space.l),
+      children: [
+        _search(sections, found),
+        const SizedBox(height: Space.s),
+        ..._rows(context, sections, found, list: true),
+      ],
+    );
+  }
+}
+
+/// One section, as the wide layout shows it beside the index or the
+/// narrow one as a page: at most 640px wide from the top, its title in
+/// title type ([titled]), then its rows; on a page when more than one
+/// Claktory is saved, its Claktory's dot and name first ([claktoryLine]).
+class _SectionBody extends StatefulWidget {
+  const _SectionBody({
+    super.key,
+    required this.anchors,
+    required this.section,
+    this.titled = true,
+    this.claktoryLine = false,
+  });
+
+  final GlobalKey<SettingAnchorsState> anchors;
+  final SettingsSection section;
+  final bool titled;
+  final bool claktoryLine;
+
+  @override
+  State<_SectionBody> createState() => _SectionBodyState();
+}
+
+class _SectionBodyState extends State<_SectionBody> {
+  final _scroll = ScrollController();
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final section = widget.section;
+    final backend = AppScope.of(context);
+    // Each in one column at most 640px wide, from the top, its title and
+    // labels on one left edge (§4.1).
+    Widget centered(Widget child) => Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 640),
+        child: SizedBox(
+          width: double.infinity,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: Space.xl),
+            child: child,
+          ),
+        ),
+      ),
+    );
+    return SelectableArea(
+      child: SettingAnchors(
+        key: widget.anchors,
+        child: ListView(
+          controller: _scroll,
+          padding: const EdgeInsets.symmetric(vertical: Space.xl),
+          children: [
+            if (widget.claktoryLine)
+              centered(
+                Padding(
+                  padding: const EdgeInsets.only(bottom: Space.m),
+                  child: SettingsClaktoryLine(
+                    name: claktoryNameInSettings(backend),
+                    color: claktoryColor(backend),
+                    style: TypeScale.of(context).caption
+                        .copyWith(color: palette.textMuted),
+                  ),
+                ),
+              ),
+            if (widget.titled)
+              centered(
+                Padding(
+                  padding: const EdgeInsets.only(bottom: Space.l),
+                  child: Semantics(
+                    header: true,
+                    child: Text(
+                      section.title,
+                      style: TypeScale.of(context).title
+                          .copyWith(color: palette.text),
+                    ),
+                  ),
+                ),
+              ),
+            // Each selectable where the pointer is at any zoom.
+            for (final child in section.children)
+              ScrolledSelection(
+                key: child.key == null ? null : ValueKey(child.key),
+                child: centered(
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: Space.s),
+                    child: child,
+                  ),
+                ),
+              ),
           ],
         ),
       ),
@@ -161,78 +642,105 @@ class SettingsView extends StatelessWidget {
   }
 }
 
-/// A section of Settings: its title (its id in lower case, as show_screen
-/// names it), what's in it, and on a phone, where each is a page of its
-/// own, its glyph and a word on what it's set to.
+/// A section of Settings: its title, its [id] (as show_screen and links
+/// name it: its title in lower case unless given), what's in it, its glyph,
+/// a word on what it's set to (on a narrow list's row), and what search
+/// finds in it.
 class SettingsSection {
-  const SettingsSection({
+  SettingsSection({
     required this.title,
     required this.children,
     required this.glyph,
+    String? id,
     this.summary = '',
     this.group = 0,
-  });
+    this.device = false,
+    this.entries = const [],
+    this.items = const [],
+    this.words = const [],
+  }) : id = id ?? title.toLowerCase();
 
   final String title;
   final List<Widget> children;
   final Widget Function(Color color) glyph;
 
-  /// What it's set to, at the end of its row on a phone ("Matt").
+  /// As show_screen and links name it ("devices").
+  final String id;
+
+  /// What it's set to, at the end of its row in the narrow list ("Matt").
   final String summary;
 
-  /// Rows of one group sit together on a phone, apart from the next.
+  /// The Claktory's sections sit in groups, a hairline apart in the list
+  /// (§3).
   final int group;
 
-  String get id => title.toLowerCase();
+  /// This device's own section, after the Claktory's, under no heading.
+  final bool device;
+
+  /// The settings search finds in it, by label.
+  final List<SettingEntry> entries;
+
+  /// Its own things search finds (secret, device, account and report
+  /// type names): each leads to its top.
+  final List<String> items;
+
+  /// Words that find it, besides its title (Trish's §10).
+  final List<String> words;
+
+  SearchableSection get searchable => SearchableSection(
+    id: id,
+    title: title,
+    entries: entries,
+    items: items,
+    words: words,
+  );
 }
 
-/// The sections Settings shows now, in order.
+/// The sections Settings shows now, in order (§3): the Claktory's, in
+/// four groups (who you are and this Claktory; models; what agents can
+/// reach; its machine and the screen), then this device's.
 List<SettingsSection> settingsSectionsOf(
   BuildContext context,
   Workspace workspace,
 ) {
   Widget Function(Color) lucide(String icon) =>
       (color) => ExtensionGlyph(icon: icon, name: '', color: color);
+  final backend = AppScope.of(context);
   final settings = workspace.settings;
   Model? model;
   for (final candidate in workspace.models) {
     if (candidate.id == settings.defaultModel) model = candidate;
   }
+  const versionWords = [
+    'update',
+    'version',
+    'upgrade',
+    'App Store',
+    'TestFlight',
+    'Google Play',
+  ];
+  const quitWords = ['sleep', 'lid', 'battery', 'background'];
   return [
     SettingsSection(
       title: 'Profile',
       glyph: lucide('user'),
       summary: settings.userName,
+      words: const ['name', 'photo', 'avatar'],
+      entries: const [
+        SettingEntry('Your name', id: 'name', words: ['first name']),
+        SettingEntry('Avatar', id: 'avatar', words: ['photo', 'picture']),
+      ],
       children: [
-        _YourName(workspace: workspace),
-        _Avatar(person: workspace.person),
+        SettingAnchor(
+          id: 'name',
+          child: _YourName(workspace: workspace),
+        ),
+        SettingAnchor(
+          id: 'avatar',
+          child: _Avatar(person: workspace.person),
+        ),
       ],
     ),
-    SettingsSection(
-      title: 'General',
-      glyph: (color) => CogGlyph(color: color),
-      summary: claktoryName(AppScope.of(context)),
-      children: [
-        ClaktoryIdentity(workspace: workspace),
-        // The version, and checking for a newer one now.
-        UpdateCheckRow(workspace: workspace),
-        // Keeping the Mac awake while agents work, on a Mac.
-        if (workspace.keepAwake.available) _KeepAwake(workspace: workspace),
-        // What quitting the Mac app does, and turning Claktory off now,
-        // where its Mac's background service runs it (friend bug #27).
-        if (workspace.backendService.canStop) _Engine(workspace: workspace),
-        // Moving this Claktory to another computer, from any device.
-        MoveSettingRow(source: BackendMove(AppScope.of(context))),
-      ],
-    ),
-    // What notifies the person, from a backend that has notifications.
-    if (settings.hasNotifications())
-      SettingsSection(
-        title: 'Notifications',
-        glyph: lucide('bell'),
-        summary: notificationsSummary(settings.notifications),
-        children: [NotificationSettingsView(settings: settings.notifications)],
-      ),
     // Only while the backend has the account on.
     if (workspace.hasAccount() &&
         workspace.account.state !=
@@ -241,7 +749,101 @@ List<SettingsSection> settingsSectionsOf(
         title: 'Account',
         glyph: lucide('globe'),
         summary: workspace.account.email,
+        words: const ['email', 'sign out', 'claktory.com'],
+        entries: const [
+          SettingEntry('Email'),
+          SettingEntry('Shared with claktory.com'),
+          SettingEntry('Recovery key'),
+          SettingEntry('Delete account'),
+        ],
         children: [AccountSettings(account: workspace.account)],
+      ),
+    SettingsSection(
+      title: 'General',
+      glyph: (color) => CogGlyph(color: color),
+      summary: claktoryNameInSettings(backend),
+      entries: [
+        const SettingEntry('Claktory name', id: 'identity'),
+        const SettingEntry('Color', id: 'identity'),
+        const SettingEntry('Version', id: 'version', words: versionWords),
+        const SettingEntry(
+          'Check for updates',
+          id: 'version',
+          words: versionWords,
+        ),
+        if (workspace.keepAwake.available)
+          const SettingEntry('Sleep', id: 'keep-awake', words: quitWords),
+        if (workspace.backendService.canStop)
+          SettingEntry(
+            quitLabel(AppScope.of(context)),
+            id: 'quit',
+            words: quitWords,
+          ),
+        const SettingEntry(
+          'Move to another computer',
+          id: 'move',
+          words: ['move', 'migrate', 'new computer'],
+        ),
+      ],
+      children: [
+        SettingAnchor(
+          id: 'identity',
+          child: ClaktoryIdentity(workspace: workspace),
+        ),
+        // The version, and checking for a newer one now.
+        SettingAnchor(
+          id: 'version',
+          child: UpdateCheckRow(workspace: workspace),
+        ),
+        // Keeping the Mac awake while agents work, on a Mac.
+        if (workspace.keepAwake.available)
+          SettingAnchor(
+            id: 'keep-awake',
+            child: _KeepAwake(workspace: workspace),
+          ),
+        // What quitting the Mac app does, and turning Claktory off now,
+        // where its Mac's background service runs it (friend bug #27).
+        if (workspace.backendService.canStop)
+          SettingAnchor(
+            id: 'quit',
+            child: _Engine(workspace: workspace),
+          ),
+        // Moving this Claktory to another computer, from any device.
+        SettingAnchor(
+          id: 'move',
+          child: MoveSettingRow(source: BackendMove(backend)),
+        ),
+      ],
+    ),
+    // What notifies the person, from a backend that has notifications.
+    if (settings.hasNotifications())
+      SettingsSection(
+        title: 'Notifications',
+        glyph: lucide('bell'),
+        summary: notificationsSummary(settings.notifications),
+        words: const ['alerts', 'sounds', 'push', 'quiet hours'],
+        entries: const [
+          SettingEntry('Notify me when'),
+          SettingEntry('Show in notifications'),
+          SettingEntry('Quiet hours'),
+          SettingEntry('Send a test notification'),
+        ],
+        children: [NotificationSettingsView(settings: settings.notifications)],
+      ),
+    // Only from a backend that has checklist reminders' timing.
+    if (settings.hasChecklist())
+      SettingsSection(
+        title: 'Checklist',
+        glyph: lucide('list-checks'),
+        words: const ['reminders', 'overdue'],
+        entries: const [
+          SettingEntry('Waiting for an agent'),
+          SettingEntry('Waiting for you'),
+          SettingEntry('Waiting for something outside'),
+          SettingEntry('Asking you again'),
+          SettingEntry('Overdue'),
+        ],
+        children: [ChecklistTimes(settings: settings.checklist)],
       ),
     SettingsSection(
       title: 'Providers',
@@ -252,52 +854,108 @@ List<SettingsSection> settingsSectionsOf(
           if (provider.accounts.isNotEmpty || provider.signedInWith.isNotEmpty)
             provider.name,
       ].join(', '),
+      words: const [
+        'sign in',
+        'API key',
+        'Claude',
+        'OpenAI',
+        'OpenRouter',
+        'subscription',
+      ],
+      entries: const [SettingEntry('Add a provider')],
+      items: [
+        for (final provider in workspace.providers)
+          if (provider.accounts.isNotEmpty ||
+              provider.signedInWith.isNotEmpty) ...[
+            provider.name,
+            for (final account in provider.accounts)
+              if (account.label.isNotEmpty) account.label,
+          ],
+      ],
       children: [ProviderSettings(workspace: workspace)],
     ),
-    SettingsSection(
-      title: 'Secrets',
-      group: 2,
-      glyph: lucide('key-round'),
-      children: const [SecretsSettings()],
-    ),
-    // The kinds of report pipes forward, where Claktory has them as data
-    // (Workspace.report_type_rules).
-    if (reportTypesAvailable(workspace))
-      SettingsSection(
-        title: 'Pipes',
-        group: 2,
-        glyph: (color) => PortalGlyph(color: color),
-        children: const [ReportTypesSettings()],
-      ),
     SettingsSection(
       title: 'Defaults',
       group: 1,
       glyph: lucide('brain'),
       summary: model == null ? '' : modelLabel(model),
+      words: const ['model', 'effort'],
+      entries: const [
+        SettingEntry('Model', words: ['default model']),
+        SettingEntry('Reasoning effort', words: ['effort', 'thinking']),
+        SettingEntry('Default fallback model', words: ['fallback']),
+        SettingEntry(
+          'Summarize conversations at',
+          words: ['compaction', 'compact', 'context'],
+        ),
+        SettingEntry('Idle conversations'),
+      ],
       children: [_Defaults(workspace: workspace)],
     ),
-    // Only from a backend that has checklist reminders' timing.
-    if (settings.hasChecklist())
-      SettingsSection(
-        title: 'Checklist',
-        group: 1,
-        glyph: lucide('list-checks'),
-        children: [ChecklistTimes(settings: settings.checklist)],
-      ),
     // Only where the Claktory knows voice messages.
     if (voiceKnown(workspace))
       SettingsSection(
         title: 'Voice',
         group: 1,
         glyph: lucide('mic'),
+        words: const ['dictation', 'microphone', 'transcription'],
+        entries: const [SettingEntry('Speech model')],
         children: [VoiceSettings(model: workspace.speechModel)],
       ),
+    SettingsSection(
+      title: 'Secrets',
+      group: 2,
+      glyph: lucide('key-round'),
+      words: const ['keys', 'passwords', 'tokens', 'vault'],
+      entries: const [
+        SettingEntry('Add a secret'),
+        SettingEntry('Recovery key', id: 'recovery-key'),
+      ],
+      items: [
+        for (final secret in workspace.vault.secrets)
+          if (secret.name.isNotEmpty) secret.name,
+      ],
+      children: const [SecretsSettings()],
+    ),
     SettingsSection(
       title: 'Devices',
       group: 2,
       glyph: lucide('monitor-smartphone'),
+      words: const [
+        'phone',
+        'iPad',
+        'connect',
+        'add a device',
+        'remove',
+        'pair',
+      ],
+      entries: const [
+        SettingEntry('Add a device', words: ['pair', 'connect']),
+        SettingEntry('Connect to another Claktory'),
+      ],
+      items: [
+        for (final device in workspace.remote.devices)
+          if (device.name.isNotEmpty) device.name,
+      ],
       children: [DevicesSettings(workspace: workspace)],
     ),
+    // The kinds of report pipes forward, where Claktory has them as data
+    // (Workspace.report_type_rules). Its id stays "pipes", as show_screen
+    // names it.
+    if (reportTypesAvailable(workspace))
+      SettingsSection(
+        title: 'Report types',
+        id: 'pipes',
+        group: 2,
+        glyph: (color) => PortalGlyph(color: color),
+        words: const ['pipes', 'reports'],
+        entries: const [SettingEntry('New report type')],
+        items: [
+          for (final type in workspace.reportSchemas)
+            if (type.name.isNotEmpty) type.name,
+        ],
+        children: const [ReportTypesSettings()],
+      ),
     // Browser control's log, only where the backend has browser control
     // (its preview).
     if (browserControlAvailable(workspace))
@@ -305,55 +963,215 @@ List<SettingsSection> settingsSectionsOf(
         title: 'Browser',
         group: 2,
         glyph: lucide('globe'),
+        words: const ['chrome', 'log'],
+        entries: const [SettingEntry('Clear log')],
         children: [BrowserLogSettings(workspace: workspace)],
+      ),
+    // Claktory's browser (#435), where this Claktory has one.
+    if (agentBrowserAvailable(workspace))
+      SettingsSection(
+        title: "Claktory's browser",
+        group: 2,
+        glyph: lucide('monitor'),
+        children: [AgentBrowserSettings(workspace: workspace)],
       ),
     SettingsSection(
       title: 'Resources',
       group: 3,
       glyph: lucide('gauge'),
+      words: const ['disk', 'memory', 'processor', 'CPU'],
+      entries: const [
+        SettingEntry('Memory'),
+        SettingEntry('Disk'),
+        SettingEntry('Processors', words: ['CPU']),
+        SettingEntry('Build caches'),
+      ],
       children: [_ResourceAlerts(workspace: workspace)],
     ),
     SettingsSection(
       title: 'Display',
       group: 3,
       glyph: lucide('monitor'),
+      entries: const [
+        SettingEntry('Panes agents can open', id: 'panes'),
+        SettingEntry('Highlights', id: 'highlights', words: ['glow']),
+      ],
       children: [
-        const ZoomSetting(),
-        _PaneCap(workspace: workspace),
-        _Highlights(workspace: workspace),
+        SettingAnchor(
+          id: 'panes',
+          child: _PaneCap(workspace: workspace),
+        ),
+        SettingAnchor(
+          id: 'highlights',
+          child: _Highlights(workspace: workspace),
+        ),
       ],
     ),
-    // The files this device keeps from a Claktory on another machine
-    // (#446): how much, and Clear.
-    if (keepsFiles(AppScope.of(context)))
-      SettingsSection(
-        title: 'Storage',
-        group: 3,
-        glyph: lucide('database'),
-        children: const [FileCacheSetting()],
-      ),
     // Advanced diagnostics, from a backend that records them.
     if (workspace.hasDiagnostics())
       SettingsSection(
         title: 'Advanced diagnostics',
-        group: 4,
+        id: 'diagnostics',
+        group: 3,
         glyph: lucide('network'),
+        words: const ['logs', 'debug'],
+        entries: const [SettingEntry('Record advanced diagnostics')],
         children: [DiagnosticsSettings(workspace: workspace)],
       ),
-    // Removing Claktory, from the Mac it runs on.
-    if (canRemoveThisMac(context))
-      SettingsSection(
-        title: 'This Mac',
-        group: 4,
-        glyph: lucide('laptop-minimal'),
-        children: const [RemoveThisMac()],
-      ),
+    _deviceSection(context, workspace),
   ];
 }
 
-/// Settings on a phone: a page listing the sections, each opening as a
-/// page of its own, with Back. A section an agent opens (show_screen)
-/// opens over the list.
+/// This device's own settings, in one section named after it (§3): what
+/// only this device keeps, never the Claktory.
+SettingsSection _deviceSection(BuildContext context, Workspace workspace) {
+  final scope = AppScope.scope(context);
+  final backend = scope.backend;
+  // The Mac that runs the Claktory: its version is General's, since the
+  // two update together.
+  final ownMac = backend.localBackend && backend.target == null;
+  final textSize = !zoomsHere && defaultTargetPlatform == TargetPlatform.iOS;
+  final files = keepsFiles(backend);
+  final remove = canRemoveThisMac(context);
+  final version = scope.appBuild.version;
+  const sizeWords = ['text size', 'font', 'bigger', 'smaller', 'scale'];
+  final icon = switch (thisDeviceKind) {
+    'iPhone' || 'phone' => 'smartphone',
+    'iPad' || 'tablet' => 'tablet',
+    _ => 'laptop-minimal',
+  };
+  return SettingsSection(
+    title: thisDeviceTitle,
+    id: 'device',
+    group: 4,
+    device: true,
+    glyph: (color) => ExtensionGlyph(icon: icon, name: '', color: color),
+    summary: ownMac ? '' : versionLabel(version),
+    entries: [
+      // This device's own sign-in, first (area 2, 8.5; Lucy 49738): on one
+      // whose Claktory runs elsewhere.
+      if (!backend.localBackend)
+        const SettingEntry(
+          'Claktory account',
+          id: 'device-account',
+          words: ['sign in', 'sign out', 'email', 'account'],
+        ),
+      if (!ownMac)
+        const SettingEntry(
+          'Version',
+          id: 'app-version',
+          words: [
+            'update',
+            'version',
+            'upgrade',
+            'App Store',
+            'TestFlight',
+            'Google Play',
+          ],
+        ),
+      const SettingEntry(
+        'Permissions',
+        id: 'permissions',
+        words: ['microphone', 'camera', 'notifications', 'allow', 'privacy'],
+      ),
+      if (zoomsHere) const SettingEntry('Zoom', id: 'zoom', words: sizeWords),
+      if (textSize)
+        const SettingEntry('Text size', id: 'text-size', words: sizeWords),
+      const SettingEntry(
+        'Recordings not sent',
+        id: 'recordings',
+        words: ['voice', 'recording'],
+      ),
+      if (files)
+        const SettingEntry(
+          'Saved files',
+          id: 'storage',
+          words: ['storage', 'cache', 'space', 'downloads', 'files'],
+        ),
+      if (remove)
+        SettingEntry(
+          'Remove Claktory from this $thisDeviceKind',
+          id: 'remove',
+          words: const ['uninstall', 'remove'],
+        ),
+    ],
+    children: [
+      if (!backend.localBackend)
+        const SettingAnchor(id: 'device-account', child: DeviceAccountRow()),
+      if (!ownMac)
+        SettingAnchor(id: 'app-version', child: _ThisAppVersion(version)),
+      // What the system lets Claktory do here (permissions spec §2.1).
+      const SettingAnchor(id: 'permissions', child: DevicePermissions()),
+      if (zoomsHere) const SettingAnchor(id: 'zoom', child: ZoomSetting()),
+      if (textSize) const SettingAnchor(id: 'text-size', child: _TextSize()),
+      const SettingAnchor(id: 'recordings', child: KeptRecordings()),
+      if (files) const SettingAnchor(id: 'storage', child: FileCacheSetting()),
+      if (remove) const SettingAnchor(id: 'remove', child: RemoveThisMac()),
+    ],
+  );
+}
+
+/// A version as Settings shows it (Trish): "v0.1.23"; a dev build's, and
+/// a date stamp from before numbered versions ("2026.11.18-1958"), as
+/// they're stamped.
+String versionLabel(String version) =>
+    RegExp(r'^\d{1,3}\.\d').hasMatch(version) ? 'v$version' : version;
+
+/// This app's own version, on a device whose Claktory runs elsewhere (a
+/// phone, an iPad, a Mac used as a remote): what its store updates.
+class _ThisAppVersion extends StatelessWidget {
+  const _ThisAppVersion(this.version);
+
+  final String version;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return SettingRow(
+      label: 'Version',
+      // With the store it came from, which updates it (ST1).
+      child: Wrap(
+        spacing: Space.m,
+        runSpacing: Space.s,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Text(
+            versionLabel(version),
+            style: TypeScale.of(context).body.copyWith(
+              color: palette.text,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+          const AppSourceButton(),
+        ],
+      ),
+    );
+  }
+}
+
+/// iOS has no Zoom: text follows Dynamic Type, as the HIG asks, from the
+/// iPhone's or iPad's own Settings (§3).
+class _TextSize extends StatelessWidget {
+  const _TextSize();
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return SettingRow(
+      label: 'Text size',
+      child: Text(
+        "Text size follows your $thisDeviceKind's Settings → Display & "
+        'Brightness → Text Size.',
+        style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
+      ),
+    );
+  }
+}
+
+/// Settings on a phone: a page listing the sections under the Claktory's
+/// name, then this device's row, with search at the top; each section
+/// opens as a page of its own, with Back. A section a link or an agent
+/// opens (show_screen) opens over the list.
 class _PhoneSettings extends StatefulWidget {
   const _PhoneSettings();
 
@@ -363,6 +1181,14 @@ class _PhoneSettings extends StatefulWidget {
 
 class _PhoneSettingsState extends State<_PhoneSettings> {
   ValueNotifier<String?>? _section;
+  final _query = TextEditingController();
+  final _searchFocus = FocusNode(debugLabel: 'Search Settings');
+
+  @override
+  void initState() {
+    super.initState();
+    _query.addListener(() => setState(() {}));
+  }
 
   @override
   void didChangeDependencies() {
@@ -377,6 +1203,8 @@ class _PhoneSettingsState extends State<_PhoneSettings> {
   @override
   void dispose() {
     _section?.removeListener(_wanted);
+    _query.dispose();
+    _searchFocus.dispose();
     super.dispose();
   }
 
@@ -384,25 +1212,32 @@ class _PhoneSettingsState extends State<_PhoneSettings> {
     if (_section?.value == null) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final section = _section;
-      final id = section?.value;
-      if (!mounted || section == null || id == null) return;
+      final place = section?.value;
+      if (!mounted || section == null || place == null) return;
       section.value = null;
+      final wanted = settingsPlaceOf(place);
       final workspace = AppScope.of(context).workspace.workspace;
       // Not in Settings now (Account while signed out, say): the list.
-      if (settingsSectionsOf(context, workspace).any((s) => s.id == id)) {
-        _open(id);
+      if (settingsSectionsOf(
+        context,
+        workspace,
+      ).any((s) => s.id == wanted.section)) {
+        _open(wanted.section, wanted.setting);
       }
     });
     // Asked for between frames: one to run it in.
     WidgetsBinding.instance.ensureVisualUpdate();
   }
 
-  void _open(String id) => PhoneRoutes.of(context)?.push<void>(
-    PhoneRoute(
-      id: 'settings:$id',
-      builder: (context) => SettingsView(section: id),
-    ),
-  );
+  void _open(String id, [String setting = '']) {
+    _settingsShown[AppScope.of(context)] = id;
+    PhoneRoutes.of(context)?.push<void>(
+      PhoneRoute(
+        id: 'settings:$id',
+        builder: (context) => SettingsView(section: id, setting: setting),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -410,7 +1245,15 @@ class _PhoneSettingsState extends State<_PhoneSettings> {
     final scope = AppScope.scope(context);
     void close() => scope.page.value = AppPage.agent;
     return CallbackShortcuts(
-      bindings: {const SingleActivator(LogicalKeyboardKey.escape): close},
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.escape): () {
+          if (_query.text.isNotEmpty) {
+            _query.clear();
+          } else {
+            close();
+          }
+        },
+      },
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -425,32 +1268,87 @@ class _PhoneSettingsState extends State<_PhoneSettings> {
             child: ListenableBuilder(
               listenable: scope.backend.workspace,
               builder: (context, _) {
-                // In their groups: who you are and this Claktory; models;
-                // what agents can reach; this computer and the screen.
-                final all = settingsSectionsOf(
+                final sections = settingsSectionsOf(
                   context,
                   scope.backend.workspace.workspace,
                 );
-                final sections = [
-                  for (var group = 0; group <= 4; group++)
-                    ...all.where((section) => section.group == group),
+                final query = _query.text.trim();
+                final found = searchSettings(
+                  [for (final section in sections) section.searchable],
+                  query,
+                  device: thisDeviceKind,
+                );
+                final claktory = [
+                  for (final section in sections)
+                    if (!section.device) section,
                 ];
+                // The search field at the top of the list's scroll, gone
+                // as it scrolls, as iOS Settings has it.
                 return ListView(
                   padding: const EdgeInsets.symmetric(vertical: Space.s),
                   children: [
-                    for (final (i, section) in sections.indexed) ...[
-                      if (i > 0 && sections[i - 1].group != section.group)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: Touch.gutter,
-                            vertical: Space.s,
-                          ),
-                          child: Container(height: 1, color: palette.hairline),
-                        ),
-                      _SectionRow(
-                        section: section,
-                        onTap: () => _open(section.id),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        Touch.gutter,
+                        0,
+                        Touch.gutter,
+                        Space.s,
                       ),
+                      child: SettingsSearchField(
+                        controller: _query,
+                        focusNode: _searchFocus,
+                        onSubmitted: () {
+                          final first = found
+                              .where((each) => !each.isAnswer)
+                              .firstOrNull;
+                          if (first != null) {
+                            _open(first.section, first.setting);
+                          }
+                        },
+                      ),
+                    ),
+                    if (query.isNotEmpty) ...[
+                      if (found.isEmpty) SettingsNoResults(query: query),
+                      for (final result in found)
+                        SettingsResultRow(
+                          result: result,
+                          onTap: () => _open(result.section, result.setting),
+                        ),
+                    ] else ...[
+                      const Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          Touch.gutter,
+                          Space.s,
+                          Touch.gutter,
+                          Space.xs,
+                        ),
+                        child: SettingsClaktoryHeading(),
+                      ),
+                      for (final (i, section) in claktory.indexed) ...[
+                        if (i > 0 && claktory[i - 1].group != section.group)
+                          Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: Touch.gutter,
+                              vertical: Space.s,
+                            ),
+                            child: Container(
+                              height: 1,
+                              color: palette.hairline,
+                            ),
+                          ),
+                        _SectionRow(
+                          section: section,
+                          onTap: () => _open(section.id),
+                        ),
+                      ],
+                      for (final section in sections)
+                        if (section.device) ...[
+                          const SizedBox(height: Space.l),
+                          _SectionRow(
+                            section: section,
+                            onTap: () => _open(section.id),
+                          ),
+                        ],
                     ],
                   ],
                 );
@@ -464,8 +1362,7 @@ class _PhoneSettingsState extends State<_PhoneSettings> {
 }
 
 /// A section's row in a phone's Settings: its glyph, its title, what it's
-/// set to, and a chevron to its page. At large text sizes what it's set to
-/// goes under the title.
+/// set to, and a chevron to its page.
 class _SectionRow extends StatelessWidget {
   const _SectionRow({required this.section, required this.onTap});
 
@@ -473,76 +1370,36 @@ class _SectionRow extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    final large = largeText(context);
-    // Never broken inside a word ("Notification / s" at the largest
-    // text on an iPhone SE, Zucchero's row 510): drawn smaller to fit.
-    final title = FittedHeading(
-      section.title,
-      style: PhoneType.body.copyWith(color: palette.text),
-    );
-    final summary = section.summary.isEmpty
-        ? null
-        : Text(
-            section.summary,
-            maxLines: large ? 2 : 1,
-            overflow: TextOverflow.ellipsis,
-            textAlign: large ? TextAlign.start : TextAlign.end,
-            style: (large ? PhoneType.secondary : PhoneType.body).copyWith(
-              color: palette.textMuted,
-            ),
-          );
-    return Semantics(
-      container: true,
-      button: true,
-      onTap: onTap,
-      child: Pressable(
-        onTap: onTap,
-        builder: (context, pressed) => Container(
-          constraints: const BoxConstraints(minHeight: Touch.row),
-          color: pressed ? palette.hover : const Color(0x00000000),
-          padding: const EdgeInsets.symmetric(
-            horizontal: Touch.gutter,
-            vertical: Space.s,
-          ),
-          child: Row(
-            children: [
-              SizedBox(
-                width: 36,
-                child: Align(
-                  alignment: AlignmentDirectional.centerStart,
-                  child: section.glyph(palette.textMuted),
-                ),
-              ),
-              if (large)
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [title, ?summary],
-                  ),
-                )
-              else ...[
-                title,
-                const SizedBox(width: Space.m),
-                Expanded(child: summary ?? const SizedBox.shrink()),
-              ],
-              const SizedBox(width: Space.s),
-              Chevron(color: palette.textFaint, down: false),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => SettingsSectionRow(
+    key: ValueKey('settings-row:${section.id}'),
+    title: section.title,
+    glyph: section.glyph,
+    summary: section.summary,
+    list: true,
+    onTap: onTap,
+  );
 }
 
 /// A section of Settings as a page of its own on a phone, with Back to the
-/// list.
-class _PhoneSettingsPage extends StatelessWidget {
-  const _PhoneSettingsPage({required this.id});
+/// list; its Claktory named first when more than one is saved (§4.2).
+class _PhoneSettingsPage extends StatefulWidget {
+  const _PhoneSettingsPage({required this.id, this.setting = ''});
 
   final String id;
+  final String setting;
+
+  @override
+  State<_PhoneSettingsPage> createState() => _PhoneSettingsPageState();
+}
+
+class _PhoneSettingsPageState extends State<_PhoneSettingsPage> {
+  final _anchors = GlobalKey<SettingAnchorsState>();
+
+  @override
+  void initState() {
+    super.initState();
+    SettingAnchors.revealWhenReady(_anchors, widget.setting);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -559,8 +1416,12 @@ class _PhoneSettingsPage extends StatelessWidget {
             context,
             scope.backend.workspace.workspace,
           )) {
-            if (candidate.id == id) section = candidate;
+            if (candidate.id == widget.id) section = candidate;
           }
+          final claktoryLine =
+              section != null &&
+              !section.device &&
+              _claktoriesSaved(context) > 1;
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -573,8 +1434,21 @@ class _PhoneSettingsPage extends StatelessWidget {
               ),
               Expanded(
                 child: SelectableArea(
-                  child: _PhoneSectionList(
-                    children: section?.children ?? const <Widget>[],
+                  child: SettingAnchors(
+                    key: _anchors,
+                    child: _PhoneSectionList(
+                      children: [
+                        if (claktoryLine)
+                          SettingsClaktoryLine(
+                            name: claktoryNameInSettings(scope.backend),
+                            color: claktoryColor(scope.backend),
+                            style: PhoneType.caption.copyWith(
+                              color: palette.textMuted,
+                            ),
+                          ),
+                        ...?section?.children,
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -586,7 +1460,7 @@ class _PhoneSettingsPage extends StatelessWidget {
   }
 }
 
-/// A phone's section page's list, which find searches (a phone's Search).
+/// A phone's section page's list.
 class _PhoneSectionList extends StatefulWidget {
   const _PhoneSectionList({required this.children});
 
@@ -606,71 +1480,28 @@ class _PhoneSectionListState extends State<_PhoneSectionList> {
   }
 
   @override
-  Widget build(BuildContext context) => RenderedFindScope(
-    placeholder: 'Search Settings',
-    child: ListView(
-      controller: _scroll,
-      scrollCacheExtent: RenderedFindScope.everything,
-      padding: const EdgeInsets.fromLTRB(
-        Touch.gutter,
-        Space.l,
-        Touch.gutter,
-        Space.xl,
-      ),
-      children: [
-        // Each selectable where the pointer is at any zoom.
-        for (final child in <Widget>[
-          for (final child in widget.children) ...[
-            child,
-            const SizedBox(height: Space.s),
-          ],
-        ])
-          ScrolledSelection(
-            key: child.key == null ? null : ValueKey(child.key),
-            child: child,
-          ),
-      ],
+  Widget build(BuildContext context) => ListView(
+    controller: _scroll,
+    padding: const EdgeInsets.fromLTRB(
+      Touch.gutter,
+      Space.l,
+      Touch.gutter,
+      Space.xl,
     ),
-  );
-}
-
-class _Section extends StatelessWidget {
-  const _Section({required this.title, required this.children});
-
-  final String title;
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    return SettingsSectionAnchor(
-      id: title.toLowerCase(),
-      child: Align(
-        alignment: Alignment.topCenter,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 640),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: Space.xl),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text(
-                  title,
-                  style: TypeScale.of(context).emphasis
-                      .copyWith(color: palette.text),
-                ),
-                const SizedBox(height: Space.m),
-                for (final child in children) ...[
-                  child,
-                  const SizedBox(height: Space.s),
-                ],
-              ],
-            ),
-          ),
+    children: [
+      // Each selectable where the pointer is at any zoom.
+      for (final child in <Widget>[
+        for (final child in widget.children) ...[
+          child,
+          const SizedBox(height: Space.s),
+        ],
+      ])
+        ScrolledSelection(
+          key: child.key == null ? null : ValueKey(child.key),
+          child: child,
         ),
-      ),
-    );
-  }
+    ],
+  );
 }
 
 /// Runs requests for a settings control and shows why one was refused.
@@ -765,33 +1596,52 @@ class _DefaultsState extends State<_Defaults> with SettingRequests {
         SettingRow(
           label: 'Model',
           child: workspace.models.isEmpty
-              ? Text(
-                  'No model available. Sign in to a provider above.',
+              // Where models come from, a link there (Lucy's Settings spec
+              // §5, ST4).
+              ? SettingsLink(
+                  before: 'No model available. ',
+                  label: 'Sign in to a provider',
+                  after: '.',
+                  section: 'providers',
                   style: TypeScale.of(context).body
                       .copyWith(color: palette.textMuted),
                 )
-              : SizedBox(
-                  width: controlWidth(context, 280),
-                  child: ModelSelect(
-                    workspace: workspace,
-                    value: model?.id ?? '',
-                    title: 'Default model',
-                    onChanged: (id) {
-                      if (id.isEmpty) return;
-                      final update = UpdateSettings(defaultModel: id);
-                      // Keep the effort only if the new model accepts it.
-                      for (final candidate in workspace.models) {
-                        if (candidate.id == id &&
-                            settings.defaultEffort.isNotEmpty &&
-                            !candidate.efforts.contains(
-                              settings.defaultEffort,
-                            )) {
-                          update.defaultEffort = '';
-                        }
-                      }
-                      _update(update);
-                    },
-                  ),
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox(
+                      width: controlWidth(context, 280),
+                      child: ModelSelect(
+                        workspace: workspace,
+                        value: model?.id ?? '',
+                        title: 'Default model',
+                        onChanged: (id) {
+                          if (id.isEmpty) return;
+                          final update = UpdateSettings(defaultModel: id);
+                          // Keep the effort only if the new model accepts it.
+                          for (final candidate in workspace.models) {
+                            if (candidate.id == id &&
+                                settings.defaultEffort.isNotEmpty &&
+                                !candidate.efforts.contains(
+                                  settings.defaultEffort,
+                                )) {
+                              update.defaultEffort = '';
+                            }
+                          }
+                          _update(update);
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: Space.xs),
+                    // What it changes, and what it doesn't (ST3).
+                    Text(
+                      'For new agents and chats. Agents you have keep their '
+                      'own model.',
+                      style: TypeScale.of(context).caption
+                          .copyWith(color: palette.textFaint),
+                    ),
+                  ],
                 ),
         ),
         if (model != null && model.efforts.isNotEmpty)
@@ -1487,12 +2337,27 @@ class _YourNameState extends State<_YourName> with SettingRequests {
                   ],
                 );
               }
-              return Row(
-                children: [
-                  SizedBox(width: 200, child: field),
-                  const SizedBox(width: Space.m),
-                  Expanded(child: note),
-                ],
+              // Wide: Save beside the field while it's changed; else the
+              // help under it, never beside (§4.1).
+              return ListenableBuilder(
+                listenable: _name,
+                builder: (context, _) =>
+                    _name.text.trim() == widget.workspace.settings.userName
+                    ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SizedBox(width: 200, child: field),
+                          const SizedBox(height: Space.xs),
+                          note,
+                        ],
+                      )
+                    : Row(
+                        children: [
+                          SizedBox(width: 200, child: field),
+                          const SizedBox(width: Space.m),
+                          note,
+                        ],
+                      ),
               );
             },
           ),
@@ -1576,9 +2441,8 @@ class _AvatarColors extends StatelessWidget {
   }
 }
 
-/// The narrowest a setting's control and the words beside it (the
-/// avatar and Shuffle colors and their caption, the name field and its
-/// note) share a line in; narrower, the words go under.
+/// The narrowest a name field and Save beside it share a line in;
+/// narrower, Save goes under.
 const _besideWidth = 360.0;
 
 /// The person's avatar (Workspace.person): its colors to pick from
@@ -1603,8 +2467,8 @@ class _AvatarState extends State<_Avatar> with SettingRequests {
       children: [
         SettingRow(
           label: 'Avatar',
-          child: LayoutBuilder(
-            builder: (context, constraints) {
+          child: Builder(
+            builder: (context) {
               final avatar = PersonAvatar(person: person, size: 40);
               final shuffle = Button(
                 label: 'Shuffle colors',
@@ -1625,45 +2489,23 @@ class _AvatarState extends State<_Avatar> with SettingRequests {
                             AppScope.of(context).shuffleAvatar(choice: choice),
                       ),
                     );
-              // A phone's finger-sized button leaves the words no room
-              // beside it, and so does a narrow pane (an iPad's, at its
-              // finger sizes, overflowed): they go under.
-              if (isPhoneLayout(context) ||
-                  constraints.maxWidth < _besideWidth * _textScale(context)) {
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Wrap(
-                      spacing: Space.m,
-                      runSpacing: Space.s,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      children: [avatar, shuffle],
-                    ),
-                    const SizedBox(height: Space.s),
-                    caption,
-                    if (colors != null) ...[
-                      const SizedBox(height: Space.m),
-                      colors,
-                    ],
-                  ],
-                );
-              }
-              final line = Row(
-                children: [
-                  avatar,
-                  const SizedBox(width: Space.m),
-                  shuffle,
-                  const SizedBox(width: Space.m),
-                  Expanded(child: caption),
-                ],
-              );
-              if (colors == null) return line;
+              // The words under the avatar and Shuffle colors, at every
+              // width (§4.1: help goes under its control).
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  line,
-                  const SizedBox(height: Space.m),
-                  colors,
+                  Wrap(
+                    spacing: Space.m,
+                    runSpacing: Space.s,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [avatar, shuffle],
+                  ),
+                  const SizedBox(height: Space.s),
+                  caption,
+                  if (colors != null) ...[
+                    const SizedBox(height: Space.m),
+                    colors,
+                  ],
                 ],
               );
             },
@@ -1739,6 +2581,16 @@ class _HighlightsState extends State<_Highlights> with SettingRequests {
   }
 }
 
+/// General's quit setting, named after its computer when shown on another
+/// device (§3, ST8): "When you quit Claktory on Mac Studio"; on that Mac,
+/// "When you quit Claktory".
+String quitLabel(Backend backend) {
+  final computer = claktoryNameInText(backend);
+  return backend.target == null || computer == 'this Mac'
+      ? 'When you quit Claktory'
+      : 'When you quit Claktory on $computer';
+}
+
 /// What happens to Claktory on its Mac when the Mac app quits, and the
 /// switch that turns it off now (friend bug #27): where its Mac's
 /// background service runs it (BackendService.can_stop). The choice from
@@ -1778,18 +2630,19 @@ class _EngineState extends State<_Engine> with SettingRequests {
     final backend = AppScope.of(context);
     final here =
         backend.target == null && defaultTargetPlatform == TargetPlatform.macOS;
+    final label = quitLabel(backend);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         SettingRow(
-          label: 'When I quit Claktory',
+          label: label,
           top: true,
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Select<QuitMode>(
-                title: 'When I quit Claktory',
+                title: label,
                 value: mode,
                 options: const [
                   SelectOption(
@@ -2186,12 +3039,15 @@ class SettingRow extends StatelessWidget {
         ),
       );
     }
+    // The label on the control's first line: a field's text, a button's
+    // word, a paragraph's first line, never the middle of the control and
+    // the help under it (§4.1). Beside a control with no text (a switch),
+    // both start at the top.
     return Padding(
       padding: const EdgeInsets.only(bottom: Space.m),
       child: Row(
-        crossAxisAlignment: top
-            ? CrossAxisAlignment.start
-            : CrossAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.baseline,
+        textBaseline: TextBaseline.alphabetic,
         children: [
           SizedBox(
             width: 160 * scale,
@@ -2203,7 +3059,8 @@ class SettingRow extends StatelessWidget {
           ),
           Expanded(
             child: Align(
-              alignment: top ? Alignment.topLeft : Alignment.centerLeft,
+              alignment: AlignmentDirectional.topStart,
+              heightFactor: 1,
               child: child,
             ),
           ),
@@ -2227,10 +3084,10 @@ double _textScale(BuildContext context) {
 double controlWidth(BuildContext context, double width) =>
     isPhoneLayout(context) ? double.infinity : width * _textScale(context);
 
-/// Controls in a line: a field, its unit, Save. A Mac keeps them on one
-/// line, with [Space.s] then [Space.m] before the last; a phone, and any
-/// device at a larger text size, wraps them onto more lines when they
-/// don't fit.
+/// Controls in a line: a field, its unit, Save, with [Space.s] between
+/// them and on a Mac [Space.m] before the last. They wrap onto more lines
+/// when they don't fit: on a phone, at a larger text size, or in a narrow
+/// pane.
 class _Line extends StatelessWidget {
   const _Line({required this.children});
 
@@ -2238,22 +3095,20 @@ class _Line extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (isPhoneLayout(context) || _textScale(context) > 1) {
-      return Wrap(
-        spacing: Space.s,
-        runSpacing: Space.s,
-        crossAxisAlignment: WrapCrossAlignment.center,
-        children: children,
-      );
-    }
-    return Row(
-      mainAxisSize: MainAxisSize.min,
+    final roomy = !isPhoneLayout(context) && _textScale(context) <= 1;
+    return Wrap(
+      spacing: Space.s,
+      runSpacing: Space.s,
+      crossAxisAlignment: WrapCrossAlignment.center,
       children: [
-        for (final (i, child) in children.indexed) ...[
-          if (i > 0)
-            SizedBox(width: i == children.length - 1 ? Space.m : Space.s),
-          child,
-        ],
+        for (final (i, child) in children.indexed)
+          if (roomy && i > 0 && i == children.length - 1)
+            Padding(
+              padding: const EdgeInsets.only(left: Space.m - Space.s),
+              child: child,
+            )
+          else
+            child,
       ],
     );
   }

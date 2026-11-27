@@ -7,11 +7,10 @@ import 'package:factory_app/controls.dart' show ExtensionGlyph, GlyphButton;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/recorder.dart';
 import 'package:factory_app/scope.dart';
-import 'package:factory_app/screens.dart' show SettingsScroller;
 import 'package:factory_app/voice.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart' show EditableText, Scrollable;
+import 'package:flutter/widgets.dart' show EditableText;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -491,17 +490,13 @@ void main() {
         withVoice(SpeechModelState.SPEECH_MODEL_STATE_READY, bytes: 740000000),
       );
       harness.page.value = AppPage.settings;
+      harness.backend.settingsSection.value = 'voice';
       await harness.show(tester);
       await settle(tester);
       await tester.scrollUntilVisible(
         find.text('Speech model'),
         300,
-        scrollable: find
-            .descendant(
-              of: find.byType(SettingsScroller),
-              matching: find.byType(Scrollable),
-            )
-            .first,
+        scrollable: settingsSectionScroll('voice'),
       );
       expect(
         find.textContaining('Parakeet v3 (25 languages), 740 MB, on'),
@@ -594,7 +589,12 @@ void main() {
     );
     expect(
       said[TargetPlatform.iOS],
-      'To record, allow microphone access in Settings → Claktory.',
+      matches(
+        RegExp(
+          r"^To record, allow microphone access in the (iPhone|iPad)'s "
+          r'Settings app\.$',
+        ),
+      ),
     );
     expect(
       said[TargetPlatform.android],

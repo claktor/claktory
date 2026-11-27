@@ -87,7 +87,7 @@ void main() {
     // The phone: its conversation, with no Settings file under ⋯.
     await tester.tap(find.text(_agent).first);
     await waitFor(tester, find.text('Send'));
-    await tester.tap(find.bySemanticsLabel('Extensions'));
+    await tester.tap(find.bySemanticsLabel(RegExp('^More options for ')));
     await tester.pump(const Duration(seconds: 1));
     expect(find.text('Settings'), findsNothing);
     await hold(tester, seconds: 2);

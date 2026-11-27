@@ -5,7 +5,6 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.admin.DevicePolicyManager
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.ImageFormat
 import android.graphics.Matrix
@@ -16,11 +15,10 @@ import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.media.ImageReader
-import android.net.Uri
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
-import android.provider.Settings
+import android.os.SystemClock
 import android.util.Size
 import android.view.Surface
 import android.view.TextureView
@@ -151,47 +149,53 @@ object Upright {
 
 /**
  * The camera's permission, for factory/device's cameraAccess,
- * requestCamera and openCameraSettings, answered as on the iPhone:
- * "granted"; "undetermined" while asking can still show the system's
- * question (never asked, or refused once: Android asks a second time);
- * "denied" once the person said no in this run of the app and Android
- * won't ask again, so only Settings changes it (Android doesn't tell
- * "never asked" from "won't ask again" before asking, and the app keeps
- * no record of asking: asked then, the system answers no at once, and
- * the app offers Settings); "restricted" when the phone's administrator
- * turned the camera off; "unavailable" with no camera.
+ * requestCamera and openCameraSettings, answered as on the iPhone: as
+ * [PermissionState] reads it, "restricted" when the phone's administrator
+ * turned the camera off, and "unavailable" with no camera.
  */
 class CameraAccess(private val activity: Activity) : HostLifecycle, AutoCloseable {
     private var asking: MethodChannel.Result? = null
-    private var refused = false
 
     fun access(): String = when {
         !activity.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY) -> "unavailable"
         granted(activity) -> "granted"
         (activity.getSystemService(Context.DEVICE_POLICY_SERVICE) as? DevicePolicyManager)?.getCameraDisabled(null) == true -> "restricted"
-        refused && !activity.shouldShowRequestPermissionRationale(Manifest.permission.CAMERA) -> "denied"
-        else -> "undetermined"
+        else -> PermissionState.of(
+            granted = false,
+            refusedForGood = Refusals.refusedForGood(Manifest.permission.CAMERA),
+            androidWouldExplain = activity.shouldShowRequestPermissionRationale(Manifest.permission.CAMERA),
+        )
     }
+
+    /** Refused once, and Android will still ask ([PermissionState.refusedOnce]). */
+    fun refusedOnce(): Boolean = access() == "undetermined" && PermissionState.refusedOnce(
+        granted = false,
+        androidWouldExplain = activity.shouldShowRequestPermissionRationale(Manifest.permission.CAMERA),
+    )
 
     fun request(result: MethodChannel.Result) {
         if (granted(activity)) return result.success(true)
         if (access() == "unavailable" || asking != null) return result.success(false)
         asking = result
+        Refusals.asking(
+            Manifest.permission.CAMERA,
+            explains = activity.shouldShowRequestPermissionRationale(Manifest.permission.CAMERA),
+            at = SystemClock.elapsedRealtime(),
+        )
         activity.requestPermissions(arrayOf(Manifest.permission.CAMERA), REQUEST)
     }
 
-    fun openSettings() {
-        runCatching {
-            activity.startActivity(
-                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", activity.packageName, null)),
-            )
-        }
-    }
+    fun openSettings() = AppSettings.open(activity)
 
     override fun onPermissionResult(requestCode: Int, permissions: Array<out String>, grants: IntArray): Boolean {
         if (requestCode != REQUEST) return false
         val allowed = grants.isNotEmpty() && grants.all { it == PackageManager.PERMISSION_GRANTED }
-        if (!allowed) refused = true
+        Refusals.answered(
+            Manifest.permission.CAMERA,
+            allowed,
+            explains = activity.shouldShowRequestPermissionRationale(Manifest.permission.CAMERA),
+            at = SystemClock.elapsedRealtime(),
+        )
         asking?.success(allowed)
         asking = null
         return true

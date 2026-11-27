@@ -2,7 +2,9 @@
 // from and when they were last read from the provider, with Refresh models.
 import 'package:factory_app/login.dart' show ProviderCard;
 import 'package:factory_app/provider_models.dart';
+import 'package:factory_app/tell_rivet.dart' show TellRivet;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/scope.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -14,6 +16,8 @@ Provider _provider({
   int fetchedMs = 0,
   bool fetching = false,
   String error = '',
+  bool signedOut = false,
+  List<Account> accounts = const [],
 }) => Provider(
   id: 'anthropic',
   name: 'Anthropic',
@@ -22,6 +26,8 @@ Provider _provider({
   modelsFetchedMs: Int64(fetchedMs),
   modelsFetching: fetching,
   modelsFetchError: error,
+  modelsFetchSignedOut: signedOut,
+  accounts: accounts,
 );
 
 Future<Harness> _show(WidgetTester tester, Provider provider) async {
@@ -89,6 +95,34 @@ void main() {
     );
   });
 
+  testWidgets("another failure keeps Tell Rivet beside it", (tester) async {
+    await _show(tester, _provider(error: 'Anthropic couldn’t be reached.'));
+    expect(find.byType(TellRivet), findsOneWidget);
+    expect(find.text('Sign in again…'), findsNothing);
+  });
+
+  testWidgets('a read the provider refused for its sign-in says Sign-in '
+      'expired with Sign in again…, adding as the account would, and no '
+      'Tell Rivet (settings.md ST2)', (tester) async {
+    final harness = await _show(
+      tester,
+      _provider(
+        error: 'Anthropic refused the sign-in.',
+        signedOut: true,
+        accounts: [Account(id: 'a1', methodId: 'api_key')],
+      ),
+    );
+    expect(find.text('Sign-in expired'), findsOneWidget);
+    expect(find.text('Anthropic refused the sign-in.'), findsNothing);
+    expect(find.byType(TellRivet), findsNothing);
+    await tester.tap(find.text('Sign in again…'));
+    await settle(tester);
+    final start = harness.lastStartLogin;
+    expect(start.providerId, 'anthropic');
+    expect(start.methodId, 'api_key');
+    expect(start.addAccount, isTrue);
+  });
+
   testWidgets("a refused refresh shows the backend's sentence", (tester) async {
     final harness = await _show(tester, _provider());
     harness.backend.refuse = 'Sign in to Anthropic first.';
@@ -109,6 +143,49 @@ void main() {
     );
     await settle(tester);
     expect(find.byType(ProviderModels), findsOneWidget);
+  });
+
+  testWidgets("a refresh's failure stays on its provider's card when "
+      "another sorts in above it (Abbacchio's row 1707)", (tester) async {
+    final openRouter = Provider(
+      id: 'openrouter',
+      name: 'OpenRouter',
+      signedInWith: 'an API key',
+      modelsFetchable: true,
+    );
+    final openAi = Provider(
+      id: 'openai',
+      name: 'OpenAI',
+      signedInWith: 'an API key',
+    );
+    final harness = Harness(Workspace(providers: [openRouter]));
+    await harness.show(tester, size: const Size(1200, 1200));
+    await settle(tester);
+    harness.page.value = AppPage.settings;
+    await settle(tester);
+    harness.backend.settingsSection.value = 'providers';
+    await settle(tester);
+    harness.backend.refuse = 'OpenRouter answered 401 Unauthorized';
+    await tester.tap(find.text('Refresh models'));
+    await settle(tester);
+    expect(find.text('OpenRouter answered 401 Unauthorized'), findsOneWidget);
+
+    await harness.apply(tester, Workspace(providers: [openAi, openRouter]));
+    await settle(tester);
+    Finder inCard(String id, Finder finder) => find.descendant(
+      of: find.byWidgetPredicate(
+        (widget) => widget is ProviderCard && widget.provider.id == id,
+      ),
+      matching: finder,
+    );
+    expect(
+      inCard('openrouter', find.text('OpenRouter answered 401 Unauthorized')),
+      findsOneWidget,
+    );
+    expect(
+      inCard('openai', find.text('OpenRouter answered 401 Unauthorized')),
+      findsNothing,
+    );
   });
 
   testWidgets('not signed in, the card has no models line', (tester) async {

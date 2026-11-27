@@ -209,6 +209,7 @@ void main() {
     final harness = await showWith(tester, snapshot);
     await tester.tap(find.text('Builder').last);
     await pumpFrames(tester);
+    await unfoldExtensions(tester);
     final select = find.descendant(
       of: find
           .ancestor(

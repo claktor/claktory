@@ -205,7 +205,12 @@ void main() {
     await pumpFrames(tester);
     final one = tester.getSize(find.text('Profile'));
     final row = find.text('Notifications');
-    await tester.scrollUntilVisible(row, 200);
+    await tester.scrollUntilVisible(
+      row,
+      200,
+      // The list's own, not its search field's.
+      scrollable: find.byType(Scrollable).first,
+    );
     await pumpFrames(tester);
     // One line, as tall as "Profile"'s.
     expect(tester.getSize(row).height, lessThanOrEqualTo(one.height + 1));

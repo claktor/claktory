@@ -387,7 +387,7 @@ void main() {
       final harness = _harness([_reply(1, 'Hello there')]);
       await harness.show(tester);
       await settle(tester);
-      await tester.tap(find.bySemanticsLabel('Find'));
+      await _findFromMenu(tester);
       await pumpFrames(tester);
       expect(find.byType(FindBar), findsOneWidget);
       var session = tester.widget<FindBar>(find.byType(FindBar)).session;
@@ -446,7 +446,7 @@ void main() {
       await harness.show(tester, size: const Size(1400, 900));
       await settle(tester);
       expect(find.byType(NeedsYouList), findsOneWidget);
-      await tester.tap(find.bySemanticsLabel('Find'));
+      await _findFromMenu(tester);
       await pumpFrames(tester);
       expect(find.byType(FindBar), findsOneWidget);
       expect(openTarget(tester), isA<ConversationFind>());
@@ -821,12 +821,8 @@ void main() {
     );
     await harness.show(tester, size: const Size(1180, 820));
     await settle(tester);
-    // The header's magnifying glass, as Zucchero opened it.
-    await tester.tap(
-      find.byWidgetPredicate(
-        (widget) => widget is GlyphButton && widget.label == 'Find',
-      ),
-    );
+    // Find… in the header's ⋯, where its magnifying glass went.
+    await _findFromMenu(tester);
     await pumpFrames(tester);
     await _type(tester, 'ship');
     expect(_count(tester), '1 of 3');
@@ -840,4 +836,16 @@ void main() {
     await tester.pump();
     expect(_count(tester), '3 of 3');
   });
+}
+
+/// Find… in the agent's ⋯ (agent-view.md §4), where the header's
+/// magnifying glass was.
+Future<void> _findFromMenu(WidgetTester tester) async {
+  await tester.tap(
+    find.byWidgetPredicate(
+      (widget) => widget is GlyphButton && widget.label.startsWith('More options for '),
+    ),
+  );
+  await pumpFrames(tester);
+  await tester.tap(find.text('Find…'));
 }

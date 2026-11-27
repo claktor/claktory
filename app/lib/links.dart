@@ -20,8 +20,12 @@ import 'controls.dart' show showModal;
 import 'devices.dart' show thisDeviceKind;
 import 'forms.dart' show FormFrame;
 import 'identity.dart';
+import 'ipad/pair_step.dart' show pairScreenKey;
+import 'mobile/device.dart' show deviceCapabilities;
 import 'mobile/drawer.dart' show PhoneDrawerHost;
 import 'mobile/local_network.dart' show connectNewClaktory;
+import 'mobile/permission.dart' show permissionHost;
+import 'rail.dart' show PhoneClaktories;
 import 'scope.dart';
 
 /// The schemes this app's builds open links with.
@@ -172,14 +176,59 @@ Future<bool?> _onAccount(BuildContext context, RemoteFactory target) async {
 /// the Claktory isn't on the person's account (Fugo's rules), when that's
 /// known: signed out or unreadable, it only cautions.
 Future<bool> confirmPairing(BuildContext context, RemoteFactory target) async {
-  final onAccount = await _onAccount(context, target);
+  final onAccount = await pairingOnAccount(context, target);
   if (!context.mounted) return false;
   var connect = false;
-  await showModal(context, (dialog, close) {
-    final palette = Palette.of(dialog);
+  // On an iPad a dialog at every width, which a change between Split View
+  // and full screen keeps (Sale's row 198).
+  final iPad =
+      defaultTargetPlatform == TargetPlatform.iOS &&
+      deviceCapabilities.idiom == Idiom.pad;
+  await showModal(dialog: iPad, context, (dialog, close) {
     return FormFrame(
-      title: 'Connect to this Claktory?',
-      fields: [
+      title: pairingCheckTitle,
+      fields: [PairingCheck(target: target, onAccount: onAccount)],
+      error: null,
+      submitLabel: 'Connect',
+      onSubmit: () {
+        connect = true;
+        close();
+      },
+      onCancel: close,
+    );
+  });
+  return connect;
+}
+
+/// Whether [target] is on the person's account, for [PairingCheck]: null
+/// when that can't be known.
+Future<bool?> pairingOnAccount(BuildContext context, RemoteFactory target) =>
+    _onAccount(context, target);
+
+/// What asks before a code connects: [confirmPairing]'s, and Add a
+/// Claktory's once a code is pasted or scanned (devices-signin.md §3).
+const pairingCheckTitle = 'Connect to this Claktory?';
+
+/// What's checked before a code connects: the code's fingerprint, the
+/// other side's name only quoted, and whether it's on the person's account
+/// as far as that's known ([onAccount], Fugo's rules).
+class PairingCheck extends StatelessWidget {
+  const PairingCheck({
+    super.key,
+    required this.target,
+    required this.onAccount,
+  });
+
+  final RemoteFactory target;
+  final bool? onAccount;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
         Text.rich(
           TextSpan(
             children: [
@@ -206,7 +255,10 @@ Future<bool> confirmPairing(BuildContext context, RemoteFactory target) async {
         Text(
           [
             if (target.name.isNotEmpty) 'It calls itself “${target.name}”.',
-            "You'll still need to allow this $thisDeviceKind on it.",
+            // One on this device's account lets it in with no Allow
+            // (Abbacchio's row 1667).
+            if (onAccount != true)
+              "You'll still need to allow this $thisDeviceKind on it.",
           ].join(' '),
           style: TextStyles.body.copyWith(color: palette.textMuted),
         ),
@@ -228,16 +280,8 @@ Future<bool> confirmPairing(BuildContext context, RemoteFactory target) async {
           ),
         ],
       ],
-      error: null,
-      submitLabel: 'Connect',
-      onSubmit: () {
-        connect = true;
-        close();
-      },
-      onCancel: close,
     );
-  });
-  return connect;
+  }
 }
 
 /// Takes what [links] brings, in the window: asks before adding a
@@ -304,16 +348,30 @@ class _LinkOpenerState extends State<LinkOpener> {
       );
       return;
     }
-    // Added already: it shows.
+    // Added already: it shows; on a phone, in place of its list of
+    // Claktories or Add a Claktory, where a link is taken too (Zucchero's
+    // row 685).
     if (connections.saved.contains(target)) {
       AppScope.switchFactory(context, target);
+      PhoneClaktories.showConversation();
       return;
     }
     unawaited(() async {
-      if (await confirmPairing(context, target) && mounted) {
+      if (!await confirmPairing(context, target)) return;
+      // Crossing between the narrow and wide layouts while Connect to this
+      // Claktory? waits builds a new window, and this opener with it: Connect
+      // goes on from the pairing screen, which crosses whole, or else the
+      // screen showing now (Sale's row 202).
+      final from = mounted
+          ? context
+          : pairScreenKey.currentContext ?? permissionHost;
+      if (from != null && from.mounted) {
         // The first on an iPhone or iPad: why Claktory asks for the local
         // network, before iOS does (mobile/local_network.dart).
-        await connectNewClaktory(context, target);
+        await connectNewClaktory(from, target);
+        if (connections.saved.contains(target)) {
+          PhoneClaktories.showConversation();
+        }
       }
     }());
   }

@@ -491,6 +491,7 @@ impl Runner {
             chrome::checked_url(url)?;
         }
         firewall_holds()?;
+        no_ipv6_out()?;
         let root = self.root(profile);
         private_folder(&root).map_err(|error| format!("couldn't make the browser's profile: {error}"))?;
         let lock = lock_profile(&root)?;
@@ -674,6 +675,38 @@ pub(crate) fn firewall_holds() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// A public address's IPv6 the browser's user mustn't reach (Cloudflare's
+/// resolver): a LAN with global IPv6 gives its devices public addresses
+/// too, which no private range matches (Fugo 49450).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const PUBLIC_V6: std::net::SocketAddr =
+    std::net::SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)), 443);
+
+/// The firewall gives the browser's user no IPv6 beyond DNS (Fugo 49450):
+/// a connection to a public IPv6 address is reset at once. A machine with
+/// no IPv6 route says so before the firewall sees it, which holds too;
+/// connected, or no answer (the reset is local, so it's immediate), means
+/// the rule isn't loaded.
+#[cfg(target_os = "linux")]
+pub(crate) fn no_ipv6_out() -> Result<String, String> {
+    use std::io::ErrorKind;
+    let missing = || "pages in Claktory's browser could reach devices on your network: run its setup again in Settings → Claktory's browser".to_owned();
+    match std::net::TcpStream::connect_timeout(&PUBLIC_V6, Duration::from_secs(2)) {
+        Ok(_) => Err(missing()),
+        Err(error) if error.kind() == ErrorKind::ConnectionRefused => Ok("reset at once".to_owned()),
+        Err(error) if error.kind() == ErrorKind::TimedOut => Err(missing()),
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ENETUNREACH | libc::EHOSTUNREACH | libc::EADDRNOTAVAIL | libc::EAFNOSUPPORT)) => {
+            Ok(format!("no IPv6 route here ({error})"))
+        }
+        Err(error) => Err(format!("couldn't check the browser's firewall over IPv6: {error}")),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn no_ipv6_out() -> Result<String, String> {
+    Err("Claktory's browser runs on Linux only".to_owned())
 }
 
 /// Where the firewall check connects: loopback and each of this machine's

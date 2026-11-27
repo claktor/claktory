@@ -4,7 +4,6 @@ import 'package:factory_app/selection.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
-import 'package:factory_app/settings_view.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -225,28 +224,8 @@ void main() {
       // Text joins the selection after the frame that builds it.
       await tester.pump();
       // Under Profile and Providers.
-      await tester.scrollUntilVisible(
-        find.text('Defaults'),
-        200,
-        scrollable: find
-            .descendant(
-              of: find.byType(SettingsView),
-              matching: find.byType(Scrollable),
-            )
-            .first,
-      );
-      await tester.pump();
-      final heading = find.text('Defaults');
-      await tester.scrollUntilVisible(
-        heading,
-        200,
-        scrollable: find
-            .descendant(
-              of: find.byType(SettingsView),
-              matching: find.byType(Scrollable),
-            )
-            .first,
-      );
+      final heading = inSettingsSection('defaults', find.text('Defaults'));
+      await revealInSettings(tester, heading, section: 'defaults');
       await tester.pump();
       await rightClick(
         tester,
@@ -257,16 +236,7 @@ void main() {
       await tester.pump();
       expect(copied, ['Defaults']);
 
-      await tester.scrollUntilVisible(
-        find.textContaining('A soft glow'),
-        200,
-        scrollable: find
-            .descendant(
-              of: find.byType(SettingsView),
-              matching: find.byType(Scrollable),
-            )
-            .first,
-      );
+      await revealInSettings(tester, find.textContaining('A soft glow'));
       await tester.pump();
       final glow = find.textContaining('A soft glow');
       await rightClick(
@@ -293,9 +263,11 @@ void main() {
       await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
       await tester.sendKeyUpEvent(LogicalKeyboardKey.meta);
       await tester.pump();
+      // The section shown, its title too, and none of the index beside it.
       expect(copied.last, contains('A soft glow'));
-      expect(copied.last, contains('Defaults'));
-      expect(copied.last, isNot(contains('Sign out')));
+      expect(copied.last, startsWith('Display'));
+      expect(copied.last, isNot(contains('Done')));
+      expect(copied.last, isNot(contains('Defaults')));
     },
     variant: mac,
   );

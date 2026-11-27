@@ -2,7 +2,6 @@ import 'package:factory_app/controls.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:factory_app/settings_view.dart';
-import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
@@ -24,16 +23,7 @@ Future<void> _openDisplay(WidgetTester tester, Harness harness) async {
   harness.page.value = AppPage.settings;
   await settle(tester);
   // Settings builds its sections as they scroll into view.
-  await tester.scrollUntilVisible(
-    find.text('Panes agents can open'),
-    200,
-    scrollable: find
-        .descendant(
-          of: find.byType(SettingsView),
-          matching: find.byType(Scrollable),
-        )
-        .first,
-  );
+  await revealInSettings(tester, find.text('Panes agents can open'));
   await settle(tester);
 }
 
@@ -79,16 +69,7 @@ void main() {
     await harness.show(tester);
     harness.page.value = AppPage.settings;
     await settle(tester);
-    await tester.scrollUntilVisible(
-      find.textContaining('A soft glow on what changes'),
-      200,
-      scrollable: find
-          .descendant(
-            of: find.byType(SettingsView),
-            matching: find.byType(Scrollable),
-          )
-          .first,
-    );
+    await revealInSettings(tester, find.textContaining('A soft glow on what changes'));
     await settle(tester);
     expect(find.text('Panes agents can open'), findsNothing);
   });

@@ -116,8 +116,8 @@ void main() {
     addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
     try {
       await _open(tester, size: const Size(375, 667));
-      // Needs you on an iPhone is one card a screen; its button saves it.
-      await tester.tap(find.text('Save recovery key…'));
+      // Needs you on an iPhone lists it first (#599): its row saves it.
+      await tester.tap(find.text('Save the recovery key for nixos'));
       await settle(tester);
       await tester.ensureVisible(find.text('Show recovery key'));
       await settle(tester);

@@ -530,6 +530,48 @@ void main() {
           expect(find.text(shareBrowserNote), findsNothing);
         });
 
+        testWidgets('a site that failed while its tab was up says why once '
+            'the person is back (row 655)', (tester) async {
+          final harness = await elsewhere(tester);
+          await tester.tap(find.text('Open'));
+          await settle(tester);
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.inactive,
+          );
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.hidden,
+          );
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.paused,
+          );
+          harness.backend.workspace.apply(
+            _workspace(
+              shares: [
+                _theirs()
+                  ..lastFailureMs = Int64(5000)
+                  ..lastFailure = 'The shared website stopped answering.',
+              ],
+              selected: 'p3',
+            ),
+          );
+          await settle(tester);
+          expect(find.textContaining('stopped answering'), findsNothing);
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.hidden,
+          );
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.inactive,
+          );
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.resumed,
+          );
+          await settle(tester);
+          expect(
+            find.text('The shared website stopped answering.'),
+            findsOneWidget,
+          );
+        });
+
         testWidgets('in a browser that keeps nothing up, it says it stops '
             'loading when you leave', (tester) async {
           how = 'browser';
@@ -652,6 +694,62 @@ void main() {
             findsOneWidget,
           );
           expect(inAppShareBrowser.shows(harness.backend, 's1'), isFalse);
+        });
+
+        // Zucchero row 655: a site that stopped answers with the Claktory's
+        // own page, which Safari counts as loaded; the Claktory says it
+        // failed on the share instead (last_failure).
+        testWidgets('a site that failed while its page was up says why once '
+            'the person is back', (tester) async {
+          final harness = await iPhone(tester);
+          await tester.tap(find.text('Open'));
+          await settle(tester);
+          harness.backend.workspace.apply(
+            _workspace(
+              shares: [
+                _theirs()
+                  ..lastFailureMs = Int64(5000)
+                  ..lastFailure =
+                      "Dashboard isn't answering on the other side.",
+              ],
+              selected: 'p3',
+            ),
+          );
+          await settle(tester);
+          // Still on the page: nothing said yet.
+          expect(find.textContaining("isn't answering"), findsNothing);
+          sink!.success({'visible': false});
+          await settle(tester);
+          expect(
+            find.text("Dashboard isn't answering on the other side."),
+            findsOneWidget,
+          );
+        });
+
+        testWidgets('a failure from before the page opened, or one cleared '
+            'while it was up, says nothing', (tester) async {
+          final harness = await iPhone(tester);
+          final failed = _theirs()
+            ..lastFailureMs = Int64(5000)
+            ..lastFailure = 'The shared website stopped answering.';
+          harness.backend.workspace.apply(
+            _workspace(shares: [failed], selected: 'p3'),
+          );
+          await settle(tester);
+          await tester.tap(find.text('Open'));
+          await settle(tester);
+          sink!.success({'visible': false});
+          await settle(tester);
+          expect(find.textContaining('stopped answering'), findsNothing);
+          // Open again: it loads, the failure clears.
+          await tester.tap(find.text('Open'));
+          await settle(tester);
+          harness.backend.workspace.apply(
+            _workspace(shares: [_theirs()], selected: 'p3'),
+          );
+          sink!.success({'visible': false});
+          await settle(tester);
+          expect(find.textContaining('stopped answering'), findsNothing);
         });
 
         testWidgets('offline by then, it names the Claktory, and the line goes '

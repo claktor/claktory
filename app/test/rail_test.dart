@@ -10,17 +10,20 @@ import 'package:factory_app/controls.dart';
 import 'package:factory_app/device_account.dart';
 import 'package:factory_app/drafts.dart';
 import 'package:factory_app/identity.dart';
+import 'package:factory_app/links.dart' show appLinks;
 import 'package:factory_app/main.dart';
 import 'package:factory_app/name_step.dart';
 import 'package:factory_app/mobile/drawer.dart';
 import 'package:factory_app/phone.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
+import 'package:factory_app/device_kind.dart' show thisDeviceKindForTests;
 import 'package:factory_app/devices.dart' show thisDeviceKind;
 import 'package:factory_app/rail.dart';
 import 'package:factory_app/waiting.dart' show NeedsYouMark;
 import 'package:factory_app/sidebar.dart';
 import 'package:factory_app/tunnel_client.dart';
 import 'package:factory_app/voice_keep.dart';
+import 'package:factory_app/mobile/local_network.dart' show localNetwork;
 import 'package:flutter/foundation.dart'
     show debugDefaultTargetPlatformOverride;
 import 'package:flutter/gestures.dart';
@@ -314,7 +317,10 @@ void main() {
     app.backends['']!.connected.value = false;
     app.backends['']!.refused.value = 'unknown device';
     await pumpFrames(tester);
-    expect(_labeled("this Claktory doesn't allow this device"), findsOneWidget);
+    expect(
+      _labeled('this Claktory no longer allows this device'),
+      findsOneWidget,
+    );
   });
 
   testWidgets("a right click renames and recolors one for every device, or "
@@ -517,8 +523,10 @@ void main() {
     });
   });
 
-  testWidgets("the chooser's Remove… is the rail's, question and all "
-      '(#529, MC8, MC13)', (tester) async {
+  testWidgets('Add a Claktory lists none of the Claktories already here: '
+      "they're the rail's, to switch to and remove (devices-signin.md §3)", (
+    tester,
+  ) async {
     final app = _App();
     app.connections
       ..use(parsePairingCode(_nixos))
@@ -526,30 +534,25 @@ void main() {
     await app.show(tester);
     await tester.tap(_labeled('Add a Claktory'));
     await pumpFrames(tester);
-    expect(find.text('Your Claktories'), findsOneWidget);
-    expect(find.text('Running here'), findsOneWidget);
-    final row = find.text('Running elsewhere');
-    expect(row, findsOneWidget);
-    expect(find.text('Forget'), findsNothing);
-    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
-    addTearDown(mouse.removePointer);
-    await mouse.addPointer(location: Offset.zero);
-    await mouse.moveTo(tester.getCenter(row));
-    await pumpFrames(tester);
-    await tester.tap(find.text('Remove…'));
-    await pumpFrames(tester);
-    expect(find.text('Remove nixos?'), findsOneWidget);
-    expect(app.connections.saved, hasLength(1), reason: 'only once asked');
-    await tester.tap(find.text('Remove'));
-    await pumpFrames(tester);
-    expect(app.connections.saved, isEmpty);
+    expect(find.text('Add a Claktory'), findsWidgets);
+    for (final gone in [
+      'Your Claktories',
+      'Running here',
+      'Running elsewhere',
+    ]) {
+      expect(find.text(gone), findsNothing, reason: gone);
+    }
+    expect(find.text('Remove…'), findsNothing);
+    expect(find.text('Use a code instead'), findsOneWidget);
   });
 
   testWidgets('a touch-only iPad at full width: touch and hold a tile opens '
-      "its form, and the chooser's Remove… shows without a pointer (Zucchero "
-      'row 642)', (tester) async {
+      'its form (Zucchero row 642)', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    // The app sets iOS's Local Network up as it starts on an iPad: not for
+    // the tests after this one.
+    addTearDown(() => localNetwork = null);
     final app = _App();
     app.connections
       ..use(parsePairingCode(_nixos))
@@ -560,13 +563,6 @@ void main() {
     expect(find.text('Shown on every device connected to it.'), findsOneWidget);
     await tester.tap(find.text('Cancel').last);
     await pumpFrames(tester);
-
-    await tester.tap(_labeled('Add a Claktory'));
-    await pumpFrames(tester);
-    expect(find.text('Remove…'), findsOneWidget);
-    await tester.tap(find.text('Remove…'));
-    await pumpFrames(tester);
-    expect(find.text('Remove nixos?'), findsOneWidget);
   });
 
   test('with none kept, the question says nothing of recordings', () {
@@ -586,18 +582,44 @@ void main() {
     expect(_labeled('This Mac'), findsNothing);
   });
 
+  testWidgets("this Mac's tile is a monitor on a desktop Mac, a laptop on a "
+      'laptop (area 2, MC13)', (tester) async {
+    String glyph() => tester
+        .widgetList<CustomPaint>(find.byType(CustomPaint))
+        .map((paint) => paint.painter.runtimeType.toString())
+        .firstWhere(
+          (name) => name == '_DesktopPainter' || name == '_LaptopPainter',
+        );
+    addTearDown(() => thisDeviceKindForTests = null);
+    thisDeviceKindForTests = DeviceKind.DEVICE_KIND_DESKTOP;
+    final app = _App(snapshots: {_nixos: _workspace('Nix')});
+    app.connections.use(parsePairingCode(_nixos));
+    await app.show(tester);
+    expect(glyph(), '_DesktopPainter');
+
+    // A laptop: its own tree, as on another Mac.
+    await tester.pumpWidget(const SizedBox());
+    thisDeviceKindForTests = DeviceKind.DEVICE_KIND_LAPTOP;
+    final laptop = _App(snapshots: {_nixos: _workspace('Nix')});
+    laptop.connections.use(parsePairingCode(_nixos));
+    await laptop.show(tester);
+    await pumpFrames(tester);
+    expect(glyph(), '_LaptopPainter');
+  });
+
   testWidgets('"+" adds one by its code', (tester) async {
     final app = _App();
     await app.show(tester);
     expect(_labeled('This Mac'), findsOneWidget);
     await tester.tap(_labeled('Add a Claktory'));
     await pumpFrames(tester);
-    expect(find.text('Your Claktories'), findsOneWidget);
+    await tester.tap(find.text('Use a code instead'));
+    await pumpFrames(tester);
     await tester.enterText(find.byType(EditableText).last, _mini);
     await tester.pump();
     await tester.tap(find.text('Connect'));
     await pumpFrames(tester);
-    // A pasted code connects only once confirmed (confirmPairing).
+    // A pasted code connects only once confirmed, in the same dialog.
     expect(find.text('Connect to this Claktory?'), findsOneWidget);
     expect(app.connections.current, isNull);
     await tester.tap(find.text('Connect').last);
@@ -704,6 +726,27 @@ void main() {
     });
   }
 
+  // Abbacchio's row 1675: Remove… on a Claktory from the account that wants
+  // this device signed in forgot it at once, with no question.
+  testWidgets('a Claktory from the account that wants a sign-in: Remove… '
+      'asks first, as the rail does', (tester) async {
+    final target = RemoteFactory.fromAccount(
+      const AccountClaktory(id: 'n', name: 'nixos', endpointId: _nixosKey),
+    );
+    final app = _App(snapshots: {target.code: _workspace('Nix')});
+    app.connections.use(target);
+    await app.show(tester);
+    final backend = app.backends[target.code]!;
+    backend.connected.value = false;
+    backend.signInRequired.value =
+        'This Claktory lets this device in only once it shows it is yours.';
+    await pumpFrames(tester);
+    await tester.tap(find.text('Remove…').last);
+    await pumpFrames(tester);
+    expect(find.text('Remove nixos?'), findsOneWidget);
+    expect(app.connections.saved, contains(target), reason: 'not yet');
+  });
+
   testWidgets("a tile counts what waits in a Claktory's chats and pipes too, "
       'as Needs you does', (tester) async {
     final app = _App(
@@ -793,10 +836,53 @@ void main() {
     expect(find.byType(ClaktoryList), findsOneWidget);
   });
 
+  testWidgets("on a phone, a link opened over the list of Claktories asks "
+      "there, and one already added shows (Zucchero's row 685)", (
+    tester,
+  ) async {
+    final app = _App(
+      localBackend: false,
+      snapshots: {_nixos: _workspace('Nix'), _mini: _workspace('Mini')},
+    );
+    app.connections
+      ..use(parsePairingCode(_mini))
+      ..use(parsePairingCode(_nixos));
+    addTearDown(() {
+      while (appLinks.take() != null) {}
+    });
+    await app.show(tester, size: const Size(390, 844));
+    final back = tester.widget(
+      find.byWidgetPredicate((w) => w.runtimeType.toString() == '_BackToList'),
+    );
+    (back as dynamic).back();
+    await pumpFrames(tester);
+    expect(find.byType(ClaktoryList), findsOneWidget);
+
+    // A new one's code, as the Camera opens it.
+    appLinks.receive('factory://?t=${'d' * 64}&name=studio&e=${'e' * 64}');
+    await pumpFrames(tester);
+    expect(find.text('Connect to this Claktory?'), findsOneWidget);
+    expect(
+      find.text('Connect to this Claktory?').hitTestable(),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Cancel'));
+    await pumpFrames(tester);
+    expect(find.byType(ClaktoryList), findsOneWidget);
+    expect(app.connections.saved, hasLength(2));
+
+    // One added already: it shows, its window in place of the list.
+    appLinks.receive(_mini);
+    await pumpFrames(tester);
+    expect(app.connections.current?.code, _mini);
+    expect(find.byType(ClaktoryList), findsNothing);
+  });
+
   testWidgets('on a phone, the Claktories are a rail in the drawer; the '
       'list of them stays in reach', (tester) async {
-    // Signed out, so Add a Claktory asks for a code: and none can be
-    // checked, which each one's label says.
+    // Signed out, so Add a Claktory asks for the email first, with the
+    // code a link away: and none can be checked, which each one's label
+    // says.
     final app = _App(
       account: DeviceAccount(),
       localBackend: false,
@@ -866,6 +952,11 @@ void main() {
     await tester.tap(_labeled('Add a Claktory'));
     await pumpFrames(tester);
     expect(find.byType(PairScreen), findsOneWidget);
+    // Signed out: the email sign-in first (area 2, 8.2), the code a link
+    // away; no camera here, so it's pasted.
+    expect(find.byKey(const ValueKey('device-email')), findsOneWidget);
+    await tester.tap(find.text('Use a code instead'));
+    await pumpFrames(tester);
     final third = 'factory://?t=${'e' * 64}&name=pi&e=${'f' * 64}';
     await tester.enterText(find.byType(EditableText), third);
     await tester.pump();
@@ -878,6 +969,124 @@ void main() {
     expect(find.byType(PairScreen), findsNothing);
     expect(app.connections.current?.code, third);
     expect(app.connections.saved, hasLength(3));
+  });
+
+  testWidgets('a Claktory found through the account and signed out of it: '
+      "Remove… asks the rail's question first, never removes at once "
+      "(Abbacchio's 1675)", (tester) async {
+    final app = _App();
+    final found = RemoteFactory.fromAccount(
+      const AccountClaktory(
+        id: 'n',
+        name: 'nixos',
+        endpointId: _nixosKey,
+        relays: ['https://relay.example.com'],
+      ),
+    );
+    app.connections.use(found);
+    await app.show(tester);
+    app.backends[found.code]!.signInRequired.value =
+        'This Claktory was signed out of your Claktory account, so it '
+        "can't let this device in.";
+    await pumpFrames(tester);
+    expect(find.text('nixos was signed out'), findsOneWidget);
+    await tester.tap(find.text('Remove…'));
+    await pumpFrames(tester);
+    expect(find.text('Remove nixos?'), findsOneWidget);
+    expect(app.connections.saved, contains(found));
+  });
+
+  testWidgets("the phone's list says what stops a Claktory waiting on a "
+      "sign-in, never Connecting… (Zucchero's row 720)", (tester) async {
+    final app = _App(
+      account: DeviceAccount(),
+      localBackend: false,
+      snapshots: {_nixos: _workspace('Nix'), _mini: _workspace('Mini')},
+    );
+    app.connections
+      ..use(parsePairingCode(_mini))
+      ..use(parsePairingCode(_nixos));
+    await app.show(tester, size: const Size(390, 844));
+    app.backends[_mini]!
+      ..connected.value = false
+      ..signInRequired.value = 'Confirm this device is yours: sign in.';
+    await pumpFrames(tester);
+    final back = tester.widget(
+      find.byWidgetPredicate((w) => w.runtimeType.toString() == '_BackToList'),
+    );
+    (back as dynamic).back();
+    await pumpFrames(tester);
+    expect(find.byType(ClaktoryList), findsOneWidget);
+    expect(find.text('Sign in to connect'), findsOneWidget);
+    expect(find.text('Connecting…'), findsNothing);
+    // Signed out itself, it says so instead.
+    app.backends[_mini]!.signInRequired.value =
+        'This Claktory was signed out of your Claktory account, so it '
+        "can't let this device in.";
+    await pumpFrames(tester);
+    expect(find.text('Signed out'), findsOneWidget);
+  });
+
+  testWidgets("a pushed page's back row shows its whole label where it "
+      'fits, else the chevron alone, grown with the text; never cut or '
+      'wrapped (Lucy 50050)', (tester) async {
+    final long = 'factory://?t=${'e' * 64}&name=atticstudio&e=${'f' * 64}';
+    for (final scale in const [1.0, 3.12]) {
+      await tester.pumpWidget(const SizedBox());
+      tester.platformDispatcher.textScaleFactorTestValue = scale;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      final app = _App(account: DeviceAccount(), localBackend: false);
+      app.connections.use(parsePairingCode(long));
+      await app.show(tester, size: const Size(320, 568));
+      PhoneClaktories.showAdding(code: true);
+      await pumpFrames(tester);
+      // Where it goes, said either way.
+      final back = _labeled('Back to atticstudio');
+      expect(back, findsOneWidget, reason: '$scale');
+      final label = find.text('atticstudio');
+      final chevron = tester
+          .widgetList<ExtensionGlyph>(find.byType(ExtensionGlyph))
+          .firstWhere((glyph) => glyph.icon == 'chevron-left');
+      if (scale == 1) {
+        expect(label, findsOneWidget);
+        expect(chevron.size, 16);
+      } else {
+        expect(label, findsNothing);
+        expect(chevron.size, greaterThan(16));
+      }
+      expect(tester.takeException(), isNull);
+    }
+  });
+
+  testWidgets("on a phone, a Claktory's Use a new code pushes Add a Claktory "
+      'at its code, with Back to that Claktory (area 2, 8.4; Lucy 49058)', (
+    tester,
+  ) async {
+    final app = _App(
+      account: DeviceAccount(),
+      localBackend: false,
+      snapshots: {_nixos: _workspace('Nix')},
+    );
+    app.connections.use(parsePairingCode(_nixos));
+    await app.show(tester, size: const Size(390, 844));
+    app.backends[_nixos]!
+      ..connected.value = false
+      ..refused.value = 'unknown device';
+    await pumpFrames(tester);
+    expect(find.text('nixos no longer allows this $thisDeviceKind'), findsOne);
+    await tester.tap(find.text('Use a new code'));
+    await pumpFrames(tester);
+    // The phone's own page, not the Mac's chooser in a sheet; at the code,
+    // though this phone is signed out (which starts others at the email).
+    expect(find.byType(PairScreen), findsOneWidget);
+    expect(find.byType(ClaktoryList), findsNothing);
+    expect(find.byKey(const ValueKey('device-email')), findsNothing);
+    expect(find.text('Sign in with your email instead'), findsOneWidget);
+    // Back, named for where it goes: the Claktory's page again.
+    await tester.tap(find.text('nixos').first);
+    await pumpFrames(tester);
+    expect(find.byType(PairScreen), findsNothing);
+    expect(find.text('nixos no longer allows this $thisDeviceKind'), findsOne);
   });
 
   for (final (scale, size) in [

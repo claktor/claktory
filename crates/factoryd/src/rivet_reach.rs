@@ -37,13 +37,15 @@ use Reach::{Config, Person, Tool, View};
 
 const SIGN_IN: &str = "the person's own accounts: only they sign in or out";
 const VAULT: &str = "only the person adds secret values or sets the vault's protections";
-const CARD: &str = "the person's answer to a card or a question";
+const CARD: &str = "the person's answer to a request or a question";
 const VOICE: &str = "the person's own words";
 const DRAWING: &str = "the person's own drawing";
 const CHAT: &str = "chats are the person's, and agents can't see them";
 const BROWSER: &str = "Claktory's browser (its live view, turns, errands' log, who's contained for errands, and its time zone and languages) is the person's own: never a tool's or a pipe's (Fugo, #435)";
 const CODES: &str = "a site's recovery codes are the person's alone: shown only on their device, never to an agent, a tool or a pipe (Fugo, #435 W8b)";
 const ALERTS: &str = "reading an alert is the person's: an agent never clears one from their Needs you (Bruno 44235)";
+const OFFER: &str = "what a device offers the person is theirs to dismiss, on that device";
+const PROTECTED: &str = "macOS's Files and Folders prompts and their Needs you items are the person's: an agent never brings a prompt up nor clears one (item 12, Bruno 45729)";
 const HISTORY: &str = "History is the person's own, on their devices: never an agent's or a pipe's (Fugo, #458)";
 
 /// Everything a request can change, and how Rivet does it. Only the tests
@@ -65,6 +67,8 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         Body::PinAgent(_) | Body::UnpinAgent(_) => vec![Config(&["pinned_agents"])],
         Body::GetHistoryOverview(_) | Body::GetHistoryEvents(_) | Body::WatchHistory(_) => vec![Person(HISTORY)],
         Body::ReadAlerts(_) => vec![Person(ALERTS)],
+        Body::DismissNotificationsOffer(_) => vec![Person(OFFER)],
+        Body::CheckProtectedPlaces(_) | Body::DismissProtectedPlace(_) => vec![Person(PROTECTED)],
         Body::WatchAgentBrowser(_)
         | Body::AgentBrowserFrameAck(_)
         | Body::AgentBrowserInput(_)
@@ -189,6 +193,9 @@ pub(crate) fn reach(body: &Body) -> Vec<Reach> {
         | Body::AccountSignIn(_)
         | Body::AccountVerify(_)
         | Body::AccountResend(_)
+        | Body::AccountSignInCancel(_)
+        | Body::PublishRecoveryKey(_)
+        | Body::UseRecoveryKey(_)
         | Body::AccountSignOut(_)
         | Body::SkipAccountSignIn(_)
         | Body::StartConnect(_)
@@ -461,6 +468,15 @@ mod tests {
 
     fn named(word: &str) -> bool {
         MANUAL.contains(&format!("`{word}`"))
+    }
+
+    /// The account's recovery key (#239) is the person's alone: Rivet can
+    /// neither use a new one nor publish one (Fugo 47922, 49014).
+    #[test]
+    fn the_accounts_recovery_key_is_the_persons_alone() {
+        for body in [Body::UseRecoveryKey(Default::default()), Body::PublishRecoveryKey(Default::default())] {
+            assert_eq!(reach(&body), vec![Person(SIGN_IN)], "{body:?}");
+        }
     }
 
     #[test]

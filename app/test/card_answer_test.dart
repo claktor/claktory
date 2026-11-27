@@ -5,6 +5,7 @@ import 'package:factory_app/app_grant_card.dart';
 import 'package:factory_app/ask_card.dart';
 import 'package:factory_app/backend.dart' show RequestFailure;
 import 'package:factory_app/card_answer.dart';
+import 'package:factory_app/decision.dart' show DecisionComment;
 import 'package:factory_app/keep_awake_card.dart';
 import 'package:factory_app/pairing_card.dart';
 import 'package:factory_app/pipe_start.dart';
@@ -191,8 +192,6 @@ void main() {
         h,
         AppGrantCard(grant, agentId: 'rivet', seq: 12),
       );
-      await tester.tap(find.text('Add a comment'));
-      await settle(tester);
       await tester.enterText(find.byType(EditableText).last, 'Only Ana');
       await tester.pump();
       await tester.pump();
@@ -333,7 +332,7 @@ void main() {
         shownIn: 'june',
       ),
     );
-    expect(answer.value?.yes, 'Give');
+    expect(answer.value?.yes, 'Give CF_DNS to June');
     expect(
       [for (final c in answer.value!.choices) (c.label, c.chosen)],
       [('CF_DNS', true), ('GITHUB', false)],
@@ -385,7 +384,7 @@ void main() {
       expect(now.filesKey, cardKey('june', 'q7'));
       // The card draws neither.
       expect(find.text('Approve'), findsNothing);
-      expect(find.text('Add a comment'), findsNothing);
+      expect(find.byType(DecisionComment), findsNothing);
       now.field!.text = 'Only the docs';
       await tester.pump();
       await tester.pump();
@@ -418,8 +417,6 @@ void main() {
           child: AskPersonCard(approval(), agentId: 'june', seq: 7),
         ),
       );
-      await settle(tester);
-      await tester.tap(find.text('Add a comment'));
       await settle(tester);
       await tester.enterText(find.byType(EditableText).last, 'Wait for Ana');
       await settle(tester);

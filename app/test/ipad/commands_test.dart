@@ -120,8 +120,8 @@ void main() {
     );
   });
 
-  test('once native takes the commands, it runs them by id and Flutter '
-      'stands down', () async {
+  test('once native takes the commands, it runs them by id (Flutter binds '
+      'their keys too: menu_keys_test)', () async {
     final sent = <MethodCall>[];
     messenger.setMockMethodCallHandler(channel, (call) async {
       sent.add(call);

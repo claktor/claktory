@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -15,7 +16,12 @@ import 'compatibility.dart';
 import 'connect_step.dart';
 import 'connection.dart' show Connection, Link;
 import 'engine.dart' show WhenAppQuitsStep, asksWhenAppQuits;
-import 'devices.dart' show FactoryChooser, thisDeviceKind;
+import 'claktory_problem.dart'
+    show
+        CantConnectPage,
+        ClaktorySignedOutPage,
+        NoLongerAllowedPage,
+        removeClaktory;
 import 'history/export_job.dart' show ReplayJobBanner;
 import 'map.dart';
 import 'monitors_overview.dart' show MonitorsOverview;
@@ -37,6 +43,7 @@ import 'identity.dart';
 import 'ipad/pair_step.dart';
 import 'ipad/focus.dart' show IPadFocus;
 import 'ipad/workbench.dart' show WindowKeyboard, Workbench, workbenchRailWidth;
+import 'protected_places.dart' show ProtectedPlacesAtLaunch;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'rail.dart' show railWidth;
 import 'scope.dart';
@@ -142,6 +149,11 @@ class _ShellState extends State<Shell> {
       // than the name step waiting there, "Connecting…", until a relaunch.
       AppScope.of(context).signInRequired,
       AppScope.of(context).otherAccount,
+      // Turned away or gone: a step that asked over the Claktory (its own
+      // sign-in) leaves with it, never left over its problem page
+      // (Abbacchio's 1676).
+      AppScope.of(context).connected,
+      AppScope.of(context).refused,
       signInPutOff(AppScope.of(context)),
       modelStepStarted(AppScope.of(context)),
       AppScope.scope(context).page,
@@ -276,8 +288,8 @@ class _ShellState extends State<Shell> {
                 final scope = AppScope.scope(context);
                 final store = scope.backend.workspace;
                 final workspace = store.workspace;
-                // The extension bar and panel belong to the agent view (a
-                // pipe, shown instead, has neither).
+                // The panel belongs to the agent view (a pipe, shown
+                // instead, has none).
                 final agent =
                     scope.page.value == AppPage.agent &&
                         selectedPipe(workspace) == null &&
@@ -286,8 +298,8 @@ class _ShellState extends State<Shell> {
                     : null;
                 final panel = openPanelOf(workspace, agent);
                 // The right side holds the open panel, if any. The
-                // conversation keeps at least this much room; a narrower
-                // window sets the panel aside.
+                // conversation keeps at least this much room; in a narrower
+                // window the panel comes over it instead.
                 const minContent = 440.0;
                 final settings = workspace.settings;
                 final sidebar =
@@ -299,12 +311,7 @@ class _ShellState extends State<Shell> {
                       sidebarMaxWidth,
                     );
                 final rail = widget.rail == null ? 0.0 : railWidth;
-                final room =
-                    constraints.maxWidth -
-                    rail -
-                    sidebar -
-                    extensionBarWidthOf(context) -
-                    minContent;
+                final room = constraints.maxWidth - rail - sidebar - minContent;
                 // The panel as wide as it was left, as far as there's room.
                 final panelRoom = math.min(panelMaxWidth, room);
                 final panelShown =
@@ -395,9 +402,6 @@ class _ShellState extends State<Shell> {
                       rail: railView,
                       sidebar: (width) => behind(Sidebar(width: width)),
                       sidebarWidth: sidebar,
-                      extensionBar: agent == null
-                          ? null
-                          : behind(ExtensionBar(agent: agent)),
                       content: content,
                       panel: panel != null && agent != null
                           ? behind(
@@ -436,21 +440,12 @@ class _ShellState extends State<Shell> {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         if (railView != null) part(railView),
-                        // The sidebar follows the Workspace on its own; the
-                        // bar is the same while its agent is.
+                        // The sidebar follows the Workspace on its own.
                         part(
                           behind(
                             Kept(
                               inputs: [sidebar],
                               builder: (_) => Sidebar(width: sidebar),
-                            ),
-                          ),
-                        ),
-                        part(
-                          behind(
-                            Kept(
-                              inputs: [agent, workspace.extensions],
-                              builder: (_) => ExtensionBar(agent: agent),
                             ),
                           ),
                         ),
@@ -535,6 +530,44 @@ class _ShellState extends State<Shell> {
                             },
                           ),
                         ),
+                      // No room beside the conversation: over it, from the
+                      // right edge (agent-view.md §3), as an iPad's
+                      // workbench shows it.
+                      if (panel != null && agent != null && !panelShown)
+                        Positioned(
+                          key: const ValueKey('panel-over'),
+                          right: 0,
+                          top: 0,
+                          bottom: keyboard,
+                          child: part(
+                            behind(
+                              DecoratedBox(
+                                decoration: const BoxDecoration(
+                                  boxShadow: floatingShadow,
+                                ),
+                                child: EscClosesPanel(
+                                  agent: agent,
+                                  child: ExtensionPanel(
+                                    key: ValueKey('${panel.id}/${agent.id}'),
+                                    extension: panel,
+                                    agent: agent,
+                                    // At most 85% of the window, as on an
+                                    // iPad.
+                                    width: math.min(
+                                      keptWidth(
+                                        settings.panelWidth,
+                                        panelWidth,
+                                        panelMinWidth,
+                                        panelMaxWidth,
+                                      ),
+                                      constraints.maxWidth * 0.85,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
                     ],
                   ),
                 );
@@ -585,7 +618,8 @@ class _WindowOverlayState extends State<_WindowOverlay> {
   late final _root = OverlayEntry(
     builder: (context) => SheetOverlay(
       overlay: Overlay.of(context),
-      child: Builder(builder: widget.builder),
+      // A Mac's places macOS protects, never checked: the sheet once.
+      child: ProtectedPlacesAtLaunch(child: Builder(builder: widget.builder)),
     ),
   );
 
@@ -629,8 +663,10 @@ class _Content extends StatelessWidget {
         // in to the person's account.
         if (backend.signInRequired.value != null && waiting != null) {
           return SignInRequiredView(
+            // Its Remove… asks first, with the rail's question, never at
+            // once (Abbacchio's row 1675).
             onCancel: waiting.fromAccount
-                ? () => scope.connections.forget(waiting)
+                ? () => unawaited(removeClaktory(context, waiting))
                 : null,
           );
         }
@@ -732,10 +768,10 @@ class _PageBackState extends State<_PageBack> {
 bool turnedAway(Backend backend) =>
     backend.refused.value != null && !backend.connected.value;
 
-/// What shows with no agent chosen: "Connecting…" (or "Can't connect",
-/// as the drawer says, with Reconnect), how to start when
-/// there are no agents, or "Select an agent", with signing in when no
-/// model can run.
+/// What shows with no agent chosen: "Connecting…" (or, as a problem page,
+/// "Can't connect to …", turned away or signed out: devices-signin.md §4),
+/// how to start when there are no agents, or "Select an agent", with
+/// signing in when no model can run.
 class NoAgentView extends StatelessWidget {
   const NoAgentView({super.key});
 
@@ -756,50 +792,23 @@ class NoAgentView extends StatelessWidget {
         // won't connect by trying, so it says so, as the drawer does, with
         // the way to another Claktory (Zucchero's row 220).
         if (turnedAway(backend)) {
-          final connection = Connection(backend);
-          final machine = connection.machine ?? 'This Claktory';
           // Signed out of the person's account (its sign-in lost to a
           // failing disk, say: friend bug #38), it lets this device in
           // again once it's signed in: a new code would pair it twice. As
           // factoryd's `remote::SIGNED_OUT` says it.
           const signedOut = 'was signed out of your Claktory account';
           if (backend.refused.value?.contains(signedOut) ?? false) {
-            return _EmptyState(
-              title: connection.line,
-              body:
-                  '$machine was signed out of your Claktory account, so it '
-                  "can't let this $thisDeviceKind in. Sign it in again in its "
-                  'Settings → Account, then try again.',
-              action: 'Try again',
-              onAction: backend.retry,
-            );
+            return ClaktorySignedOutPage(backend: backend);
           }
-          return _EmptyState(
-            title: connection.line,
-            // The app's own words, not the tunnel's (Trish).
-            body:
-                'To use it again, add this $thisDeviceKind in Settings → '
-                'Devices on ${connection.machine ?? 'this Claktory'}.',
-            action: 'Switch Claktory…',
-            onAction: () => showModal(
-              context,
-              (context, close) => FactoryChooser(close: close),
-            ),
-          );
+          return NoLongerAllowedPage(backend: backend);
         }
         // Until this Claktory's workspace is here, nothing is known about
         // it: an empty one isn't "no agents yet".
         if (!backend.connected.value || !backend.workspace.received) {
           // Once it says it can't connect, the pane says so too, not
           // "Connecting…" behind the drawer's "Can't connect" (row 480).
-          final connection = Connection(backend);
-          if (connection.link == Link.failing) {
-            return _EmptyState(
-              title: connection.line,
-              body: connection.stillTrying,
-              action: 'Reconnect',
-              onAction: backend.reconnectNow,
-            );
+          if (Connection(backend).link == Link.failing) {
+            return CantConnectPage(backend: backend);
           }
           return const _EmptyState(title: 'Connecting…');
         }

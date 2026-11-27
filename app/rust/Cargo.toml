@@ -75,6 +75,18 @@ socket2 = "0.6"
 [target.'cfg(target_os = "macos")'.dependencies]
 iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
 
+# The Windows app's check of whom it reached on this PC (src/api/windows.rs):
+# the TCP table with its processes, and a process's user. Already in the
+# tree through tokio.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }
+
 # iroh's DNS resolver, Claktory's copy of 0.1.1 (vendor/README.md): on iOS
 # it reads the system's DNS servers through libresolv rather than
 # SystemConfiguration's dynamic store, which isn't API there. Only this

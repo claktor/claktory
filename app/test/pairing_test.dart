@@ -134,18 +134,18 @@ void main() {
     await server.close(force: true);
   });
 
-  Future<Harness> waiting(WidgetTester tester) async {
+  // The code's name is what the waiting page says, as the strip and the
+  // confirm sheet do, never the backend's hostname (Zucchero's row 720).
+  final named = 'factory://?t=$_token&name=Matt%27s%20Mac%20mini&e=${'a' * 64}';
+
+  Future<Harness> waiting(WidgetTester tester, {String? code}) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     final harness = Harness(Workspace(), localBackend: false);
     await harness.show(tester, size: const Size(393, 852));
-    harness.connections.use(parsePairingCode(_code));
+    harness.connections.use(parsePairingCode(code ?? named));
     harness.backend.connected.value = false;
     harness.backend.pairing.value = PairingWait(
-      PairingPending(
-        deviceId: 'd9',
-        name: 'iPhone',
-        machine: "Matt's Mac mini",
-      ),
+      PairingPending(deviceId: 'd9', name: 'iPhone', machine: 'mac-mini-2'),
       '0427',
     );
     await pumpFrames(tester);
@@ -157,9 +157,11 @@ void main() {
     final harness = await waiting(tester);
     expect(find.text("Waiting for Matt's Mac mini"), findsOneWidget);
     expect(
+      // Since #546 the person types this number there (Trish).
       find.text(
-        "Allow this iPhone on Matt's Mac mini. Its screen shows the same "
-        'number:',
+        "Allow this iPhone on Matt's Mac mini, or on another device that "
+        "uses Matt's Mac mini, by typing the number this iPhone shows "
+        'there:',
       ),
       findsOneWidget,
     );
@@ -188,6 +190,16 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
+  testWidgets('a code without a name: the backend\'s hostname, not an '
+      'address', (tester) async {
+    await waiting(
+      tester,
+      code: 'factory://10.0.0.5:7420?t=$_token&fp=${'b' * 64}',
+    );
+    expect(find.text('Waiting for mac-mini-2'), findsOneWidget);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
   testWidgets('allowed, the phone shows its Claktory', (tester) async {
     final harness = await waiting(tester);
     harness.backend.pairing.value = null;
@@ -205,15 +217,20 @@ void main() {
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final harness = Harness(Workspace());
     await harness.show(tester);
-    harness.connections.use(parsePairingCode(_code));
+    harness.connections.use(
+      parsePairingCode('factory://?t=$_token&name=Studio&e=${'a' * 64}'),
+    );
     harness.backend.pairing.value = PairingWait(
-      PairingPending(deviceId: 'd9', name: 'Mac', machine: 'Studio'),
+      PairingPending(deviceId: 'd9', name: 'Mac', machine: 'studio-host'),
       '0427',
     );
     await pumpFrames(tester);
     expect(find.text('Waiting for Studio'), findsOneWidget);
     expect(
-      find.text('Allow this Mac on Studio. Its screen shows the same number:'),
+      find.text(
+        'Allow this Mac on Studio, or on another device that uses Studio, '
+        'by typing the number this Mac shows there:',
+      ),
       findsOneWidget,
     );
     expect(find.text('0427'), findsOneWidget);

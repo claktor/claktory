@@ -66,12 +66,10 @@ void main() {
       ),
       findsOneWidget,
     );
-    expect(
-      find.text(
-        "It calls itself “box”. You'll still need to allow this Mac on it.",
-      ),
-      findsOneWidget,
-    );
+    // On this device's account, it lets this Mac in with no Allow
+    // (Abbacchio's row 1667).
+    expect(find.text('It calls itself “box”.'), findsOneWidget);
+    expect(find.textContaining('still need to allow'), findsNothing);
     expect(find.textContaining("isn't on your Claktory account"), findsNothing);
     // Nothing yet.
     expect(harness.connections.current, isNull);
@@ -96,6 +94,8 @@ void main() {
       ),
       findsOneWidget,
     );
+    // Off the account, it still has to be allowed there.
+    expect(find.textContaining('still need to allow'), findsOneWidget);
     expect(harness.connections.current, isNull);
     await tester.tap(find.text('Cancel'));
     await settle(tester);

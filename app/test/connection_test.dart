@@ -128,7 +128,9 @@ void main() {
     await tester.tap(line);
     await settle(tester);
     expect(find.byType(ConnectionDialog), findsOneWidget);
-    expect(find.text('Switch Claktory…'), findsOneWidget);
+    // Claktories are switched in the rail, never here (devices-signin.md
+    // §3).
+    expect(find.text('Switch Claktory…'), findsNothing);
     await tester.tap(find.text('Reconnect'));
     await settle(tester);
     expect(find.byType(ConnectionDialog), findsNothing);

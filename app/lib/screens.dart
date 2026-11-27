@@ -6,28 +6,11 @@ import 'package:flutter/widgets.dart';
 import 'backend.dart';
 import 'controls.dart' show showModal;
 import 'forms.dart' show AgentSettingsForm;
-import 'identity.dart' show Motion;
 import 'links.dart' show LinkOpener;
 import 'pipes.dart' show showPipeSettings;
 import 'setup_link.dart' show SetupLinkOpener;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
-
-/// The Settings sections an agent can open by id (show_screen's
-/// "settings" screen), as their titles read in lower case.
-const settingsSections = {
-  'profile',
-  'general',
-  'account',
-  'providers',
-  'secrets',
-  'pipes',
-  'defaults',
-  'devices',
-  'resources',
-  'display',
-  'voice',
-};
 
 /// When the person last used this app: a click, a touch, a scroll, the
 /// pointer moving over it or a key. Only an app touched lately opens what
@@ -203,9 +186,9 @@ class _ScreenOpenerState extends State<ScreenOpener> {
         return true;
       case 'settings':
         AppScope.openPage(context, AppPage.settings);
-        backend.settingsSection.value = settingsSections.contains(id)
-            ? id
-            : null;
+        // Settings opens the section, or stays as it is for one it hasn't
+        // now (Account while signed out, say).
+        backend.settingsSection.value = id.isEmpty ? null : id;
         return true;
       case 'map':
         AppScope.openPage(context, AppPage.map);
@@ -288,136 +271,4 @@ class _OpenedConversations extends InheritedWidget {
   @override
   bool updateShouldNotify(_OpenedConversations oldWidget) =>
       pulse != oldWidget.pulse;
-}
-
-/// Settings' scroll view, which brings the section an agent opened
-/// ([Backend.settingsSection]) into view, its title at the top, in `base`.
-/// [builder] makes the scroll view with the controller it's given; each
-/// section in it is a [SettingsSectionAnchor].
-class SettingsScroller extends StatefulWidget {
-  const SettingsScroller({super.key, required this.builder});
-
-  final Widget Function(BuildContext context, ScrollController controller)
-  builder;
-
-  @override
-  State<SettingsScroller> createState() => _SettingsScrollerState();
-}
-
-class _SettingsScrollerState extends State<SettingsScroller> {
-  final _controller = ScrollController();
-  final _anchors = <String, BuildContext>{};
-  ValueNotifier<String?>? _section;
-
-  /// How many screens down it looks for a section not built yet (the
-  /// list builds only what's near the view).
-  static const _maxSteps = 20;
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final section = AppScope.of(context).settingsSection;
-    if (section == _section) return;
-    _section?.removeListener(_wanted);
-    _section = section..addListener(_wanted);
-    // Opened for it: once the first frame has laid the list out.
-    _wanted();
-  }
-
-  @override
-  void dispose() {
-    _section?.removeListener(_wanted);
-    _controller.dispose();
-    super.dispose();
-  }
-
-  void _wanted() {
-    if (_section?.value == null) return;
-    WidgetsBinding.instance.addPostFrameCallback((_) => _seek(0));
-  }
-
-  void _seek(int step) {
-    final section = _section;
-    final id = section?.value;
-    if (!mounted || section == null || id == null) return;
-    final anchor = _anchors[id];
-    if (anchor != null && anchor.mounted) {
-      section.value = null;
-      Scrollable.ensureVisible(
-        anchor,
-        alignment: 0,
-        duration: Motion.base,
-        curve: Curves.easeOut,
-      );
-      return;
-    }
-    // Not built yet: a screen further down, then look again.
-    if (_controller.hasClients && step < _maxSteps) {
-      final position = _controller.position;
-      if (position.pixels < position.maxScrollExtent) {
-        _controller.jumpTo(
-          (position.pixels + position.viewportDimension).clamp(
-            position.minScrollExtent,
-            position.maxScrollExtent,
-          ),
-        );
-        WidgetsBinding.instance.addPostFrameCallback((_) => _seek(step + 1));
-        return;
-      }
-    }
-    // Not in Settings now (Account while signed out, say).
-    section.value = null;
-  }
-
-  @override
-  Widget build(BuildContext context) => widget.builder(context, _controller);
-}
-
-/// Marks a section of Settings by its id ("devices"), so
-/// [SettingsScroller] can bring it into view.
-class SettingsSectionAnchor extends StatefulWidget {
-  const SettingsSectionAnchor({
-    super.key,
-    required this.id,
-    required this.child,
-  });
-
-  final String id;
-  final Widget child;
-
-  @override
-  State<SettingsSectionAnchor> createState() => _SettingsSectionAnchorState();
-}
-
-class _SettingsSectionAnchorState extends State<SettingsSectionAnchor> {
-  _SettingsScrollerState? _scroller;
-
-  @override
-  void initState() {
-    super.initState();
-    _scroller = context.findAncestorStateOfType<_SettingsScrollerState>();
-    _scroller?._anchors[widget.id] = context;
-  }
-
-  @override
-  void didUpdateWidget(SettingsSectionAnchor oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.id == widget.id) return;
-    _forget(oldWidget.id);
-    _scroller?._anchors[widget.id] = context;
-  }
-
-  @override
-  void dispose() {
-    _forget(widget.id);
-    super.dispose();
-  }
-
-  void _forget(String id) {
-    final anchors = _scroller?._anchors;
-    if (anchors != null && anchors[id] == context) anchors.remove(id);
-  }
-
-  @override
-  Widget build(BuildContext context) => widget.child;
 }

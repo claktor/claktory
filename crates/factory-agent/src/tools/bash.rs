@@ -1,6 +1,8 @@
+#[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+#[cfg(unix)]
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,18 +10,29 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
+#[cfg(unix)]
 use tokio::process::{Child, Command};
 use tokio::time::{Instant, Sleep, sleep};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 use crate::errors::{AgentError, AgentFailure, Error};
-use crate::secrets::{Redaction, Redactor, SecretUse, SecretVariable, Secrets, StreamRedactor};
+use crate::secrets::{Redaction, Redactor, SAVE_MOST, SaveAs, SecretUse, SecretVariable, Secrets, StreamRedactor};
 use crate::text::{utf16_head, utf16_len, utf16_tail};
 use crate::tools::asking::Guard;
 use crate::tools::task_logs;
 use crate::tools::{MAX_OUTPUT, Update, checks};
 use crate::types::ToolResult;
+#[cfg(windows)]
+use crate::windows::{Child, shell::Shell};
+
+// The two signals a stop sends; on Windows both end the command's job.
+#[cfg(unix)]
+use libc::{SIGKILL, SIGTERM};
+#[cfg(windows)]
+const SIGTERM: i32 = 15;
+#[cfg(windows)]
+const SIGKILL: i32 = 9;
 
 /// Output a command may write through pipes (with no background folder to
 /// write it to) before it's stopped.
@@ -161,7 +174,7 @@ impl Task {
             tracing::warn!(task = %self.id, %error, "could not cut a task's log");
         }
         let status = match self.recorded_exit() {
-            Some(code) if code > 128 => format!("signal {}", signal_name(code - 128)),
+            Some(code) if code > 128 => ended_text(&signal_name(code - 128)),
             Some(code) => format!("exit {code}"),
             None => otherwise,
         };
@@ -233,11 +246,13 @@ pub fn took(seconds: f64) -> String {
 }
 
 /// Runs the task's script ($1) and records its exit code in $2.
+#[cfg(unix)]
 const TASK_WRAPPER: &str = r#"bash --noprofile --norc -e -o pipefail -c "$1"; echo $? > "$2""#;
 
 /// As TASK_WRAPPER, for a command with secrets: its output goes to the log
 /// through the filter ($3 and its arguments), which hides their values; the
 /// values the filter gets aren't the command's.
+#[cfg(unix)]
 const FILTERED_TASK_WRAPPER: &str = concat!(
     r#"( unset "#,
     "CLAKTORY_REDACT",
@@ -255,7 +270,11 @@ pub fn boot_time_ms() -> Option<u64> {
             unsafe { libc::sysctlbyname(c"kern.boottime".as_ptr(), (&raw mut boot).cast(), &raw mut size, std::ptr::null_mut(), 0) };
         (result == 0 && boot.tv_sec > 0).then(|| boot.tv_sec as u64 * 1000 + boot.tv_usec as u64 / 1000)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        crate::windows::system::boot_time_ms()
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let stat = std::fs::read_to_string("/proc/stat").ok()?;
         let seconds: u64 = stat.lines().find_map(|line| line.strip_prefix("btime "))?.trim().parse().ok()?;
@@ -271,9 +290,16 @@ pub fn started_before_boot(started: u64) -> bool {
 
 /// Whether any process of the group is still there.
 pub fn group_alive(pid: u32) -> bool {
-    // SAFETY: signal 0 only checks that the process group exists.
-    let result = unsafe { libc::kill(-(pid as i32), 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    #[cfg(windows)]
+    {
+        crate::windows::job::alive(pid)
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 only checks that the process group exists.
+        let result = unsafe { libc::kill(-(pid as i32), 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
 }
 
 /// Cuts the middle of a running task's log once it's past its cap
@@ -398,6 +424,7 @@ async fn inject<'a>(args: &BashArgs, secrets: Option<&'a Secrets>) -> Result<Inj
 
 const WRAPPED_INVOCATIONS: [&str; 8] = ["bash", "sh", "bash -c", "bash -lc", "sh -c", "sh -lc", "/bin/bash -c", "/bin/sh -c"];
 
+#[cfg(unix)]
 const SIGNALS: &[(i32, &str)] = &[
     (libc::SIGHUP, "SIGHUP"),
     (libc::SIGINT, "SIGINT"),
@@ -421,7 +448,35 @@ const SIGNALS: &[(i32, &str)] = &[
 ];
 
 fn signal_name(signal: i32) -> String {
-    SIGNALS.iter().find(|entry| entry.0 == signal).map_or_else(|| format!("SIG{signal}"), |entry| entry.1.to_owned())
+    #[cfg(unix)]
+    {
+        SIGNALS.iter().find(|entry| entry.0 == signal).map_or_else(|| format!("SIG{signal}"), |entry| entry.1.to_owned())
+    }
+    // Git Bash reports a signal from its own `kill` as 128+n too.
+    #[cfg(windows)]
+    {
+        format!("SIG{signal}")
+    }
+}
+
+/// How a process that ended other than by exiting ended: its signal's name
+/// on a Mac or Linux; on Windows, what ended it ("stopped", "access
+/// violation").
+fn exit_signal(status: &std::process::ExitStatus) -> Option<String> {
+    #[cfg(unix)]
+    {
+        status.signal().map(signal_name)
+    }
+    #[cfg(windows)]
+    {
+        crate::windows::system::ended_by(status).map(str::to_owned)
+    }
+}
+
+/// "signal SIGTERM"; on Windows, where nothing ends by a signal but Git
+/// Bash's own, what ended it ("stopped").
+fn ended_text(signal: &str) -> String {
+    if signal.starts_with("SIG") { format!("signal {signal}") } else { signal.to_owned() }
 }
 
 /// Node's `StringDecoder("utf8")`: incomplete trailing sequences wait for the next chunk.
@@ -478,6 +533,10 @@ struct BashArgs {
     /// Names of secrets to set in the command's environment.
     #[serde(default)]
     secrets: Option<Vec<String>>,
+    /// Saves the command's whole output as a new secret instead of
+    /// showing it.
+    #[serde(default)]
+    save_as: Option<SaveAs>,
 }
 
 struct Output<'a> {
@@ -531,20 +590,40 @@ fn foreground_timeout(timeout: Option<f64>) -> f64 {
     timeout.unwrap_or(DEFAULT_TIMEOUT_SECS).min(MAX_TIMEOUT_SECS)
 }
 
+/// "process group 4242" on a Mac or Linux; on Windows, where the task is a
+/// job named by its shell's pid, "process 4242".
+fn group_text(pid: u32) -> String {
+    if cfg!(windows) { format!("process {pid}") } else { format!("process group {pid}") }
+}
+
+/// The command an agent stops a task with itself: the whole process group,
+/// or on Windows the shell's process tree (Git Bash's own `kill` knows only
+/// its own pids).
+fn stop_hint(pid: u32) -> String {
+    if cfg!(windows) { format!("taskkill //F //T //PID {pid}") } else { format!("kill -- -{pid}") }
+}
+
 /// Stops a background task: its process group gets SIGTERM, and SIGKILL
 /// half a second later if it's still there.
 pub fn stop_group(pid: u32) {
-    kill_group(pid, libc::SIGTERM);
+    kill_group(pid, SIGTERM);
     tokio::spawn(async move {
         sleep(Duration::from_millis(500)).await;
         if group_alive(pid) {
-            kill_group(pid, libc::SIGKILL);
+            kill_group(pid, SIGKILL);
         }
     });
 }
 
 fn kill_group(pid: u32, signal: i32) {
+    // Windows has no gentler stop for a whole job: either ends it.
+    #[cfg(windows)]
+    {
+        let _ = signal;
+        crate::windows::job::stop(pid);
+    }
     // SAFETY: a plain syscall on the process group this tool created; ESRCH after exit is expected.
+    #[cfg(unix)]
     unsafe {
         libc::kill(-(pid as i32), signal);
     }
@@ -555,7 +634,7 @@ fn stop(output: &mut Output, pid: u32, reason: &'static str, kill_timer: &mut Pi
         return;
     }
     output.stopped = Some(reason);
-    kill_group(pid, libc::SIGTERM);
+    kill_group(pid, SIGTERM);
     kill_timer.as_mut().reset(Instant::now() + Duration::from_millis(500));
     *kill_armed = true;
 }
@@ -589,11 +668,20 @@ pub async fn run(
     {
         return Err(AgentError::new(failure).into());
     }
+    // Asking PowerShell for an administrator's rights (best effort; the
+    // programs that do only that are stopped as they run, by the guard).
+    #[cfg(windows)]
+    if let Some(program) = crate::windows::guard::asking_in_text(&args.command) {
+        return Err(Error::Other(crate::tools::asking::told(program)));
+    }
     let mut roots: Vec<PathBuf> = folders.iter().filter_map(|folder| checks::repository_root(folder)).collect();
     roots.sort();
     roots.dedup();
     if let Some(failure) = checks::copies_repository(&args.command, cwd, &roots) {
         return Err(AgentError::new(failure).into());
+    }
+    if args.save_as.is_some() {
+        return run_saving(cwd, args, cancel, background, secrets).await;
     }
     if args.run_in_background == Some(true) && background.is_none() {
         return Err(Error::Other("Background commands aren't available here.".into()));
@@ -603,7 +691,8 @@ pub async fn run(
         if args.run_in_background == Some(true) {
             return start_background(cwd, args, background, &injected).await;
         }
-        return run_logged(cwd, args, cancel, detach, update, background, &injected).await;
+        // macOS refusing a protected folder says so (permissions.md P2).
+        return run_logged(cwd, args, cancel, detach, update, background, &injected).await.map(|result| super::protected::noted(result, cwd));
     }
     let began = std::time::Instant::now();
     let started = crate::clock::now_ms();
@@ -618,10 +707,197 @@ pub async fn run(
     let said = guard.said();
     let stopped = if said.is_empty() { String::new() } else { format!("\n{said}") };
     let text = format!("{truncated}{}{stopped}\n[{}, {}]", ended.tail, ended.state, took(began.elapsed().as_secs_f64()));
-    Ok(ToolResult::text(
+    let result = ToolResult::text(
         text,
         json!({"exitCode": ended.exit_code, "exitSignal": ended.exit_signal, "stopped": ended.stopped, "characters": ended.characters, "outputBytes": ended.output_bytes}),
+    );
+    Ok(super::protected::noted(result, cwd))
+}
+
+/// Runs a command whose whole output (stdout) is saved as a new secret
+/// (`save_as`, Fugo's save-as-secret.md): for a key made with a secret the
+/// agent holds, so the key never passes through the model, the transcript
+/// or a log. Everything that can refuse the save is checked before the
+/// command runs, so a key made at a service isn't lost to a refusal after;
+/// the rest (the value is another secret's, the output's empty or too big)
+/// only after. It runs in the foreground only, to its end or its timeout,
+/// never moving to the background: a log would hold the output. stdout is
+/// kept apart and never shown; stderr comes back once the command ended,
+/// with the new value hidden too.
+async fn run_saving(
+    cwd: &Path,
+    args: BashArgs,
+    cancel: &CancellationToken,
+    background: Option<&Background>,
+    secrets: Option<&Secrets>,
+) -> Result<ToolResult, Error> {
+    let Some(save_as) = args.save_as.clone() else { return Err(Error::Other("Nothing to save.".into())) };
+    if args.run_in_background == Some(true) {
+        return Err(Error::Other(
+            "save_as keeps a command's output out of every log, so it runs in the foreground only: leave out run_in_background. The command didn't run.".into(),
+        ));
+    }
+    let Some((found, save)) = secrets.and_then(|found| Some((found, found.save.as_ref()?))) else {
+        return Err(Error::Other("Saving a command's output as a secret isn't available here. The command didn't run.".into()));
+    };
+    let injected = inject(&args, secrets).await?;
+    (save.check)(found.agent.clone(), save_as.clone(), injected.names.clone()).await.map_err(Error::Other)?;
+    let began = std::time::Instant::now();
+    let started = crate::clock::now_ms();
+    let files = SecretFiles(Some(std::env::temp_dir().join(format!("claktory-secrets-{}", uuid::Uuid::new_v4()))));
+    let own = injected.environment(files.0.as_deref().unwrap_or(cwd))?;
+    let environment = match background {
+        Some(background) => background.with(own),
+        None => own,
+    };
+    let (mut child, pid) = spawn(cwd, &args.command, &environment)?;
+    let guard = Guard::watch(pid, &found.agent, None);
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    // One byte past the most a secret holds says it's too much; past
+    // OUTPUT_BYTES in all, the command is stopped.
+    let mut kept = Zeroizing::new(Vec::with_capacity(SAVE_MOST + 1));
+    let mut printed = 0usize;
+    let mut said = Vec::new();
+    let (mut out_buf, mut err_buf) = (Zeroizing::new(vec![0u8; 65_536]), vec![0u8; 65_536]);
+    let timer = sleep(Duration::from_secs_f64(foreground_timeout(args.timeout)));
+    tokio::pin!(timer);
+    let kill_timer = sleep(Duration::from_secs(0));
+    tokio::pin!(kill_timer);
+    let mut kill_armed = false;
+    let mut stopped: Option<&'static str> = None;
+    let halt = |reason: &'static str, stopped: &mut Option<&'static str>, kill_timer: &mut Pin<&mut Sleep>, kill_armed: &mut bool| {
+        if stopped.is_none() {
+            *stopped = Some(reason);
+            kill_group(pid, SIGTERM);
+            kill_timer.as_mut().reset(Instant::now() + Duration::from_millis(500));
+            *kill_armed = true;
+        }
+    };
+    let mut exit = None;
+    while stdout.is_some() || stderr.is_some() || exit.is_none() {
+        tokio::select! {
+            biased;
+            () = &mut timer, if stopped.is_none() => halt("timed out", &mut stopped, &mut kill_timer, &mut kill_armed),
+            () = cancel.cancelled(), if stopped.is_none() => halt("aborted", &mut stopped, &mut kill_timer, &mut kill_armed),
+            () = &mut kill_timer, if kill_armed => {
+                kill_armed = false;
+                kill_group(pid, SIGKILL);
+            }
+            read = async { match stdout.as_mut() { Some(pipe) => pipe.read(&mut out_buf).await, None => std::future::pending().await } }, if stdout.is_some() => {
+                match read {
+                    Ok(n) if n > 0 => {
+                        printed += n;
+                        let room = (SAVE_MOST + 1).saturating_sub(kept.len());
+                        kept.extend_from_slice(&out_buf[..n.min(room)]);
+                        if printed + said.len() > OUTPUT_BYTES {
+                            halt("output limit exceeded", &mut stopped, &mut kill_timer, &mut kill_armed);
+                        }
+                    }
+                    _ => stdout = None,
+                }
+            }
+            read = async { match stderr.as_mut() { Some(pipe) => pipe.read(&mut err_buf).await, None => std::future::pending().await } }, if stderr.is_some() => {
+                match read {
+                    Ok(n) if n > 0 => {
+                        let room = OUTPUT_BYTES.saturating_sub(said.len());
+                        said.extend_from_slice(&err_buf[..n.min(room)]);
+                        if n > room || printed + said.len() > OUTPUT_BYTES {
+                            halt("output limit exceeded", &mut stopped, &mut kill_timer, &mut kill_armed);
+                        }
+                    }
+                    _ => stderr = None,
+                }
+            }
+            status = child.wait(), if exit.is_none() => exit = Some(status?),
+        }
+    }
+    if stopped.is_some() {
+        kill_group(pid, SIGKILL);
+    }
+    drop(files);
+    injected.used(&args.command, None, started);
+    let status = exit.unwrap_or_default();
+    let exit_signal = exit_signal(&status);
+    // On Windows a process that ended other than by exiting has a code too.
+    let exit_code = if exit_signal.is_some() { None } else { status.code() };
+    let state = match (stopped, &exit_signal, exit_code) {
+        (Some(reason), _, _) => reason.to_owned(),
+        (None, Some(signal), _) => ended_text(signal),
+        (None, None, code) => format!("exit {}", code.unwrap_or_default()),
+    };
+    // The output is hidden in what the command said, saved or not: a key
+    // that wasn't saved is still a key. Output past the most a secret
+    // holds is no key, and isn't: a long run of the same bytes would cost
+    // the redactor minutes to take in. Nothing said, nothing to hide in.
+    let hidden = (kept.len() <= SAVE_MOST && !said.is_empty()).then(|| saved_variable(&save_as, &kept));
+    let nothing = "Nothing was saved: if the command made a key at a service, revoke it there, then run it again.";
+    let saved = if let Some(reason) = stopped {
+        let what = match reason {
+            "timed out" => "The command timed out.",
+            "aborted" => "The command was stopped.",
+            _ => "The command printed too much, so it was stopped.",
+        };
+        Err(format!("{what} {nothing}"))
+    } else if exit_code != Some(0) {
+        Err(format!("The command failed ({state}). {nothing}"))
+    } else if kept.len() > SAVE_MOST {
+        Err(format!("The command printed more than a secret holds ({} KiB). {nothing}", SAVE_MOST / 1024))
+    } else if kept.iter().all(u8::is_ascii_whitespace) {
+        Err("The command printed nothing to save, so nothing was saved.".to_owned())
+    } else {
+        let bytes = kept.len();
+        (save.store)(found.agent.clone(), save_as.clone(), injected.names.clone(), kept).await.map(|record| (record, bytes))
+    };
+    let said = String::from_utf8_lossy(&said);
+    let said = match &hidden {
+        Some(hidden) => injected.redactor.with(std::slice::from_ref(hidden)).redact(&said),
+        None => injected.redactor.redact(&said),
+    };
+    let said = utf16_tail(&said, MAX_OUTPUT);
+    let guarded = guard.said();
+    let mut text = match &saved {
+        Ok((_, bytes)) => format!(
+            "Saved the command's output ({bytes} bytes) as the secret {}, which sets {}; it's granted to you alone. Its output isn't shown. Use it with secrets: [\"{}\"].",
+            save_as.name.trim(),
+            save_as.variable.trim(),
+            save_as.name.trim()
+        ),
+        Err(why) => why.clone(),
+    };
+    if !said.trim().is_empty() {
+        text.push_str(&format!("\n\nIt said (stderr):\n{said}"));
+    }
+    if !guarded.is_empty() {
+        text.push_str(&format!("\n{guarded}"));
+    }
+    text.push_str(&format!("\n[{state}, {}]", took(began.elapsed().as_secs_f64())));
+    let record = saved.as_ref().ok().map(|(record, _)| record.clone());
+    Ok(ToolResult::text(
+        text,
+        json!({"exitCode": exit_code, "exitSignal": exit_signal, "stopped": stopped, "saved": saved.is_ok(), "secret_saved": record}),
     ))
+}
+
+/// The value `save` saves from `output`, as what hides it: its text without
+/// the spaces and line endings around it, or the bytes for output that
+/// isn't text.
+fn saved_variable(save: &SaveAs, output: &[u8]) -> SecretVariable {
+    let (value, binary) = match std::str::from_utf8(output) {
+        Ok(text) => (text.trim().to_owned(), false),
+        Err(_) => {
+            use base64::Engine as _;
+            (base64::engine::general_purpose::STANDARD.encode(output), true)
+        }
+    };
+    SecretVariable {
+        secret: save.name.trim().to_owned(),
+        variable: save.variable.trim().to_owned(),
+        value: Zeroizing::new(value),
+        file: binary,
+        public: false,
+        binary,
+    }
 }
 
 /// Starts the command and returns at once. It runs on by itself, writing
@@ -637,9 +913,11 @@ async fn start_background(cwd: &Path, args: BashArgs, background: &Background, i
     injected.used(&task.command, Some(task.id.clone()), task.started);
     let limit = args.timeout.unwrap_or(BACKGROUND_TIMEOUT_SECS).min(MAX_BACKGROUND_SECS);
     let started = format!(
-        "Started {} in the background (process group {pid}). Its output goes to {}. You'll get an event when it finishes; until then, read the log to check on it, or stop it with `kill -- -{pid}`. It's stopped if it runs past {}.",
+        "Started {} in the background ({}). Its output goes to {}. You'll get an event when it finishes; until then, read the log to check on it, or stop it with `{}`. It's stopped if it runs past {}.",
         task.id,
+        group_text(pid),
         task.log.display(),
+        stop_hint(pid),
         took(limit),
     );
     let details = json!({"task": task.id, "pid": pid, "log": task.log});
@@ -663,15 +941,15 @@ async fn watch(mut child: Child, task: Task, limit: f64, finished: Arc<dyn Fn(Fi
             _ = measure.tick() => capped(&task).await,
             () = &mut deadline, if !timed_out => {
                 timed_out = true;
-                kill_group(pid, libc::SIGTERM);
+                kill_group(pid, SIGTERM);
                 sleep(Duration::from_millis(500)).await;
-                kill_group(pid, libc::SIGKILL);
+                kill_group(pid, SIGKILL);
             }
         }
     };
     let otherwise = match status {
-        Ok(status) => match status.signal() {
-            Some(signal) => format!("signal {}", signal_name(signal)),
+        Ok(status) => match exit_signal(&status) {
+            Some(signal) => ended_text(&signal),
             None => format!("exit {}", status.code().unwrap_or_default()),
         },
         Err(error) => format!("failed: {error}"),
@@ -793,7 +1071,7 @@ async fn run_logged(
             () = &mut timer, if stopped.is_none() => {
                 if sleeping {
                     stopped = Some("timed out");
-                    kill_group(pid, libc::SIGTERM);
+                    kill_group(pid, SIGTERM);
                     kill_timer.as_mut().reset(Instant::now() + Duration::from_millis(500));
                     kill_armed = true;
                 } else {
@@ -807,7 +1085,7 @@ async fn run_logged(
             () = detach.cancelled(), if stopped.is_none() => {
                 if sleeping {
                     stopped = Some("stopped so a new message could reach you");
-                    kill_group(pid, libc::SIGTERM);
+                    kill_group(pid, SIGTERM);
                     kill_timer.as_mut().reset(Instant::now() + Duration::from_millis(500));
                     kill_armed = true;
                 } else {
@@ -820,20 +1098,20 @@ async fn run_logged(
             }
             () = cancel.cancelled(), if stopped.is_none() => {
                 stopped = Some("aborted");
-                kill_group(pid, libc::SIGTERM);
+                kill_group(pid, SIGTERM);
                 kill_timer.as_mut().reset(Instant::now() + Duration::from_millis(500));
                 kill_armed = true;
             }
             () = &mut kill_timer, if kill_armed => {
                 kill_armed = false;
-                kill_group(pid, libc::SIGKILL);
+                kill_group(pid, SIGKILL);
             }
             status = child.wait() => break status?,
             _ = ticker.tick() => {
                 read_more(&mut reader, &mut decoder, &mut redactor, &mut captured, update)?;
                 if captured.bytes > LOG_BYTES && stopped.is_none() {
                     stopped = Some("output limit exceeded");
-                    kill_group(pid, libc::SIGTERM);
+                    kill_group(pid, SIGTERM);
                     kill_timer.as_mut().reset(Instant::now() + Duration::from_millis(500));
                     kill_armed = true;
                 }
@@ -841,7 +1119,7 @@ async fn run_logged(
         }
     };
     if stopped.is_some() {
-        kill_group(pid, libc::SIGKILL);
+        kill_group(pid, SIGKILL);
     }
     read_more(&mut reader, &mut decoder, &mut redactor, &mut captured, update)?;
     let mut rest = redactor.push(&decoder.end());
@@ -858,11 +1136,11 @@ async fn run_logged(
     let (exit_code, exit_signal) = match recorded {
         Some(code) if code > 128 => (None, Some(signal_name(code - 128))),
         Some(code) => (Some(code), None),
-        None => (None, status.signal().map(signal_name)),
+        None => (None, exit_signal(&status)),
     };
     let state = match (stopped, &exit_signal, exit_code) {
         (Some(reason), _, _) => reason.to_owned(),
-        (None, Some(signal), _) => format!("signal {signal}"),
+        (None, Some(signal), _) => ended_text(signal),
         (None, None, code) => format!("exit {}", code.unwrap_or_default()),
     };
     // Short output comes back whole and its log goes; longer, the log stays
@@ -916,9 +1194,11 @@ fn moved(
         Moved::ForMessage => (format!("A new message came for you after {ran}, so this command"), ""),
     };
     let text = format!(
-        "{why} moved to the background as {id} (process group {pid}). It keeps running, for up to {} more, and you'll get an event when it ends; don't start it again meanwhile. Its output goes to {}; stop it with `kill -- -{pid}`.{advice}\n\nOutput so far ends with:\n{so_far}\n[moved to the background, {ran}]",
+        "{why} moved to the background as {id} ({}). It keeps running, for up to {} more, and you'll get an event when it ends; don't start it again meanwhile. Its output goes to {}; stop it with `{}`.{advice}\n\nOutput so far ends with:\n{so_far}\n[moved to the background, {ran}]",
+        group_text(pid),
         took(MOVED_LIMIT_SECS),
         log.display(),
+        stop_hint(pid),
     );
     ToolResult::text(text, json!({"movedToBackground": id, "task": id, "pid": pid, "log": log}))
 }
@@ -955,18 +1235,33 @@ fn spawn_wrapped(
     // Shares the command's own offset in the log, so what it says lands
     // between the command's output, never over it.
     let told = file.try_clone()?;
-    let mut command = Command::new("bash");
-    let wrapper = if filter.is_some() { FILTERED_TASK_WRAPPER } else { TASK_WRAPPER };
-    command
-        .args(["--noprofile", "--norc", "-c", wrapper, "factory-task", script])
-        .arg(log.with_extension("status"))
-        .envs(environment.iter().map(|(name, value)| (name, value.as_str())));
-    if let Some((program, values)) = filter {
-        command.args(program).env(crate::secrets::FILTER_VALUES, values.as_str());
-    }
-    command.current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::from(file.try_clone()?)).stderr(Stdio::from(file)).process_group(0);
-    let child = command.spawn()?;
-    let pid = child.id().ok_or_else(|| std::io::Error::other("the shell was spawned without a pid"))?;
+    // Claktory's own Git Bash, in a job of its own (crate::windows).
+    #[cfg(windows)]
+    let (child, pid) = {
+        let shell = Shell::get()?;
+        let mut extra = environment.to_vec();
+        if let Some((_, values)) = &filter {
+            extra.push((crate::secrets::FILTER_VALUES.to_owned(), values.clone()));
+        }
+        let environment = shell.environment(std::env::vars_os(), &extra)?;
+        shell.spawn_task(cwd, script, log, file, environment, filter.as_ref().map(|(program, _)| *program))?
+    };
+    #[cfg(unix)]
+    let (child, pid) = {
+        let mut command = Command::new("bash");
+        let wrapper = if filter.is_some() { FILTERED_TASK_WRAPPER } else { TASK_WRAPPER };
+        command
+            .args(["--noprofile", "--norc", "-c", wrapper, "factory-task", script])
+            .arg(log.with_extension("status"))
+            .envs(environment.iter().map(|(name, value)| (name, value.as_str())));
+        if let Some((program, values)) = filter {
+            command.args(program).env(crate::secrets::FILTER_VALUES, values.as_str());
+        }
+        command.current_dir(cwd).stdin(Stdio::null()).stdout(Stdio::from(file.try_clone()?)).stderr(Stdio::from(file)).process_group(0);
+        let child = command.spawn()?;
+        let pid = child.id().ok_or_else(|| std::io::Error::other("the shell was spawned without a pid"))?;
+        (child, pid)
+    };
     Guard::watch(pid, agent, Some(told));
     Ok((child, pid))
 }
@@ -994,6 +1289,14 @@ fn new_log(dir: &Path) -> std::io::Result<(String, PathBuf, std::fs::File)> {
     }
 }
 
+#[cfg(windows)]
+fn spawn(cwd: &Path, script: &str, environment: &[(String, Zeroizing<String>)]) -> Result<(Child, u32), Error> {
+    let shell = Shell::get()?;
+    let environment = shell.environment(std::env::vars_os(), environment)?;
+    Ok(shell.spawn_piped(cwd, script, environment)?)
+}
+
+#[cfg(unix)]
 fn spawn(cwd: &Path, script: &str, environment: &[(String, Zeroizing<String>)]) -> Result<(Child, u32), Error> {
     let mut command = Command::new("bash");
     command
@@ -1059,7 +1362,7 @@ async fn collect(
             () = cancel.cancelled(), if output.stopped.is_none() => stop(&mut output, pid, "aborted", &mut kill_timer, &mut kill_armed),
             () = &mut kill_timer, if kill_armed => {
                 kill_armed = false;
-                kill_group(pid, libc::SIGKILL);
+                kill_group(pid, SIGKILL);
             }
             read = async { match stdout.as_mut() { Some(pipe) => pipe.read(&mut out_buf).await, None => std::future::pending().await } }, if stdout.is_some() => {
                 match read {
@@ -1095,14 +1398,15 @@ async fn collect(
         }
     }
     if output.stopped.is_some() {
-        kill_group(pid, libc::SIGKILL);
+        kill_group(pid, SIGKILL);
     }
     let status = exit.unwrap_or_default();
-    let exit_code = status.code();
-    let exit_signal = status.signal().map(signal_name);
+    let exit_signal = exit_signal(&status);
+    // On Windows a process that ended other than by exiting has a code too.
+    let exit_code = if exit_signal.is_some() { None } else { status.code() };
     let state = match (output.stopped, &exit_signal, exit_code) {
         (Some(reason), _, _) => reason.to_owned(),
-        (None, Some(signal), _) => format!("signal {signal}"),
+        (None, Some(signal), _) => ended_text(signal),
         (None, None, code) => format!("exit {}", code.unwrap_or_default()),
     };
     Ok(Ended {

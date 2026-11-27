@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io' show FileSystemException;
 
 import 'package:flutter/services.dart';
@@ -19,9 +20,12 @@ import 'ipad/workbench.dart' show WorkbenchScope;
 import 'layout.dart' show layoutOf, open;
 import 'markdown.dart';
 import 'message_time.dart' show clockTime;
+import 'mobile/haptics.dart' show Haptics;
 import 'mobile/lines.dart';
 import 'mobile/metrics.dart';
 import 'outbox.dart' show connectionLost, decisionWaiting;
+import 'people/messages_setup.dart' show secretClipboard;
+import 'people/secret_clipboard.dart' show clearWhenDue;
 import 'pipes.dart'
     show
         PipeApprovalAsk,
@@ -31,6 +35,7 @@ import 'pipes.dart'
         pipePeerClaktory,
         pipesLimiting;
 import 'mobile/navigation.dart' show PhoneRoutes;
+import 'mobile/presentation.dart' show SheetAction, showActions;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'review_answer.dart' show rememberReviewReturn, rememberReviewTalk;
 import 'scope.dart';
@@ -45,9 +50,11 @@ const askWaiting = decisionWaiting;
 /// reason follows (AskPerson.action_error).
 const approvedNotDone = "Approved, but it couldn't be done";
 
-/// How the Claktory refuses an answer to a card its agent changed since
-/// it was shown (#428).
-const cardChanged = 'This card changed.';
+/// How the Claktory refuses an answer to a request its agent changed
+/// since it was shown (#428), and the words a Claktory from before the
+/// Requests rename (#588) still says.
+const cardChanged = 'This request changed.';
+const _cardChangedBefore = 'This card changed.';
 
 /// An agent's question for the person, one it can't go on without: what it
 /// needs (its title) and why (the body, Markdown), and the person's answer
@@ -105,7 +112,10 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
     final typed = _listened?.text.trim().isNotEmpty ?? false;
     if (typed == _typed) return;
     _typed = typed;
-    if (inDock && mounted) setState(() {});
+    // Emptied: what the agent changed is no longer news over the field.
+    final news = !typed && _changedWhileTyping;
+    if (news) _changedWhileTyping = false;
+    if ((inDock || news) && mounted) setState(() {});
   }
 
   /// The written answer's focus, or a step's what's in the way: never
@@ -114,18 +124,26 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
   var _busy = false;
   String? _error;
 
-  /// A procedure's Can't do this… was chosen: its comment field and the
-  /// button that sends it show instead of Done.
-  var _cant = false;
+  /// A step's Can't do this was pressed with nothing typed (Lucy's Needs
+  /// you cards §3.3): the cursor went to the field, which now asks what's
+  /// in the way, and a second press sends it bare.
+  var _cantAsked = false;
 
-  /// Can't do this…: its field opens with the keys, so what's typed lands
-  /// in it at once, as Add a comment's does (Abbacchio).
-  void _openCant() {
-    setState(() => _cant = true);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && _cant) _focus.requestFocus();
-    });
+  /// Can't do this on step [at]: with words (or files) it goes at once,
+  /// with them as the reason; with none, the first press puts the cursor
+  /// in the field and the second sends it bare.
+  void _cant(int at) {
+    if (_typed || _holdsFiles || _cantAsked) {
+      _answer(dismiss: true, step: at);
+      return;
+    }
+    setState(() => _cantAsked = true);
+    _focus.requestFocus();
   }
+
+  /// Its agent changed the card while the person was typing in it (N4b):
+  /// said over the field until it's empty.
+  var _changedWhileTyping = false;
 
   /// A procedure's finished steps are listed, not only counted.
   var _showSteps = false;
@@ -223,13 +241,30 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
   @override
   void didUpdateWidget(AskPersonCard old) {
     super.didUpdateWidget(old);
+    // Recovery codes, only while the card waits on screen (#435 W8b).
+    if (!_pendingAsk(widget.ask)) _codes = null;
+    // A code card's end, felt (Prosciutto): filled in, or the page changed.
+    if (widget.ask.code && _pendingAsk(old.ask) && !_pendingAsk(widget.ask)) {
+      if (widget.ask.actionError.isNotEmpty) {
+        unawaited(Haptics.warning());
+      } else if (widget.ask.state == AskPersonState.ASK_PERSON_STATE_ANSWERED) {
+        unawaited(Haptics.success());
+      }
+    }
+    // Changed by its agent while words were typed (N4b): they stay, and
+    // the field says what happened.
+    if (old.ask.revision != widget.ask.revision &&
+        _text.text.trim().isNotEmpty) {
+      _changedWhileTyping = true;
+    }
     // The next step: a clean card for it. Not when its agent changed the
     // card (#428), which can move the step back: what the person typed
     // stays, under what changed.
     if (old.ask.revision == widget.ask.revision &&
         currentStep(old.ask) != currentStep(widget.ask)) {
       _text.clear();
-      _cant = false;
+      _cantAsked = false;
+      _changedWhileTyping = false;
       _error = null;
       _waiting = false;
       _whenBack = null;
@@ -238,12 +273,72 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
 
   @override
   void dispose() {
+    _copied?.cancel();
     _backend?.connected.removeListener(_connectedChanged);
     _backend?.attachments.removeListener(_filesChanged);
     // The draft stays with the card's key, for wherever it shows next.
     _listened?.removeListener(_typing);
     _focus.dispose();
+    _code.dispose();
+    _codeFocus.dispose();
     super.dispose();
+  }
+
+  bool _pendingAsk(AskPerson ask) =>
+      !ask.withdrawn &&
+      (ask.state == AskPersonState.ASK_PERSON_STATE_PENDING ||
+          ask.state == AskPersonState.ASK_PERSON_STATE_UNSPECIFIED);
+
+  /// A code card's code (#435 W8): never a draft, a recording or a file,
+  /// and gone once sent.
+  final _code = TextEditingController();
+  final _codeFocus = FocusNode();
+
+  /// Can't do this… → In my own words: the card asks what's in the way
+  /// in place of the code.
+  var _codeOwnWords = false;
+
+  /// Fills the code in (AnswerAsk with it as the text): Claktory types it
+  /// into the page, and the agent never sees it.
+  Future<void> _fill({bool again = false}) async {
+    final code = _code.text.trim();
+    if (_busy || code.isEmpty) return;
+    await _send(
+      (backend) => backend.answerAsk(
+        widget.agentId,
+        widget.seq,
+        text: code,
+        revision: widget.ask.revision,
+        talkSeen: widget.ask.thread.length,
+        from: widget.from,
+      ),
+      () => _fill(again: true),
+      again: again,
+      // Never the code itself, even set aside.
+      said: 'Fill in',
+    );
+    if (mounted && _error == null) _code.clear();
+  }
+
+  /// Can't do this… on a code card: the reasons a code doesn't come, as
+  /// focus mode's no offers them, or the person's own words.
+  Future<void> _cantFill(BuildContext context) async {
+    const own = '\u0000own';
+    final reason = await showActions<String>(
+      context,
+      actions: const [
+        SheetAction('No code arrived', 'No code arrived'),
+        SheetAction('Not now', 'Not now'),
+        SheetAction('In my own words…', own),
+      ],
+    );
+    if (!mounted || reason == null) return;
+    if (reason == own) {
+      setState(() => _codeOwnWords = true);
+      _focus.requestFocus();
+      return;
+    }
+    await _answer(dismiss: true, reason: reason);
   }
 
   /// What the person answered last, refused because the card had changed
@@ -264,10 +359,23 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
     bool confirmed = false,
     String? reason,
   }) async {
-    // A no's reason from focus mode's dock goes with what's typed.
-    final text = dismiss ? noComment(reason, _text.text) : _text.text.trim();
+    // A no's reason from focus mode's dock goes with what's typed. Execute
+    // never takes words: it runs exactly what it shows (Fugo, #533 D2).
+    // Nor does an errand step's Done: words go only with Can't do this,
+    // as its line says, so none are kept that its agent never hears
+    // (Abbacchio's row 1640).
+    final done = !dismiss && isGenericHandoff(widget.ask);
+    final text = dismiss
+        ? noComment(reason, _text.text)
+        : confirmed || done
+        ? ''
+        : _text.text.trim();
     if (_busy ||
-        (step == null && !dismiss && widget.ask.wantsText && text.isEmpty)) {
+        (step == null &&
+            !dismiss &&
+            !done &&
+            widget.ask.wantsText &&
+            text.isEmpty)) {
       if (_dock) throw const AnswerNotSent();
       return;
     }
@@ -286,7 +394,7 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
         from: widget.from,
         confirmed: confirmed,
         // Its files (#511); none with Execute, which has no field.
-        attachments: confirmed ? const [] : await _files(backend),
+        attachments: confirmed || done ? const [] : await _files(backend),
       ),
       () => _answer(
         dismiss: dismiss,
@@ -306,6 +414,8 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
           ? 'Dismiss'
           : confirmed
           ? 'Execute'
+          : done
+          ? 'Done'
           : 'Approve',
     );
   }
@@ -456,7 +566,8 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
       }
       // Its agent changed the card meanwhile: the answer is set aside,
       // shown with the change, and what's typed stays to send again.
-      if (failure.message.startsWith(cardChanged)) {
+      if (failure.message.startsWith(cardChanged) ||
+          failure.message.startsWith(_cardChangedBefore)) {
         setState(() => _setAside = said);
         if (_dock) throw const AnswerNotSent();
         return;
@@ -471,11 +582,29 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
 
   /// The color of the line under the card: what went wrong, or that it
   /// waits.
-  Color _statusColor(Palette palette) => _error == null
+  Color _statusColor(Palette palette) => _error == null || _busy
       ? palette.textFaint
       : _waiting
       ? palette.textMuted
       : palette.danger;
+
+  /// What the card's line says in place of what pressing does (Lucy's
+  /// rule 9): Sending…, that it sends once the connection's back, or why
+  /// it was refused; null when none.
+  String? get _status => _busy ? 'Sending…' : _error;
+
+  /// Over the field, once its agent changed the card while the person
+  /// typed in it (N4b).
+  /// Trish's words (42223).
+  String? _changedLine(String name) {
+    if (!_changedWhileTyping) return null;
+    final at = currentStep(widget.ask);
+    return at == null
+        ? '$name updated this request while you were typing. Your words are '
+              'kept.'
+        : '$name changed step ${at + 1} while you were typing. Your words '
+              'are kept.';
+  }
 
   /// A question answered in a dock (focus mode's): its field, yes and no
   /// drawn there, not on the card. Not Execute, a procedure or a pipe's
@@ -486,7 +615,9 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
         !ask.hasCommand() &&
         ask.steps.isEmpty &&
         !ask.hasPipeTrust() &&
-        !ask.hasPipeApproval();
+        !ask.hasPipeApproval() &&
+        // An errand's cards keep their own buttons (#435).
+        !ask.hasHandoff();
   }
 
   /// For focus mode's keys and dock (#514): as the card's own buttons.
@@ -521,6 +652,44 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
             : (reason) => _fromDock(
                 () => _answer(dismiss: true, step: at, reason: reason),
               ),
+      );
+    }
+    // A recovery-codes card has only its own two answers, no no (Fugo
+    // 40694).
+    if (isRecoveryCodes(ask)) return null;
+    if (isAgreement(ask) || isTwoStep(ask) || isGenericHandoff(ask)) {
+      final name =
+          _backend?.workspace.agent(widget.agentId)?.name ?? 'the agent';
+      final errand = _errandButtons(name)!;
+      return CardAnswer(
+        key: key,
+        docked: false,
+        yes: errand.yes,
+        no: errand.no,
+        typed: errand.reply && _typed,
+        busy: busy,
+        error: _waiting ? null : _error,
+        status: _waiting ? _error : null,
+        onYes: busy ? null : () => _fromDock(() => _answer(dismiss: false)),
+        onSubmit: busy || !errand.reply ? null : () => _fromDock(_reply),
+        onNo: dismiss,
+      );
+    }
+    if (ask.code) {
+      // Its field and buttons are its own, never the dock's (Pesci,
+      // Prosciutto: decision (a)).
+      return CardAnswer(
+        key: key,
+        docked: false,
+        yes: 'Fill in',
+        no: "Can't do this…",
+        busy: busy,
+        error: _waiting ? null : _error,
+        status: _waiting ? _error : null,
+        onYes: busy || _code.text.trim().isEmpty
+            ? null
+            : () => _fromDock(_fill),
+        onNo: dismiss,
       );
     }
     if (ask.hasCommand()) {
@@ -560,9 +729,7 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
       key: key,
       docked: true,
       field: _text,
-      placeholder: wantsText
-          ? 'Your answer'
-          : 'A comment for $name, if you like',
+      placeholder: wantsText ? 'Your answer' : replyPlaceholder(name),
       wantsText: wantsText,
       yes: wantsText ? 'Answer' : 'Approve',
       no: 'Dismiss',
@@ -642,7 +809,19 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
                 child: Text(
                   // Answered, dismissed or taken back (#407), it needs
                   // nothing.
-                  ask.withdrawn || !pending
+                  ask.code
+                      ? (ask.withdrawn || !pending
+                            ? "$name's errand needed a code"
+                            : "$name's errand needs a code")
+                      // Whether or not two-step was asked for: the site
+                      // showed them (Abbacchio's row 1637).
+                      : isRecoveryCodes(ask)
+                      ? "$name's errand saved recovery codes"
+                      : ask.hasHandoff()
+                      ? (ask.withdrawn || !pending
+                            ? "$name's errand needed your OK"
+                            : "$name's errand needs your OK")
+                      : ask.withdrawn || !pending
                       ? '$name asked'
                       : ask.hasCommand()
                       ? '$name asks to run a command'
@@ -668,7 +847,64 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
               name: name,
               muted: dismissed || ask.withdrawn,
             )
-          else
+          else if (ask.code) ...[
+            // Claktory's heading, the site as Chrome has it, nothing from
+            // the page or the agent (Fugo 41442).
+            Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(
+                    text: handoffHost(ask),
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  const TextSpan(text: ' asks for a code'),
+                ],
+              ),
+              style: type.emphasis.copyWith(
+                color: dismissed ? palette.textMuted : palette.text,
+              ),
+            ),
+            if (pending && !ask.withdrawn) ...[
+              const SizedBox(height: Space.xs),
+              Text(
+                'Sent to your phone or email. Claktory types it into that '
+                'page once, and $name never sees it.',
+                style: type.body.copyWith(color: palette.textMuted),
+              ),
+            ],
+          ] else if (ask.hasHandoff()) ...[
+            // Claktory's heading for an errand's card ("play.google.com
+            // asks you to agree"), the site in bold.
+            _HostTitle(
+              title: ask.title,
+              host: handoffHost(ask),
+              style: type.emphasis.copyWith(
+                color: dismissed ? palette.textMuted : palette.text,
+              ),
+            ),
+            // Where any other errand step is, as Chrome has the page's
+            // site: Claktory's words, never the page's (#435 W10).
+            if (isGenericHandoff(ask) && handoffHost(ask).isNotEmpty) ...[
+              const SizedBox(height: Space.xs),
+              Text.rich(
+                TextSpan(
+                  children: [
+                    const TextSpan(text: 'On '),
+                    TextSpan(
+                      text: handoffHost(ask),
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  ],
+                ),
+                style: type.body.copyWith(color: palette.textMuted),
+              ),
+            ],
+            // The box's words on the page, fenced as the site's.
+            if (isAgreement(ask) && ask.handoff.agreement.isNotEmpty) ...[
+              const SizedBox(height: Space.s),
+              SiteWords(ask.handoff.agreement),
+            ],
+          ] else
             // What the agent wrote, to decide on: what reorders text shows
             // by its code (proseCodes, Fugo).
             Text(
@@ -693,14 +929,61 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
               const SizedBox(height: Space.s),
               _reason(palette, type, name),
             ],
-          ] else if (ask.body.isNotEmpty && !ask.hasCommand()) ...[
-            const SizedBox(height: Space.xs),
-            for (final (i, part) in askBodyParts(ask.body).indexed) ...[
-              if (i > 0) const SizedBox(height: Space.s),
-              part.command
-                  ? CommandBlock(part.text)
-                  : Markdown(proseCodes(part.text), color: palette.textMuted),
+          ] else if (isRecoveryCodes(ask) && pending && !ask.withdrawn) ...[
+            // Claktory's state first (Ghiaccio 43944): a locked vault keeps
+            // them only until it restarts, said as a warning; then the
+            // agent's words, as its own. The buttons say the rest.
+            if (bodyParagraphs(ask.body).firstOrNull case final state?) ...[
+              const SizedBox(height: Space.xs),
+              Text(
+                state,
+                style: type.body.copyWith(
+                  color: recoveryCodesAtRisk(ask)
+                      ? palette.danger
+                      : palette.textMuted,
+                ),
+              ),
             ],
+            if (ask.handoff.what.isNotEmpty) ...[
+              const SizedBox(height: Space.xs),
+              Text(
+                proseCodes('$name: “${ask.handoff.what}”'),
+                style: type.caption.copyWith(
+                  color: palette.textMuted,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ],
+          ] else if (ask.body.isNotEmpty &&
+              !ask.hasCommand() &&
+              !ask.code &&
+              !isRecoveryCodes(ask)) ...[
+            const SizedBox(height: Space.xs),
+            // Past 8 lines, its middle folds (Lucy's Needs you cards).
+            FoldedBody(
+              body: ask.body,
+              build: (text) => Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final (i, part) in askBodyParts(text).indexed) ...[
+                    if (i > 0) const SizedBox(height: Space.s),
+                    part.command
+                        ? CommandBlock(part.text)
+                        : Markdown(
+                            proseCodes(part.text),
+                            color: palette.textMuted,
+                          ),
+                  ],
+                ],
+              ),
+            ),
+          ],
+          // A site's recovery codes, asked for only while the card is on
+          // screen and waiting (#435 W8b).
+          if (isRecoveryCodes(ask) && pending && !ask.withdrawn) ...[
+            const SizedBox(height: Space.s),
+            ..._recoveryCodes(palette, type),
           ],
           // A document it asks the person to review, with Review.
           if (ask.reviewPath.isNotEmpty) ...[
@@ -743,25 +1026,42 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
             ),
           ],
           // The talk on it so far, oldest first: the person's words and
-          // its agent's replies, above the card's buttons.
-          if (ask.thread.isNotEmpty) ...[
+          // its agent's replies, above the card's buttons; a procedure's
+          // waiting step has it just above the step (#533).
+          if (ask.thread.isNotEmpty &&
+              !(ask.steps.isNotEmpty &&
+                  !ask.withdrawn &&
+                  currentStep(ask) != null)) ...[
             const SizedBox(height: Space.m),
-            AskThread(thread: ask.thread, agent: agent, name: name),
+            AskThread(
+              thread: ask.thread,
+              agent: agent,
+              name: name,
+              // A procedure's: each turn about a step says which (#533).
+              step: ask.steps.isEmpty ? null : 0,
+            ),
           ],
           const SizedBox(height: Space.m),
           // Taken back by its agent (#407): nothing to answer, and never
           // the person's dismissal.
-          if (ask.withdrawn)
+          if (ask.withdrawn) ...[
             WithdrawnLine(
               agent: agent,
               name: name,
               reason: ask.withdrawReason,
               decidedMs: decided,
-            )
-          else if (ask.steps.isNotEmpty)
+            ),
+            // What the person was typing as it was taken back stays, to
+            // send to its agent or copy (#533 N6).
+            ..._unsent(palette, type, name),
+          ] else if (ask.steps.isNotEmpty)
             ..._procedure(palette, type, color, name, pending, decided)
           else if (pending && ask.hasCommand())
             ..._execute(palette, type, name)
+          else if (pending && ask.code)
+            ..._codeCard(palette, type, name)
+          else if (pending && isRecoveryCodes(ask))
+            ..._recoveryRow(palette)
           else if (pending)
             ..._pending(palette, type, name)
           else ...[
@@ -812,6 +1112,296 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
     ],
   );
 
+  /// An agreement or two-step card's buttons and line (#435 W8b, Lucy's
+  /// §3.6): null for every other card.
+  ({String yes, String no, String line, String verbing, bool reply})?
+  _errandButtons(String name) {
+    final ask = widget.ask;
+    if (isAgreement(ask)) {
+      return (
+        yes: 'Accept',
+        no: "Can't do this",
+        line: 'Claktory checks only this box on ${handoffHost(ask)}.',
+        verbing: 'accepting',
+        reply: true,
+      );
+    }
+    if (isTwoStep(ask)) {
+      return (
+        yes: 'Approve',
+        no: "Can't do this",
+        line:
+            '$name may turn it on, with codes by text message or email '
+            'only.',
+        verbing: 'approving',
+        reply: false,
+      );
+    }
+    // Any other step only the person can take for an errand (#435 W10: a
+    // payment, a sign-in…): Done carries on from the page as it is, sending
+    // no words; what's typed goes only with Can't do this, as its reason.
+    if (isGenericHandoff(ask)) {
+      return (
+        yes: 'Done',
+        no: "Can't do this",
+        line: '$name waits until you choose Done.',
+        verbing: 'finishing',
+        reply: false,
+      );
+    }
+    return null;
+  }
+
+  /// A recovery-codes card's codes (#435 W8b): asked for as it shows, kept
+  /// only while it's on screen, never in a draft or the Workspace.
+  List<String>? _codes;
+  String? _codesError;
+  var _codesAsked = false;
+
+  Future<void> _showCodes() async {
+    setState(() {
+      _codesAsked = true;
+      _codesError = null;
+    });
+    try {
+      final codes = await AppScope.of(context)
+          .showRecoveryCodes(widget.agentId, widget.seq);
+      if (mounted) setState(() => _codes = codes);
+    } on RequestFailure catch (failure) {
+      if (mounted) setState(() => _codesError = failure.message);
+    }
+  }
+
+  /// The codes, two to a row in the code face, with Copy: the clipboard
+  /// that clears itself where the device has one (Fugo 41442). Gone, why,
+  /// and Show to ask again.
+  List<Widget> _recoveryCodes(Palette palette, TypeScale type) {
+    if (!_codesAsked) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_codesAsked) unawaited(_showCodes());
+      });
+    }
+    final codes = _codes;
+    if (codes == null) {
+      final error = _codesError;
+      return [
+        Text(
+          error ?? 'Getting the codes…',
+          style: type.caption.copyWith(
+            color: error == null ? palette.textFaint : palette.danger,
+          ),
+        ),
+        if (error != null)
+          QuietLink(label: 'Show', onTap: () => unawaited(_showCodes())),
+      ];
+    }
+    final face = type.body.copyWith(
+      fontFamily: TextStyles.mono,
+      color: palette.text,
+    );
+    return [
+      Container(
+        padding: const EdgeInsets.all(Space.m),
+        decoration: BoxDecoration(
+          border: Border.all(color: palette.hairline),
+          borderRadius: BorderRadius.circular(Radii.control),
+        ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final two = constraints.maxWidth >= 240;
+            final half = (codes.length / 2).ceil();
+            Widget column(Iterable<String> part) => Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [for (final code in part) Text(code, style: face)],
+            );
+            return two
+                ? Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: column(codes.take(half))),
+                      Expanded(child: column(codes.skip(half))),
+                    ],
+                  )
+                : column(codes);
+          },
+        ),
+      ),
+      QuietLink(
+        label: _copied != null ? 'Copied' : 'Copy',
+        onTap: () => unawaited(_copyCodes(codes)),
+      ),
+    ];
+  }
+
+  Future<void> _copyCodes(List<String> codes) async {
+    final text = codes.join('\n');
+    final token = await secretClipboard.copy(text);
+    if (token == null) {
+      await Clipboard.setData(ClipboardData(text: text));
+    } else {
+      clearWhenDue(secretClipboard, token, const Duration(seconds: 30 * 60));
+    }
+    if (!mounted) return;
+    _copied?.cancel();
+    setState(
+      () => _copied = Timer(const Duration(seconds: 2), () {
+        if (mounted) setState(() => _copied = null);
+      }),
+    );
+  }
+
+  /// A recovery-codes card's two answers, and no others (Fugo 40694): I
+  /// saved them (Claktory deletes its copy) and Keep in Secrets (a secret
+  /// given to no agent). No field: nothing goes to the agent.
+  List<Widget> _recoveryRow(Palette palette) => [
+    CardRow(
+      line: CardLine(
+        _status ??
+            "They're deleted when this card closes. Save them somewhere "
+                'safe, or keep them in Secrets.',
+        color: _statusColor(palette),
+      ),
+      quiet: [
+        Button(
+          label: 'I saved them',
+          onPressed: _busy ? null : () => _answer(dismiss: false),
+        ),
+      ],
+      primary: Button(
+        label: 'Keep in Secrets',
+        primary: true,
+        onPressed: _busy ? null : () => unawaited(_keepCodes()),
+      ),
+    ),
+  ];
+
+  Future<void> _keepCodes({bool again = false}) => _send(
+    (backend) => backend.keepRecoveryCodes(widget.agentId, widget.seq),
+    () => _keepCodes(again: true),
+    again: again,
+    said: 'Keep in Secrets',
+  );
+
+  /// A code card waiting (#435 W8, Lucy's §3.6): one field, the code
+  /// only (no comment, mic, files or draft, so nothing typed here reaches
+  /// the agent), then Claktory's line, Can't do this… and Fill in. Return
+  /// fills in with a keyboard; a phone's keys send nothing (rule 6). On a
+  /// touch screen it takes the cursor as it opens, for the code the
+  /// keyboard offers from Messages (Prosciutto), in a conversation only
+  /// when it's the card waiting there now.
+  List<Widget> _codeCard(Palette palette, TypeScale type, String name) {
+    final host = handoffHost(widget.ask);
+    if (_codeOwnWords) {
+      return [
+        CardAnswerBlock(
+          focus: _focus,
+          field: (_) => DecisionComment(
+            controller: _text,
+            focusNode: _focus,
+            agent: name,
+            enabled: !_busy,
+            placeholder: "What's in the way? $name sees this.",
+            onSubmit: () => _answer(dismiss: true),
+          ),
+          row: CommentTyped(
+            controller: _text,
+            builder: (context, typed) => CardRow(
+              line: CardLine(
+                _status ?? 'Nothing is filled in. $name gets your words.',
+                color: _statusColor(palette),
+              ),
+              quiet: [
+                Button(
+                  label: 'Back',
+                  onPressed: _busy
+                      ? null
+                      : () => setState(() => _codeOwnWords = false),
+                ),
+              ],
+              primary: Button(
+                label: "Can't do this",
+                primary: true,
+                onPressed: _busy || !typed
+                    ? null
+                    : () => _answer(dismiss: true),
+              ),
+            ),
+          ),
+        ),
+      ];
+    }
+    final agent = AppScope.of(context).workspace.agent(widget.agentId);
+    final waitingHere =
+        _dock ||
+        agent == null ||
+        agent.waitingSeqs.isEmpty ||
+        agent.waitingSeqs.last.toInt() == widget.seq;
+    void fill() => unawaited(_fill());
+    return [
+      KeepInSight(
+        focus: _codeFocus,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            CallbackShortcuts(
+              bindings: {
+                const SingleActivator(LogicalKeyboardKey.enter): fill,
+                const SingleActivator(LogicalKeyboardKey.numpadEnter): fill,
+              },
+              child: TextField(
+                controller: _code,
+                focusNode: _codeFocus,
+                placeholder: 'Code',
+                semanticsLabel: 'The code $host sent',
+                autofocus: touchFirst(context) && waitingHere,
+                // Digits only when the page's field is (Chrome says): the
+                // number pad; otherwise letters too, nothing guessed.
+                keyboardType: widget.ask.handoff.numeric
+                    ? TextInputType.number
+                    : TextInputType.visiblePassword,
+                textInputAction: TextInputAction.done,
+                // The on-screen keyboard's Done fills it in, as Return does
+                // (Prosciutto 44920); nothing while empty or sending.
+                onSubmitted: (_) => fill(),
+                autofillHints: const [AutofillHints.oneTimeCode],
+                textCapitalization: TextCapitalization.characters,
+                autocorrect: false,
+                enableSuggestions: false,
+                smartPunctuation: false,
+                inputFormatters: codeFormatters,
+              ),
+            ),
+            const SizedBox(height: Space.s),
+            ListenableBuilder(
+              listenable: _code,
+              builder: (context, _) => CardRow(
+                line: CardLine(
+                  _status ?? 'Claktory fills it in on $host.',
+                  color: _statusColor(palette),
+                ),
+                quiet: [
+                  Builder(
+                    builder: (context) => Button(
+                      label: "Can't do this…",
+                      onPressed: _busy
+                          ? null
+                          : () => unawaited(_cantFill(context)),
+                    ),
+                  ),
+                ],
+                primary: Button(
+                  label: 'Fill in',
+                  primary: true,
+                  onPressed: _busy || _code.text.trim().isEmpty ? null : fill,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ];
+  }
+
   /// An Execute card waiting (#494): Dismiss or Execute, which runs
   /// exactly the command shown, once; with Claktory's warnings, a second
   /// tap to confirm. No reply: the backend refuses one on it.
@@ -819,41 +1409,146 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
     void execute() => _executeNow();
 
     return [
-      ActionLine(
-        lead: Text(
-          _error ??
-              (_confirming
-                  ? 'Run it anyway? Read the warnings above first.'
-                  : '$name gets what it prints once it has run.'),
-          style: type.caption.copyWith(
-            color: _confirming && _error == null
-                ? palette.danger
-                : _statusColor(palette),
-          ),
+      // Why not, for its agent (#533 N5), said first: it goes only with
+      // Dismiss, never with Execute, which runs exactly what it shows.
+      CardAnswerBlock(
+        focus: _focus,
+        field: (_) => DecisionComment(
+          controller: _text,
+          agent: name,
+          enabled: !_busy,
+          focusNode: _focus,
+          placeholder: 'Why not? $name sees this only if you dismiss.',
+          above: _changedLine(name),
+          keep: _keep(name),
         ),
-        action: ControlsLine(
-          children: [
-            if (_confirming)
-              Button(
-                label: 'Cancel',
-                onPressed: _busy
-                    ? null
-                    : () => setState(() => _confirming = false),
-              )
-            else
-              Button(
-                label: 'Dismiss',
-                onPressed: _busy ? null : () => _answer(dismiss: true),
-              ),
-            Button(
+        row: CommentTyped(
+          controller: _text,
+          builder: (context, typed) => CardRow(
+            // "June sees what it prints." only: a hint (Lucy 45566).
+            quietLine: _status == null && !_confirming && !typed,
+            line: CardLine(
+              _status ??
+                  (_confirming
+                      ? "Read the warnings above, then run it only if you're "
+                            'sure.'
+                      : typed
+                      ? 'Your words go only with Dismiss. Execute runs the '
+                            'command exactly as shown.'
+                      : '$name sees what it prints.'),
+              color: _confirming && _status == null
+                  ? palette.danger
+                  : _statusColor(palette),
+            ),
+            quiet: [
+              if (_confirming)
+                Button(
+                  label: 'Cancel',
+                  onPressed: _busy
+                      ? null
+                      : () => setState(() => _confirming = false),
+                )
+              else
+                Button(
+                  label: 'Dismiss',
+                  onPressed: _busy ? null : () => _answer(dismiss: true),
+                ),
+            ],
+            primary: Button(
               label: _confirming ? 'Run anyway' : 'Execute',
               primary: true,
               onPressed: _busy ? null : execute,
             ),
-          ],
+          ),
         ),
       ),
     ];
+  }
+
+  /// Sent to its agent from a card it took back: "Sent to June".
+  var _unsentGone = false;
+  Timer? _copied;
+
+  /// Words typed on a card its agent took back meanwhile (#533 N6): not
+  /// sent, with Send to its agent (a message in its conversation, its
+  /// files with it) and Copy.
+  List<Widget> _unsent(Palette palette, TypeScale type, String name) {
+    final words = _text.text.trim();
+    if (words.isEmpty && !_holdsFiles) {
+      if (!_unsentGone) return const [];
+      return [
+        const SizedBox(height: Space.s),
+        Text(
+          'Sent to $name.',
+          style: type.caption.copyWith(color: palette.textFaint),
+        ),
+      ];
+    }
+    return [
+      const SizedBox(height: Space.s),
+      if (words.isNotEmpty)
+        Text.rich(
+          TextSpan(
+            children: [
+              TextSpan(
+                text: 'Not sent: ',
+                style: TextStyle(
+                  color: palette.textMuted,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              TextSpan(text: words),
+            ],
+          ),
+          style: type.body.copyWith(color: palette.text),
+        ),
+      _chips(),
+      const SizedBox(height: Space.xs),
+      CardRow(
+        line: CardLine(
+          words.isEmpty
+              ? 'Not sent: your files.'
+              : '$name took the request back before you sent this.',
+        ),
+        quiet: [
+          if (words.isNotEmpty)
+            Button(
+              label: _copied == null ? 'Copy' : 'Copied',
+              onPressed: () => _copyUnsent(words),
+            ),
+        ],
+        primary: Button(
+          label: 'Send to $name',
+          primary: true,
+          onPressed: () => _sendUnsent(words),
+        ),
+      ),
+    ];
+  }
+
+  Future<void> _copyUnsent(String words) async {
+    await Clipboard.setData(ClipboardData(text: words));
+    if (!mounted) return;
+    _copied?.cancel();
+    setState(
+      () => _copied = Timer(const Duration(milliseconds: 1500), () {
+        if (mounted) setState(() => _copied = null);
+      }),
+    );
+  }
+
+  /// As a message in its agent's conversation, through its outbox: it
+  /// shows there at once, and goes once the connection's there.
+  void _sendUnsent(String words) {
+    final backend = _backend;
+    if (backend == null) return;
+    backend.outbox.send(
+      widget.agentId,
+      words,
+      files: backend.attachments.take(_filesKey),
+    );
+    _text.clear();
+    setState(() => _unsentGone = true);
   }
 
   List<Widget> _pending(Palette palette, TypeScale type, String name) {
@@ -921,99 +1616,86 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
         if (widget.ask.thread.isNotEmpty) ..._talk(type, reply: wantsText),
       ];
     }
+    // An errand's agreement or two-step card (#435 W8b): its own words on
+    // the buttons and the line; a two-step one takes no reply, its words
+    // going only with Can't do this.
+    final errand = _errandButtons(name);
+    final reply = errand?.reply ?? true;
     return [
-      // A written answer has its box; an approval, a comment under its
-      // buttons for either.
-      if (wantsText) ...[
-        // Or said: the mic puts what's said in, to check before sending.
-        // What's typed stays when the card scrolls away and back.
-        _dropping(
-          name,
-          KeepWhileTyped(
-            controller: _text,
-            child: Dictation(
-              controller: _text,
-              focusNode: _focus,
-              enabled: !_busy,
-              keep: _keep(name),
-              // Files with it (#511).
-              trailing: _attach(),
-              child: CallbackShortcuts(
-                bindings: {
-                  const SingleActivator(LogicalKeyboardKey.enter): () =>
-                      _answer(dismiss: false),
-                },
-                child: TextField(
-                  controller: _text,
-                  focusNode: _focus,
-                  placeholder: 'Your answer',
-                  minLines: 1,
-                  maxLines: 8,
-                ),
-              ),
-            ),
-          ),
-        ),
-        _chips(),
-        const SizedBox(height: Space.s),
-      ],
-      // What Approve means after a talk on the card (#492), above it.
-      ..._afterTalk(palette, type, name, below: false),
-      // On a phone at large text the buttons go under the words. Once a
-      // comment is typed on an approval, one Submit in place of both: what's
-      // typed is a reply, never a yes or a no (#370).
-      CommentTyped(
-        controller: _text,
-        builder: (context, typed) {
-          final submit = typed && !wantsText;
-          return ActionLine(
-            lead: Text(
-              _error ??
-                  (submit
-                      ? '$name gets your comment and carries on from it.'
-                      : wantsText
-                      ? '$name gets your answer and carries on.'
-                      : widget.ask.reviewPath.isNotEmpty
-                      ? 'Your comments on it go to $name.'
-                      : '$name carries on once you approve.'),
-              style: type.caption.copyWith(color: _statusColor(palette)),
-            ),
-            action: submit
-                ? SubmitButton(onPressed: _busy ? null : _reply)
-                : ControlsLine(
-                    children: [
-                      Button(
-                        label: 'Dismiss',
-                        onPressed: _busy ? null : () => _answer(dismiss: true),
-                      ),
-                      Button(
-                        label: wantsText ? 'Answer' : 'Approve',
-                        primary: true,
-                        onPressed: _busy || (wantsText && !typed)
-                            ? null
-                            : () => _answer(dismiss: false),
-                      ),
-                    ],
-                  ),
-          );
-        },
-      ),
-      if (!wantsText)
-        // Return in it is Submit, once something is typed. Files with it
-        // (#511) go with Approve, Dismiss or Submit.
-        _dropping(
+      // The field, open from the start (Lucy's rule 4): a written answer's
+      // answer, or words that turn an approval's buttons into Submit
+      // (#370). Return sends them, never Approve. Files with it (#511) go
+      // with whichever is pressed.
+      CardAnswerBlock(
+        focus: _focus,
+        field: (_) => _dropping(
           name,
           DecisionComment(
             controller: _text,
             agent: name,
             enabled: !_busy,
-            onSubmit: _reply,
+            focusNode: _focus,
+            placeholder: wantsText
+                ? 'Your answer'
+                : reply
+                ? null
+                : "Why not? $name sees this only with Can't do this.",
+            onSubmit: wantsText
+                ? () => _answer(dismiss: false)
+                : reply
+                ? _reply
+                : null,
+            above: _changedLine(name),
             keep: _keep(name),
             attach: _attach(),
             files: _chips(),
             holdsFiles: _holdsFiles,
           ),
         ),
+        row: CommentTyped(
+          controller: _text,
+          builder: (context, typed) {
+            final submit = typed && !wantsText && reply;
+            final line =
+                _status ??
+                (submit
+                    ? insteadLine(errand?.verbing ?? 'approving')
+                    : typed && !reply
+                    ? "Your words go only with Can't do this."
+                    : _afterTalkLine(name) ??
+                          errand?.line ??
+                          (widget.ask.reviewPath.isNotEmpty && !wantsText
+                              ? 'Your comments on it go to $name.'
+                              : null));
+            return CardRow(
+              line: line == null
+                  ? null
+                  : CardLine(
+                      line,
+                      color: _status == null && !submit
+                          ? palette.textMuted
+                          : _statusColor(palette),
+                    ),
+              quiet: [
+                if (!submit)
+                  Button(
+                    label: errand?.no ?? 'Dismiss',
+                    onPressed: _busy ? null : () => _answer(dismiss: true),
+                  ),
+              ],
+              primary: submit
+                  ? SubmitButton(onPressed: _busy ? null : _reply)
+                  : Button(
+                      label: errand?.yes ?? (wantsText ? 'Answer' : 'Approve'),
+                      primary: true,
+                      onPressed: _busy || (wantsText && !typed)
+                          ? null
+                          : () => _answer(dismiss: false),
+                    ),
+            );
+          },
+        ),
+      ),
       if (widget.ask.thread.isNotEmpty) ..._talk(type, reply: wantsText),
     ];
   }
@@ -1030,22 +1712,8 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
     String name, {
     bool below = true,
   }) {
-    final ask = widget.ask;
-    final String line;
-    if (ask.approveFollowsTalk) {
-      line = ask.wantsText
-          ? "Your answer follows $name's last reply."
-          : "Approving agrees with $name's last reply.";
-    } else if (ask.thread.isNotEmpty &&
-        (ask.actionDescription.isNotEmpty ||
-            ask.hasPipeApproval() ||
-            ask.hasPipeTrust())) {
-      line =
-          'Approving does only what the card says, not what was said in '
-          'the talk.';
-    } else {
-      return const [];
-    }
+    final line = _afterTalkLine(name);
+    if (line == null) return const [];
     final text = Text(
       line,
       style: type.caption.copyWith(
@@ -1058,31 +1726,44 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
         : [text, const SizedBox(height: Space.xs)];
   }
 
-  /// Under a card with a thread, beneath its own buttons: Reply, for a
-  /// card whose typed words are otherwise its answer (an approval's are a
-  /// reply already, Submit), and Resolve, which ends it deciding nothing.
+  /// [_afterTalk]'s words, for a card's line; null when there's no talk
+  /// to agree with.
+  String? _afterTalkLine(String name) {
+    final ask = widget.ask;
+    if (ask.approveFollowsTalk) {
+      return ask.wantsText
+          ? "Your answer follows $name's last reply."
+          : "Approve means you agree with $name's last reply.";
+    }
+    if (ask.thread.isNotEmpty &&
+        (ask.actionDescription.isNotEmpty ||
+            ask.hasPipeApproval() ||
+            ask.hasPipeTrust())) {
+      return 'Approving does only what the request says, not what was said in '
+          'the talk.';
+    }
+    return null;
+  }
+
+  /// Under a card with a thread, beneath its row, quiet links (Lucy's
+  /// rule 3): Reply, for a card whose typed words are otherwise its answer
+  /// (an approval's are a reply already, Submit; a step's, Send), and
+  /// Resolve, which ends it deciding nothing.
   List<Widget> _talk(TypeScale type, {required bool reply}) => [
-    const SizedBox(height: Space.s),
+    const SizedBox(height: Space.xs),
     CommentTyped(
       controller: _text,
-      builder: (context, typed) => ActionLine(
-        lead: Text(
-          reply
-              ? 'Reply to keep talking, or resolve it with no decision.'
-              : 'Resolve ends it with no decision.',
-          style: type.caption.copyWith(color: Palette.of(context).textFaint),
-        ),
-        action: ControlsLine(
-          children: [
-            if (reply)
-              Button(
-                label: 'Reply',
-                // Words, or files alone (#511).
-                onPressed: _busy || !(typed || _holdsFiles) ? null : _reply,
-              ),
-            Button(label: 'Resolve', onPressed: _busy ? null : _resolve),
-          ],
-        ),
+      builder: (context, typed) => Wrap(
+        spacing: Space.m,
+        children: [
+          if (reply)
+            QuietLink(
+              label: 'Reply',
+              // Words, or files alone (#511).
+              onTap: _busy || !(typed || _holdsFiles) ? null : _reply,
+            ),
+          QuietLink(label: 'Resolve', onTap: _busy ? null : _resolve),
+        ],
       ),
     ),
   ];
@@ -1120,6 +1801,17 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
             for (final i in finished) _StepLine(index: i, step: steps[i]),
           const SizedBox(height: Space.s),
         ],
+        // The talk about it, above the step it's about (#533).
+        if (ask.thread.isNotEmpty) ...[
+          AskThread(
+            thread: ask.thread,
+            agent: AppScope.of(context).workspace.agent(widget.agentId),
+            name: name,
+            // Turns about an earlier step say which (#533).
+            step: at + 1,
+          ),
+          const SizedBox(height: Space.m),
+        ],
         Text(
           'Step ${at + 1} of ${steps.length}',
           style: type.caption.copyWith(
@@ -1135,93 +1827,72 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
               : Markdown(proseCodes(part.text), color: palette.text),
         ],
         const SizedBox(height: Space.m),
-        if (_cant) ...[
-          // What's in the way, for the agent to decide what's next; typed
-          // or said. What's typed stays when the card scrolls away and back.
-          _dropping(
-            name,
-            KeepWhileTyped(
-              controller: _text,
-              child: Dictation(
-                controller: _text,
-                focusNode: _focus,
-                enabled: !_busy,
-                keep: _keep(name),
-                // Files with it (#511): a screenshot of what's in the way.
-                trailing: _attach(),
-                child: TextField(
-                  controller: _text,
-                  focusNode: _focus,
-                  placeholder: "What's in the way? (optional)",
-                  minLines: 1,
-                  maxLines: 6,
-                ),
-              ),
-            ),
-          ),
-          _chips(),
-          const SizedBox(height: Space.s),
-          ActionLine(
-            lead: Text(
-              _error ?? '$name hears why and decides what to do next.',
-              style: type.caption.copyWith(color: _statusColor(palette)),
-            ),
-            action: ControlsLine(
-              children: [
-                Button(
-                  label: 'Back',
-                  onPressed: _busy ? null : () => setState(() => _cant = false),
-                ),
-                Button(
-                  label: "Can't do this",
-                  primary: true,
-                  onPressed: _busy
-                      ? null
-                      : () => _answer(dismiss: true, step: at),
-                ),
-              ],
-            ),
-          ),
-        ] else ...[
-          ActionLine(
-            lead: Text(
-              _error ??
-                  (at + 1 < steps.length
-                      ? 'The next step shows once this one is done.'
-                      : '$name carries on once this is done.'),
-              style: type.caption.copyWith(color: _statusColor(palette)),
-            ),
-            action: ControlsLine(
-              children: [
-                Button(
-                  label: "Can't do this…",
-                  onPressed: _busy ? null : _openCant,
-                ),
-                Button(
-                  label: 'Done',
-                  primary: true,
-                  onPressed: _busy
-                      ? null
-                      : () => _answer(dismiss: false, step: at),
-                ),
-              ],
-            ),
-          ),
-          _dropping(
+        // The field, open from the start (Lucy's rule 4). Return in it is
+        // Send, once something is typed: never Done (#533 N1).
+        CardAnswerBlock(
+          focus: _focus,
+          field: (_) => _dropping(
             name,
             DecisionComment(
               controller: _text,
               agent: name,
               enabled: !_busy,
-              onSubmitted: () => _answer(dismiss: false, step: at),
+              focusNode: _focus,
+              onSubmit: _reply,
+              // Can't do this pressed with nothing typed: what it asks.
+              placeholder: _cantAsked ? "What's in the way?" : null,
+              above: _changedLine(name),
               keep: _keep(name),
               attach: _attach(),
               files: _chips(),
               holdsFiles: _holdsFiles,
             ),
           ),
-          if (ask.thread.isNotEmpty) ..._talk(type, reply: true),
-        ],
+          row: CommentTyped(
+            controller: _text,
+            builder: (context, typed) {
+              final send = typed || _holdsFiles;
+              final done = Button(
+                label: 'Done',
+                primary: !send,
+                onPressed: _busy
+                    ? null
+                    : () => _answer(dismiss: false, step: at),
+              );
+              return CardRow(
+                // "The next step shows once…" only: a hint (Lucy 45566).
+                quietLine: _status == null && !send,
+                line: CardLine(
+                  _status ??
+                      (send
+                          ? 'Send gives $name your '
+                                '${typed ? 'words' : 'files'}. Step ${at + 1} '
+                                "waits for $name's answer."
+                          : at + 1 < steps.length
+                          ? 'The next step shows once this one is done.'
+                          : '$name carries on once this is done.'),
+                  color: _statusColor(palette),
+                ),
+                quiet: [
+                  Button(
+                    label: "Can't do this",
+                    onPressed: _busy ? null : () => _cant(at),
+                  ),
+                  if (send) done,
+                ],
+                primary: send
+                    ? Button(
+                        label: 'Send',
+                        primary: true,
+                        onPressed: _busy ? null : _reply,
+                      )
+                    : done,
+              );
+            },
+          ),
+        ),
+        // Send replies, so only Resolve, once there's a talk.
+        if (ask.thread.isNotEmpty) ..._talk(type, reply: false),
       ];
     }
     // Decided: every step done, stopped at one, or left to the agent.
@@ -1238,19 +1909,7 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
     // Closed by its agent as settled in the talk (#496).
     final agentClosed = agentResolved(ask);
     final agent = AppScope.of(context).workspace.agent(widget.agentId);
-    final outcome = agentClosed
-        ? '$name closed it'
-        : ask.resolved
-        ? 'Resolved'
-        : ask.replied
-        ? 'Replied'
-        : allDone
-        ? steps.length == 2
-              ? 'Both steps done'
-              : 'All ${steps.length} steps done'
-        : stopped != null
-        ? "Couldn't do step ${stopped.$1 + 1} of ${steps.length}"
-        : 'Left to $name';
+    final outcome = askOutcome(ask, agent: name);
     return [
       Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1267,7 +1926,9 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
                   TextSpan(
                     text: outcome,
                     style: TextStyle(
-                      color: allDone || talked ? color : palette.textMuted,
+                      color: (allDone || talked) && stopped == null
+                          ? color
+                          : palette.textMuted,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
@@ -1348,21 +2009,7 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
                     // A reply (#370): the person's words, neither a yes
                     // nor a no.
                     // Ended with no decision, after talking it through.
-                    text: agentClosed
-                        ? '$name closed it'
-                        : ask.resolved
-                        ? 'Resolved'
-                        : ask.replied
-                        ? 'Replied'
-                        : dismissed
-                        ? 'Left to $name'
-                        : failed
-                        ? approvedNotDone
-                        : ask.wantsText
-                        ? 'Answered'
-                        : ask.hasCommand()
-                        ? 'Executed'
-                        : 'Approved',
+                    text: askOutcome(ask, agent: name),
                     style: TextStyle(
                       color: failed
                           ? palette.danger
@@ -1384,14 +2031,15 @@ class _AskPersonCardState extends State<AskPersonCard> with PublishesAnswer {
           ),
         ],
       ),
-      if (failed) ...[
+      if (failed && !ask.code && !isAgreement(ask)) ...[
         const SizedBox(height: Space.xs),
         Text(
           ask.actionError,
           style: type.body.copyWith(color: palette.textMuted),
         ),
       ],
-      // The answer, or the comment it was dismissed with.
+      // The answer, or the comment it was dismissed with (a recovery-codes
+      // card's, which secret holds them).
       if (ask.answer.isNotEmpty) ...[
         const SizedBox(height: Space.xs),
         Text(
@@ -1443,9 +2091,15 @@ class AskThread extends StatelessWidget {
     required this.thread,
     required this.agent,
     required this.name,
+    this.step,
   });
 
   final List<AskThreadMessage> thread;
+
+  /// On a procedure (#533), the step it waits at (1-based), or 0 once it
+  /// doesn't: a turn about another step says which, "On step 1". Null on
+  /// an ordinary card.
+  final int? step;
 
   /// The card's agent, when the app knows it, and its name.
   final Agent? agent;
@@ -1497,6 +2151,13 @@ class AskThread extends StatelessWidget {
                                 TextSpan(
                                   text:
                                       ' · ${cardTime(context, message.atMs.toInt())}',
+                                  style: TextStyle(color: palette.textFaint),
+                                ),
+                              if (step != null &&
+                                  message.step > 0 &&
+                                  message.step != step)
+                                TextSpan(
+                                  text: ' · On step ${message.step}',
                                   style: TextStyle(color: palette.textFaint),
                                 ),
                             ],
@@ -1735,6 +2396,132 @@ String askSummary(AskPerson ask) => switch (currentStep(ask)) {
   final at? => '${ask.title} · Step ${at + 1} of ${ask.steps.length}',
   null => ask.title,
 };
+
+/// How a decided [ask] ended, in the words its card, its Needs you row
+/// and History share (Lucy's §8); [agent] is its agent's name. [short]: the
+/// Needs you row's, a procedure's without its count or wait ("Couldn't do
+/// step 2").
+/// An errand's card asking the person to accept an agreement on a site
+/// (#435 W8b).
+bool isAgreement(AskPerson ask) =>
+    ask.hasHandoff() &&
+    ask.handoff.kind == ErrandHandoffKind.ERRAND_HANDOFF_KIND_AGREEMENT;
+
+/// An errand's card with a site's recovery codes (#435 W8b).
+bool isRecoveryCodes(AskPerson ask) =>
+    ask.hasHandoff() &&
+    ask.handoff.kind == ErrandHandoffKind.ERRAND_HANDOFF_KIND_RECOVERY_CODES;
+
+/// A recovery-codes card whose codes a restart would lose: Claktory's
+/// vault was locked, so it holds them only in memory (Ghiaccio 43832).
+bool recoveryCodesAtRisk(AskPerson ask) =>
+    ask.body.startsWith("Claktory's vault is locked");
+
+/// An errand's card asking to turn two-step sign-in on at a site (#435
+/// W8b).
+bool isTwoStep(AskPerson ask) =>
+    ask.hasHandoff() &&
+    ask.handoff.kind == ErrandHandoffKind.ERRAND_HANDOFF_KIND_TWO_STEP;
+
+/// An errand's card for any other step only the person can take (#435
+/// W10: a payment, a sign-in, a check that they're a person…): Done and
+/// Can't do this, with the cards' own field and row.
+bool isGenericHandoff(AskPerson ask) =>
+    ask.hasHandoff() &&
+    !ask.code &&
+    !isAgreement(ask) &&
+    !isTwoStep(ask) &&
+    !isRecoveryCodes(ask) &&
+    ask.handoff.kind != ErrandHandoffKind.ERRAND_HANDOFF_KIND_CODE;
+
+/// A code card's site (#435 W8): the host of the page's origin as Chrome
+/// gave it (punycode, never the page's words).
+String handoffHost(AskPerson ask) {
+  final origin = ask.handoff.origin;
+  final host = Uri.tryParse(origin)?.host ?? '';
+  return host.isEmpty ? origin : host;
+}
+
+/// What a code card's field takes (#435 W8): spaces and dashes pasted with
+/// a code left out, at most 16 characters (the backend refuses more).
+final codeFormatters = <TextInputFormatter>[
+  FilteringTextInputFormatter.deny(RegExp(r'[\s\-\u2010-\u2015\u2212]')),
+  LengthLimitingTextInputFormatter(16),
+];
+
+/// The line saying a code card's page changed before Claktory could fill
+/// the code in (#435 W8): the card ended, nothing filled in.
+const codePageChanged = "The page changed, so it wasn't filled in.";
+
+String askOutcome(AskPerson ask, {required String agent, bool short = false}) {
+  if (ask.withdrawn) return 'Withdrawn';
+  // A code card (#435 W8): never the code.
+  if (ask.code) {
+    if (ask.state == AskPersonState.ASK_PERSON_STATE_DISMISSED) {
+      return "Couldn't fill it in";
+    }
+    if (ask.actionError.isNotEmpty) return codePageChanged;
+    return short ? 'Filled in' : 'Filled in on ${handoffHost(ask)}';
+  }
+  // A site's recovery codes (#435 W8b): never the codes.
+  if (isRecoveryCodes(ask)) {
+    return ask.answer.isNotEmpty ? 'Kept in Secrets' : 'You saved them';
+  }
+  if (isAgreement(ask) &&
+      ask.state != AskPersonState.ASK_PERSON_STATE_DISMISSED &&
+      !ask.replied &&
+      !ask.resolved) {
+    return ask.actionError.isNotEmpty
+        ? 'The page changed, so nothing was ticked.'
+        : 'Accepted';
+  }
+  // Any other errand step (#435 W10): done, or not.
+  if (isGenericHandoff(ask) && !ask.replied && !ask.resolved) {
+    return ask.state == AskPersonState.ASK_PERSON_STATE_DISMISSED
+        ? "Couldn't do this"
+        : 'Done';
+  }
+  final steps = ask.steps;
+  if (steps.isNotEmpty) {
+    final stopped = steps.indexWhere(
+      (step) => step.state == AskStepState.ASK_STEP_STATE_CANT,
+    );
+    // Can't do this waits for its agent to rewrite the step or answer; it
+    // gave up once it resolved the card (Cioccolata's N3). Never
+    // "Dismissed" (N3).
+    if (stopped >= 0) {
+      final of = short ? '' : ' of ${steps.length}';
+      return ask.resolved
+          ? 'Stopped at step ${stopped + 1}$of'
+          : short
+          ? "Couldn't do step ${stopped + 1}"
+          : "Couldn't do step ${stopped + 1}$of · waiting for $agent";
+    }
+  }
+  if (agentResolved(ask)) return '$agent closed it';
+  if (ask.resolved) return 'Resolved';
+  if (ask.replied) {
+    // Sent on a step (#533): it waits there for its agent.
+    final at = steps.indexWhere(_open);
+    return at < 0 || steps.isEmpty || short
+        ? 'Replied'
+        : 'Replied on step ${at + 1} · waiting for $agent';
+  }
+  final dismissed = ask.state == AskPersonState.ASK_PERSON_STATE_DISMISSED;
+  if (steps.isNotEmpty) {
+    if (dismissed) return 'Dismissed';
+    return short
+        ? 'All steps done'
+        : steps.length == 2
+        ? 'Both steps done'
+        : 'All ${steps.length} steps done';
+  }
+  if (dismissed) return 'Dismissed';
+  if (ask.actionError.isNotEmpty) return approvedNotDone;
+  if (ask.wantsText) return 'Answered';
+  if (ask.hasCommand()) return 'Ran';
+  return 'Approved';
+}
 
 /// Whether [ask] was closed by its agent as settled in the talk (#496),
 /// rather than resolved by the person: its talk ends with the agent's
@@ -2002,6 +2789,79 @@ class _StepLine extends StatelessWidget {
               padding: const EdgeInsetsDirectional.only(start: Space.m),
               child: CardSentFiles(step.commentAttachments),
             ),
+        ],
+      ),
+    );
+  }
+}
+
+/// An errand card's heading, Claktory's ("play.google.com asks you to
+/// agree"), the site's host in bold where it leads.
+class _HostTitle extends StatelessWidget {
+  const _HostTitle({
+    required this.title,
+    required this.host,
+    required this.style,
+  });
+
+  final String title;
+  final String host;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    final leads = host.isNotEmpty && title.startsWith(host);
+    return Text.rich(
+      TextSpan(
+        children: [
+          if (leads)
+            TextSpan(
+              text: host,
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+          TextSpan(
+            text: proseCodes(leads ? title.substring(host.length) : title),
+          ),
+        ],
+      ),
+      style: style,
+    );
+  }
+}
+
+/// Words a site showed, fenced as the site's and never Claktory's (#435
+/// W8b's agreement, Fugo): "The site's words" over them, in a hairline
+/// box.
+class SiteWords extends StatelessWidget {
+  const SiteWords(this.words, {super.key});
+
+  final String words;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    return Container(
+      padding: const EdgeInsets.all(Space.m),
+      decoration: BoxDecoration(
+        border: Border.all(color: palette.hairline),
+        borderRadius: BorderRadius.circular(Radii.control),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            "The site's words",
+            style: type.caption.copyWith(
+              color: palette.textFaint,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: Space.xs),
+          Text(
+            proseCodes(words),
+            style: type.body.copyWith(color: palette.text),
+          ),
         ],
       ),
     );

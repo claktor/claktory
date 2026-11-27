@@ -33,7 +33,7 @@ size and minSdk.
 | minSdk / compile / target | 24 / 36 / 36 | 24 is Flutter's floor and the NDK API the Rust and C code link for (Flutter hands minSdk to the native-assets hook, `targetNdkApi`). 36 is Play's requirement for new apps and updates. |
 | Build tools | 36.0.0 | AGP 9.3's pairing. |
 | NDK | 28.2.13676358 (r28c) | Flutter's template and AGP 9.3's default. r28+ links 16 KiB-aligned by default, and `native_toolchain_rust` needs ≥ r27 (it looks for the API-35 clang wrappers). |
-| ABIs | `arm64-v8a`, `x86_64` | Phones are arm64; x86_64 is for emulators and CI hosts that aren't Apple silicon. No 32-bit ARM: untested support is worse than none (spec §3). |
+| ABIs | `arm64-v8a`, `x86_64` | Phones are arm64; x86_64 is for emulators and CI hosts that aren't Apple silicon, and ChromeOS. No 32-bit ARM: untested support is worse than none (spec §3). Built with x86_64 only on prime ("Where builds run"). |
 | Page size | 16 KiB | Required of apps targeting 35+; built that way from day one. |
 | bundletool | 1.18.3 | Current release (Google Maven), for AAB config dumps and APK sets. |
 
@@ -91,6 +91,22 @@ NDK, or a `JAVA_HOME` that isn't the pinned JDK. Each of these silently
 changes what gets built: the first three, for instance, switch off the
 16 KiB link flag (§3).
 
+### Where builds run
+
+Nothing is built for x86 on an Apple-silicon Mac (Matt's rule, Bruno 48603
+and 48619), and the app ships `x86_64` beside `arm64-v8a`. So:
+- **On this Mac (Apple silicon):** arm64 only. Every build passes
+  `--target-platform android-arm64` (Flutter) or `-Ptarget-platform=android-arm64`
+  (Gradle): the dev and QA APKs, the device tests, lint. A build here whose
+  target platforms include `android-x64` (given, or left out, which means
+  all) stops at Flutter's compile step, before anything is compiled for it,
+  with a sentence that says to build arm64 here and releases on prime.
+  `-PclaktoryAbis=arm64-v8a` packages arm64 alone (the filter takes only
+  ABIs from `android.abis`).
+- **On prime** (the tailnet build machine Pericolo runs, as for the Linux
+  x86_64 build): releases, with both ABIs. `tools/release_apk.sh` refuses
+  on an Apple-silicon Mac and says to run it there.
+
 ## 2. The host
 
 Generated once with `flutter create --platforms=android --org com.claktory`
@@ -135,10 +151,26 @@ app/android/
   `dataExtractionRules` (31+) excluding everything from cloud backup and
   device transfer. Camera as an optional feature, microphone asked on use,
   both later. Launcher activity `singleTop`, `adjustResize`, resizable, no
-  orientation lock. `android:enableOnBackInvokedCallback`: the shared Dart
-  Back is bound on main (Katya, 34d486bc), so the dev build can turn it on
-  to run her OS Back matrix; that's a test run, not device acceptance, and
-  three-button Back stays in the foreground-core gate either way.
+  orientation lock. `android:enableOnBackInvokedCallback="true"` (row 187):
+  Back comes as the system's back callbacks. Opted out, Android sent the
+  old onBackPressed, and an edge swipe pulled back and let go still went
+  back. FlutterActivity registers its callback while the Dart has
+  something to pop: from Android 14 it hands the Dart start, progress,
+  cancel and commit, and only commit goes back; on 13 it's the commit
+  alone. At the root, `MainActivity` registers its own callback before
+  Flutter's (so Flutter's, when there, is always above it): the system's
+  default there finishes a task not started from the launcher (a link, a
+  share), tearing the engine down, so this one leaves through
+  `popSystemNavigator`, as Home. The price is the system's back-to-home
+  preview, which a registered callback turns off.
+  Proof: `PredictiveBackTest` (instrumentation, on a full-size emulator:
+  a 320×640 one behind a size override has the edge gesture off): the
+  packaged manifest opts in (a Back key reaches a registered callback),
+  and edge swipes injected as one touch are started then cancelled when
+  pulled back to the edge, and invoked when let go (3 runs of 3 on API
+  36); `RootBackTest`'s Back key at the root leaves the screen stopped.
+  The screens' own handling is Doppio's driver; three-button Back stays
+  in the foreground-core gate.
 - **Release builds** shrink with R8; `proguard-rules.pro` keeps
   `TunnelBootstrap`'s native method. No debug-signing fallback: a release
   without its signing config fails.
@@ -1081,7 +1113,7 @@ on a phone, still owed for every item.
 | `factory/recorder` (+`/events`) | `VoiceRecorder.kt`: `MediaRecorder`, AAC in .m4a, 16 kHz mono, 32 kbps, ten minutes; audio focus; a call or leaving the screen interrupts, keeping the file | `Recorder.swift` |
 | `factory/audio` (+`/events`) | `AudioPlayback.kt`: `MediaPlayer`, transient audio focus; a call, unplugged headphones or leaving the screen pause | `AudioPlayer.swift` |
 | `claktory/video` | `VideoPlayback.kt`: `MediaPlayer` into a `SurfaceProducer` texture; the file's turn reported as `quarterTurns` unless the texture turns frames itself | `VideoPlayers.swift` |
-| `factory/device` `cameraAccess`, `requestCamera`, `openCameraSettings`, `qrCode`; `claktory/scanner` view | `QrScanner.kt`: Camera2 into a `TextureView`, frames read with ZXing core 3.5.3 (Apache-2.0, Fugo's review; pinned, Maven Central only); the camera open only while the view shows and the app is on screen; frames in memory only, nothing read logged, codes over 4 KB ignored | `Scanner.swift`, `AppDelegate.qrCode` |
+| `factory/device` `cameraAccess`, `cameraRefusedOnce`, `requestCamera`, `openCameraSettings`, `qrCode`; `claktory/scanner` view | `QrScanner.kt`: Camera2 into a `TextureView`, frames read with ZXing core 3.5.3 (Apache-2.0, Fugo's review; pinned, Maven Central only); the camera open only while the view shows and the app is on screen; frames in memory only, nothing read logged, codes over 4 KB ignored | `Scanner.swift`, `AppDelegate.qrCode` |
 | `factory/links`; `factory/device` `webAuth`, `cancelWebAuth` | `WebLinks.kt`: `LinkActivity` takes `claktory[-dev\|-debug]://` links and sign-in redirects on the application id's scheme; a Custom Tab (no library) for the page | Mac `Links`, iPhone `WebAuth` |
 
 - **Permissions** are asked on use, never at launch: `RECORD_AUDIO` and
@@ -1089,7 +1121,28 @@ on a phone, still owed for every item.
   installs and pairs by pasting. Access answers: `undetermined` while
   Android can still show its question (never asked, or refused once),
   `denied` once it won't (so Settings is the way, §8), `restricted` when
-  the phone's administrator turned the camera off.
+  the phone's administrator turned the camera off (`Permissions.kt`'s
+  `PermissionState`, the same for both). Before asking, Android doesn't
+  tell "never asked" from "refused for good", and nothing about asking is
+  kept on the device: a refusal for good is remembered in memory for the
+  process (`Refusals`, so a turned phone's new activity still reads
+  `denied`). A no is for good when Android stops explaining after it
+  explained before (a second no), or when it came under a second after
+  asking (no question showed; its instant no takes ~60 ms); Android's
+  question set aside with Back or a tap beside it changes nothing, so it
+  stays `undetermined` and the sheet's Before comes back. After a
+  permanent no in an earlier run the permission sheet's
+  Continue gets Android's instant no, then Declined (ux/permissions.md
+  rule 3: one wasted tap, accepted). Open Settings, from the microphone,
+  the camera or `factory/device` `openAppSettings`, opens the app's page
+  (`ACTION_APPLICATION_DETAILS_SETTINGS`); Android ends the app's process
+  when a permission is taken away there, so coming back starts afresh.
+  Beside `access`, `refusedOnce` (`factory/recorder`) and
+  `cameraRefusedOnce` (`factory/device`) say true after a first no while
+  Android will still ask, for This phone's Permissions row (Off, with
+  Turn on…; Lucy's ruling in permissions.md §2.1); `access` stays
+  `undetermined` then, so the sheet's Continue still asks. Elsewhere the
+  methods are missing, which reads as false.
 - **Links** never become Flutter routes (`flutter_deeplinking_enabled`
   false); `LinkActivity` hands each to the one `MainActivity`, found in
   its own task by `CLEAR_TOP | SINGLE_TOP | NEW_TASK`, never a second.

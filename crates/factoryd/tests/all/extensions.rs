@@ -833,7 +833,7 @@ async fn an_item_blocked_on_the_person_with_nothing_asked_reminds_its_owner_dail
     assert_eq!(
         events[0].text,
         "1 checklist item blocks on the person and you have no question waiting for them: #1 Fix login. \
-         None of it shows in their Needs you until you ask: file ask_person now with item naming it, one card per \
+         None of it shows in their Needs you until you ask: file ask_person now with item naming it, one request per \
          decision or action (secrets_request or propose_to_rivet with item, if one waits on a secret or on Rivet) — or note \
          on the item why you can't ask yet."
     );

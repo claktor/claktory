@@ -10,6 +10,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/scheduler.dart' show SchedulerPhase;
+import 'package:flutter/services.dart' show HardwareKeyboard, KeyDownEvent;
 import 'package:flutter/widgets.dart';
 
 import '../controls.dart' show Button, ExtensionGlyph;
@@ -19,6 +20,7 @@ import '../layout.dart' show viewerKindFor;
 import '../protocol/factory/v1/factory.pb.dart' show Entry, ViewLeaf, ViewNode;
 import '../inbox.dart' show NeedsYouItem;
 import '../mobile/device.dart' show WindowControls, windowControls;
+import '../mobile/metrics.dart' show TypeScale;
 import '../mobile/needs_you_phone.dart' show PhoneNeedsYou;
 import '../needs_you_focus.dart';
 import '../voice_session.dart' show activeVoice;
@@ -108,37 +110,72 @@ class _IPadFocusState extends State<IPadFocus> {
   /// popover changes it, and closes the popover.
   String? _shown;
 
+  /// Focus mode's commands with modifiers that only the system's menu
+  /// would run otherwise, bound here too: its key commands don't fire in
+  /// the Simulator (Zucchero's row 701), and a press UIKit runs never
+  /// reaches Flutter, nor one Flutter has the menu again (CommandMenu).
+  /// ⌘↩ and ⌘⌫ are FocusKeys' (held, they record); ⌘⇧N FocusModeLayer's.
+  static const _bound = {
+    'focus.next',
+    'focus.previous',
+    'focus.context',
+    'focus.go',
+  };
+
+  /// One of [_bound]'s keys going down runs it as it stands now, asked as
+  /// the key comes (never in a build); one that can't run now (a field has
+  /// the keys, no card) goes on to what has the keys.
+  KeyEventResult _key(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent || !mounted) return KeyEventResult.ignored;
+    for (final command in focusCommands(
+      context,
+      _session,
+      leave: widget.leave,
+    )) {
+      if (!_bound.contains(command.id) ||
+          !command.activator.accepts(event, HardwareKeyboard.instance)) {
+        continue;
+      }
+      final run = command.run;
+      if (run == null) return KeyEventResult.ignored;
+      run();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
   @override
   Widget build(BuildContext context) {
     final focus = WorkbenchScope.of(context);
     final menu = focus.menu;
-    final commands = [
-      for (final command in focusCommands(
-        context,
-        _session,
-        leave: widget.leave,
-      ))
-        WorkbenchCommand(
-          id: command.id,
-          title: command.title,
-          keys: command.activator,
-          run: command.run,
-        ),
-    ];
     // The system's menu lists them as they are now: titled with the
-    // card's own yes and no, disabled while they can't run.
+    // card's own yes and no, disabled while they can't run. Read after
+    // the frame: whether a field has the keys asks the focused widget,
+    // which a window built in place of another (a resize across the
+    // phone's layout) may still find in the tree going away.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) unawaited(menu.publish(commands));
+      if (!mounted) return;
+      final commands = [
+        for (final command in focusCommands(
+          context,
+          _session,
+          leave: widget.leave,
+        ))
+          WorkbenchCommand(
+            id: command.id,
+            title: command.title,
+            keys: command.activator,
+            run: command.run,
+          ),
+      ];
+      unawaited(menu.publish(commands));
     });
     final palette = Palette.of(context);
     final tier = windowTier(context);
-    return FocusKeys(
+    final keys = FocusKeys(
       session: _session,
       leave: widget.leave,
-      // Once the menu takes them, it runs them; the letters stay here.
-      nativeIds: menu.native
-          ? {for (final command in commands) command.id}
-          : const {},
+      // ⌘↩ and ⌘⌫ stay here, the system's menu or not (row 701).
       child: ColoredBox(
         color: palette.canvas,
         child: SafeWindow(
@@ -158,6 +195,12 @@ class _IPadFocusState extends State<IPadFocus> {
           ),
         ),
       ),
+    );
+    return Focus(
+      canRequestFocus: false,
+      skipTraversal: true,
+      onKeyEvent: _key,
+      child: keys,
     );
   }
 
@@ -226,6 +269,10 @@ class _IPadFocusState extends State<IPadFocus> {
                 ),
                 panel: contextOpen ? FocusContext(session: _session) : null,
                 panelWidth: columns.contextPanel,
+                // Under the stage's header: its Done, Context and Go to
+                // conversation stay in reach.
+                panelTop: _stageHeader,
+                title: 'Context',
                 onDismiss: () => _session.contextOpen = false,
               ),
             ),
@@ -259,6 +306,7 @@ class _IPadFocusState extends State<IPadFocus> {
               stage: phone,
               panel: contextOpen ? FocusContext(session: _session) : null,
               panelWidth: columns.contextPanel,
+              title: 'Context',
               onDismiss: () => _session.contextOpen = false,
             ),
           ),
@@ -275,12 +323,12 @@ class _IPadFocusState extends State<IPadFocus> {
           trailing: [
             _Position(session: _session, onTap: _toggleQueue),
             _Step(
-              label: 'Previous card',
+              label: 'Previous request',
               icon: 'chevron-up',
               onTap: _session.waiting.length > 1 ? _session.previous : null,
             ),
             _Step(
-              label: 'Next card',
+              label: 'Next request',
               icon: 'chevron-down',
               onTap: _session.waiting.length > 1 ? _session.next : null,
             ),
@@ -312,7 +360,8 @@ class _IPadFocusState extends State<IPadFocus> {
                 : columns.contextPanel,
             // The queue drops from the count, at the header's right; Context
             // slides over from the right edge, as wider.
-            panelTop: _queueOpen ? titleBarHeight + Space.l : 0,
+            panelTop: _queueOpen ? titleBarHeight + Space.l : _stageHeader,
+            title: _queueOpen || !contextOpen ? null : 'Context',
             onDismiss: () {
               if (_queueOpen) {
                 setState(() => _queueOpen = false);
@@ -326,6 +375,11 @@ class _IPadFocusState extends State<IPadFocus> {
   }
 
   void _toggleQueue() => setState(() => _queueOpen = !_queueOpen);
+
+  /// The stage's header at its least height (FocusStage's): Context over
+  /// the stage starts under it. Taller at a large text size, where
+  /// Context's own close button is the way out.
+  static const _stageHeader = titleBarHeight + Space.l;
 
   /// A PDF or a picture a card asks to have reviewed, on the stage in the
   /// document host, to draw on with Pencil, with the iPad's review bar
@@ -369,7 +423,9 @@ class _IPadFocusState extends State<IPadFocus> {
 
 /// [stage], with [panel] over its right side when there is one: a tap on
 /// the stage around it ([onDismiss]) closes it, as the workbench's
-/// sidebar overlay does.
+/// sidebar overlay does. A [title]d panel (Context) has a header of its
+/// own with a close button, so a finger or VoiceOver has a way out that
+/// isn't a tap beside it (Zucchero's row 666).
 class _OverStage extends StatelessWidget {
   const _OverStage({
     required this.stage,
@@ -377,6 +433,7 @@ class _OverStage extends StatelessWidget {
     required this.panelWidth,
     required this.onDismiss,
     this.panelTop = 0,
+    this.title,
   });
 
   final Widget stage;
@@ -384,16 +441,20 @@ class _OverStage extends StatelessWidget {
   final double panelWidth;
   final double panelTop;
   final VoidCallback onDismiss;
+  final String? title;
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    final type = TypeScale.of(context);
     final panel = this.panel;
+    final title = this.title;
     return Stack(
       children: [
         Positioned.fill(child: stage),
         if (panel != null) ...[
           Positioned.fill(
+            top: panelTop,
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: onDismiss,
@@ -413,7 +474,45 @@ class _OverStage extends StatelessWidget {
                 border: Border.all(color: palette.hairline),
                 boxShadow: floatingShadow,
               ),
-              child: panel,
+              child: title == null
+                  ? panel
+                  : Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Container(
+                          padding: const EdgeInsetsDirectional.only(
+                            start: Space.l,
+                            end: Space.xs,
+                          ),
+                          decoration: BoxDecoration(
+                            border: Border(
+                              bottom: BorderSide(color: palette.hairline),
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Semantics(
+                                  header: true,
+                                  child: Text(
+                                    title,
+                                    style: type.label.copyWith(
+                                      color: palette.textMuted,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              _Step(
+                                label: 'Hide $title',
+                                icon: 'x',
+                                onTap: onDismiss,
+                              ),
+                            ],
+                          ),
+                        ),
+                        Expanded(child: panel),
+                      ],
+                    ),
             ),
           ),
         ],

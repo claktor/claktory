@@ -13,6 +13,7 @@ import 'package:factory_app/backend.dart' show RequestFailure;
 import 'package:factory_app/card_files.dart';
 import 'package:factory_app/drop.dart' show WindowDropOverlay;
 import 'package:factory_app/shell.dart' show Shell;
+import 'package:factory_app/decision.dart' show DecisionComment;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
@@ -114,10 +115,7 @@ void main() {
 
   /// Opens Add a comment and attaches what the picker gives.
   Future<void> attach(WidgetTester tester) async {
-    if (find.text('Add a comment').evaluate().isNotEmpty) {
-      await tester.tap(find.text('Add a comment'));
-      await settle(tester);
-    }
+    if (find.text('Add a comment').evaluate().isNotEmpty) {}
     await tester.tap(_cardClip());
     await _io(tester);
   }
@@ -202,8 +200,6 @@ void main() {
       tester,
       _card(steps: [AskStep(text: 'Open Settings')]),
     );
-    await tester.tap(find.text("Can't do this…"));
-    await settle(tester);
     await tester.tap(_cardClip());
     await _io(tester);
     expect(find.text('logo.png'), findsOneWidget);
@@ -235,8 +231,15 @@ void main() {
   macWidgets("files dropped or pasted while the card's field has the keys "
       'go to the card, and the overlay says so', (tester) async {
     final harness = await _show(tester, _card());
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
+    // The field never takes the keys by itself (Lucy's rule 4).
+    expect(FileDrop.divertedTo.value, isNull);
+    await tester.showKeyboard(
+      find.descendant(
+        of: find.byType(DecisionComment),
+        matching: find.byType(EditableText),
+      ),
+    );
+    await tester.pump();
     expect(FileDrop.divertedTo.value, 'your answer to June');
     FileDrop.deliver([notes]);
     await _io(tester);
@@ -362,8 +365,6 @@ void main() {
         child: AskPersonCard(_card().askPerson, agentId: 'june', seq: 4),
       ),
     );
-    await settle(tester);
-    await tester.tap(find.text('Add a comment'));
     await settle(tester);
     final clip = find.bySemanticsLabel('Attach files').first;
     expect(tester.getSize(clip).height, greaterThanOrEqualTo(44));

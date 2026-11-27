@@ -155,7 +155,7 @@ void main() {
 
     await tester.tap(find.text('Sign in to Anthropic again'));
     await settle(tester);
-    final start = harness.last.startLogin;
+    final start = harness.lastStartLogin;
     expect(start.providerId, 'anthropic');
     expect(start.methodId, 'oauth');
     expect(start.addAccount, isTrue);
@@ -203,7 +203,9 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('Unlock them with your recovery key.'), findsOneWidget);
-    await tester.tap(find.text('Unlock the secrets on this Mac with its recovery key'));
+    await tester.tap(
+      find.text('Unlock the secrets on this Mac with its recovery key'),
+    );
     await settle(tester);
     expect(find.byType(UnlockSecretsForm), findsOneWidget);
 

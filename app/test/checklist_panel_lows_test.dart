@@ -105,11 +105,9 @@ void main() {
       await pumpFrames(tester);
       expect(tester.takeException(), isNull);
       final card = tester.getRect(find.byType(AskPersonCard));
-      final lead = find.text('Tester carries on once you approve.');
-      expect(tester.getRect(lead).right, lessThanOrEqualTo(card.right));
-      if (width >= 300) {
-        expect(tester.getSize(lead).width, greaterThanOrEqualTo(96));
-      }
+      // The field, whole, inside the card.
+      final field = tester.getRect(find.byType(EditableText));
+      expect(field.right, lessThanOrEqualTo(card.right));
       for (final label in ['Dismiss', 'Approve']) {
         final rect = tester.getRect(find.text(label));
         expect(rect.left, greaterThan(card.left), reason: label);

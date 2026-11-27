@@ -57,6 +57,7 @@ void main() {
       ),
     );
     harness.page.value = AppPage.settings;
+    harness.backend.settingsSection.value = 'general';
     await harness.show(tester, size: const Size(1400, 1000));
     await pumpFrames(tester);
     expect(find.byType(SettingsView), findsOneWidget);

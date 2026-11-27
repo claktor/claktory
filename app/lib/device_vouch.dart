@@ -287,10 +287,14 @@ class LocalVouch extends ChangeNotifier {
 /// (signed out by the person, or removed by another device). Nothing where
 /// it isn't offered.
 class SignInThroughThisMac extends StatelessWidget {
-  const SignInThroughThisMac({super.key, this.vouch});
+  const SignInThroughThisMac({super.key, this.vouch, this.refused});
 
   /// Tests give one; the app's by default.
   final LocalVouch? vouch;
+
+  /// An account the Claktory asking turns away: nothing when it's the one
+  /// this Mac's Claktory would vouch with (Abbacchio row 1541).
+  final String? refused;
 
   @override
   Widget build(BuildContext context) {
@@ -300,6 +304,12 @@ class SignInThroughThisMac extends StatelessWidget {
       listenable: vouch,
       builder: (context, _) {
         if (!vouch.offered) return const SizedBox.shrink();
+        final refused = this.refused?.trim().toLowerCase();
+        if (refused != null &&
+            refused.isNotEmpty &&
+            vouch.email.trim().toLowerCase() == refused) {
+          return const SizedBox.shrink();
+        }
         final palette = Palette.of(context);
         final type = TypeScale.of(context);
         final email = vouch.email;

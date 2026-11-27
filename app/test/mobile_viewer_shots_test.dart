@@ -124,7 +124,7 @@ Future<Harness> openOnPhone(
   addTearDown(tester.view.resetPadding);
   await harness.show(tester, size: screen.size);
   await pumpFrames(tester);
-  await tester.tap(find.bySemanticsLabel('Extensions'));
+  await tester.tap(find.bySemanticsLabel(RegExp('^More options for ')));
   await pumpFrames(tester);
   await tester.tap(find.text(path.split('/').last).last);
   for (var i = 0; i < 8; i++) {

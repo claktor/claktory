@@ -58,7 +58,7 @@ void main() {
     expect(find.text('Providers'), findsNothing);
     await tester.tap(find.text('Change key…'));
     await pumpFrames(tester);
-    final start = harness.last.startLogin;
+    final start = harness.lastStartLogin;
     expect(start.providerId, 'anthropic');
     expect(start.methodId, 'api_key');
     expect(start.addAccount, isFalse, reason: 'in place of the refused key');
@@ -78,8 +78,8 @@ void main() {
     expect(find.text("Anthropic refused Builder's sign-in."), findsOneWidget);
     await tester.tap(find.text('Sign in again…'));
     await pumpFrames(tester);
-    expect(harness.last.startLogin.methodId, 'oauth');
-    expect(harness.last.startLogin.addAccount, isFalse);
+    expect(harness.lastStartLogin.methodId, 'oauth');
+    expect(harness.lastStartLogin.addAccount, isFalse);
   });
 
   testWidgets("a refused key from the environment can't be replaced: Add a "
@@ -99,8 +99,8 @@ void main() {
     );
     await tester.tap(find.text('Add a key…'));
     await pumpFrames(tester);
-    expect(harness.last.startLogin.methodId, 'api_key');
-    expect(harness.last.startLogin.addAccount, isTrue);
+    expect(harness.lastStartLogin.methodId, 'api_key');
+    expect(harness.lastStartLogin.addAccount, isTrue);
   });
 
   testWidgets("another account than the first: Settings → Providers, to "

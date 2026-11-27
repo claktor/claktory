@@ -122,7 +122,7 @@ async fn a_conversation_with_a_card_waiting_stays_until_it_s_answered() {
     apply_request(&mut client, &mut view, select("rivet")).await;
     soon(&factory);
     drain(&mut client, &mut view, Duration::from_millis(300)).await;
-    assert!(factory.conversation_held("builder"), "a card waits in it");
+    assert!(factory.conversation_held("builder"), "a request waits in it");
 
     let answer = v1::AnswerAsk { agent_id: "builder".into(), seq, dismiss: false, text: String::new(), ..Default::default() };
     apply_request(&mut client, &mut view, client_message::Body::AnswerAsk(answer)).await;

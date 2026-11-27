@@ -256,7 +256,7 @@ void main() {
     await pumpFrames(tester);
     // Its conversation fills the screen.
     expect(find.byType(Pane), findsNothing, reason: 'one pane at a time');
-    await tester.tap(find.bySemanticsLabel('Extensions'));
+    await tester.tap(find.bySemanticsLabel(RegExp('^More options for ')));
     await pumpFrames(tester);
     expect(find.text('Files'), findsOneWidget);
     await tester.tap(find.text('main.rs'));

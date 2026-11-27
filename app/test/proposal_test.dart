@@ -42,10 +42,7 @@ void main() {
     expect(find.text('Proposal to Rivet'), findsOneWidget);
     expect(find.text(_text), findsOneWidget);
     // The comment is one tap away, under the buttons.
-    expect(find.text('A comment for Rivet, if you like'), findsNothing);
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
-    expect(find.text('Rivet gets it with your answer.'), findsOneWidget);
+    expect(find.text('Reply to Rivet'), findsOneWidget);
     await tester.enterText(_commentField, 'Just one, on Sonnet ');
     await settle(tester);
     expect(find.text('Approve'), findsNothing);
@@ -71,8 +68,6 @@ void main() {
       'approves', (tester) async {
     final harness = proposing();
     await harness.show(tester);
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
     await tester.enterText(_commentField, 'Not now, next week');
     await settle(tester);
     await tester.tap(find.text('Submit'));
@@ -168,7 +163,7 @@ void main() {
   });
 }
 
-/// The comment's field, once Add a comment is tapped.
+/// The comment's field, open from the start.
 final _commentField = find.descendant(
   of: find.byType(DecisionComment),
   matching: find.byType(EditableText),

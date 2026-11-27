@@ -180,7 +180,7 @@ pub(crate) fn signs(db: &Connection, team: &Team, end: i64, now: i64, names: &Ha
         asked.push(format!("{} questions and proposals in the last 24 hours", cards24.raised));
     }
     if cards24.decided >= MIN_SAMPLE && cards24.dismissed as f64 / cards24.decided as f64 > 0.2 {
-        asked.push(format!("{} of {} decided cards dismissed", cards24.dismissed, cards24.decided));
+        asked.push(format!("{} of {} decided requests dismissed", cards24.dismissed, cards24.decided));
     }
     if !asked.is_empty() {
         signs.push(Sign {
@@ -197,13 +197,13 @@ pub(crate) fn signs(db: &Connection, team: &Team, end: i64, now: i64, names: &Ha
         signs.push(Sign {
             key: "person_blind".to_owned(),
             says: format!(
-                "Silent waits: {} item{} wait{} on the person with no card for them, the oldest {oldest:.0} hours (owners: {}).",
+                "Silent waits: {} item{} wait{} on the person with no request for them, the oldest {oldest:.0} hours (owners: {}).",
                 silent.len(),
                 if silent.len() == 1 { "" } else { "s" },
                 if silent.len() == 1 { "s" } else { "" },
                 owners.join(", ")
             ),
-            means: "The person can't see what waits on them. One card listing them, or their owners asking.",
+            means: "The person can't see what waits on them. One request listing them, or their owners asking.",
         });
     }
     let cards72 = metrics::cards(db, team, three_days, end)?;
@@ -211,7 +211,7 @@ pub(crate) fn signs(db: &Connection, team: &Team, end: i64, now: i64, names: &Ha
         signs.push(Sign {
             key: "person_slow".to_owned(),
             says: format!(
-                "The person takes {:.1} hours (p90) to decide, at {:.1} cards a day over 3 days.",
+                "The person takes {:.1} hours (p90) to decide, at {:.1} requests a day over 3 days.",
                 cards72.decided_p90_min.unwrap_or(0.0) / 60.0,
                 cards72.per_day
             ),

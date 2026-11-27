@@ -5,8 +5,9 @@
 //! the folder's `.factoryignore` hides (gitignore syntax). Without one, common
 //! build and dependency folders are hidden. Which folders are open, and
 //! whether hidden files show, is workspace state, so every device shows the
-//! same tree; Factory lists the open folders again every tick and sends the
-//! tree whenever it changes.
+//! same tree; Factory lists a project's folders again when one of them
+//! changes (`explorer_watch`), or what it shows may have, and sends the tree
+//! whenever it changes.
 //!
 //! The project's folders (where some of its agents work) are listed too,
 //! each as a root of its own, and so are its agents' own checkouts. No
@@ -18,11 +19,13 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::time::SystemTime;
 
 use factory_protocol::v1::{self, server_message::Body};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use crate::config::{Config, FolderView};
+use crate::explorer_watch::Listed;
 use crate::factory::{Factory, Inner, RequestError};
 
 pub const IGNORE_FILE: &str = ".factoryignore";
@@ -150,16 +153,28 @@ impl Factory {
     /// sends each tree that changed. The focused project's goes last, and
     /// again after any other's, for apps that keep only the last one.
     pub(crate) async fn refresh_explorer(&self) {
+        self.list_explorers(None, false).await;
+    }
+
+    /// `refresh_explorer` for the projects in `only` (every one whose files
+    /// are open if None), watching what each read; `again`: every watch
+    /// anew (the backstop).
+    pub(crate) async fn list_explorers(&self, only: Option<BTreeSet<String>>, again: bool) {
         let _listing = self.explorer_lock.lock().await;
         let (plans, focused) = {
             let inner = self.lock();
-            let mut open: BTreeSet<String> = self.viewer.paths(FILES_PANE).into_iter().collect();
-            open.extend(self.file_watches.projects());
-            open.extend(inner.state.focused_project.clone());
-            let plans: Vec<Plan> = open.iter().filter_map(|id| self.plan(&inner, id)).collect();
-            (plans, inner.state.focused_project.clone())
+            (self.plans(&inner), inner.state.focused_project.clone())
         };
-        let listed = tokio::task::spawn_blocking(move || plans.into_iter().map(Plan::list).collect::<Vec<v1::Explorer>>()).await;
+        let open: BTreeSet<String> = plans.iter().map(|plan| plan.id.clone()).collect();
+        self.explorer_plans.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone_from(&plans);
+        let wanted: Vec<Plan> = plans.into_iter().filter(|plan| only.as_ref().is_none_or(|only| only.contains(&plan.id))).collect();
+        let (watch, rules, kept) = (self.explorer_watch.clone(), self.explorer_rules.clone(), open.clone());
+        let listed = tokio::task::spawn_blocking(move || {
+            let listed: Vec<(v1::Explorer, Listed)> = wanted.into_iter().map(|plan| plan.list(&rules)).collect();
+            watch.set(listed.iter().map(|(explorer, read)| (explorer.project_id.clone(), read.clone())).collect(), &kept, again);
+            listed.into_iter().map(|(explorer, _)| explorer).collect::<Vec<v1::Explorer>>()
+        })
+        .await;
         let listed = match listed {
             Ok(listed) => listed,
             Err(error) => {
@@ -168,7 +183,7 @@ impl Factory {
             }
         };
         let mut inner = self.lock();
-        inner.explorers.retain(|id, _| listed.iter().any(|explorer| explorer.project_id == *id));
+        inner.explorers.retain(|id, _| open.contains(id));
         let mut send_focused = false;
         for explorer in listed {
             if inner.explorers.get(&explorer.project_id) == Some(&explorer) {
@@ -185,6 +200,22 @@ impl Factory {
         if send_focused && let Some(explorer) = focused.and_then(|id| inner.explorers.get(&id)) {
             self.send(Body::Explorer(explorer.clone()));
         }
+    }
+
+    /// What to list for the explorer of each project whose files are open.
+    fn plans(&self, inner: &Inner) -> Vec<Plan> {
+        let mut open: BTreeSet<String> = self.viewer.paths(FILES_PANE).into_iter().collect();
+        open.extend(self.file_watches.projects());
+        open.extend(inner.state.focused_project.clone());
+        open.iter().filter_map(|id| self.plan(inner, id)).collect()
+    }
+
+    /// Whether what the explorers show may have changed since they were
+    /// last listed: a project's files opened or closed, a folder, an agent's
+    /// checkout or an open folder added or gone.
+    pub(crate) fn explorer_plans_changed(&self) -> bool {
+        let plans = self.plans(&self.lock());
+        *self.explorer_plans.lock().unwrap_or_else(std::sync::PoisonError::into_inner) != plans
     }
 
     /// What to list for a project's explorer; None if there's no such project.
@@ -241,7 +272,8 @@ impl Factory {
 const FILES_PANE: &str = "files";
 
 /// A project's explorer, to be listed.
-struct Plan {
+#[derive(Clone, PartialEq)]
+pub(crate) struct Plan {
     id: String,
     root: PathBuf,
     view: FolderView,
@@ -249,17 +281,20 @@ struct Plan {
 }
 
 impl Plan {
-    fn list(self) -> v1::Explorer {
+    /// The explorer, and the folders and `.factoryignore` files it read.
+    fn list(self, rules: &Rules) -> (v1::Explorer, Listed) {
         let Plan { id, root, view, roots } = self;
+        let mut read = Listed::default();
         // Each root's tree leaves out the other roots inside it.
         let paths: Vec<PathBuf> = roots.iter().map(|(_, path, _)| path.clone()).collect();
-        let (entries, error) = if paths.contains(&root) { (Vec::new(), String::new()) } else { listed(&root, &view, &paths) };
+        let (entries, error) =
+            if paths.contains(&root) { (Vec::new(), String::new()) } else { listed(&root, &view, &paths, rules, &mut read) };
         let mut folders = Vec::new();
         for (root, path, own) in roots {
-            let (entries, error) = listed(&path, &own, &paths);
+            let (entries, error) = listed(&path, &own, &paths, rules, &mut read);
             folders.push(v1::ExplorerRoot { path: path.display().to_string(), entries, error, ..root });
         }
-        v1::Explorer { project_id: id, show_all: view.show_all, entries, error, folders }
+        (v1::Explorer { project_id: id, show_all: view.show_all, entries, error, folders }, read)
     }
 }
 
@@ -305,6 +340,8 @@ impl Drop for Watch {
     fn drop(&mut self) {
         if let Some(factory) = self.factory.upgrade() {
             factory.file_watches.set(self.id, "");
+            // The explorers look again at what's open.
+            factory.wake_loops();
         }
     }
 }
@@ -331,9 +368,9 @@ pub(crate) fn view_exists(config: &Config, key: &str) -> bool {
 }
 
 /// A root's rows, or why it can't be read. Directories in `roots` (the
-/// explorer's other roots) are left out.
-fn listed(root: &Path, view: &FolderView, roots: &[PathBuf]) -> (Vec<v1::FileEntry>, String) {
-    match list(root, view, roots) {
+/// explorer's other roots) are left out; what it read goes in `read`.
+fn listed(root: &Path, view: &FolderView, roots: &[PathBuf], rules: &Rules, read: &mut Listed) -> (Vec<v1::FileEntry>, String) {
+    match list(root, view, roots, rules, read) {
         Ok(entries) => (entries, String::new()),
         Err(error) => (Vec::new(), format!("Can't read {}: {error}", root.display())),
     }
@@ -341,10 +378,10 @@ fn listed(root: &Path, view: &FolderView, roots: &[PathBuf]) -> (Vec<v1::FileEnt
 
 /// The rows to show: the folder's entries, and the entries of each open
 /// folder right after it.
-fn list(root: &Path, view: &FolderView, roots: &[PathBuf]) -> std::io::Result<Vec<v1::FileEntry>> {
-    let rules = rules(root);
+fn list(root: &Path, view: &FolderView, roots: &[PathBuf], rules: &Rules, read: &mut Listed) -> std::io::Result<Vec<v1::FileEntry>> {
+    let rules = rules.of(root, read);
     let mut rows = Vec::new();
-    let listing = Listing { root, rules: &rules, view, roots };
+    let mut listing = Listing { root, rules: &rules, view, roots, read };
     listing.folder("", 0, false, &mut rows)?;
     Ok(rows)
 }
@@ -356,13 +393,18 @@ struct Listing<'a> {
     view: &'a FolderView,
     /// Directories shown as roots of their own, left out here.
     roots: &'a [PathBuf],
+    /// The folders read.
+    read: &'a mut Listed,
 }
 
 impl Listing<'_> {
-    fn folder(&self, folder: &str, depth: u32, in_hidden: bool, rows: &mut Vec<v1::FileEntry>) -> std::io::Result<()> {
+    fn folder(&mut self, folder: &str, depth: u32, in_hidden: bool, rows: &mut Vec<v1::FileEntry>) -> std::io::Result<()> {
         let (root, rules, view) = (self.root, self.rules, self.view);
         let mut children = Vec::new();
-        for entry in std::fs::read_dir(root.join(folder))? {
+        let path = root.join(folder);
+        let entries = std::fs::read_dir(&path)?;
+        self.read.folders.insert(path);
+        for entry in entries {
             let Ok(entry) = entry else { continue };
             let name = entry.file_name().to_string_lossy().into_owned();
             // Follows symlinks, so a linked folder opens like a folder.
@@ -392,6 +434,51 @@ impl Listing<'_> {
             }
         }
         Ok(())
+    }
+}
+
+/// Each root's `.factoryignore` rules, kept while the file stays as it was
+/// (its modified time and size), or the defaults while it has none, rather
+/// than made again at each listing.
+#[derive(Default)]
+pub(crate) struct Rules {
+    kept: Mutex<HashMap<PathBuf, (Stamp, Arc<Gitignore>)>>,
+}
+
+/// A `.factoryignore`'s modified time and size; None while there's none.
+type Stamp = Option<(SystemTime, u64)>;
+
+impl Rules {
+    /// The most roots kept.
+    const MOST: usize = 512;
+
+    /// `root`'s rules; its `.factoryignore`, when it has one, goes in `read`.
+    fn of(&self, root: &Path, read: &mut Listed) -> Arc<Gitignore> {
+        let file = root.join(IGNORE_FILE);
+        let metadata = std::fs::metadata(&file).ok().filter(std::fs::Metadata::is_file);
+        if metadata.is_some() {
+            read.files.insert(file);
+        }
+        // None when it can't be told whether the file changed: made again.
+        let stamp = match &metadata {
+            None => Some(None),
+            Some(metadata) => metadata.modified().ok().map(|at| Some((at, metadata.len()))),
+        };
+        let mut kept = self.kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(stamp) = stamp
+            && let Some((kept_stamp, rules)) = kept.get(root)
+            && *kept_stamp == stamp
+        {
+            return rules.clone();
+        }
+        let made = Arc::new(rules(root));
+        if let Some(stamp) = stamp {
+            if kept.len() >= Self::MOST {
+                kept.clear();
+            }
+            kept.insert(root.to_owned(), (stamp, made.clone()));
+        }
+        made
     }
 }
 

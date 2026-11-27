@@ -4,7 +4,6 @@
 // and leaves the pane in the agent's layout. A phone asked to show a page
 // pane (showPane, as the app strip's chips do) opens the page the same way.
 import 'package:factory_app/inbox.dart' show InboxView;
-import 'package:factory_app/mobile/needs_you_phone.dart' show PhoneNeedsYou;
 import 'package:factory_app/ipad/workbench.dart';
 import 'package:factory_app/mobile/navigation.dart';
 import 'package:factory_app/pane_chrome.dart';
@@ -57,8 +56,8 @@ void main() {
     await harness.show(tester, size: _narrow, home: _window(focus));
     await pumpFrames(tester);
     expect(find.byType(PhoneShell), findsOneWidget);
-    // The phone's Needs you, one card a screen (#514).
-    expect(find.byType(PhoneNeedsYou), findsOneWidget);
+    // The phone's Needs you: the list first (#599).
+    expect(find.byType(InboxView), findsOneWidget);
     expect(_viewers, findsNothing);
     expect(find.text(_cantShow), findsNothing);
     final page = AppScope.scope(tester.element(find.byType(Shell))).page;
@@ -75,13 +74,13 @@ void main() {
     expect(page.value, AppPage.agent);
     await harness.show(tester, size: _narrow, home: _window(focus));
     await pumpFrames(tester);
-    expect(find.byType(PhoneNeedsYou), findsOneWidget);
+    expect(find.byType(InboxView), findsOneWidget);
     expect(find.text(_cantShow), findsNothing);
 
     await tester.tap(find.bySemanticsLabel('Back').last);
     await pumpFrames(tester, const Duration(seconds: 1));
     expect(page.value, AppPage.agent);
-    expect(find.byType(PhoneNeedsYou), findsNothing);
+    expect(find.byType(InboxView), findsNothing);
     expect(_viewers, findsNothing);
     expect(layoutsSent(harness), isEmpty);
   });
@@ -103,11 +102,11 @@ void main() {
     tester.view.display.size = _narrow;
     await tester.pump();
     expect(find.byType(PhoneShell), findsOneWidget);
-    expect(find.byType(PhoneNeedsYou), findsOneWidget);
-    final first = tester.state(find.byType(PhoneNeedsYou));
+    expect(find.byType(InboxView), findsOneWidget);
+    final first = tester.state(find.byType(InboxView));
     await pumpFrames(tester);
     // The same page, kept: not one made again a frame later.
-    expect(tester.state(find.byType(PhoneNeedsYou)), same(first));
+    expect(tester.state(find.byType(InboxView)), same(first));
     final page = AppScope.scope(tester.element(find.byType(Shell))).page;
     expect(page.value, AppPage.inbox);
   });
@@ -125,13 +124,13 @@ void main() {
         .routes;
     expect(routes.showPane('a1', 'needs'), isTrue);
     await pumpFrames(tester, const Duration(seconds: 1));
-    expect(find.byType(PhoneNeedsYou), findsOneWidget);
+    expect(find.byType(InboxView), findsOneWidget);
     expect(_viewers, findsNothing);
     expect(find.text(_cantShow), findsNothing);
 
     await tester.tap(find.bySemanticsLabel('Back').last);
     await pumpFrames(tester, const Duration(seconds: 1));
-    expect(find.byType(PhoneNeedsYou), findsNothing);
+    expect(find.byType(InboxView), findsNothing);
     expect(layoutsSent(harness), isEmpty);
   });
 }

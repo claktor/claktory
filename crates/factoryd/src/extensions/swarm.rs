@@ -53,14 +53,14 @@ static MANIFEST: Manifest = Manifest {
 
 const PROMPT: &str = "## Team health
 
-swarm_report measures how agents work together, from Claktory's records: how busy each agent is, how long agents take to answer each other, who's in the middle of the traffic, finished and blocked items, the person's cards, wake-ups and tokens, and which warning signs are red. Use it when the person asks why things are slow, or to improve how the team works, and when Claktory tells you a sign turned red. Before you propose anything, follow the playbook (the Claktory manual's note \"swarm-playbook\", with memory_read, if you have the manual):
+swarm_report measures how agents work together, from Claktory's records: how busy each agent is, how long agents take to answer each other, who's in the middle of the traffic, finished and blocked items, the person's requests, wake-ups and tokens, and which warning signs are red. Use it when the person asks why things are slow, or to improve how the team works, and when Claktory tells you a sign turned red. Before you propose anything, follow the playbook (the Claktory manual's note \"swarm-playbook\", with memory_read, if you have the manual):
 - Look at two windows, 6 hours and 72 hours; a sign counts only when it holds in the last 6 hours and in the 6 before them.
 - Find which constraint binds before proposing more agents: more agents make coordination problems worse.
-- Propose at most five changes, each tied to a sign, in one ask_person card, and apply nothing until the person approves; never delete an agent or give a secret that way. Measure again a day later.
+- Propose at most five changes, each tied to a sign, in one ask_person request, and apply nothing until the person approves; never delete an agent or give a secret that way. Measure again a day later.
 - It reads counts and times only. Don't read what agents wrote unless the person asks about a specific exchange, and never a pipe's messages.
 ";
 
-const ABOUT: &str = "How the agents work together, from Claktory's records, over a window: each agent's busy share and runs (Q1), how long agents take to answer each other (Q2), the traffic and its hub (Q3), the last 7 days (Q4), finished items and cycle times (Q5), what's blocked and on what (Q6), the person's cards (Q7), wake-ups against the prompt cache (Q8), tokens and context size (Q9), the monitors that wake agents most (Q10), and the warning signs that are red. Counts, times and states only. window: hours (6 unless given; 72 for the trend); offset: hours before now the window ends (0 unless given; 6 for the 6 hours before); project: a project's id or name, for its agents and the admin agents (everyone unless given).";
+const ABOUT: &str = "How the agents work together, from Claktory's records, over a window: each agent's busy share and runs (Q1), how long agents take to answer each other (Q2), the traffic and its hub (Q3), the last 7 days (Q4), finished items and cycle times (Q5), what's blocked and on what (Q6), the person's requests (Q7), wake-ups against the prompt cache (Q8), tokens and context size (Q9), the monitors that wake agents most (Q10), and the warning signs that are red. Counts, times and states only. window: hours (6 unless given; 72 for the trend); offset: hours before now the window ends (0 unless given; 6 for the 6 hours before); project: a project's id or name, for its agents and the admin agents (everyone unless given).";
 
 pub(crate) struct Swarm;
 
@@ -279,7 +279,7 @@ fn text(report: &Report) -> String {
         );
     }
 
-    out.push_str("\nQ4 By day: day | agent messages | person's | agents active | runs | short | items done | cards | agent messages per item done:\n");
+    out.push_str("\nQ4 By day: day | agent messages | person's | agents active | runs | short | items done | requests | agent messages per item done:\n");
     for day in &report.days {
         let _ = writeln!(
             out,
@@ -308,7 +308,7 @@ fn text(report: &Report) -> String {
         opt(flow.littles_law_cycle_h, 1)
     );
 
-    let _ = writeln!(out, "\nQ6 Blocked now: {} items. list #item | owner | hours | waits on | owner's card waiting:", report.blocked.len());
+    let _ = writeln!(out, "\nQ6 Blocked now: {} items. list #item | owner | hours | waits on | owner's request waiting:", report.blocked.len());
     for item in report.blocked.iter().take(30) {
         let _ = writeln!(
             out,
@@ -328,7 +328,7 @@ fn text(report: &Report) -> String {
     let cards = &report.cards;
     let _ = writeln!(
         out,
-        "\nQ7 The person's cards: {} raised ({:.1} a day), {} decided, {} dismissed (questions a /clear closed unseen count as neither); decided in {} min (p50), {} min (p90).",
+        "\nQ7 The person's requests: {} raised ({:.1} a day), {} decided, {} dismissed (questions a /clear closed unseen count as neither); decided in {} min (p50), {} min (p90).",
         cards.raised,
         cards.per_day,
         cards.decided,
@@ -532,7 +532,7 @@ fn check(factory: &Arc<Factory>, now: i64) -> Result<(), String> {
         }
         let _ = write!(
             text,
-            "Run swarm_report (6 hours, then 72) and follow the playbook before proposing anything: at most five changes on one ask_person card, applied only once {person} approves. Claktory won't mention {} again until {} clears.",
+            "Run swarm_report (6 hours, then 72) and follow the playbook before proposing anything: at most five changes in one ask_person request, applied only once {person} approves. Claktory won't mention {} again until {} clears.",
             if new.len() == 1 { "it" } else { "them" },
             if new.len() == 1 { "it" } else { "each" }
         );

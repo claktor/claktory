@@ -63,7 +63,7 @@ async fn rivet_asks_to_approve_a_pipe_on_a_card_only_the_persons_tap_approves() 
     let pipe = waiting(&mut client, &mut view, &factory).await;
     let args = json!({"pipe": "Waiting", "reason": "Matt said Lea answers it and Bo reads it.", "members": ["Lea", "Bo"], "commands": ["Lea"], "lead": "Lea", "review_incoming": true});
     let said = call(&mut client, &mut view, "rivet", "pipes_approve", &args.to_string()).await;
-    assert!(said.starts_with("Asked Matt: their card shows what you propose"), "{said}");
+    assert!(said.starts_with("Asked Matt: their request shows what you propose"), "{said}");
     let (seq, card) = cards(&view).pop().expect("a card");
     assert_eq!(card.title, "Approve the pipe \"Waiting\"");
     assert_eq!(
@@ -84,7 +84,7 @@ async fn rivet_asks_to_approve_a_pipe_on_a_card_only_the_persons_tap_approves() 
     // choices on it.
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
     match apply_request(&mut client, &mut view, answer(seq, false)).await {
-        Body::Error(error) => assert_eq!(error.message, "Approve it with the choices on the card, or in the pipe."),
+        Body::Error(error) => assert_eq!(error.message, "Approve it with the choices in the request, or in the pipe."),
         other => panic!("not refused: {other:?}"),
     }
     assert_eq!(pipe_of(&view, &pipe).state(), v1::PipeState::Approval);
@@ -92,9 +92,9 @@ async fn rivet_asks_to_approve_a_pipe_on_a_card_only_the_persons_tap_approves() 
     // Asked again: the same card, changed.
     let args = json!({"pipe": "Waiting", "reason": "Cy reads it too.", "members": ["Lea", "Bo", "Cy"], "commands": ["Lea"], "lead": "Lea", "review_incoming": true});
     let said = call(&mut client, &mut view, "rivet", "pipes_approve", &args.to_string()).await;
-    assert!(said.starts_with("Changed your card"), "{said}");
+    assert!(said.starts_with("Changed your request"), "{said}");
     let all = cards(&view);
-    assert_eq!(all.len(), 1, "one card for the pipe");
+    assert_eq!(all.len(), 1, "one request for the pipe");
     let (_, card) = all[0].clone();
     assert_eq!((card.revision, card.update_reason.as_str()), (2, "Cy reads it too."));
     assert_eq!(card.pipe_approval.clone().expect("the proposal").member_ids, ["lea", "bo", "cy"]);
@@ -113,7 +113,7 @@ async fn rivet_asks_to_approve_a_pipe_on_a_card_only_the_persons_tap_approves() 
     let (_, decided) = cards(&view).pop().expect("the card");
     assert_eq!(decided.state(), v1::AskPersonState::Answered);
     let lines = pipes::messages_for_test(&factory, &pipe);
-    assert!(lines.iter().any(|line| line.text.starts_with("You approved it, from Rivet's card. Waiting for")), "{lines:?}");
+    assert!(lines.iter().any(|line| line.text.starts_with("You approved it, in Rivet's request. Waiting for")), "{lines:?}");
 
     // Nothing of the digits or the other side's words reaches Rivet: its
     // results, events, cards and conversation's files.
@@ -194,9 +194,9 @@ async fn a_card_to_approve_a_pipe_is_checked_as_the_persons_approval_and_void_on
     pipes::peer_key_for_test(&factory, &pipe, "another-endpoint");
     view.follow(&mut client, |view| cards(view).pop().is_some_and(|(_, card)| card.withdrawn)).await;
     let (_, card) = cards(&view).pop().expect("the card");
-    assert_eq!(card.withdraw_reason, "This card is void: its other side's Claktory changed.");
+    assert_eq!(card.withdraw_reason, "This request is void: its other side's Claktory changed.");
     let refused = apply_request(&mut client, &mut view, approve_from(&card, &pipe, &["lea"], "lea", &[])).await;
-    assert!(matches!(refused, Body::Error(error) if error.message.starts_with("This card no longer waits for you")));
+    assert!(matches!(refused, Body::Error(error) if error.message.starts_with("This request no longer waits for you")));
     assert_eq!(pipe_of(&view, &pipe).state(), v1::PipeState::Approval);
 
     // Asked again, then Matt approves in the pipe itself: void.
@@ -212,7 +212,7 @@ async fn a_card_to_approve_a_pipe_is_checked_as_the_persons_approval_and_void_on
     apply_request(&mut client, &mut view, Request::ApprovePipe(plain)).await;
     view.follow(&mut client, |view| cards(view).iter().filter(|(_, card)| card.withdrawn).count() == 2).await;
     let (_, card) = cards(&view).pop().expect("the card");
-    assert_eq!(card.withdraw_reason, "This card is void: the pipe was approved in its own view.");
+    assert_eq!(card.withdraw_reason, "This request is void: the pipe was approved in its own view.");
 
     // Only an admin agent that hasn't read from outside.
     let lea = call(&mut client, &mut view, "lea", "pipes_approve", &args.to_string()).await;

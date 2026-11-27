@@ -104,6 +104,33 @@ enum ConnectionStoreCheck {
       check(defaults.object(forKey: ConnectionStore.defaultsKey) == nil, "user defaults stay empty")
     }
 
+    // Not read yet: a write is refused from the start (Fugo), on the
+    // Keychain and ad hoc alike, until a read works or the person starts
+    // over.
+    do {
+      let defaults = freshDefaults()
+      let keychain = FakeKeychain()
+      keychain.data = try! ConnectionStore.encode(saved)
+      let store = ConnectionStore(defaults: defaults, keychain: keychain, log: log)
+      check(!store.readFailed, "not read yet isn't a failed read")
+      check(code { try store.write(["current": ""]) } == "credentials_read_failed", "a write before any read is refused")
+      check(same(ConnectionStore.decode(keychain.data!) ?? [:], saved), "the Keychain is as it was")
+      check(defaults.object(forKey: ConnectionStore.defaultsKey) == nil, "nothing went to user defaults")
+      check(same(try store.read(), saved), "then read")
+      check(code { try store.write(["current": "later"]) } == nil, "and written")
+      check(same(ConnectionStore.decode(keychain.data!) ?? [:], ["current": "later"]), "written after the read")
+
+      let adHocDefaults = freshDefaults()
+      adHocDefaults.set(saved, forKey: ConnectionStore.defaultsKey)
+      let adHoc = ConnectionStore(defaults: adHocDefaults, keychain: nil, log: log)
+      check(code { try adHoc.write([:]) } == "credentials_read_failed", "ad hoc too")
+      check(same(adHocDefaults.dictionary(forKey: ConnectionStore.defaultsKey) ?? [:], saved), "user defaults as they were")
+
+      let fresh = ConnectionStore(defaults: freshDefaults(), keychain: FakeKeychain(), log: log)
+      try fresh.reset()
+      check(code { try fresh.write(saved) } == nil, "starting over allows writing")
+    }
+
     // The Keychain can't be read: an error, never an empty store, and
     // nothing written over it until a read works or the person starts over.
     do {

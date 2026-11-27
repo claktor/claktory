@@ -25,9 +25,14 @@ use crate::login::Flow;
 use crate::models::Models;
 use crate::transcript::{Change, Transcript, TranscriptError, now_ms};
 
-/// How often the explorer's folders are listed while an app is connected,
-/// and the watched files read while they can't be watched.
+/// How often the watched files are read while they can't be watched.
 const WATCH_INTERVAL: Duration = Duration::from_millis(500);
+/// How often the explorers' folders are listed anyway while an app is
+/// connected, for what their watches miss (`explorer_watch`).
+const EXPLORER_BACKSTOP: Duration = Duration::from_secs(20);
+/// How long the explorers wait after a change for the ones that come with
+/// it (a build writing several files), to list once.
+const EXPLORER_SETTLE: Duration = Duration::from_millis(150);
 /// How often the watched files are read anyway, in case a change went
 /// unreported.
 const WATCH_SAFETY: Duration = Duration::from_secs(30);
@@ -354,6 +359,11 @@ pub struct Factory {
     pub(crate) files: tokio::sync::Mutex<()>,
     /// Serializes listings of the explorer.
     pub(crate) explorer_lock: tokio::sync::Mutex<()>,
+    /// The explorers' folders watched, the rules kept and what was listed
+    /// last (`explorer`).
+    pub(crate) explorer_watch: Arc<crate::explorer_watch::ExplorerWatch>,
+    pub(crate) explorer_rules: Arc<crate::explorer::Rules>,
+    pub(crate) explorer_plans: Mutex<Vec<crate::explorer::Plan>>,
     /// The projects connections show the files of (`crate::explorer`).
     pub(crate) file_watches: crate::explorer::Watches,
     pub(crate) health: crate::update::Health,
@@ -501,6 +511,8 @@ pub struct Factory {
     /// Notifications: who's using Claktory where, and what was seen
     /// (`crate::notify`).
     pub(crate) notify: crate::notify::State,
+    /// macOS's protected places as last found (`crate::protected`).
+    pub(crate) protected: crate::protected::Protected,
     /// Browser control's sessions and the connections brokering them
     /// (`crate::browser`).
     pub(crate) browser: crate::browser::Browser,
@@ -518,6 +530,11 @@ pub struct Factory {
     pub(crate) diagnostics: crate::diagnostics::Recorder,
     /// Notified when a project is unarchived: its agents read what waited.
     unarchived: tokio::sync::Notify,
+    /// The app's token on Windows for this start of the backend
+    /// (`windows::app_token`), in memory only and never logged; none when it
+    /// couldn't be written (`connection::app_token_matches`).
+    #[cfg(windows)]
+    pub(crate) app_token: Mutex<Option<zeroize::Zeroizing<String>>>,
 }
 
 pub(crate) struct Inner {
@@ -900,6 +917,9 @@ impl Factory {
             store,
             files: tokio::sync::Mutex::new(()),
             explorer_lock: tokio::sync::Mutex::new(()),
+            explorer_watch: Arc::default(),
+            explorer_rules: Arc::default(),
+            explorer_plans: Mutex::default(),
             file_watches: crate::explorer::Watches::default(),
             health: crate::update::Health::default(),
             updates: crate::update::Updates::default(),
@@ -960,6 +980,7 @@ impl Factory {
             service,
             catalog,
             notify: crate::notify::State::default(),
+            protected: crate::protected::Protected::default(),
             browser: crate::browser::Browser::default(),
             agent_browser: crate::browser_host::Host::default(),
             presentations: crate::presentation::Hub::default(),
@@ -967,6 +988,8 @@ impl Factory {
             watches: crate::watch::Hub::default(),
             diagnostics: crate::diagnostics::Recorder::default(),
             unarchived: tokio::sync::Notify::new(),
+            #[cfg(windows)]
+            app_token: Mutex::new(None),
             key_color,
             key_seed,
         });
@@ -1786,7 +1809,7 @@ impl Factory {
                 // Errands only for an agent the person contained for them.
                 if extension.id == crate::errands::ERRANDS && extension.enabled == Some(true) && !self.pipes.errand_agent(id) {
                     return Err(RequestError::Remote(
-                        "Errands is only for an agent contained for errands: contain it first, in its settings.".to_owned(),
+                        "Errands is only for an agent used for errands: turn on Use for errands… in its settings first.".to_owned(),
                     ));
                 }
                 crate::extensions::apply_change(config, id, extension)?;
@@ -2510,9 +2533,25 @@ impl Factory {
                 Ok(path)
             })
             .await?;
-        tokio::fs::create_dir_all(&path).await?;
+        self.folder_made(&path).await?;
         self.refresh_explorer().await;
         Ok(())
+    }
+
+    /// A project's folder added or pointed at `path`: made if missing,
+    /// and, in a place macOS protects, read at once, so macOS asks while
+    /// the person is there (`crate::protected`). One macOS refuses can't be
+    /// made: that's shown as the place's state rather than as this error.
+    async fn folder_made(&self, path: &Path) -> Result<(), RequestError> {
+        let made = tokio::fs::create_dir_all(path).await;
+        let protected = self.protected.root(path).is_some();
+        if protected {
+            crate::protected::touch(self, path).await;
+        }
+        match made {
+            Err(error) if protected && error.raw_os_error() == Some(1) => Ok(()),
+            made => Ok(made?),
+        }
     }
 
     /// Renames a project's folder, or points it at another folder on disk.
@@ -2549,7 +2588,7 @@ impl Factory {
                 Ok(folder.path.clone())
             })
             .await?;
-        tokio::fs::create_dir_all(&path).await?;
+        self.folder_made(&path).await?;
         self.refresh_explorer().await;
         Ok(())
     }
@@ -2864,6 +2903,7 @@ impl Factory {
                 waiting_items: waiting_items.remove(&agent.id).unwrap_or_default(),
                 default_prompt: Config::default_prompt(agent).unwrap_or_default().to_owned(),
                 waiting_seqs: runtime.and_then(|runtime| runtime.transcript.as_ref()).map(Transcript::waiting_seqs).unwrap_or_default(),
+                waiting_versions: runtime.and_then(|runtime| runtime.transcript.as_ref()).map(Transcript::waiting_versions).unwrap_or_default(),
                 lead_id: inner.config.lead(agent).map(|lead| lead.id.clone()).unwrap_or_default(),
                 usage_wait: runtime.and_then(|runtime| runtime.usage_wait.as_ref()).map(|wait| wait.text.clone()).unwrap_or_default(),
                 usage_wait_until_ms: runtime.and_then(|runtime| runtime.usage_wait.as_ref()).map_or(0, |wait| wait.until_ms),
@@ -2902,6 +2942,7 @@ impl Factory {
                 })
                 .contains(&(agent.to_owned(), task.to_owned()))
         });
+        crate::account::recovery::fill(self, config, &mut vault);
         if vault.exists && !vault.unlocked {
             vault.agents_waiting = self.agents_waiting_for_vault(inner);
             let problem = self.account.view(&inner.config.account).map(|account| account.problem).unwrap_or_default();
@@ -2929,6 +2970,8 @@ impl Factory {
             provider_waits,
             alerts,
             alerts_unread,
+            protected_places: crate::protected::view(self, config),
+            protected_roots: crate::protected::roots(self),
             os: std::env::consts::OS.to_owned(),
             map: Some(crate::map::build(config, &self.home, &vault, &apps)),
             apps,
@@ -3269,19 +3312,59 @@ async fn watch(factory: Weak<Factory>) {
     }
 }
 
-/// Lists the explorers' folders again every half second while an app is
-/// connected (it's for apps only); with none, waits for one.
+/// Lists the explorers' folders again while an app is connected (it's for
+/// apps only): a project's when one of its folders changes
+/// (`explorer_watch`), all of them when what they show may have changed (a
+/// project's files opened, a folder or agent added) and every
+/// `EXPLORER_BACKSTOP` for what watches miss. With none, waits for one.
 async fn explore(factory: Weak<Factory>) {
-    let Some(mut woken) = factory.upgrade().map(|factory| factory.loops_woken()) else { return };
+    let Some((mut woken, mut activity, changed)) =
+        factory.upgrade().map(|factory| (factory.loops_woken(), factory.activity(), factory.explorer_watch.changed.clone()))
+    else {
+        return;
+    };
+    let mut backstop = tokio::time::Instant::now();
     loop {
         let Some(connected) = factory.upgrade().map(|factory| factory.clients() > 0) else { return };
-        if connected {
-            tokio::time::sleep(WATCH_INTERVAL).await;
-        } else if woken.changed().await.is_err() {
-            return;
+        let full = if !connected {
+            if woken.changed().await.is_err() {
+                return;
+            }
+            true
+        } else {
+            tokio::select! {
+                () = changed.notified() => false,
+                () = tokio::time::sleep_until(backstop) => true,
+                seen = activity.changed() => {
+                    if seen.is_err() {
+                        return;
+                    }
+                    false
+                }
+                seen = woken.changed() => {
+                    if seen.is_err() {
+                        return;
+                    }
+                    false
+                }
+            }
+        };
+        if !full {
+            tokio::time::sleep(EXPLORER_SETTLE).await;
         }
+        // What came meanwhile is in this listing.
+        activity.borrow_and_update();
+        woken.borrow_and_update();
         let Some(factory) = factory.upgrade() else { return };
-        factory.refresh_explorer().await;
+        let dirty = factory.explorer_watch.take();
+        if full {
+            factory.list_explorers(None, true).await;
+            backstop = tokio::time::Instant::now() + EXPLORER_BACKSTOP;
+        } else if dirty.is_none() || factory.explorer_plans_changed() {
+            factory.list_explorers(None, false).await;
+        } else if let Some(dirty) = dirty.filter(|dirty| !dirty.is_empty()) {
+            factory.list_explorers(Some(dirty), false).await;
+        }
     }
 }
 
@@ -3367,6 +3450,12 @@ impl Factory {
     /// minute after the first; for tests that read factory.db themselves.
     pub fn write_calls(&self) {
         self.store.write_calls();
+    }
+
+    /// A stand-in for macOS's protected places (`crate::protected`), so a
+    /// test never reads the real Documents; for tests.
+    pub fn set_protected_places(&self, places: Arc<dyn crate::protected::Places>) {
+        self.protected.set(places);
     }
 
     /// Makes new vault passphrases cheap to check; for tests.

@@ -16,12 +16,20 @@ import 'warp.dart';
 
 /// Where History's records come from: the backend, or a test's.
 abstract class HistorySource {
-  Future<HistoryOverview> overview();
+  /// The overview; with [project], its counts only that project's.
+  Future<HistoryOverview> overview({String project = ''});
 
   /// Events after [cursor] (from the first when empty), up to [until]
-  /// (ms) when given.
-  Future<HistoryEvents> events(List<int> cursor, {double? until});
-  Future<void> watch(bool on);
+  /// (ms) when given; only [project]'s when given, a page then holding
+  /// fewer, even none, with more to ask for.
+  Future<HistoryEvents> events(
+    List<int> cursor, {
+    double? until,
+    String project = '',
+  });
+
+  /// New events while [on]; only [project]'s when given.
+  Future<void> watch(bool on, {String project = ''});
   Stream<HistoryEvents> get pushes;
   ValueListenable<Int64> get changed;
 }
@@ -32,17 +40,23 @@ class BackendHistory implements HistorySource {
   final Backend backend;
 
   @override
-  Future<HistoryOverview> overview() => backend.historyOverview();
+  Future<HistoryOverview> overview({String project = ''}) =>
+      backend.historyOverview(project: project);
 
   @override
-  Future<HistoryEvents> events(List<int> cursor, {double? until}) =>
-      backend.historyEvents(
-        cursor: cursor,
-        untilMs: until == null ? null : Int64(until.ceil()),
-      );
+  Future<HistoryEvents> events(
+    List<int> cursor, {
+    double? until,
+    String project = '',
+  }) => backend.historyEvents(
+    cursor: cursor,
+    untilMs: until == null ? null : Int64(until.ceil()),
+    project: project,
+  );
 
   @override
-  Future<void> watch(bool on) => backend.watchHistory(on);
+  Future<void> watch(bool on, {String project = ''}) =>
+      backend.watchHistory(on, project: project);
 
   @override
   Stream<HistoryEvents> get pushes => backend.historyPushes;
@@ -118,11 +132,43 @@ class HistoryController extends ChangeNotifier {
   /// choice while History is open, never kept.
   String? project;
 
-  /// Shows only [id]'s project (null: all of them).
+  /// What the backend is asked for: [project]'s id, or '' for all.
+  String get _asked => project ?? '';
+
+  /// Shows only [id]'s project (null: all of them). The board filters what
+  /// it draws at once; the backend is asked again for that project's
+  /// counts and events alone (a Claktory from before that sends them all,
+  /// which the board filters the same), from where the playhead is.
   void showProject(String? id) {
     if (id == project) return;
     project = id;
     notifyListeners();
+    if (_opened && !_closed && timeline != null) unawaited(_reproject());
+  }
+
+  Future<void> _reproject() async {
+    final asked = project;
+    try {
+      final overview = await source.overview(project: _asked);
+      if (_closed || asked != project) return;
+      _take(overview);
+      loaded = false;
+      _waiting.clear();
+      unawaited(source.watch(true, project: _asked).catchError((_) {}));
+      _restart();
+      notifyListeners();
+      await _pages(fresh: true);
+    } on RequestFailure catch (failure) {
+      if (_closed || asked != project) return;
+      problem = "Couldn't load the history. ${failure.message}";
+      notifyListeners();
+    }
+  }
+
+  /// Loads the events afresh, from where the playhead is first.
+  void _restart() {
+    _stretches = [_Stretch(double.negativeInfinity, const [])];
+    _reach(time.value);
   }
 
   /// Loads the overview and the first page, then the rest in the
@@ -139,12 +185,12 @@ class HistoryController extends ChangeNotifier {
     problem = null;
     notifyListeners();
     try {
-      final overview = await source.overview();
+      final overview = await source.overview(project: _asked);
       if (_closed) return;
       _take(overview);
       time.value = timeline!.start;
       notifyListeners();
-      unawaited(source.watch(true).catchError((_) {}));
+      unawaited(source.watch(true, project: _asked).catchError((_) {}));
       await _pages();
     } on RequestFailure catch (failure) {
       if (_closed) return;
@@ -168,21 +214,23 @@ class HistoryController extends ChangeNotifier {
   }
 
   /// Loads the events: first where the playhead is, then the rest in
-  /// order. Again from the start when [fresh]: what's here stays until the
-  /// first page comes.
+  /// order. Afresh when [fresh] (the stretches made new by the caller):
+  /// what's here stays until the first page comes.
   Future<void> _pages({bool fresh = false}) async {
     final load = ++_loads;
     problem = null;
-    if (fresh) {
-      _stretches = [_Stretch(double.negativeInfinity, const [])];
-    }
     try {
       while (!_closed && load == _loads) {
         final k = _next();
         if (k < 0) break;
         final stretch = _stretches[k];
         final asked = k + 1 < _stretches.length ? _stretches[k + 1] : null;
-        final page = await source.events(stretch.cursor, until: asked?.from);
+        final from = stretch.cursor;
+        final page = await source.events(
+          from,
+          until: asked?.from,
+          project: _asked,
+        );
         if (_closed || load != _loads) return;
         // Where the playhead went meanwhile may have started a stretch
         // since: up to that one, then.
@@ -204,7 +252,10 @@ class HistoryController extends ChangeNotifier {
           );
         }
         stretch.cursor = page.nextCursor;
-        if (reached || page.nextCursor.isEmpty || page.dt.isEmpty) {
+        // One project's page can hold none with more to come; it's done
+        // when there's no more, or nothing moved on.
+        final stuck = page.dt.isEmpty && listEquals(page.nextCursor, from);
+        if (reached || page.nextCursor.isEmpty || stuck) {
           stretch.done = true;
           if (after != null) {
             // Up to the next: one stretch.
@@ -215,7 +266,14 @@ class HistoryController extends ChangeNotifier {
             _stretches.removeAt(i + 1);
           }
         }
-        _rewarp();
+        // Where the playhead is, at once; pages loading elsewhere, at
+        // most every quarter second, and never more than a tenth of the
+        // time: each warp reads every event so far, so one a page was
+        // quadratic at a year or more (Polpo).
+        if (_stretchAt(time.value) == _stretches.indexOf(stretch) ||
+            _sinceWarp.elapsedMilliseconds >= math.max(250, 10 * _warpMs)) {
+          _rewarp();
+        }
         notifyListeners();
       }
       if (_closed || load != _loads) return;
@@ -313,8 +371,9 @@ class HistoryController extends ChangeNotifier {
     final known = timeline;
     if (known == null || source.changed.value.toInt() <= known.version) return;
     try {
-      final overview = await source.overview();
-      if (_closed) return;
+      final asked = project;
+      final overview = await source.overview(project: _asked);
+      if (_closed || asked != project) return;
       final same =
           overview.nodes.length >= known.nodes.length &&
           [
@@ -324,6 +383,7 @@ class HistoryController extends ChangeNotifier {
       _take(overview);
       if (!same) {
         loaded = false;
+        _restart();
         unawaited(_pages(fresh: true));
       }
       notifyListeners();
@@ -342,19 +402,31 @@ class HistoryController extends ChangeNotifier {
   /// The scrubber's end: the known history, or now while live.
   double get last => math.max(end, live ? time.value : log.last);
 
+  /// Since the warp was last made.
+  final _sinceWarp = Stopwatch();
+
+  /// How long the last warp took to make, in ms.
+  var _warpMs = 0;
+
   void _rewarp() {
     final timeline = this.timeline;
     if (timeline == null) return;
-    warp = TimeWarp.build(
-      start: timeline.start,
-      end: math.max(timeline.end, loaded ? log.last : timeline.end),
-      speed: speed,
-      times: log.times,
-      loaded: loaded ? [(double.negativeInfinity, double.infinity)] : _loaded,
-      histogram: timeline.histogram,
-      histogramStart: timeline.histogramStart,
-    );
+    _sinceWarp
+      ..reset()
+      ..start();
+    warp = _warp(timeline);
+    _warpMs = _sinceWarp.elapsedMilliseconds;
   }
+
+  TimeWarp _warp(HistoryTimeline timeline) => TimeWarp.build(
+    start: timeline.start,
+    end: math.max(timeline.end, loaded ? log.last : timeline.end),
+    speed: speed,
+    times: log.times,
+    loaded: loaded ? [(double.negativeInfinity, double.infinity)] : _loaded,
+    histogram: timeline.histogram,
+    histogramStart: timeline.histogramStart,
+  );
 
   /// When history time [h] plays, in seconds: past the known end, a second
   /// a second.

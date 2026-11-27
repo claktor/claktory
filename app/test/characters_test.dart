@@ -4,6 +4,7 @@ import 'package:factory_app/characters/character.dart';
 import 'package:factory_app/characters/clock.dart';
 import 'package:factory_app/characters/identity.dart';
 import 'package:factory_app/characters/pose.dart';
+import 'package:factory_app/controls.dart' show Select;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/transcript.dart';
 import 'package:fixnum/fixnum.dart';
@@ -555,23 +556,25 @@ void main() {
       ),
     );
     await harness.show(tester);
-    await tester.tap(find.text('Opus 5.5 · High'));
-    await settle(tester);
-    bool selected(String label) => tester
-        .widgetList<Semantics>(labeled(label))
-        .any((w) => w.properties.selected ?? false);
-    // The shape was chosen.
-    expect(selected('Square'), isTrue);
-    expect(selected('Automatic'), isFalse);
+    await openAgentSettings(tester);
+    // The shape was chosen: the Shape menu shows it, by the character.
+    final menu = find.descendant(
+      of: find.byWidgetPredicate((w) => w is Select<String>),
+      matching: find.text('Square'),
+    );
+    expect(menu, findsOneWidget);
     // Every agent has the same eyes: there's nothing else to pick.
     expect(labeled('Bright'), findsNothing);
     expect(find.text('Face'), findsNothing);
-    await tester.ensureVisible(labeled('Hexagon'));
-    await tester.tap(labeled('Hexagon'));
+    await tester.ensureVisible(menu);
     await pumpFrames(tester);
-    // The preview shows it before it's saved.
+    await tester.tap(menu);
+    await settle(tester);
+    await tester.tap(find.text('Hexagon').last);
+    await pumpFrames(tester);
+    // The character shows it before it's saved.
     final preview = tester.widget<AgentCharacter>(
-      find.byWidgetPredicate((w) => w is AgentCharacter && w.size == 80),
+      find.byWidgetPredicate((w) => w is AgentCharacter && w.size == 28),
     );
     expect(preview.agent.avatarShape, 'hexagon');
     await tester.tap(find.text('Save'));
@@ -582,38 +585,21 @@ void main() {
     expect(update.hasName(), isFalse);
 
     // Back to automatic: an empty choice.
-    await tester.tap(find.text('Opus 5.5 · High'));
+    await openAgentSettings(tester);
+    final square = find.descendant(
+      of: find.byWidgetPredicate((w) => w is Select<String>),
+      matching: find.text('Square'),
+    );
+    await tester.ensureVisible(square);
+    await pumpFrames(tester);
+    await tester.tap(square);
     await settle(tester);
-    await tester.ensureVisible(labeled('Automatic').first);
-    await tester.tap(labeled('Automatic').first);
+    await tester.tap(find.text('Automatic').last);
     await pumpFrames(tester);
     await tester.tap(find.text('Save'));
     await settle(tester);
     expect(harness.last.updateAgent.hasAvatarShape(), isTrue);
     expect(harness.last.updateAgent.avatarShape, '');
     expect(harness.last.updateAgent.hasAvatarFace(), isFalse);
-  });
-
-  testWidgets('settings preview the character in each mood', (tester) async {
-    final harness = Harness(workspace(agents: [builder(working: false)]));
-    await harness.show(tester);
-    await tester.tap(find.text('Opus 5.5 · High'));
-    await settle(tester);
-    final preview = find.byWidgetPredicate(
-      (w) => w is AgentCharacter && w.size == 80,
-    );
-    expect(preview, findsOneWidget);
-    expect(labeled('Builder — idle'), findsWidgets);
-    await tester.tap(find.text('Asleep'));
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(labeled('Builder — asleep (idle)'), findsOneWidget);
-    // A sample doesn't change the agent's own face in the sidebar.
-    expect(
-      tester.widget<AgentCharacter>(find.byType(AgentCharacter).first).mood,
-      isNull,
-    );
-    await tester.tap(find.text('As now'));
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(labeled('Builder — asleep (idle)'), findsNothing);
   });
 }

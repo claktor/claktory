@@ -4,7 +4,8 @@
 //
 // factory/recorder: "access" (granted, denied, undetermined or
 // restricted), "request" (asks the person; true if allowed), "openSettings"
-// (the iPhone's Settings for this app; nothing on the Mac), "start" (a file
+// (the iPhone's Settings for this app; on the Mac, System Settings at
+// Privacy & Security → Microphone), "start" (a file
 // path; errors "denied", "busy" or "failed"), "stop" ({path, durationMs}),
 // "cancel" (stops and deletes the file), "voiceFolder" (where recordings
 // are made and kept until their Claktory has them: see voiceFolder()).
@@ -17,6 +18,7 @@
 import AVFoundation
 
 #if os(macOS)
+  import AppKit
   import FlutterMacOS
 #else
   import Flutter
@@ -84,6 +86,15 @@ final class Recorder: NSObject, AVAudioRecorderDelegate, FlutterStreamHandler {
       #if os(iOS)
         if let url = URL(string: UIApplication.openSettingsURLString) {
           UIApplication.shared.open(url)
+        }
+      #else
+        // System Settings → Privacy & Security → Microphone (Abbacchio's
+        // row 1681), or Privacy & Security where that pane isn't named.
+        if let url = URL(
+          string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+          ?? URL(string: "x-apple.systempreferences:com.apple.preference.security")
+        {
+          NSWorkspace.shared.open(url)
         }
       #endif
       result(nil)

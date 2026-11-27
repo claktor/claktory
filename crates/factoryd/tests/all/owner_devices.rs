@@ -73,6 +73,14 @@ fn refused(answer: &Body) -> (ErrorCode, String) {
     }
 }
 
+/// Where a refusal says to sign in: (Error.account_service, account_email).
+fn where_to(answer: &Body) -> (String, String) {
+    match answer {
+        Body::Error(error) => (error.account_service.clone(), error.account_email.clone()),
+        other => panic!("expected an error, got {other:?}"),
+    }
+}
+
 fn remote(view: &View) -> v1::RemoteAccess {
     view.workspace.remote.clone().expect("remote access")
 }
@@ -141,6 +149,9 @@ async fn the_first_device_through_the_account_is_in_at_once_and_the_next_waits_f
     // shares its key, so every Hello proves the account afresh.
     let (_, answer) = knock(&local, &second, "", "").await;
     assert_eq!(refused(&answer).0, ErrorCode::SignInRequired);
+    // Turned away to sign in, a device it knows hears where (Sale's row
+    // 189, Fugo 47717): this Claktory's service and its email, masked.
+    assert_eq!(where_to(&answer), (instance.url.clone(), "m…@example.com".to_owned()));
 
     // Turned away, it hears it can ask again by connecting again.
     let third = new_device().await;
@@ -150,6 +161,7 @@ async fn the_first_device_through_the_account_is_in_at_once_and_the_next_waits_f
     let answer = tablet.receive().await.body.expect("an answer");
     let (code, reason) = refused(&answer);
     assert!(code == ErrorCode::Unauthorized && reason.ends_with("didn't allow this device."), "{reason}");
+    assert_eq!(where_to(&answer), (String::new(), String::new()), "a device turned away hears nothing of the account");
 
     // Another key with that assertion, another account's, or no sign-in at
     // all: turned away, saying what to do.
@@ -163,6 +175,22 @@ async fn the_first_device_through_the_account_is_in_at_once_and_the_next_waits_f
     assert!(matches!(&answer, Body::Error(error) if !error.other_account_before), "never let in here: {answer:?}");
     let (_, answer) = knock(&local, &stranger, "", "").await;
     assert_eq!(refused(&answer).0, ErrorCode::SignInRequired);
+    // A device it doesn't know never hears whose Claktory this is: neither
+    // with no sign-in nor with one that ran out.
+    assert_eq!(where_to(&answer), (String::new(), String::new()));
+    let now = jiff::Timestamp::now().as_second();
+    let ran_out = DeviceAssertion {
+        v: 1,
+        account_id: account.clone(),
+        account_key: "a-device-account-key".to_owned(),
+        device_key: stranger.id().to_string(),
+        iat: now - 7200,
+        exp: now - 3600,
+    };
+    let ran_out = sign_device_assertion(&ed25519_dalek::SigningKey::from_bytes(&instance.secrets.1), &ran_out);
+    let (_, answer) = knock(&local, &stranger, "", &ran_out).await;
+    assert_eq!(refused(&answer).0, ErrorCode::SignInRequired);
+    assert_eq!(where_to(&answer), (String::new(), String::new()));
     drop(phone);
 }
 
@@ -222,6 +250,98 @@ async fn a_signed_out_claktory_asks_to_be_signed_in_again_and_a_code_never_pairs
     view.follow(&mut client, |view| remote(view).devices.iter().all(|device| device.id != first)).await;
     let listed: Vec<String> = remote(&view).devices.into_iter().map(|device| device.id).collect();
     assert_eq!(listed, [pending.device_id], "listed once");
+}
+
+/// What a connection is told as it's turned away.
+async fn turned_away(client: &mut Client) -> v1::Error {
+    client.wait_for(|body| if let Body::Error(error) = body { Some(error.clone()) } else { None }).await
+}
+
+/// Still connected: it's answered.
+async fn answers(client: &mut Client) {
+    let reply = client.request(Request::ShowRecoveryKey(v1::ShowRecoveryKey {})).await;
+    assert!(!matches!(reply.body, Body::Error(ref error) if error.code() == ErrorCode::SignInRequired), "{:?}", reply.body);
+}
+
+/// The first device found through the account, connected.
+async fn through_the_account(instance: &Instance, account: &str, local: &Code) -> Client {
+    let key = new_device().await;
+    let (mut phone, answer) = knock(local, &key, "", &assertion(instance, account, &key)).await;
+    welcomed(&mut phone, answer).await;
+    phone
+}
+
+/// Row 713 (Fugo 49686): signing out closes the connections of devices the
+/// account let in, as a new connection would be turned away, within a
+/// second and after the sign-out's own answer; a device paired with a code
+/// and this computer's app stay connected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn signing_out_closes_the_connections_the_account_let_in_and_only_those() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let (_factory, mut client, _view, local) = signed_in(&dir, &instance).await;
+    let account = account_id(&dir);
+    let mut phone = through_the_account(&instance, &account, &local).await;
+    // Paired with a code (and signed in to the account, so in at once):
+    // not found through the account, so the sign-in doesn't hold it open.
+    let (token, _) = factoryd::remote::pair(&home(&dir), "iPad").expect("paired");
+    let key = new_device().await;
+    let (mut ipad, answer) = knock(&local, &key, &token, &assertion(&instance, &account, &key)).await;
+    welcomed(&mut ipad, answer).await;
+
+    // The phone signs this Claktory out itself: it hears the Ack first.
+    phone.ok(Request::AccountSignOut(v1::AccountSignOut {})).await;
+    let started = std::time::Instant::now();
+    let why = turned_away(&mut phone).await;
+    assert_eq!(why.code(), ErrorCode::SignInRequired, "{why:?}");
+    assert!(why.message.contains("signed out of your Claktory account"), "{why:?}");
+    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    answers(&mut ipad).await;
+    answers(&mut client).await;
+}
+
+/// Row 713: switched to another account, a device let in only through the
+/// one before is turned away, as the gate would turn it away now.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn switching_accounts_closes_the_connections_the_account_before_let_in() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let (_factory, mut client, _view, local) = signed_in(&dir, &instance).await;
+    let account = account_id(&dir);
+    let key = new_device().await;
+    let (mut phone, answer) = knock(&local, &key, "", &assertion(&instance, &account, &key)).await;
+    welcomed(&mut phone, answer).await;
+    crate::claktory_account::sign_in(&mut client, &instance, "ana@example.com").await;
+    assert_ne!(account_id(&dir), account, "switched");
+    // It's this Claktory that changed accounts, and the words say so
+    // (Zucchero's row 718, Trish 50372), with its new email masked.
+    let switched = |why: &v1::Error| {
+        why.code() == ErrorCode::OtherAccount
+            && why.other_account_before
+            && why.message.contains("is now signed in as a…@example.com, a different account, so it no longer lets this device in")
+    };
+    let why = turned_away(&mut phone).await;
+    assert!(switched(&why), "{why:?}");
+    // Connecting again, it hears the same.
+    let (_, answer) = knock(&local, &key, "", &assertion(&instance, &account, &key)).await;
+    assert!(matches!(&answer, Body::Error(why) if switched(why)), "{answer:?}");
+    answers(&mut client).await;
+}
+
+/// Row 713: removed at claktory.com and seen at a check-in, it turns away
+/// the devices the account let in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_claktory_removed_at_the_service_closes_the_connections_the_account_let_in() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let (factory, mut client, _view, local) = signed_in(&dir, &instance).await;
+    let account = account_id(&dir);
+    let mut phone = through_the_account(&instance, &account, &local).await;
+    instance.sql("UPDATE claktories SET revoked_at = 1");
+    factory.check_in_now();
+    let why = turned_away(&mut phone).await;
+    assert_eq!(why.code(), ErrorCode::SignInRequired, "{why:?}");
+    answers(&mut client).await;
 }
 
 /// The paired device with this id, as the Workspace shows it.

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import 'android/device_identity.dart';
+import 'mobile/device.dart' show Idiom, deviceCapabilities;
 import 'protocol/factory/v1/factory.pb.dart';
 
 /// What kind of device this app runs on, told to the backend in every
@@ -12,6 +13,12 @@ Future<DeviceKind> thisDeviceKindForHello() =>
     _kind ??= deviceKindOf(defaultTargetPlatform);
 
 Future<DeviceKind>? _kind;
+
+/// What [thisDeviceKindForHello] answers from now on, in a test: a desktop
+/// Mac's rail, say. Null works it out again.
+@visibleForTesting
+set thisDeviceKindForTests(DeviceKind? kind) =>
+    _kind = kind == null ? null : Future.value(kind);
 
 /// Runs a command and answers its output; null if it couldn't run.
 typedef CommandRunner = Future<String?> Function(
@@ -28,8 +35,7 @@ Future<String?> _run(String command, List<String> args) async {
   }
 }
 
-/// iPhone or iPad from the screen's shorter side (an iPad's is 744 points
-/// or more, an iPhone's at most 440); on a Mac, a laptop when it has a
+/// iPhone or iPad from the native idiom, at any window width; on a Mac, a laptop when it has a
 /// built-in battery or is a MacBook, else a desktop.
 @visibleForTesting
 Future<DeviceKind> deviceKindOf(
@@ -39,8 +45,7 @@ Future<DeviceKind> deviceKindOf(
 }) async {
   switch (platform) {
     case TargetPlatform.iOS:
-      final side = shortestSide ?? _shortestSide();
-      return side >= 600
+      return _iPad(shortestSide)
           ? DeviceKind.DEVICE_KIND_TABLET
           : DeviceKind.DEVICE_KIND_PHONE;
     case TargetPlatform.macOS:
@@ -85,13 +90,13 @@ String platformOf(TargetPlatform platform, DeviceKind kind) =>
       TargetPlatform.fuchsia => '',
     };
 
-double _shortestSide() {
-  final views = PlatformDispatcher.instance.views;
-  if (views.isEmpty) return 0;
-  final view = views.first;
-  final size = view.physicalSize / view.devicePixelRatio;
-  return size.shortestSide;
-}
+/// Whether this iOS device is an iPad: from the native idiom, never the
+/// window, which Split View and Slide Over narrow to a phone's width (an
+/// iPad waiting to be let in read as an iPhone, Sale's row 198). A side
+/// given (a test's) decides by it instead: an iPad's is 744 points or more.
+bool _iPad(double? shortestSide) => shortestSide == null
+    ? deviceCapabilities.idiom == Idiom.pad
+    : shortestSide >= 600;
 
 /// This device's own name, told to the backend in every Hello: a device
 /// paired with a code made without a name takes it ("Matt's MacBook").
@@ -119,8 +124,7 @@ Future<String> deviceNameOf(
       if (trimmed.isNotEmpty) return trimmed;
       return Platform.localHostname.replaceAll(RegExp(r'\.local$'), '');
     case TargetPlatform.iOS:
-      final side = shortestSide ?? _shortestSide();
-      return side >= 600 ? 'iPad' : 'iPhone';
+      return _iPad(shortestSide) ? 'iPad' : 'iPhone';
     case TargetPlatform.linux:
     case TargetPlatform.windows:
       return Platform.localHostname;

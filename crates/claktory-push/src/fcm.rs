@@ -123,11 +123,21 @@ impl Fcm {
         }
         let body: Value = response.json().await.unwrap_or_default();
         let code = body["error"]["status"].as_str().unwrap_or_default().to_owned();
-        let unregistered =
-            body["error"]["details"].as_array().is_some_and(|details| details.iter().any(|detail| detail["errorCode"] == "UNREGISTERED"));
+        let details = body["error"]["details"].as_array().cloned().unwrap_or_default();
+        // The token will never take a push: retired (UNREGISTERED), or not
+        // a token at all (a BadRequest on message.token). Not
+        // SENDER_ID_MISMATCH: with both apps in the relay's one project,
+        // that's the relay's service account being another project's, and
+        // forgetting every phone for it would outlast the fix.
+        let unusable = details.iter().any(|detail| {
+            detail["errorCode"] == "UNREGISTERED"
+                || detail["fieldViolations"]
+                    .as_array()
+                    .is_some_and(|violations| violations.iter().any(|violation| violation["field"] == "message.token"))
+        });
         match (status, code.as_str()) {
             (404, _) | (_, "NOT_FOUND") => Delivery::Gone,
-            _ if unregistered => Delivery::Gone,
+            _ if unusable => Delivery::Gone,
             (401, _) => {
                 *self.stale.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = true;
                 Delivery::Transient("FCM: the access token was refused".to_owned())

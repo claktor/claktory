@@ -25,7 +25,7 @@ const OWN_IDS: u64 = 1_000_000_000;
 pub(crate) fn spawn(factory: &Arc<Factory>) -> Result<Io, String> {
     // An uncontained Chrome: only ever for the dev Claktory or a debug
     // build, never the real one (Fugo 37166).
-    if super::profile(factory) != "dev" && !cfg!(debug_assertions) {
+    if !super::dev_home(factory.home().root()) && !cfg!(debug_assertions) {
         return Err("Claktory's browser isn't available on this computer yet.".to_owned());
     }
     let profile = factory.home().root().join("browser-standin");

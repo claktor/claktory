@@ -323,8 +323,15 @@ fn left(ms: u64) -> String {
 }
 
 /// "Tue 14:05": the weekday and time of `at` (ms since 1970) here.
+#[cfg(windows)]
+pub fn local_time(at: u64) -> Option<String> {
+    crate::windows::system::local_time(at)
+}
+
+/// "Tue 14:05": the weekday and time of `at` (ms since 1970) here.
 // libc deprecates musl's `time_t` alias ahead of a change to 64 bits; it's
 // 64 bits already on the targets Claktory builds (x86_64, aarch64).
+#[cfg(unix)]
 #[allow(deprecated)]
 pub fn local_time(at: u64) -> Option<String> {
     let seconds = libc::time_t::try_from(at / 1000).ok()?;

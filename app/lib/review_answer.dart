@@ -271,7 +271,7 @@ class ReviewMovedOn extends StatelessWidget {
 
 /// What [ReviewMovedOn] says.
 String reviewMovedOn(String name) =>
-    'That card was closed. This is another one from $name.';
+    'That request was closed. This is another one from $name.';
 
 /// What a held bar says ([reviewWaits]): the person's reply is with its
 /// agent.

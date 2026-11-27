@@ -372,6 +372,24 @@ void main() {
     vouch.dispose();
   });
 
+  testWidgets("not offered when it's the account the Claktory asking turns "
+      'away (Abbacchio row 1541)', (tester) async {
+    local.answers.add(
+      DeviceVouched(refused: 'device_removed', message: 'Removed.'),
+    );
+    final vouch = start();
+    await tester.runAsync(() async {
+      local.signedIn(true);
+      await settle();
+    });
+    await Harness(Workspace()).show(
+      tester,
+      home: SignInThroughThisMac(vouch: vouch, refused: 'Matt@Example.com'),
+    );
+    expect(find.text('Use this account'), findsNothing);
+    vouch.dispose();
+  });
+
   test('Connections read a key kept in the keychain', () async {
     final storage = MemoryConnectionStorage()
       ..kept = const StoredConnections(

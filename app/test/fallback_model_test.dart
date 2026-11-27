@@ -135,16 +135,7 @@ void main() {
     harness.page.value = AppPage.settings;
     await harness.show(tester, size: const Size(1400, 1000));
     await pumpFrames(tester);
-    await tester.scrollUntilVisible(
-      find.text('Default fallback model'),
-      200,
-      scrollable: find
-          .descendant(
-            of: find.byType(SettingsView),
-            matching: find.byType(Scrollable),
-          )
-          .first,
-    );
+    await revealInSettings(tester, find.text('Default fallback model'));
     await pumpFrames(tester);
     final row = find.ancestor(
       of: find.text('Default fallback model'),

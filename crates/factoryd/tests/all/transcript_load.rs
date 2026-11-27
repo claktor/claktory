@@ -293,7 +293,7 @@ async fn older_segments_come_back_from_disk_as_they_were() {
     let mut read = Transcript::load(dir.clone(), "builder".into()).await.expect("load");
     same(&read, &whole);
     // The card is held, and changes on disk too.
-    let Some(Kind::AskPerson(card)) = read.entry(ask).and_then(|entry| entry.kind.clone()) else { panic!("the card is held") };
+    let Some(Kind::AskPerson(card)) = read.entry(ask).and_then(|entry| entry.kind.clone()) else { panic!("the request is held") };
     let answered = v1::AskPerson { state: v1::AskPersonState::Answered.into(), answer: "B".into(), ..card };
     assert!(read.set_ask(answered.clone()).is_some());
     assert!(read.waiting_seqs().is_empty());

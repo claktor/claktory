@@ -225,16 +225,12 @@ void main() {
   testWidgets('a typed comment: one Submit, a reply that gives nothing '
       '(#370)', (tester) async {
     final harness = await _card(tester, _grant());
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
     await tester.enterText(_comment, ' Only Ana, and only reading. ');
     await settle(tester);
     expect(find.text('Approve'), findsNothing);
     expect(find.text('Decline'), findsNothing);
     expect(
-      find.text(
-        'Nothing is given. Rivet gets your comment and can suggest it again.',
-      ),
+      find.text('Submit sends your words instead of approving.'),
       findsOneWidget,
     );
     await tester.tap(find.text('Submit'));
@@ -254,8 +250,6 @@ void main() {
 
   testWidgets('Return in the comment is Submit, never Approve', (tester) async {
     final harness = await _card(tester, _grant());
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
     await tester.enterText(_comment, 'Read only, please.');
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await settle(tester);

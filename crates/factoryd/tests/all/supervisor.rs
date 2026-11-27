@@ -102,7 +102,7 @@ async fn a_backend_update_that_does_not_start_is_undone_and_a_good_one_sticks() 
     assert_eq!(view.workspace.version, "dev");
     // A vault with no key on disk: open only while a backend holds its key,
     // which each hands to the next.
-    let recovery = client_message::Body::NewRecoveryKey(v1::NewRecoveryKey { proof: None });
+    let recovery = client_message::Body::NewRecoveryKey(v1::NewRecoveryKey { proof: None, ..Default::default() });
     assert!(matches!(apply_request(&mut client, &mut view, recovery).await, Body::RecoveryKey(_)));
     let locked = client_message::Body::SetVaultLockedMode(v1::SetVaultLockedMode { locked_mode: true, proof: None });
     apply_request(&mut client, &mut view, locked).await;

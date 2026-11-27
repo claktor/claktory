@@ -1,4 +1,4 @@
-import 'dart:async' show Completer;
+import 'dart:async' show Completer, unawaited;
 
 import 'package:cupertino_ui/cupertino_ui.dart'
     show DefaultCupertinoLocalizations;
@@ -16,6 +16,8 @@ import 'package:factory_app/loopback_forward.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scanner.dart';
 import 'package:factory_app/scope.dart';
+import 'package:factory_app/settings_view.dart'
+    show SettingsView, settingsSectionsOf;
 import 'package:factory_app/shell.dart';
 import 'package:factory_app/state.dart';
 import 'package:factory_app/update.dart';
@@ -861,6 +863,10 @@ class RecordingBackend extends Backend {
   );
 
   @override
+  Future<void> providersShown() =>
+      _record(ClientMessage(providersShown: ProvidersShown()));
+
+  @override
   Future<void> addModel(String model) =>
       _record(ClientMessage(addModel: AddModel(model: model)));
 
@@ -881,8 +887,10 @@ class RecordingBackend extends Backend {
   Future<void>? historyHold;
 
   @override
-  Future<HistoryOverview> historyOverview() async {
-    await _record(ClientMessage(getHistoryOverview: GetHistoryOverview()));
+  Future<HistoryOverview> historyOverview({String project = ''}) async {
+    await _record(
+      ClientMessage(getHistoryOverview: GetHistoryOverview(projectId: project)),
+    );
     return historyReply ?? Completer<HistoryOverview>().future;
   }
 
@@ -892,12 +900,14 @@ class RecordingBackend extends Backend {
     Int64? untilMs,
     int limit = 0,
     bool runs = true,
+    String project = '',
   }) async {
     await _record(
       ClientMessage(
         getHistoryEvents: GetHistoryEvents(
           afterCursor: cursor,
           untilMs: untilMs,
+          projectId: project,
         ),
       ),
     );
@@ -909,8 +919,11 @@ class RecordingBackend extends Backend {
   }
 
   @override
-  Future<void> watchHistory(bool on) =>
-      _record(ClientMessage(watchHistory: WatchHistory(on: on)));
+  Future<void> watchHistory(bool on, {String project = ''}) => _record(
+    ClientMessage(
+      watchHistory: WatchHistory(on: on, projectId: project),
+    ),
+  );
 
   @override
   Future<void> signOut(String providerId, {String accountId = ''}) => _record(
@@ -1108,6 +1121,7 @@ class RecordingBackend extends Backend {
     String description,
     List<SecretEntry> entries, {
     bool askEachTime = false,
+    List<String> sites = const [],
   }) => _record(
     ClientMessage(
       createSecret: CreateSecret(
@@ -1115,7 +1129,15 @@ class RecordingBackend extends Backend {
         description: description,
         entries: entries,
         askEachTime: askEachTime,
+        sites: sites,
       ),
+    ),
+  );
+
+  @override
+  Future<void> setSecretSites(String id, List<String> sites) => _record(
+    ClientMessage(
+      setSecretSites: SetSecretSites(id: id, sites: sites),
     ),
   );
 
@@ -1174,9 +1196,13 @@ class RecordingBackend extends Backend {
       _record(ClientMessage(deleteSecret: DeleteSecret(id: id)));
 
   @override
-  Future<void> grantSecret(String id, String agentId) => _record(
+  Future<void> grantSecret(
+    String id,
+    String agentId, {
+    bool fillOnly = false,
+  }) => _record(
     ClientMessage(
-      grantSecret: GrantSecret(id: id, agentId: agentId),
+      grantSecret: GrantSecret(id: id, agentId: agentId, fillOnly: fillOnly),
     ),
   );
 
@@ -1305,6 +1331,10 @@ class RecordingBackend extends Backend {
       _record(ClientMessage(accountSignOut: AccountSignOut()));
 
   @override
+  Future<void> accountSignInCancel() =>
+      _record(ClientMessage(accountSignInCancel: AccountSignInCancel()));
+
+  @override
   Future<void> setAccountService(String url) =>
       _record(ClientMessage(setAccountService: SetAccountService(url: url)));
 
@@ -1336,6 +1366,10 @@ class RecordingBackend extends Backend {
       confirmRecoveryKey: ConfirmRecoveryKey(checkId: checkId, typed: typed),
     ),
   );
+
+  @override
+  Future<void> useRecoveryKey() =>
+      _record(ClientMessage(useRecoveryKey: UseRecoveryKey()));
 
   /// What [startConnect] answers (Priya's connectors_test).
   var connectStarted = ConnectStarted(
@@ -1445,6 +1479,17 @@ class RecordingBackend extends Backend {
   @override
   Future<void> setReportReader(SetReportReader ask) =>
       _record(ClientMessage(setReportReader: ask));
+
+  @override
+  Future<void> setAgentContained(String agentId, {required bool contained}) =>
+      _record(
+        ClientMessage(
+          setAgentContained: SetAgentContained(
+            agentId: agentId,
+            contained: contained,
+          ),
+        ),
+      );
 
   @override
   Future<void> decidePipeReports(String pipeId, {required bool send}) =>
@@ -1931,6 +1976,27 @@ class RecordingBackend extends Backend {
       _record(ClientMessage(sharePipeWebsite: share));
 
   @override
+  Future<void> pinAgent(String agentId, {String beforeId = ''}) => _record(
+    ClientMessage(
+      pinAgent: PinAgent(agentId: agentId, beforeId: beforeId),
+    ),
+  );
+
+  @override
+  Future<void> unpinAgent(String agentId) =>
+      _record(ClientMessage(unpinAgent: UnpinAgent(agentId: agentId)));
+
+  @override
+  Future<void> checkProtectedPlaces(List<String> roots) => _record(
+    ClientMessage(checkProtectedPlaces: CheckProtectedPlaces(roots: roots)),
+  );
+
+  @override
+  Future<void> dismissProtectedPlace(String root) => _record(
+    ClientMessage(dismissProtectedPlace: DismissProtectedPlace(root: root)),
+  );
+
+  @override
   Future<void> stopPipeShare(String shareId) =>
       _record(ClientMessage(stopPipeShare: StopPipeShare(shareId: shareId)));
 
@@ -2100,6 +2166,29 @@ class RecordingBackend extends Backend {
     );
     return pipeMessagesById['$pipeId/$seq'];
   }
+
+  /// What [showRecoveryCodes] answers (#435 W8b); set [recoveryCodesGone]
+  /// and it refuses with that instead.
+  var recoveryCodes = <String>[];
+  String? recoveryCodesGone;
+
+  @override
+  Future<List<String>> showRecoveryCodes(String agentId, int seq) async {
+    await _record(
+      ClientMessage(
+        showRecoveryCodes: ShowRecoveryCodes(agentId: agentId, seq: Int64(seq)),
+      ),
+    );
+    if (recoveryCodesGone case final gone?) throw RequestFailure(gone);
+    return [...recoveryCodes];
+  }
+
+  @override
+  Future<void> keepRecoveryCodes(String agentId, int seq) => _record(
+    ClientMessage(
+      keepRecoveryCodes: KeepRecoveryCodes(agentId: agentId, seq: Int64(seq)),
+    ),
+  );
 
   @override
   Future<void> readAlerts(List<String> ids) =>
@@ -2453,10 +2542,30 @@ class Harness {
 
   /// The body of the last request sent.
   ClientMessage get last => backend.sent.last;
+
+  /// The last sign-in asked for: opening Providers sends ProvidersShown
+  /// after it, so it isn't always [last].
+  StartLogin get lastStartLogin =>
+      backend.sent.lastWhere((sent) => sent.hasStartLogin()).startLogin;
 }
 
 /// Live indicators pulse forever, so wait out the UI's own motion instead of
 /// waiting for every animation to stop.
+/// Opens the selected agent's settings from its header, as a click on its
+/// name does.
+Future<void> openAgentSettings(WidgetTester tester) async {
+  await tester.tap(
+    find
+        .byWidgetPredicate(
+          (widget) =>
+              widget is Semantics &&
+              widget.properties.hint == 'Opens agent settings',
+        )
+        .first,
+  );
+  await settle(tester);
+}
+
 Future<void> settle(WidgetTester tester) =>
     tester.pump(const Duration(milliseconds: 500));
 
@@ -2470,6 +2579,16 @@ Future<void> pumpFrames(
   for (var elapsed = Duration.zero; elapsed < total; elapsed += frame) {
     await tester.pump(frame);
   }
+}
+
+/// Unfolds the extensions in an agent's settings ("N on · Change…"),
+/// scrolling it to the middle first, clear of the form's footer.
+Future<void> unfoldExtensions(WidgetTester tester) async {
+  final change = find.text('Change…').last;
+  unawaited(Scrollable.ensureVisible(tester.element(change), alignment: 0.5));
+  await pumpFrames(tester);
+  await tester.tap(change);
+  await pumpFrames(tester);
 }
 
 Provider anthropic({String signedInWith = '', bool canSignOut = false}) =>
@@ -2543,3 +2662,84 @@ class FakeCamera implements Camera {
 
   void scan(String code) => _onCode?.call(code);
 }
+
+/// The scrollable of the Settings section [id] ("voice") shown beside the
+/// index or as a page: open it with `backend.settingsSection`, as a link.
+Finder settingsSectionScroll(String id) => find
+    .descendant(
+      of: find.byWidgetPredicate(
+        (widget) =>
+            widget.key == ValueKey('settings-section:$id') ||
+            widget.key == ValueKey('settings-page:$id'),
+      ),
+      matching: find.byType(Scrollable),
+    )
+    .first;
+
+/// Settings opened at the section holding [target] and scrolled to it,
+/// looking in each section in turn as a person would ([section] first
+/// when given: its id, "devices"). Settings must be showing.
+Future<void> revealInSettings(
+  WidgetTester tester,
+  Finder target, {
+  String? section,
+}) async {
+  // A phone's section is a page of its own, over the list.
+  final pages = find.byWidgetPredicate(
+    (widget) => widget is SettingsView && widget.section != null,
+  );
+  if (pages.evaluate().isNotEmpty) {
+    await tester.scrollUntilVisible(
+      target,
+      200,
+      scrollable: find
+          .descendant(of: pages.last, matching: find.byType(Scrollable))
+          .first,
+    );
+    await pumpFrames(tester);
+    return;
+  }
+  final context = tester.element(find.byType(SettingsView).first);
+  final backend = AppScope.of(context);
+  final ids = [
+    ?section,
+    for (final each in settingsSectionsOf(context, backend.workspace.workspace))
+      if (each.id != section) each.id,
+  ];
+  for (final id in ids) {
+    backend.settingsSection.value = id;
+    await pumpFrames(tester);
+    final body = find.byWidgetPredicate(
+      (widget) =>
+          widget.key == ValueKey('settings-section:$id') ||
+          widget.key == ValueKey('settings-page:$id'),
+    );
+    if (body.evaluate().isEmpty) continue;
+    final scroll = settingsSectionScroll(id);
+    final inSection = find.descendant(of: body, matching: target);
+    try {
+      await tester.scrollUntilVisible(
+        inSection.first,
+        200,
+        scrollable: scroll,
+        maxScrolls: 40,
+      );
+      await pumpFrames(tester);
+      return;
+    } on Object {
+      // Not in this one.
+    }
+  }
+  throw TestFailure('Not in any section of Settings: $target');
+}
+
+/// [finder] within the Settings section [id] shown (not the index's row
+/// of the same words).
+Finder inSettingsSection(String id, Finder finder) => find.descendant(
+  of: find.byWidgetPredicate(
+    (widget) =>
+        widget.key == ValueKey('settings-section:$id') ||
+        widget.key == ValueKey('settings-page:$id'),
+  ),
+  matching: finder,
+);

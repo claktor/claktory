@@ -373,11 +373,19 @@ class Button extends StatefulWidget {
     required this.label,
     required this.onPressed,
     this.primary = false,
+    this.glyph,
+    this.semanticLabel,
   });
 
   final String label;
   final VoidCallback? onPressed;
   final bool primary;
+
+  /// A 16px glyph before [label], in the label's color.
+  final Widget Function(Color color)? glyph;
+
+  /// What a screen reader says for it, when that isn't [label].
+  final String? semanticLabel;
 
   @override
   State<Button> createState() => _ButtonState();
@@ -477,16 +485,21 @@ class _ButtonState extends State<Button> {
               widthFactor: 1,
               child: MediaQuery.withClampedTextScaling(
                 maxScaleFactor: phone ? 2 : double.infinity,
-                child: Text(
-                  widget.label,
-                  maxLines: phone ? null : 1,
-                  textAlign: TextAlign.center,
-                  style: (phone ? PhoneType.label : TextStyles.label).copyWith(
-                    color: foreground,
-                    fontWeight: phone && widget.primary
-                        ? FontWeight.w600
-                        : null,
+                child: _labelled(
+                  Text(
+                    widget.label,
+                    semanticsLabel: widget.semanticLabel,
+                    maxLines: phone ? null : 1,
+                    textAlign: TextAlign.center,
+                    style: (phone ? PhoneType.label : TextStyles.label)
+                        .copyWith(
+                          color: foreground,
+                          fontWeight: phone && widget.primary
+                              ? FontWeight.w600
+                              : null,
+                        ),
                   ),
+                  foreground,
                 ),
               ),
             ),
@@ -495,6 +508,19 @@ class _ButtonState extends State<Button> {
       ),
     );
   }
+
+  /// [text], after the glyph when there is one.
+  Widget _labelled(Widget text, Color color) => switch (widget.glyph) {
+    null => text,
+    final glyph => Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ExcludeSemantics(child: glyph(color)),
+        const SizedBox(width: Space.s - 2),
+        Flexible(child: text),
+      ],
+    ),
+  };
 }
 
 /// The box a [TextField] without a border sits in, drawn by its owner (the
@@ -549,6 +575,8 @@ class TextField extends StatefulWidget {
     this.textCapitalization,
     this.inputFormatters,
     this.autocorrect,
+    this.enableSuggestions,
+    this.smartPunctuation,
     this.scrollPadding = const EdgeInsets.all(20),
     this.editItems,
     this.semanticsLabel,
@@ -580,6 +608,14 @@ class TextField extends StatefulWidget {
   final TextCapitalization? textCapitalization;
   final List<TextInputFormatter>? inputFormatters;
   final bool? autocorrect;
+
+  /// The keyboard's suggestions (and its learning what's typed); null as
+  /// [kind] says.
+  final bool? enableSuggestions;
+
+  /// Smart dashes and quotes; false turns both off (a code). Null leaves
+  /// the platform's.
+  final bool? smartPunctuation;
 
   /// How much room to keep around it when it's scrolled into view.
   final EdgeInsets scrollPadding;
@@ -696,7 +732,15 @@ class _TextFieldState extends State<TextField>
       autofocus: widget.autofocus,
       obscureText: obscure,
       autocorrect: widget.autocorrect ?? setup?.autocorrect ?? !obscure,
-      enableSuggestions: !obscure && (setup?.enableSuggestions ?? true),
+      enableSuggestions:
+          !obscure &&
+          (widget.enableSuggestions ?? setup?.enableSuggestions ?? true),
+      smartDashesType: widget.smartPunctuation == false
+          ? SmartDashesType.disabled
+          : null,
+      smartQuotesType: widget.smartPunctuation == false
+          ? SmartQuotesType.disabled
+          : null,
       keyboardType:
           widget.keyboardType ??
           setup?.keyboardType ??
@@ -1288,13 +1332,22 @@ class _SelectState<T> extends State<Select<T>> {
 
 /// Shows a dialog over the whole window. The builder gets a `close` callback;
 /// Esc and a click on the scrim close it too. On a phone it's a sheet from
-/// the bottom instead ([PhoneSheet]), which dragging down closes too.
+/// the bottom instead ([PhoneSheet]), which dragging down closes too, unless
+/// [dialog] (an iPad's permission or pairing, a dialog at every width:
+/// area 5a), which also outlasts a change of layout.
 Future<void> showModal(
   BuildContext context,
-  Widget Function(BuildContext context, VoidCallback close) builder,
-) {
-  if (isPhoneLayout(context)) return showModalSheet(context, builder);
-  final overlay = Overlay.of(context);
+  Widget Function(BuildContext context, VoidCallback close) builder, {
+  bool dialog = false,
+}) {
+  if (!dialog && isPhoneLayout(context)) {
+    return showModalSheet(context, builder);
+  }
+  // A [dialog] goes in the window's root overlay (main.dart's, above the
+  // layout): crossing between the narrow and wide layouts builds a new
+  // window, and it stays through that, still waiting for its answer
+  // (Sale's row 198).
+  final overlay = Overlay.of(context, rootOverlay: dialog);
   final done = Completer<void>();
   late final OverlayEntry entry;
   BackHandle? back;
@@ -1316,6 +1369,17 @@ Future<void> showModal(
   back = PhoneBack.maybeOf(context)
       ?.register(CallbackBackToken(onBack: close, onRetired: close));
   return done.future;
+}
+
+/// Narrower than this, a dialog (an iPad's permission in Slide Over's
+/// 320) sits closer to the window's edges with less padding inside, so its
+/// words get a column wide enough not to break mid-word (Lucy 49620).
+const _narrowModalWidth = 400.0;
+
+/// A dialog's content that asks for a width other than the form dialog's
+/// 480: Add a Claktory's at most 460 (devices-signin.md §8.8).
+abstract interface class ModalWidth {
+  double get modalWidth;
 }
 
 class _Modal extends StatefulWidget {
@@ -1354,6 +1418,7 @@ class _ModalState extends State<_Modal> {
     final close = widget.close;
     final child = widget.child;
     final palette = Palette.of(context);
+    final narrow = MediaQuery.sizeOf(context).width < _narrowModalWidth;
     return TweenAnimationBuilder<double>(
       tween: Tween(begin: 0, end: 1),
       duration: Motion.fast,
@@ -1385,9 +1450,12 @@ class _ModalState extends State<_Modal> {
                   node: _scope,
                   autofocus: true,
                   child: Container(
-                    width: 480,
-                    margin: const EdgeInsets.all(Space.xl),
-                    padding: const EdgeInsets.all(Space.xl),
+                    width: switch (child) {
+                      final ModalWidth sized => sized.modalWidth,
+                      _ => 480,
+                    },
+                    margin: EdgeInsets.all(narrow ? Space.l : Space.xl),
+                    padding: EdgeInsets.all(narrow ? 20 : Space.xl),
                     decoration: BoxDecoration(
                       color: palette.canvas,
                       borderRadius: BorderRadius.circular(Radii.floating),
@@ -2732,6 +2800,7 @@ final _lucide = <String, void Function(Canvas, Paint)>{
   'send': _drawSend,
   'panels-top-left': _drawPanelsTopLeft,
   'key-round': _drawKeyRound,
+  'folder-lock': _drawFolderLock,
   'monitor': _drawMonitor,
   'laptop-minimal': _drawLaptopMinimal,
   'smartphone': _drawSmartphone,
@@ -3001,6 +3070,14 @@ final _drawKeyRound = _paths(const [
   'M16 7.5a.5.5 0 1 0 1 0a.5.5 0 1 0-1 0',
 ]);
 
+// Lucide's folder-lock: a place macOS keeps private (item 12).
+final _drawFolderLock = _paths(const [
+  'M15 17h6a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1h-6a1 1 0 0 1-1-1v-3a1 1 0 0 1 1-1z',
+  'M10 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2'
+      'a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v2.5',
+  'M20 17v-2a2 2 0 1 0-4 0v2',
+]);
+
 final _drawPanelsTopLeft = _paths(const [
   'M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z',
   'M3 9h18',
@@ -3137,6 +3214,31 @@ class CloseGlyph extends StatelessWidget {
     painter: _LucidePainter(color, _drawX),
   );
 }
+
+/// A 16px viewfinder (Lucide's focus), for Needs you's focus mode.
+class FocusGlyph extends StatelessWidget {
+  const FocusGlyph({super.key, required this.color});
+
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => CustomPaint(
+    size: const Size.square(16),
+    painter: _LucidePainter(color, _drawFocus),
+  );
+}
+
+void _drawFocus(Canvas canvas, Paint paint) {
+  canvas.drawCircle(const Offset(12, 12), 3, paint);
+  _drawFocusCorners(canvas, paint);
+}
+
+final _drawFocusCorners = _paths(const [
+  'M3 7V5a2 2 0 0 1 2-2h2',
+  'M17 3h2a2 2 0 0 1 2 2v2',
+  'M21 17v2a2 2 0 0 1-2 2h-2',
+  'M7 21H5a2 2 0 0 1-2-2v-2',
+]);
 
 /// An on/off switch: a 28×16 pill, signal when on, with a knob that slides.
 class Toggle extends StatelessWidget {

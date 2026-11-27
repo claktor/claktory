@@ -207,6 +207,33 @@ void main() {
     expect(find.text('June · 14:32', findRichText: true), findsOneWidget);
   });
 
+  testWidgets('what follows the name wider than the row: one line, cut at '
+      'its end, never overflowing', (tester) async {
+    await tester.pumpWidget(
+      const Directionality(
+        textDirection: TextDirection.ltr,
+        child: Center(
+          child: SizedBox(
+            width: 120,
+            child: NameRoleLine(
+              name: 'Rivet',
+              role: 'Admin',
+              after: [TextSpan(text: ' · 20784 days ago · Updated')],
+              style: TextStyle(fontSize: 13),
+              roleStyle: TextStyle(fontSize: 13),
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(tester.takeException(), isNull);
+    final line = tester.widget<RichText>(
+      find.text('Rivet · 20784 days ago · Updated', findRichText: true),
+    );
+    expect(line.overflow, TextOverflow.ellipsis);
+    expect(line.maxLines, 1);
+  });
+
   testWidgets("on a Mac's Needs you: a request, an urgent alert and a fold "
       'each say the role; Claktory\'s own and an agent without one, the '
       'name alone', (tester) async {
@@ -219,6 +246,36 @@ void main() {
     expect(_role('Backend'), findsOneWidget);
     expect(find.text('Urgent · Omar', findRichText: true), findsOneWidget);
     await _shot(tester, 'roles-mac');
+  });
+
+  testWidgets("VoiceOver says who asks once: the character beside the name "
+      'reads nothing (Zucchero 48776)', (tester) async {
+    final semantics = tester.ensureSemantics();
+    await _open(tester, _workspace(alerts: const []));
+    final labels = <String>[];
+    void walk(SemanticsNode node) {
+      labels.add(node.label);
+      node.visitChildren((child) {
+        walk(child);
+        return true;
+      });
+    }
+
+    walk(
+      tester
+          .binding
+          .renderViews
+          .first
+          .owner!
+          .semanticsOwner!
+          .rootSemanticsNode!,
+    );
+    final label = labels.firstWhere(
+      (label) => label.contains('Ship the release tonight'),
+    );
+    expect(RegExp('June').allMatches(label), hasLength(1), reason: label);
+    expect(label, contains('June, Project Manager · 30 min ago'));
+    semantics.dispose();
   });
 
   testWidgets("a liaison's request keeps its pipe's name, with no role", (
@@ -250,7 +307,7 @@ void main() {
 
   for (final large in [false, true]) {
     testWidgets('on an iPhone at 390pt${large ? ', the largest text' : ''}: '
-        "the stage's header says it", (tester) async {
+        "the list says it, and focus mode's stage", (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
       if (large) {
@@ -265,7 +322,13 @@ void main() {
       );
       await _shot(tester, 'roles-iphone${large ? '-ax5' : ''}');
       if (large) return;
-      // The "1 of 5" list says it too (Lucy 46817).
+      // Focus mode's stage says it, and its "1 of 5" list (Lucy 46817).
+      await tester.tap(find.bySemanticsLabel('Focus on Needs you'));
+      await pumpFrames(tester);
+      expect(
+        find.textContaining('Project Manager', findRichText: true),
+        findsWidgets,
+      );
       await tester.tap(find.text('1 of 5'));
       await pumpFrames(tester);
       expect(tester.takeException(), isNull);

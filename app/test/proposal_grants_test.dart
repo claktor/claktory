@@ -110,8 +110,6 @@ void main() {
     final harness = _proposing(_proposal());
     await harness.show(tester);
     await settle(tester);
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
     await tester.enterText(
       find.descendant(
         of: find.byType(DecisionComment),

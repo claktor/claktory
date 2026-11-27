@@ -689,14 +689,18 @@ List<int> _dates(Uint8List bytes) {
 
 class _NoSource implements HistorySource {
   @override
-  Future<HistoryOverview> overview() => Completer<HistoryOverview>().future;
+  Future<HistoryOverview> overview({String project = ''}) =>
+      Completer<HistoryOverview>().future;
 
   @override
-  Future<HistoryEvents> events(List<int> cursor, {double? until}) =>
-      Completer<HistoryEvents>().future;
+  Future<HistoryEvents> events(
+    List<int> cursor, {
+    double? until,
+    String project = '',
+  }) => Completer<HistoryEvents>().future;
 
   @override
-  Future<void> watch(bool on) async {}
+  Future<void> watch(bool on, {String project = ''}) async {}
 
   @override
   Stream<HistoryEvents> get pushes => const Stream.empty();

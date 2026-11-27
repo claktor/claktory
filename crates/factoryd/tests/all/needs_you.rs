@@ -12,7 +12,7 @@ fn history(query: &str, before_ms: i64, limit: u32) -> client_message::Body {
     client_message::Body::ListNeedsYouHistory(v1::ListNeedsYouHistory { query: query.into(), before_ms, limit })
 }
 
-async fn list(client: &mut Client, query: &str, before_ms: i64, limit: u32) -> v1::NeedsYouHistory {
+pub(crate) async fn list(client: &mut Client, query: &str, before_ms: i64, limit: u32) -> v1::NeedsYouHistory {
     match client.request(history(query, before_ms, limit)).await.body {
         Body::NeedsYouHistory(history) => history,
         other => panic!("expected NeedsYouHistory, got {other:?}"),
@@ -113,7 +113,7 @@ async fn the_person_finds_what_they_decided_and_opens_it_at_the_card() {
     assert_eq!(all.records[2].pipe_id, "p1");
     let taint = &all.records[3].taint;
     assert_eq!((taint.len(), taint[0].pipe_id.as_str(), taint[0].via_names.as_slice()), (1, "p1", ["Liaison".to_owned()].as_slice()));
-    assert_eq!(all.records[5].seq, 0, "a card not in its conversation opens it at the end");
+    assert_eq!(all.records[5].seq, 0, "a request not in its conversation opens it at the end");
     // Nothing the other side of a pipe wrote, as a title or anywhere.
     let text = format!("{all:?}");
     assert!(!text.contains("Claktory Security") && !text.contains("MARKER"), "{text}");
@@ -334,30 +334,34 @@ async fn history_says_where_a_procedure_ended_and_how_a_secret_was_given() {
         .expect("an ask");
     }
     let vault = rusqlite::Connection::open(home_of(addr).root().join("vault/vault.db")).expect("vault.db");
+    // Every request names the admin agent an approval would pass it to
+    // (Rivet, in a Claktory that has it); only those that passed to it
+    // were stamped approved (Abbacchio's 1580).
     let requests = [
-        ("Gave", "granted", "", "Hetzner prod", ""),
-        ("Added", "granted", r#"{"name":"Added","added":true}"#, "Added", ""),
-        ("Generated", "generated", r#"{"name":"Generated","generate":"ssh-ed25519"}"#, "Generated", ""),
-        ("Imported", "granted", r#"{"name":"Imported","imports":[{"variable":"KS","path":"/tmp/ks"}]}"#, "Imported", ""),
-        ("Generated for it", "granted", r#"{"name":"Generated for it","generate":"password"}"#, "Generated for it", ""),
+        ("Gave", "granted", "", "Hetzner prod", false),
+        ("Added", "granted", r#"{"name":"Added","added":true}"#, "Added", false),
+        ("Generated", "generated", r#"{"name":"Generated","generate":"ssh-ed25519"}"#, "Generated", false),
+        ("Imported", "granted", r#"{"name":"Imported","imports":[{"variable":"KS","path":"/tmp/ks"}]}"#, "Imported", false),
+        ("Generated for it", "granted", r#"{"name":"Generated for it","generate":"password"}"#, "Generated for it", false),
         (
             "Imported for no one",
             "generated",
             r#"{"name":"Imported for no one","imports":[{"variable":"KS","path":"/tmp/ks"}]}"#,
             "Imported for no one",
-            "",
+            false,
         ),
-        ("Left to Rivet", "approved", "", "", "rivet"),
-        ("Rivet found it", "granted", "", "Cloudflare", "rivet"),
-        ("Dismissed", "dismissed", "", "", ""),
+        ("Left to Rivet", "approved", "", "", true),
+        ("Rivet found it", "granted", "", "Cloudflare", true),
+        ("Dismissed", "dismissed", "", "", false),
     ];
-    for (at, (name, state, new_secret, given_name, admin)) in requests.iter().enumerate() {
+    for (at, (name, state, new_secret, given_name, passed)) in requests.iter().enumerate() {
         let decided = now - (10 - at as i64) * minute;
+        let approved = if *passed { decided - minute / 2 } else { 0 };
         vault
             .execute(
                 "INSERT INTO requests (id, agent, secret, secret_name, new_secret, reason, state, created, decided, given_name, admin, approved)
-                 VALUES (?1, 'builder', '', ?1, ?2, '', ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![name, new_secret, state, decided - minute, if *state == "approved" { 0 } else { decided }, given_name, admin, decided],
+                 VALUES (?1, 'builder', '', ?1, ?2, '', ?3, ?4, ?5, ?6, 'rivet', ?7)",
+                params![name, new_secret, state, decided - minute, if *state == "approved" { 0 } else { decided }, given_name, approved],
             )
             .expect("a request");
     }

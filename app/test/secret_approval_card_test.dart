@@ -189,9 +189,6 @@ void main() {
   testWidgets("a comment typed is one Submit, which doesn't allow it "
       '(#370); decided, the card shows the comment', (tester) async {
     final harness = await _card(tester, _approval());
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
-    expect(find.text('June gets it with your answer.'), findsOneWidget);
     final field = find.descendant(
       of: find.byType(DecisionComment),
       matching: find.byType(EditableText),
@@ -201,7 +198,7 @@ void main() {
     expect(find.text("Don't allow"), findsNothing);
     expect(find.text('Allow once'), findsNothing);
     expect(
-      find.text('Not allowed this time. June gets your comment.'),
+      find.text('Submit sends your words instead of allowing.'),
       findsOneWidget,
     );
     await tester.tap(find.text('Submit'));

@@ -97,7 +97,7 @@ void main() {
   });
 
   testWidgets('changed while the person types: their words stay, under the '
-      'new version', (tester) async {
+      'new version, and the field says so', (tester) async {
     final harness = _asking(_ask());
     await harness.show(tester);
     await settle(tester);
@@ -113,7 +113,14 @@ void main() {
           .controller
           .text,
       'Yes, do',
-    );
+    ); // Said over the field (N4b, Trish's words), until it's emptied.
+    const said =
+        'Builder updated this request while you were typing. Your words are '
+        'kept.';
+    expect(_inCard(find.text(said)), findsOneWidget);
+    await tester.enterText(_inCard(find.byType(EditableText)), '');
+    await tester.pump();
+    expect(_inCard(find.text(said)), findsNothing);
   });
 
   testWidgets("an answer to an older version is set aside, not lost: the "
@@ -122,13 +129,13 @@ void main() {
     final harness = _asking(_ask());
     await harness.show(tester);
     await settle(tester);
-    harness.backend.refuse = 'This card changed. Look at it again.';
+    harness.backend.refuse = 'This request changed. Look at it again.';
     await tester.enterText(_inCard(find.byType(EditableText)), 'Yes, do');
     await tester.pump();
     await tester.tap(_inCard(find.text('Answer')));
     await settle(tester);
     expect(
-      _inCard(find.text('This card changed. Look at it again.')),
+      _inCard(find.text('This request changed. Look at it again.')),
       findsNothing,
     );
     expect(
@@ -268,6 +275,8 @@ void main() {
           seq: Int64(7),
           title: 'Restart the new build server?',
           outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_ANSWERED,
+          // Words, so it reads Answered (a bare yes reads Approved).
+          reply: 'After lunch',
           updates: 2,
           askedMs: Int64(now - 60000),
           decidedMs: Int64(now),
@@ -280,7 +289,10 @@ void main() {
     await tester.tap(find.text('History'));
     await settle(tester);
     await settle(tester);
-    expect(find.text('Answered · Updated twice'), findsOneWidget);
+    expect(
+      find.text('Answered · Updated twice · “After lunch”', findRichText: true),
+      findsOneWidget,
+    );
   });
 
   group('a proposal decided while the connection is down (row 1052)', () {
@@ -330,14 +342,17 @@ void main() {
         'yet", and nothing is decided', (tester) async {
       final harness = await approvedOffline(tester);
       load(harness, proposal(revision: 2));
-      harness.backend.refuse = 'This card changed. Look at it again.';
+      harness.backend.refuse = 'This request changed. Look at it again.';
       harness.backend.connected.value = false;
       await tester.pump();
       harness.backend.connected.value = true;
       await settle(tester);
       expect(harness.last.decideProposal.revision, 1);
       expect(find.text(askWaiting), findsNothing);
-      expect(find.text('This card changed. Look at it again.'), findsOneWidget);
+      expect(
+        find.text('This request changed. Look at it again.'),
+        findsOneWidget,
+      );
       expect(find.text('Add a fifth backend agent.'), findsOneWidget);
     });
   });

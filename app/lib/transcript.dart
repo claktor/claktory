@@ -3226,11 +3226,17 @@ class _LocalPicture extends StatelessWidget {
   final Widget failed;
 
   @override
-  Widget build(BuildContext context) => Image.file(
-    File(path),
-    cacheWidth: (240 * MediaQuery.devicePixelRatioOf(context)).round(),
+  Widget build(BuildContext context) => Image(
+    // As the message box decoded it while it waited (warmSentPicture).
+    image: sentPicture(path, MediaQuery.devicePixelRatioOf(context)),
     fit: BoxFit.contain,
     gaplessPlayback: true,
+    // Still decoding: the room a phone's photo takes (portrait, 3:4), so
+    // the bubble doesn't grow under the view when it's ready.
+    frameBuilder: (context, child, frame, synchronous) =>
+        frame == null && !synchronous
+        ? const SizedBox(width: 135, height: 180)
+        : child,
     errorBuilder: (context, error, stack) => failed,
   );
 }
@@ -3709,6 +3715,14 @@ class _ProposalCardState extends State<ProposalCard> {
               decidedMs: decided,
             )
           else if (pending) ...[
+            // The field first, open from the start (Lucy's rule 4).
+            DecisionComment(
+              controller: _comment,
+              agent: name,
+              enabled: !_deciding,
+              onSubmit: _reply,
+            ),
+            const SizedBox(height: Space.s),
             // Once a comment is typed, one Submit in place of both: the
             // proposal goes to Rivet with the person's words as what to do
             // (#370).
@@ -3756,12 +3770,6 @@ class _ProposalCardState extends State<ProposalCard> {
                   ],
                 ],
               ),
-            ),
-            DecisionComment(
-              controller: _comment,
-              agent: name,
-              enabled: !_deciding,
-              onSubmit: _reply,
             ),
           ] else ...[
             // Who decided: the person.

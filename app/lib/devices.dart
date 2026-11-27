@@ -13,18 +13,20 @@ import 'connections.dart';
 import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
-import 'links.dart' show confirmPairing, pairingFingerprint;
+import 'links.dart'
+    show PairingCheck, pairingCheckTitle, pairingFingerprint, pairingOnAccount;
 import 'pairing.dart' show DeviceNumberField, decideDevice, isDeviceNumber;
 import 'pasted_code.dart';
 import 'mobile/device.dart' show deviceCapabilities;
 import 'mobile/drawer.dart' show largeText;
-import 'mobile/metrics.dart' show TypeScale;
+import 'mobile/local_network.dart' show connectNewClaktory;
+import 'mobile/metrics.dart' show Metrics, TypeScale;
 import 'mobile/input.dart' show InputKind;
 import 'mobile/lines.dart' show ActionLine, ControlsLine;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'phone.dart' show pairingProblem;
 import 'pipes.dart' show backendOnMac;
-import 'rail.dart' show ClaktoriesScope, confirmRemoveClaktory;
+import 'rail.dart' show ClaktoriesScope;
 import 'scan_code.dart';
 import 'scope.dart';
 import 'tunnel_client.dart';
@@ -971,13 +973,23 @@ class _QrPainter extends CustomPainter {
   bool shouldRepaint(_QrPainter old) => old.modules != modules;
 }
 
-/// Which Factory this app shows: this Mac's, or one on another machine
-/// it's paired with; and a new one from a pairing code. Opened from the
-/// Factory name at the bottom of the sidebar.
-class FactoryChooser extends StatefulWidget {
-  const FactoryChooser({super.key, required this.close});
+/// Add a Claktory (Lucy's devices-signin.md §3): the Claktories on the
+/// person's account first, each a row that asks in place, and a code one
+/// quiet link away, never both at once. Opened from + at the rail's foot,
+/// and at the code ([code]) wherever a new code is the way back. The
+/// Claktories already here are the rail's, never listed here.
+class FactoryChooser extends StatefulWidget implements ModalWidth {
+  const FactoryChooser({super.key, required this.close, this.code = false});
 
   final VoidCallback close;
+
+  /// A form dialog of at most 460 (devices-signin.md §8.8; Abbacchio's
+  /// row 1710).
+  @override
+  double get modalWidth => 460;
+
+  /// Opens at "Use a code instead".
+  final bool code;
 
   @override
   State<FactoryChooser> createState() => _FactoryChooserState();
@@ -990,6 +1002,26 @@ class _FactoryChooserState extends State<FactoryChooser> {
   /// (friend bug #2).
   var _canScan = false;
 
+  /// With a code, rather than from the account.
+  late var _withCode = widget.code;
+
+  /// On an iPad, iPhone or Android device with a camera, a code is
+  /// scanned first (§7: Scan code is the primary); Paste code brings the
+  /// field.
+  var _pasting = false;
+
+  /// A row of the account's asks "Connect to …?" in place: the foot's
+  /// Cancel goes, so there's one on screen.
+  var _asking = false;
+
+  /// Every Claktory on the account is here already.
+  var _nothingLeft = false;
+
+  /// A code pasted or scanned, checked before it connects, and whether it's
+  /// on the account as far as that's known; and one being looked up.
+  (RemoteFactory, bool?)? _checking;
+  var _lookingUp = false;
+
   @override
   void initState() {
     super.initState();
@@ -1000,8 +1032,8 @@ class _FactoryChooserState extends State<FactoryChooser> {
     });
   }
 
-  /// Scans the other Claktory's code, which then connects as a pasted one
-  /// does, once the person says so.
+  /// Scans the other Claktory's code, which then asks as a pasted one
+  /// does.
   Future<void> _scan() async {
     final scanned = await scanCode(
       context,
@@ -1010,9 +1042,7 @@ class _FactoryChooserState extends State<FactoryChooser> {
     );
     if (scanned == null || !mounted) return;
     _code.text = scanned;
-    if (pastedPairingCode(scanned) case final target?) {
-      await _connectPasted(target);
-    }
+    if (pastedPairingCode(scanned) case final target?) await _check(target);
   }
 
   @override
@@ -1021,217 +1051,336 @@ class _FactoryChooserState extends State<FactoryChooser> {
     super.dispose();
   }
 
-  void _show(RemoteFactory? target) {
-    widget.close();
-    AppScope.switchFactory(context, target);
+  /// A code connects only once the person says so, as every way a code
+  /// comes in does (Fugo): the check, in this dialog, never a second one.
+  Future<void> _check(RemoteFactory target) async {
+    if (_lookingUp) return;
+    setState(() => _lookingUp = true);
+    final onAccount = await pairingOnAccount(context, target);
+    if (!mounted) return;
+    setState(() {
+      _lookingUp = false;
+      _checking = (target, onAccount);
+    });
   }
 
-  /// A pasted code connects only once the person says so, as every way a
-  /// code comes in does (confirmPairing, Fugo).
-  Future<void> _connectPasted(RemoteFactory target) async {
-    // One question at a time: a second click while it asks does nothing
-    // (Abbacchio).
-    if (_asking) return;
-    _asking = true;
-    final bool yes;
-    try {
-      yes = await confirmPairing(context, target);
-    } finally {
-      _asking = false;
-    }
-    if (!yes || !mounted) return;
-    _show(target);
+  /// Connects to [target]: the first connection on an iPhone or iPad says
+  /// why it asks for the local network first. The dialog closes after,
+  /// so the sheet comes over it.
+  Future<void> _connect(RemoteFactory target) async {
+    final close = widget.close;
+    await connectNewClaktory(context, target);
+    close();
   }
-
-  /// Whether [confirmPairing] is asking about a pasted code.
-  var _asking = false;
 
   @override
   Widget build(BuildContext context) {
-    final connections = AppScope.scope(context).connections;
+    final scope = AppScope.scope(context);
+    final connections = scope.connections;
     // This Mac's own Claktory, if it runs one (else it can be set up).
     final claktories = ClaktoriesScope.of(context);
     final hasLocalBackend =
-        claktories?.localBackend ?? AppScope.of(context).localBackend;
+        claktories?.localBackend ?? scope.backend.localBackend;
+    final setUpHere = !hasLocalBackend && (claktories?.canChooseLocal ?? false)
+        ? QuietLink(
+            label: 'Set up Claktory on this Mac',
+            onTap: () {
+              widget.close();
+              claktories!.setLocalBackend(true);
+            },
+          )
+        : null;
     return ListenableBuilder(
-      listenable: Listenable.merge([connections, _code]),
+      listenable: Listenable.merge([connections.account, _code]),
       builder: (context, _) {
-        final pasted = _code.text.trim();
-        final target = pastedPairingCode(pasted);
-        final current = connections.current;
-        return FormFrame(
-          title: 'Your Claktories',
-          error: pasted.isNotEmpty && target == null
-              ? otherCodeProblem(
-                      pasted,
-                      device: thisDeviceKind,
-                      // An iPhone's or iPad's Claktory is on a Mac, as the phone's
-                      // pairing screen says (Zucchero's row 219).
-                      where: defaultTargetPlatform == TargetPlatform.iOS
-                          ? onMac
-                          : whereItRuns,
-                    ) ??
-                    "That isn't a Claktory code."
-              : null,
-          submitLabel: 'Connect',
-          onSubmit: target == null
+        final checking = _checking;
+        if (checking != null) {
+          final (target, onAccount) = checking;
+          return _AddFrame(
+            title: pairingCheckTitle,
+            body: null,
+            fields: [PairingCheck(target: target, onAccount: onAccount)],
+            quiet: const [],
+            cancelLabel: 'Back',
+            onCancel: () => setState(() => _checking = null),
+            primary: 'Connect',
+            onPrimary: () => unawaited(_connect(target)),
+          );
+        }
+        if (_withCode) return _codeForm(context);
+        final account = connections.account;
+        return _AddFrame(
+          title: 'Add a Claktory',
+          body: !account.signedIn
               ? null
-              : () => unawaited(_connectPasted(target)),
-          onCancel: widget.close,
+              : _nothingLeft
+              ? 'All your Claktories are already here. To add one that '
+                    "isn't on your account yet, use its code."
+              : 'On your account · ${account.email}',
           fields: [
-            if (hasLocalBackend)
-              _FactoryRow(
-                label: 'This Mac',
-                detail: 'Running here',
-                showing: current == null,
-                onTap: () => _show(null),
-              )
-            else if (claktories != null && claktories.canChooseLocal)
-              _FactoryRow(
-                label: 'This Mac',
-                detail: 'Set up Claktory here',
-                showing: false,
-                onTap: () {
-                  widget.close();
-                  claktories.setLocalBackend(true);
-                },
-              ),
-            for (final saved in connections.saved)
-              _FactoryRow(
-                label: saved.label,
-                // Where it runs, beside "Running here" (MC13: a device is
-                // what shows a Claktory, not where one runs).
-                detail: 'Running elsewhere',
-                showing: saved == current,
-                onTap: () => _show(saved),
-                // The rail's own Remove…, its question and all (#529, MC8):
-                // one act, one word.
-                onRemove: switch (claktories?.all.where(
-                  (claktory) => claktory.target == saved,
-                )) {
-                  final found? when found.isNotEmpty => () => unawaited(
-                    confirmRemoveClaktory(context, found.first),
-                  ),
-                  _ => null,
-                },
-              ),
-            const SizedBox(height: Space.l),
-            Field(
-              label: 'On your account',
-              child: YourClaktories(onConnect: _show, hideConnected: true),
-            ),
-            const SizedBox(height: Space.l),
-            Field(
-              label: 'Connect to another Claktory',
-              note: _canScan
-                  ? "Scan or paste the code from that Claktory's Settings → "
-                        'Devices, or the one `factoryd pair` prints on a '
-                        'server.'
-                  : "Paste the code from that Claktory's Settings → Devices, "
-                        'or the one `factoryd pair` prints on a server.',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  TextField(
-                    controller: _code,
-                    placeholder: 'Paste code',
-                    autocorrect: false,
-                    textCapitalization: TextCapitalization.none,
-                    autofocus: true,
-                    onSubmitted: (_) {
-                      if (target != null) unawaited(_connectPasted(target));
-                    },
-                  ),
-                  if (_canScan) ...[
-                    const SizedBox(height: Space.s),
-                    Align(
-                      alignment: AlignmentDirectional.centerStart,
-                      child: Button(
-                        label: 'Scan code',
-                        onPressed: () => unawaited(_scan()),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
+            YourClaktories(
+              hideConnected: true,
+              // A Mac with its own Claktory is signed in through it, which
+              // Settings → Account says (§6).
+              accountLine: !hasLocalBackend,
+              onConnect: (target) => unawaited(_connect(target)),
+              onAsking: (asking) => setState(() => _asking = asking),
+              onNothingLeft: (nothing) =>
+                  setState(() => _nothingLeft = nothing),
             ),
           ],
+          quiet: [
+            if (!_nothingLeft)
+              QuietLink(
+                label: 'Use a code instead',
+                onTap: () => setState(() => _withCode = true),
+              ),
+            ?setUpHere,
+          ],
+          onCancel: _asking ? null : widget.close,
+          primary: _nothingLeft ? 'Use a code' : null,
+          onPrimary: () => setState(() => _withCode = true),
         );
       },
     );
   }
+
+  Widget _codeForm(BuildContext context) {
+    final useAccount = QuietLink(
+      label: 'Use your account instead',
+      onTap: () => setState(() => _withCode = false),
+    );
+    // A Mac with a camera offers Scan code beside the field instead.
+    final scanFirst =
+        _canScan &&
+        (defaultTargetPlatform == TargetPlatform.iOS ||
+            defaultTargetPlatform == TargetPlatform.android);
+    if (scanFirst && !_pasting) {
+      return _AddFrame(
+        title: 'Add a Claktory with a code',
+        body:
+            "Scan the code from that Claktory's Settings → Devices, or paste "
+            'the one factoryd pair prints on a server.',
+        fields: [
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: Button(
+              label: 'Paste code',
+              onPressed: () => setState(() => _pasting = true),
+            ),
+          ),
+        ],
+        quiet: [useAccount],
+        onCancel: widget.close,
+        primary: 'Scan code',
+        onPrimary: _lookingUp ? null : () => unawaited(_scan()),
+      );
+    }
+    final pasted = _code.text.trim();
+    final target = pastedPairingCode(pasted);
+    void submit() {
+      if (target != null) unawaited(_check(target));
+    }
+
+    return _AddFrame(
+      title: 'Add a Claktory with a code',
+      body: null,
+      error: pasted.isNotEmpty && target == null
+          ? otherCodeProblem(
+                  pasted,
+                  device: thisDeviceKind,
+                  // An iPhone's or iPad's Claktory is on a Mac, as the
+                  // phone's pairing screen says (Zucchero's row 219).
+                  where: defaultTargetPlatform == TargetPlatform.iOS
+                      ? onMac
+                      : whereItRuns,
+                ) ??
+                "That isn't a Claktory code."
+          : null,
+      primary: 'Connect',
+      onPrimary: target == null || _lookingUp ? null : submit,
+      onCancel: widget.close,
+      quiet: [useAccount],
+      fields: [
+        Field(
+          label: 'Code',
+          note: _canScan
+              ? "Scan or paste the code from that Claktory's Settings → "
+                    'Devices, or the one factoryd pair prints on a server.'
+              : "Paste the code from that Claktory's Settings → Devices, or "
+                    'the one factoryd pair prints on a server.',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextField(
+                controller: _code,
+                placeholder: 'Paste code',
+                autocorrect: false,
+                textCapitalization: TextCapitalization.none,
+                autofocus: true,
+                onSubmitted: (_) => submit(),
+              ),
+              if (_canScan) ...[
+                const SizedBox(height: Space.s),
+                Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  child: Button(
+                    label: 'Scan code',
+                    onPressed: () => unawaited(_scan()),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
 }
 
-/// One Factory in the chooser: its name and address, the signal dot on the
-/// one showing, and Forget for one on another machine.
-class _FactoryRow extends StatelessWidget {
-  const _FactoryRow({
-    required this.label,
-    required this.detail,
-    required this.showing,
-    required this.onTap,
-    this.onRemove,
+/// Add a Claktory's frame, as [FormFrame] lays a form out (Cmd+Enter
+/// presses [primary]), for its states: none until a row is chosen (§3:
+/// the row is the button), no Cancel while a row asks, and [quiet] links
+/// at the left of the buttons, wrapping under them where they don't fit.
+class _AddFrame extends StatelessWidget {
+  const _AddFrame({
+    required this.title,
+    required this.body,
+    required this.fields,
+    required this.quiet,
+    required this.onCancel,
+    required this.primary,
+    required this.onPrimary,
+    this.error,
+    this.cancelLabel = 'Cancel',
   });
 
-  final String label;
-  final String detail;
-  final bool showing;
-  final VoidCallback onTap;
+  final String title;
+  final String? body;
+  final List<Widget> fields;
+  final List<Widget> quiet;
+  final String? error;
 
-  /// Removes it from this device, after the rail's question.
-  final VoidCallback? onRemove;
+  /// Cancel's words and what it does; no Cancel without it.
+  final String cancelLabel;
+  final VoidCallback? onCancel;
+
+  /// The primary's words, if there is one, and what it does (null: off).
+  final String? primary;
+  final VoidCallback? onPrimary;
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    return Semantics(
-      button: true,
-      selected: showing,
-      label: label,
-      child: Pressable(
-        onTap: onTap,
-        builder: (context, hovered) => AnimatedContainer(
-          duration: Motion.fast,
-          padding: const EdgeInsets.symmetric(
-            horizontal: Space.s,
-            vertical: Space.s,
-          ),
-          decoration: BoxDecoration(
-            color: showing
-                ? palette.selected
-                : hovered
-                ? palette.hover
-                : null,
-            borderRadius: BorderRadius.circular(Radii.control),
-          ),
-          child: Row(
-            children: [
-              SizedBox(
-                width: Space.l,
-                child: showing ? Dot(color: palette.signal) : null,
+    final type = TypeScale.of(context);
+    final body = this.body;
+    final error = this.error;
+    final onCancel = this.onCancel;
+    final primary = this.primary;
+    void submit() {
+      if (primary != null) onPrimary?.call();
+    }
+
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.enter, meta: true): submit,
+        const SingleActivator(LogicalKeyboardKey.enter, control: true): submit,
+      },
+      child: FocusTraversalGroup(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Semantics(
+              header: true,
+              child: Text(
+                title,
+                style: type.emphasis.copyWith(color: palette.text),
               ),
-              Expanded(
+            ),
+            if (body != null) ...[
+              const SizedBox(height: Space.s),
+              Text(body, style: type.body.copyWith(color: palette.textMuted)),
+            ],
+            const SizedBox(height: Space.xl),
+            Flexible(
+              child: SingleChildScrollView(
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      label,
-                      style: TypeScale.of(context).label
-                          .copyWith(color: palette.text),
-                    ),
-                    Text(
-                      detail,
-                      style: TypeScale.of(context).caption
-                          .copyWith(color: palette.textFaint),
-                    ),
-                  ],
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: fields,
                 ),
               ),
-              // On hover with a pointer; always with a finger, which has
-              // none (Zucchero's row 642).
-              if (onRemove != null && (hovered || touchFirst(context)))
-                Button(label: 'Remove…', onPressed: onRemove),
-            ],
+            ),
+            if (error != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: Space.m),
+                child: Text(
+                  error,
+                  style: type.caption.copyWith(color: palette.danger),
+                ),
+              ),
+            const SizedBox(height: Space.s),
+            Row(
+              children: [
+                Expanded(
+                  child: Wrap(
+                    spacing: Space.m,
+                    runSpacing: Space.xs,
+                    children: quiet,
+                  ),
+                ),
+                if (onCancel != null) ...[
+                  const SizedBox(width: Space.s),
+                  Button(label: cancelLabel, onPressed: onCancel),
+                ],
+                if (primary != null) ...[
+                  const SizedBox(width: Space.s),
+                  Button(label: primary, primary: true, onPressed: onPrimary),
+                ],
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A quiet link: muted words, underlined, a finger's height on touch
+/// (Add a Claktory's "Use a code instead").
+class QuietLink extends StatelessWidget {
+  const QuietLink({super.key, required this.label, required this.onTap});
+
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final touch = touchFirst(context);
+    return Semantics(
+      button: true,
+      label: label,
+      container: true,
+      onTap: onTap,
+      excludeSemantics: true,
+      child: Pressable(
+        onTap: onTap,
+        builder: (context, hovered) => ConstrainedBox(
+          constraints: BoxConstraints(
+            minHeight: touch ? Metrics.of(context).target : 28,
+          ),
+          child: Align(
+            alignment: AlignmentDirectional.centerStart,
+            widthFactor: 1,
+            child: Text(
+              label,
+              style: TypeScale.of(context).body.copyWith(
+                color: hovered ? palette.text : palette.textMuted,
+                decoration: TextDecoration.underline,
+                decorationColor: hovered ? palette.text : palette.textFaint,
+              ),
+            ),
           ),
         ),
       ),
@@ -1284,67 +1433,6 @@ class TunnelLine extends StatelessWidget {
               .copyWith(color: failed ? palette.textMuted : palette.textFaint),
         ),
       ],
-    );
-  }
-}
-
-/// Why the app can't connect to the Claktory it shows, and what to do:
-/// opened from the sidebar's footer.
-class TunnelProblem extends StatelessWidget {
-  const TunnelProblem({super.key, required this.close});
-
-  final VoidCallback close;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    final backend = AppScope.of(context);
-    final machine = backend.target?.label ?? 'this Claktory';
-    return ValueListenableBuilder(
-      valueListenable: backend.tunnel,
-      builder: (context, status, _) {
-        final now = status ?? idleTunnel;
-        final connected = now.phase == TunnelPhase.connected;
-        return FormFrame(
-          title: connected
-              ? 'Connected to $machine'
-              : "Can't connect to $machine",
-          body: connected
-              ? 'Private and encrypted.'
-              : tunnelAdvice(now, machine, device: thisDeviceKind),
-          fields: [
-            // What went wrong exactly, for whoever looks into it.
-            if (!connected && now.error.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(bottom: Space.m),
-                child: Text(
-                  now.error,
-                  style: TypeScale.of(context).caption
-                      .copyWith(color: palette.textFaint),
-                ),
-              ),
-          ],
-          error: null,
-          submitLabel: 'Try again',
-          onSubmit: connected
-              ? null
-              : () {
-                  backend.retry();
-                  close();
-                },
-          onCancel: close,
-          secondary: Button(
-            label: 'Switch Claktory…',
-            onPressed: () {
-              close();
-              showModal(
-                context,
-                (context, close) => FactoryChooser(close: close),
-              );
-            },
-          ),
-        );
-      },
     );
   }
 }

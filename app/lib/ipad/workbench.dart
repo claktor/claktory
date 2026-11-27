@@ -6,7 +6,6 @@ import 'package:flutter/widgets.dart';
 
 import '../controls.dart' show Pressable;
 import '../highlights.dart' show HighlightGlow, HighlightStore;
-import '../extensions.dart' show extensionBarWidthOf;
 import '../identity.dart';
 import '../layout.dart';
 import '../mobile/device.dart' show WindowControls, windowControls;
@@ -15,6 +14,7 @@ import '../mobile/permission.dart' show registerPermissionHost;
 import '../mobile/popover.dart' show presentPopover;
 import '../needs_you_focus.dart' show focusModeKey, focusModeOf, setFocusMode;
 import '../panes.dart' show PaneProjection, paneTitle, paneGlyph;
+import '../pinned_agents.dart' show openPinned, pinnedAgents;
 import '../protocol/factory/v1/factory.pb.dart';
 import '../scope.dart' show AppScope;
 import '../selection.dart' show Unselectable;
@@ -334,7 +334,6 @@ class Workbench extends StatefulWidget {
     required this.sidebar,
     required this.sidebarWidth,
     required this.content,
-    this.extensionBar,
     this.panel,
     this.panelWidth = 0,
     this.agent,
@@ -352,9 +351,6 @@ class Workbench extends StatefulWidget {
   /// The selected agent's view, or whatever shows instead, with its
   /// banners.
   final Widget content;
-
-  /// The agent's extension bar, when it has one.
-  final Widget? extensionBar;
 
   /// The open panel, [panelWidth] wide, when there is one.
   final Widget? panel;
@@ -515,6 +511,8 @@ class _WorkbenchState extends State<Workbench> {
         focus: focus,
         agent: agent,
         showPanes: showPanes,
+        pins: pinnedAgents(AppScope.of(context).workspace.workspace),
+        openPin: (pin) => openPinned(context, pin.id),
       );
       final textFactor = textFactorOf(MediaQuery.textScalerOf(context).scale);
       // The agent's panes show what fits this window, focused as the person
@@ -562,7 +560,6 @@ class _WorkbenchState extends State<Workbench> {
       });
       return WorkbenchShortcuts(
         commands: commands,
-        native: focus.menu.native,
         escape: focus.overlayOpen && !pinned ? focus.closeOverlay : null,
         child: SafeWindow(
           controls: _controls,
@@ -584,7 +581,7 @@ class _WorkbenchState extends State<Workbench> {
   );
 
   /// The full and paired tiers: the rail's column, the sidebar when it's
-  /// pinned, the extension bar, the content and the panel when it fits.
+  /// pinned, the content and the panel when it fits.
   Widget _wide(
     BuildContext context,
     WorkbenchFocus focus,
@@ -598,8 +595,7 @@ class _WorkbenchState extends State<Workbench> {
       final tier => tier,
     };
     final sidebar = pinned ? _sidebarWidth(constraints.maxWidth) : 0.0;
-    final room =
-        constraints.maxWidth - workbenchRailWidth - sidebar - _bar(context);
+    final room = constraints.maxWidth - workbenchRailWidth - sidebar;
     final panel = widget.panel;
     final panelFits =
         panel != null && room - widget.panelWidth >= _contentMinWidth;
@@ -626,7 +622,6 @@ class _WorkbenchState extends State<Workbench> {
                 SizedBox(width: sidebar, child: widget.sidebar(sidebar)),
                 Container(width: 1, color: palette.hairline),
               ],
-              ?_extensionBar,
               Expanded(child: _aboveKeyboard(context, content)),
               if (panelFits)
                 SizedBox(
@@ -668,10 +663,7 @@ class _WorkbenchState extends State<Workbench> {
               Expanded(
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    ?_extensionBar,
-                    Expanded(child: _aboveKeyboard(context, content)),
-                  ],
+                  children: [Expanded(child: _aboveKeyboard(context, content))],
                 ),
               ),
             ],
@@ -685,17 +677,6 @@ class _WorkbenchState extends State<Workbench> {
       ],
     );
   }
-
-  /// The extension bar, scrolling when the window is too short for all
-  /// its glyphs (a short Stage Manager window).
-  Widget? get _extensionBar {
-    final bar = widget.extensionBar;
-    return bar == null ? null : WorkbenchBarScroll(child: bar);
-  }
-
-  /// The extension bar's width, when there is one.
-  double _bar(BuildContext context) =>
-      widget.extensionBar == null ? 0 : extensionBarWidthOf(context);
 
   double _sidebarWidth(double window) =>
       math.min(widget.sidebarWidth, math.max(200.0, window * 0.4));
@@ -968,99 +949,6 @@ class _PaneRow extends StatelessWidget {
           ),
         ),
       ),
-    );
-  }
-}
-
-/// A column of glyphs (the extension bar) in a window too short for all
-/// of them: it keeps every glyph at its size and scrolls, and the edge it's
-/// cut at fades out, so what's past it reads as more to scroll to rather
-/// than cut off. Tall enough, it fills the height as it would unwrapped.
-@visibleForTesting
-class WorkbenchBarScroll extends StatefulWidget {
-  const WorkbenchBarScroll({super.key, required this.child});
-
-  final Widget child;
-
-  @override
-  State<WorkbenchBarScroll> createState() => WorkbenchBarScrollState();
-}
-
-@visibleForTesting
-class WorkbenchBarScrollState extends State<WorkbenchBarScroll> {
-  /// Whether some of the column is past the top edge, and past the
-  /// bottom: that edge fades out.
-  var _above = false;
-  var _below = false;
-
-  bool get fadesTop => _above;
-  bool get fadesBottom => _below;
-
-  bool _follow(ScrollNotification notification) {
-    if (notification.depth == 0) _place(notification.metrics);
-    return false;
-  }
-
-  bool _measured(ScrollMetricsNotification notification) {
-    if (notification.depth == 0) _place(notification.metrics);
-    return false;
-  }
-
-  void _place(ScrollMetrics metrics) {
-    final above = metrics.extentBefore > 0.5;
-    final below = metrics.extentAfter > 0.5;
-    if (above != _above || below != _below) {
-      setState(() {
-        _above = above;
-        _below = below;
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    const shown = Color(0xFFFFFFFF);
-    const gone = Color(0x00FFFFFF);
-    return LayoutBuilder(
-      builder: (context, constraints) =>
-          NotificationListener<ScrollMetricsNotification>(
-            onNotification: _measured,
-            child: NotificationListener<ScrollNotification>(
-              onNotification: _follow,
-              // Always masked, so the scroll view keeps its offset as the
-              // fades come and go.
-              child: ShaderMask(
-                blendMode: BlendMode.dstIn,
-                shaderCallback: (bounds) {
-                  final fade = math.min(
-                    0.5,
-                    Space.xl / math.max(bounds.height, 1),
-                  );
-                  return LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      _above ? gone : shown,
-                      shown,
-                      shown,
-                      _below ? gone : shown,
-                    ],
-                    stops: [0, fade, 1 - fade, 1],
-                  ).createShader(bounds);
-                },
-                child: SingleChildScrollView(
-                  child: ConstrainedBox(
-                    // At least the window's height, so its background and
-                    // hairline run to the foot.
-                    constraints: BoxConstraints(
-                      minHeight: constraints.maxHeight,
-                    ),
-                    child: widget.child,
-                  ),
-                ),
-              ),
-            ),
-          ),
     );
   }
 }

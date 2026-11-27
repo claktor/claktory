@@ -229,6 +229,14 @@ class _WhenAppQuitsStepState extends State<WhenAppQuitsStep> {
             'You can change this at any time in Settings → General.',
             style: type.caption.copyWith(color: palette.textFaint),
           ),
+          const SizedBox(height: Space.xs),
+          // Where macOS lets it be turned off, and what that does (Lucy's
+          // permissions spec, P6).
+          Text(
+            'macOS lists Claktory Agents under Login Items. If you turn it '
+            'off there, your agents stop when you quit Claktory.',
+            style: type.caption.copyWith(color: palette.textFaint),
+          ),
           if (_error case final error?) ...[
             const SizedBox(height: Space.s),
             ErrorLine(error, about: 'Choosing what quitting does:'),

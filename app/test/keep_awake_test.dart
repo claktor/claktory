@@ -4,10 +4,13 @@
 // Needs you's question while keep_awake.ask: Keep it awake or Let it sleep.
 
 import 'package:factory_app/controls.dart' show Button, Toggle;
+import 'package:factory_app/highlights.dart' show HighlightStore;
 import 'package:factory_app/inbox.dart';
 import 'package:factory_app/keep_awake_card.dart' show keepAwakeAnswered;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
+import 'package:factory_app/settings_shell.dart'
+    show SettingsLink, settingGlowKey;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -217,7 +220,10 @@ void main() {
       );
       await settle(tester);
       expect(
-        find.text('You can change this in Settings → General.'),
+        find.text(
+          'You can change this in Settings → General.',
+          findRichText: true,
+        ),
         findsOneWidget,
       );
       // No conversation to open: the card is all there is.
@@ -246,6 +252,36 @@ void main() {
       expect(find.text(label), findsNothing);
     });
   }
+
+  testWidgets("the card's Settings → General is a link to General's Sleep, "
+      'glowing (Settings spec §5)', (tester) async {
+    final harness = Harness(
+      _workspace(KeepAwake(available: true, laptop: true, ask: true))
+        ..highlights = true,
+    )..backend.appliesLayouts = true;
+    await harness.show(tester, size: const Size(1200, 900));
+    await settle(tester);
+    harness.page.value = AppPage.inbox;
+    await settle(tester);
+    await tester.tap(find.text("Keep your agents working while you're away?"));
+    await settle(tester);
+    await tester.ensureVisible(find.byType(SettingsLink));
+    await settle(tester);
+    final glowed = <String>{};
+    void seen() {
+      glowed.addAll(harness.backend.highlights.glows.map((glow) => glow.key));
+    }
+
+    harness.backend.highlights.addListener(seen);
+    addTearDown(() => harness.backend.highlights.removeListener(seen));
+    await tester.tapOnText(find.textRange.ofSubstring('Settings → General'));
+    await settle(tester);
+    // Beside the conversation, as Settings opens on a Mac; narrow there,
+    // so General's page.
+    expect(find.byKey(const ValueKey('settings-page:general')), findsOneWidget);
+    expect(glowed, contains(settingGlowKey('keep-awake')));
+    await tester.pump(HighlightStore.duration);
+  });
 
   testWidgets('on a phone the question fits and answers', (tester) async {
     final harness = Harness(

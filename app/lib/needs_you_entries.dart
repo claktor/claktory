@@ -6,6 +6,7 @@
 // the open conversation's own live copy is preferred to what was fetched.
 import 'dart:async';
 
+import 'package:fixnum/fixnum.dart' show Int64;
 import 'package:flutter/foundation.dart';
 
 import 'backend.dart';
@@ -113,7 +114,7 @@ class NeedsYouEntries extends ChangeNotifier {
     final agents = {for (final agent in workspace.agents) agent.id: agent};
     final chats = {for (final chat in workspace.chats) chat.id: chat};
     for (final item in items) {
-      if (!_has(item) || _stepping(item, agents, chats)) fetch(item);
+      if (!_has(item) || _changedSince(item, agents, chats)) fetch(item);
     }
     for (final (:item, count: _) in _held.values) {
       if (_waiting.contains(item.key) && !now.contains(item.key)) fetch(item);
@@ -128,6 +129,38 @@ class NeedsYouEntries extends ChangeNotifier {
     NeedsYouKind.pipeUnanswered => _messages.containsKey(item.key),
     _ => true,
   };
+
+  /// What the Workspace says of [item]'s card now (Agent.waiting_versions,
+  /// Chat.waiting_versions: changed whenever anything on the card does,
+  /// compared only for equality); null from a Claktory that doesn't say.
+  Int64? _versionOf(
+    NeedsYouItem item,
+    Map<String, Agent> agents,
+    Map<String, Chat> chats,
+  ) => switch (item.kind) {
+    NeedsYouKind.entry =>
+      agents[item.agentId]?.waitingVersions[Int64(item.seq)],
+    NeedsYouKind.chat => chats[item.chatId]?.waitingVersions[Int64(item.seq)],
+    _ => null,
+  };
+
+  /// What each fetched card's version was as its fetch started.
+  final _fetchedAt = <String, Int64?>{};
+
+  /// Whether [item]'s card changed since it was fetched (an ask_update, a
+  /// reply on it, a step, while no conversation held it): fetched again,
+  /// so its row shows it as it is and keeps its place (Squalo's B3). Only
+  /// that card, once (Polpo's refetch rule). From a Claktory that doesn't
+  /// say, as before: a procedure whose agent changed.
+  bool _changedSince(
+    NeedsYouItem item,
+    Map<String, Agent> agents,
+    Map<String, Chat> chats,
+  ) {
+    final version = _versionOf(item, agents, chats);
+    if (version == null) return _stepping(item, agents, chats);
+    return _fetchedAt[item.key] != version;
+  }
 
   /// A procedure (ask_person's steps) that waits moves on a step at a time
   /// with no change to what waits: once its agent (or chat) changes in the
@@ -197,6 +230,12 @@ class NeedsYouEntries extends ChangeNotifier {
       // after this, and so fetches it again.
       if (item.kind == NeedsYouKind.entry || item.kind == NeedsYouKind.chat) {
         _fetchedUnder[key] = _ownerOf(item);
+        final workspace = backend.workspace.workspace;
+        _fetchedAt[key] = _versionOf(
+          item,
+          {for (final agent in workspace.agents) agent.id: agent},
+          {for (final chat in workspace.chats) chat.id: chat},
+        );
       }
       try {
         if (item.kind == NeedsYouKind.entry) {

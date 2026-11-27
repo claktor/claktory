@@ -6,6 +6,68 @@ Every change adds a line under `## Unreleased`: "Added …", "Fixed …", "Chang
 
 ## Unreleased
 
+## v0.1.25
+Released 2026-11-27 06:29 UTC.
+Pin the agents you use most, search Settings for anything, and answer requests that all work the same way across Claktory.
+- Added: Pin the agents you talk to most under Rivet in the sidebar, whatever project they're in. Right click or touch and hold an agent for Pin or Unpin; reorder pins by dragging or with Move up and Move down, and on a Mac or an iPad with a keyboard open them with ⌘1 to ⌘9. On an iPad, the menu opens beside the row.
+- Added: Agents can save a key they make with one of your secrets straight to Secrets, without the key ever showing in their conversation. Each one shows in History and in Settings → Secrets as saved by that agent, where you can delete it.
+- Added: Settings shows whether Claktory may use notifications, the microphone and the camera on this device, under This Mac, This iPhone or This iPad, with a way to turn each on. The first time you use the mic, Claktory says what it's for before your device asks.
+- Added: When a project's folder is in Documents, Desktop, Downloads, iCloud Drive or another disk, Claktory says first why your Mac will ask about it, so you can let your agents work there before they need it. If you said no, Needs you tells you how to turn it on in System Settings, and Settings → This Mac → Permissions shows each of these folders as On or Off.
+- Added: Switch account… in Settings → Account moves a Claktory to another Claktory account. It stays signed in as it is until you enter the code sent to the new address. If your device connects to it through your account, switching or signing out warns first that it may disconnect, and says how to connect again.
+- Added: Needs you has a Focus mode button at the end of its Waiting tab, so you can go through what waits one request at a time without remembering ⌘⇧N.
+- Added: In Settings, This iPhone, This iPad or This Mac (on a Mac connected to a Claktory elsewhere) shows whether that device is signed in to your Claktory account, and lets you sign it in or out.
+- Added: A request to run a command has a field to tell the agent why you dismiss it. Your words go only with Dismiss: Execute always runs exactly the command shown.
+- Added: In Settings → Providers, an OpenRouter key with a spending limit shows what's left beside it, such as "$12.40 left".
+- Changed: What an agent asks of you is now called a request everywhere, from focus mode's Next request to what agents tell you. Requests still wait for you in Needs you.
+- Changed: Settings is easier to find your way around. Where there's room, its sections run down the left with a search field, so you can find a setting by its name or by what you call it, and wherever Claktory mentions a place in Settings, it's a link that takes you there.
+- Changed: Requests have fewer buttons, and every request works the same way. The field for your words is always open above the buttons, the main button is always last, and the buttons no longer change as you type, except that on a plain yes-or-no request your words become Submit. Return never approves anything. Long requests fold their middle so the buttons stay in view. Once a request is answered, it says how it ended in its own words, such as Gave Hetzner or Couldn't do step 2, and so does its row in Needs you. This includes the review bar under a PDF or picture you draw on with an iPad.
+- Changed: An agent's header puts what you use most one click away. On a Mac or iPad, its name opens its settings, you change its model and effort from a small menu right there (with Undo), Checklist and running Tasks open their panels, and ⋯ has Find, other versions, its panels and Extensions. On iPhone, the header shows the agent's model after its role.
+- Changed: An agent's settings are easier to read. What you change most, its model and effort, comes first, then its name and role, its look and its prompt, which folds when it's long. Its extensions fold to how many are on, with Change… to see them, and "Or ask Rivet to change …" at the top hands the change to Rivet instead.
+- Changed: Add a Claktory starts with the Claktories on your account, one click each, with a code one click away, and on your phone, adding another Claktory starts with signing in with your email. When a Claktory can't let your device in, its page says what's wrong and puts the way on first, such as Try again or Use a new code, with the ways out as links under it.
+- Changed: On your iPhone, and an iPad in Slide Over or a narrow Split View, Needs you opens on the list of everything waiting again, so you can pick what to answer. Tap a request to answer it on its own screen, then you're back at the list; tap Focus mode to go through them one at a time.
+- Changed: Settings → Secrets shows when your account's recovery key opens this Claktory's secrets, with the Claktory it was made on and when. When your account has a new recovery key, it says so there, and Use the key here uses it only once you choose to.
+- Changed: History plays more smoothly after a long time of work, and one project's History shows how busy that project was, not your whole Claktory.
+- Changed: New files show up in a project's Files sooner, and Claktory uses less of your computer while Files is open.
+- Changed: On an iPad, the camera's first-time and turned-off screens keep their words and Continue together in the middle of the window at every size, Slide Over included, and asking for notifications or the local network is a dialog in the middle even in a narrow window. While the camera can't be used in this window, Paste code instead is the main button when you add a Claktory too, and on iPadOS 18 or later the code scanner keeps working in Split View, Slide Over and Stage Manager.
+- Changed: When a provider stops taking your sign-in for its model list, Settings → Providers says Sign-in expired, with Sign in again… right there.
+- Changed: The first time you set up Claktory on a Mac, it says that turning off Claktory Agents in Login Items stops your agents when you quit.
+- Changed: On iPhone, iPad and Android, Settings → This device shows App Store, TestFlight or Google Play beside the app's version, for the store it came from.
+- Changed: On Android, the update row in Settings says Android may ask you to let your browser install apps.
+- Changed: On an iMac, a Mac mini or a Mac Studio, this Mac's tile among your Claktories shows a desktop instead of a laptop.
+- Changed: On your phone at the largest text sizes, Back shows only its arrow, grown with the text, when its label doesn't fit, as iOS does, instead of a cut-off label.
+- Fixed: Needs you's list no longer jumps under your finger. A new request goes in above the one you're about to tap without moving it, and a small pill at the top, such as ↑ 1 new, takes you up to it. One answered on another device fades where it was, and the rest close up once you let go.
+- Fixed: Needs you shows each request as its agent last changed it, on every device and even when you haven't opened its conversation, so it says Updated and you never answer an older version that Claktory then turns away.
+- Fixed: If a file you're reviewing changes just before you tap Approve, Claktory turns the approval away and shows the request as updated, so you never approve an older version of the file.
+- Fixed: If an agent takes back a request while you're typing in it, your words stay in the request, marked Not sent, with Copy and Send to the agent.
+- Fixed: In a request for a secret, the words you type go with whatever you choose, so pasted values are never lost. The request is shorter: you paste the values, and its name and settings fold into one line you can edit. If you dismiss it with a reason, the agent reads it and can ask again.
+- Fixed: An alert no longer counts as delivered to an iPhone or iPad with Claktory's notifications turned off; when an alert reaches none of your devices, the agent is told where notifications are off. Turn them back on in your device's Settings and it counts again as soon as you return to Claktory.
+- Fixed: Signing a Claktory out of your account now disconnects the devices it let in through your account straight away, as the Sign out sheet says, instead of leaving them connected until they reconnect.
+- Fixed: When a Claktory turns your phone or iPad away until you sign in, its screen names the email that Claktory is signed in with, and once it lets the device in again, the device connects by itself: within half a minute while it shows that screen, or as soon as you choose the Claktory or come back to the app.
+- Fixed: The list of your Claktories no longer says Connecting… for one that's waiting on you. It says Sign in to connect, Signed out or On another account.
+- Fixed: A Claktory's code you scan with your phone's Camera, or a link to add one, now asks to connect at once while Claktory shows its list of Claktories or Add a Claktory, instead of waiting until you open one.
+- Fixed: Where Claktory asks for the camera to scan a code, Paste code instead is there from the start, not only after you turn the camera down.
+- Fixed: Claktory no longer opens in focus mode on your Mac or iPad because you quit it there, or because you went into another Claktory from focus mode's list. It always opens where you were, and focus mode starts only when you choose it.
+- Fixed: In focus mode on a Mac or an iPad, you can attach files to your answer with the paperclip beside its field, or on a Mac drop them on the window while you type.
+- Fixed: On an iPad, focus mode keeps the request you were on when the window narrows to one request a screen or widens again, and a tap on who asks opens Context in a narrow window. Context over the request leaves focus mode's buttons in reach and has its own close button.
+- Fixed: On an iPad, moving between Split View or Slide Over and full screen, or turning the iPad, no longer sends you back to the start of connecting to your Claktory, and no longer closes Connect to this Claktory? or the question about notifications.
+- Fixed: On an iPad, connecting your first Claktory in full screen says why it asks for Local Network before iPadOS asks, as it already did everywhere else. In Slide Over at the largest text, permission questions are wider, so words no longer break in the middle, and if the question about notifications closes before you answer, Claktory asks again the next time you come back to it.
+- Fixed: On an iPad with a keyboard, ⌃⌘S shows and hides the sidebar, and focus mode's shortcuts work: ⌘⇧C for Context, ⌥⌘↑ and ⌥⌘↓ between requests, ⌘⇧G to go to the conversation, and ⌘↩ and ⌘⌫ to answer.
+- Fixed: On an iPad, Search Settings is in the menu you see when you hold ⌘ again, and after you tap a section in Settings' index, ↑ and ↓ move to the sections before and after it, on a Mac too.
+- Fixed: An iPad in Split View or Slide Over no longer shows up as an iPhone on the Claktory you add it to.
+- Fixed: On Android, Back closes the camera's or microphone's question without leaving Claktory or saying it's off: Claktory explains again and the phone asks once more, and after a second no it offers Open Settings. A feature your workplace turned off no longer mentions Screen Time.
+- Fixed: On Android, a back swipe you pull back to the edge before letting go no longer goes back.
+- Fixed: On Android, the attach menu (Take photo, Choose photos or videos, Choose files) looks like the phone's own menus again, light or dark with the phone, instead of an old grey dialog.
+- Fixed: On Android, TalkBack now outlines only the Paste code instead button, not the whole screen.
+- Fixed: On a Mac, Open System Settings for the microphone now opens Privacy & Security → Microphone.
+- Fixed: On a Mac, a Claktory's Sign in to Claktory no longer stays over its page once that Claktory removes your Mac.
+- Fixed: While a pane fills the window, VoiceOver reads only that pane, not the agent's header, the sidebar or the panes hidden under it.
+- Fixed: Sending several photos at once keeps the conversation at its newest message, so the agent's reply shows as it comes, instead of stopping at the top of your message.
+- Fixed: When a website someone shares with you stops answering while you have it open on your phone or iPad, Claktory says why once you're back.
+- Fixed: Your Claktories lists a Claktory you renamed by its new name, as the rest of the app does.
+- Fixed: In Settings → Providers, a failed Refresh models stays on its own provider when you sign in to another one, instead of moving to that provider.
+- Fixed: Versions in Settings → General and at the foot of the sidebar show their v, such as v0.1.24.
+- Fixed: With an account service of your own, Settings → Account names it in Manage account and Shared with, instead of claktory.com.
+
 ## v0.1.24
 Released 2026-11-26 23:33 UTC.
 Go through everything that needs you in focus mode, never miss an alert, and take photos for your agents right from Claktory on your phone.

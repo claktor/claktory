@@ -117,7 +117,7 @@ async fn an_agent_changes_its_own_question_in_place_and_an_answer_to_the_old_one
     assert_eq!(
         said,
         format!(
-            "Changed question {id}, \"Deploy Thursday?\": the person's card shows it as it is now, marked updated with your reason, without notifying them again. An answer they give to the version before is refused, so they look again. It can be changed 9 more times."
+            "Changed question {id}, \"Deploy Thursday?\": the person's request shows it as it is now, marked updated with your reason, without notifying them again. An answer they give to the version before is refused, so they look again. It can be changed 9 more times."
         )
     );
     let (seq_now, shown) = card(&view, &id);
@@ -197,12 +197,12 @@ async fn a_changed_procedure_keeps_its_steps_done_and_a_card_takes_ten_changes()
         let said = call(&mut client, &mut view, "builder", "ask_update", serde_json::json!({"id": id, "body": format!("So releases are signed ({at}).")})).await;
         assert!(said.starts_with(&format!("Changed question {id}")), "{said}");
         if at == 10 {
-            assert!(said.ends_with(" That was the last change this card can take."), "{said}");
+            assert!(said.ends_with(" That was the last change this request can take."), "{said}");
         }
     }
     assert_eq!(card(&view, &id).1.revision, 11);
     let more = call(&mut client, &mut view, "builder", "ask_update", serde_json::json!({"id": id, "body": "Once more."})).await;
-    assert!(more.starts_with(&format!("You've changed question {id} 10 times, the most one card can be changed")), "{more}");
+    assert!(more.starts_with(&format!("You've changed question {id} 10 times, the most one request can be changed")), "{more}");
     assert_eq!(reply_to(&mut client, &mut view, done(1, 11)).await, Ok(()));
 }
 
@@ -224,7 +224,7 @@ async fn an_agent_changes_its_own_proposal_to_rivet() {
     assert_eq!(
         said,
         format!(
-            "Changed proposal {id}: the person's card shows it as it is now, marked updated with your reason, without notifying them again. Approving the version before is refused, so they look again. It can be changed 9 more times."
+            "Changed proposal {id}: the person's request shows it as it is now, marked updated with your reason, without notifying them again. Approving the version before is refused, so they look again. It can be changed 9 more times."
         )
     );
     let (seq_now, shown) = proposal(&view, &id);
@@ -306,4 +306,94 @@ async fn a_review_card_follows_its_file_and_an_approval_of_the_file_before_is_re
     settle().await;
     let _ = client.ping(b"after the answer").await;
     assert_eq!(card(&view, &id).1.revision, 4);
+}
+
+/// An approval given after its file changed but before the watch marked it
+/// (Abbacchio 1570) is refused, and the card is marked at once.
+#[tokio::test]
+async fn an_approval_between_a_save_and_the_mark_is_refused() {
+    let dir = temp_dir();
+    let (factory, mut client, mut view) = setup(&dir).await;
+    // The watch would mark it only after a minute's quiet.
+    factoryd::review_watch::set_times_for_test(&factory, std::time::Duration::from_millis(50), std::time::Duration::from_secs(60));
+    let file = dir.join("site/plan.md");
+    std::fs::write(&file, "- step a\n").expect("the file");
+    let said = call(&mut client, &mut view, "builder", "ask_person", serde_json::json!({"title": "Review the plan", "body": "B", "review": "plan.md"})).await;
+    let id = id_in(&said);
+    let (seq, asked) = card(&view, &id);
+    assert_eq!(asked.revision, 1);
+    std::fs::write(&file, "- step a\n- step d\n").expect("saved");
+    assert_eq!(reply_to(&mut client, &mut view, answer(seq, "", Some(1))).await, Err("This card changed. Look at it again.".to_owned()));
+    view.follow(&mut client, |view| card(view, &id).1.revision == 2).await;
+    let (_, marked) = card(&view, &id);
+    assert_eq!(
+        (marked.update_note.as_str(), marked.state()),
+        ("This file changed since Builder asked. Approving means it as it reads now.", AskPersonState::Pending)
+    );
+    // The approval of the file as it reads now goes through.
+    assert_eq!(reply_to(&mut client, &mut view, answer(seq, "", Some(2))).await, Ok(()));
+    assert_eq!(card(&view, &id).1.state(), AskPersonState::Answered);
+}
+
+/// Squalo's B3: the Workspace carries each waiting card's version, so Needs
+/// you fetches again only a card that changed, even with no conversation
+/// open: ask_update, a step done and proposal_update change it; the agent's
+/// other work doesn't, and a restart keeps it.
+#[tokio::test]
+async fn the_workspace_says_which_waiting_card_changed() {
+    let dir = temp_dir();
+    let (factory, mut client, mut view) = setup(&dir).await;
+    let version = |view: &View, seq: u64| view.agent("builder").waiting_versions.get(&seq).copied();
+    let steps = serde_json::json!({"title": "Set up signing", "body": "So releases are signed.", "steps": ["Open Settings.", "Sign in."]});
+    let id = id_in(&call(&mut client, &mut view, "builder", "ask_person", steps).await);
+    let (seq, _) = card(&view, &id);
+    view.follow(&mut client, |view| view.agent("builder").waiting_seqs == [seq]).await;
+    let asked = version(&view, seq).expect("a version for each waiting card");
+    assert_eq!(view.agent("builder").waiting_versions.len(), 1, "only the waiting");
+
+    // Its agent's other work, and another agent's card, leave it as it is.
+    call(&mut client, &mut view, "builder", "agents_status", serde_json::json!({})).await;
+    call(&mut client, &mut view, "writer", "ask_person", serde_json::json!({"title": "Tone?", "body": "For the blog."})).await;
+    assert_eq!(version(&view, seq), Some(asked));
+
+    // Changed by its agent: a new version at the same seq.
+    call(&mut client, &mut view, "builder", "ask_update", serde_json::json!({"id": id, "body": "So every release is signed."})).await;
+    view.follow(&mut client, |view| version(view, seq).is_some_and(|now| now != asked)).await;
+    let updated = version(&view, seq).unwrap();
+    assert_eq!(view.agent("builder").waiting_seqs, [seq]);
+
+    // A step done is a change too.
+    let done = client_message::Body::AnswerAsk(v1::AnswerAsk {
+        agent_id: "builder".into(),
+        seq,
+        step: Some(0),
+        revision: Some(2),
+        ..Default::default()
+    });
+    assert_eq!(reply_to(&mut client, &mut view, done).await, Ok(()));
+    view.follow(&mut client, |view| version(view, seq).is_some_and(|now| now != updated)).await;
+    let stepped = version(&view, seq).unwrap();
+
+    // A proposal's update.
+    let rivet = v1::UpdateAgent { agent_id: "rivet".into(), model: Some(MODEL.into()), effort: Some("off".into()), ..Default::default() };
+    apply_request(&mut client, &mut view, client_message::Body::UpdateAgent(rivet)).await;
+    let proposed =
+        id_in(&call(&mut client, &mut view, "builder", "propose_to_rivet", serde_json::json!({"message": "Add a backend agent."})).await);
+    let (proposal_seq, _) = proposal(&view, &proposed);
+    view.follow(&mut client, |view| version(view, proposal_seq).is_some()).await;
+    let first = version(&view, proposal_seq).unwrap();
+    call(&mut client, &mut view, "builder", "proposal_update", serde_json::json!({"id": proposed, "message": "Add two backend agents."})).await;
+    view.follow(&mut client, |view| version(view, proposal_seq).is_some_and(|now| now != first)).await;
+    assert_eq!(version(&view, seq), Some(stepped), "the other card is untouched");
+    let versions = view.agent("builder").waiting_versions.clone();
+
+    // The same after a restart.
+    drop(client);
+    drop(factory);
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    apply_request(&mut client, &mut view, select("builder")).await;
+    view.follow(&mut client, |view| view.agent("builder").waiting_versions.len() == 2).await;
+    assert_eq!(view.agent("builder").waiting_versions, versions);
 }

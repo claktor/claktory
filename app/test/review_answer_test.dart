@@ -867,7 +867,7 @@ void main() {
       expect(inBar('Which option is better?'), findsOneWidget);
       expect(_held, findsNothing);
       expect(
-        inBar('That card was closed. This is another one from Fugo.'),
+        inBar('That request was closed. This is another one from Fugo.'),
         findsOneWidget,
       );
       expect(tester.widget<EditableText>(_field).controller.text, isEmpty);

@@ -7,6 +7,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:factory_app/backend.dart' show Backend;
 import 'package:factory_app/connections.dart';
 import 'package:factory_app/diagnostics_record.dart' show PushStep;
 import 'package:factory_app/drafts.dart';
@@ -30,10 +31,17 @@ class _Backend extends RecordingBackend {
 
   final registered = <RegisterNotifications>[];
 
+  /// What each SetActive said of this device's notifications.
+  final said = <NotificationPermission>[];
+
   @override
   Future<void> registerNotifications(
     RegisterNotifications registration,
   ) async => registered.add(registration);
+
+  @override
+  Future<void> sendActive(bool active) async =>
+      said.add(Backend.notificationPermission());
 }
 
 class _Device implements PushDevice {
@@ -210,6 +218,52 @@ void main() {
     expect(device.asked, 1);
     expect(find.text('Know when an agent needs you'), findsNothing);
     expect(studio().registered, hasLength(1));
+  });
+
+  testWidgets('lost with its window before an answer (an iPad crossing '
+      'between its narrow and wide layouts builds a new one), it asks again '
+      "in the new window (Sale's row 198, Lucy 49620)", (tester) async {
+    final registrar = await start(tester);
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    late BuildContext screen;
+    Future<void> window() => Harness(Workspace()).show(
+      tester,
+      size: const Size(390, 844),
+      home: Builder(
+        builder: (context) {
+          screen = context;
+          return const SizedBox.expand();
+        },
+      ),
+    );
+    await window();
+    addTearDown(registerPermissionHost(screen));
+    await connect(tester, studio());
+    unawaited(registrar.askInContext());
+    await pumpFrames(tester, const Duration(seconds: 1));
+    expect(find.text('Know when an agent needs you'), findsOneWidget);
+
+    // The window goes, its sheet with it, before Continue.
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+    expect(find.text('Know when an agent needs you'), findsNothing);
+    await window();
+    addTearDown(registerPermissionHost(screen));
+    await pumpFrames(tester, const Duration(seconds: 1));
+    expect(find.text('Know when an agent needs you'), findsOneWidget);
+    await tester.tap(find.text('Continue'));
+    await pumpFrames(tester, const Duration(seconds: 1));
+    expect(device.asked, 1);
+    expect(studio().registered, hasLength(1));
+
+    // Answered: a later window or coming back asks nothing.
+    await tester.pumpWidget(const SizedBox());
+    await window();
+    addTearDown(registerPermissionHost(screen));
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await pumpFrames(tester, const Duration(seconds: 1));
+    expect(find.text('Know when an agent needs you'), findsNothing);
   });
 
   testWidgets('a Claktory paired since the app started asks once, as it '
@@ -425,6 +479,56 @@ void main() {
     );
     await connect(tester, studio());
     expect(registrar.failures.value, {studio(): PushStep.registration});
+  });
+
+  group('each Claktory hears whether this iPhone shows notifications '
+      '(item 13)', () {
+    const unsaid = NotificationPermission.NOTIFICATION_PERMISSION_UNSPECIFIED;
+    const notAsked = NotificationPermission.NOTIFICATION_PERMISSION_NOT_ASKED;
+    const allowed = NotificationPermission.NOTIFICATION_PERMISSION_ALLOWED;
+    const denied = NotificationPermission.NOTIFICATION_PERMISSION_DENIED;
+    // And unsaid once the registrar goes (each test's own tear-down).
+    tearDown(() => expect(Backend.notificationPermission(), unsaid));
+
+    testWidgets('read at start, said again as the person answers; the '
+        'registration carries it', (tester) async {
+      final registrar = await start(tester);
+      expect(Backend.notificationPermission(), notAsked);
+      expect(studio().said, [notAsked]);
+
+      await connect(tester, studio());
+      await registrar.askInContext();
+      await tester.pump();
+      expect(Backend.notificationPermission(), allowed);
+      expect(studio().said.last, allowed);
+      expect(studio().registered.single.permission, allowed);
+
+      // Read again, unchanged: nothing more to say.
+      final before = studio().said.length;
+      await registrar.refresh();
+      expect(studio().said, hasLength(before));
+    });
+
+    testWidgets('turned off in the system, then back in the app: said at '
+        'once', (tester) async {
+      await start(tester);
+      device
+        ..permission = 'allowed'
+        ..token = 'feed';
+      await connect(tester, studio());
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+      expect(studio().said.last, allowed);
+
+      device.permission = 'denied';
+      // Away in Settings, and back.
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      await tester.pump();
+      await tester.pump();
+      expect(Backend.notificationPermission(), denied);
+      expect(studio().said.last, denied);
+    });
   });
 
   test("a dev build never registers with Claktory's own relay: only with "

@@ -171,7 +171,7 @@ void main() {
     // both (with room for both, it gets its least).
     final harness = Harness(snapshot(layout: beside('settings', '')));
     harness.backend.appliesLayouts = true;
-    await harness.show(tester, size: const Size(925, 900));
+    await harness.show(tester, size: const Size(880, 900));
     await settle(tester);
     final pane = find.byType(PageSideways);
     expect(tester.getSize(pane).width, lessThan(pagePaneMinWidth - 40));

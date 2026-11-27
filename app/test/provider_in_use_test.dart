@@ -81,6 +81,7 @@ void main() {
     final harness = Harness(snapshot);
     await harness.show(tester, size: const Size(1200, 1100));
     harness.page.value = AppPage.settings;
+    harness.backend.settingsSection.value = 'providers';
     await settle(tester);
     const line = 'No agents or chats use OpenRouter models yet.';
     expect(_onOpenRouter(line), findsOneWidget);

@@ -75,7 +75,7 @@ void main() {
     );
     await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
     // The conversation under it is out of reach.
-    expect(find.semantics.byLabel('Extensions'), findsNothing);
+    expect(find.semantics.byLabel('More options for Mike'), findsNothing);
     expect(find.semantics.byLabel('Close menu'), findsOne);
     semantics.dispose();
   });

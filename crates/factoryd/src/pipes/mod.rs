@@ -1669,7 +1669,7 @@ pub(crate) async fn approve(factory: &Arc<Factory>, request: &v1::ApprovePipe) -
     // From an agent's card (#471 G1): only approving, with the person's
     // own choices; dismissing or replying is on the card itself.
     if !request.card_id.trim().is_empty() && (!request.approve || request.reply) {
-        return Err(RequestError::Pipe("Dismiss the card, or reply on it, on the card itself.".to_owned()));
+        return Err(RequestError::Pipe("Dismiss the request, or reply on it, in the request itself.".to_owned()));
     }
     if !request.approve {
         pipe_link::close(factory, &record.id);
@@ -1787,7 +1787,7 @@ async fn approve_as_chosen(
     if request.review_outgoing.is_none() {
         review_with_commands(factory, &record.id, &[]);
     }
-    let you = from.map_or_else(|| "You approved it".to_owned(), |agent| format!("You approved it, from {agent}'s card"));
+    let you = from.map_or_else(|| "You approved it".to_owned(), |agent| format!("You approved it, in {agent}'s request"));
     if opened {
         line(factory, &record.id, format!("{you}, and so did the other side: the pipe is open."));
     } else {

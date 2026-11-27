@@ -7,6 +7,7 @@ import 'package:flutter/widgets.dart';
 
 import 'backend.dart';
 import 'controls.dart';
+import 'devices.dart' show thisDeviceKind;
 import 'identity.dart';
 import 'scope.dart';
 import 'settings_view.dart' show SettingRow;
@@ -393,38 +394,48 @@ class ZoomSetting extends StatelessWidget {
     final palette = Palette.of(context);
     final level = zoom.level;
     final mac = defaultTargetPlatform == TargetPlatform.macOS;
+    // Android's phones and tablets, with a keyboard only sometimes
+    // (Risotto 49783, Trish 49821).
     final note = mac
         ? 'Only on this Mac. Press ⌘+ or ⌘− to zoom, and ⌘0 for actual size.'
+        : defaultTargetPlatform == TargetPlatform.android
+        ? 'Only on this $thisDeviceKind. With a keyboard, press Ctrl+ or '
+              'Ctrl− to zoom, and Ctrl+0 for actual size.'
         : 'Only on this computer. Press Ctrl+ or Ctrl− to zoom, and Ctrl+0 '
               'for actual size.';
+    // Its help under the menu, never beside it (settings.md §4.1).
     return SettingRow(
       label: 'Zoom',
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(
-            width: 120,
-            child: Select<double>(
-              value: _nearest(level),
-              options: [
-                for (final level in zoomLevels)
-                  SelectOption(level, zoomPercent(level)),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 120,
+                child: Select<double>(
+                  value: _nearest(level),
+                  options: [
+                    for (final level in zoomLevels)
+                      SelectOption(level, zoomPercent(level)),
+                  ],
+                  onChanged: (level) => unawaited(zoom.set(level)),
+                ),
+              ),
+              if ((level - 1).abs() > 0.001) ...[
+                const SizedBox(width: Space.s),
+                Button(
+                  label: 'Actual size',
+                  onPressed: () => unawaited(zoom.actualSize()),
+                ),
               ],
-              onChanged: (level) => unawaited(zoom.set(level)),
-            ),
+            ],
           ),
-          if ((level - 1).abs() > 0.001) ...[
-            const SizedBox(width: Space.s),
-            Button(
-              label: 'Actual size',
-              onPressed: () => unawaited(zoom.actualSize()),
-            ),
-          ],
-          const SizedBox(width: Space.m),
-          Expanded(
-            child: Text(
-              note,
-              style: TextStyles.caption.copyWith(color: palette.textMuted),
-            ),
+          const SizedBox(height: Space.xs),
+          Text(
+            note,
+            style: TextStyles.caption.copyWith(color: palette.textMuted),
           ),
         ],
       ),

@@ -195,7 +195,13 @@ void main() {
     await show(tester);
     await open(tester, const ReportTypesSettings());
 
-    expect(find.text('Report types'), findsOneWidget);
+    expect(
+      find.text(
+        'What a pipe’s agent fills in for each kind of report it passes on. '
+        'Pipes themselves are set up in their project.',
+      ),
+      findsOneWidget,
+    );
     expect(find.text('Bug report  Built in', findRichText: true), findsOne);
     expect(find.text('2 fields · v1 · used by 1 pipe'), findsOneWidget);
     expect(find.text('3 fields · v2'), findsOneWidget);

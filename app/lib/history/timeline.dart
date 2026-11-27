@@ -136,6 +136,13 @@ class HistoryTimeline {
   static int _pair(int a, int b) =>
       a < b ? a * 0x100000000 + b : b * 0x100000000 + a;
 
+  /// The spans of the messaging edges between [a] and [b], either way;
+  /// empty when they have none.
+  List<List<Span>> messagingSpans(int a, int b) => [
+    for (final edge in _messaging[_pair(a, b)] ?? const <int>[])
+      edgeSpans[edge],
+  ];
+
   /// Whether nodes [a] and [b] could message each other at [t], as far as
   /// is known: a message without such a line travels in an arc instead.
   bool messagingAt(int a, int b, double t) {
@@ -249,10 +256,17 @@ class HistoryLog {
   var _length = 0;
   var _toLength = 0;
 
-  /// Each node's runs by event index: starts and ends (ms), in order; an
-  /// end of infinity while it runs.
-  final runStarts = <int, List<double>>{};
-  final runEnds = <int, List<double>>{};
+  /// Each node's runs: starts and ends (ms), in order; an end of infinity
+  /// while it runs. In typed arrays: a list of doubles boxes each one,
+  /// three times the memory at millions of runs (Polpo).
+  final _runs = <int, _Runs>{};
+
+  /// The nodes with runs.
+  Iterable<int> get runNodes => _runs.keys;
+
+  /// [node]'s runs' starts and ends, in order (views, not copies).
+  Float64List runStarts(int node) => _runs[node]?.starts ?? Float64List(0);
+  Float64List runEnds(int node) => _runs[node]?.ends ?? Float64List(0);
 
   int get length => _length;
 
@@ -279,13 +293,20 @@ class HistoryLog {
   /// [before].
   bool add(HistoryEvents page, {bool push = false, double? before}) {
     final count = page.dt.length;
-    // What's added: times, the rest by column.
-    final times = <double>[];
-    final froms = <int>[];
-    final kinds = <int>[];
-    final flags = <int>[];
-    final counts = <int>[];
-    final tos = <int>[];
+    // What's added: times, the rest by column, typed: a page holds
+    // thousands (Polpo).
+    var recipients = 0;
+    for (var i = 0; i < count; i++) {
+      recipients += i < page.toCount.length ? math.max(1, page.toCount[i]) : 1;
+    }
+    final times = Float64List(count);
+    final froms = Uint32List(count);
+    final kinds = Uint8List(count);
+    final flags = Uint8List(count);
+    final counts = Uint16List(count);
+    final tos = Uint32List(recipients);
+    var n = 0;
+    var t = 0;
     var reached = false;
     var at = page.baseMs.toDouble();
     var toAt = 0;
@@ -302,21 +323,27 @@ class HistoryLog {
         toAt += many;
         continue;
       }
-      times.add(at);
-      froms.add(i < page.from.length ? page.from[i] : 0);
-      kinds.add(
-        i < pageKinds.length
-            ? EventKind.of(pageKinds[i]).index
-            : EventKind.agent.index,
-      );
-      flags.add(i < page.flags.length ? page.flags[i] & 0xFF : 0);
-      counts.add(many);
+      times[n] = at;
+      froms[n] = i < page.from.length ? page.from[i] : 0;
+      kinds[n] = i < pageKinds.length
+          ? EventKind.of(pageKinds[i]).index
+          : EventKind.agent.index;
+      flags[n] = i < page.flags.length ? page.flags[i] & 0xFF : 0;
+      counts[n] = many;
+      n++;
       for (var k = 0; k < many; k++) {
-        tos.add(toAt < page.to.length ? page.to[toAt] : 0);
+        tos[t++] = toAt < page.to.length ? page.to[toAt] : 0;
         toAt++;
       }
     }
-    _insert(times, froms, kinds, flags, counts, tos);
+    _insert(
+      Float64List.sublistView(times, 0, n),
+      Uint32List.sublistView(froms, 0, n),
+      Uint8List.sublistView(kinds, 0, n),
+      Uint8List.sublistView(flags, 0, n),
+      Uint16List.sublistView(counts, 0, n),
+      Uint32List.sublistView(tos, 0, t),
+    );
     var start = page.baseMs.toDouble();
     for (var i = 0; i < page.runNode.length; i++) {
       start += i < page.runStart.length ? page.runStart[i].toDouble() : 0;
@@ -330,12 +357,12 @@ class HistoryLog {
   /// Puts events (in order) in their place: at the end, or before the
   /// first one later than them.
   void _insert(
-    List<double> times,
-    List<int> froms,
-    List<int> kinds,
-    List<int> flags,
-    List<int> counts,
-    List<int> tos,
+    Float64List times,
+    Uint32List froms,
+    Uint8List kinds,
+    Uint8List flags,
+    Uint16List counts,
+    Uint32List tos,
   ) {
     final n = times.length;
     if (n == 0) return;
@@ -371,8 +398,9 @@ class HistoryLog {
   }
 
   void _run(int node, double start, double end) {
-    final starts = runStarts.putIfAbsent(node, () => []);
-    final ends = runEnds.putIfAbsent(node, () => []);
+    final runs = _runs.putIfAbsent(node, _Runs.new);
+    final starts = runs.starts;
+    final ends = runs.ends;
     final i = _upper(starts, start);
     // The same run again (a push saying it ended): its end now.
     if (i > 0 && starts[i - 1] == start) {
@@ -381,16 +409,15 @@ class HistoryLog {
     }
     // A run still open when a later one starts ended by then.
     if (i > 0 && ends[i - 1] > start) ends[i - 1] = start;
-    starts.insert(i, start);
-    ends.insert(i, i + 1 < starts.length ? math.min(end, starts[i + 1]) : end);
+    runs.insert(i, start, i < starts.length ? math.min(end, starts[i]) : end);
   }
 
   /// Whether [node] was working at [t].
   bool running(int node, double t) {
-    final starts = runStarts[node];
-    if (starts == null || starts.isEmpty) return false;
-    final i = _upper(starts, t) - 1;
-    return i >= 0 && t < runEnds[node]![i];
+    final runs = _runs[node];
+    if (runs == null || runs.length == 0) return false;
+    final i = _upper(runs.starts, t) - 1;
+    return i >= 0 && t < runs.ends[i];
   }
 
   /// The index of the first event at or after [t].
@@ -423,7 +450,7 @@ class HistoryLog {
     return lo;
   }
 
-  static int _upper(List<double> list, double t) {
+  static int _upper(Float64List list, double t) {
     var lo = 0;
     var hi = list.length;
     while (lo < hi) {
@@ -493,5 +520,32 @@ class HistoryLog {
       }
     }
     return (sent: sent, received: received, partner: partner);
+  }
+}
+
+/// One node's runs, in order: growable typed arrays.
+class _Runs {
+  var _starts = Float64List(4);
+  var _ends = Float64List(4);
+  var length = 0;
+
+  Float64List get starts => Float64List.sublistView(_starts, 0, length);
+  Float64List get ends => Float64List.sublistView(_ends, 0, length);
+
+  /// Puts a run at [i]: at the end as pages come in order, else what's
+  /// after it moves along.
+  void insert(int i, double start, double end) {
+    if (length == _starts.length) {
+      final size = length * 2;
+      _starts = Float64List(size)..setRange(0, length, _starts);
+      _ends = Float64List(size)..setRange(0, length, _ends);
+    }
+    if (i < length) {
+      _starts.setRange(i + 1, length + 1, _starts, i);
+      _ends.setRange(i + 1, length + 1, _ends, i);
+    }
+    _starts[i] = start;
+    _ends[i] = end;
+    length++;
   }
 }

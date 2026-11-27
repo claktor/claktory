@@ -67,7 +67,7 @@ async fn rivet_changes_a_pipes_words_only_on_a_card_that_shows_them_old_beside_n
     let renamed = v1::UpdatePipe { pipe_id: pipe.clone(), name: Some("Webby".into()), ..Default::default() };
     apply_request(&mut client, &mut view, Request::UpdatePipe(renamed)).await;
     let why = refused(&mut client, &mut view, seq).await;
-    assert_eq!(why, "The pipe's name, what it's for or its instructions changed since this card was asked: dismiss it, and ask again.");
+    assert_eq!(why, "The pipe's name, what it's for or its instructions changed since this request was asked: dismiss it, and ask again.");
     assert_eq!(pipe_of(&view, &pipe).name, "Webby");
     apply_request(&mut client, &mut view, answer(seq, true)).await;
 
@@ -84,7 +84,7 @@ async fn rivet_changes_a_pipes_words_only_on_a_card_that_shows_them_old_beside_n
     assert_eq!((now.purpose.as_str(), now.prompt.as_str()), ("testing", "Be brief."));
     let said = lines(&factory, &pipe);
     assert!(
-        said.iter().any(|line| line == "You renamed this pipe to \"Site talk\" and changed its instructions, on a card you approved."),
+        said.iter().any(|line| line == "You renamed this pipe to \"Site talk\" and changed its instructions, in a request you approved."),
         "{said:?}"
     );
 
@@ -134,7 +134,7 @@ async fn rivet_lowers_a_liaisons_spending_limit_at_once_and_raises_it_only_on_a_
     .await;
     assert!(said.starts_with("Set the daily spending limit of the agent answering the pipe \"Website\" from $10 to $5."), "{said}");
     view.follow(&mut client, |view| cap(view) == 5.0).await;
-    assert!(cards(&view).is_empty(), "no card for lowering it");
+    assert!(cards(&view).is_empty(), "no request for lowering it");
     assert!(
         lines(&factory, &pipe).contains(&"Rivet set the daily spending limit of the agent answering this pipe from $10 to $5.".to_owned())
     );
@@ -154,7 +154,7 @@ async fn rivet_lowers_a_liaisons_spending_limit_at_once_and_raises_it_only_on_a_
     let set = v1::SetSpendCap { agent_id: "liaison".into(), cap_usd: 7.0, cap_tokens: 0 };
     apply_request(&mut client, &mut view, Request::SetSpendCap(set)).await;
     let why = refused(&mut client, &mut view, seq).await;
-    assert_eq!(why, "The pipe's liaison or its spending limit changed since this card was asked: dismiss it, and ask again.");
+    assert_eq!(why, "The pipe's liaison or its spending limit changed since this request was asked: dismiss it, and ask again.");
     assert_eq!(cap(&view), 7.0);
     apply_request(&mut client, &mut view, answer(seq, true)).await;
     call(&mut client, &mut view, "rivet", "pipes_settings", raise).await;
@@ -165,7 +165,7 @@ async fn rivet_lowers_a_liaisons_spending_limit_at_once_and_raises_it_only_on_a_
     let said = lines(&factory, &pipe);
     assert!(
         said.contains(
-            &"You set the daily spending limit of the agent answering this pipe from $7 to $20.50, on a card you approved.".to_owned()
+            &"You set the daily spending limit of the agent answering this pipe from $7 to $20.50, in a request you approved.".to_owned()
         ),
         "{said:?}"
     );
@@ -299,7 +299,7 @@ async fn pipes_list_counts_what_waits_for_the_person() {
     let list = call(&mut client, &mut view, "rivet", "pipes_list", "{}").await;
     assert!(
         list.contains(
-            "paused: the agents talked on their own; Matt can continue it, or you can ask them to on a card (pipes_settings resume)"
+            "paused: the agents talked on their own; Matt can continue it, or you can ask them to in a request (pipes_settings resume)"
         ),
         "{list}"
     );
@@ -337,7 +337,7 @@ async fn rivet_stops_sharing_a_website_with_a_pipe_at_once() {
     let args = json!({"pipe": "Website", "reason": "Matt asked.", "stop_sharing": ["dashboard", "Docs"]});
     let said = call(&mut client, &mut view, "rivet", "pipes_settings", &args.to_string()).await;
     assert!(said.starts_with("Stopped sharing ") && said.contains("\"Dashboard\"") && said.contains("\"Docs\""), "{said}");
-    assert!(cards(&view).is_empty(), "a narrowing made a card");
+    assert!(cards(&view).is_empty(), "a narrowing made a request");
     let said = lines(&factory, &pipe);
     for name in ["Dashboard", "Docs"] {
         let line = format!("Rivet, after it read from outside, stopped sharing {name} with this pipe.");

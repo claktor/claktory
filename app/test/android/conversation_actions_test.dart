@@ -102,7 +102,9 @@ void main() {
         final harness = _conversation();
         await showAndroid(tester, harness: harness, textScale: scale);
         await tester.enterText(find.byType(EditableText).last, 'Unsent draft');
-        await tester.tap(find.bySemanticsLabel('Extensions').last);
+        await tester.tap(
+          find.bySemanticsLabel(RegExp('^More options for ')).last,
+        );
         await pumpFrames(tester);
         expect(find.text('Search'), findsOneWidget);
         // Search is the first action in the conversation's more sheet.

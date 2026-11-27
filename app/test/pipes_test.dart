@@ -460,8 +460,6 @@ void main() {
       ),
     );
     await settle(tester);
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
     expect(find.text("Only June sees it, not Ana's Claktory."), findsOneWidget);
     await tester.enterText(
       find.descendant(
@@ -501,7 +499,7 @@ void main() {
     );
     await settle(tester);
     expect(find.textContaining('Waiting for you to send it'), findsOneWidget);
-    expect(find.text('Add a comment'), findsNothing);
+    expect(find.byType(DecisionComment), findsNothing);
   });
 
   testWidgets("an agent's held message with a comment typed: one Submit, "
@@ -527,8 +525,6 @@ void main() {
       ),
     );
     await settle(tester);
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
     final field = find.descendant(
       of: find.byType(DecisionComment),
       matching: find.byType(EditableText),
@@ -538,7 +534,7 @@ void main() {
     expect(find.text('Discard'), findsNothing);
     expect(find.text('Send'), findsOneWidget, reason: "the composer's only");
     expect(
-      find.text('Not sent. June gets your comment and writes it again.'),
+      find.text('Submit sends your words instead of sending.'),
       findsOneWidget,
     );
     await tester.tap(find.text('Submit'));
@@ -627,8 +623,6 @@ void main() {
         ],
       ),
     );
-    await settle(tester);
-    await tester.tap(find.text('Add a comment'));
     await settle(tester);
     await tester.enterText(
       find.descendant(
@@ -1055,9 +1049,7 @@ void main() {
         _pipe(state: PipeState.PIPE_STATE_APPROVAL, digits: '4821'),
       ], selected: 'pipe1'),
     );
-    final add = find.text('Add a comment');
-    await tester.ensureVisible(add);
-    await tester.tap(add);
+    await tester.ensureVisible(find.byType(DecisionComment));
     await settle(tester);
     expect(
       find.text("Only your agents see it, not Ana's Claktory."),
@@ -1087,9 +1079,7 @@ void main() {
           ..replyAgentId = 'june',
       ], selected: 'pipe1'),
     );
-    final add = find.text('Add a comment');
-    await tester.ensureVisible(add);
-    await tester.tap(add);
+    await tester.ensureVisible(find.byType(DecisionComment));
     await settle(tester);
     final field = find.descendant(
       of: find.byType(DecisionComment),
@@ -1100,7 +1090,7 @@ void main() {
     expect(find.text('Approve'), findsNothing);
     expect(find.text('Decline'), findsNothing);
     expect(
-      find.text('The pipe still waits for you. June gets your comment.'),
+      find.text('Submit sends your words instead of approving.'),
       findsOneWidget,
     );
     await tester.ensureVisible(find.text('Submit'));
@@ -2566,13 +2556,10 @@ void main() {
         of: find.byType(DecisionComment),
         matching: find.byType(EditableText),
       );
-      await tester.ensureVisible(find.text('Add a comment'));
-      await tester.tap(find.text('Add a comment'));
-      await tester.pump();
       await tester.enterText(field, 'Add Kai too');
       await tester.pump();
       expect(
-        find.text('The pipe still waits for you. June gets your comment.'),
+        find.text('Submit sends your words instead of approving.'),
         findsOneWidget,
       );
       await tester.tap(find.text('Submit'));
@@ -2852,9 +2839,6 @@ void main() {
     testWidgets('a comment typed is a reply to the agent: Submit, nothing '
         'accepted', (tester) async {
       final harness = await showCard(tester, account);
-      await tester.ensureVisible(find.text('Add a comment'));
-      await tester.tap(find.text('Add a comment'));
-      await tester.pump();
       await tester.enterText(
         find.descendant(
           of: find.byType(DecisionComment),

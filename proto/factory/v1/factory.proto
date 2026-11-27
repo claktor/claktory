@@ -451,7 +451,44 @@ message ClientMessage {
     // person's own: refused to agents. Answered with Ack.
     PinAgent pin_agent = 262;
     UnpinAgent unpin_agent = 263;
+    // Drops a pending sign-in (Switch account…'s code not given yet): the
+    // person's devices only, never an agent's.
+    AccountSignInCancel account_sign_in_cancel = 264;
+    // The account's recovery key (#239): a new one the person's device made
+    // and signed (NewRecoveryKey, then this), and using one claktory.com
+    // changed in a way this Claktory couldn't verify. The person's devices
+    // only, never an agent's.
+    PublishRecoveryKey publish_recovery_key = 265;
+    UseRecoveryKey use_recovery_key = 266;
+    // The person dismisses the "Get notified…" offer on the device that
+    // sends it (PairedDevice.notifications_offer_dismissed, or
+    // RemoteAccess.local_notifications_offer_dismissed for this computer's
+    // own app). Answered with Ack.
+    DismissNotificationsOffer dismiss_notifications_offer = 267;
+    // The person's device asks factoryd to read macOS's protected places
+    // now (Workspace.protected_places); the person's only.
+    CheckProtectedPlaces check_protected_places = 258;
+    // The person's OK on a protected place's Needs you item; the person's
+    // only.
+    DismissProtectedPlace dismiss_protected_place = 259;
   }
+}
+
+// Reads each place (ProtectedPlace.root; others are skipped) now, and keeps
+// what it found: the app's one-time sheet for places never checked sends
+// those on Continue (macOS asks the person then), and coming back to the
+// front it sends the refused ones, so a place let in from System Settings
+// shows On (reading one macOS has decided on asks nothing). Ack once read;
+// the Workspace follows when anything changed.
+message CheckProtectedPlaces {
+  repeated string roots = 1;
+}
+
+// The item leaves Needs you for History (NEEDS_YOU_RECORD_KIND_PROTECTED_
+// PLACE, outcome DISMISSED); the place stays REFUSED. Nothing waiting is
+// fine. Ack.
+message DismissProtectedPlace {
+  string root = 1;
 }
 
 // The person read these alerts (Alert.id): they opened one, or tapped Got
@@ -870,6 +907,8 @@ message ServerMessage {
     RecoveryCodes recovery_codes = 92;
     // The answer to VouchDevice, to the asker only.
     DeviceVouched device_vouched = 91;
+    // 94: RecoveryKeyToSign (#239), the answer to NewRecoveryKey with an
+    // account, comes with v0.2.0; reserved for it.
   }
   // Resuming the Workspace on reconnect (#378), only to an app whose Hello
   // has workspace_patches. On a message carrying a Workspace or a
@@ -1168,6 +1207,10 @@ message RemoteAccess {
   // Allows not yet dismissed, oldest first (#527 S3). A removed device's
   // goes with it.
   repeated AllowNotice allow_notices = 15;
+  // This computer's own app (Welcome.device_id "local"), which `devices`
+  // leaves out, dismissed the "Get notified…" offer: as
+  // PairedDevice.notifications_offer_dismissed is for a paired device.
+  bool local_notifications_offer_dismissed = 16;
 }
 
 // A device that connected with a pairing code and waits to be allowed: a
@@ -1286,6 +1329,15 @@ message PairedDevice {
   // account · <time>".
   int64 turned_ms = 19;
   string turned_why = 20;
+  // Whether it shows notifications, as it last said (SetActive,
+  // RegisterNotifications): for the Permissions rows and Needs you.
+  // UNSPECIFIED when it hasn't said, or its app is from before.
+  NotificationPermission notification_permission = 21;
+  // The person dismissed the "Get notified…" offer on this device
+  // (DismissNotificationsOffer, area 5a item 4); cleared once it says its
+  // notifications are allowed (SetActive.notifications ALLOWED), so the
+  // offer doesn't show again after they're turned off later.
+  bool notifications_offer_dismissed = 22;
 }
 
 // An Allow the person should know of (#527 S3): "<device> can now use
@@ -2593,6 +2645,14 @@ message Error {
   // in with that one again lets it back in); false for a device this
   // Claktory never let in, which only a pipe can work with.
   bool other_account_before = 4;
+  // With ERROR_CODE_SIGN_IN_REQUIRED, answering the Hello of a device this
+  // Claktory recognizes (paired here and not removed), so its sign-in goes
+  // to the right place (Sale's row 189): the account service this Claktory
+  // uses, empty for claktory.com, and the email it's signed in with, masked
+  // as the app's screen shows it ("m…@example.com"; empty when it isn't
+  // signed in). Both empty for any other device.
+  string account_service = 5;
+  string account_email = 6;
 }
 
 // A Claktory that moved to another computer, as the copy left behind
@@ -2841,6 +2901,69 @@ message Workspace {
   // badge. Read ones are in History.
   repeated Alert alerts = 51;
   uint32 alerts_unread = 52;
+  // Places macOS keeps private until the person lets Claktory Agents in
+  // (Files and Folders: Documents, Desktop, Downloads, iCloud Drive,
+  // volumes; permissions.md P2), as Claktory last found them: each place a
+  // project or folder works in, in the sidebar's order, then any other an
+  // agent was refused in. Empty on any system but macOS. One with
+  // needs_you is a Needs you item.
+  repeated ProtectedPlace protected_places = 53;
+  // Every place macOS protects on this computer, whatever uses it: the
+  // home's Documents, Desktop, Downloads and iCloud Drive, then each volume
+  // mounted in /Volumes, by name. For the app to tell, before anything is
+  // saved, whether a path typed is in one (its root, or under it by whole
+  // components) and name it, as factoryd will. Empty on any system but
+  // macOS.
+  repeated ProtectedRoot protected_roots = 54;
+}
+
+// A place macOS protects (Workspace.protected_places). macOS has no way to
+// ask whether Claktory may use it, so state is the last check's result,
+// kept in the backend: an agent refused there, a folder added or pointed
+// there (factoryd reads it at once, so macOS asks while the person is
+// there), or a check the app asked for (CheckProtectedPlaces).
+message ProtectedPlace {
+  // Absolute: "/Users/ana/Documents", "/Volumes/Backup". What
+  // CheckProtectedPlaces and DismissProtectedPlace name.
+  string root = 1;
+  // As the person knows it: "Documents", "iCloud Drive", a volume's name.
+  string name = 2;
+  ProtectedPlaceState state = 3;
+  // When it was last found so, in ms since 1970; 0 never.
+  int64 checked_ms = 4;
+  // The projects and folders working in it, by name, in the sidebar's
+  // order (a project by its own folder, a folder by its name).
+  repeated string used_by = 5;
+  // Refused, and the person hasn't answered its Needs you item: show it,
+  // with title and text, Open System Settings (Privacy & Security → Files
+  // and Folders) and OK (DismissProtectedPlace). Raised once per refusal:
+  // again only after a check found it let in and a later one refused it.
+  bool needs_you = 6;
+  // REFUSED: the item's words, Claktory's ("Your agents can't work in
+  // Documents" / "macOS hasn't let Claktory Agents into Documents, so
+  // commands in nixos-site fail. Turn it on for Claktory Agents in System
+  // Settings."). Empty otherwise.
+  string title = 7;
+  string text = 8;
+  // The agent refused there most recently; empty when a check found it.
+  string agent_id = 9;
+}
+
+// A place macOS protects (Workspace.protected_roots).
+message ProtectedRoot {
+  // Absolute: "/Users/ana/Documents", "/Volumes/Backup".
+  string root = 1;
+  // As the person knows it: "Documents", "iCloud Drive", a volume's name.
+  string name = 2;
+}
+
+enum ProtectedPlaceState {
+  // Never checked: no Permissions row for it.
+  PROTECTED_PLACE_STATE_UNSPECIFIED = 0;
+  // The last check got in: "Documents · On".
+  PROTECTED_PLACE_STATE_ALLOWED = 1;
+  // macOS refused the last check or an agent: "Documents · Off".
+  PROTECTED_PLACE_STATE_REFUSED = 2;
 }
 
 // Claktory's background service on a Mac (friend bug #24): the LaunchAgent
@@ -4268,6 +4391,12 @@ message Provider {
   // Its model list can be read from the provider now: it's signed in, at
   // the provider's own address. Refresh models is offered only then.
   bool models_fetchable = 16;
+  // The last read of its model list failed because the provider didn't
+  // take the sign-in or key (it answered 401), so it likely needs signing
+  // in again: a hint for the "Sign-in expired" line with Sign in again….
+  // It marks nothing signed out and changes nothing else; the next read
+  // that works clears it.
+  bool models_fetch_signed_out = 17;
 }
 
 // One account signed in to a provider, such as one of two Claude
@@ -4354,6 +4483,12 @@ message AccountCredit {
   // reached."); empty when it worked. The other fields then still hold the
   // last good read, if there was one (read_ms 0 if never).
   string error = 9;
+  // What's left to spend, as Settings → Providers shows it beside the key
+  // (settings.md §8.9): "$12.40 left" while a spending limit has some left;
+  // empty when there's nothing to say (no limit set, since the provider
+  // tells a key nothing about the account's balance, or the limit used up,
+  // which `warning` says).
+  string left_shown = 10;
 }
 
 message ProviderUsage {
@@ -4594,6 +4729,16 @@ message Agent {
   // entries. Empty when nothing waits. The Workspace is
   // sent again whenever one is made, decided, withdrawn or expires.
   repeated uint64 waiting_seqs = 32;
+  // Each waiting entry's version, by seq (exactly the seqs in waiting_seqs):
+  // a fingerprint of the entry as LoadEntries gives it now, which changes
+  // whenever anything in it does (ask_update, a reply on its thread, a
+  // step, proposal_update, a review's new version, its attachments) and
+  // stays the same across restarts. Opaque: compare for equality only. The
+  // app fetches a waiting card again only when its version differs from
+  // the one its copy was fetched under (Squalo's B3), so an update made
+  // while no conversation is open still reaches Needs you. A seq missing
+  // here (a Claktory from before) is unknown: keep the copy.
+  map<uint64, uint64> waiting_versions = 55;
   // The agent it reports to, its lead, which can read how it's set up (its
   // settings, extensions, secrets by name, monitors; never its tools):
   // another agent in its project, or an admin agent. Empty when it has none.
@@ -5962,6 +6107,45 @@ message VaultState {
   // while it's true. A new recovery key makes it true again. Only ever true
   // while the vault is open.
   bool recovery_key_unconfirmed = 11;
+  // The account's recovery key covers this vault (#239): signed in to
+  // claktory.com, its key is sealed to the public half of the account's one
+  // recovery key, which matched claktory.com's at the last check-in. "Covered
+  // by your account's recovery key": nothing to save here (the device that
+  // made the key showed it, and no Claktory keeps it), and
+  // recovery_key_unconfirmed is false.
+  bool recovery_key_covered = 12;
+  // With recovery_key_covered: the Claktory where the account's current key
+  // was made, by its name as claktory.com last gave it (not signed:
+  // untrusted text, one line); empty when it's no longer the account's.
+  string recovery_key_made_on = 13;
+  // With recovery_key_covered: when that key was made, ms since 1970; 0 when
+  // unknown.
+  int64 recovery_key_made_ms = 14;
+  // ShowRecoveryKey can show a key: this Claktory's own, kept to show again
+  // (made at sign-in, or by ShowRecoveryKey), while the account's key doesn't
+  // cover the vault, or once it does if the person confirmed it before.
+  // False otherwise: no Claktory keeps the account's key, so offer "Make a
+  // new recovery key" instead (NewRecoveryKey with public_key, from v0.2.0).
+  bool recovery_key_showable = 15;
+  // The recovery key that covers the vault now (the account's, else its own)
+  // was typed here to open it (UnlockVault) since it was sealed: this
+  // Claktory has seen it, so offer to make a new one.
+  bool recovery_key_used = 16;
+  // claktory.com has a recovery key for the account other than the one this
+  // vault is sealed to (the account's first included), which this Claktory
+  // won't seal to by itself, and whose statements check (each signed by its
+  // Claktory and approved by a device, unbroken back to the key it's sealed
+  // to): it stays sealed as it is, and Needs you has Claktory's own alert
+  // about it, until the person chooses Use the key here (UseRecoveryKey) on
+  // this computer's app or a device paired here and confirmed as theirs, or
+  // the account's key comes back to the one it's sealed to. A key that
+  // doesn't check sets nothing here: only an alert says it couldn't be
+  // checked. With it, who made the new key and when, by claktory.com's word
+  // (not signed: untrusted text, one line): the Claktory's name, empty when
+  // it's no longer the account's, and ms since 1970.
+  bool recovery_key_change_waiting = 17;
+  string recovery_key_change_made_on = 18;
+  int64 recovery_key_change_made_ms = 19;
 }
 
 message SecretInfo {
@@ -6081,6 +6265,12 @@ message SetSecretSites {
   string id = 1;
   repeated string sites = 2;
 }
+
+// The "Get notified…" offer, dismissed on the device that sends this
+// (area 5a item 4): PairedDevice.notifications_offer_dismissed, or
+// RemoteAccess.local_notifications_offer_dismissed for this computer's own
+// app. The person's only.
+message DismissNotificationsOffer {}
 
 // Turns Ask each time (SecretInfo.ask_each_time) on or off for a secret.
 // Off needs the vault's proof, as GrantSecret does, since it lets agents'
@@ -6222,9 +6412,57 @@ message ChangePassphrase {
 
 // A recovery key, a key of the person's own that opens the vault too; it
 // replaces the last one, which stops working. Answered with RecoveryKey.
+//
+// Signed in to claktory.com (#239), the key is the account's, made on the
+// device: the app makes the key pair, shows the key and has the person type
+// back a group, then sends its public half here with the device's own
+// account key, the one this connection was let in with. Answered with
+// RecoveryKeyToSign; the device checks and signs it and sends
+// PublishRecoveryKey. The person's devices only.
 message NewRecoveryKey {
   VaultProof proof = 1;
+  // The key pair's public half: X25519, 32 bytes, base64url. The pair comes
+  // from the key's 20 bytes: secret = HKDF-SHA256(the bytes, salt "claktory
+  // account recovery key", info "x25519 v1"), public = X25519(secret, the
+  // base point). Empty: this Claktory's own key, as without an account.
+  string public_key = 2;
+  // The device's account key (Ed25519, base64url): the one this connection
+  // was let in with, of a device paired here, confirmed and not removed;
+  // anything else is refused.
+  string device_key = 3;
 }
+
+// The account's new recovery key, for its device to sign (#239): `payload`
+// is base64url of the statement's JSON, {"v": 1, "account_id",
+// "claktory_id", "public_key", "replaces", "device_key", "iat"}. Before
+// signing, the device checks every field: its own public_key, account and
+// device_key, this Claktory, the current key as replaces, and iat within
+// 300 s. Then it signs "claktory recovery key device v1\n" followed by the
+// payload's bytes (decoded) with its account key, and sends
+// PublishRecoveryKey.
+message RecoveryKeyToSign {
+  string payload = 1;
+}
+
+// The device's signature on RecoveryKeyToSign's payload (#239): Claktory
+// checks it with device_key, signs the statement, sends it to claktory.com,
+// and seals this vault to the new key in place of the account's last one.
+// Answered with Ack. ERROR_CODE_INVALID_REQUEST when the account's key changed
+// meanwhile, the payload is over 5 minutes old or the signature doesn't
+// check; ERROR_CODE_UNREACHABLE when claktory.com can't be reached. The
+// person's devices only.
+message PublishRecoveryKey {
+  string device_key = 1;
+  // Ed25519, 64 bytes, base64url.
+  string device_sig = 2;
+}
+
+// Use the new key here (#239): seals this vault to claktory.com's current
+// recovery key for the account, which changed in a way this Claktory
+// couldn't verify (VaultState.recovery_key_change_waiting), the device
+// asking approving it. Only from a device paired here and confirmed.
+// Answered with Ack; ERROR_CODE_INVALID_REQUEST when nothing waits.
+message UseRecoveryKey {}
 
 // Turns locked mode on (the key kept on disk is deleted) or off (it's kept
 // again). On needs a key of the person's own (a passphrase or recovery
@@ -6518,7 +6756,8 @@ message ClaktoryAccount {
   // person ("claktory.com can't be reached; Claktory tries again by
   // itself"); empty when it worked.
   string problem = 6;
-  // AWAITING_CODE: when the code stops working, in ms since 1970.
+  // AWAITING_CODE, or while switching_to is set: when the code stops
+  // working, in ms since 1970.
   int64 code_expires_ms = 7;
   // Exactly what this Claktory last sent the service, as JSON, for "What
   // claktory.com receives": its sign-in (the request that emails the code)
@@ -6534,10 +6773,17 @@ message ClaktoryAccount {
   // AWAITING_CODE. False in a Claktory made since, which asks until it's
   // signed in.
   bool skippable = 12;
-  // AWAITING_CODE: the address the code email comes from, such as
-  // "code@auth.claktory.com", so the person knows what to look for (in spam
-  // too); empty when unknown.
+  // AWAITING_CODE, or while switching_to is set: the address the code
+  // email comes from, such as "code@auth.claktory.com", so the person knows
+  // what to look for (in spam too); empty when unknown.
   string code_from = 13;
+  // Switch account… (V6): while this Claktory is signed in and a sign-in to
+  // another address waits for its code, the address the code went to. The
+  // state stays SIGNED_IN with the current email, which stays signed in
+  // until the code checks out (AccountVerify swaps them) or the person
+  // cancels (AccountSignInCancel); a wrong or expired code changes neither.
+  // Empty otherwise: AWAITING_CODE is only for a Claktory not signed in.
+  string switching_to = 16;
 }
 
 enum ClaktoryAccountState {
@@ -6572,6 +6818,12 @@ message AccountVerify {
 
 // Emails a new code to the same address. Answered with Ack.
 message AccountResend {}
+
+// Drops the pending sign-in, its code no longer asked for (Switch account…'s
+// Cancel, V6): the account signed in stays exactly as it was; not signed in,
+// it's back to what it was before the code was asked for. Answered with Ack, also when nothing was pending.
+// The person's devices only.
+message AccountSignInCancel {}
 
 // Signs out: no more check-ins, and back to SIGNED_OUT (SKIPPED once the
 // sign-in step was skipped). The vault stays as it is, unlocked while
@@ -8999,6 +9251,8 @@ message Chat {
   // Entries waiting for the person (a proposal to Rivet), as
   // Agent.waiting_seqs.
   repeated uint64 waiting_seqs = 8;
+  // Each waiting entry's version, as Agent.waiting_versions.
+  map<uint64, uint64> waiting_versions = 16;
   // Sent while it replies, not yet read (ChatQueuedMessages lists them).
   uint32 queued_messages = 9;
   // Its model can run (its provider is signed in); otherwise show "No model
@@ -9395,6 +9649,12 @@ message NotificationSettingsChange {
 // counts as inactive until it says so, and when it closes. Answered with Ack.
 message SetActive {
   bool active = 1;
+  // Whether this device shows notifications now, as its system says
+  // (permissions.md P3, item 13): sent each time, since a change made in
+  // the device's Settings shows when the app comes back to the front. Only
+  // a connection that said ALLOWED counts as showing a Notify; UNSPECIFIED
+  // (an app from before) is judged by its platform, as before.
+  NotificationPermission notifications = 2;
 }
 
 // This device gets notifications pushed to it while it isn't connected: its
@@ -9408,6 +9668,23 @@ message RegisterNotifications {
   // 32 random bytes the device made: AES-256-GCM.
   bytes key = 2;
   PushPlatform platform = 3;
+  // As SetActive.notifications, at registration. Nothing is pushed to a
+  // device whose last word was DENIED, NOT_ASKED or UNSUPPORTED.
+  NotificationPermission permission = 4;
+}
+
+// Whether a device's system shows Claktory's notifications (item 13).
+enum NotificationPermission {
+  // Not said: an app from before, judged by its platform.
+  NOTIFICATION_PERMISSION_UNSPECIFIED = 0;
+  // The system shows them (iOS's provisional and ephemeral count).
+  NOTIFICATION_PERMISSION_ALLOWED = 1;
+  // Refused, or turned off in the device's Settings.
+  NOTIFICATION_PERMISSION_DENIED = 2;
+  // The system hasn't asked yet.
+  NOTIFICATION_PERMISSION_NOT_ASKED = 3;
+  // This app can't show them (Android for now, Linux, Windows).
+  NOTIFICATION_PERMISSION_UNSUPPORTED = 4;
 }
 
 enum PushPlatform {
@@ -9571,6 +9848,10 @@ message NeedsYouRecord {
   // (agent_id): "Imported, given to Risotto". False for every other
   // outcome and kind.
   bool secret_to_no_one = 34;
+  // COMMAND: the card's command as it was, with how it ran (`run`, its
+  // output left empty here): draw its heading and first line as the card
+  // does. Unset for every other kind.
+  AskCommand command = 35;
 }
 
 enum NeedsYouRecordKind {
@@ -9682,6 +9963,34 @@ enum NeedsYouRecordKind {
   // on. seq is the notify_person call's entry in its agent's conversation
   // (0 for Claktory's own, or once it's no longer there).
   NEEDS_YOU_RECORD_KIND_ALERT = 21;
+  // An agent's card asking the person to run a command (ask_person's
+  // `command`, Execute): APPROVED when they ran it ("Executed", with
+  // command.run saying how it went), DISMISSED, WITHDRAWN or RESOLVED as a
+  // question's. title is Claktory's heading ("Run this command on Matt's
+  // Mac Studio"), never the agent's words; command is the command.
+  NEEDS_YOU_RECORD_KIND_COMMAND = 19;
+  // macOS refused Claktory Agents a protected place, and its Needs you item
+  // ended (ProtectedPlace): outcome DISMISSED (the person's OK) or CHANGED
+  // (a later check found it let in). title and excerpt the item's words
+  // when it was raised, agent_id the agent refused there (empty when a
+  // check found it), asked_ms raised, decided_ms ended.
+  NEEDS_YOU_RECORD_KIND_PROTECTED_PLACE = 22;
+  // An agent saved a command's output as a new secret, with bash's save_as
+  // (a key it made with a secret it holds): no card, no approval. Outcome
+  // CHANGED, agent_id the agent, title Claktory's sentence ("Pericolo saved
+  // Play deploy key, a new secret made with Google Cloud owner"),
+  // agent_reason the secret's description, in the agent's words.
+  // seq is the bash call's entry in its conversation. The secret is granted
+  // to that agent alone; Settings → Secrets shows it as saved by it
+  // (SecretInfo.owner_agent_id), where the person can delete it.
+  NEEDS_YOU_RECORD_KIND_SECRET_SAVED = 23;
+  // This vault was sealed to the account's recovery key claktory.com has
+  // (#239), one other than it was sealed to (or none): title Claktory's
+  // words, asked_ms when the check-in saw the key, decided_ms when it was
+  // sealed; agent_id empty. On the person's choice (UseRecoveryKey), or by
+  // itself for a change every one of whose steps a device paired here
+  // approved.
+  NEEDS_YOU_RECORD_KIND_RECOVERY_KEY_CHANGED = 24;
 }
 
 enum NeedsYouOutcome {

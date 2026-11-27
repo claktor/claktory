@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension as _, params};
 use serde_json::{Value, json};
 
 use super::geo::Location;
-use crate::protocol::{Activity, CheckIn, Counts, Health, PublicStats, Usage, hex, sha256};
+use crate::protocol::{Activity, CheckIn, Counts, Health, PublicStats, RecoveryKey, Usage, hex, sha256};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS accounts (
@@ -274,6 +274,22 @@ CREATE TRIGGER IF NOT EXISTS analytics_months_kept BEFORE UPDATE ON analytics_mo
 BEGIN SELECT RAISE(ABORT, 'a published month is never changed'); END;
 CREATE TRIGGER IF NOT EXISTS analytics_months_never_deleted BEFORE DELETE ON analytics_months
 BEGIN SELECT RAISE(ABORT, 'a published month is never deleted'); END;
+-- Each account's recovery keys (#239), the last 10, the newest its key
+-- now: only the public half, with the statement of the Claktory that set
+-- it and the device's signature that approved it, that Claktory's id and
+-- backend key then (to check it with) and when it was set. Deleted with
+-- the account.
+CREATE TABLE IF NOT EXISTS recovery_keys (
+    id INTEGER PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    statement TEXT NOT NULL,
+    device_sig TEXT NOT NULL,
+    claktory_id TEXT NOT NULL,
+    backend_key TEXT NOT NULL,
+    set_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS recovery_keys_by_account ON recovery_keys (account_id, id);
 ";
 
 /// How long a period's id is kept, to know it if it's sent again. A
@@ -1396,6 +1412,7 @@ pub fn delete_account(conn: &mut Connection, account: &Account, apps: bool, now:
     tx.execute("DELETE FROM key_accounts WHERE account_id = ?1", params![account.id])?;
     tx.execute("DELETE FROM apps_sign_outs WHERE account_id = ?1", params![account.id])?;
     tx.execute("DELETE FROM apps_claktory_removals WHERE account_id = ?1", params![account.id])?;
+    tx.execute("DELETE FROM recovery_keys WHERE account_id = ?1", params![account.id])?;
     tx.execute("DELETE FROM requests WHERE email = ?1", params![account.email])?;
     tx.execute("DELETE FROM sessions WHERE email = ?1", params![account.email])?;
     tx.execute("DELETE FROM accounts WHERE id = ?1", params![account.id])?;
@@ -1917,4 +1934,75 @@ pub fn issued_assertion(conn: &Connection, account_key: &str, device_key: &str, 
         )?;
     }
     Ok(())
+}
+
+/// How many of an account's recovery keys are kept: its key now and the
+/// chain before it.
+const RECOVERY_KEYS_KEPT: i64 = 10;
+
+/// The account's recovery key (#239), if it has one, with the ones before it.
+pub fn recovery_key(conn: &Connection, account_id: &str) -> rusqlite::Result<Option<RecoveryKey>> {
+    let mut keys: Vec<RecoveryKey> = conn
+        .prepare(
+            // Its Claktory's name as GET /v1/claktories gives it, while
+            // it's still the account's.
+            "SELECT k.public_key, k.statement, k.device_sig, k.claktory_id, k.backend_key, k.set_at,
+                    COALESCE(c.display_name, c.name, '')
+             FROM recovery_keys k
+             LEFT JOIN claktories c ON c.id = k.claktory_id AND c.account_id = k.account_id AND c.revoked_at IS NULL
+             WHERE k.account_id = ?1 ORDER BY k.id DESC LIMIT ?2",
+        )?
+        .query_map(params![account_id, RECOVERY_KEYS_KEPT], |row| {
+            Ok(RecoveryKey {
+                public_key: row.get(0)?,
+                statement: row.get(1)?,
+                device_sig: row.get(2)?,
+                claktory_id: row.get(3)?,
+                claktory_name: row.get(6)?,
+                backend_key: row.get(4)?,
+                set_at: row.get(5)?,
+                history: Vec::new(),
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    if keys.is_empty() {
+        return Ok(None);
+    }
+    let mut now = keys.remove(0);
+    now.history = keys;
+    Ok(Some(now))
+}
+
+/// Sets the account's recovery key to `key` if the one it has is
+/// `replaces` (`""`: none), or is `key`'s already (a retry): the key it
+/// has then. Otherwise nothing changes, and Err gives the one it has.
+pub fn set_recovery_key(
+    conn: &mut Connection,
+    account_id: &str,
+    replaces: &str,
+    key: &RecoveryKey,
+) -> rusqlite::Result<Result<RecoveryKey, Option<RecoveryKey>>> {
+    let tx = conn.transaction()?;
+    let now = recovery_key(&tx, account_id)?;
+    if let Some(now) = &now
+        && now.public_key == key.public_key
+    {
+        return Ok(Ok(now.clone()));
+    }
+    if now.as_ref().map_or("", |now| now.public_key.as_str()) != replaces {
+        return Ok(Err(now));
+    }
+    tx.execute(
+        "INSERT INTO recovery_keys (account_id, public_key, statement, device_sig, claktory_id, backend_key, set_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![account_id, key.public_key, key.statement, key.device_sig, key.claktory_id, key.backend_key, key.set_at],
+    )?;
+    tx.execute(
+        "DELETE FROM recovery_keys WHERE account_id = ?1 AND id NOT IN
+         (SELECT id FROM recovery_keys WHERE account_id = ?1 ORDER BY id DESC LIMIT ?2)",
+        params![account_id, RECOVERY_KEYS_KEPT],
+    )?;
+    let set = recovery_key(&tx, account_id)?;
+    tx.commit()?;
+    Ok(set.ok_or(None))
 }

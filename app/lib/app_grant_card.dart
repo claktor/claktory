@@ -6,12 +6,19 @@ import 'avatar.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
-import 'card_answer.dart' show CardAnswer, PublishesAnswer, noComment;
-import 'decision.dart' show CommentTyped, DecisionComment, SubmitButton;
+import 'card_answer.dart'
+    show CardAnswer, PublishesAnswer, insteadLine, noComment;
+import 'decision.dart'
+    show
+        CardAnswerBlock,
+        CardLine,
+        CardRow,
+        CommentTyped,
+        DecisionComment,
+        SubmitButton;
 import 'extensions.dart' show dayLabel, logTime;
 import 'forms.dart' show rivetIn;
 import 'identity.dart';
-import 'mobile/lines.dart';
 import 'mobile/metrics.dart';
 import 'people/contacts.dart';
 import 'people/people_view.dart' show contactsApi;
@@ -475,30 +482,29 @@ class _AppGrantCardState extends State<AppGrantCard> with PublishesAnswer {
     final loading = _reachesConversations && _friends == null;
     final unknown = !loading && !_known;
     return [
-      // Once a comment is typed, one Submit: a reply, giving nothing.
-      CommentTyped(
-        controller: _comment,
-        builder: (context, typed) => typed
-            ? ActionLine(
-                lead: Text(
-                  _error ??
-                      'Nothing is given. $rivetName gets your comment and '
-                          'can suggest it again.',
-                  style: type.caption.copyWith(
-                    color: _error == null ? palette.textFaint : palette.danger,
+      // The field, open from the start, above the row (Lucy's rules 2 and
+      // 4). Once something's typed, one Submit: a reply, giving nothing;
+      // Return too.
+      CardAnswerBlock(
+        field: (focus) => DecisionComment(
+          controller: _comment,
+          focusNode: focus,
+          agent: rivetName,
+          enabled: !busy,
+          onSubmit: _submit,
+        ),
+        row: CommentTyped(
+          controller: _comment,
+          builder: (context, typed) => typed
+              ? CardRow(
+                  line: CardLine(
+                    _error ?? insteadLine('approving'),
+                    color: _error == null ? null : palette.danger,
                   ),
-                ),
-                action: SubmitButton(onPressed: busy ? null : _submit),
-              )
-            : _buttons(palette, type, name, busy: busy, unknown: unknown),
-      ),
-      // The shared Add a comment: typed, it's Submit's, Return too.
-      const SizedBox(height: Space.xs),
-      DecisionComment(
-        controller: _comment,
-        agent: rivetName,
-        enabled: !busy,
-        onSubmit: _submit,
+                  primary: SubmitButton(onPressed: busy ? null : _submit),
+                )
+              : _buttons(palette, type, name, busy: busy, unknown: unknown),
+        ),
       ),
     ];
   }
@@ -511,8 +517,8 @@ class _AppGrantCardState extends State<AppGrantCard> with PublishesAnswer {
     required bool busy,
     required bool unknown,
   }) {
-    return ActionLine(
-      lead: Text(
+    return CardRow(
+      line: Text(
         _error ??
             (_approving == true
                 ? 'Giving $name access…'
@@ -530,24 +536,22 @@ class _AppGrantCardState extends State<AppGrantCard> with PublishesAnswer {
               : palette.danger,
         ),
       ),
-      action: ControlsLine(
-        children: [
-          if (_friendsFailed)
-            Button(
-              label: 'Try again',
-              onPressed: busy ? null : () => unawaited(_loadFriends()),
-            ),
+      quiet: [
+        Button(
+          label: 'Decline',
+          onPressed: busy ? null : () => _decide(approve: false),
+        ),
+        if (_friendsFailed)
           Button(
-            label: 'Decline',
-            onPressed: busy ? null : () => _decide(approve: false),
+            label: 'Try again',
+            onPressed: busy ? null : () => unawaited(_loadFriends()),
           ),
-          Button(
-            label: 'Approve',
-            primary: true,
-            // Only once every conversation it reaches is known here.
-            onPressed: busy || !_known ? null : () => _decide(approve: true),
-          ),
-        ],
+      ],
+      primary: Button(
+        label: 'Approve',
+        primary: true,
+        // Only once every conversation it reaches is known here.
+        onPressed: busy || !_known ? null : () => _decide(approve: true),
       ),
     );
   }

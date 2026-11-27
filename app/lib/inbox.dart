@@ -7,8 +7,10 @@
 // chat's and pipe's waiting_seqs), and each card is fetched as it is now,
 // with LoadEntries for an agent's, LoadChatEntries for a chat's and
 // LoadPipeMessages for a pipe's.
-import 'dart:async' show Timer;
+import 'dart:async' show Timer, unawaited;
+import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -39,10 +41,13 @@ import 'lid_closed.dart' show LidClosedStuck, lidClosedStuck;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
+import 'mobile/navigation.dart' show PhoneRoutes;
 import 'move.dart' show BackendMove, MoveConfirmCard, MoveStatus, moveStatusOf;
 import 'name_role_line.dart';
 import 'needs_you_alerts.dart';
 import 'needs_you_entries.dart';
+import 'needs_you_focus.dart' show openFocusMode;
+import 'needs_you_hold.dart';
 import 'needs_you_history.dart' show NeedsYouHistoryList, NeedsYouTabs;
 import 'pairing.dart' show AllowDeviceCard, deviceCallingItself;
 import 'pairing_card.dart' show DevicePairingCard;
@@ -51,13 +56,18 @@ import 'pane_chrome.dart' show InPane;
 import 'people/chat_view.dart' show openDmChat;
 import 'pipe_timeline.dart' show pipeItemKey, pipeLiaison;
 import 'pipes.dart';
+import 'protected_place_item.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'provider_wait_card.dart';
 import 'recovery_key.dart' show SaveRecoveryKeyForm;
 import 'scope.dart';
 import 'selection.dart' show CopyShape, SelectableArea, SelectionPane;
 import 'secrets.dart'
-    show SecretRequestCard, UnlockSecretsForm, secretRequestSummary;
+    show
+        SecretRequestCard,
+        UnlockSecretsForm,
+        secretOutcome,
+        secretRequestSummary;
 import 'transcript.dart' show ProposalCard, deviceGlyph;
 import 'usage.dart' show UsageRing, formatAge;
 import 'visible_codes.dart' show proseCodes;
@@ -141,6 +151,11 @@ enum NeedsYouKind {
   /// The Mac can't sleep with its lid closed although Claktory isn't
   /// keeping it awake (KeepAwake.lid_closed STUCK, #371): what fixes it.
   lidStuck,
+
+  /// A place macOS keeps from Claktory Agents (Documents, a volume…)
+  /// refused it, with agents working there (ProtectedPlace.needs_you,
+  /// permissions.md P2): Open System Settings, or OK.
+  protectedPlace,
 
   /// An alert an agent (or Claktory) sent, kept until the person reads it
   /// (Workspace.alerts; Lucy's needs-you-cards.md §3.9): nothing to
@@ -305,6 +320,17 @@ class NeedsYouItem {
       sessionId = '',
       conversationId = '';
 
+  /// The place's root is its [sessionId].
+  const NeedsYouItem.protectedPlace(this.sessionId)
+    : kind = NeedsYouKind.protectedPlace,
+      agentId = '',
+      chatId = '',
+      pipeId = '',
+      providerId = '',
+      accountId = '',
+      seq = 0,
+      conversationId = '';
+
   /// The waiting device's id is its [sessionId].
   const NeedsYouItem.device(this.sessionId)
     : kind = NeedsYouKind.device,
@@ -358,6 +384,7 @@ class NeedsYouItem {
     NeedsYouKind.keepAwake => 'keepAwake',
     NeedsYouKind.backendService => 'backendService',
     NeedsYouKind.lidStuck => 'lidStuck',
+    NeedsYouKind.protectedPlace => 'protected:$sessionId',
     NeedsYouKind.alert => 'alert:$sessionId',
     NeedsYouKind.alertGroup => 'alerts:$agentId',
   };
@@ -429,6 +456,10 @@ List<NeedsYouItem> needsYouItems(Workspace workspace) {
     // A laptop that can't sleep with its lid closed: factoryd notifies too.
     if (workspace.keepAwake.lidClosed == LidClosedState.LID_CLOSED_STUCK)
       const NeedsYouItem.lidStuck(),
+    // A place macOS refused agents, once per refusal; on every device, as
+    // the Mac's own words say where to turn it on.
+    for (final place in workspace.protectedPlaces)
+      if (place.needsYou) NeedsYouItem.protectedPlace(place.root),
     // Also floating over the window on every device (MoveGate).
     if (workspace.hasMove() && moveStatusOf(workspace.move).awaitsPerson)
       const NeedsYouItem.move(),
@@ -603,7 +634,12 @@ String needsYouLabel(int count) => count == 1
 /// The Needs you page: on a Mac a pane beside the conversation (or the
 /// agent view's place, with no agent), on a phone a page of its own.
 class InboxView extends StatefulWidget {
-  const InboxView({super.key});
+  const InboxView({super.key, this.onOpen});
+
+  /// What a tap on a request does instead of opening it in place: an
+  /// iPhone's (and a narrow iPad's) opens it alone on its own screen
+  /// (#599, needs-you-cards.md §4.5), as [NeedsYouList.onOpen].
+  final void Function(NeedsYouItem item)? onOpen;
 
   @override
   State<InboxView> createState() => _InboxViewState();
@@ -686,12 +722,42 @@ class _InboxViewState extends State<InboxView> {
                   alignment: Alignment.topCenter,
                   child: ConstrainedBox(
                     constraints: const BoxConstraints(maxWidth: 640),
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: NeedsYouTabs(
-                        history: _history,
-                        choose: (history) => setState(() => _history = history),
-                      ),
+                    child: Builder(
+                      builder: (context) {
+                        final tabs = NeedsYouTabs(
+                          history: _history,
+                          choose: (history) =>
+                              setState(() => _history = history),
+                        );
+                        final focus = !_history && focusModeHere(context);
+                        // A phone's tabs take the width: at the largest
+                        // text, Focus mode goes under them, at the end.
+                        if (focus &&
+                            isPhoneLayout(context) &&
+                            largeText(context)) {
+                          return Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              tabs,
+                              const Align(
+                                alignment: Alignment.centerRight,
+                                child: FocusModeButton(),
+                              ),
+                            ],
+                          );
+                        }
+                        return Row(
+                          children: [
+                            Expanded(
+                              child: Align(
+                                alignment: Alignment.centerLeft,
+                                child: tabs,
+                              ),
+                            ),
+                            if (focus) const FocusModeButton(),
+                          ],
+                        );
+                      },
                     ),
                   ),
                 ),
@@ -701,7 +767,7 @@ class _InboxViewState extends State<InboxView> {
                     // Its words select and copy, as what waits does; each
                     // row is copied apart from the next.
                     ? const SelectableArea(child: NeedsYouHistoryList())
-                    : const NeedsYouList(),
+                    : NeedsYouList(onOpen: widget.onOpen),
               ),
             ],
           ),
@@ -711,11 +777,80 @@ class _InboxViewState extends State<InboxView> {
   }
 }
 
+/// Whether Needs you has a way into focus mode here: everywhere but
+/// Android, an iPhone and a narrow iPad window too (#599: Needs you opens
+/// on the list there, and focus mode is the person's choice).
+bool focusModeHere(BuildContext context) =>
+    defaultTargetPlatform != TargetPlatform.android;
+
+/// The page's way into focus mode (#514), as ⌘⇧N, at the end of its tabs:
+/// shown while something waits, since focus mode shows only what waits.
+class FocusModeButton extends StatelessWidget {
+  const FocusModeButton({super.key});
+
+  static const label = 'Focus on Needs you';
+
+  @override
+  Widget build(BuildContext context) {
+    final backend = AppScope.of(context);
+    return ListenableBuilder(
+      listenable: backend.workspace,
+      builder: (context, _) {
+        if (needsYouCount(backend.workspace.workspace) == 0) {
+          return const SizedBox.shrink();
+        }
+        return Padding(
+          padding: const EdgeInsets.only(left: Space.s),
+          child: HoverCard(
+            end: true,
+            card: (context) => const Text('$label · ⌘⇧N'),
+            child: Button(
+              label: 'Focus mode',
+              semanticLabel: label,
+              // It grows with its label, as an SF Symbol does with
+              // Dynamic Type, up to where the label stops (2× on a phone).
+              glyph: (color) {
+                final size = MediaQuery.textScalerOf(context)
+                    .clamp(
+                      maxScaleFactor: isPhoneLayout(context)
+                          ? 2
+                          : double.infinity,
+                    )
+                    .scale(16);
+                return SizedBox.square(
+                  dimension: size,
+                  child: FittedBox(child: FocusGlyph(color: color)),
+                );
+              },
+              // An iPhone's is a screen of its own over the list, never
+              // kept as the device's focus mode (#599).
+              onPressed: () {
+                if (PhoneRoutes.of(context)?.openFocus() ?? false) return;
+                openFocusMode(context);
+              },
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 /// Everything that waits for the person, newest first, each a bubble that
 /// opens to its card. What they answer here stays, answered, until they
 /// leave, so they see it went through. A phone's drawer can show it too.
 class NeedsYouList extends StatefulWidget {
-  const NeedsYouList({super.key, this.padding, this.shrinkWrap = false});
+  const NeedsYouList({
+    super.key,
+    this.padding,
+    this.shrinkWrap = false,
+    this.onOpen,
+  });
+
+  /// What a tap on a request does instead of opening it in place (an
+  /// iPhone's: it alone, on its own screen). It stays in the list once
+  /// answered, showing how it ended, as one answered in place does.
+  final void Function(NeedsYouItem item)? onOpen;
 
   /// Around the list; the page's own by default.
   final EdgeInsets? padding;
@@ -783,9 +918,40 @@ class _NeedsYouListState extends State<NeedsYouList> {
   var _shownAlerts = const <(NeedsYouItem, String)>[];
   final _places = <String, GlobalKey>{};
 
+  /// The list holds still under the finger (#599, row 688; Lucy's §4.5):
+  /// a row coming in above the ones in view goes in with the offset grown
+  /// by its height (needs_you_hold.dart), and one leaving fades where it
+  /// was, the rows under it closing up only once no finger is down.
+  final _scroll = ScrollController();
+  final _content = GlobalKey();
+
+  /// Every row this list has shown, and those that came in since it
+  /// opened and haven't been in view yet: what the pill counts.
+  Set<String>? _known;
+  final _fresh = <String>{};
+  var _kinds = const <String, ({bool alert, bool urgent})>{};
+  var _above = (requests: 0, alerts: 0, urgent: 0);
+  var _padTop = 0.0;
+
+  /// Each request's time as last drawn, and those whose time rose since
+  /// (changed by their agent, or replied on), which move up the list: the
+  /// list holds the rows in view for them as for one that came in, and
+  /// the pill counts them (Squalo's R1).
+  var _times = const <String, int>{};
+  var _movedUp = const <String>{};
+
+  /// The rows in their order as last drawn, each as drawn, and those that
+  /// left, drawn faded in their place meanwhile.
+  var _lastOrder = const <String>[];
+  var _lastRows = const <String, Widget>{};
+  final _leaving = <String, Widget>{};
+  var _touches = 0;
+  Timer? _closeUp;
+
   @override
   void initState() {
     super.initState();
+    _scroll.addListener(_seeAbove);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       _store.addListener(_rebuild);
@@ -797,6 +963,8 @@ class _NeedsYouListState extends State<NeedsYouList> {
 
   @override
   void dispose() {
+    _closeUp?.cancel();
+    _scroll.dispose();
     _unhighlight?.cancel();
     _find.dispose();
     _store.revealAlert.removeListener(_reveal);
@@ -811,6 +979,86 @@ class _NeedsYouListState extends State<NeedsYouList> {
     if (mounted) setState(() {});
   }
 
+  /// Each row's box by its key, for the list to hold the top one still.
+  Map<String, RenderBox> _rowBoxes() => {
+    for (final MapEntry(:key, :value) in _places.entries)
+      if (value.currentContext?.findRenderObject() case final RenderBox box)
+        key: box,
+  };
+
+  /// What came in above the rows in view and isn't seen yet: the pill's.
+  /// One that comes into view, or went in below it, is seen.
+  void _seeAbove() {
+    if (!mounted) return;
+    var requests = 0, alerts = 0, urgent = 0;
+    final content = _content.currentContext?.findRenderObject();
+    if (_fresh.isNotEmpty && content is RenderBox && _scroll.hasClients) {
+      final top = _scroll.offset - _padTop;
+      for (final key in [..._fresh]) {
+        final box = _places[key]?.currentContext?.findRenderObject();
+        if (box is! RenderBox || !box.attached || !box.hasSize) {
+          _fresh.remove(key);
+          continue;
+        }
+        // Seen once its top is in view: at the very top, the offset grown
+        // by its height still shows the padding's worth of its foot.
+        final at = box.getTransformTo(content).getTranslation().y;
+        if (at >= top - 1) {
+          _fresh.remove(key);
+          continue;
+        }
+        final kind = _kinds[key];
+        if (kind == null) continue;
+        if (kind.urgent) urgent++;
+        kind.alert ? alerts++ : requests++;
+      }
+    } else {
+      _fresh.clear();
+    }
+    final above = (requests: requests, alerts: alerts, urgent: urgent);
+    if (above != _above) setState(() => _above = above);
+  }
+
+  /// Rows that showed and went above the top so the rows under one that
+  /// came in could stay: counted by the pill until they're seen again.
+  void _pushedAbove(List<String> keys) {
+    if (!mounted) return;
+    _fresh.addAll(keys);
+    _seeAbove();
+  }
+
+  /// Up to what came in above.
+  void _toNew() {
+    if (!_scroll.hasClients) return;
+    final to = _scroll.position.minScrollExtent;
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _scroll.jumpTo(to);
+    } else {
+      unawaited(
+        _scroll.animateTo(to, duration: Motion.base, curve: Curves.easeOut),
+      );
+    }
+  }
+
+  /// Rows that left close up once they've faded and no finger is down.
+  void _closeUpSoon() {
+    _closeUp?.cancel();
+    _closeUp = Timer(Motion.base, _closeUpNow);
+  }
+
+  void _closeUpNow() {
+    _closeUp = null;
+    if (!mounted || _touches > 0 || _leaving.isEmpty) return;
+    setState(_leaving.clear);
+  }
+
+  void _touched(int by) {
+    _touches = math.max(0, _touches + by);
+    if (_touches == 0 && _leaving.isNotEmpty && _closeUp == null) {
+      _closeUpNow();
+    }
+  }
+
   void _toggle(NeedsYouItem item) {
     final key = item.key;
     setState(() {
@@ -822,6 +1070,20 @@ class _NeedsYouListState extends State<NeedsYouList> {
     });
     // Opened: as it is now.
     if (_open.contains(key)) _store.fetch(item);
+  }
+
+  /// [item] alone, elsewhere ([NeedsYouList.onOpen]): kept here to show
+  /// how it ended once answered.
+  void _openAlone(NeedsYouItem item) {
+    if (_kept[item.key] == null) {
+      _store.hold(item);
+      setState(() => _kept[item.key] = item);
+    }
+    // As it is now, as one opened in place is: a copy fetched before its
+    // agent changed it would be answered as it was, and turned away
+    // (Squalo's B4).
+    _store.fetch(item);
+    widget.onOpen!(item);
   }
 
   /// Reads [alerts], [item]'s: they stay here, marked Read.
@@ -936,14 +1198,36 @@ class _NeedsYouListState extends State<NeedsYouList> {
         if (!item.isAlert) item,
     ];
     // Newest first; unknown times (a pipe's approval, its pause) on top.
+    // Each by the newest time this list has seen for it: a card's time
+    // only rises, so a copy of it older than one shown (B3) never sinks
+    // its row back down under the finger (Zucchero's row 717, Bruno 50306).
+    final times = {
+      for (final item in items)
+        item.key: math.max(
+          _times[item.key] ?? 0,
+          _store.timeOf(item, workspace),
+        ),
+    };
     final order = {for (var i = 0; i < items.length; i++) items[i].key: i};
     items.sort((a, b) {
-      final ta = _store.timeOf(a, workspace);
-      final tb = _store.timeOf(b, workspace);
+      final ta = times[a.key]!;
+      final tb = times[b.key]!;
       final ka = ta == 0 ? 1 << 62 : ta, kb = tb == 0 ? 1 << 62 : tb;
       if (ka != kb) return kb.compareTo(ka);
       return order[a.key]!.compareTo(order[b.key]!);
     });
+    final movedUp = {
+      for (final MapEntry(:key, value: time) in times.entries)
+        if ((_times[key] ?? 0) > 0 && time > _times[key]!) key,
+    };
+    _times = times;
+    _movedUp = movedUp;
+    if (movedUp.isNotEmpty) {
+      _fresh.addAll(movedUp);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (identical(_movedUp, movedUp)) _movedUp = const {};
+      });
+    }
     final padding =
         widget.padding ??
         EdgeInsets.all(isPhoneLayout(context) ? Space.l : Space.xl);
@@ -953,7 +1237,11 @@ class _NeedsYouListState extends State<NeedsYouList> {
           item: item,
           waiting: keys.contains(item.key),
           open: _open.contains(item.key),
-          onToggle: () => item.isAction ? _act(item) : _toggle(item),
+          onToggle: () => item.isAction
+              ? _act(item)
+              : widget.onOpen == null
+              ? _toggle(item)
+              : _openAlone(item),
           entry: item.isEntry ? _store.entryOf(item) : null,
           message:
               item.kind == NeedsYouKind.pipeHeld ||
@@ -994,7 +1282,29 @@ class _NeedsYouListState extends State<NeedsYouList> {
     final shownKeys = {
       for (final item in [...items, ...urgent, ...lateAlerts]) item.key,
     };
-    _places.removeWhere((key, _) => !shownKeys.contains(key));
+    // Came in since the list opened: new, until it's been in view.
+    final known = _known;
+    if (known == null) {
+      _known = {...shownKeys};
+    } else {
+      for (final key in shownKeys) {
+        if (known.add(key)) _fresh.add(key);
+      }
+    }
+    _kinds = {
+      for (final item in [...urgent, ...items, ...lateAlerts])
+        item.key: (alert: item.isAlert, urgent: isUrgentAlert(alerts, item)),
+    };
+    // Gone (answered elsewhere, taken back): faded where it was meanwhile.
+    for (final key in _lastOrder) {
+      if (shownKeys.contains(key) || _leaving.containsKey(key)) continue;
+      if (_lastRows[key] case final row?) _leaving[key] = row;
+    }
+    _leaving.removeWhere((key, _) => shownKeys.contains(key));
+    if (_leaving.isNotEmpty && _closeUp == null) _closeUpSoon();
+    _places.removeWhere(
+      (key, _) => !shownKeys.contains(key) && !_leaving.containsKey(key),
+    );
     Widget placed(NeedsYouItem item, Widget child) => Align(
       key: ValueKey(item.key),
       alignment: Alignment.topCenter,
@@ -1035,61 +1345,121 @@ class _NeedsYouListState extends State<NeedsYouList> {
     // Copied, each item's lines on their own and a blank line between
     // items, as they read: the items in one Column inside the list, whose
     // own selection would run them together.
+    // The rows in their order, each keyed by its item on the column's own
+    // children: matched by place instead, a question coming in above
+    // would take this one's card, and with it what the person was typing
+    // and their focus.
+    final rows = <(String, Widget)>[
+      // Urgent alerts first: they can't wait (§3.9).
+      for (final item in urgent) (item.key, placed(item, alertRow(item))),
+      for (final bubble in _shown)
+        (bubble.item.key, placed(bubble.item, bubble)),
+      if (lateAlerts.isNotEmpty) ...[
+        (
+          'alerts-heading',
+          Align(
+            key: const ValueKey('alerts-heading'),
+            alignment: Alignment.topCenter,
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 640, minWidth: 640),
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(
+                  Space.m,
+                  _shown.isEmpty && urgent.isEmpty ? 0 : Space.l,
+                  Space.m,
+                  Space.xs,
+                ),
+                child: Semantics(
+                  header: true,
+                  child: Text(
+                    'Alerts',
+                    style: TextStyles.label.copyWith(
+                      color: palette.textMuted,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        for (final item in lateAlerts) (item.key, placed(item, alertRow(item))),
+      ],
+    ];
+    _lastRows = {
+      for (final (key, row) in rows)
+        if (key != 'alerts-heading') key: row,
+    };
+    // Those that left, faded where they were, after the row before them.
+    for (final (index, key) in _lastOrder.indexed) {
+      final row = _leaving[key];
+      if (row == null) continue;
+      var at = 0;
+      for (var before = index - 1; before >= 0; before--) {
+        final found = rows.indexWhere((each) => each.$1 == _lastOrder[before]);
+        if (found >= 0) {
+          at = found + 1;
+          break;
+        }
+      }
+      rows.insert(at, (
+        key,
+        _Leaving(key: ValueKey('leaving $key'), child: row),
+      ));
+    }
+    _lastOrder = [for (final (key, _) in rows) key];
+    _padTop = padding.top;
+    if (_fresh.isNotEmpty || _above.requests + _above.alerts > 0) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _seeAbove());
+    }
     return FindScope(
       target: _find,
-      child: SelectableArea(
-        child: ListView(
-          shrinkWrap: widget.shrinkWrap,
-          padding: padding,
+      // A finger down holds the rows that left until it lifts.
+      child: Listener(
+        onPointerDown: (_) => _touched(1),
+        onPointerUp: (_) => _touched(-1),
+        onPointerCancel: (_) => _touched(-1),
+        child: Stack(
           children: [
-            // Selected where the pointer is at any zoom, however far it's
-            // scrolled.
-            ScrolledSelection(
-              child: CopyShape(
-                separator: '\n\n',
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    // Urgent alerts first: they can't wait (§3.9).
-                    for (final item in urgent) placed(item, alertRow(item)),
-                    // Keyed here, on the column's own children: matched by place
-                    // instead, a question coming in above would take this one's
-                    // card, and with it what the person was typing and their
-                    // focus.
-                    for (final bubble in _shown) placed(bubble.item, bubble),
-                    if (lateAlerts.isNotEmpty) ...[
-                      Align(
-                        key: const ValueKey('alerts-heading'),
-                        alignment: Alignment.topCenter,
-                        child: ConstrainedBox(
-                          constraints: const BoxConstraints(
-                            maxWidth: 640,
-                            minWidth: 640,
-                          ),
-                          child: Padding(
-                            padding: EdgeInsets.fromLTRB(
-                              Space.m,
-                              _shown.isEmpty && urgent.isEmpty ? 0 : Space.l,
-                              Space.m,
-                              Space.xs,
-                            ),
-                            child: Semantics(
-                              header: true,
-                              child: Text(
-                                'Alerts',
-                                style: TextStyles.label.copyWith(
-                                  color: palette.textMuted,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
+            SelectableArea(
+              child: CustomScrollView(
+                controller: _scroll,
+                shrinkWrap: widget.shrinkWrap,
+                slivers: [
+                  SliverPadding(
+                    padding: padding,
+                    sliver: HeldBox(
+                      rows: _rowBoxes,
+                      movedUp: () => _movedUp,
+                      onPushedAbove: _pushedAbove,
+                      // Selected where the pointer is at any zoom, however
+                      // far it's scrolled.
+                      child: ScrolledSelection(
+                        child: CopyShape(
+                          separator: '\n\n',
+                          child: Column(
+                            key: _content,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [for (final (_, row) in rows) row],
                           ),
                         ),
                       ),
-                      for (final item in lateAlerts)
-                        placed(item, alertRow(item)),
-                    ],
-                  ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            // What came in above the rows in view.
+            Positioned(
+              top: Space.s,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: NewAbovePill(
+                  requests: _above.requests,
+                  alerts: _above.alerts,
+                  urgent: _above.urgent,
+                  onTap: _toNew,
                 ),
               ),
             ),
@@ -1124,6 +1494,8 @@ class _NeedsYouListState extends State<NeedsYouList> {
         // Opened here, it stays once the Mac can sleep, saying so
         // (Abbacchio's row 1159).
         NeedsYouKind.lidStuck => true,
+        // Set aside or let in here: it stays, saying which.
+        NeedsYouKind.protectedPlace => true,
         // Read here: it stays, marked Read.
         NeedsYouKind.alert || NeedsYouKind.alertGroup => true,
         _ => workspace.pipes.any((pipe) => pipe.id == item.pipeId),
@@ -1175,14 +1547,24 @@ class _Bubble extends StatelessWidget with _ItemParts {
     final proposal = entry?.whichKind() == Entry_Kind.proposal
         ? entry!.proposal
         : null;
+    final secret = entry?.whichKind() == Entry_Kind.secretRequest
+        ? entry!.secretRequest
+        : null;
     final answered = Text(
-      ask?.withdrawn == true || proposal?.withdrawn == true
+      // How it ended, in its card's own words, never only "Answered"
+      // (N12, Lucy's §8): Gave Hetzner, Couldn't do step 2, Replied…
+      secret != null
+          ? secret.state == SecretRequestState.SECRET_REQUEST_STATE_APPROVED
+                ? 'Approved'
+                : secretOutcome(secret, agent: agent?.name ?? secret.agentId)
+          : ask != null
+          ? askOutcome(ask, agent: agent?.name ?? 'The agent', short: true)
+          : proposal?.withdrawn == true
           ? 'Withdrawn'
-          : ask?.resolved == true
-          ? 'Resolved'
-          : ask?.state == AskPersonState.ASK_PERSON_STATE_DISMISSED ||
-                proposal?.state == ProposalState.PROPOSAL_STATE_DISMISSED
+          : proposal?.state == ProposalState.PROPOSAL_STATE_DISMISSED
           ? 'Dismissed'
+          : proposal != null
+          ? (proposal.replied ? 'Replied' : 'Approved')
           : 'Answered',
       style: TextStyles.caption.copyWith(color: palette.textFaint),
     );
@@ -1218,65 +1600,77 @@ class _Bubble extends StatelessWidget with _ItemParts {
           color: hovered ? palette.hover : const Color(0x00000000),
           child: Row(
             children: [
-              SizedBox.square(
-                dimension: 24,
-                child: Center(
-                  child: agent != null
-                      ? AgentCharacter(agent: agent, size: 24)
-                      : item.kind == NeedsYouKind.providerWait
-                      // The provider's own circle, its ring as full as it is.
-                      ? switch (_providerWait) {
-                          final wait? => switch (providerWaitMeters(
-                            workspace,
-                            wait,
-                          ).firstOrNull) {
-                            final meter? => UsageRing(meter: meter),
+              // Who asks is said once, by the line beside it (Zucchero
+              // 48776: "Lea, Lea, Project Manager").
+              ExcludeSemantics(
+                child: SizedBox.square(
+                  dimension: 24,
+                  child: Center(
+                    child: agent != null
+                        ? AgentCharacter(agent: agent, size: 24)
+                        : item.kind == NeedsYouKind.providerWait
+                        // The provider's own circle, its ring as full as it is.
+                        ? switch (_providerWait) {
+                            final wait? => switch (providerWaitMeters(
+                              workspace,
+                              wait,
+                            ).firstOrNull) {
+                              final meter? => UsageRing(meter: meter),
+                              null => ExtensionGlyph(
+                                icon: 'chart-column',
+                                name: '',
+                                color: palette.textMuted,
+                              ),
+                            },
                             null => ExtensionGlyph(
                               icon: 'chart-column',
                               name: '',
-                              color: palette.textMuted,
+                              color: palette.textFaint,
                             ),
-                          },
-                          null => ExtensionGlyph(
-                            icon: 'chart-column',
+                          }
+                        : item.kind == NeedsYouKind.keepAwake ||
+                              item.kind == NeedsYouKind.backendService ||
+                              item.kind == NeedsYouKind.lidStuck
+                        ? ExtensionGlyph(
+                            icon: 'laptop-minimal',
                             name: '',
-                            color: palette.textFaint,
+                            color: waiting
+                                ? palette.textMuted
+                                : palette.textFaint,
+                          )
+                        : item.kind == NeedsYouKind.protectedPlace
+                        ? ExtensionGlyph(
+                            icon: 'folder-lock',
+                            name: '',
+                            color: waiting
+                                ? palette.textMuted
+                                : palette.textFaint,
+                          )
+                        : item.isAction || item.kind == NeedsYouKind.device
+                        ? ExtensionGlyph(
+                            icon:
+                                item.kind == NeedsYouKind.vault ||
+                                    item.kind == NeedsYouKind.recoveryKey
+                                ? 'key-round'
+                                : item.kind == NeedsYouKind.device
+                                ? deviceGlyph(
+                                    pendingDeviceOf(workspace, item)?.kind ??
+                                        DeviceKind.DEVICE_KIND_PHONE,
+                                  )
+                                : 'user',
+                            name: '',
+                            color: palette.textMuted,
+                          )
+                        : item.kind == NeedsYouKind.chat
+                        ? ChatGlyph(
+                            color: waiting
+                                ? palette.textMuted
+                                : palette.textFaint,
+                          )
+                        : PortalGlyph(
+                            color: waiting ? pipeColor : palette.textFaint,
                           ),
-                        }
-                      : item.kind == NeedsYouKind.keepAwake ||
-                            item.kind == NeedsYouKind.backendService ||
-                            item.kind == NeedsYouKind.lidStuck
-                      ? ExtensionGlyph(
-                          icon: 'laptop-minimal',
-                          name: '',
-                          color: waiting
-                              ? palette.textMuted
-                              : palette.textFaint,
-                        )
-                      : item.isAction || item.kind == NeedsYouKind.device
-                      ? ExtensionGlyph(
-                          icon:
-                              item.kind == NeedsYouKind.vault ||
-                                  item.kind == NeedsYouKind.recoveryKey
-                              ? 'key-round'
-                              : item.kind == NeedsYouKind.device
-                              ? deviceGlyph(
-                                  pendingDeviceOf(workspace, item)?.kind ??
-                                      DeviceKind.DEVICE_KIND_PHONE,
-                                )
-                              : 'user',
-                          name: '',
-                          color: palette.textMuted,
-                        )
-                      : item.kind == NeedsYouKind.chat
-                      ? ChatGlyph(
-                          color: waiting
-                              ? palette.textMuted
-                              : palette.textFaint,
-                        )
-                      : PortalGlyph(
-                          color: waiting ? pipeColor : palette.textFaint,
-                        ),
+                  ),
                 ),
               ),
               const SizedBox(width: Space.s + 2),
@@ -1436,6 +1830,7 @@ class _Bubble extends StatelessWidget with _ItemParts {
                         item.kind != NeedsYouKind.keepAwake &&
                         item.kind != NeedsYouKind.backendService &&
                         item.kind != NeedsYouKind.lidStuck &&
+                        item.kind != NeedsYouKind.protectedPlace &&
                         item.kind != NeedsYouKind.dmSend) ...[
                       const SizedBox(height: Space.s),
                       Wrap(
@@ -1580,6 +1975,8 @@ mixin _ItemParts {
         ? backendServiceTitle
         : item.kind == NeedsYouKind.lidStuck
         ? lidClosedStuck(backend)
+        : item.kind == NeedsYouKind.protectedPlace
+        ? protectedPlaceTitle(protectedPlaceAt(workspace, item.sessionId))
         : item.isAlert
         ? switch (alertsOf(workspace.alerts, item)) {
             [final latest, ...] when item.kind == NeedsYouKind.alertGroup =>
@@ -1668,6 +2065,10 @@ mixin _ItemParts {
         return keep.lidClosed != LidClosedState.LID_CLOSED_STUCK || fix.isEmpty
             ? 'It can sleep again.'
             : fix;
+      case NeedsYouKind.protectedPlace:
+        return protectedPlaceSummary(
+          protectedPlaceAt(workspace, item.sessionId),
+        );
       case NeedsYouKind.browser:
         final session = browserSessionOf(workspace, item);
         if (session == null) return 'No longer needs you';
@@ -1867,13 +2268,29 @@ class NeedsYouCard extends StatelessWidget with _ItemParts {
           return line('It can sleep again.');
         }
         return LidClosedStuck(keep: keep, heading: false);
+      case NeedsYouKind.protectedPlace:
+        final place = protectedPlaceAt(workspace, item.sessionId);
+        if (place == null) return line('No longer needs you.');
+        if (!place.needsYou) return line(protectedPlaceEnded(place));
+        return ProtectedPlaceCard(place: place);
       case NeedsYouKind.move:
         final move = _move;
         if (!MoveConfirmCard.shows(move)) {
-          return line(
-            move.active
-                ? 'This move is under way. Follow it in Settings → General.'
-                : 'This move ended.',
+          if (!move.active) return line('This move ended.');
+          // Follow it: General, at the move (Lucy's Settings spec §5).
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              line('This move is under way.'),
+              _OpenLink(
+                label: 'Follow it',
+                onTap: () => AppScope.openSettingsAt(
+                  context,
+                  'general',
+                  setting: 'move',
+                ),
+              ),
+            ],
           );
         }
         return MoveConfirmCard(
@@ -2249,6 +2666,10 @@ class _NeedsYouChipState extends State<NeedsYouChip> {
       button: true,
       expanded: _open,
       label: count == 0 ? 'Close' : needsYouChipLabel(count),
+      // Its own element, which VoiceOver presses as a click does
+      // (Abbacchio's row 1615).
+      container: true,
+      onTap: _toggle,
       excludeSemantics: true,
       child: Pressable(
         onTap: _toggle,
@@ -2312,4 +2733,29 @@ class _NeedsYouChipState extends State<NeedsYouChip> {
       ),
     );
   }
+}
+
+/// A row that left the list while in view (answered elsewhere, taken
+/// back): it fades where it was, taking no taps, until the list closes up
+/// over it once no finger is down (#599, row 688).
+class _Leaving extends StatelessWidget {
+  const _Leaving({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => IgnorePointer(
+    child: ExcludeSemantics(
+      child: TweenAnimationBuilder<double>(
+        tween: Tween(begin: 1, end: 0),
+        duration: MediaQuery.disableAnimationsOf(context)
+            ? Duration.zero
+            : Motion.base,
+        curve: Curves.easeOut,
+        builder: (context, shown, child) =>
+            Opacity(opacity: shown, child: child),
+        child: child,
+      ),
+    ),
+  );
 }

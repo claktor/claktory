@@ -9,6 +9,7 @@ import 'package:flutter/widgets.dart';
 
 import 'avatar.dart';
 import 'backend.dart';
+import 'card_answer.dart' show insteadLine;
 import 'controls.dart';
 import 'decision.dart';
 import 'identity.dart';
@@ -2055,58 +2056,39 @@ class _DecideState extends State<_Decide> {
     final agent = own
         ? null
         : controller.backend.workspace.agent(thread.suggestion.authorAgentId);
-    final buttons = Wrap(
-      spacing: Space.xs,
-      runSpacing: Space.xs,
-      children: [
-        Button(
-          label: own ? 'Apply' : 'Accept',
-          primary: true,
-          onPressed: canAccept ? () => _decide(accept: true) : null,
-        ),
-        Button(
-          label: own ? 'Discard' : 'Reject',
-          onPressed: () => _decide(accept: false),
-        ),
-      ],
+    final accept = Button(
+      label: own ? 'Apply' : 'Accept',
+      primary: true,
+      onPressed: canAccept ? () => _decide(accept: true) : null,
+    );
+    final reject = Button(
+      label: own ? 'Discard' : 'Reject',
+      onPressed: () => _decide(accept: false),
     );
     final name = agent?.name ?? 'The agent';
     return Unselectable(
       child: own
-          ? buttons
-          : Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                // A comment typed: one Submit, saying what it does.
-                CommentTyped(
-                  controller: _comment,
-                  builder: (context, typed) => typed
-                      ? Wrap(
-                          spacing: Space.s,
-                          runSpacing: Space.xs,
-                          crossAxisAlignment: WrapCrossAlignment.center,
-                          children: [
-                            SubmitButton(onPressed: () => unawaited(_reply())),
-                            Text(
-                              'The change stays open, and $name gets your '
-                              'comment.',
-                              style: TextStyles.caption.copyWith(
-                                color: Palette.of(context).textFaint,
-                              ),
-                            ),
-                          ],
-                        )
-                      : Align(
-                          alignment: AlignmentDirectional.centerStart,
-                          child: buttons,
+          ? CardRow(quiet: [reject], primary: accept)
+          // The field, open from the start, above the row (Lucy's rules 2
+          // and 4); words typed: one Submit, saying what it does.
+          : CardAnswerBlock(
+              field: (focus) => DecisionComment(
+                controller: _comment,
+                focusNode: focus,
+                agent: name,
+                onSubmit: () => unawaited(_reply()),
+              ),
+              row: CommentTyped(
+                controller: _comment,
+                builder: (context, typed) => typed
+                    ? CardRow(
+                        line: CardLine(insteadLine('accepting')),
+                        primary: SubmitButton(
+                          onPressed: () => unawaited(_reply()),
                         ),
-                ),
-                DecisionComment(
-                  controller: _comment,
-                  agent: name,
-                  onSubmit: () => unawaited(_reply()),
-                ),
-              ],
+                      )
+                    : CardRow(quiet: [reject], primary: accept),
+              ),
             ),
     );
   }

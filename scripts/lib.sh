@@ -83,6 +83,11 @@ backend_fingerprint() {
     if [[ -f scripts/build-rg.sh ]]; then
       echo "ripgrep: $(sed -n 's/^RG_VERSION=//p; s/^RG_CRATE_SHA256=//p' scripts/build-rg.sh | tr '\n' ' ')"
     fi
+    # The agent browser's Mac image (#435 W11), whose digest factoryd carries.
+    # Left out when absent, so older commits fingerprint as they always did.
+    if [[ -f scripts/browser-image/Containerfile ]]; then
+      shasum -a 256 scripts/browser-image.sh scripts/browser-image/* scripts/claktory-browser.nft scripts/claktory-browser-nft.sh
+    fi
     # And jq (tools/jq, scripts/build-jq.sh's pin), the same way.
     if [[ -f scripts/build-jq.sh ]]; then
       echo "jq: $(sed -n 's/^JQ_VERSION=//p; s/^JQ_TARBALL_SHA256=//p' scripts/build-jq.sh | tr '\n' ' ')"
@@ -632,4 +637,101 @@ public_commit() {
     GIT_AUTHOR_NAME="$PUBLIC_NAME" GIT_AUTHOR_EMAIL="$PUBLIC_EMAIL" GIT_AUTHOR_DATE="$date" \
     GIT_COMMITTER_NAME="$PUBLIC_NAME" GIT_COMMITTER_EMAIL="$PUBLIC_EMAIL" GIT_COMMITTER_DATE="$date" \
     git -C "$repo" -c commit.gpgsign=false commit-tree "$tree" ${parent:+-p "$parent"}
+}
+
+# x86_64 containers never run on an arm64 machine (Matt, 27 Nov): not
+# emulated, not cross-compiling. build-linux.sh, build-rg.sh and build-jq.sh
+# run their x86_64 containers on an x86_64 Linux machine over ssh instead,
+# FACTORY_X86_HOST (user@host, its podman rootless), with FACTORY_X86_KEY
+# (the ssh key's file) and FACTORY_X86_KNOWN_HOSTS (its pinned host key)
+# when given. On an x86_64 machine they run here, as before.
+#
+#   container_for ARCH   sets CONTAINER_PLATFORM (linux/amd64 or linux/arm64)
+#                        and CONTAINER_ARCH (x86_64 or aarch64) for the
+#                        machine that runs ARCH's containers, and points
+#                        `engine` at it; refuses x86_64 on arm64 without a host
+#   engine ARGS...       the container engine's command, there
+#
+# A remote run: each `-v /path:/inside[:ro]` is copied to a folder of the
+# run's own on the host (a source tree without target/, app/ and .git), and
+# what the container writes in a writable one is copied back, then the
+# folder is removed. `-e NAME` takes NAME's value from here. Nothing else
+# goes over, and only files the container wrote come back.
+container_for() { # ARCH
+  ENGINE="${ENGINE:-${FACTORY_CONTAINER:-}}"
+  if [[ -z "$ENGINE" ]]; then
+    if command -v podman >/dev/null; then ENGINE=podman
+    elif command -v docker >/dev/null; then ENGINE=docker
+    fi
+  fi
+  X86_REMOTE=""
+  case "$1" in
+    aarch64) CONTAINER_ARCH=aarch64 CONTAINER_PLATFORM=linux/arm64 ;;
+    x86_64) CONTAINER_ARCH=x86_64 CONTAINER_PLATFORM=linux/amd64 ;;
+    *) echo "container_for: x86_64 or aarch64, not $1" >&2; return 2 ;;
+  esac
+  case "$(uname -m)" in
+    x86_64 | amd64) [[ "$1" == x86_64 ]] || CONTAINER_ARCH=x86_64 CONTAINER_PLATFORM=linux/amd64 ;;
+    *)
+      if [[ "$1" == x86_64 ]]; then
+        [[ -n "${FACTORY_X86_HOST:-}" ]] || {
+          echo "x86_64 builds don't run on this $(uname -m) machine, emulated or cross-compiled: set FACTORY_X86_HOST to an x86_64 Linux machine with podman (user@host, reached over ssh), and FACTORY_X86_KEY to its key" >&2
+          return 1
+        }
+        X86_REMOTE="$FACTORY_X86_HOST" ENGINE=podman
+      else
+        CONTAINER_ARCH=aarch64 CONTAINER_PLATFORM=linux/arm64
+      fi ;;
+  esac
+  [[ -n "$X86_REMOTE" || -n "$ENGINE" ]] || {
+    echo "building for Linux needs podman (brew install podman; podman machine init; podman machine start) or docker" >&2
+    return 1
+  }
+}
+
+x86_ssh() { # ARGS... (the remote command, already quoted)
+  local opts=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30)
+  [[ -z "${FACTORY_X86_KEY:-}" ]] || opts+=(-i "$FACTORY_X86_KEY" -o IdentitiesOnly=yes)
+  [[ -z "${FACTORY_X86_KNOWN_HOSTS:-}" ]] || opts+=(-o StrictHostKeyChecking=yes -o UserKnownHostsFile="$FACTORY_X86_KNOWN_HOSTS")
+  ssh "${opts[@]}" "$X86_REMOTE" "$@"
+}
+
+engine() {
+  if [[ -z "${X86_REMOTE:-}" ]]; then "$ENGINE" "$@"; return; fi
+  local dir args=() arg spec path inside mode n=0 code=0 writable=() name
+  # A run's own folder; any a killed run left behind over a day ago goes.
+  dir="$(x86_ssh "find /tmp -maxdepth 1 -name 'claktory-x86.*' -user \"\$(id -un)\" -mmin +1440 -exec podman unshare rm -rf {} + 2>/dev/null; mktemp -d /tmp/claktory-x86.XXXXXX")" || return 1
+  [[ "$dir" =~ ^/tmp/claktory-x86\.[A-Za-z0-9]+$ ]] || { echo "the x86_64 host gave no folder for the run" >&2; return 1; }
+  while (($#)); do
+    arg="$1"; shift
+    if [[ "$arg" == -v && $# -gt 0 && "$1" == /* ]]; then
+      spec="$1"; shift
+      path="${spec%%:*}" inside="${spec#*:}" mode=""
+      [[ "$inside" == *:* ]] && mode="${inside##*:}" inside="${inside%%:*}"
+      n=$((n + 1))
+      x86_ssh "mkdir $dir/m$n" || { code=1; break; }
+      if [[ "$mode" == ro ]]; then
+        COPYFILE_DISABLE=1 tar --no-xattrs --exclude=./target --exclude=./app --exclude=./.git -C "$path" -cf - . |
+          x86_ssh "tar -xf - -C $dir/m$n" || { code=1; break; }
+        args+=(-v "$dir/m$n:$inside:ro")
+      else
+        args+=(-v "$dir/m$n:$inside")
+        writable+=("$n:$path")
+      fi
+    elif [[ "$arg" == -e && $# -gt 0 && "$1" != *=* ]]; then
+      name="$1"; shift
+      args+=(-e "$name=${!name-}")
+    else
+      args+=("$arg")
+    fi
+  done
+  if ((code == 0)); then
+    x86_ssh "$(printf '%q ' podman "${args[@]}")" </dev/null || code=$?
+    # What the container wrote comes back, and only that.
+    for spec in ${writable[@]+"${writable[@]}"}; do
+      x86_ssh "tar -cf - -C $dir/m${spec%%:*} ." | tar -xf - -C "${spec#*:}" || code=1
+    done
+  fi
+  x86_ssh "podman unshare rm -rf $dir" || true
+  return "$code"
 }

@@ -116,7 +116,7 @@ impl Instance {
         rusqlite::Connection::open(&self.db).expect("the service's database").query_row(query, [], |row| row.get(0)).expect("sql")
     }
 
-    fn sql(&self, statement: &str) {
+    pub(crate) fn sql(&self, statement: &str) {
         rusqlite::Connection::open(&self.db).expect("the service's database").execute(statement, []).expect("sql");
     }
 }
@@ -615,6 +615,73 @@ async fn switching_accounts_takes_one_code() {
     assert_eq!(instance.count("SELECT COUNT(*) FROM accounts"), 2);
 }
 
+/// Switch account… (V6): signed in, a code asked for another address keeps
+/// the account signed in, shown as SIGNED_IN with where the code went; a
+/// wrong or expired code changes nothing, Cancel drops only the code asked
+/// for, and the right code swaps the accounts.
+#[tokio::test]
+async fn switching_accounts_keeps_the_account_signed_in_until_the_new_code_checks_out() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let (addr, _factory) = open(&dir, &instance.url).await;
+    let (mut client, _, _) = Client::connect(addr).await;
+    sign_in(&mut client, &instance, "matt@example.com").await;
+    let token = || {
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("home/account/account.json")).expect("account.json")).expect("JSON");
+        saved["machine_token"].as_str().unwrap_or_default().to_owned()
+    };
+    let signed_in_with = token();
+    assert!(!signed_in_with.is_empty());
+    let shown = |workspace: &v1::Workspace| {
+        let state = account(workspace);
+        (state.state(), state.email, state.switching_to)
+    };
+    let still = (AccountState::SignedIn, "matt@example.com".to_owned());
+
+    // Asked for: still signed in, with where the code went.
+    let events = client.ok(Request::AccountSignIn(v1::AccountSignIn { email: "ana@example.com".into() })).await;
+    let workspace = last_workspace(&events).expect("workspace").clone();
+    assert_eq!(shown(&workspace), (still.0, still.1.clone(), "ana@example.com".to_owned()));
+    assert!(account(&workspace).code_expires_ms > factoryd::transcript::now_ms(), "when the code stops working");
+
+    // A wrong code: nothing changes, so the person can try again.
+    let code = instance.last_code("ana@example.com");
+    let wrong = if code == "000000" { "111111" } else { "000000" };
+    let answer = client.request(Request::AccountVerify(v1::AccountVerify { code: wrong.into() })).await;
+    assert!(matches!(answer.body, Body::Error(_)), "{:?}", answer.body);
+    let events = client.ok(Request::AccountResend(v1::AccountResend {})).await;
+    let workspace = last_workspace(&events).expect("workspace").clone();
+    assert_eq!(shown(&workspace), (still.0, still.1.clone(), "ana@example.com".to_owned()));
+    assert_eq!(token(), signed_in_with, "the account signed in is untouched");
+
+    // Cancel: back to the account as it was; again, nothing to cancel.
+    let events = client.ok(Request::AccountSignInCancel(v1::AccountSignInCancel {})).await;
+    let workspace = last_workspace(&events).expect("workspace").clone();
+    assert_eq!(shown(&workspace), (still.0, still.1.clone(), String::new()));
+    assert_eq!(account(&workspace).code_expires_ms, 0);
+    client.ok(Request::AccountSignInCancel(v1::AccountSignInCancel {})).await;
+    assert_eq!(token(), signed_in_with);
+    let early = client.request(Request::AccountVerify(v1::AccountVerify { code: instance.last_code("ana@example.com") })).await;
+    assert_eq!(failure(&early.body).0, ErrorCode::InvalidRequest, "no code asked for any more");
+
+    // An expired code: still signed in, still switching.
+    client.ok(Request::AccountSignIn(v1::AccountSignIn { email: "ana@example.com".into() })).await;
+    instance.advance(3600);
+    let late = client.request(Request::AccountVerify(v1::AccountVerify { code: instance.last_code("ana@example.com") })).await;
+    assert!(matches!(late.body, Body::Error(_)), "{:?}", late.body);
+    assert_eq!(token(), signed_in_with);
+
+    // The right code swaps them: the same Claktory, moved.
+    client.ok(Request::AccountResend(v1::AccountResend {})).await;
+    let code = instance.last_code("ana@example.com");
+    let events = client.ok(Request::AccountVerify(v1::AccountVerify { code })).await;
+    let workspace = last_workspace(&events).expect("workspace").clone();
+    assert_eq!(shown(&workspace), (AccountState::SignedIn, "ana@example.com".to_owned(), String::new()));
+    assert_ne!(token(), signed_in_with);
+    assert_eq!(instance.count("SELECT COUNT(*) FROM claktories"), 1, "the same Claktory, moved");
+}
+
 /// The service's record of the one Claktory: whether it's removed, whether
 /// its token was ended, and the backend keys retired (#524).
 fn signed_out_there(instance: &Instance) -> (i64, i64, i64) {
@@ -672,7 +739,16 @@ async fn a_sign_out_the_service_cant_hear_is_told_when_it_can_be_reached() {
     {
         let (addr, _factory) = open(&dir, &instance.url).await;
         let (mut client, _, _) = Client::connect(addr).await;
-        sign_in(&mut client, &instance, "matt@example.com").await;
+        let workspace = sign_in(&mut client, &instance, "matt@example.com").await;
+        // Its first check-in done and kept: one still going when the
+        // service stops would fail, and its save write the account back
+        // over the sign-out the next Claktory makes (Cioccolata 50246).
+        until(&mut client, workspace, |workspace| account(workspace).last_check_in_ms > 0).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !account_saved_checked_in(&dir) {
+            assert!(std::time::Instant::now() < deadline, "the check-in wasn't kept");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
     drop(signed_out_while_down(&instance).await);
     assert_eq!(signed_out_there(&instance), (0, 0, 0));
@@ -785,6 +861,14 @@ async fn a_claktory_that_moved_here_changes_its_credentials_once_and_its_vault_s
     let saved: serde_json::Value = serde_json::from_str(&account_file("account.json")).expect("json");
     let before: serde_json::Value = serde_json::from_str(&token).expect("json");
     assert_eq!(saved["machine_token"], before["machine_token"]);
+}
+
+/// account.json keeps a check-in.
+fn account_saved_checked_in(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join("home/account/account.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .is_some_and(|saved| saved["last_check_in_ms"].as_i64().is_some_and(|ms| ms > 0))
 }
 
 fn factoryd_unhex(text: &str) -> Vec<u8> {
@@ -937,4 +1021,154 @@ async fn a_check_in_counts_devices_setup_and_how_backend_versions_fared() {
     assert_eq!(instance.count("SELECT COALESCE(SUM(crashes), 0) FROM health"), 1, "recorded at the service");
     // A model connected stays reached; no agent has reached a model.
     assert_eq!(sent["setup"], serde_json::json!({"model_connected": true, "first_run": false}));
+}
+
+/// The account's recovery key (#239), what main does: nothing waits until
+/// claktory.com has a key, so Use the key here is refused; from
+/// `factoryd`'s own commands it's refused before anything else, as it is
+/// for Rivet (rivet_reach: the person's own accounts); and making a new
+/// account key from a device isn't in this version. The vault shows its
+/// own key as before.
+#[tokio::test]
+async fn the_accounts_recovery_key_is_used_only_on_the_persons_choice_from_their_own_device() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let (addr, _factory) = open(&dir, &instance.url).await;
+    let (mut client, _, _) = Client::connect(addr).await;
+    let workspace = sign_in(&mut client, &instance, "matt@example.com").await;
+    let vault = workspace.vault.clone().unwrap_or_default();
+    assert!(vault.recovery_key_showable && !vault.recovery_key_covered && !vault.recovery_key_change_waiting, "{vault:?}");
+
+    let reply = client.request(Request::UseRecoveryKey(v1::UseRecoveryKey {})).await;
+    assert_eq!(failure(&reply.body), (ErrorCode::InvalidRequest, "There's no new recovery key to use.".to_owned()));
+
+    let mut cli = Client::open(addr).await;
+    let hello = v1::Hello {
+        protocol_version: factory_protocol::PROTOCOL_VERSION,
+        client_version: "factoryd-cli 0.1.0".into(),
+        token: crate::common::local_token(addr),
+        ..Default::default()
+    };
+    cli.send(v1::ClientMessage { id: 1, body: Some(Request::Hello(hello)) }).await;
+    cli.welcomed().await;
+    let reply = cli.request(Request::UseRecoveryKey(v1::UseRecoveryKey {})).await;
+    assert_eq!(failure(&reply.body).0, ErrorCode::Unauthorized, "{:?}", reply.body);
+
+    for request in [
+        Request::PublishRecoveryKey(v1::PublishRecoveryKey { device_key: "a".into(), device_sig: "b".into() }),
+        Request::NewRecoveryKey(v1::NewRecoveryKey { public_key: "c".into(), ..Default::default() }),
+    ] {
+        let reply = client.request(request).await;
+        assert!(failure(&reply.body).1.contains("can't make a new recovery key for your account yet"), "{:?}", reply.body);
+    }
+    let reply = client.request(Request::ShowRecoveryKey(v1::ShowRecoveryKey {})).await;
+    assert!(matches!(reply.body, Body::RecoveryKey(_)), "its own key, as before: {:?}", reply.body);
+}
+
+/// Puts a recovery key for the account at the service, as the Claktory in
+/// `dir` would, approved by `device`: its public half.
+async fn put_recovery_key(instance: &Instance, dir: &Path, device: &ed25519_dalek::SigningKey, bytes: &[u8; 20], replaces: &str) -> String {
+    use claktory_account::protocol::{self as api, RecoveryKeyStatement, SetRecoveryKey};
+    let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("home/account/account.json")).expect("account.json")).expect("json");
+    let seed: [u8; 32] = factoryd_unhex(std::fs::read_to_string(dir.join("home/account/claktory.key")).expect("key").trim()).try_into().expect("seed");
+    let backend = ed25519_dalek::SigningKey::from_bytes(&seed);
+    let public = recovery_public(bytes);
+    let statement = RecoveryKeyStatement {
+        v: 1,
+        account_id: saved["account_id"].as_str().expect("account").to_owned(),
+        claktory_id: saved["claktory_id"].as_str().expect("claktory").to_owned(),
+        public_key: public.clone(),
+        replaces: replaces.to_owned(),
+        device_key: api::b64(device.verifying_key().as_bytes()),
+        iat: jiff::Timestamp::now().as_second(),
+    };
+    let statement = api::sign_recovery_key(&backend, &statement);
+    let body = serde_json::to_vec(&SetRecoveryKey { device_sig: api::sign_recovery_key_device(device, &statement), statement }).expect("json");
+    let time = jiff::Timestamp::now().as_second() + 2;
+    let path = "/v1/account/recovery-key";
+    let answer = reqwest::Client::new()
+        .put(format!("{}{path}", instance.url))
+        .header("authorization", format!("Bearer {}", saved["machine_token"].as_str().expect("token")))
+        .header(api::TIME_HEADER, time.to_string())
+        .header(api::SIGNATURE_HEADER, api::sign_request(&backend, "PUT", path, time, &body))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("an answer");
+    assert_eq!(answer.status().as_u16(), 200, "{}", answer.text().await.unwrap_or_default());
+    public
+}
+
+/// The public half of the account recovery key made from `bytes`
+/// (vault::account_recovery's pair, as the apps make it).
+fn recovery_public(bytes: &[u8; 20]) -> String {
+    use hkdf::Hkdf;
+    let mut secret = [0u8; 32];
+    Hkdf::<sha2::Sha256>::new(Some(b"claktory account recovery key"), bytes).expand(b"x25519 v1", &mut secret).expect("32 bytes");
+    claktory_account::protocol::b64(curve25519_dalek::montgomery::MontgomeryPoint::mul_base_clamped(secret).to_bytes())
+}
+
+/// A recovery key's text from its bytes: RFC 4648 base32 in groups of 4.
+fn recovery_text(bytes: &[u8; 20]) -> String {
+    const BASE32: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let bits: String = bytes.iter().map(|byte| format!("{byte:08b}")).collect();
+    let chars: Vec<char> = (0..32).map(|at| BASE32[usize::from_str_radix(&bits[at * 5..at * 5 + 5], 2).expect("bits")] as char).collect();
+    chars.chunks(4).map(|group| group.iter().collect::<String>()).collect::<Vec<_>>().join("-")
+}
+
+/// The account's recovery key end to end (#239, main's half): a key a
+/// device approved, at claktory.com, waits at the check-in with Claktory's
+/// alert and seals nothing by itself; Use the key here seals the vault to
+/// it, covered, with a record in History; the key typed opens the vault
+/// when it's locked, and is then marked used.
+#[tokio::test]
+async fn a_key_at_claktory_com_covers_the_vault_once_the_person_chooses_it() {
+    let dir = temp_dir();
+    let instance = Instance::start(&dir).await;
+    let bytes = [42u8; 20];
+    {
+        let (addr, _factory) = open(&dir, &instance.url).await;
+        let (mut client, _, _) = Client::connect(addr).await;
+        sign_in(&mut client, &instance, "matt@example.com").await;
+        put_recovery_key(&instance, &dir, &ed25519_dalek::SigningKey::from_bytes(&[5; 32]), &bytes, "").await;
+    }
+    instance.advance(61);
+    // It checks in at start.
+    let (addr, factory) = open(&dir, &instance.url).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let waits = |workspace: &v1::Workspace| workspace.vault.as_ref().is_some_and(|vault| vault.recovery_key_change_waiting);
+    let workspace = until(&mut client, workspace, waits).await;
+    let vault = workspace.vault.clone().expect("vault");
+    assert!(!vault.recovery_key_covered && vault.recovery_key_change_made_ms > 0, "{vault:?}");
+    assert!(!vault.recovery_key_change_made_on.is_empty(), "this Claktory's own name: {vault:?}");
+    let alert = workspace.alerts.iter().find(|alert| alert.title.starts_with("Your account has a new recovery key")).expect("Claktory's alert");
+    assert!(alert.text.contains("Use it here only if you made it"), "{alert:?}");
+
+    client.ok(Request::UseRecoveryKey(v1::UseRecoveryKey {})).await;
+    let covered = |workspace: &v1::Workspace| workspace.vault.as_ref().is_some_and(|vault| vault.recovery_key_covered);
+    let workspace = wait_for(&mut client, covered).await;
+    let vault = workspace.vault.clone().expect("vault");
+    assert!(!vault.recovery_key_change_waiting && !vault.recovery_key_unconfirmed && !vault.recovery_key_used, "{vault:?}");
+    let changes: i64 = rusqlite::Connection::open(dir.join("home/factory.db"))
+        .expect("factory.db")
+        .query_row("SELECT COUNT(*) FROM recovery_key_changes", [], |row| row.get(0))
+        .expect("count");
+    assert_eq!(changes, 1, "a record in History");
+    let again = client.request(Request::UseRecoveryKey(v1::UseRecoveryKey {})).await;
+    assert_eq!(failure(&again.body).0, ErrorCode::InvalidRequest, "nothing waits now");
+    drop(client);
+    drop(factory);
+
+    // Locked (removed at the service), the account's key opens it, and it's
+    // been seen here.
+    instance.sql("UPDATE claktories SET revoked_at = 1");
+    instance.advance(61);
+    let (addr, _factory) = open(&dir, &instance.url).await;
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    until(&mut client, workspace, |workspace| account(workspace).state() == AccountState::Revoked).await;
+    let opened = client.request(Request::UnlockVault(v1::UnlockVault { passphrase: recovery_text(&bytes).to_lowercase() })).await;
+    assert!(matches!(opened.body, Body::VaultSession(_)), "{:?}", opened.body);
+    let used = |workspace: &v1::Workspace| workspace.vault.as_ref().is_some_and(|vault| vault.unlocked && vault.recovery_key_used);
+    wait_for(&mut client, used).await;
 }

@@ -3,7 +3,10 @@
 //! recent, with a line where the rest was cut; logs of tasks that finished
 //! [`KEPT_FOR`] ago go.
 
+#[cfg(unix)]
 use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use crate::windows::positioned::FileExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -132,7 +135,14 @@ fn appends(pid: u32) -> bool {
         };
         size >= 4 && (answer[0] as u32) & (libc::O_APPEND as u32) != 0
     }
-    #[cfg(not(target_os = "macos"))]
+    // Every task's log is opened to append (FILE_APPEND_DATA) by this
+    // backend, and there are no older Windows versions that didn't.
+    #[cfg(windows)]
+    {
+        let _ = pid;
+        true
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let Ok(info) = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/1")) else { return false };
         let flags = info.lines().find_map(|line| line.strip_prefix("flags:")).and_then(|flags| u32::from_str_radix(flags.trim(), 8).ok());
@@ -204,6 +214,7 @@ pub fn task_number(path: &Path) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::process::CommandExt;
 
     /// With short lines and long ones (Abbacchio's F1: with 1 KB lines the
@@ -260,7 +271,8 @@ mod tests {
     }
 
     /// Only a log its task appends to is cut: one an older version's task
-    /// writes at its own place never is.
+    /// writes at its own place never is. (Windows has no older tasks.)
+    #[cfg(unix)]
     #[test]
     fn only_a_log_its_task_appends_to_is_cut() {
         let dir = std::env::temp_dir().join(format!("task-logs-own-{}", std::process::id()));
@@ -281,6 +293,7 @@ mod tests {
 
     /// A task that wrote it all between two checks is cut when it ends,
     /// or at the next start (Abbacchio's F2); not while its group runs.
+    #[cfg(unix)]
     #[test]
     fn a_finished_tasks_log_past_the_cap_is_cut() {
         let dir = std::env::temp_dir().join(format!("task-logs-finished-{}", std::process::id()));

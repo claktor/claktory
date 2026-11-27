@@ -40,6 +40,9 @@ enum MainError {
     Usage,
     #[error("can't find your home directory")]
     NoHome,
+    #[cfg(windows)]
+    #[error("Couldn't prepare Claktory's folder: {0}")]
+    Windows(std::io::Error),
     #[error(transparent)]
     Open(#[from] OpenError),
     #[error("could not listen on {addr}: {source}")]
@@ -168,11 +171,15 @@ async fn run() -> Result<(), MainError> {
             command.push(arg);
         }
     }
-    let user_home = std::env::home_dir().ok_or(MainError::NoHome)?;
-    let mut instance = home::instance(dev, &user_home);
+    let mut instance = home::instance_in(dev, home::instance_root(dev).ok_or(MainError::NoHome)?);
     if let Some(root) = std::env::var_os("FACTORY_HOME") {
         instance.home = Home::new(root.into());
     }
+    // Private before anything is written into it, as it's 0700 on a Mac
+    // (Fugo 45257, condition 1): `windows::prepare_home`, for every
+    // command, never a fallback.
+    #[cfg(windows)]
+    factoryd::windows::prepare_home(instance.home.root()).map_err(MainError::Windows)?;
     if let Ok(port) = std::env::var("FACTORY_PORT") {
         instance.addr.set_port(port.parse()?);
     }
@@ -197,6 +204,11 @@ async fn run() -> Result<(), MainError> {
                 factoryd::set_filter_executable(factoryd);
             }
             let home = instance.home.clone();
+            // On Windows, before any command runs: the private home and its
+            // records folder, and the commands' jobs an earlier backend left,
+            // found again (`windows::start`, prepare_home first).
+            #[cfg(windows)]
+            factoryd::windows::start(home.root()).map_err(MainError::Windows)?;
             let served = serve(instance, handed).await;
             if let Err(error) = &served {
                 update::trial_failed(&home, error);
@@ -752,6 +764,20 @@ fn providers_for(home: &Home, release: bool) -> Vec<factory_agent::providers::Pr
     providers
 }
 
+/// The backend's listener. On Windows it's bound for this process alone
+/// (SO_EXCLUSIVEADDRUSE, not inherited), and a backend that can't bind it
+/// so doesn't serve: never a plain bind instead (Fugo 48392 c, Jotaro 48933).
+async fn listen(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    #[cfg(windows)]
+    {
+        TcpListener::from_std(factoryd::windows::listener::bind_exclusive(addr)?)
+    }
+    #[cfg(not(windows))]
+    {
+        TcpListener::bind(addr).await
+    }
+}
+
 async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Handed>) -> Result<(), MainError> {
     let Instance { home, addr } = instance;
     // Never half started: an import that didn't finish is finished first.
@@ -764,10 +790,17 @@ async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Hand
     let models = Arc::new(registry(&home, addr.port())?);
     // A helper an older backend's update left out goes in beside this one.
     factoryd::update::heal_helpers(&home);
-    let listener = TcpListener::bind(addr).await.map_err(|source| match source.kind() {
+    let listener = listen(addr).await.map_err(|source| match source.kind() {
         std::io::ErrorKind::AddrInUse => MainError::PortInUse(addr.port()),
         _ => MainError::Bind { addr, source },
     })?;
+    // The app's token for this start, once the port is this backend's alone
+    // and before anything is served (Fugo 48927); without one, no Hello
+    // matches it.
+    #[cfg(windows)]
+    let app_token = factoryd::windows::app_token::rotate(home.root())
+        .inspect_err(|error| tracing::error!(%error, "could not write the app's token"))
+        .ok();
     // Moving to another computer, frozen for its last part: only the
     // move's progress is served, before anything else (moved.json included).
     if let Some(saved) = factoryd::move_run::frozen(&home) {
@@ -780,6 +813,8 @@ async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Hand
         return Ok(());
     }
     let factory = Factory::open(home.clone(), models).await?;
+    #[cfg(windows)]
+    factory.set_app_token(app_token);
     if let Some(handed) = handed {
         factory.take_vault_key(handed);
     }
@@ -796,11 +831,17 @@ async fn serve(instance: Instance, handed: Option<factoryd::vault::handoff::Hand
     tokio::spawn(factoryd::launch_agent::update(home.clone(), addr.port()));
     tracing::info!(%addr, home = %home.root().display(), version = factoryd::update::VERSION, "factoryd listening");
     // SIGTERM (the supervisor stopping, at a restart or shutdown): what's
-    // being written is finished first.
+    // being written is finished first. On Windows, Ctrl-C for now; Jotaro's
+    // stop event replaces it (49761).
+    #[cfg(unix)]
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(MainError::Signal)?;
+    #[cfg(unix)]
+    let stop = terminate.recv();
+    #[cfg(windows)]
+    let stop = tokio::signal::ctrl_c();
     tokio::select! {
         () = factoryd::serve(listener, factory.clone()) => {}
-        _ = terminate.recv() => {
+        _ = stop => {
             tracing::info!("stopping");
             factory.finish_writes(Duration::from_secs(5)).await;
             factory.stopping();

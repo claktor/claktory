@@ -18,8 +18,9 @@ bool connectionLost(RequestFailure failure) =>
     failure.message == decisionWaiting;
 
 /// What a decision on a card cut off by the connection fails with: the
-/// backend sends it again by itself once the connection is back.
-const decisionWaiting = "Not sent yet. It's sent when the connection is back.";
+/// backend sends it again by itself once the connection is back. Said in
+/// the card's line (Lucy's Needs you cards, rule 9).
+const decisionWaiting = "Sends when you're back online.";
 
 /// Why a message waits, said beside "Not sent yet".
 const waitingForConnection =

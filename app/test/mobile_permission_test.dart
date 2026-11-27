@@ -12,6 +12,7 @@ import 'package:factory_app/mobile/scroll_fade.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/recorder.dart' show MicAccess, VoiceRecorder;
 import 'package:flutter/foundation.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -73,6 +74,20 @@ class _Long extends _Fake {
     glyph: 'bell',
     title: 'Before title',
     body: List.filled(30, 'Before body.').join(' '),
+    offTitle: 'Off title',
+    offBody: 'What stops.',
+  );
+}
+
+/// Words with one long enough to break at the largest text in Slide Over.
+class _Words extends _Fake {
+  _Words() : super(PermissionAccess.undetermined);
+
+  @override
+  PermissionWords words(BuildContext context) => const PermissionWords(
+    glyph: 'bell',
+    title: 'Notifications',
+    body: 'Claktory tells you when an agent needs you.',
     offTitle: 'Off title',
     offBody: 'What stops.',
   );
@@ -329,9 +344,7 @@ void main() {
     expect(permission.requests, 0);
   });
 
-  testWidgets('restricted: no Open Settings, only the way out', (
-    tester,
-  ) async {
+  testWidgets('restricted: no Open Settings, only the way out', (tester) async {
     onIphone();
     final context = await screen(tester);
     var pasted = 0;
@@ -350,6 +363,38 @@ void main() {
     await pumpFrames(tester, const Duration(seconds: 1));
     expect(pasted, 1);
     expect(find.text('Off title'), findsNothing);
+  });
+
+  testWidgets("in Slide Over's 320 at the largest text, the dialog keeps "
+      'close to the edges and no word breaks inside itself (row 198)', (
+    tester,
+  ) async {
+    asIPad();
+    tester.platformDispatcher.textScaleFactorTestValue = 3.1;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    final context = await screen(
+      tester,
+      size: const Size(320, 1024),
+      text: 3.1,
+    );
+    unawaited(askPermission(context, _Words()));
+    await pumpFrames(tester, const Duration(seconds: 1));
+    final body = find.textContaining('Claktory tells you');
+    final rect = tester.getRect(body);
+    // 16pt from the window, 20pt inside (Lucy 49620): about 248pt.
+    expect(rect.width, greaterThanOrEqualTo(240));
+    final paragraph = tester.renderObject<RenderParagraph>(
+      find.descendant(of: body, matching: find.byType(RichText)),
+    );
+    final text = paragraph.text.toPlainText();
+    var at = 0;
+    for (final word in text.split(' ')) {
+      final boxes = paragraph.getBoxesForSelection(
+        TextSelection(baseOffset: at, extentOffset: at + word.length),
+      );
+      expect(boxes, hasLength(1), reason: word);
+      at += word.length + 1;
+    }
   });
 
   testWidgets('on an iPad, a dialog: Return presses the way on; Esc does '
@@ -384,10 +429,7 @@ void main() {
       onIphone();
       final context = await screen(tester);
       final recorder = _FakeRecorder(MicAccess.granted);
-      expect(
-        await askMicrophone(context, recorder: recorder),
-        MicReady.ready,
-      );
+      expect(await askMicrophone(context, recorder: recorder), MicReady.ready);
       expect(recorder.requests, 0);
     });
 

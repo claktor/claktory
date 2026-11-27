@@ -3,6 +3,7 @@ import CoreImage
 import Flutter
 import PhotosUI
 import Security
+import StoreKit
 import UIKit
 import UniformTypeIdentifiers
 
@@ -174,9 +175,55 @@ import UniformTypeIdentifiers
         // read: Claktory's browser takes it from the device that first
         // opens it (#435).
         result(TimeZone.current.identifier)
+      case "appSource":
+        // Where this copy came from (ux/settings.md §3, ST1): "app_store",
+        // "testflight", or nil for a dev build, below iOS 16 or when the
+        // App Store can't say. The version rows offer its page from it.
+        Self.appSource { result($0) }
       default: result(FlutterMethodNotImplemented)
       }
     }
+  }
+
+  /// The App Store's own record of this copy (StoreKit 2): production is
+  /// the App Store, sandbox is TestFlight. Only the Release build
+  /// (com.claktory.app) asks; Claktory Dev, Debug builds and the Simulator
+  /// answer nil without asking. Asked once a run, as the record doesn't
+  /// change while the app is open.
+  private static var appSourceAnswer: String??
+
+  private static func appSource(_ done: @escaping (String?) -> Void) {
+    if let answer = appSourceAnswer {
+      done(answer)
+      return
+    }
+    #if targetEnvironment(simulator)
+      done(nil)
+    #else
+      guard Bundle.main.bundleIdentifier == "com.claktory.app",
+        #available(iOS 16.0, *)
+      else {
+        done(nil)
+        return
+      }
+      Task {
+        let answer: String?
+        switch try? await AppTransaction.shared {
+        case .verified(let transaction):
+          switch transaction.environment {
+          case .production: answer = "app_store"
+          case .sandbox: answer = "testflight"
+          default: answer = nil
+          }
+        default:
+          answer = nil
+        }
+        await MainActor.run {
+          appSourceAnswer = .some(answer)
+          done(answer)
+        }
+      }
+    #endif
   }
 
   // The workbench's commands (CommandMenu.swift): at the end of the View

@@ -129,17 +129,17 @@ fn event_text(newer: &Newer, person: &str, can_set: bool) -> String {
     }
     let _ = write!(
         text,
-        "\nAsk {person} before anything changes: one ask_person card for this model, naming these agents, asking whether to move them to {name}. "
+        "\nAsk {person} before anything changes: one ask_person request for this model, naming these agents, asking whether to move them to {name}. "
     );
     if can_set {
         let _ = write!(
             text,
-            "If {person} says yes, move each one with models_set, giving only the model ({model}), so each keeps its effort where {name} has it. If {person} dismisses the card or says no, change nothing."
+            "If {person} says yes, move each one with models_set, giving only the model ({model}), so each keeps its effort where {name} has it. If {person} dismisses the request or says no, change nothing."
         );
     } else {
         let _ = write!(
             text,
-            "You can't change agents' models here (your Models extension's Can change models is off), so the card says how {person} can do it in the app: in each agent's settings, under Model, pick {name}. Change nothing yourself."
+            "You can't change agents' models here (your Models extension's Can change models is off), so the request says how {person} can do it in the app: in each agent's settings, under Model, pick {name}. Change nothing yourself."
         );
     }
     let _ = write!(text, " Never move an agent without {person}'s yes. Claktory tells you about each newer model once.");
@@ -168,17 +168,17 @@ fn catch_up_text(newer: &[Newer], person: &str, can_set: bool) -> String {
     }
     let _ = write!(
         text,
-        "\nAsk {person} before anything changes, on one ask_person card for them all: each newer model with the agents on it, and which to move. "
+        "\nAsk {person} before anything changes, in one ask_person request for them all: each newer model with the agents on it, and which to move. "
     );
     if can_set {
         let _ = write!(
             text,
-            "For each model {person} says yes to, move its agents with models_set, giving only the model, so each keeps its effort where the new model has it. Leave the rest, and change nothing if {person} dismisses the card."
+            "For each model {person} says yes to, move its agents with models_set, giving only the model, so each keeps its effort where the new model has it. Leave the rest, and change nothing if {person} dismisses the request."
         );
     } else {
         let _ = write!(
             text,
-            "You can't change agents' models here (your Models extension's Can change models is off), so the card says how {person} can do it in the app: in each agent's settings, under Model, pick the newer model. Change nothing yourself."
+            "You can't change agents' models here (your Models extension's Can change models is off), so the request says how {person} can do it in the app: in each agent's settings, under Model, pick the newer model. Change nothing yourself."
         );
     }
     let _ = write!(
@@ -358,9 +358,9 @@ mod tests {
              These agents run on an older version:\n\
              - Mike (mike), on GPT-6.1 Sol (openai-codex/gpt-6.1-sol)\n\
              - Ana (ana), on GPT-6.0 Sol (openai-codex/gpt-6.0-sol)\n\n\
-             Ask Matt before anything changes: one ask_person card for this model, naming these agents, asking whether to move them to GPT-6.2 Sol. \
+             Ask Matt before anything changes: one ask_person request for this model, naming these agents, asking whether to move them to GPT-6.2 Sol. \
              If Matt says yes, move each one with models_set, giving only the model (openai-codex/gpt-6.2-sol), so each keeps its effort where GPT-6.2 Sol has it. \
-             If Matt dismisses the card or says no, change nothing. Never move an agent without Matt's yes. Claktory tells you about each newer model once."
+             If Matt dismisses the request or says no, change nothing. Never move an agent without Matt's yes. Claktory tells you about each newer model once."
         );
         let text = event_text(sol, "Matt", false);
         assert!(
@@ -373,7 +373,7 @@ mod tests {
                 "Newer versions of models your agents run on are out, from before Claktory looked for them:\n\n\
                  GPT-6.2 Sol (openai-codex/gpt-6.2-sol), from OpenAI Codex. These agents run on an older version:\n\
                  - Mike (mike), on GPT-6.1 Sol (openai-codex/gpt-6.1-sol)\n- Ana (ana), on GPT-6.0 Sol (openai-codex/gpt-6.0-sol)\n\n\
-                 Ask Matt before anything changes, on one ask_person card for them all"
+                 Ask Matt before anything changes, in one ask_person request for them all"
             ),
             "{catch_up}"
         );

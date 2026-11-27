@@ -327,7 +327,7 @@ void main() {
     await harness.backend.openPanel('a1', '');
     harness.backend.workspace.apply(_workspace(''));
     await pumpFrames(tester);
-    await tester.tap(find.bySemanticsLabel('Extensions'));
+    await tester.tap(find.bySemanticsLabel(RegExp('^More options for ')));
     await pumpFrames(tester);
     expect(find.text("Builder's extensions"), findsOneWidget);
     // The sheet has no title: its heading names it for VoiceOver, and

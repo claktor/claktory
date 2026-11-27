@@ -1,9 +1,12 @@
 // A move of this Claktory an agent started (#243 S1) waits for the
 // person's own Confirm: besides floating over the window, it's in Needs
 // you, opening to the same card.
+import 'package:factory_app/highlights.dart' show HighlightStore;
 import 'package:factory_app/inbox.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
+import 'package:factory_app/settings_shell.dart' show settingGlowKey;
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
@@ -67,5 +70,42 @@ void main() {
     await tester.tap(_inNeedsYou(find.text('Confirm')));
     await settle(tester);
     expect(harness.last.hasConfirmMove(), isTrue);
+  });
+
+  testWidgets('once under way, the opened item says so, with Follow it to '
+      "General's move, glowing (Settings spec §5)", (tester) async {
+    final harness = Harness(_workspace()..highlights = true)
+      ..backend.appliesLayouts = true;
+    await harness.show(tester, size: const Size(1200, 900));
+    await settle(tester);
+    harness.page.value = AppPage.inbox;
+    await settle(tester);
+    await tester.tap(
+      _inNeedsYou(find.text('Move this Claktory to cloud-box?')),
+    );
+    await pumpFrames(tester);
+    await harness.apply(
+      tester,
+      _workspace(here: true)
+        ..highlights = true
+        ..move.phase = MovePhase.MOVE_PHASE_COPYING,
+    );
+    await settle(tester);
+    expect(_inNeedsYou(find.text('This move is under way.')), findsOneWidget);
+    final glowed = <String>{};
+    void seen() =>
+        glowed.addAll(harness.backend.highlights.glows.map((glow) => glow.key));
+    harness.backend.highlights.addListener(seen);
+    addTearDown(() => harness.backend.highlights.removeListener(seen));
+    await tester.tap(_inNeedsYou(find.text('Follow it')));
+    await settle(tester);
+    // Settings takes the window (no agent to open it beside): General
+    // beside the index.
+    expect(
+      find.byKey(const ValueKey('settings-section:general')),
+      findsOneWidget,
+    );
+    expect(glowed, contains(settingGlowKey('move')));
+    await tester.pump(HighlightStore.duration);
   });
 }

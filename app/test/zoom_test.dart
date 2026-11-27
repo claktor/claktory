@@ -1,6 +1,5 @@
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
-import 'package:factory_app/settings_view.dart' show SettingsView;
 import 'package:factory_app/zoom.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -190,16 +189,7 @@ void main() {
       harness.page.value = AppPage.settings;
       await settle(tester);
       // Settings builds its sections as they scroll into view.
-      await tester.scrollUntilVisible(
-        find.text('Actual size'),
-        200,
-        scrollable: find
-            .descendant(
-              of: find.byType(SettingsView),
-              matching: find.byType(Scrollable),
-            )
-            .first,
-      );
+      await revealInSettings(tester, find.text('Actual size'));
       await settle(tester);
       expect(find.text('125%'), findsOneWidget);
       expect(

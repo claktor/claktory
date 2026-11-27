@@ -55,7 +55,7 @@ async fn rivet_asks_to_trust_another_account_only_on_a_card_that_never_says_who(
     presents(&factory, &pipe, "b1", "SENTINEL-NEW@example.com", 1);
     view.follow(&mut client, |view| change(view, &pipe) == v1::PipeIdentityChange::AccountChanged).await;
     let said = call(&mut client, &mut view, "rivet", "pipes_trust", &args).await;
-    assert!(said.starts_with("Asked Matt: their card shows who the other side was and is now, which you never see"), "{said}");
+    assert!(said.starts_with("Asked Matt: their request shows who the other side was and is now, which you never see"), "{said}");
     let (seq, card) = cards(&view).pop().expect("a card");
     assert_eq!(card.title, "Trust the Claktory at the other end of the pipe \"Website\"");
     assert!(
@@ -72,7 +72,7 @@ async fn rivet_asks_to_trust_another_account_only_on_a_card_that_never_says_who(
     // Approving the card alone is refused.
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
     match apply_request(&mut client, &mut view, answer(seq, false)).await {
-        Body::Error(error) => assert_eq!(error.message, "Accept it on the card, or in the pipe."),
+        Body::Error(error) => assert_eq!(error.message, "Accept it in the request, or in the pipe."),
         other => panic!("not refused: {other:?}"),
     }
     // Accepted from the card: Rivet hears only that.
@@ -95,7 +95,7 @@ async fn rivet_asks_to_trust_another_account_only_on_a_card_that_never_says_who(
         .expect("read");
     seen.push_str(&rows.join("\n"));
     for sentinel in ["SENTINEL-NEW", "ana@example.com", "b1|", "peer-endpoint"] {
-        assert!(!seen.contains(sentinel), "{sentinel} reached Rivet or the card");
+        assert!(!seen.contains(sentinel), "{sentinel} reached Rivet or the request");
     }
 }
 
@@ -115,9 +115,9 @@ async fn a_trust_card_is_void_once_the_change_moves_on_and_its_comment_goes_to_t
     presents(&factory, &pipe, "c1", "cy@example.com", 2);
     view.follow(&mut client, |view| cards(view).pop().is_some_and(|(_, card)| card.withdrawn)).await;
     let (_, withdrawn) = cards(&view).pop().expect("the card");
-    assert_eq!(withdrawn.withdraw_reason, "This card is void: who's at the other end of the pipe changed again since it was asked.");
+    assert_eq!(withdrawn.withdraw_reason, "This request is void: who's at the other end of the pipe changed again since it was asked.");
     match apply_request(&mut client, &mut view, accept(&pipe, &card)).await {
-        Body::Error(error) => assert!(error.message.starts_with("This card no longer waits for you"), "{}", error.message),
+        Body::Error(error) => assert!(error.message.starts_with("This request no longer waits for you"), "{}", error.message),
         other => panic!("not refused: {other:?}"),
     }
     assert_eq!(change(&view, &pipe), v1::PipeIdentityChange::AccountChanged);
@@ -127,7 +127,7 @@ async fn a_trust_card_is_void_once_the_change_moves_on_and_its_comment_goes_to_t
     let plain = v1::AcceptPipeIdentity { pipe_id: pipe.clone(), ..Default::default() };
     apply_request(&mut client, &mut view, Request::AcceptPipeIdentity(plain)).await;
     view.follow(&mut client, |view| cards(view).iter().filter(|(_, card)| card.withdrawn).count() == 2).await;
-    assert_eq!(cards(&view).pop().expect("the card").1.withdraw_reason, "This card is void: the change was accepted in the pipe.");
+    assert_eq!(cards(&view).pop().expect("the card").1.withdraw_reason, "This request is void: the change was accepted in the pipe.");
 
     // Dismissed with a comment: the pipe's lead gets it, Rivet only that
     // it was dismissed.
@@ -167,14 +167,14 @@ async fn a_trust_card_is_void_once_the_change_moves_on_and_its_comment_goes_to_t
     view.follow(&mut client, |view| cards(view).iter().filter(|(_, card)| card.withdrawn).count() == 3).await;
     assert_eq!(
         cards(&view).pop().expect("the card").1.withdraw_reason,
-        "This card is void: the other side's Claktory no longer says which account it's signed in to."
+        "This request is void: the other side's Claktory no longer says which account it's signed in to."
     );
     call(&mut client, &mut view, "rivet", "pipes_trust", &args).await;
     presents(&factory, &pipe, "c1", "cy@example.com", 5);
     view.follow(&mut client, |view| cards(view).iter().filter(|(_, card)| card.withdrawn).count() == 4).await;
     assert_eq!(
         cards(&view).pop().expect("the card").1.withdraw_reason,
-        "This card is void: the other side signs in with the account you accepted again."
+        "This request is void: the other side signs in with the account you accepted again."
     );
     assert_eq!(change(&view, &pipe), v1::PipeIdentityChange::None);
     presents(&factory, &pipe, "e1", "eve@example.com", 6);

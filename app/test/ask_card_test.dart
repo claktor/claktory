@@ -199,8 +199,6 @@ void main() {
     await harness.show(tester);
     await settle(tester);
     expect(find.text('Approve'), findsOneWidget);
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
     await tester.enterText(
       find.descendant(
         of: find.byType(AskPersonCard),
@@ -213,7 +211,7 @@ void main() {
     expect(find.text('Dismiss'), findsNothing);
     expect(find.text('Submit'), findsOneWidget);
     expect(
-      find.text('June gets your comment and carries on from it.'),
+      find.text('Submit sends your words instead of approving.'),
       findsOneWidget,
     );
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
@@ -320,7 +318,7 @@ void main() {
       ),
     );
     await settle(tester);
-    expect(find.textContaining('Left to June'), findsOneWidget);
+    expect(find.textContaining('Dismissed'), findsOneWidget);
     expect(find.text('Do it after the release'), findsOneWidget);
   });
 
@@ -336,6 +334,12 @@ void main() {
       Transcript(agentId: 'june', entries: [_entry()]),
     );
     await harness.show(tester, size: const Size(320, 700));
+    await settle(tester);
+    // At this size the body is longer than 8 lines: its middle, the
+    // command, folds under Show all (Lucy's spec).
+    expect(find.text(_command), findsNothing);
+    await tester.ensureVisible(find.text('Show all'));
+    await tester.tap(find.text('Show all'));
     await settle(tester);
     final code = find.text(_command);
     await tester.ensureVisible(code);
@@ -462,8 +466,6 @@ void main() {
       );
       expect(find.text('The blue one'), findsOneWidget);
 
-      await tester.tap(find.text('Add a comment'));
-      await settle(tester);
       await tester.enterText(
         find.descendant(
           of: find.byType(AskPersonCard),
@@ -491,12 +493,17 @@ void main() {
       expect(find.text('Ran it twice'), findsNothing);
     });
 
-    testWidgets("Can't do this… asks what's in the way, and sends it with "
-        'the step', (tester) async {
+    testWidgets("Can't do this with the field empty puts the cursor in it, "
+        "asking what's in the way; typed, it sends it with the step", (
+      tester,
+    ) async {
       final harness = await show(tester, procedure(done: 2));
-      await tester.tap(find.text("Can't do this…"));
+      await tester.tap(find.text("Can't do this"));
       await settle(tester);
-      expect(find.text('Done'), findsNothing);
+      // Nothing sent: one state, the field asks (Lucy's §3.3).
+      expect(harness.backend.sent.where((m) => m.hasAnswerAsk()), isEmpty);
+      expect(find.text('Done'), findsOneWidget);
+      expect(find.text("What's in the way?"), findsOneWidget);
       // Its field has the keys at once: what's typed lands in it.
       expect(
         tester
@@ -778,7 +785,8 @@ void main() {
       await tester.tap(inCard(find.byKey(const ValueKey('dictate'))));
       await io(tester);
       expect(recorder.recordingInto, isNotNull);
-      await tester.tap(inCard(find.text('Done')));
+      // The recording's Done, in the field above the card's row.
+      await tester.tap(inCard(find.text('Done')).first);
       await io(tester);
       await pumpFrames(tester);
     }
@@ -946,8 +954,6 @@ void main() {
           ],
         ),
       );
-      await tester.tap(find.text("Can't do this…"));
-      await settle(tester);
       await say(tester, 'Only');
       await tester.tap(find.text("Can't do this"));
       await settle(tester);
@@ -1091,7 +1097,6 @@ void main() {
             ],
           ),
           'The key is at home',
-          open: "Can't do this…",
         );
         await center(tester, find.text("Can't do this"));
         await tester.pump();
@@ -1109,7 +1114,6 @@ void main() {
           tester,
           _ask(),
           'After the release',
-          open: 'Add a comment',
         );
         // Typed: Submit, the words a reply (#370).
         await center(tester, find.text('Submit'));

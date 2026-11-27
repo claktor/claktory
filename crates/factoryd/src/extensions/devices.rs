@@ -64,7 +64,7 @@ CREATE INDEX device_pairings_by_agent ON device_pairings (agent, id);
 CREATE INDEX device_pairings_by_state ON device_pairings (state);
 ";
 
-const ADD: &str = "Add a device of the person's (a phone, a laptop) to Claktory, as Settings → Devices → Add a device does. name: what to call it, such as \"Matt's iPhone\". kind: phone, tablet, laptop or desktop, when you know what the device is, so the card leads with the right way to connect (scanning for a phone or tablet, pasting for a computer); leave it out when you don't. The person sees its pairing code in a card in your conversation, for 10 minutes, and scans or pastes it on the device; then they allow the device on this computer themselves. You never see the code. You're told when the device is added, or when the code ends first.";
+const ADD: &str = "Add a device of the person's (a phone, a laptop) to Claktory, as Settings → Devices → Add a device does. name: what to call it, such as \"Matt's iPhone\". kind: phone, tablet, laptop or desktop, when you know what the device is, so the request leads with the right way to connect (scanning for a phone or tablet, pasting for a computer); leave it out when you don't. The person sees its pairing code in a request in your conversation, for 10 minutes, and scans or pastes it on the device; then they allow the device on this computer themselves. You never see the code. You're told when the device is added, or when the code ends first.";
 const LIST: &str = "List the person's devices: those added, with whether they're connected, those waiting for the person to allow them, and codes not used yet.";
 const REMOVE: &str = "Remove one of the person's devices, by id or name, only when they ask: it can't connect to Claktory any more, and its open connections close. A device not added yet has its code cancelled.";
 
@@ -192,7 +192,7 @@ async fn add(factory: Arc<Factory>, agent: String, args: AddArgs) -> Result<Tool
     factory.refresh_remote();
     let minutes = remote::CODE_LIFETIME.as_secs() / 60;
     let said = format!(
-        "Started adding {}. {person} sees its code in a card in your conversation for {minutes} minutes, scans or pastes it on the device, then allows the device on {}. You'll be told when it's added, or when the code ends first.",
+        "Started adding {}. {person} sees its code in a request in your conversation for {minutes} minutes, scans or pastes it on the device, then allows the device on {}. You'll be told when it's added, or when the code ends first.",
         device.name,
         remote::machine_name()
     );

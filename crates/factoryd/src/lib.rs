@@ -34,6 +34,7 @@ mod dm_link;
 mod encoding;
 pub mod errands;
 mod explorer;
+mod explorer_watch;
 mod file_watch;
 pub mod log_file;
 mod extensions;
@@ -80,6 +81,7 @@ mod presentation;
 mod previews;
 mod proposal_grants;
 mod proposals;
+pub mod protected;
 mod provider_waits;
 pub mod remote;
 mod repeats;
@@ -109,6 +111,10 @@ pub mod user_apps;
 pub mod vault;
 mod waits;
 mod watch;
+// Where Claktory lives on Windows and what the backend sets up there
+// first (Jotaro's; main.rs reaches it).
+#[cfg(windows)]
+pub mod windows;
 
 pub use account::analytics::{backend_started, backend_stopped};
 /// For tests: anchors a test's own account service to roots of its own.

@@ -7,7 +7,6 @@
 import 'package:factory_app/diagnostics.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart' show AppPage;
-import 'package:factory_app/settings_view.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -68,15 +67,8 @@ Diagnostics _diagnostics({
 Future<Harness> _show(WidgetTester tester, Diagnostics? diagnostics) async {
   final harness = Harness(_workspace(diagnostics));
   harness.page.value = AppPage.settings;
+  harness.backend.settingsSection.value = 'diagnostics';
   await harness.show(tester, size: const Size(1200, 2400));
-  await pumpFrames(tester);
-  final scrollable = find
-      .descendant(
-        of: find.byType(SettingsView),
-        matching: find.byType(Scrollable),
-      )
-      .first;
-  await tester.drag(scrollable, const Offset(0, -4000));
   await pumpFrames(tester);
   return harness;
 }

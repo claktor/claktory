@@ -218,6 +218,23 @@ fn a_push_is_sealed_padded_and_counted() {
 }
 
 #[test]
+fn a_connection_shows_notifications_as_its_device_says_else_as_its_platform() {
+    let state = State::default();
+    let mac = state.connect("mac", "macos");
+    let linux = state.connect("pc", "linux");
+    assert_eq!(state.showing(), 1, "by platform until they say");
+    assert!(mac.set_permission(v1::NotificationPermission::Denied));
+    assert_eq!((state.showing(), state.permission("mac")), (0, Some(v1::NotificationPermission::Denied)));
+    assert!(!mac.set_permission(v1::NotificationPermission::Unspecified), "an app from before says nothing");
+    assert!(!mac.set_permission(v1::NotificationPermission::Denied), "the same again changes nothing");
+    assert!(mac.set_permission(v1::NotificationPermission::Allowed));
+    assert!(linux.set_permission(v1::NotificationPermission::Allowed));
+    assert_eq!(state.showing(), 2);
+    drop(linux);
+    assert_eq!(state.showing(), 1);
+}
+
+#[test]
 fn a_push_waits_while_its_device_or_another_is_in_use() {
     let state = State::default();
     let now = now_ms();

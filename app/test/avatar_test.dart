@@ -118,6 +118,8 @@ void main() {
     final workspace = _workspace();
     workspace.agents.first.layout = beside('settings', '');
     final harness = Harness(workspace)..backend.appliesLayouts = true;
+    // Narrow, Profile is a page of its own.
+    harness.backend.settingsSection.value = 'profile';
     // Settings squeezed to 320 (Sorbet's iPad pass: it overflowed by 64).
     await harness.show(tester, size: const Size(848, 900));
     await settle(tester);

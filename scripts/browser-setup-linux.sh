@@ -157,13 +157,26 @@ else
 fi
 [[ -d /tmp/.X11-unix && ! -L /tmp/.X11-unix && "$(stat -c %u /tmp/.X11-unix)" == 0 ]] || die "/tmp/.X11-unix isn't a folder of root's"
 
-# Chrome's policy: pages can't reach the local network, and Chrome never
-# signs in or syncs itself (a site's sign-in stays the site's cookies).
-install -d -m 0755 /etc/opt/chrome/policies/managed
-echo '{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"], "BrowserSignin": 0, "SyncDisabled": true, "CommandLineFlagSecurityWarningsEnabled": false}' >"$tmp"
-if ! cmp -s "$tmp" /etc/opt/chrome/policies/managed/claktory.json; then
-  install -o root -g root -m 0644 "$tmp" /etc/opt/chrome/policies/managed/claktory.json
-fi
+# Chrome's policy lives only in the runner's own mount namespace (Ghiaccio
+# 49028, Fugo 49032): the runner mounts a private tmpfs over Chrome's managed
+# policy folder and writes it there, so the person's own Chrome on this
+# machine never sees it. Here: the empty mount points, real folders of
+# root's, and our own policy file from before taken out. Any other file there
+# (an employer's policy for the person's Chrome, say) is left as it is.
+our_policy='"LocalNetworkAccessBlockedForUrls"'
+for dir in /etc/opt/chrome/policies/managed /etc/chromium/policies/managed; do
+  # Chromium's folder only where it's there already or Chromium is installed.
+  if [[ "$dir" == /etc/chromium/* && ! -e "$dir" ]] && ! command -v chromium >/dev/null && ! command -v chromium-browser >/dev/null; then continue; fi
+  for part in "${dir%/policies/managed}" "${dir%/managed}" "$dir"; do
+    [[ ! -L "$part" ]] || die "$part is a symbolic link; remove it and run this again"
+  done
+  install -d -o root -g root -m 0755 "$dir"
+  [[ "$(stat -c %u "$dir")" == 0 ]] || die "$dir isn't a folder of root's"
+  if [[ -f "$dir/claktory.json" ]]; then
+    grep -q "$our_policy" "$dir/claktory.json" || die "$dir/claktory.json isn't Claktory's policy; it's left as it is, and the browser can't be set up while it's there"
+    rm -f "$dir/claktory.json"
+  fi
+done
 
 # The firewall: the browser's user reaches neither this machine nor the local
 # network. Its own unit loads only its own table, now and at every boot, so the

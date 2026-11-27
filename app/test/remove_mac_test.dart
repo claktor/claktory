@@ -1,7 +1,6 @@
 import 'package:factory_app/controls.dart' show Toggle;
 import 'package:factory_app/remove_mac.dart';
 import 'package:factory_app/scope.dart';
-import 'package:factory_app/settings_view.dart' show SettingsView;
 import 'package:factory_app/setup.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -28,16 +27,7 @@ void main() {
     await harness.show(tester, size: const Size(1200, 1100));
     harness.page.value = AppPage.settings;
     await settle(tester);
-    await tester.scrollUntilVisible(
-      find.text('Remove Claktory from this Mac…'),
-      300,
-      scrollable: find
-          .descendant(
-            of: find.byType(SettingsView),
-            matching: find.byType(Scrollable),
-          )
-          .first,
-    );
+    await revealInSettings(tester, find.text('Remove Claktory from this Mac…'));
     await settle(tester);
     expect(find.text('This Mac'), findsOneWidget);
     await tester.tap(find.text('Remove Claktory from this Mac…'));
@@ -157,7 +147,11 @@ void main() {
     final harness = Harness(workspace());
     await harness.show(tester, size: const Size(1200, 1100));
     harness.page.value = AppPage.settings;
+    harness.backend.settingsSection.value = 'device';
     await settle(tester);
-    expect(find.text('This Mac', skipOffstage: false), findsNothing);
+    expect(
+      find.text('Remove Claktory from this Mac…', skipOffstage: false),
+      findsNothing,
+    );
   });
 }

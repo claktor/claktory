@@ -82,7 +82,7 @@ void main() {
       tester,
       workspace()..selectedAgentId = 'mike',
     );
-    await tester.tap(find.bySemanticsLabel('Extensions'));
+    await tester.tap(find.bySemanticsLabel(RegExp('^More options for ')));
     await pumpFrames(tester);
     expect(find.text("Mike's extensions"), findsOneWidget);
     await tester.tap(find.text('Checklist'));

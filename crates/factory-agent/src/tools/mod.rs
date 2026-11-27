@@ -5,6 +5,7 @@ pub mod asking;
 pub mod diff;
 pub mod fs;
 pub mod images;
+pub mod protected;
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -275,9 +276,21 @@ pub fn secrets(tools: &mut [Tool]) {
     for tool in tools.iter_mut().filter(|tool| tool.kind == ToolKind::Bash) {
         if let Some(properties) = tool.spec.parameters.get_mut("properties").and_then(Value::as_object_mut) {
             properties.insert("secrets".into(), json!({"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}]}));
+            properties.insert("save_as".into(), json!({"anyOf": [{
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The new secret's name, as Settings → Secrets shows it."},
+                    "variable": {"type": "string", "description": "The environment variable it sets: letters, digits and _."},
+                    "file": {"type": "boolean", "description": "true: the output goes in a file and the variable holds its path (keys in files, binary output)."},
+                    "description": {"type": "string", "description": "What it is, what it's for and what made it, for the person."}
+                },
+                "required": ["name", "variable", "description"]
+            }, {"type": "null"}]}));
         }
-        if !tool.spec.description.contains(SECRETS_HINT) {
-            tool.spec.description = format!("{} {SECRETS_HINT}", tool.spec.description).into();
+        for hint in [SECRETS_HINT, SAVE_AS_HINT] {
+            if !tool.spec.description.contains(hint) {
+                tool.spec.description = format!("{} {hint}", tool.spec.description).into();
+            }
         }
     }
 }
@@ -333,6 +346,8 @@ fn on_path(program: &str, path: &str) -> bool {
     })
 }
 
+/// What bash's description says of save_as.
+const SAVE_AS_HINT: &str = "save_as saves the command's whole output (stdout, at most 64 KiB) as a new secret granted to you alone, never shown to you: for a key a command makes with a secret you hold, such as a narrower key for the job. It runs in the foreground only.";
 const SECRETS_HINT: &str = "secrets names secrets granted to you: their variables are set for that command only, and their values are hidden in all output; never print or save a value yourself.";
 
 /// Lets read_file also read the absolute directories `dirs`, and keeps write_file and edit_file

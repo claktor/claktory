@@ -2093,6 +2093,7 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots 1.0.12",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -2120,7 +2121,9 @@ dependencies = [
  "chacha20poly1305 0.11.0",
  "claktory-account",
  "claktory-dm-crypto",
+ "claktory-push",
  "claktory-user-apps",
+ "curve25519-dalek 5.0.0",
  "dom_smoothie",
  "ed25519-dalek",
  "factory-agent",
@@ -2179,6 +2182,7 @@ dependencies = [
  "unicode-normalization",
  "unicode-segmentation",
  "url",
+ "windows-sys 0.61.2",
  "x11rb",
  "zeroize",
  "zstd",

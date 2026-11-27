@@ -420,8 +420,7 @@ void main() {
     final agent = builder(working: false)..color = 'violet';
     final harness = Harness(workspace(agents: [agent]));
     await harness.show(tester);
-    await tester.tap(find.text('Opus 5.5 · High'));
-    await settle(tester);
+    await openAgentSettings(tester);
     await tester.tap(find.byKey(const ValueKey('color-teal')));
     await settle(tester);
     await tester.tap(find.text('Save'));

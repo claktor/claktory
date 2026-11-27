@@ -1,9 +1,10 @@
 //! Handoffs (agent-browser.md §4): what only the person may do on a page
-//! (pay, prove who they are, type a code, accept an agreement, solve a
-//! captcha, sign in), handed to them on a card through Ask: Show me opens
-//! the browser's live view, Done gives the browser back to the agent with
-//! the page as it is then, Can't do this ends the errand with their reason.
-//! While the card waits the agent can't read or act.
+//! (pay, type a code, accept an agreement, sign in), handed to them on a
+//! card through Ask: Done gives the browser back to the agent with the
+//! page as it is then, Can't do this ends the errand with their reason.
+//! While the card waits the agent can't read or act. A check that the
+//! visitor is a person isn't handed over: Claktory tries the page again
+//! later (`checks`, W5); proving who the person is stops the errand.
 
 use std::sync::Arc;
 
@@ -106,30 +107,32 @@ pub(crate) async fn hand(factory: &Arc<Factory>, agent: &str, kind: &str, what: 
     if what.is_empty() || what.chars().count() > WHAT_MAX {
         return Err(format!("what is one sentence, at most {WHAT_MAX} characters, of what the person should do."));
     }
-    hand_over(factory, agent, kind, what).await
-}
-
-/// Hands the person a check that they're a person, which the page put up
-/// and which didn't clear by itself: Claktory's own handoff, in its words.
-/// What the agent is told, and the card's details for its entry.
-pub(crate) async fn hand_check(factory: &Arc<Factory>, agent: &str, origin: &str) -> (String, serde_json::Value) {
-    let person = factory.lock().config.person().to_owned();
-    let site = if origin.is_empty() { "the page".to_owned() } else { origin.to_owned() };
-    let what = format!("Pass the check on {site} that asks whether you're a person.");
-    match hand_over(factory, agent, v1::ErrandHandoffKind::Captcha, what).await {
-        Ok(result) => (
-            format!(
-                "{site} put up a check that you're a person, which only {person} may pass, so Claktory handed it to them on a card (\"{}\"). The browser is theirs until they answer: you're told when they're done, with the page as it is then.",
-                heading(v1::ErrandHandoffKind::Captcha)
-            ),
-            result.details,
-        ),
-        Err(why) => (
-            format!(
-                "{site} put up a check that you're a person, and handing it to {person} didn't work ({why}): hand it over with errand_handoff, kind \"captcha\"."
-            ),
-            serde_json::Value::Null,
-        ),
+    match kind {
+        // No one can pass it for the browser: Claktory tries the page
+        // again later (W5).
+        v1::ErrandHandoffKind::Captcha => {
+            let errand = factory.driving(agent).map_err(super::said)?;
+            let (origin, _, address) = where_now(factory).await;
+            Ok(ToolResult::text(factory.check_wait(&errand, agent, &origin, &address), json!({})))
+        }
+        // Proving who the person is (an identity document) is never an
+        // errand's: it stops, and says why (Matt's card 222).
+        v1::ErrandHandoffKind::Identity => {
+            let errand = factory.driving(agent).map_err(super::said)?;
+            let (origin, _, _) = where_now(factory).await;
+            let site = if origin.is_empty() { "The page".to_owned() } else { origin.clone() };
+            let reason = format!("{site} asks the person to prove who they are, which an errand never does.");
+            factory.end_errand(&errand.id, State::Stopped, &reason).await;
+            log::write(
+                &factory.store,
+                &log::Entry { errand: errand.id.clone(), agent: agent.to_owned(), origin, action: "Stopped: the site asks to prove who you are".to_owned(), ..Default::default() },
+            );
+            Ok(ToolResult::text(
+                format!("{reason} Errand {} is over: tell your lead, or whoever opened it, what was done and what wasn't, and that the person does this part themselves.", errand.id),
+                json!({}),
+            ))
+        }
+        _ => hand_over(factory, agent, kind, what).await,
     }
 }
 
@@ -173,7 +176,7 @@ async fn hand_over(factory: &Arc<Factory>, agent: &str, kind: v1::ErrandHandoffK
         &log::Entry { errand: errand.id.clone(), agent: agent.to_owned(), origin, action: logged(kind).to_owned(), ..Default::default() },
     );
     let said = format!(
-        "Handed to {person} on a card: \"{card_title}\". Until they answer it, the browser is theirs: errand_read, errand_act and errand_navigate wait. When they press Done you're told what the page is then; if they can't do it, you're told why and the errand ends."
+        "Handed to {person} in a request: \"{card_title}\". Until they answer it, the browser is theirs: errand_read, errand_act and errand_navigate wait. When they press Done you're told what the page is then; if they can't do it, you're told why and the errand ends."
     );
     let details = json!({"ask": id.to_string(), "title": card_title, "body": body, "wants_text": false, "handoff": handoff});
     Ok(ToolResult::text(said, details))
@@ -187,6 +190,11 @@ pub(crate) fn in_details(details: &serde_json::Value) -> Option<v1::ErrandHandof
 /// The person answered handoff card `ask` of `agent`'s: Done (`done`), or
 /// Can't do this with `reason`.
 pub(crate) async fn answered(factory: &Arc<Factory>, agent: &str, handoff: &HandoffRow, done: bool, reason: &str) {
+    // What a recovery-codes or two-step page showed leaves Chrome's caches,
+    // whatever the answer (Fugo 1642).
+    if super::shows_secrets(handoff.kind) {
+        factory.forget_cached(&handoff.errand, &handoff.origin).await;
+    }
     // A code card fills its field from the person's answer, an agreement
     // card ticks its box (`super::code`).
     let acts = handoff.kind == v1::ErrandHandoffKind::Code as i32
@@ -236,7 +244,7 @@ pub(crate) async fn answered(factory: &Arc<Factory>, agent: &str, handoff: &Hand
     // isn't handed over again from here: no tool result would post its
     // card (Ghiaccio 40233).
     let now = match resumed {
-        Ok(()) => factory.errand_step_handing(agent, super::Step::Read { limit: 4096 }, false).await,
+        Ok(()) => factory.errand_step(agent, super::Step::Read { limit: 4096 }).await,
         Err(why) => Err(why),
     };
     let page = match now {

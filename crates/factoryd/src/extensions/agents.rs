@@ -78,8 +78,8 @@ const STATUS: &str = "Whether agents are idle or working, one line each: every a
 const INSPECT: &str = "How an agent on your team is set up, read only: you, the agents you lead (directly or through others), or, as an admin agent, every agent. `agent` (an id or name) gives its name, role, project and folder, model and effort, lead, extensions with their options, secrets (by name, never values), monitors, prompt and whether it's working; `agent` \"team\", or none, lists your team, one line each.";
 const COMPACT: &str = "Admin only, when the person asks: summarize another agent's conversation, as their /compact does, so it carries on from the summary with less context. Idle, it's summarized now; working, as soon as its current work ends, before it reads anything new. `agent`: its id or name.";
 const STOP: &str = "Admin only, when the person asks: stop another agent's current work, as their Stop does. It stops where it is, mid-reply or mid-command; what's already queued for it stays and reaches it afterwards, as a new run. `agent`: its id or name.";
-const CLEAR: &str = "Admin only, when the person asks: ask them to clear another agent's conversation, as their /clear does. It never clears by itself: it opens a card in your conversation, and only their approval clears it (the agent stops, its conversation is archived and it starts on an empty one; its checklist and memory stay). You're told in an event whether they approved. `agent`: its id or name.";
-const SUGGEST: &str = "Suggest that the person talk to another agent (`agent`, by id or name, one you can message) themselves: they see a card in your conversation, with `reason`, and a button that opens that agent's conversation with `message` in its message box, drafted and not sent, for them to change or send. Write `message` as the person would send it, in their voice, saying everything that agent needs; `reason` is one line on why they should talk to it.";
+const CLEAR: &str = "Admin only, when the person asks: ask them to clear another agent's conversation, as their /clear does. It never clears by itself: it opens a request in your conversation, and only their approval clears it (the agent stops, its conversation is archived and it starts on an empty one; its checklist and memory stay). You're told in an event whether they approved. `agent`: its id or name.";
+const SUGGEST: &str = "Suggest that the person talk to another agent (`agent`, by id or name, one you can message) themselves: they see a request in your conversation, with `reason`, and a button that opens that agent's conversation with `message` in its message box, drafted and not sent, for them to change or send. Write `message` as the person would send it, in their voice, saying everything that agent needs; `reason` is one line on why they should talk to it.";
 /// The prompt's line on suggesting a talk. `{person}`: the user's name, or
 /// "the person".
 const SUGGEST_PROMPT: &str = "When {person} should give another agent something or settle something with it directly (secrets it will ask them for, a decision that's theirs), rather than you passing it on, suggest it with agents_suggest_talk: they get a button that opens that agent with your message drafted for them.\n";
@@ -509,7 +509,7 @@ fn suggest(factory: &Factory, proposer: &str, args: SuggestArgs) -> Result<ToolR
     let from = super::caller(config, proposer)?;
     let agent = resolve(config, from, &args.agent)?;
     let said = format!(
-        "Suggested. {} sees a card with a button that opens {}'s conversation with your message drafted; nothing is sent until they send it.",
+        "Suggested. {} sees a request with a button that opens {}'s conversation with your message drafted; nothing is sent until they send it.",
         config.person_capitalized(),
         agent.name
     );

@@ -174,7 +174,7 @@ async fn a_key_the_person_holds_can_open_the_vault_after_a_restart() {
         let refused = client.request(Request::SetVaultLockedMode(v1::SetVaultLockedMode { locked_mode: true, proof: None })).await;
         assert!(failure(&refused.body).1.contains("neither"), "{:?}", refused.body);
         // A recovery key first: then it can.
-        let key = client.request(Request::NewRecoveryKey(v1::NewRecoveryKey { proof: None })).await;
+        let key = client.request(Request::NewRecoveryKey(v1::NewRecoveryKey { proof: None, ..Default::default() })).await;
         let Body::RecoveryKey(key) = key.body else { panic!("expected a recovery key") };
         recovery = key.key;
         let locked = client.request(Request::SetVaultLockedMode(v1::SetVaultLockedMode { locked_mode: true, proof: None })).await;
@@ -1061,6 +1061,13 @@ async fn the_person_approves_the_need_and_the_admin_grants_or_collects() {
     let decided = shown_request(&view, &asked.id);
     assert_eq!((decided.state(), decided.given_secret_name.as_str()), (v1::SecretRequestState::Granted, "Cloudflare"));
     assert!(waiting_seqs(&view, "builder").is_empty(), "nothing waits any more");
+    // History says it was left to Rivet (Abbacchio's 1580).
+    let history = crate::needs_you::list(&mut client, "Cloudflare token", 0, 0).await;
+    let record = history.records.first().expect("in History");
+    assert_eq!(
+        (record.secret_outcome(), record.subject_agent_id.as_str()),
+        (v1::NeedsYouSecretOutcome::Admin, "rivet")
+    );
     // Builder uses it under the name it asked for.
     let output =
         call(&mut client, &mut view, "builder", "bash", r#"{"command":"echo $CLOUDFLARE_API_TOKEN","secrets":["Cloudflare"]}"#).await;
@@ -1076,10 +1083,10 @@ async fn the_person_approves_the_need_and_the_admin_grants_or_collects() {
     let opened = call(&mut client, &mut view, "rivet", "secrets_collect", &format!(r#"{{"request":"{}"}}"#, second.id)).await;
     assert!(opened.starts_with("Asked the person to add Mail key"), "{opened}");
     let card = shown_request(&view, &second.id);
-    assert!(card.collecting && card.state() == v1::SecretRequestState::Approved, "the card in Rivet's conversation");
+    assert!(card.collecting && card.state() == v1::SecretRequestState::Approved, "the request in Rivet's conversation");
     // While collecting, the person's wait is Rivet's card, counted once.
-    assert_eq!(waiting_seqs(&view, "rivet").len(), 1, "the collect card is in Needs you");
-    assert!(waiting_seqs(&view, "builder").is_empty(), "the asker's card isn't");
+    assert_eq!(waiting_seqs(&view, "rivet").len(), 1, "the collect request is in Needs you");
+    assert!(waiting_seqs(&view, "builder").is_empty(), "the asker's request isn't");
 
     // The person saves the card: the secret is made and goes to Builder,
     // the card shows it granted, and Rivet hears how it ended.
@@ -1089,7 +1096,7 @@ async fn the_person_approves_the_need_and_the_admin_grants_or_collects() {
     };
     apply_request(&mut client, &mut view, Request::DecideSecretRequest(save)).await;
     let card = shown_request(&view, &second.id);
-    assert!(card.state() == v1::SecretRequestState::Granted && !card.collecting, "Rivet's card follows");
+    assert!(card.state() == v1::SecretRequestState::Granted && !card.collecting, "Rivet's request follows");
     assert!(waiting_seqs(&view, "rivet").is_empty(), "nothing waits with Rivet any more");
     view.follow(&mut client, |view| {
         events(view).iter().any(|line| line.contains("gave Builder Resend for its request themselves")) && idle(view, "rivet")
@@ -1106,7 +1113,7 @@ async fn the_person_approves_the_need_and_the_admin_grants_or_collects() {
     let mut view = View { workspace, ..View::default() };
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
     let card = shown_request(&view, &second.id);
-    assert!(card.state() == v1::SecretRequestState::Granted && !card.collecting, "Rivet's card after a restart");
+    assert!(card.state() == v1::SecretRequestState::Granted && !card.collecting, "Rivet's request after a restart");
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
     assert_eq!(shown_request(&view, &asked.id).state(), v1::SecretRequestState::Granted);
 }
@@ -1198,7 +1205,7 @@ async fn collecting(client: &mut Client, view: &mut View, dir: &Path) -> v1::Sec
     let opened = call(client, view, "rivet", "secrets_collect", &format!(r#"{{"request":"{}"}}"#, asked.id)).await;
     assert!(opened.starts_with("Asked the person to add Mail key"), "{opened}");
     assert!(shown_request(view, &asked.id).collecting);
-    assert_eq!(waiting_seqs(view, "rivet").len(), 1, "the collect card is in Needs you");
+    assert_eq!(waiting_seqs(view, "rivet").len(), 1, "the collect request is in Needs you");
     asked
 }
 
@@ -1222,7 +1229,7 @@ async fn a_request_withdrawn_while_collected_closes_the_admins_card() {
         view.follow(&mut client, |view| waiting_seqs(view, "rivet").is_empty()).await;
         apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
         let card = shown_request(&view, &id);
-        assert!(card.state() == v1::SecretRequestState::Withdrawn && !card.collecting, "Rivet's card follows: {card:?}");
+        assert!(card.state() == v1::SecretRequestState::Withdrawn && !card.collecting, "Rivet's request follows: {card:?}");
 
         // The form saved anyway: refused, saying why.
         let save = v1::DecideSecretRequest {
@@ -1235,7 +1242,7 @@ async fn a_request_withdrawn_while_collected_closes_the_admins_card() {
 
         // Rivet closing the card after the request closed isn't an error.
         let closed = call(&mut client, &mut view, "rivet", "secrets_collect", &format!(r#"{{"request":"{id}","cancel":true}}"#)).await;
-        assert_eq!(closed, format!("{id} is closed already (its agent withdrew it), and so is its card."));
+        assert_eq!(closed, format!("{id} is closed already (its agent withdrew it), and so is its request."));
         assert!(waiting_seqs(&view, "rivet").is_empty());
         apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "builder".into() })).await;
     }
@@ -1263,10 +1270,10 @@ async fn a_collect_card_opened_again_replaces_the_first() {
         let mut view = View { workspace, ..View::default() };
         id = collecting(&mut client, &mut view, &dir).await.id;
         let closed = call(&mut client, &mut view, "rivet", "secrets_collect", &format!(r#"{{"request":"{id}","cancel":true}}"#)).await;
-        assert!(closed.starts_with("Closed the card"), "{closed}");
+        assert!(closed.starts_with("Closed the request"), "{closed}");
         assert!(waiting_seqs(&view, "rivet").is_empty());
         call(&mut client, &mut view, "rivet", "secrets_collect", &format!(r#"{{"request":"{id}"}}"#)).await;
-        assert_eq!(waiting_seqs(&view, "rivet").len(), 1, "the new card");
+        assert_eq!(waiting_seqs(&view, "rivet").len(), 1, "the new request");
     }
     let (addr, _factory) = start_with(&dir, Scripted::signed_in()).await;
     let (mut client, workspace, _) = Client::connect(addr).await;
@@ -1282,7 +1289,7 @@ async fn a_collect_card_opened_again_replaces_the_first() {
         })
         .collect();
     assert_eq!(cards.len(), 2, "{cards:?}");
-    assert!(!cards[0].1 && cards[1].1, "only the newer card is open: {cards:?}");
+    assert!(!cards[0].1 && cards[1].1, "only the newer request is open: {cards:?}");
     assert_eq!(waiting_seqs(&view, "rivet"), [cards[1].0]);
 }
 

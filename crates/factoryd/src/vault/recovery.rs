@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use zeroize::Zeroizing;
 
-use super::{Inner, Vault, VaultError, aad, crypto};
+use super::{Inner, Vault, VaultError, aad, account_recovery, crypto};
 use crate::encoding::same;
 use crate::transcript::now_ms;
 
@@ -28,6 +28,9 @@ const HOUR_MS: i64 = 3600 * 1000;
 const GROUPS: u32 = 8;
 /// What `kept` names the confirmation.
 const CONFIRMED: &str = "recovery-confirmed";
+/// What `kept` names the recovery key last typed to open the vault: its
+/// protector's hash.
+const USED: &str = "recovery-used";
 
 /// The checks running now, by device, and when wrong groups were typed.
 #[derive(Default)]
@@ -44,8 +47,8 @@ struct Check {
     until: i64,
 }
 
-/// Which recovery key the vault holds now: a hash of its protector, which
-/// a new key replaces. None if it has none.
+/// Which recovery key of its own the vault holds now: a hash of its
+/// protector, which a new key replaces. None if it has none.
 fn generation(db: &Connection) -> Result<Option<String>, VaultError> {
     let sealed: Option<Vec<u8>> =
         db.query_row("SELECT sealed_vmk FROM protectors WHERE kind = 'recovery'", [], |row| row.get(0)).optional()?;
@@ -70,7 +73,7 @@ fn normal(text: &str) -> Zeroizing<String> {
 
 impl Vault {
     /// The recovery key kept to show again, if there is one.
-    fn kept_recovery(inner: &Inner) -> Result<Option<Zeroizing<String>>, VaultError> {
+    pub(super) fn kept_recovery(inner: &Inner) -> Result<Option<Zeroizing<String>>, VaultError> {
         let vmk = Self::open_vmk(inner)?;
         let db = Self::db(inner)?;
         let sealed: Option<Vec<u8>> = db.query_row("SELECT sealed FROM kept WHERE name = 'recovery'", [], |row| row.get(0)).optional()?;
@@ -80,16 +83,94 @@ impl Vault {
         Ok(Some(Zeroizing::new(String::from_utf8_lossy(&opened).into_owned())))
     }
 
-    /// Whether the vault, open, holds a recovery key the person hasn't
-    /// confirmed (VaultState.recovery_key_unconfirmed). False while locked.
+    /// The vault is sealed to the account's recovery key (#239): covered by
+    /// it, rather than by a key of its own.
+    pub(super) fn account_covered(db: &Connection) -> Result<bool, VaultError> {
+        Ok(account_recovery::generation(db)?.is_some())
+    }
+
+    /// Whether this Claktory's own recovery key was confirmed (the one it
+    /// holds now).
+    fn own_confirmed(inner: &Inner, vmk: &[u8; 32]) -> Result<bool, VaultError> {
+        let db = Self::db(inner)?;
+        let Some(generation) = generation(db)? else { return Ok(false) };
+        let sealed: Option<Vec<u8>> = db.query_row("SELECT sealed FROM kept WHERE name = ?1", [CONFIRMED], |row| row.get(0)).optional()?;
+        let confirmed = sealed.and_then(|sealed| crypto::open(vmk, &sealed, &aad(&["kept", &inner.vault_id, CONFIRMED])));
+        Ok(confirmed.is_some_and(|confirmed| confirmed.as_slice() == generation.as_bytes()))
+    }
+
+    /// Whether this Claktory's own recovery key, kept, is shown: always
+    /// without the account's key; with it, only one the person confirmed
+    /// before (one they saved).
+    pub(super) fn own_showable(inner: &Inner) -> Result<bool, VaultError> {
+        let vmk = Self::open_vmk(inner)?;
+        let db = Self::db(inner)?;
+        if !account_recovery::kept(db, "recovery")? {
+            return Ok(false);
+        }
+        Ok(!Self::account_covered(db)? || Self::own_confirmed(inner, vmk)?)
+    }
+
+    /// The recovery key the person is asked to save and confirm, while it's
+    /// shown: its generation and text.
+    fn current(inner: &Inner) -> Result<Option<(String, Zeroizing<String>)>, VaultError> {
+        if !Self::own_showable(inner)? {
+            return Ok(None);
+        }
+        let (Some(text), Some(generation)) = (Self::kept_recovery(inner)?, generation(Self::db(inner)?)?) else { return Ok(None) };
+        Ok(Some((generation, text)))
+    }
+
+    /// Whether the vault, open, holds a recovery key of its own the person
+    /// hasn't confirmed (VaultState.recovery_key_unconfirmed); covered by the
+    /// account's (#239), nothing is asked. False while locked.
     pub(super) fn recovery_unconfirmed(inner: &Inner) -> Result<bool, VaultError> {
         let Some(vmk) = inner.vmk.as_deref() else { return Ok(false) };
         let db = Self::db(inner)?;
+        if Self::account_covered(db)? {
+            return Ok(false);
+        }
         let kept: bool = db.query_row("SELECT COUNT(*) > 0 FROM kept WHERE name = 'recovery'", [], |row| row.get(0))?;
-        let Some(generation) = generation(db)?.filter(|_| kept) else { return Ok(false) };
-        let sealed: Option<Vec<u8>> = db.query_row("SELECT sealed FROM kept WHERE name = ?1", [CONFIRMED], |row| row.get(0)).optional()?;
-        let confirmed = sealed.and_then(|sealed| crypto::open(vmk, &sealed, &aad(&["kept", &inner.vault_id, CONFIRMED])));
-        Ok(confirmed.is_none_or(|confirmed| confirmed.as_slice() != generation.as_bytes()))
+        if !kept || generation(db)?.is_none() {
+            return Ok(false);
+        }
+        Ok(!Self::own_confirmed(inner, vmk)?)
+    }
+
+    /// Whether ShowRecoveryKey shows a key (VaultState.recovery_key_showable):
+    /// anything but a vault covered by the account's key with nothing of its
+    /// own to show. False while locked.
+    pub(super) fn recovery_showable(inner: &Inner) -> Result<bool, VaultError> {
+        if inner.vmk.is_none() {
+            return Ok(false);
+        }
+        Ok(Self::own_showable(inner)? || !Self::account_covered(Self::db(inner)?)?)
+    }
+
+    /// The recovery key that opened the vault was typed here
+    /// (VaultState.recovery_key_used): `generation` is its protector's hash,
+    /// from `check_which`.
+    pub(crate) fn note_recovery_used(&self, generation: &str) -> Result<(), VaultError> {
+        let mut inner = self.lock();
+        let vmk = Self::open_vmk(&inner)?;
+        Self::keep(Self::db(&inner)?, &inner.vault_id, vmk, USED, generation.as_bytes())?;
+        inner.state = None;
+        Ok(())
+    }
+
+    /// Whether the recovery key that covers the vault now (the account's, or
+    /// else its own) was typed here to open it since it was made.
+    pub(super) fn recovery_used(inner: &Inner) -> Result<bool, VaultError> {
+        let Some(vmk) = inner.vmk.as_deref() else { return Ok(false) };
+        let db = Self::db(inner)?;
+        let now = match account_recovery::generation(db)? {
+            Some(account) => Some(account),
+            None => generation(db)?,
+        };
+        let Some(now) = now else { return Ok(false) };
+        let sealed: Option<Vec<u8>> = db.query_row("SELECT sealed FROM kept WHERE name = ?1", [USED], |row| row.get(0)).optional()?;
+        let used = sealed.and_then(|sealed| crypto::open(vmk, &sealed, &aad(&["kept", &inner.vault_id, USED])));
+        Ok(used.is_some_and(|used| used.as_slice() == now.as_bytes()))
     }
 
     /// Refused while too many wrong groups were typed in the last hour.
@@ -113,16 +194,13 @@ impl Vault {
         let mut inner = self.lock();
         let now = now_ms();
         Self::tries_left(&mut inner.checks, now)?;
-        if Self::kept_recovery(&inner)?.is_none() {
-            return Err(VaultError::Invalid("There's no recovery key yet: show it first.".to_owned()));
-        }
-        let Some(generation) = generation(Self::db(&inner)?)? else {
+        let Some(current) = Self::current(&inner)? else {
             return Err(VaultError::Invalid("There's no recovery key yet: show it first.".to_owned()));
         };
         // 8 groups: a byte's remainder is as likely for each.
         let group = usize::from(crypto::random::<1>()[0]) % GROUPS as usize;
         let id = crypto::hex(&crypto::random::<16>());
-        inner.checks.by_device.insert(device.to_owned(), Check { id: id.clone(), group, generation, until: now + CHECK_MS });
+        inner.checks.by_device.insert(device.to_owned(), Check { id: id.clone(), group, generation: current.0, until: now + CHECK_MS });
         Ok(v1::RecoveryKeyCheck { check_id: id, group: group as u32 + 1, groups: GROUPS })
     }
 
@@ -133,25 +211,24 @@ impl Vault {
         let now = now_ms();
         Self::tries_left(&mut inner.checks, now)?;
         let ran_out = || VaultError::Invalid("This check timed out. Start again.".to_owned());
-        let current = generation(Self::db(&inner)?)?;
-        let (group, generation) = match inner.checks.by_device.get(device) {
-            Some(check) if check.id == check_id && check.until > now && current.as_deref() == Some(check.generation.as_str()) => {
-                (check.group, check.generation.clone())
+        let current = Self::current(&inner)?;
+        let (group, current) = match (inner.checks.by_device.get(device), current) {
+            (Some(check), Some(current)) if check.id == check_id && check.until > now && current.0 == check.generation => {
+                (check.group, current)
             }
-            Some(check) if check.id == check_id => {
+            (Some(check), _) if check.id == check_id => {
                 inner.checks.by_device.remove(device);
                 return Err(ran_out());
             }
             _ => return Err(ran_out()),
         };
-        let key = Self::kept_recovery(&inner)?.ok_or_else(ran_out)?;
-        let expected = key.split('-').nth(group).map(normal).ok_or_else(ran_out)?;
+        let expected = current.1.split('-').nth(group).map(normal).ok_or_else(ran_out)?;
         if !same(&normal(typed), &expected) {
             inner.checks.wrong.push(now);
             return Err(VaultError::WrongGroup(group as u32 + 1));
         }
         let vmk = Self::open_vmk(&inner)?;
-        Self::keep(Self::db(&inner)?, &inner.vault_id, vmk, CONFIRMED, generation.as_bytes())?;
+        Self::keep(Self::db(&inner)?, &inner.vault_id, vmk, CONFIRMED, current.0.as_bytes())?;
         inner.checks.by_device.clear();
         inner.state = None;
         Ok(())

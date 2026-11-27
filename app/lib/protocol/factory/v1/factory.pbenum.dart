@@ -397,6 +397,36 @@ class ErrorCode extends $pb.ProtobufEnum {
   const ErrorCode._(super.value, super.name);
 }
 
+class ProtectedPlaceState extends $pb.ProtobufEnum {
+  /// Never checked: no Permissions row for it.
+  static const ProtectedPlaceState PROTECTED_PLACE_STATE_UNSPECIFIED =
+      ProtectedPlaceState._(
+          0, _omitEnumNames ? '' : 'PROTECTED_PLACE_STATE_UNSPECIFIED');
+
+  /// The last check got in: "Documents · On".
+  static const ProtectedPlaceState PROTECTED_PLACE_STATE_ALLOWED =
+      ProtectedPlaceState._(
+          1, _omitEnumNames ? '' : 'PROTECTED_PLACE_STATE_ALLOWED');
+
+  /// macOS refused the last check or an agent: "Documents · Off".
+  static const ProtectedPlaceState PROTECTED_PLACE_STATE_REFUSED =
+      ProtectedPlaceState._(
+          2, _omitEnumNames ? '' : 'PROTECTED_PLACE_STATE_REFUSED');
+
+  static const $core.List<ProtectedPlaceState> values = <ProtectedPlaceState>[
+    PROTECTED_PLACE_STATE_UNSPECIFIED,
+    PROTECTED_PLACE_STATE_ALLOWED,
+    PROTECTED_PLACE_STATE_REFUSED,
+  ];
+
+  static final $core.List<ProtectedPlaceState?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 2);
+  static ProtectedPlaceState? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const ProtectedPlaceState._(super.value, super.name);
+}
+
 class BackendServiceState extends $pb.ProtobufEnum {
   /// Nothing to say: not a Mac, the dev Claktory, or one run elsewhere for
   /// tests.
@@ -2806,6 +2836,50 @@ class NotifyMode extends $pb.ProtobufEnum {
   const NotifyMode._(super.value, super.name);
 }
 
+/// Whether a device's system shows Claktory's notifications (item 13).
+class NotificationPermission extends $pb.ProtobufEnum {
+  /// Not said: an app from before, judged by its platform.
+  static const NotificationPermission NOTIFICATION_PERMISSION_UNSPECIFIED =
+      NotificationPermission._(
+          0, _omitEnumNames ? '' : 'NOTIFICATION_PERMISSION_UNSPECIFIED');
+
+  /// The system shows them (iOS's provisional and ephemeral count).
+  static const NotificationPermission NOTIFICATION_PERMISSION_ALLOWED =
+      NotificationPermission._(
+          1, _omitEnumNames ? '' : 'NOTIFICATION_PERMISSION_ALLOWED');
+
+  /// Refused, or turned off in the device's Settings.
+  static const NotificationPermission NOTIFICATION_PERMISSION_DENIED =
+      NotificationPermission._(
+          2, _omitEnumNames ? '' : 'NOTIFICATION_PERMISSION_DENIED');
+
+  /// The system hasn't asked yet.
+  static const NotificationPermission NOTIFICATION_PERMISSION_NOT_ASKED =
+      NotificationPermission._(
+          3, _omitEnumNames ? '' : 'NOTIFICATION_PERMISSION_NOT_ASKED');
+
+  /// This app can't show them (Android for now, Linux, Windows).
+  static const NotificationPermission NOTIFICATION_PERMISSION_UNSUPPORTED =
+      NotificationPermission._(
+          4, _omitEnumNames ? '' : 'NOTIFICATION_PERMISSION_UNSUPPORTED');
+
+  static const $core.List<NotificationPermission> values =
+      <NotificationPermission>[
+    NOTIFICATION_PERMISSION_UNSPECIFIED,
+    NOTIFICATION_PERMISSION_ALLOWED,
+    NOTIFICATION_PERMISSION_DENIED,
+    NOTIFICATION_PERMISSION_NOT_ASKED,
+    NOTIFICATION_PERMISSION_UNSUPPORTED,
+  ];
+
+  static final $core.List<NotificationPermission?> _byValue =
+      $pb.ProtobufEnum.$_initByValueList(values, 4);
+  static NotificationPermission? valueOf($core.int value) =>
+      value < 0 || value >= _byValue.length ? null : _byValue[value];
+
+  const NotificationPermission._(super.value, super.name);
+}
+
 class PushPlatform extends $pb.ProtobufEnum {
   static const PushPlatform PUSH_PLATFORM_UNSPECIFIED =
       PushPlatform._(0, _omitEnumNames ? '' : 'PUSH_PLATFORM_UNSPECIFIED');
@@ -3005,6 +3079,46 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
       NeedsYouRecordKind._(
           21, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_ALERT');
 
+  /// An agent's card asking the person to run a command (ask_person's
+  /// `command`, Execute): APPROVED when they ran it ("Executed", with
+  /// command.run saying how it went), DISMISSED, WITHDRAWN or RESOLVED as a
+  /// question's. title is Claktory's heading ("Run this command on Matt's
+  /// Mac Studio"), never the agent's words; command is the command.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_COMMAND =
+      NeedsYouRecordKind._(
+          19, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_COMMAND');
+
+  /// macOS refused Claktory Agents a protected place, and its Needs you item
+  /// ended (ProtectedPlace): outcome DISMISSED (the person's OK) or CHANGED
+  /// (a later check found it let in). title and excerpt the item's words
+  /// when it was raised, agent_id the agent refused there (empty when a
+  /// check found it), asked_ms raised, decided_ms ended.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_PROTECTED_PLACE =
+      NeedsYouRecordKind._(
+          22, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_PROTECTED_PLACE');
+
+  /// An agent saved a command's output as a new secret, with bash's save_as
+  /// (a key it made with a secret it holds): no card, no approval. Outcome
+  /// CHANGED, agent_id the agent, title Claktory's sentence ("Pericolo saved
+  /// Play deploy key, a new secret made with Google Cloud owner"),
+  /// agent_reason the secret's description, in the agent's words.
+  /// seq is the bash call's entry in its conversation. The secret is granted
+  /// to that agent alone; Settings → Secrets shows it as saved by it
+  /// (SecretInfo.owner_agent_id), where the person can delete it.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_SECRET_SAVED =
+      NeedsYouRecordKind._(
+          23, _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_SECRET_SAVED');
+
+  /// This vault was sealed to the account's recovery key claktory.com has
+  /// (#239), one other than it was sealed to (or none): title Claktory's
+  /// words, asked_ms when the check-in saw the key, decided_ms when it was
+  /// sealed; agent_id empty. On the person's choice (UseRecoveryKey), or by
+  /// itself for a change every one of whose steps a device paired here
+  /// approved.
+  static const NeedsYouRecordKind NEEDS_YOU_RECORD_KIND_RECOVERY_KEY_CHANGED =
+      NeedsYouRecordKind._(24,
+          _omitEnumNames ? '' : 'NEEDS_YOU_RECORD_KIND_RECOVERY_KEY_CHANGED');
+
   static const $core.List<NeedsYouRecordKind> values = <NeedsYouRecordKind>[
     NEEDS_YOU_RECORD_KIND_UNSPECIFIED,
     NEEDS_YOU_RECORD_KIND_QUESTION,
@@ -3027,10 +3141,14 @@ class NeedsYouRecordKind extends $pb.ProtobufEnum {
     NEEDS_YOU_RECORD_KIND_SECRET_GIVEN_UP,
     NEEDS_YOU_RECORD_KIND_GIVEN_UP,
     NEEDS_YOU_RECORD_KIND_ALERT,
+    NEEDS_YOU_RECORD_KIND_COMMAND,
+    NEEDS_YOU_RECORD_KIND_PROTECTED_PLACE,
+    NEEDS_YOU_RECORD_KIND_SECRET_SAVED,
+    NEEDS_YOU_RECORD_KIND_RECOVERY_KEY_CHANGED,
   ];
 
   static final $core.List<NeedsYouRecordKind?> _byValue =
-      $pb.ProtobufEnum.$_initByValueList(values, 21);
+      $pb.ProtobufEnum.$_initByValueList(values, 24);
   static NeedsYouRecordKind? valueOf($core.int value) =>
       value < 0 || value >= _byValue.length ? null : _byValue[value];
 

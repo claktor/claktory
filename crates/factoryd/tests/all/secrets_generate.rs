@@ -134,7 +134,7 @@ async fn a_key_for_no_one_stays_with_no_one() {
     assert_eq!(generated.state(), v1::SecretRequestState::Generated);
     let kept = secret(&view, "Release key");
     assert!(kept.grants.is_empty(), "{kept:?}");
-    assert!(!kept.ask_each_time, "an app that doesn't say gets the card's default: not asking each time");
+    assert!(!kept.ask_each_time, "an app that doesn't say gets the request's default: not asking each time");
     let used = call(&mut client, &mut view, "bo", "bash", r#"{"command":"echo hi","secrets":["Release key"]}"#).await;
     assert!(!used.contains("hi\n") && !used.starts_with("hi"), "{used}");
 }
@@ -241,4 +241,32 @@ async fn the_vault_generates_a_password_that_no_one_sees() {
 
 fn decide_body(id: &str) -> v1::DecideSecretRequest {
     v1::DecideSecretRequest { agent_id: "bo".into(), request_id: id.into(), approve: true, ask_each_time: Some(false), ..Default::default() }
+}
+
+/// Abbacchio's 1580: in a Claktory with Rivet, every request names the
+/// admin agent an approval would pass it to; the person generating it on
+/// the card is still History's GENERATED, given to no one when asked so,
+/// never ADMIN.
+#[tokio::test]
+async fn history_says_generated_with_rivet_there() {
+    let (_dir, mut client, mut view) = setup().await;
+    for ask in [
+        r#"{"name":"QA DB password","generate":"password","grant":"nobody","reason":"x"}"#,
+        r#"{"name":"QA API password","generate":"password","reason":"x"}"#,
+    ] {
+        call(&mut client, &mut view, "bo", "secrets_request", ask).await;
+        let request = pending(&view);
+        assert_eq!(request.admin_agent_id, "rivet", "Rivet is there, with Secrets");
+        apply_request(&mut client, &mut view, client_message::Body::DecideSecretRequest(decide_body(&request.id))).await;
+    }
+    view.follow(&mut client, |view| event_text(view, "the vault generated QA API password").is_some() && idle(view, "bo")).await;
+
+    let history = crate::needs_you::list(&mut client, "password", 0, 0).await;
+    let outcome = |title: &str| {
+        let record = history.records.iter().find(|record| record.title == title).unwrap_or_else(|| panic!("{title}: {history:?}"));
+        (record.secret_outcome(), record.secret_given_name.as_str(), record.subject_agent_id.as_str(), record.secret_to_no_one)
+    };
+    use v1::NeedsYouSecretOutcome as Secret;
+    assert_eq!(outcome("QA DB password"), (Secret::Generated, "QA DB password", "", true));
+    assert_eq!(outcome("QA API password"), (Secret::Generated, "QA API password", "", false));
 }

@@ -79,6 +79,8 @@ Future<Harness> _open(
   await settle(tester);
   expect(find.text('Claude usage limit reached'), findsOneWidget);
   await _tap(tester, 'Claude usage limit reached');
+  // On an iPhone it opens alone, over the list (#599): in once it's slid.
+  await settle(tester);
   expect(find.byType(ProviderWaitCard), findsOneWidget);
   return harness;
 }

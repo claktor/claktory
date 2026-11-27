@@ -89,9 +89,25 @@ class AppScope extends InheritedWidget {
 
   /// Shows Settings at Providers, where providers are signed in and the
   /// provider picker adds one.
-  static void openProviders(BuildContext context) {
-    openPage(context, AppPage.settings);
-    of(context).settingsSection.value = 'providers';
+  static void openProviders(BuildContext context) =>
+      openSettingsAt(context, 'providers');
+
+  /// Shows Settings at [section] (settings_view.dart's section ids, such as
+  /// "general"), and [setting] in it (a SettingAnchor's id, such as "move")
+  /// brought into view and glowing; wide, the section beside the index,
+  /// narrow, its page over the list (Lucy's Settings spec §5).
+  static void openSettingsAt(
+    BuildContext context,
+    String section, {
+    String setting = '',
+  }) {
+    // Already showing (a link inside it, say): it goes there where it is.
+    if (!pageShown(context, AppPage.settings)) {
+      openPage(context, AppPage.settings);
+    }
+    of(context).settingsSection.value = setting.isEmpty
+        ? section
+        : '$section#$setting';
   }
 
   /// Shows what changed in each version of Claktory.

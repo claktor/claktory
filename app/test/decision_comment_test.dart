@@ -1,6 +1,6 @@
-// "Add a comment" under a card's buttons opens its field with the focus,
-// even while something else has it (Sorbet's iPad find: after a PDF's
-// reload its pane held focus, and the field opened without it).
+// A card's field (Lucy's Needs you cards, rule 4): open from the start,
+// "Reply to June", never taking the focus by itself; Return sends only
+// where words alone answer (rule 6).
 import 'package:factory_app/controls.dart' show Button;
 import 'package:factory_app/decision.dart';
 import 'package:factory_app/dictation.dart';
@@ -15,9 +15,8 @@ import 'harness.dart';
 import 'voice_test.dart' show FakeRecorder, io, withVoice;
 
 void main() {
-  testWidgets('the field opens focused though something else had focus', (
-    tester,
-  ) async {
+  testWidgets('the field is open from the start and never takes the focus '
+      'by itself', (tester) async {
     final comment = TextEditingController();
     addTearDown(comment.dispose);
     final other = FocusNode();
@@ -33,14 +32,16 @@ void main() {
     );
     other.requestFocus();
     await tester.pump();
-    expect(other.hasFocus, isTrue);
-
-    await tester.tap(find.text('Add a comment'));
-    await pumpFrames(tester);
+    expect(find.text('Add a comment'), findsNothing);
+    expect(find.text('Reply to June'), findsOneWidget);
     final field = tester.widget<EditableText>(find.byType(EditableText));
-    expect(field.focusNode.hasFocus, isTrue);
-    expect(other.hasFocus, isFalse);
+    expect(field.focusNode.hasFocus, isFalse);
+    expect(other.hasFocus, isTrue);
     await tester.enterText(find.byType(EditableText), 'Looks good');
+    expect(comment.text, 'Looks good');
+    // Without Submit, Return sends nothing and adds no line.
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
     expect(comment.text, 'Looks good');
   });
 
@@ -60,8 +61,6 @@ void main() {
       tester,
       home: DecisionComment(controller: comment, agent: 'June'),
     );
-    await tester.tap(find.text('Add a comment'));
-    await pumpFrames(tester);
     await tester.enterText(find.byType(EditableText), 'Yes,');
     await tester.tap(find.byKey(const ValueKey('dictate')));
     await io(tester);
@@ -97,10 +96,6 @@ void main() {
           ),
         ),
       );
-      if (find.text('Add a comment').evaluate().isNotEmpty) {
-        await tester.tap(find.text('Add a comment'));
-        await pumpFrames(tester);
-      }
       await tester.tap(find.byKey(const ValueKey('dictate')));
       await io(tester);
       expect(find.text('Done'), findsOneWidget, reason: '$width at $scale');
@@ -112,7 +107,7 @@ void main() {
   });
 
   testWidgets('with Submit (#370): once typed, the buttons give way to one '
-      'Submit, Return is Submit, and the note goes', (tester) async {
+      'Submit, and Return is Submit', (tester) async {
     final comment = TextEditingController();
     addTearDown(comment.dispose);
     var submitted = 0;
@@ -132,11 +127,8 @@ void main() {
         ],
       ),
     );
-    await tester.tap(find.text('Add a comment'));
-    await pumpFrames(tester);
     expect(find.text('Approve'), findsOneWidget);
     expect(find.text('Submit'), findsNothing);
-    expect(find.text('June gets it with your answer.'), findsOneWidget);
 
     // Spaces alone aren't a comment.
     await tester.enterText(find.byType(EditableText), '   ');
@@ -149,7 +141,6 @@ void main() {
     await tester.pump();
     expect(find.text('Approve'), findsNothing);
     expect(find.text('Submit'), findsOneWidget);
-    expect(find.text('June gets it with your answer.'), findsNothing);
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     expect(submitted, 1);
     await tester.tap(find.text('Submit'));

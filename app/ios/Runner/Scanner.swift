@@ -188,6 +188,15 @@ class ScannerView: NSObject, FlutterPlatformView, AVCaptureVideoDataOutputSample
       session.canAddInput(input)
     else { return }
     session.beginConfiguration()
+    // An iPad that can keeps the camera in Split View, Slide Over and Stage
+    // Manager, so the code reads there too and "not available in this
+    // window" is only for one that can't. A QR code needs nothing heavy.
+    // From iOS 18 without the multitasking entitlement, which an app built
+    // for iOS 15 would need before it (Apple's "Accessing the camera while
+    // multitasking on iPad").
+    if #available(iOS 18.0, *), session.isMultitaskingCameraAccessSupported {
+      session.isMultitaskingCameraAccessEnabled = true
+    }
     session.sessionPreset = .high
     session.addInput(input)
     let output = AVCaptureVideoDataOutput()

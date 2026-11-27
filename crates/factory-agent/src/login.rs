@@ -162,9 +162,14 @@ async fn read_line(prompt: &str, secret: bool) -> Result<String, Error> {
     Ok(line.trim_end_matches(['\r', '\n']).to_owned())
 }
 
+#[cfg(windows)]
+use crate::windows::console::EchoOff;
+
 /// Turns terminal echo off until dropped. `None` when stdin is not a terminal.
+#[cfg(unix)]
 struct EchoOff(libc::termios);
 
+#[cfg(unix)]
 impl EchoOff {
     fn new() -> Option<EchoOff> {
         // SAFETY: plain termios calls on stdin with a zeroed, correctly sized termios that tcgetattr fills.
@@ -186,6 +191,7 @@ impl EchoOff {
     }
 }
 
+#[cfg(unix)]
 impl Drop for EchoOff {
     fn drop(&mut self) {
         // SAFETY: restores the attributes read from the same descriptor in `new`.

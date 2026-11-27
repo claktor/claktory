@@ -28,6 +28,7 @@ import 'name_role_line.dart';
 import 'layout.dart' show viewerKindFor;
 import 'message_box.dart' show AgentMessageTarget, MessageBox, MessageTarget;
 import 'card_answer.dart';
+import 'card_files.dart' show CardAttachButton, CardFileDrop;
 import 'needs_you_entries.dart';
 import 'mobile/metrics.dart';
 import 'pipes.dart' show PipeMessageView;
@@ -700,6 +701,8 @@ String focusEnded(
     if (ask.state == AskPersonState.ASK_PERSON_STATE_DISMISSED) {
       return 'Dismissed';
     }
+    // Words sent back with Submit rather than a yes (#533).
+    if (ask.replied) return 'Replied';
     if (ask.wantsText) return 'Answered';
     return 'Approved';
   }
@@ -734,7 +737,7 @@ const focusRowHeight = 52.0;
 /// Focus mode on a Mac (§4): the queue at the left, the card on the stage,
 /// its conversation in Context at the right. The rail and the sidebar are
 /// gone; the window keeps its size.
-class NeedsYouFocus extends StatelessWidget {
+class NeedsYouFocus extends StatefulWidget {
   const NeedsYouFocus({super.key, required this.session, required this.leave});
 
   final FocusSession session;
@@ -743,7 +746,35 @@ class NeedsYouFocus extends StatelessWidget {
   final VoidCallback leave;
 
   @override
+  State<NeedsYouFocus> createState() => _NeedsYouFocusState();
+}
+
+class _NeedsYouFocusState extends State<NeedsYouFocus> {
+  /// Whether Context had room beside the stage at the last layout.
+  bool? _wide;
+
+  /// Its room just changed: Context waits for [_fits] to open or close it,
+  /// so it never shows for a frame where it no longer belongs.
+  var _pending = false;
+
+  /// Folded, Context starts closed, its button opening it over the stage
+  /// (the stage's answers stay in reach: Abbacchio's row 1608); with room
+  /// again, it's back beside the stage. As the iPad's does.
+  void _fits(bool wide) {
+    if (wide == _wide) return;
+    _wide = wide;
+    _pending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() => _pending = false);
+      widget.session.contextOpen = wide;
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final session = widget.session;
+    final leave = widget.leave;
     final palette = Palette.of(context);
     return ColoredBox(
       color: palette.canvas,
@@ -753,6 +784,7 @@ class NeedsYouFocus extends StatelessWidget {
         child: LayoutBuilder(
           builder: (context, constraints) {
             final wide = constraints.maxWidth >= focusContextFoldsBelow;
+            _fits(wide);
             final contextWidth = math.max(
               focusContextMinWidth,
               constraints.maxWidth -
@@ -778,7 +810,7 @@ class NeedsYouFocus extends StatelessWidget {
                         ),
                         // Folded: over the stage's right side, as the
                         // chip's panel floats.
-                        if (!wide && session.contextOpen)
+                        if (!wide && session.contextOpen && !_pending)
                           Positioned(
                             top: titleBarHeight + Space.s,
                             right: Space.s,
@@ -803,7 +835,7 @@ class NeedsYouFocus extends StatelessWidget {
                       ],
                     ),
                   ),
-                  if (wide && session.contextOpen)
+                  if (wide && session.contextOpen && !_pending)
                     Container(
                       width: contextWidth,
                       decoration: BoxDecoration(
@@ -1141,6 +1173,7 @@ class _QueueRow extends StatelessWidget {
     NeedsYouKind.keepAwake ||
     NeedsYouKind.backendService ||
     NeedsYouKind.lidStuck => 'laptop-minimal',
+    NeedsYouKind.protectedPlace => 'folder-lock',
     NeedsYouKind.chat => 'message-circle',
     NeedsYouKind.signIn => 'user',
     _ => 'arrow-left-right',
@@ -1682,6 +1715,9 @@ class _AnswerBarState extends State<_AnswerBar> {
   final _focus = FocusNode(debugLabel: 'Focus mode answer');
   final _dictation = GlobalKey();
 
+  /// What didn't go in of the files chosen or dropped for this card.
+  String? _filesNote;
+
   FocusSession get _session => widget.session;
 
   @override
@@ -1694,6 +1730,7 @@ class _AnswerBarState extends State<_AnswerBar> {
   @override
   void didUpdateWidget(_AnswerBar old) {
     super.didUpdateWidget(old);
+    if (old.item.key != widget.item.key) _filesNote = null;
     if (old.session != widget.session) {
       old.session.answer.removeListener(_changed);
       widget.session.answer.addListener(_changed);
@@ -1821,34 +1858,75 @@ class _AnswerBarState extends State<_AnswerBar> {
             );
     }
 
+    // Files to go with the answer, as the card in its conversation takes
+    // them (#511; Zucchero's row 666): the paperclip beside the field, and
+    // on a Mac what's dropped or pasted while the field has the keys. They
+    // show on the card, under its words; here only what didn't go in.
+    final files = answer.filesKey;
+    void noted(String? note) {
+      if (mounted) setState(() => _filesNote = note);
+    }
+
+    final filesOpen = answerable && !answer.busy;
+    Widget dictation = Dictation(
+      key: _dictation,
+      controller: field,
+      focusNode: _focus,
+      keep: DictationFor(
+        'focus/${widget.item.key}',
+        who.isEmpty ? 'Your answer' : 'Your answer to $who',
+      ),
+      child: CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.enter): _return,
+          const SingleActivator(LogicalKeyboardKey.numpadEnter): _return,
+        },
+        child: TextField(
+          controller: field,
+          focusNode: _focus,
+          placeholder: placeholder,
+          minLines: 1,
+          maxLines: 6,
+          semanticsLabel: placeholder,
+        ),
+      ),
+    );
+    if (files != null) {
+      dictation = CardFileDrop(
+        card: files,
+        label: who.isEmpty ? 'your answer' : 'your answer to $who',
+        enabled: filesOpen,
+        onNote: noted,
+        child: dictation,
+      );
+    }
     return Padding(
       padding: const EdgeInsets.only(top: Space.l),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Dictation(
-            key: _dictation,
-            controller: field,
-            focusNode: _focus,
-            keep: DictationFor(
-              'focus/${widget.item.key}',
-              who.isEmpty ? 'Your answer' : 'Your answer to $who',
+          if (files != null)
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(child: dictation),
+                const SizedBox(width: Space.xs),
+                CardAttachButton(
+                  card: files,
+                  enabled: filesOpen,
+                  onNote: noted,
+                ),
+              ],
+            )
+          else
+            dictation,
+          if (files != null && _filesNote != null) ...[
+            const SizedBox(height: Space.xs),
+            Text(
+              _filesNote!,
+              style: type.caption.copyWith(color: palette.danger),
             ),
-            child: CallbackShortcuts(
-              bindings: {
-                const SingleActivator(LogicalKeyboardKey.enter): _return,
-                const SingleActivator(LogicalKeyboardKey.numpadEnter): _return,
-              },
-              child: TextField(
-                controller: field,
-                focusNode: _focus,
-                placeholder: placeholder,
-                minLines: 1,
-                maxLines: 6,
-                semanticsLabel: placeholder,
-              ),
-            ),
-          ),
+          ],
           // The card's own word on its answer ("Not sent yet…").
           if (answer.status case final status? when status.isNotEmpty) ...[
             const SizedBox(height: Space.xs),
@@ -2087,7 +2165,7 @@ class _FocusContextState extends State<FocusContext> {
     );
   }
 
-  /// "▸ This card", where the card is in its conversation.
+  /// "▸ This request", where the request is in its conversation.
   Widget _thisCard(BuildContext context) {
     final type = TypeScale.of(context);
     return Padding(
@@ -2096,7 +2174,7 @@ class _FocusContextState extends State<FocusContext> {
         vertical: Space.s,
       ),
       child: Text(
-        '▸ This card',
+        '▸ This request',
         style: type.caption.copyWith(color: Palette.of(context).signal),
       ),
     );
@@ -2273,7 +2351,7 @@ List<FocusCommand> focusCommands(
     ),
     FocusCommand(
       id: 'focus.next',
-      title: 'Next Card',
+      title: 'Next Request',
       activator: const SingleActivator(
         LogicalKeyboardKey.arrowDown,
         meta: true,
@@ -2283,7 +2361,7 @@ List<FocusCommand> focusCommands(
     ),
     FocusCommand(
       id: 'focus.previous',
-      title: 'Previous Card',
+      title: 'Previous Request',
       activator: const SingleActivator(
         LogicalKeyboardKey.arrowUp,
         meta: true,
@@ -2490,17 +2568,32 @@ class _FocusKeysState extends State<FocusKeys> {
 }
 
 /// Whether this device is in focus mode on a Claktory: the backend's
-/// (Settings.focus_mode, §9.1), so it's the same after a relaunch, and
-/// each device has its own. A change shows at once, before the backend
-/// says so; a Claktory too old to keep it keeps it for this run.
+/// (Settings.focus_mode, §9.1), each device its own. A change shows at
+/// once, before the backend says so; a Claktory too old to keep it keeps
+/// it for this run. Every run starts out of it (#599, Squalo's F1): the
+/// first time this run hears from the Claktory, a device it still lists
+/// (quit in focus mode, or put there from another Claktory's queue) is
+/// taken out, so the app never opens into it.
 class _FocusMode extends ChangeNotifier implements ValueListenable<bool> {
   _FocusMode(this._backend) {
     _backend.workspace.addListener(_changed);
     _kept = _keptOn;
+    _startOut();
   }
 
   final Backend _backend;
   late bool _kept;
+
+  /// Whether this run has heard from the Claktory yet.
+  var _started = false;
+
+  /// Out of focus mode at the start of the run, once the Claktory's
+  /// settings are known: never shown on, the backend told.
+  void _startOut() {
+    if (_started || !_backend.workspace.received) return;
+    _started = true;
+    if (_kept && _asked == null) set(false);
+  }
 
   /// Set here and not yet said back.
   bool? _asked;
@@ -2513,6 +2606,11 @@ class _FocusMode extends ChangeNotifier implements ValueListenable<bool> {
   bool get value => _asked ?? _kept;
 
   void _changed() {
+    if (!_started) {
+      _kept = _keptOn;
+      _startOut();
+      if (!_started) return;
+    }
     final was = value;
     final kept = _keptOn;
     if (kept != _kept) {
@@ -2532,6 +2630,34 @@ class _FocusMode extends ChangeNotifier implements ValueListenable<bool> {
     _backend.setFocusMode(on).catchError((Object error) {
       // An older Claktory: this run keeps it.
       if (error is! RequestFailure) throw error;
+    });
+  }
+
+  /// The sitting while focus mode is on, kept here rather than by the
+  /// layer showing it: an iPad's window crossing into the phone's layout
+  /// and back builds a new window, and a new layer, and the sitting and
+  /// its card go on in it (Sale's row 182).
+  FocusSession? _session;
+
+  /// The layers showing [_session].
+  var _holders = 0;
+
+  /// [_session] for a layer that shows it, made when there's none.
+  FocusSession _hold() {
+    _holders++;
+    return _session ??= FocusSession(_backend);
+  }
+
+  /// A layer stopped showing [_session]: once none does after this frame
+  /// (focus mode left, another Claktory shown, the window gone), the
+  /// sitting ends; a layer built in its place in the same frame keeps it.
+  void _release() {
+    _holders--;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final session = _session;
+      if (_holders > 0 || session == null) return;
+      _session = null;
+      session.dispose();
     });
   }
 }
@@ -2603,15 +2729,17 @@ class _FocusModeLayerState extends State<FocusModeLayer> {
 
   void _changed() {
     final backend = _backend!;
-    final on = focusModeOf(backend).value;
+    final mode = _focusModeOf(backend);
+    final on = mode.value;
     final old = _session;
-    // Off, or another Claktory now: the sitting ends; on there, a new one.
+    // Off, or another Claktory now: this layer lets the sitting go, and it
+    // ends after the frame that no longer shows it, unless another layer
+    // shows it by then; on, it takes the sitting there is, or a new one.
     if (old != null && (!on || !identical(old.backend, backend))) {
       _session = null;
-      // After the frame that no longer shows it.
-      WidgetsBinding.instance.addPostFrameCallback((_) => old.dispose());
+      _focusModeOf(old.backend)._release();
     }
-    if (on && _session == null) _session = FocusSession(backend);
+    if (on && _session == null) _session = mode._hold();
     if (mounted) setState(() {});
   }
 
@@ -2620,7 +2748,10 @@ class _FocusModeLayerState extends State<FocusModeLayer> {
     HardwareKeyboard.instance.removeHandler(_key);
     final backend = _backend;
     if (backend != null) focusModeOf(backend).removeListener(_changed);
-    _session?.dispose();
+    // A window built in this one's place (a resize across the phone's
+    // layout) takes the sitting on; else it ends after this frame.
+    if (_session case final session?) _focusModeOf(session.backend)._release();
+    _session = null;
     super.dispose();
   }
 

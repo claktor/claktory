@@ -44,8 +44,8 @@ Future<Harness> showProviders(
   final harness = Harness(snapshot);
   await harness.show(tester, size: const Size(1200, 1100));
   harness.page.value = AppPage.settings;
+  harness.backend.settingsSection.value = 'providers';
   await settle(tester);
-  // Providers is below General, wherever General ends.
   await tester.ensureVisible(pickerField);
   await settle(tester);
   return harness;
@@ -65,13 +65,59 @@ void main() {
         if (choiceMatches(choice, query)) choice.method.label,
     ];
     expect(matching(''), hasLength(6));
-    expect(matching('openai'), [
-      'OpenAI (ChatGPT Plus/Pro)',
-      'OpenAI API key',
-    ]);
+    expect(matching('openai'), ['OpenAI (ChatGPT Plus/Pro)', 'OpenAI API key']);
     expect(matching('KEY router'), ['OpenRouter API key']);
     expect(matching('codex'), ['OpenAI (ChatGPT Plus/Pro)']);
     expect(matching('gemini'), isEmpty);
+  });
+
+  testWidgets('Defaults: with no model, Sign in to a provider is a link '
+      'to Providers; with models, what the default changes', (tester) async {
+    final empty = workspace()
+      ..providers.clear()
+      ..models.clear();
+    final harness = Harness(empty);
+    await harness.show(tester, size: const Size(1200, 1100));
+    harness.page.value = AppPage.settings;
+    harness.backend.settingsSection.value = 'defaults';
+    await settle(tester);
+    expect(
+      find.text(
+        'No model available. Sign in to a provider.',
+        findRichText: true,
+      ),
+      findsOneWidget,
+    );
+    await tester.tapOnText(find.textRange.ofSubstring('Sign in to a provider'));
+    await settle(tester);
+    expect(
+      find.byKey(const ValueKey('settings-section:providers')),
+      findsOneWidget,
+    );
+
+    await harness.apply(tester, workspace());
+    harness.backend.settingsSection.value = 'defaults';
+    await settle(tester);
+    expect(
+      find.text(
+        'For new agents and chats. Agents you have keep their own model.',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('opening Providers asks Claktory to read again what it shows '
+      "that's stale (ProvidersShown), once each time it opens", (tester) async {
+    final harness = await showProviders(tester);
+    int shown() =>
+        harness.backend.sent.where((sent) => sent.hasProvidersShown()).length;
+    expect(shown(), 1);
+    harness.backend.settingsSection.value = 'general';
+    await settle(tester);
+    expect(shown(), 1);
+    harness.backend.settingsSection.value = 'providers';
+    await settle(tester);
+    expect(shown(), 2);
   });
 
   testWidgets('Settings lists only providers signed in to, and the picker '

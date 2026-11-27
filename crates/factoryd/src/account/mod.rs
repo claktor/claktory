@@ -24,6 +24,7 @@
 pub(crate) mod analytics;
 pub(crate) mod anchor;
 pub(crate) mod apps;
+pub(crate) mod recovery;
 pub(crate) mod relay_token;
 pub(crate) mod reports;
 pub(crate) mod vouch;
@@ -119,6 +120,16 @@ struct Saved {
     /// Sign-outs the service hasn't heard of yet (#524), one per service:
     /// told when it can be reached (`tell_sign_outs`).
     signing_out: Vec<SigningOut>,
+    /// The account's recovery key (#239), when claktory.com's last matched
+    /// the one the vault is sealed to: the Claktory that set it (its id at
+    /// the service) and when, in ms since 1970. Empty when it didn't.
+    recovery_made_by: String,
+    /// Its name as claktory.com gave it then (untrusted, `recovery::name`).
+    recovery_made_name: String,
+    recovery_made_ms: i64,
+    /// claktory.com's key when it's another, not verified: it waits for
+    /// the person (`recovery::use_new`).
+    recovery_waiting: Option<recovery::Waiting>,
 }
 
 /// A sign-out to tell a service of: the sign-in it ends. The backend key
@@ -292,6 +303,15 @@ fn configured_service(config: &AccountConfig) -> String {
     if config.service.is_empty() { DEFAULT_SERVICE.to_owned() } else { service_url(&config.service).unwrap_or_default() }
 }
 
+/// An email as the app's screen shows it: its first character, then "…"
+/// and its domain ("m…@example.com").
+fn masked_email(email: &str) -> String {
+    match email.split_once('@') {
+        Some((user, domain)) => format!("{}…@{domain}", user.chars().next().map(String::from).unwrap_or_default()),
+        None => String::new(),
+    }
+}
+
 /// How the service is named to the person: "claktory.com", or its host.
 fn service_name(service: &str) -> String {
     if service.is_empty() || service == DEFAULT_SERVICE {
@@ -343,6 +363,15 @@ fn try_again(seconds: i64, now: &jiff::ZonedDateTime) -> String {
 }
 
 /// A sign-in request's failure, in the app's words.
+impl Inner {
+    /// Signed in, not removed, with a sign-in waiting for its code: Switch
+    /// account… (V6), which keeps the account signed in until the code
+    /// checks out.
+    fn switching(&self) -> bool {
+        self.pending.is_some() && self.saved.signed_in() && !self.saved.revoked
+    }
+}
+
 fn sign_in_error(service: &str, failure: Failure) -> RequestError {
     let name = service_name(service);
     match failure {
@@ -384,6 +413,15 @@ fn forget_set_aside(dir: &std::path::Path) {
         {
             tracing::warn!(%error, "could not delete a sign-in set aside as unreadable");
         }
+    }
+}
+
+impl Factory {
+    /// Checks in with the account service now rather than at its next
+    /// time; tests'.
+    pub fn check_in_now(&self) {
+        self.account.lock().next_check_in = Instant::now();
+        self.account.wake.notify_one();
     }
 }
 
@@ -733,6 +771,23 @@ impl State {
             .then(|| (saved.account_id.clone(), saved.email.clone(), saved.service.clone()))
     }
 
+    /// Where a device this Claktory recognizes signs in when it's turned
+    /// away to (Error.account_service, account_email; Sale's row 189, Fugo
+    /// 47717): the service, empty for claktory.com, and the email signed in
+    /// with, masked as the app shows it ("m…@example.com"), empty when not
+    /// signed in.
+    pub(crate) fn where_to_sign_in(&self, config: &AccountConfig) -> (String, String) {
+        if !config.enabled {
+            return (String::new(), String::new());
+        }
+        let inner = self.lock();
+        let saved = &inner.saved;
+        let signed_in = saved.signed_in() && !saved.revoked;
+        let service = if signed_in { saved.service.clone() } else { configured_service(config) };
+        let service = if service == DEFAULT_SERVICE { String::new() } else { service };
+        (service, if signed_in { masked_email(&saved.email) } else { String::new() })
+    }
+
     /// This Claktory's registration while it's signed in and not removed:
     /// the account, its Claktory id and the registration's epoch, which a
     /// sign-in again or a move changes (its direct-message leaf goes with it).
@@ -766,7 +821,10 @@ impl State {
         }
         let inner = self.lock();
         let saved = &inner.saved;
-        let state = if inner.pending.is_some() {
+        // Switch account… (V6): signed in, with a code asked for another
+        // address, it shows as signed in, with where the code went.
+        let switching = inner.switching();
+        let state = if inner.pending.is_some() && !switching {
             v1::ClaktoryAccountState::AwaitingCode
         } else if saved.signed_in() && saved.revoked {
             v1::ClaktoryAccountState::Revoked
@@ -775,14 +833,16 @@ impl State {
         } else {
             v1::ClaktoryAccountState::SignedOut
         };
-        let (email, service) = match &inner.pending {
+        let (email, service) = match inner.pending.as_ref().filter(|_| !switching) {
             Some(pending) => (pending.start.email.clone(), pending.service.clone()),
             None if saved.signed_in() => (saved.email.clone(), saved.service.clone()),
             None => (String::new(), configured_service(config)),
         };
         let name = if saved.name.is_empty() { computer_name() } else { saved.name.clone() };
+        let switching_to = inner.pending.as_ref().filter(|_| switching).map(|pending| pending.start.email.clone()).unwrap_or_default();
         #[cfg(feature = "qa-lies")]
-        let email = crate::qa_lies::email(email);
+        let (email, switching_to) =
+            (crate::qa_lies::email(email), if switching_to.is_empty() { switching_to } else { crate::qa_lies::email(switching_to) });
         Some(v1::ClaktoryAccount {
             state: state.into(),
             email,
@@ -804,6 +864,7 @@ impl State {
             // service lets the app go on without it, for now.
             skippable: false,
             code_from: inner.pending.as_ref().map(|pending| pending.code_from.clone()).unwrap_or_default(),
+            switching_to,
         })
     }
 
@@ -916,6 +977,9 @@ fn enabled(factory: &Factory) -> Result<AccountConfig, RequestError> {
 
 fn changed(factory: &Factory) {
     factory.broadcast_workspace(&factory.lock());
+    // Devices let in through the account it no longer has are turned away
+    // at once (row 713), not at the tunnel's next look.
+    factory.account_open();
 }
 
 /// AccountSignIn: emails a code. Signing in again while signed in (another
@@ -971,8 +1035,14 @@ async fn send_code(
     let account = &factory.account;
     let mut asked = account.call(service, Some(verifying), "POST", "/v1/sign-in/start", &start, None).await;
     // A backend key this Claktory signed out with (#524), back from a
-    // backup, say: the service won't take it again, so a new one.
-    if matches!(&asked, Err(Failure::Refused(_, body)) if body.error == "backend_key_retired") {
+    // backup, say: the service won't take it again, so a new one; never
+    // while it's signed in with it (Switch account…, V6), which a new key
+    // would end before the new code checks out.
+    let switching = {
+        let inner = account.lock();
+        inner.saved.signed_in() && !inner.saved.revoked
+    };
+    if !switching && matches!(&asked, Err(Failure::Refused(_, body)) if body.error == "backend_key_retired") {
         tracing::info!(service, "the account service retired this backend key; signing in with a new one");
         account.new_key();
         let (_, key) = account.identity()?;
@@ -1017,6 +1087,20 @@ pub(crate) async fn resend(factory: &Arc<Factory>) -> Result<(), RequestError> {
     send_code(factory, &pending.service, &pending.service_key, pending.key_from, &verifying, pending.start).await
 }
 
+/// AccountSignInCancel (V6): drops the sign-in waiting for its code; the
+/// account signed in, if any, stays exactly as it was. Nothing waiting:
+/// nothing changes.
+pub(crate) async fn cancel_sign_in(factory: &Arc<Factory>) -> Result<(), RequestError> {
+    enabled(factory)?;
+    let account = &factory.account;
+    let _busy = account.busy.lock().await;
+    if account.lock().pending.take().is_some() {
+        tracing::info!("a sign-in waiting for its code was cancelled");
+        changed(factory);
+    }
+    Ok(())
+}
+
 /// AccountVerify: signs in with the emailed code, and protects the vault
 /// with the account. Returns the account it signed in to, once it's this
 /// Claktory's and saved.
@@ -1024,7 +1108,11 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<String,
     enabled(factory)?;
     let account = &factory.account;
     let _busy = account.busy.lock().await;
-    let Some(pending) = account.lock().pending.clone() else {
+    let (pending, switching_from) = {
+        let inner = account.lock();
+        (inner.pending.clone(), inner.switching().then(|| inner.saved.email.clone()))
+    };
+    let Some(pending) = pending else {
         return Err(refused(ErrorCode::InvalidRequest, "Enter your email address first."));
     };
     let Some(verifying) = api::verifying_key(&pending.service_key) else {
@@ -1043,6 +1131,14 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<String,
     let signer = Some(("", signed_out_with.as_ref().unwrap_or(&key)));
     let signed_in: SignedIn = match account.call(&pending.service, Some(&verifying), "POST", "/v1/sign-in/verify", &asked, signer).await {
         Ok(signed_in) => signed_in,
+        // Switching accounts (V6): the account signed in stays as it was,
+        // its key and identity too; only the sign-in asked for ends.
+        Err(Failure::Refused(_, body)) if switching_from.is_some() && ["backend_key_retired", "claktory_taken"].contains(&body.error.as_str()) => {
+            account.lock().pending = None;
+            changed(factory);
+            let current = switching_from.unwrap_or_default();
+            return Err(refused(ErrorCode::InvalidRequest, format!("Claktory couldn't switch to that account. It's still signed in as {current}.")));
+        }
         Err(Failure::Refused(_, body)) if body.error == "backend_key_retired" => {
             account.lock().pending = None;
             account.new_key();
@@ -1128,12 +1224,18 @@ pub(crate) async fn verify(factory: &Arc<Factory>, code: &str) -> Result<String,
         };
         let shares = Zeroizing::new([local.as_slice(), share.as_slice()].concat());
         factory.vault.protect_with_account(&signed_in.account_id, &serde_json::to_string(&params)?, &shares)?;
+        // The account's recovery key (#239), compared with the one the vault
+        // is sealed to.
+        recovery::compare(factory, signed_in.recovery_key.clone()).await;
     } else if factory.vault.exists() {
         account.set_problem("Your secrets stay locked until you open them with the recovery key.");
     }
     factory.vault_changed();
     forget_set_aside(&account.dir);
     relay_token::signed_in(factory);
+    // Switched from another account: devices let in through that one are
+    // turned away (row 713).
+    factory.account_open();
     account.wake.notify_one();
     Ok(signed_in.account_id)
 }
@@ -1191,6 +1293,9 @@ pub(crate) async fn sign_out(factory: &Arc<Factory>) -> Result<(), RequestError>
     tracing::info!("signed out of the account service");
     relay_token::signed_out(factory);
     factory.vault_changed();
+    // Devices let in through the account are turned away (row 713), each
+    // after the answer it's being sent.
+    factory.account_open();
     Ok(())
 }
 
@@ -1501,6 +1606,7 @@ async fn check_in(factory: &Arc<Factory>) {
             // else is awaited (and broadcast).
             account.save();
             reseal(factory, checked.epoch).await;
+            recovery::compare(factory, checked.recovery_key).await;
             register_endpoints(factory).await;
             relay_token::renew(factory).await;
             note_key_from(account).await;

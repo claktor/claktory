@@ -13,7 +13,6 @@ import 'package:factory_app/settings_view.dart';
 import 'package:factory_app/state.dart';
 import 'package:factory_app/tunnel_client.dart';
 import 'package:fixnum/fixnum.dart';
-import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
@@ -1214,11 +1213,16 @@ void main() {
     expect(harness.backend.reconnectsAsked, 1);
     expect(find.byType(ConnectionDialog), findsOneWidget);
     expect(find.text('Nothing answered within 20 seconds.'), findsOneWidget);
+    // The dialog's (the main pane behind it says it too, row 480).
     expect(
-      find.textContaining('Make sure mac-mini is on, awake and online'),
+      find.descendant(
+        of: find.byType(ConnectionDialog),
+        matching: find.textContaining(
+          'Make sure mac-mini is on, awake and online',
+        ),
+      ),
       findsOneWidget,
     );
-    // The dialog's (the main pane behind it has one too, row 480).
     await tester.tap(
       find.descendant(
         of: find.byType(ConnectionDialog),
@@ -1278,16 +1282,7 @@ void main() {
       matching: find.text('Connected to mac-mini'),
     );
     // Settings builds its sections as they scroll into view.
-    await tester.scrollUntilVisible(
-      line,
-      200,
-      scrollable: find
-          .descendant(
-            of: find.byType(SettingsView),
-            matching: find.byType(Scrollable),
-          )
-          .first,
-    );
+    await revealInSettings(tester, line);
     expect(line, findsOneWidget);
     expect(find.text('Private and encrypted.'), findsOneWidget);
     expect(find.textContaining('relay'), findsNothing);

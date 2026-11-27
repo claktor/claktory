@@ -1007,12 +1007,12 @@ void main() {
         expect(status('Connecting to Origin…'), findsOneWidget);
         origin.refused.value = 'unknown device';
         await tester.pump();
-        expect(status("Origin doesn't allow this device"), findsOneWidget);
+        expect(status('Origin no longer allows this device'), findsOneWidget);
         expect(status('Connecting to Origin…'), findsNothing);
         origin.refused.value = null;
         origin.connected.value = true;
         await tester.pump();
-        expect(status("Origin doesn't allow this device"), findsNothing);
+        expect(status('Origin no longer allows this device'), findsNothing);
         expect(status('Loading…'), findsNothing);
         await tester.tap(find.widgetWithText(Button, 'Cancel'));
         await pumpFrames(tester);

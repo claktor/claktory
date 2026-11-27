@@ -7,7 +7,7 @@ import 'agent_name.dart';
 import 'avatar.dart';
 import 'backend.dart';
 import 'card_answer.dart'
-    show AnswerNotSent, CardAnswer, PublishesAnswer, noComment;
+    show AnswerNotSent, CardAnswer, PublishesAnswer, insteadLine, noComment;
 import 'characters/character.dart';
 import 'controls.dart';
 import 'decision.dart';
@@ -20,7 +20,7 @@ import 'mobile/header.dart' show HeaderButton, PhoneHeader;
 import 'mobile/metrics.dart' show TypeScale;
 import 'mobile/page_find.dart' show PhonePageFind, phonePageSearch;
 import 'mobile/input.dart' show InputKind;
-import 'mobile/lines.dart' show ActionLine, ControlsLine;
+import 'mobile/lines.dart' show ActionLine;
 import 'mobile/popover.dart' show presentPopover;
 import 'account.dart' show askSignIn;
 import 'mobile/presentation.dart' show SheetAction, showActions;
@@ -1848,43 +1848,46 @@ class _PipeTrustAskViewState extends State<PipeTrustAskView> {
           reason,
         ],
         const SizedBox(height: Space.m),
-        CommentTyped(
-          controller: ask.comment,
-          builder: (context, typed) => ActionLine(
-            lead: Text(
-              error ??
-                  (typed
-                      ? '${ask.agent} gets your comment. Nothing changes '
-                            'until you answer.'
-                      : account
-                      ? 'Trust it only once $name told you about the change.'
-                      : 'OK keeps the pipe as it is.'),
-              style: type.caption.copyWith(
-                color: error != null ? palette.danger : palette.textFaint,
-              ),
-            ),
-            action: typed
-                ? SubmitButton(onPressed: busy ? null : ask.onReply)
-                : ControlsLine(
-                    children: [
-                      Button(
-                        label: 'Dismiss',
-                        onPressed: busy ? null : ask.onDismiss,
-                      ),
-                      Button(
-                        label: account ? 'Trust' : 'OK',
-                        primary: true,
-                        onPressed: busy ? null : _accept,
-                      ),
-                    ],
-                  ),
+        // The field, open from the start, above the row (Lucy's rules 2
+        // and 4).
+        CardAnswerBlock(
+          field: (focus) => DecisionComment(
+            controller: ask.comment,
+            focusNode: focus,
+            agent: ask.agent,
+            enabled: !busy,
+            onSubmit: ask.onReply,
           ),
-        ),
-        DecisionComment(
-          controller: ask.comment,
-          agent: ask.agent,
-          enabled: !busy,
-          onSubmit: ask.onReply,
+          row: CommentTyped(
+            controller: ask.comment,
+            builder: (context, typed) => CardRow(
+              line: CardLine(
+                error ??
+                    (typed
+                        ? insteadLine(
+                            account ? 'trusting' : 'keeping the pipe as it is',
+                          )
+                        : account
+                        ? 'Trust it only once $name told you about the change.'
+                        : 'OK keeps the pipe as it is.'),
+                color: error != null ? palette.danger : null,
+              ),
+              quiet: [
+                if (!typed)
+                  Button(
+                    label: 'Dismiss',
+                    onPressed: busy ? null : ask.onDismiss,
+                  ),
+              ],
+              primary: typed
+                  ? SubmitButton(onPressed: busy ? null : ask.onReply)
+                  : Button(
+                      label: account ? 'Trust' : 'OK',
+                      primary: true,
+                      onPressed: busy ? null : _accept,
+                    ),
+            ),
+          ),
         ),
       ],
     );
@@ -2465,6 +2468,21 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
                 style: TextStyles.body.copyWith(color: palette.textMuted),
               ),
             ),
+          // The field first, open from the start (Lucy's rule 4).
+          // Approved, the lead chosen here hears it; declined, the agent
+          // that set the pipe up (or Rivet): only this side's agents.
+          DecisionComment(
+            controller: _commentField,
+            agent: 'your agents',
+            note: 'Only your agents see it, not ${pipePeerClaktory(pipe)}.',
+            enabled: !busy,
+            onSubmit: replyTo == null
+                ? null
+                : ask != null
+                ? ask.onReply
+                : () => _reply(replyTo),
+          ),
+          const SizedBox(height: Space.s),
           // A comment typed, with someone to hear it: one Submit, the
           // pipe still waiting (#370).
           CommentTyped(
@@ -2485,8 +2503,7 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
               final words = Text(
                 error ??
                     (replying
-                        ? 'The pipe still waits for you. $replyTo '
-                              'gets your comment.'
+                        ? insteadLine('approving')
                         : check ??
                               (_sentTo != null
                                   ? 'Sent to $_sentTo.'
@@ -2563,19 +2580,6 @@ class _PipeApprovalCardState extends State<PipeApprovalCard>
                 },
               );
             },
-          ),
-          // Approved, the lead chosen here hears it; declined, the agent
-          // that set the pipe up (or Rivet): only this side's agents.
-          DecisionComment(
-            controller: _commentField,
-            agent: 'your agents',
-            note: 'Only your agents see it, not ${pipePeerClaktory(pipe)}.',
-            enabled: !busy,
-            onSubmit: replyTo == null
-                ? null
-                : ask != null
-                ? ask.onReply
-                : () => _reply(replyTo),
           ),
         ],
       ),
@@ -3346,6 +3350,16 @@ class _PipeMessageViewState extends State<PipeMessageView>
           ),
           if (_error case final error?) line(error, color: palette.danger),
           const SizedBox(height: Space.xs),
+          // The field first, open from the start (Lucy's rule 4).
+          if (hearer != null)
+            DecisionComment(
+              controller: _comment,
+              agent: hearer,
+              peer: pipePeerClaktory(widget.pipe),
+              enabled: !_busy,
+              onSubmit: replies ? () => _decide(false, reply: true) : null,
+            ),
+          if (hearer != null) const SizedBox(height: Space.s),
           if (replies)
             CommentTyped(
               controller: _comment,
@@ -3355,10 +3369,7 @@ class _PipeMessageViewState extends State<PipeMessageView>
                       runSpacing: Space.xs,
                       crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
-                        line(
-                          'Not sent. $hearer gets your comment and writes '
-                          'it again.',
-                        ),
+                        line(insteadLine('sending')),
                         SubmitButton(
                           onPressed: _busy
                               ? null
@@ -3370,14 +3381,6 @@ class _PipeMessageViewState extends State<PipeMessageView>
             )
           else
             choices,
-          if (hearer != null)
-            DecisionComment(
-              controller: _comment,
-              agent: hearer,
-              peer: pipePeerClaktory(widget.pipe),
-              enabled: !_busy,
-              onSubmit: replies ? () => _decide(false, reply: true) : null,
-            ),
         ],
       );
     }
@@ -5205,52 +5208,47 @@ class _SecretApprovalCardState extends State<SecretApprovalCard>
           ],
           const SizedBox(height: Space.m),
           if (pending) ...[
-            // A comment typed: one Submit, which doesn't allow it (#370).
-            CommentTyped(
-              controller: _comment,
-              builder: (context, typed) => Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      _error ??
-                          (typed
-                              ? 'Not allowed this time. $name gets your '
-                                    'comment.'
-                              : 'If you allow it, this command runs once.'),
-                      style: TextStyles.caption.copyWith(
-                        color: _error == null
-                            ? palette.textFaint
-                            : palette.danger,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: Space.s),
-                  if (typed)
-                    SubmitButton(
-                      onPressed: _busy
-                          ? null
-                          : () => _decide(false, reply: true),
-                    )
-                  else ...[
-                    Button(
-                      label: "Don't allow",
-                      onPressed: _busy ? null : () => _decide(false),
-                    ),
-                    const SizedBox(width: Space.s),
-                    Button(
-                      label: 'Allow once',
-                      primary: true,
-                      onPressed: _busy ? null : () => _decide(true),
-                    ),
-                  ],
-                ],
+            // The field, open from the start, above the row (Lucy's rules
+            // 2 and 4); a comment typed: one Submit, which doesn't allow it
+            // (#370).
+            CardAnswerBlock(
+              field: (focus) => DecisionComment(
+                controller: _comment,
+                focusNode: focus,
+                agent: name,
+                enabled: !_busy,
+                onSubmit: () => _decide(false, reply: true),
               ),
-            ),
-            DecisionComment(
-              controller: _comment,
-              agent: name,
-              enabled: !_busy,
-              onSubmit: () => _decide(false, reply: true),
+              row: CommentTyped(
+                controller: _comment,
+                builder: (context, typed) => CardRow(
+                  line: CardLine(
+                    _error ??
+                        (typed
+                            ? insteadLine('allowing')
+                            : 'If you allow it, this command runs once.'),
+                    color: _error == null ? null : palette.danger,
+                  ),
+                  quiet: [
+                    if (!typed)
+                      Button(
+                        label: "Don't allow",
+                        onPressed: _busy ? null : () => _decide(false),
+                      ),
+                  ],
+                  primary: typed
+                      ? SubmitButton(
+                          onPressed: _busy
+                              ? null
+                              : () => _decide(false, reply: true),
+                        )
+                      : Button(
+                          label: 'Allow once',
+                          primary: true,
+                          onPressed: _busy ? null : () => _decide(true),
+                        ),
+                ),
+              ),
             ),
           ] else
             Row(

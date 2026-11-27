@@ -15,6 +15,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
 import 'ipad/as_ipad.dart';
+import 'pair_start.dart' show pastPairStart;
 
 Future<Harness> _show(
   WidgetTester tester,
@@ -220,8 +221,9 @@ void main() {
     expect(find.textContaining('iPhone'), findsNothing);
   });
 
-  testWidgets('a phone with a Claktory already, adding another: straight to '
-      'the ways in', (tester) async {
+  testWidgets('a phone with a Claktory already, adding another, signed '
+      'out: straight to the email sign-in, the code a link away (area 2, '
+      '8.2)', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final harness = Harness(Workspace(), localBackend: false);
@@ -236,6 +238,11 @@ void main() {
     expect(find.byType(PairScreen), findsOneWidget);
     expect(find.text('Already set up?'), findsNothing);
     expect(find.text('Send me the link'), findsNothing);
+    // Your account first, a code second: never the scanner first.
+    expect(find.byKey(const ValueKey('device-email')), findsOneWidget);
+    expect(find.text('Use a code instead'), findsOneWidget);
+    await tester.tap(find.text('Use a code instead'));
+    await pumpFrames(tester);
     expect(find.text('Sign in with your email instead'), findsOneWidget);
   });
 
@@ -297,5 +304,18 @@ void main() {
     expect(find.textContaining('Paste the code for this iPhone.'), findsOne);
     expect(tester.getRect(find.bySemanticsLabel('Back')).top, greaterThan(0));
     expect(tester.getRect(find.text(title)).top, greaterThan(0));
+  });
+
+  testWidgets('"Paste code instead" under Continue is a node of its own, '
+      "the link's size: TalkBack frames it, not the whole screen "
+      "(Sale's row 195)", (tester) async {
+    final semantics = tester.ensureSemantics();
+    await _show(tester, TargetPlatform.android, size: const Size(411, 914));
+    await pastPairStart(tester);
+    final link = find.bySemanticsLabel('Paste code instead').last;
+    expect(tester.getSemantics(link).rect.height, lessThan(100));
+    final continueNode = tester.getSemantics(find.bySemanticsLabel('Continue'));
+    expect(continueNode.parent?.label, isNot('Paste code instead'));
+    semantics.dispose();
   });
 }

@@ -1,10 +1,15 @@
 import 'package:factory_app/account.dart';
 import 'package:factory_app/backend.dart';
+import 'package:factory_app/connections.dart'
+    show RemoteFactory, parsePairingCode;
+import 'package:factory_app/device_account.dart'
+    show AccountClaktory, DeviceAccount;
+import 'package:factory_app/devices.dart' show thisDeviceKind;
 import 'package:factory_app/name_step.dart' show nameFromEmail;
 import 'package:factory_app/controls.dart' show Field;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
-import 'package:factory_app/settings_view.dart';
+import 'package:factory_app/settings_shell.dart' show SettingAnchor;
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -12,6 +17,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'app_test.dart' show workspace;
+import 'device_confirm_test.dart' as confirm show FakeAccountApi, signedIn;
 import 'harness.dart';
 
 /// The sign-in step's field.
@@ -109,19 +115,9 @@ Future<void> openSettings(WidgetTester tester, Harness harness) async {
   await settle(tester);
 }
 
-Future<void> reveal(WidgetTester tester, Finder target) async {
-  await tester.scrollUntilVisible(
-    target,
-    200,
-    scrollable: find
-        .descendant(
-          of: find.byType(SettingsView),
-          matching: find.byType(Scrollable),
-        )
-        .first,
-  );
-  await pumpFrames(tester);
-}
+/// Settings at the section holding [target], scrolled to it.
+Future<void> reveal(WidgetTester tester, Finder target, {String? section}) =>
+    revealInSettings(tester, target, section: section);
 
 void main() {
   testWidgets('with the account off, nothing of it shows', (tester) async {
@@ -445,9 +441,321 @@ void main() {
     await tester.tap(find.text('Sign out…'));
     await pumpFrames(tester);
     expect(find.text('Sign out of Claktory?'), findsOneWidget);
+    // This Mac's own: nothing disconnects.
+    expect(find.textContaining('let it in through your account'), findsNothing);
     await tester.tap(find.text('Sign out').last);
     await pumpFrames(tester);
     expect(harness.last.hasAccountSignOut(), isTrue);
+  });
+
+  testWidgets('signing out a Claktory this device reached through the '
+      'account says it disconnects, and the ways back (#529, V6)', (
+    tester,
+  ) async {
+    final harness = await showAccount(tester, signedIn);
+    harness.connections.use(
+      RemoteFactory.fromAccount(
+        AccountClaktory(id: 's', name: 'Studio', endpointId: 'e' * 64),
+      ),
+    );
+    // Connected to it: its own Workspace, its account signed in.
+    harness.backend.workspace.apply(withAccount(signedIn));
+    await pumpFrames(tester);
+    await openSettings(tester, harness);
+    await reveal(tester, find.text('Sign out…'));
+    await tester.tap(find.text('Sign out…'));
+    await pumpFrames(tester);
+    expect(
+      find.textContaining(
+        'disconnects from Studio, which let it in through your account. To '
+        'connect again, add this $thisDeviceKind on Studio in Settings → '
+        'Devices, or run factoryd pair in a terminal there.',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('Switch account… keeps this account until the new one\'s '
+      'code checks out, then closes (#529, V6)', (tester) async {
+    final harness = await showAccount(tester, signedIn);
+    await openSettings(tester, harness);
+    await reveal(tester, find.text('Switch account…'));
+    await tester.tap(find.text('Switch account…'));
+    await pumpFrames(tester);
+    final form = find.byType(SwitchAccountForm);
+    final input = find.descendant(
+      of: form,
+      matching: find.byType(EditableText),
+    );
+    expect(find.text('Switch account'), findsOneWidget);
+    expect(
+      find.textContaining(
+        "stays signed in as matt@example.com until you enter the new "
+        "account's code.",
+      ),
+      findsOneWidget,
+    );
+    // Its own Mac: nothing to warn about.
+    expect(find.textContaining('stops letting this'), findsNothing);
+
+    await tester.enterText(input, ' new@example.com ');
+    await tester.pump();
+    await tester.tap(find.text('Send code'));
+    await pumpFrames(tester);
+    expect(harness.last.accountSignIn.email, 'new@example.com');
+
+    // Still signed in as before, the code pending.
+    final pending = harness.backend.workspace.workspace.deepCopy();
+    pending.account
+      ..switchingTo = 'new@example.com'
+      ..codeFrom = 'hello@claktory.com'
+      ..codeExpiresMs = Int64(
+        DateTime.now().add(const Duration(minutes: 15)).millisecondsSinceEpoch,
+      );
+    await harness.apply(tester, pending);
+    await pumpFrames(tester);
+    expect(find.text('Check your email'), findsOneWidget);
+    expect(
+      find.textContaining('Enter the 6-digit code sent to new@example.com.'),
+      findsOneWidget,
+    );
+    expect(
+      find.text(
+        "It's from hello@claktory.com. Can't find it? Check your spam "
+        'folder.',
+      ),
+      findsOneWidget,
+    );
+
+    await tester.enterText(input, '123 456');
+    await tester.pump();
+    expect(harness.last.accountVerify.code, '123456');
+
+    final switched = harness.backend.workspace.workspace.deepCopy();
+    switched.account
+      ..email = 'new@example.com'
+      ..clearSwitchingTo()
+      ..clearCodeFrom()
+      ..clearCodeExpiresMs();
+    await harness.apply(tester, switched);
+    await pumpFrames(tester);
+    expect(form, findsNothing);
+    expect(find.text('new@example.com'), findsOneWidget);
+    expect(find.text('Switch account…'), findsOneWidget);
+  });
+
+  testWidgets('the switch code boxes take the focus each time the code '
+      'step shows, and again after Resend code (V6, Abbacchio)', (
+    tester,
+  ) async {
+    final harness = await showAccount(tester, signedIn);
+    await openSettings(tester, harness);
+    await reveal(tester, find.text('Switch account…'));
+    await tester.tap(find.text('Switch account…'));
+    await pumpFrames(tester);
+    final form = find.byType(SwitchAccountForm);
+    final input = find.descendant(
+      of: form,
+      matching: find.byType(EditableText),
+    );
+    bool boxesFocused() => tester
+        .widget<EditableText>(
+          find.descendant(
+            of: find.byKey(const ValueKey('switch-code')),
+            matching: find.byType(EditableText),
+          ),
+        )
+        .focusNode
+        .hasFocus;
+    Future<void> codeSent(String to, {bool resendable = false}) async {
+      final pending = harness.backend.workspace.workspace.deepCopy();
+      pending.account
+        ..switchingTo = to
+        ..codeExpiresMs = Int64(
+          DateTime.now()
+              .add(Duration(minutes: resendable ? 1 : 15))
+              .millisecondsSinceEpoch,
+        );
+      await harness.apply(tester, pending);
+      await pumpFrames(tester);
+    }
+
+    await tester.enterText(input, 'new@example.com');
+    await tester.pump();
+    await tester.tap(find.text('Send code'));
+    await pumpFrames(tester);
+    await codeSent('new@example.com');
+    expect(boxesFocused(), isTrue);
+
+    // Another address, then its code: the boxes again, focused.
+    await tester.tap(find.text('Use a different email'));
+    await pumpFrames(tester);
+    await tester.enterText(input, 'other@example.com');
+    await tester.pump();
+    await tester.tap(find.text('Send code'));
+    await pumpFrames(tester);
+    await codeSent('other@example.com', resendable: true);
+    expect(boxesFocused(), isTrue);
+
+    // Away from the boxes, then Resend code: back in them.
+    FocusManager.instance.primaryFocus?.unfocus();
+    await tester.pump();
+    expect(boxesFocused(), isFalse);
+    await tester.tap(find.text('Resend code'));
+    await pumpFrames(tester);
+    expect(boxesFocused(), isTrue);
+  });
+
+  testWidgets('a switch waiting for its code says so; Cancel drops it '
+      '(#529, V6)', (tester) async {
+    final snapshot = withAccount(signedIn);
+    snapshot.account
+      ..switchingTo = 'new@example.com'
+      ..codeExpiresMs = Int64(
+        DateTime.now().add(const Duration(minutes: 15)).millisecondsSinceEpoch,
+      );
+    final harness = Harness(snapshot);
+    await harness.show(tester, size: const Size(1200, 900));
+    await pumpFrames(tester);
+    await openSettings(tester, harness);
+    await reveal(tester, find.text('Enter code…'));
+    expect(
+      find.text(
+        'Switching to new@example.com: enter the code sent there to finish.',
+      ),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Enter code…'));
+    await pumpFrames(tester);
+    expect(find.text('Check your email'), findsOneWidget);
+    // Cancel drops the code asked for; the account stays.
+    await tester.tap(find.text('Cancel').last);
+    await pumpFrames(tester);
+    expect(harness.last.hasAccountSignInCancel(), isTrue);
+    expect(find.byType(SwitchAccountForm), findsNothing);
+  });
+
+  testWidgets('switching a Claktory this device reached through the '
+      'account warns it may stop letting it in (#529, V6)', (tester) async {
+    final harness = await showAccount(tester, signedIn);
+    harness.connections.use(
+      RemoteFactory.fromAccount(
+        AccountClaktory(id: 's', name: 'Studio', endpointId: 'e' * 64),
+      ),
+    );
+    harness.backend.workspace.apply(withAccount(signedIn));
+    await pumpFrames(tester);
+    await openSettings(tester, harness);
+    await reveal(tester, find.text('Switch account…'));
+    await tester.tap(find.text('Switch account…'));
+    await pumpFrames(tester);
+    expect(
+      find.text(
+        "If the new account isn't the one this $thisDeviceKind uses, Studio "
+        'stops letting this $thisDeviceKind in. To connect again, add this '
+        '$thisDeviceKind on Studio in Settings → Devices, or run factoryd '
+        'pair in a terminal there.',
+      ),
+      findsOneWidget,
+    );
+    // Nothing asked yet: Cancel only closes.
+    await tester.tap(find.text('Cancel').last);
+    await pumpFrames(tester);
+    expect(
+      harness.backend.sent.where((m) => m.hasAccountSignInCancel()),
+      isEmpty,
+    );
+  });
+
+  testWidgets("on a device without its own Claktory, Settings → Account "
+      "says whether this device is signed in, with Sign in… or Sign out…, "
+      "first in This Mac, never in Account (area 2, 8.5; Lucy 49738)", (
+    tester,
+  ) async {
+    Future<Harness> on(DeviceAccount account, {bool local = false}) async {
+      // A fresh tree: the app before keeps none of its state.
+      await tester.pumpWidget(const SizedBox());
+      final harness = Harness(
+        withAccount(signedIn),
+        localBackend: local,
+        account: account,
+      );
+      harness.connections.use(
+        parsePairingCode('factory://?t=${'c' * 64}&e=${'a' * 64}&name=Studio'),
+      );
+      await harness.show(tester, size: const Size(1200, 900));
+      await pumpFrames(tester);
+      harness.backend.workspace.apply(withAccount(signedIn));
+      await pumpFrames(tester);
+      await openSettings(tester, harness);
+      return harness;
+    }
+
+    // Signed in: who as, and a quiet Sign out….
+    await on(confirm.signedIn(confirm.FakeAccountApi()));
+    final line = find.text('Signed in as matt@example.com.');
+    await reveal(tester, line);
+    expect(line, findsOneWidget);
+    // This device's own section, not the Claktory's Account.
+    expect(
+      find.ancestor(
+        of: find.byType(DeviceAccountRow),
+        matching: find.byWidgetPredicate(
+          (widget) => widget is SettingAnchor && widget.id == 'device-account',
+        ),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.ancestor(
+        of: find.byType(DeviceAccountRow),
+        matching: find.byType(AccountSettings),
+      ),
+      findsNothing,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(DeviceAccountRow),
+        matching: find.text('Sign out…'),
+      ),
+      findsOneWidget,
+    );
+
+    // Signed out: Sign in…, in a dialog of its own.
+    await on(DeviceAccount());
+    final out = find.text('Not signed in.');
+    await reveal(tester, out);
+    expect(out, findsOneWidget);
+    await tester.tap(
+      find.descendant(
+        of: find.byType(DeviceAccountRow),
+        matching: find.text('Sign in…'),
+      ),
+    );
+    await pumpFrames(tester);
+    expect(find.text('Sign in on this $thisDeviceKind'), findsOneWidget);
+    expect(find.byKey(const ValueKey('device-email')), findsOneWidget);
+  });
+
+  testWidgets("a Mac with its own Claktory says nothing of this device's "
+      'sign-in: it signs in with its Claktory (area 2, §6)', (tester) async {
+    final harness = await showAccount(tester, signedIn);
+    await openSettings(tester, harness);
+    await reveal(tester, find.text('Sign out…'));
+    expect(find.byType(DeviceAccountRow), findsNothing);
+  });
+
+  testWidgets('a self-hosted account service is named as itself, never '
+      "claktory.com (Zucchero's V6 NIT)", (tester) async {
+    final snapshot = withAccount(signedIn);
+    snapshot.account.service = 'https://accounts.example.test';
+    final harness = Harness(snapshot);
+    await harness.show(tester, size: const Size(1200, 900));
+    await pumpFrames(tester);
+    await openSettings(tester, harness);
+    await reveal(tester, find.text('Manage account at accounts.example.test'));
+    expect(find.text('Shared with accounts.example.test'), findsOneWidget);
+    expect(find.textContaining('claktory.com'), findsNothing);
   });
 
   testWidgets('another account service signs out first', (tester) async {
@@ -549,6 +857,53 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('on an iPhone SE at the largest text, the switch code sheet '
+      'fits, Resend and the other email under the code (#529, V6)', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    tester.platformDispatcher.textScaleFactorTestValue = 53 / 17;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    final snapshot = withAccount(signedIn);
+    snapshot.account
+      ..switchingTo = 'new@example.com'
+      ..codeExpiresMs = Int64(
+        DateTime.now().add(const Duration(minutes: 10)).millisecondsSinceEpoch,
+      );
+    final harness = Harness(snapshot);
+    await harness.show(tester, size: const Size(320, 568));
+    await pumpFrames(tester);
+    await openSettings(tester, harness);
+    // Account's page, as its row in Settings' list opens it.
+    harness.backend.settingsSection.value = 'account';
+    await pumpFrames(tester);
+    await reveal(tester, find.text('Enter code…'));
+    await tester.tap(find.text('Enter code…'));
+    await pumpFrames(tester);
+    expect(tester.takeException(), isNull);
+    expect(find.text('Check your email'), findsOneWidget);
+    final sheet = find
+        .ancestor(
+          of: find.byKey(const ValueKey('switch-code')),
+          matching: find.byType(Scrollable),
+        )
+        .first;
+    for (final target in [
+      find.text('Resend code'),
+      find.text('Use a different email'),
+    ]) {
+      await tester.scrollUntilVisible(target, 200, scrollable: sheet);
+      await pumpFrames(tester);
+      final rect = tester.getRect(target);
+      expect(rect.top, greaterThanOrEqualTo(0));
+      expect(rect.bottom, lessThanOrEqualTo(568));
+    }
+    await tester.tap(find.text('Resend code'));
+    await pumpFrames(tester);
+    expect(harness.last.hasAccountResend(), isTrue);
+  });
+
   // Zucchero's row 126: at AX XXXL on an iPhone SE the sheet overflowed by
   // 2487 px and couldn't scroll, so the key couldn't be seen.
   testWidgets('on an iPhone SE at the largest text, the recovery key sheet '
@@ -563,8 +918,8 @@ void main() {
       size: const Size(320, 568),
     );
     await openSettings(tester, harness);
-    await reveal(tester, find.text('Account'));
-    await tester.tap(find.text('Account'));
+    // Account's page, as its row or a link opens it.
+    harness.backend.settingsSection.value = 'account';
     await pumpFrames(tester);
     await reveal(tester, find.text('Show recovery key…'));
     await tester.tap(find.text('Show recovery key…'));

@@ -97,7 +97,7 @@ async fn the_card_names_the_secret_that_fits_and_follows_the_vault() {
     call(&mut client, &mut view, "bo", "secrets_request", &asking("https://github.com/settings/tokens/new?scopes=repo")).await;
     let request = latest(&view);
     assert_eq!(request.link_host, "github.com");
-    assert_eq!(request.fitting_secret_id, "", "an empty vault: the card is the form");
+    assert_eq!(request.fitting_secret_id, "", "an empty vault: the request is the form");
 
     // A secret that sets what it asks for, added while it waits: the card
     // names it now.

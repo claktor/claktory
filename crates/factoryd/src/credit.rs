@@ -207,7 +207,22 @@ fn view(credit: &KeyCredit, provider: &str, now: i64) -> v1::AccountCredit {
         warning,
         read_ms: now,
         error: String::new(),
+        left_shown: if limited && left > 0.0 { format!("{} left", dollars(left)) } else { String::new() },
     }
+}
+
+/// "$1,234.50": dollars to the cent, with thousands set apart.
+fn dollars(amount: f64) -> String {
+    let cents = (amount * 100.0).round() as u64;
+    let whole = (cents / 100).to_string();
+    let mut grouped = String::new();
+    for (index, digit) in whole.chars().enumerate() {
+        if index > 0 && (whole.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    format!("${grouped}.{:02}", cents % 100)
 }
 
 /// When a limit that refills `reset` ("daily", "weekly" or "monthly", in
@@ -233,6 +248,17 @@ mod tests {
 
     fn at(text: &str) -> i64 {
         text.parse::<jiff::Timestamp>().expect("a time").as_millisecond()
+    }
+
+    #[test]
+    fn what_is_left_reads_in_dollars_only_while_a_limit_has_some() {
+        let key = |limit: Option<f64>, left: Option<f64>| KeyCredit { limit, left, ..KeyCredit::default() };
+        assert_eq!(view(&key(Some(50.0), Some(12.4)), "OpenRouter", NOW).left_shown, "$12.40 left");
+        assert_eq!(view(&key(Some(5000.0), Some(1234.505)), "OpenRouter", NOW).left_shown, "$1,234.51 left");
+        assert_eq!(view(&key(Some(50.0), Some(0.0)), "OpenRouter", NOW).left_shown, "");
+        assert_eq!(view(&key(None, None), "OpenRouter", NOW).left_shown, "");
+        assert_eq!(dollars(0.004), "$0.00");
+        assert_eq!(dollars(999.999), "$1,000.00");
     }
 
     #[test]

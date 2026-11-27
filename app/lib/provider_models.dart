@@ -23,7 +23,10 @@ String modelsStatus(Provider provider, DateTime now) {
 
 /// A provider's models in its card in Settings → Providers: [modelsStatus],
 /// with Refresh models where the provider's list can be read now, and why
-/// the last read failed (the list there stays).
+/// the last read failed (the list there stays). A read the provider refused
+/// for its sign-in or key says "Sign-in expired" with Sign in again…, in
+/// place of Tell Rivet: Rivet can't sign in for the person (settings.md
+/// ST2). It marks nothing signed out: requests may still work.
 class ProviderModels extends StatefulWidget {
   const ProviderModels({super.key, required this.provider});
 
@@ -51,6 +54,25 @@ class _ProviderModelsState extends State<ProviderModels> {
       if (mounted) setState(() => _failure = error.message);
     } finally {
       if (mounted) setState(() => _asked = false);
+    }
+  }
+
+  /// The usual sign-in, as an account's own Sign in again… starts it: with
+  /// the first account's way, adding, so it replaces itself in place and
+  /// never overwrites a working one.
+  Future<void> _signInAgain() async {
+    final provider = widget.provider;
+    final first = provider.accounts.firstOrNull;
+    final method = first?.methodId ?? provider.methods.firstOrNull?.id ?? '';
+    setState(() => _failure = null);
+    try {
+      await AppScope.scope(context).login.start(
+        provider.id,
+        method.isEmpty ? 'oauth' : method,
+        addAccount: first != null,
+      );
+    } on RequestFailure catch (error) {
+      if (mounted) setState(() => _failure = error.message);
     }
   }
 
@@ -84,7 +106,29 @@ class _ProviderModelsState extends State<ProviderModels> {
               ),
           ],
         ),
-        if (error != null && !busy)
+        if (provider.modelsFetchSignedOut &&
+            provider.modelsFetchError.isNotEmpty &&
+            !busy)
+          Padding(
+            padding: const EdgeInsets.only(top: Space.xs),
+            child: Wrap(
+              spacing: Space.s,
+              runSpacing: Space.xs,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Text(
+                  'Sign-in expired',
+                  style: TypeScale.of(context).caption
+                      .copyWith(color: palette.danger),
+                ),
+                Button(label: 'Sign in again…', onPressed: _signInAgain),
+                // Signing in couldn't start: that one is worth telling.
+                if (_failure case final failure? when !_asked)
+                  ErrorLine(failure, about: 'In Settings → Providers:'),
+              ],
+            ),
+          )
+        else if (error != null && !busy)
           Padding(
             padding: const EdgeInsets.only(top: Space.xs),
             child: ErrorLine(error, about: 'In Settings → Providers:'),

@@ -1,5 +1,7 @@
-// Needs you on an iPhone (#514, Formaggio's spec §7): the screen is focus
-// mode itself, one card a screen. Its title says where the card is among
+// Needs you's cards on an iPhone (#514, Formaggio's spec §7), one a
+// screen: focus mode, which the person starts from the list, or one request
+// they tapped in it, alone ([PhoneNeedsYou.only]; #599, needs-you-cards.md
+// §4.5), which goes back to the list once answered. Its title says where the card is among
 // those waiting ("3 of 7") and opens the queue as a sheet; ˄ ˅ move
 // between cards, as Mail's do between messages; who asks is a row that
 // pushes the card's conversation; and the answer is pinned at the foot,
@@ -48,6 +50,10 @@ const phoneThumbRow = 50.0;
 /// The answer pinned at the foot (tests find its buttons by it).
 const phoneThumbDockKey = Key('needs-you-thumb-dock');
 
+/// How long an answered request tapped in the list stays, its receipt
+/// showing, before the list comes back.
+const phoneAnsweredFor = Duration(milliseconds: 600);
+
 /// Needs you on a phone: the sitting's cards, one a screen.
 class PhoneNeedsYou extends StatefulWidget {
   const PhoneNeedsYou({
@@ -56,7 +62,14 @@ class PhoneNeedsYou extends StatefulWidget {
     this.onClose,
     this.reviewBody,
     this.onContext,
+    this.only,
   });
+
+  /// One request alone, by its key, tapped in the list: titled with who
+  /// asks, with no place among the rest nor ˄ ˅, and closed once its
+  /// answer is accepted (after [phoneAnsweredFor], its receipt showing),
+  /// or when it's gone. Null: focus mode, every card in turn.
+  final String? only;
 
   /// The sitting to show (an iPad's focus mode, kept above a resize, or a
   /// test's); else one of its own, for as long as the screen is up.
@@ -96,6 +109,9 @@ class _PhoneNeedsYouState extends State<PhoneNeedsYou> {
     if (_own?.backend == backend) return;
     _own?.removeListener(_changed);
     _own?.dispose();
+    // A request tapped in the list: the sitting shows it, as one a
+    // notification asks for.
+    if (widget.only case final only?) backend.needsYouCard.value = only;
     _own = FocusSession(backend)..addListener(_changed);
   }
 
@@ -107,6 +123,7 @@ class _PhoneNeedsYouState extends State<PhoneNeedsYou> {
 
   @override
   void dispose() {
+    _closing?.cancel();
     widget.session?.removeListener(_changed);
     _own?.removeListener(_changed);
     _own?.dispose();
@@ -118,6 +135,42 @@ class _PhoneNeedsYouState extends State<PhoneNeedsYou> {
     final receipt = _session.receipt;
     if (receipt != null && receipt != _receipt) unawaited(Haptics.success());
     _receipt = receipt;
+    _holdOnly();
+    _closeOnceAnswered();
+  }
+
+  /// A request alone never gives way to another: the sitting moves on as
+  /// an answer lands, and it's brought back at once, before anything is
+  /// drawn, so the receipt shows over this one and nothing else can take
+  /// a tap meant for it (Squalo's B1).
+  void _holdOnly() {
+    final only = widget.only, session = _session;
+    if (only == null || session.current?.key == only) return;
+    if (session.items.any((item) => item.key == only)) session.select(only);
+  }
+
+  Timer? _closing;
+
+  /// A request alone goes back to the list once its answer here was
+  /// accepted (a card with something to show once answered, a pipe
+  /// invite's code, stays until Back), or at once when it's gone.
+  void _closeOnceAnswered() {
+    final only = widget.only;
+    if (only == null || _closing != null) return;
+    final session = _session;
+    final outcome = session.outcomeOf(only);
+    final answered =
+        outcome != null &&
+        outcome.state == FocusOutcomeState.ended &&
+        outcome.here &&
+        !(session.answer.value?.keep ?? false);
+    final gone =
+        session.items.isNotEmpty &&
+        !session.items.any((item) => item.key == only);
+    if (!answered && !gone) return;
+    _closing = Timer(gone ? Duration.zero : phoneAnsweredFor, () {
+      if (mounted) _close();
+    });
   }
 
   void _close() {
@@ -150,18 +203,34 @@ class _PhoneNeedsYouState extends State<PhoneNeedsYou> {
         final own = review == null
             ? null
             : widget.reviewBody?.call(context, item!, review);
+        final only = widget.only != null;
         final moving =
-            session.waiting.length > 1 ||
-            (item != null && !session.isWaiting(item.key) && of > 0);
+            !only &&
+            (session.waiting.length > 1 ||
+                (item != null && !session.isWaiting(item.key) && of > 0));
+        final who = item == null
+            ? ''
+            : focusWho(session.backend.workspace.workspace, item);
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             PhoneHeader(
               leading: HeaderButton.back(onTap: _close),
-              title: _Title(at: at, of: of, item: item),
-              onTitleTap: () => _openQueue(context, session),
-              titleLabel: at > 0 ? '$at of $of waiting' : 'Needs you',
-              titleHint: 'Shows everything that waits',
+              title: only
+                  ? Text(
+                      who.isEmpty ? 'Needs you' : who,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: PhoneType.emphasis.copyWith(color: palette.text),
+                    )
+                  : _Title(at: at, of: of, item: item),
+              onTitleTap: only ? null : () => _openQueue(context, session),
+              titleLabel: only
+                  ? null
+                  : at > 0
+                  ? '$at of $of waiting'
+                  : 'Needs you',
+              titleHint: only ? null : 'Shows everything that waits',
               trailing: [
                 if (moving) ...[
                   HeaderButton(
@@ -195,7 +264,7 @@ class _PhoneNeedsYouState extends State<PhoneNeedsYou> {
             ),
             Expanded(
               child: item == null
-                  ? _NothingLeft(session: session)
+                  ? _NothingLeft(session: session, onDone: _close)
                   // The next card fades up as the last goes (§7.4); with
                   // Reduce Motion it simply swaps. Only one card is built.
                   : TweenAnimationBuilder<double>(
@@ -210,6 +279,8 @@ class _PhoneNeedsYouState extends State<PhoneNeedsYou> {
                       child: _Card(
                         session: session,
                         item: item,
+                        onDone: _close,
+                        alone: widget.only != null,
                         own: own,
                         onContext: widget.onContext,
                       ),
@@ -225,7 +296,13 @@ class _PhoneNeedsYouState extends State<PhoneNeedsYou> {
                       .copyWith(color: palette.textMuted),
                 ),
               ),
-            if (item != null && !(own?.answers ?? false))
+            // A request alone, once its answer is accepted, takes no more:
+            // its receipt shows until the list comes back.
+            if (item != null &&
+                !(own?.answers ?? false) &&
+                !(only &&
+                    session.outcomeOf(item.key)?.state ==
+                        FocusOutcomeState.ended))
               _ThumbDock(key: phoneThumbDockKey, session: session, item: item),
           ],
         );
@@ -279,12 +356,21 @@ class _Card extends StatelessWidget {
   const _Card({
     required this.session,
     required this.item,
+    required this.onDone,
+    this.alone = false,
     this.own,
     this.onContext,
   });
 
   final FocusSession session;
   final NeedsYouItem item;
+
+  /// Back to the list, from a card ended with nothing after it.
+  final VoidCallback onDone;
+
+  /// Opened alone from the list: once it's ended, Done goes back to it,
+  /// never Next to another (Zucchero 49234).
+  final bool alone;
 
   /// The platform's own review of the card's file, if it has one.
   final FocusReviewBody? own;
@@ -348,13 +434,19 @@ class _Card extends StatelessWidget {
                             ),
                           ),
                         ),
-                        Button(
-                          label: 'Next',
-                          primary: true,
-                          onPressed: session.waiting.isEmpty
-                              ? null
-                              : session.next,
-                        ),
+                        // Nothing after it: Done, back to the list, rather
+                        // than a Next with nowhere to go (F3).
+                        session.waiting.isEmpty || alone
+                            ? Button(
+                                label: 'Done',
+                                primary: true,
+                                onPressed: onDone,
+                              )
+                            : Button(
+                                label: 'Next',
+                                primary: true,
+                                onPressed: session.next,
+                              ),
                       ],
                     ),
                     const SizedBox(height: Space.m),
@@ -562,7 +654,11 @@ class _WhoAsks extends StatelessWidget {
     if (!watch || open == null) return clamped;
     return Semantics(
       button: true,
-      label: '$who, ${agent?.role ?? ''}',
+      // No role, no trailing comma for VoiceOver (Zucchero 48776).
+      label: [
+        who,
+        if (agent?.role case final role? when role.isNotEmpty) role,
+      ].join(', '),
       hint: "Opens $who's conversation",
       excludeSemantics: true,
       child: Pressable(onTap: open, builder: (context, _) => clamped),
@@ -686,6 +782,11 @@ class _ThumbDockState extends State<_ThumbDock> {
     final palette = Palette.of(context);
     final who = focusWho(_session.backend.workspace.workspace, widget.item);
     final placeholder = who.isEmpty ? 'Your answer' : 'Your answer to $who';
+    // At the largest text sizes the full words cut off after a word or
+    // two ("Your an…", Zucchero 48776): the field then says only
+    // "Answer", and VoiceOver still reads it in full.
+    final big = MediaQuery.textScalerOf(context).scale(16) / 16 > 1.6;
+    final shown = big ? 'Answer' : placeholder;
     final answerable = _session.answerable;
     final files = answer.filesKey;
     return Container(
@@ -723,7 +824,7 @@ class _ThumbDockState extends State<_ThumbDock> {
                   child: TextField(
                     controller: field,
                     focusNode: _focus,
-                    placeholder: placeholder,
+                    placeholder: shown,
                     minLines: 1,
                     maxLines: 5,
                     semanticsLabel: placeholder,
@@ -786,11 +887,13 @@ class _ThumbDockState extends State<_ThumbDock> {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // The no and the yes 2:3, as Lucy's spec has them
+                    // (Zucchero 49328).
                     if (noButton != null) ...[
-                      Expanded(child: noButton),
+                      Expanded(flex: 2, child: noButton),
                       const SizedBox(width: Space.s),
                     ],
-                    Expanded(flex: 2, child: yesButton),
+                    Expanded(flex: 3, child: yesButton),
                   ],
                 ),
               );
@@ -806,9 +909,12 @@ class _ThumbDockState extends State<_ThumbDock> {
 /// and the agents at work now. Back is the way out; it never closes by
 /// itself.
 class _NothingLeft extends StatelessWidget {
-  const _NothingLeft({required this.session});
+  const _NothingLeft({required this.session, required this.onDone});
 
   final FocusSession session;
+
+  /// Back to the list (F3: one rule on every device).
+  final VoidCallback onDone;
 
   @override
   Widget build(BuildContext context) {
@@ -856,6 +962,8 @@ class _NothingLeft extends StatelessWidget {
                 ],
               ),
             ],
+            const SizedBox(height: Space.xl),
+            Button(label: 'Done', primary: true, onPressed: onDone),
           ],
         ),
       ),
@@ -1088,6 +1196,7 @@ String _systemGlyph(NeedsYouItem item) => switch (item.kind) {
   NeedsYouKind.keepAwake ||
   NeedsYouKind.backendService ||
   NeedsYouKind.lidStuck => 'laptop-minimal',
+  NeedsYouKind.protectedPlace => 'folder-lock',
   NeedsYouKind.chat => 'message-circle',
   NeedsYouKind.signIn => 'user',
   _ => 'arrow-left-right',

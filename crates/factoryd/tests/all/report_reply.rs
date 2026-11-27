@@ -204,7 +204,7 @@ async fn while_secrets_are_locked_nothing_is_reported_since_none_could_be_hidden
         let mut view = View::default();
         builder(&mut client, &mut view, &dir).await;
         reply = ask(&mut client, &mut view, "something rude").await;
-        client.request(Request::NewRecoveryKey(v1::NewRecoveryKey { proof: None })).await;
+        client.request(Request::NewRecoveryKey(v1::NewRecoveryKey { proof: None, ..Default::default() })).await;
         client.request(Request::SetVaultLockedMode(v1::SetVaultLockedMode { locked_mode: true, proof: None })).await;
     }
     let (addr, _factory) = start(&dir).await;

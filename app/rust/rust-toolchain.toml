@@ -1,7 +1,8 @@
 # The Rust the app's tunnel builds with (hook/build.dart, through
 # native_toolchain_rust, which needs a pinned version): the Mac (both
 # architectures), iPhones, the iOS Simulator on either Mac, and Android
-# phones (arm64) and emulators (arm64 on a Mac, x86_64 elsewhere).
+# phones (arm64) and emulators (arm64 on a Mac, x86_64 elsewhere), and Windows
+# (x64, Arm64 later: hook/build.dart's windowsTriples).
 [toolchain]
 channel = "1.97.1"
 targets = [
@@ -12,4 +13,6 @@ targets = [
   "x86_64-apple-ios",
   "aarch64-linux-android",
   "x86_64-linux-android",
+  "x86_64-pc-windows-msvc",
+  "aarch64-pc-windows-msvc",
 ]

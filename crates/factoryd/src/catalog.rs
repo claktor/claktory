@@ -64,6 +64,9 @@ struct Status {
     fetched_ms: u64,
     /// Why the last read failed; empty when it worked.
     error: String,
+    /// The last read failed because the provider didn't take the sign-in
+    /// or key: a hint only.
+    signed_out: bool,
     fetching: bool,
     /// When the last read failed, so the next try waits `RETRY`.
     failed_at: Option<Instant>,
@@ -88,6 +91,7 @@ impl Catalog {
         provider.models_fetch_error = status.error;
         provider.models_fetching = status.fetching;
         provider.models_fetchable = fetchable;
+        provider.models_fetch_signed_out = status.signed_out;
     }
 }
 
@@ -175,8 +179,16 @@ async fn fetch(factory: &Arc<Factory>, provider: &str) -> Result<(), String> {
     };
     set(&|status| status.fetching = true);
     let path = path(&factory.home, provider);
+    // Whether a read failed because the provider didn't take the sign-in
+    // or key (it answered 401): only a hint for the app, which changes
+    // nothing about the sign-in itself.
+    let refused = std::sync::atomic::AtomicBool::new(false);
     let read = async {
-        let Some(body) = factory.models.fetch_models(provider).await? else {
+        let fetched = factory.models.fetch_models(provider).await.map_err(|error| {
+            refused.store(error.is_unauthorized() || error.is_refused(), std::sync::atomic::Ordering::Relaxed);
+            error.to_string()
+        })?;
+        let Some(body) = fetched else {
             return Err(format!("Sign in to {} first, in Settings → Providers.", factory_agent::providers::listing::name(provider)));
         };
         let changed = factory
@@ -198,9 +210,11 @@ async fn fetch(factory: &Arc<Factory>, provider: &str) -> Result<(), String> {
         Ok(_) => set(&|status| *status = Status { fetched_ms: now, ..Status::default() }),
         Err(error) => {
             tracing::warn!(provider, %error, "could not read the provider's model list: the one there is stays");
+            let signed_out = refused.load(std::sync::atomic::Ordering::Relaxed);
             set(&|status| {
                 status.fetching = false;
                 status.error.clone_from(error);
+                status.signed_out = signed_out;
                 status.failed_at = Some(Instant::now());
             });
         }

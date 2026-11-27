@@ -7,7 +7,12 @@ import 'agent_name.dart';
 import 'characters/character.dart';
 import 'backend.dart';
 import 'controls.dart';
+import 'decision.dart' show QuietLink;
+import 'extension_about.dart' show hasExtensionView;
 import 'folder_browser.dart';
+import 'errands/errand_agent_field.dart'
+    show ErrandAgentField, errandsExtension;
+import 'highlights.dart' show Glow, HighlightStore;
 import 'identity.dart';
 import 'mobile/metrics.dart';
 import 'model_select.dart' show ModelSelect;
@@ -18,9 +23,12 @@ import 'mobile/platform_policy.dart';
 import 'notification_settings.dart' show notifyModeOptions;
 import 'pipe_reports.dart'
     show ForwardReportsField, StopReadingReportsField, containedKeeps;
+import 'protected_places.dart'
+    show protectedPathCaption, protectedRootOf, saveIntoProtectedPlaces;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'secrets.dart';
+import 'pinned_agents.dart' show unpinnedOnArchive;
 import 'pipes.dart'
     show
         ConnectPipeForm,
@@ -285,14 +293,18 @@ class FormFrame extends StatelessWidget {
     );
     return LayoutBuilder(
       builder: (context, constraints) {
-        // At the largest text sizes, or when Cancel or the action wouldn't
-        // fit in its quarter of the bar ("I've saved it" on a small
-        // iPhone), the title goes under them and each has half the bar,
-        // so no word is cut short.
+        // When Cancel or the action wouldn't fit in its quarter of the bar
+        // ("I've saved it" on a small iPhone), or at the largest text sizes
+        // the title wouldn't fit whole in two lines between them, the title
+        // goes under them and each has half the bar, so no word is cut
+        // short. Like iOS's, the title grows with the text only as far as
+        // the bar does, in it or under it (Lucy: at AX5 it took a quarter
+        // of the screen).
         final stacked =
-            largeText(context) ||
             !_fitsBar(context, cancelLabel, constraints.maxWidth / 4) ||
-            !_fitsBar(context, submitLabel, constraints.maxWidth / 4);
+            !_fitsBar(context, submitLabel, constraints.maxWidth / 4) ||
+            (largeText(context) &&
+                !_titleFitsBar(context, type, constraints.maxWidth / 2));
         return _phoneFormBody(
           context,
           palette,
@@ -307,6 +319,29 @@ class FormFrame extends StatelessWidget {
         );
       },
     );
+  }
+
+  /// Whether the title fits whole in two lines [width] wide, at the bar's
+  /// text size (clamped at ×1.5, as the bar is), never breaking a word.
+  bool _titleFitsBar(BuildContext context, TypeScale type, double width) {
+    final scaler = MediaQuery.textScalerOf(context).clamp(maxScaleFactor: 1.5);
+    TextPainter laid(String text, {int? maxLines, double? maxWidth}) =>
+        TextPainter(
+          text: TextSpan(text: text, style: type.emphasis),
+          textScaler: scaler,
+          textDirection: TextDirection.ltr,
+          maxLines: maxLines,
+        )..layout(maxWidth: maxWidth ?? double.infinity);
+    final whole = laid(title, maxLines: 2, maxWidth: width);
+    var fits = !whole.didExceedMaxLines;
+    whole.dispose();
+    for (final word in title.split(RegExp(r'\s+'))) {
+      if (!fits) break;
+      final painter = laid(word);
+      fits = painter.width <= width;
+      painter.dispose();
+    }
+    return fits;
   }
 
   /// Whether [label] fits a bar button [width] wide, at the bar's text
@@ -356,7 +391,11 @@ class FormFrame extends StatelessWidget {
             ],
           ),
         ),
-        if (stacked) heading,
+        if (stacked)
+          MediaQuery.withClampedTextScaling(
+            maxScaleFactor: 1.5,
+            child: heading,
+          ),
         const SizedBox(height: Space.s),
         Flexible(
           child: SingleChildScrollView(
@@ -452,9 +491,12 @@ class FittedHeading extends StatelessWidget {
 
 /// [child], scrolled into sight once it shows (a new one, by its key).
 class _ScrolledTo extends StatefulWidget {
-  const _ScrolledTo({super.key, required this.child});
+  const _ScrolledTo({super.key, required this.child, this.scroll = true});
 
   final Widget child;
+
+  /// False: shown where it is, not scrolled to.
+  final bool scroll;
 
   @override
   State<_ScrolledTo> createState() => _ScrolledToState();
@@ -465,7 +507,7 @@ class _ScrolledToState extends State<_ScrolledTo> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
+      if (!mounted || !widget.scroll) return;
       Scrollable.ensureVisible(
         context,
         duration: MediaQuery.disableAnimationsOf(context)
@@ -546,6 +588,11 @@ class _BarButton extends StatelessWidget {
 
 /// Runs a request for a form: tracks that it's in flight, closes the form
 /// when the backend accepts, and shows the backend's reason when it refuses.
+/// A save the person set aside at a sheet that comes first.
+class _SetAside implements Exception {
+  const _SetAside();
+}
+
 mixin _Submitting<T extends StatefulWidget> on State<T> {
   var submitting = false;
   String? error;
@@ -558,6 +605,10 @@ mixin _Submitting<T extends StatefulWidget> on State<T> {
     try {
       await request;
       close();
+    } on _SetAside {
+      // The person set aside a sheet before anything was saved: the form
+      // stays as it was.
+      if (mounted) setState(() => submitting = false);
     } on RequestFailure catch (failure) {
       if (!mounted) return;
       setState(() {
@@ -716,6 +767,12 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
     final backend = AppScope.of(context);
     final project = widget.project;
     final name = _name.text.trim();
+    // Folders moved into a place macOS protects get its sheet first.
+    final moved = {
+      for (final edit in _folders)
+        if (!edit.removed && edit.moved)
+          edit.path.text.trim(): edit.name.text.trim(),
+    };
     Future<void> save() async {
       if (name != project.name) {
         await backend.updateProject(
@@ -737,7 +794,18 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
       }
     }
 
-    submitRequest(save(), widget.close);
+    submitRequest(_saving(moved, save), widget.close);
+  }
+
+  /// [save], with the sheet first for [folders] (path to name) going into
+  /// a place macOS protects.
+  Future<void> _saving(
+    Map<String, String> folders,
+    Future<void> Function() save,
+  ) async {
+    if (!await saveIntoProtectedPlaces(context, folders: folders, save: save)) {
+      throw const _SetAside();
+    }
   }
 
   /// Rivet adds the folder, as the person describes it; without a Rivet
@@ -756,12 +824,13 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
   void _createFolder() {
     final name = _newName.text.trim();
     if (name.isEmpty || submitting) return;
+    final backend = AppScope.of(context);
+    final path = _newPath.text.trim();
     submitRequest(
-      AppScope.of(context).createFolder(
-        CreateFolder(
-          projectId: widget.project.id,
-          name: name,
-          path: _newPath.text.trim(),
+      _saving(
+        {path: name},
+        () => backend.createFolder(
+          CreateFolder(projectId: widget.project.id, name: name, path: path),
         ),
       ),
       widget.close,
@@ -986,9 +1055,13 @@ class _ProjectSettingsFormState extends State<ProjectSettingsForm>
       note: archived
           ? "Archived: it's hidden from the sidebar, and its agents don't "
                 'work until you unarchive it.'
-          : 'Hides the project and its agents from the sidebar, and its '
-                'agents stop working. Nothing is deleted, and you can '
-                'unarchive it anytime.',
+          : [
+              'Hides the project and its agents from the sidebar, and its '
+                  'agents stop working. Nothing is deleted, and you can '
+                  'unarchive it anytime.',
+              // Its agents' pins go with it, and don't come back.
+              unpinnedOnArchive(backend.workspace.workspace, widget.project.id),
+            ].where((line) => line.isNotEmpty).join(' '),
       child: Align(
         alignment: Alignment.centerLeft,
         child: Button(
@@ -1085,7 +1158,6 @@ class _PathField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = Palette.of(context);
     final backend = AppScope.of(context);
     final remote = backend.target;
     final machine = backend.workspace.workspace.remote.machine.isNotEmpty
@@ -1123,17 +1195,52 @@ class _PathField extends StatelessWidget {
         ),
       ],
     );
-    if (remote == null) return row;
+    // In a place macOS protects (Lucy's P2): whether it asks first, or
+    // refused, as the backend finds.
+    return ListenableBuilder(
+      listenable: backend.workspace,
+      builder: (context, _) {
+        final workspace = backend.workspace.workspace;
+        final place = protectedRootOf(workspace, controller.text);
+        final protected = place == null
+            ? null
+            : protectedPathCaption(workspace, place);
+        return _captioned(
+          context,
+          row,
+          protected,
+          remote == null ? null : machine,
+        );
+      },
+    );
+  }
+
+  /// [row] over the captions it has: [protected]'s, and where the path is
+  /// when the Claktory is on [machine], another one.
+  Widget _captioned(
+    BuildContext context,
+    Widget row,
+    String? protected,
+    String? machine,
+  ) {
+    final palette = Palette.of(context);
+    if (machine == null && protected == null) return row;
+    final caption = TypeScale.of(context).caption;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         row,
-        const SizedBox(height: Space.xs),
-        Text(
-          'A path on $machine, where this Claktory runs.',
-          style: TypeScale.of(context).caption
-              .copyWith(color: palette.textFaint),
-        ),
+        if (protected != null) ...[
+          const SizedBox(height: Space.xs),
+          Text(protected, style: caption.copyWith(color: palette.textMuted)),
+        ],
+        if (machine != null) ...[
+          const SizedBox(height: Space.xs),
+          Text(
+            'A path on $machine, where this Claktory runs.',
+            style: caption.copyWith(color: palette.textFaint),
+          ),
+        ],
       ],
     );
   }
@@ -1240,6 +1347,7 @@ class _AgentFields extends StatelessWidget {
     this.defaultPrompt = '',
     this.lead,
     this.fallback,
+    this.appearance,
     required this.close,
   });
 
@@ -1286,6 +1394,10 @@ class _AgentFields extends StatelessWidget {
   /// has it.
   final Widget? fallback;
 
+  /// How it looks (its character, shape and color), in place of the
+  /// color alone; only an existing agent has it.
+  final Widget? appearance;
+
   /// Closes the form, for leaving it to sign in.
   final VoidCallback close;
 
@@ -1300,82 +1412,25 @@ class _AgentFields extends StatelessWidget {
     final palette = Palette.of(context);
     final usesDefault = offerDefault && model.isEmpty;
     final effortModel = usesDefault ? workspace.settings.defaultModel : model;
+    final phone = isPhoneLayout(context);
+    // Two fields side by side where there's room; on a phone, stacked.
+    Widget pair(Widget first, Widget second, {int a = 1, int b = 1}) => Flex(
+      direction: phone ? Axis.vertical : Axis.horizontal,
+      crossAxisAlignment: phone
+          ? CrossAxisAlignment.stretch
+          : CrossAxisAlignment.start,
+      children: [
+        _Share(flex: a, child: first),
+        if (!phone) const SizedBox(width: Space.m),
+        _Share(flex: b, child: second),
+      ],
+    );
+    // Lucy's agent view §6: the model first (the change people make
+    // themselves when a provider runs out), then the name and role, how
+    // it looks, its prompt, and where it works.
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Field(
-          label: 'Name',
-          child: TextField(
-            controller: name,
-            // A phone brings the keyboard up only for a new agent's name,
-            // not over its settings.
-            autofocus: !isPhoneLayout(context) || name.text.isEmpty,
-            kind: InputKind.text,
-            onSubmitted: (_) => onSubmit(),
-          ),
-        ),
-        Field(
-          label: 'Role',
-          note: 'What it does, shown under its name. Optional.',
-          child: TextField(
-            controller: role,
-            placeholder: 'Such as Coordinator or Writer',
-            kind: InputKind.text,
-            onSubmitted: (_) => onSubmit(),
-          ),
-        ),
-        Field(
-          label: 'Color',
-          child: ColorPicker(value: color, onChanged: onColor),
-        ),
-        Field(
-          label: 'Prompt',
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              TextField(
-                controller: prompt,
-                placeholder: 'What this agent does and how',
-                kind: InputKind.multiline,
-                minLines: 4,
-                maxLines: 10,
-              ),
-              if (defaultPrompt.isNotEmpty)
-                _DefaultPrompt(prompt: prompt, defaultPrompt: defaultPrompt),
-            ],
-          ),
-        ),
-        if (workspace.projects.isNotEmpty)
-          Field(
-            label: 'Project',
-            child: Select(
-              value: project,
-              options: [
-                if (offerWorkspace)
-                  SelectOption('', '$outsideLabel (no project)'),
-                for (final candidate in workspace.projects)
-                  SelectOption(candidate.id, candidate.name),
-              ],
-              onChanged: onProject,
-            ),
-          ),
-        if (_folders.isNotEmpty)
-          Field(
-            label: 'Folder',
-            note: 'Where it works: one of the project\'s folders.',
-            child: Select(
-              value: _folders.any((candidate) => candidate.id == folder)
-                  ? folder
-                  : '',
-              options: [
-                const SelectOption('', "The project's folder"),
-                for (final candidate in _folders)
-                  SelectOption(candidate.id, candidate.name),
-              ],
-              onChanged: onFolder,
-            ),
-          ),
-        ?lead,
         if (workspace.models.isEmpty)
           Field(
             label: 'Model',
@@ -1414,53 +1469,196 @@ class _AgentFields extends StatelessWidget {
             ),
           )
         else
-          Flex(
-            // On a phone, the effort goes under the model.
-            direction: isPhoneLayout(context) ? Axis.vertical : Axis.horizontal,
-            crossAxisAlignment: isPhoneLayout(context)
-                ? CrossAxisAlignment.stretch
-                : CrossAxisAlignment.start,
-            children: [
-              _Share(
-                flex: 3,
-                child: Field(
-                  label: 'Model',
-                  child: ModelSelect(
-                    workspace: workspace,
-                    value: model,
-                    extra: [
-                      if (offerDefault)
-                        SelectOption('', _defaultModelLabel(workspace)),
-                    ],
-                    onChanged: onModel,
-                  ),
-                ),
+          pair(
+            a: 3,
+            b: 2,
+            Field(
+              label: 'Model',
+              child: ModelSelect(
+                workspace: workspace,
+                value: model,
+                extra: [
+                  if (offerDefault)
+                    SelectOption('', _defaultModelLabel(workspace)),
+                ],
+                onChanged: onModel,
               ),
-              if (!isPhoneLayout(context)) const SizedBox(width: Space.m),
-              _Share(
-                flex: 2,
-                child: Field(
-                  label: 'Reasoning effort',
-                  child: Select(
-                    value: effort,
-                    options: _effortOptions(
-                      workspace,
-                      effortModel,
-                      effort,
-                      defaultLabel: offerDefault
-                          ? _defaultEffortLabel(workspace)
-                          : null,
-                    ),
-                    onChanged: onEffort,
-                  ),
+            ),
+            Field(
+              label: 'Reasoning effort',
+              child: Select(
+                value: effort,
+                options: _effortOptions(
+                  workspace,
+                  effortModel,
+                  effort,
+                  defaultLabel: offerDefault
+                      ? _defaultEffortLabel(workspace)
+                      : null,
                 ),
+                onChanged: onEffort,
               ),
-            ],
+            ),
           ),
         if (workspace.models.isNotEmpty) ?fallback,
+        pair(
+          Field(
+            label: 'Name',
+            child: TextField(
+              controller: name,
+              // A phone brings the keyboard up only for a new agent's
+              // name, not over its settings.
+              autofocus: !phone || name.text.isEmpty,
+              kind: InputKind.text,
+              onSubmitted: (_) => onSubmit(),
+            ),
+          ),
+          Field(
+            label: 'Role',
+            child: TextField(
+              controller: role,
+              placeholder: 'Such as Coordinator or Writer',
+              semanticsLabel: 'Role, shown under its name. Optional.',
+              kind: InputKind.text,
+              onSubmitted: (_) => onSubmit(),
+            ),
+          ),
+        ),
+        appearance ??
+            Field(
+              label: 'Color',
+              child: ColorPicker(value: color, onChanged: onColor),
+            ),
+        Field(
+          label: 'Prompt',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _FoldedPrompt(controller: prompt),
+              if (defaultPrompt.isNotEmpty)
+                _DefaultPrompt(prompt: prompt, defaultPrompt: defaultPrompt),
+            ],
+          ),
+        ),
+        _where(context, pair),
+        ?lead,
       ],
     );
   }
+
+  /// Project and Folder, side by side where there's room.
+  Widget _where(
+    BuildContext context,
+    Widget Function(Widget, Widget, {int a, int b}) pair,
+  ) {
+    final project = workspace.projects.isEmpty
+        ? null
+        : Field(
+            label: 'Project',
+            child: Select(
+              value: this.project,
+              options: [
+                if (offerWorkspace)
+                  SelectOption('', '$outsideLabel (no project)'),
+                for (final candidate in workspace.projects)
+                  SelectOption(candidate.id, candidate.name),
+              ],
+              onChanged: onProject,
+            ),
+          );
+    final folder = _folders.isEmpty
+        ? null
+        : Field(
+            label: 'Folder',
+            note: "Where it works: one of the project's folders.",
+            child: Select(
+              value: _folders.any((candidate) => candidate.id == this.folder)
+                  ? this.folder
+                  : '',
+              options: [
+                const SelectOption('', "The project's folder"),
+                for (final candidate in _folders)
+                  SelectOption(candidate.id, candidate.name),
+              ],
+              onChanged: onFolder,
+            ),
+          );
+    if (project != null && folder != null) return pair(project, folder);
+    return project ?? folder ?? const SizedBox.shrink();
+  }
+}
+
+/// An agent's prompt, folded to its first 6 lines with Show all while it
+/// runs longer (Lucy's agent view §6); it unfolds when it takes the keys,
+/// so typing never happens in a fold.
+class _FoldedPrompt extends StatefulWidget {
+  const _FoldedPrompt({required this.controller});
+
+  final TextEditingController controller;
+
+  @override
+  State<_FoldedPrompt> createState() => _FoldedPromptState();
+}
+
+class _FoldedPromptState extends State<_FoldedPrompt> {
+  static const _foldLines = 6;
+  final _focus = FocusNode();
+  var _open = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _focus.addListener(() {
+      if (_focus.hasFocus && !_open) setState(() => _open = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _focus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, constraints) {
+      final field = TextField(
+        controller: widget.controller,
+        focusNode: _focus,
+        placeholder: 'What this agent does and how',
+        semanticsLabel: 'Prompt',
+        kind: InputKind.multiline,
+        minLines: 4,
+        maxLines: _open ? null : _foldLines,
+      );
+      // Longer than the fold: Show all under it. The field stays first in
+      // the column either way, so unfolding on focus keeps the keys in it.
+      var folded = false;
+      if (!_open) {
+        final painter = TextPainter(
+          text: TextSpan(
+            text: widget.controller.text,
+            style: TypeScale.of(context).body,
+          ),
+          textDirection: Directionality.of(context),
+          textScaler: MediaQuery.textScalerOf(context),
+        )..layout(maxWidth: math.max(0, constraints.maxWidth - 2 * Space.m));
+        folded = painter.computeLineMetrics().length > _foldLines;
+        painter.dispose();
+      }
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          field,
+          if (folded)
+            QuietLink(
+              label: 'Show all',
+              onTap: () => setState(() => _open = true),
+            ),
+        ],
+      );
+    },
+  );
 }
 
 /// Its [flex] share of a Mac's row; on a phone, where the row is a column,
@@ -1494,9 +1692,10 @@ class ColorPicker extends StatelessWidget {
       context,
       phone ? Touch.target : 26.0,
     );
-    return Wrap(
-      spacing: phone ? Space.xs : Space.s,
-      runSpacing: phone ? Space.xs : Space.s,
+    final spacing = phone ? Space.xs : Space.s;
+    final swatches = Wrap(
+      spacing: spacing,
+      runSpacing: spacing,
       children: [
         for (final MapEntry(key: name, value: color) in agentColors.entries)
           Semantics(
@@ -1532,6 +1731,26 @@ class ColorPicker extends StatelessWidget {
             ),
           ),
       ],
+    );
+    // In one row when they fit; else split evenly (4 + 4), so no swatch
+    // sits alone on a line (Lucy's agent view §6).
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final count = agentColors.length;
+        final room = constraints.maxWidth;
+        if (!room.isFinite) return swatches;
+        final fit = math.max(1, ((room + spacing) / (size + spacing)).floor());
+        if (fit >= count) return swatches;
+        final rows = (count / fit).ceil();
+        final perRow = (count / rows).ceil();
+        return Align(
+          alignment: AlignmentDirectional.centerStart,
+          child: SizedBox(
+            width: perRow * (size + spacing) - spacing + 0.5,
+            child: swatches,
+          ),
+        );
+      },
     );
   }
 }
@@ -1707,10 +1926,15 @@ class AgentSettingsForm extends StatefulWidget {
     super.key,
     required this.agent,
     required this.close,
+    this.showExtensions = false,
   });
 
   final Agent agent;
   final VoidCallback close;
+
+  /// Opens at its Extensions, unfolded and scrolled into sight (the
+  /// agent's menu's Extensions…, Lucy's agent view §4).
+  final bool showExtensions;
 
   @override
   State<AgentSettingsForm> createState() => _AgentSettingsFormState();
@@ -1743,6 +1967,70 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
   /// The shape chosen here; empty for automatic.
   late var _shape = _shapeChoice(widget.agent);
   var _confirmingDelete = false;
+
+  /// Its extensions' list is unfolded ("11 on · Change…").
+  late var _extensionsOpen = widget.showExtensions;
+
+  /// Times the agent was just made an errand agent here: Errands, under
+  /// its extensions, is scrolled to and glows.
+  var _errandsShown = 0;
+
+  Widget _errandsRow(String id, Widget row) => _errandsRowOf(
+    id,
+    row,
+    shown: _errandsShown,
+    store: AppScope.scope(context).backend.highlights,
+    agentId: widget.agent.id,
+  );
+
+  void _errandsNext() {
+    setState(() {
+      _extensionsOpen = true;
+      _errandsShown++;
+    });
+    final highlights = AppScope.scope(context).backend.highlights;
+    final key = 'agent-settings:errands:${widget.agent.id}';
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => highlights.glow(key, const [signal]),
+    );
+  }
+
+  /// Asking whether to save before going to Rivet (Lucy's agent view §6).
+  var _confirmingRivet = false;
+
+  /// "Or ask Rivet to change June": Rivet's conversation with "Change
+  /// June: " in its message box, nothing sent. With changes here, it asks
+  /// first whether to save them.
+  void _toRivet({bool save = false}) {
+    final name = widget.agent.name;
+    void go() {
+      // While the form's context still stands, then the form goes.
+      final rivet = rivetIn(AppScope.of(context).workspace.workspace);
+      askRivet(
+        context,
+        'Change $name: ',
+        hint: 'Tell ${rivet?.name ?? 'Rivet'} what to change',
+      );
+      widget.close();
+    }
+
+    if (save) {
+      final backend = AppScope.of(context);
+      final update = _changes();
+      final changes = _extensionChanges();
+      final id = widget.agent.id;
+      submitRequest(() async {
+        if (update != null) await backend.updateAgent(update);
+        for (final change in changes) {
+          await backend.updateAgent(
+            UpdateAgent(agentId: id, extension_8: change),
+          );
+        }
+      }(), go);
+      return;
+    }
+    go();
+  }
 
   /// Extensions turned on or off here, by id, until saved.
   final _enabled = <String, bool>{};
@@ -1886,6 +2174,74 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
     submitRequest(save(), widget.close);
   }
 
+  /// The workspace's extensions, those with something to show first (a
+  /// panel, or the secrets it was given), each group in its order.
+  List<Extension> _showingFirst(Workspace workspace) {
+    bool shows(Extension extension) =>
+        hasExtensionView(extension) || extension.id == 'secrets';
+    return [
+      ...workspace.extensions.where(shows),
+      ...workspace.extensions.where((extension) => !shows(extension)),
+    ];
+  }
+
+  /// How it looks, in one row (Lucy's §6): its character as it will be
+  /// saved, its shape and its color; Shape's help under them. On a phone
+  /// the swatches take a row of their own.
+  Widget _appearance(Agent agent) => Builder(
+    builder: (context) {
+      final previewed = _previewed(agent);
+      final character = AgentCharacter(agent: previewed, size: 28);
+      final shape = SizedBox(
+        width: 140,
+        child: Select(
+          title: 'Shape',
+          value: _shape,
+          options: [
+            const SelectOption('', 'Automatic'),
+            for (final shape in CharacterShape.values)
+              SelectOption(shape.name, _capitalized(shape.name)),
+          ],
+          onChanged: (shape) => setState(() => _shape = shape),
+        ),
+      );
+      final colors = ColorPicker(
+        value: _color,
+        onChanged: (color) => setState(() => _color = color),
+      );
+      // On a phone, and at the largest text anywhere, the swatches go
+      // under the character and its shape.
+      final phone = isPhoneLayout(context) || largeText(context);
+      return Field(
+        label: 'Appearance',
+        note:
+            'Automatic keeps the same shape when you rename or move the '
+            'agent.',
+        child: phone
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      character,
+                      const SizedBox(width: Space.m),
+                      Expanded(child: shape),
+                    ],
+                  ),
+                  const SizedBox(height: Space.s),
+                  colors,
+                ],
+              )
+            : Wrap(
+                spacing: Space.m,
+                runSpacing: Space.s,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [character, shape, colors],
+              ),
+      );
+    },
+  );
+
   @override
   Widget build(BuildContext context) {
     final backend = AppScope.of(context);
@@ -1906,7 +2262,19 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
         fields: const [],
       );
     }
+    if (_confirmingRivet) {
+      return FormFrame(
+        title: 'Save your changes to ${agent.name}?',
+        error: error,
+        submitLabel: 'Save',
+        cancelLabel: 'Discard',
+        onSubmit: submitting ? null : () => _toRivet(save: true),
+        onCancel: () => _toRivet(),
+        fields: const [],
+      );
+    }
     final store = backend.workspace;
+    final rivet = rivetIn(store.workspace);
     return ListenableBuilder(
       listenable: Listenable.merge([
         store,
@@ -1933,33 +2301,18 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
             }),
           ),
           fields: [
-            Field(
-              label: 'Character',
-              child: CharacterPreview(
-                // As it will look: its color and shape as picked, not
-                // yet saved. Automatic shows the one it has until saved:
-                // only Factory knows which it picks.
-                agent: _previewed(agent),
+            // How Matt changes agents, said where he'd change one (Lucy's
+            // §6); not in Rivet's own, nor with no Rivet to ask.
+            if (rivet != null && rivet.id != agent.id && rivet.modelAvailable)
+              Padding(
+                padding: const EdgeInsets.only(bottom: Space.l),
+                child: QuietLink(
+                  label: 'Or ask ${rivet.name} to change ${agent.name}',
+                  onTap: () => _changed
+                      ? setState(() => _confirmingRivet = true)
+                      : _toRivet(),
+                ),
               ),
-            ),
-            Field(
-              label: 'Shape',
-              note:
-                  'Automatic keeps the same shape when you rename or move '
-                  'the agent.',
-              child: _AvatarPicker(
-                value: _shape,
-                options: [
-                  for (final shape in CharacterShape.values)
-                    (
-                      shape.name,
-                      _capitalized(shape.name),
-                      specOf(_previewed(agent)..avatarShape = shape.name),
-                    ),
-                ],
-                onChanged: (shape) => setState(() => _shape = shape),
-              ),
-            ),
             _AgentFields(
               workspace: workspace,
               name: _name,
@@ -1989,6 +2342,7 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
               onSubmit: _submit,
               offerDefault: false,
               offerWorkspace: true,
+              appearance: _appearance(agent),
               // As the backend has it now, with what's changed here: the
               // admin option turned on or off makes it an admin agent.
               outsideLabel: outsideProjectsLabel(_edited),
@@ -2072,37 +2426,56 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
               _PipeLimitNote(agent: _current, workspace: workspace),
             // Reading reports keeps it from the same: why, and the way out.
             if (_current.readsReports) StopReadingReportsField(agent: _current),
+            // Errands in Claktory's browser, at once, not through Save; just
+            // turned on, Errands is the next step (Lucy 49837).
+            ErrandAgentField(agent: _current, onContained: _errandsNext),
             // Above the extensions, so it's in sight: which secrets it has.
             AgentSecretsField(agent: _current),
-            if (workspace.extensions.isNotEmpty)
+            if (workspace.extensions.isNotEmpty && !_extensionsOpen)
               Field(
                 label: 'Extensions',
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    for (final extension in workspace.extensions)
-                      if (_saved(extension.id) case final saved?)
-                        _ExtensionSettings(
-                          extension: extension,
-                          workspace: workspace,
-                          agentId: agent.id,
-                          projectId: _project,
-                          // Ask is all a pipe's limit leaves it; reading
-                          // reports, its database and Reports too.
-                          limited: !containedKeeps(_current, extension.id),
-                          enabled: _enabled[extension.id] ?? saved.enabled,
-                          value: (option) =>
-                              _options[extension.id]?[option] ??
-                              saved.options[option] ??
-                              OptionValue(),
-                          onEnabled: (on) =>
-                              setState(() => _enabled[extension.id] = on),
-                          onOption: (option, value) => setState(
-                            () =>
-                                (_options[extension.id] ??= {})[option] = value,
+                child: _ExtensionsFolded(
+                  on: _edited.extensions.where((e) => e.enabled).length,
+                  onChange: () => setState(() => _extensionsOpen = true),
+                ),
+              ),
+            if (workspace.extensions.isNotEmpty && _extensionsOpen)
+              _ScrolledTo(
+                key: const ValueKey('extensions'),
+                scroll: widget.showExtensions,
+                child: Field(
+                  label: 'Extensions',
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      // Those with something to show first (Lucy's §6).
+                      for (final extension in _showingFirst(workspace))
+                        if (_saved(extension.id) case final saved?)
+                          _errandsRow(
+                            extension.id,
+                            _ExtensionSettings(
+                              extension: extension,
+                              workspace: workspace,
+                              agentId: agent.id,
+                              projectId: _project,
+                              // Ask is all a pipe's limit leaves it; reading
+                              // reports, its database and Reports too.
+                              limited: !containedKeeps(_current, extension.id),
+                              enabled: _enabled[extension.id] ?? saved.enabled,
+                              value: (option) =>
+                                  _options[extension.id]?[option] ??
+                                  saved.options[option] ??
+                                  OptionValue(),
+                              onEnabled: (on) =>
+                                  setState(() => _enabled[extension.id] = on),
+                              onOption: (option, value) => setState(
+                                () => (_options[extension.id] ??= {})[option] =
+                                    value,
+                              ),
+                            ),
                           ),
-                        ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
           ],
@@ -2110,6 +2483,50 @@ class _AgentSettingsFormState extends State<AgentSettingsForm>
       },
     );
   }
+}
+
+/// Errands' row, just after the agent was made an errand agent: scrolled
+/// to and glowing once, since turning it on is the next step.
+Widget _errandsRowOf(
+  String id,
+  Widget row, {
+  required int shown,
+  required HighlightStore store,
+  required String agentId,
+}) {
+  if (id != errandsExtension) return row;
+  return _ScrolledTo(
+    key: ValueKey('errands:$shown'),
+    scroll: shown > 0,
+    child: Glow(
+      store: store,
+      matches: (key) => key == 'agent-settings:errands:$agentId',
+      child: row,
+    ),
+  );
+}
+
+/// An agent's extensions, folded (Lucy's agent view §6): "11 on ·
+/// Change…", which unfolds the list in place.
+class _ExtensionsFolded extends StatelessWidget {
+  const _ExtensionsFolded({required this.on, required this.onChange});
+
+  final int on;
+  final VoidCallback onChange;
+
+  @override
+  Widget build(BuildContext context) => Wrap(
+    spacing: Space.s,
+    crossAxisAlignment: WrapCrossAlignment.center,
+    children: [
+      Text(
+        '$on on ·',
+        style: TypeScale.of(context).body
+            .copyWith(color: Palette.of(context).text),
+      ),
+      QuietLink(label: 'Change…', onTap: onChange),
+    ],
+  );
 }
 
 /// Whom agent [agentId] can report to from [project]: the other agents
@@ -2444,13 +2861,82 @@ class _SwitchRow extends StatelessWidget {
     );
     return LayoutBuilder(
       builder: (context, constraints) {
-        if (_stacks(context, constraints.maxWidth)) {
+        final style =
+            (strong ? TypeScale.of(context).label : TypeScale.of(context).body)
+                .copyWith(
+                  color: onChanged == null ? palette.textMuted : palette.text,
+                );
+        // A word of the name wider than the line beside the switch (a
+        // finger's target at most) would break inside it: then the glyph
+        // and switch go above, and the name has the whole width.
+        bool wordsFit() {
+          final room = constraints.maxWidth - Space.s - 48;
+          for (final word in label.split(' ')) {
+            final painter = TextPainter(
+              text: TextSpan(text: word, style: style),
+              textScaler: MediaQuery.textScalerOf(context),
+              textDirection: Directionality.of(context),
+              maxLines: 1,
+            )..layout();
+            final width = painter.width;
+            painter.dispose();
+            if (width > room) return false;
+          }
+          return true;
+        }
+
+        if (_stacks(context, constraints.maxWidth) && !wordsFit()) {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             spacing: Space.xs,
             children: [
               Row(children: [?leading, const Spacer(), toggle]),
               words,
+            ],
+          );
+        }
+        if (_stacks(context, constraints.maxWidth)) {
+          // At the largest text (Lucy): the switch at the end of the name's
+          // first line, so it reads as the row's, and the description
+          // under both. The glyph leads the name, which wraps between
+          // words, under it if it must, never inside one.
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            spacing: Space.xs,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Text.rich(
+                      TextSpan(
+                        children: [
+                          if (leading != null) ...[
+                            WidgetSpan(
+                              alignment: PlaceholderAlignment.middle,
+                              child: leading!,
+                            ),
+                            const TextSpan(text: ' '),
+                          ],
+                          TextSpan(text: label),
+                        ],
+                      ),
+                      style: style,
+                    ),
+                  ),
+                  const SizedBox(width: Space.s),
+                  toggle,
+                ],
+              ),
+              if (description.isNotEmpty)
+                Text(
+                  description,
+                  style: TypeScale.of(context).caption.copyWith(
+                    color: onChanged == null
+                        ? palette.textFaint
+                        : palette.textMuted,
+                  ),
+                ),
             ],
           );
         }
@@ -2811,169 +3297,3 @@ String _shapeChoice(Agent agent) =>
     agent.hasAvatarShapeOverride() ? agent.avatarShapeOverride : '';
 
 String _capitalized(String id) => id[0].toUpperCase() + id.substring(1);
-
-/// Automatic, or one of a character's shapes, each drawn at rest
-/// in the agent's color, the chosen one ringed like a color swatch. A
-/// choice this app doesn't know (from a newer Factory) rings nothing.
-class _AvatarPicker extends StatelessWidget {
-  const _AvatarPicker({
-    required this.value,
-    required this.options,
-    required this.onChanged,
-  });
-
-  /// The chosen id; empty for automatic.
-  final String value;
-
-  /// Each choice: its id, its name and how it looks.
-  final List<(String, String, CharacterSpec)> options;
-  final ValueChanged<String> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    Color ring(bool selected, bool hovered) => selected
-        ? palette.text
-        : hovered
-        ? palette.textFaint
-        : const Color(0x00000000);
-    return Wrap(
-      spacing: Space.s,
-      runSpacing: Space.s,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        Semantics(
-          button: true,
-          selected: value.isEmpty,
-          label: 'Automatic',
-          excludeSemantics: true,
-          child: Pressable(
-            onTap: () => onChanged(''),
-            builder: (context, hovered) => AnimatedContainer(
-              duration: Motion.fast,
-              height: 36,
-              padding: const EdgeInsets.symmetric(horizontal: Space.m - 2),
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(
-                  width: 2,
-                  color: ring(value.isEmpty, hovered),
-                ),
-              ),
-              child: Text(
-                'Automatic',
-                style: TypeScale.of(context).caption.copyWith(
-                  color: value.isEmpty || hovered
-                      ? palette.text
-                      : palette.textMuted,
-                ),
-              ),
-            ),
-          ),
-        ),
-        for (final (id, name, spec) in options)
-          Semantics(
-            key: ValueKey('avatar-$id'),
-            button: true,
-            selected: id == value,
-            label: name,
-            excludeSemantics: true,
-            child: Pressable(
-              onTap: () => onChanged(id),
-              builder: (context, hovered) => AnimatedContainer(
-                duration: Motion.fast,
-                width: 36,
-                height: 36,
-                padding: const EdgeInsets.all(2),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(Radii.control + 2),
-                  border: Border.all(
-                    width: 2,
-                    color: ring(id == value, hovered),
-                  ),
-                ),
-                child: StillCharacter(spec: spec, size: 28),
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
-/// An agent's character at 80px, living, with its own mood now ("As now")
-/// or any of the seven to see how it looks in each.
-class CharacterPreview extends StatefulWidget {
-  const CharacterPreview({super.key, required this.agent});
-
-  final Agent agent;
-
-  @override
-  State<CharacterPreview> createState() => _CharacterPreviewState();
-}
-
-class _CharacterPreviewState extends State<CharacterPreview> {
-  /// The sample mood shown; null for the agent's own.
-  Mood? _mood;
-
-  @override
-  Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    Widget chip(String label, Mood? mood) {
-      final selected = mood == _mood;
-      return Pressable(
-        onTap: () => setState(() => _mood = mood),
-        builder: (context, hovered) => AnimatedContainer(
-          duration: Motion.fast,
-          height: 22,
-          padding: const EdgeInsets.symmetric(horizontal: Space.s),
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: selected
-                ? palette.selected
-                : hovered
-                ? palette.hover
-                : null,
-            borderRadius: BorderRadius.circular(11),
-          ),
-          child: Text(
-            label,
-            style: TypeScale.of(context).caption.copyWith(
-              color: selected || hovered ? palette.text : palette.textMuted,
-            ),
-          ),
-        ),
-      );
-    }
-
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        AgentCharacter(agent: widget.agent, size: 80, live: true, mood: _mood),
-        const SizedBox(width: Space.m),
-        Expanded(
-          child: Wrap(
-            spacing: Space.xs,
-            runSpacing: Space.xs,
-            children: [
-              chip('As now', null),
-              for (final mood in Mood.values) chip(moodName(mood), mood),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-/// A mood's name on its own, for the preview's samples.
-String moodName(Mood mood) => switch (mood) {
-  Mood.idle => 'Idle',
-  Mood.thinking => 'Thinking',
-  Mood.working => 'Tool running',
-  Mood.news => 'News',
-  Mood.failed => 'Failed',
-  Mood.noModel => 'No model',
-  Mood.asleep => 'Asleep',
-};

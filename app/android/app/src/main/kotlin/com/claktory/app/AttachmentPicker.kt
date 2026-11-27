@@ -8,6 +8,7 @@ import android.content.ClipboardManager
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -60,7 +61,7 @@ class AttachmentPicker(
             add(activity.getString(R.string.attach_files) to ::files)
             if (clipboardHasImage()) add(activity.getString(R.string.attach_paste) to ::paste)
         }
-        menu = AlertDialog.Builder(activity)
+        menu = AlertDialog.Builder(activity, SystemDialogs.theme(activity))
             .setItems(choices.map { it.first }.toTypedArray()) { _, which -> choices[which].second() }
             .setNegativeButton(R.string.attach_cancel) { _, _ -> finish(emptyList()) }
             // Back, or a tap outside: nothing chosen.
@@ -379,4 +380,20 @@ class AttachmentCopies(
             }
         }
     }
+}
+
+/**
+ * The phone's own dialog look, light or dark as the phone is, for the few
+ * native dialogs the app shows (the attach menu). The activity's theme is
+ * the bare one Flutter's host starts from, whose dialogs are Android's
+ * oldest, grey-buttoned style.
+ */
+object SystemDialogs {
+    fun theme(context: Context): Int = if (dark(context.resources.configuration.uiMode)) {
+        android.R.style.Theme_DeviceDefault_Dialog_Alert
+    } else {
+        android.R.style.Theme_DeviceDefault_Light_Dialog_Alert
+    }
+
+    fun dark(uiMode: Int): Boolean = uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
 }

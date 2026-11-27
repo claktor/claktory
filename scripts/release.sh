@@ -182,12 +182,47 @@ RG=false
 [[ -f "$SRC_ROOT/scripts/build-rg.sh" ]] && RG=true
 JQ=false
 [[ -f "$SRC_ROOT/scripts/build-jq.sh" ]] && JQ=true
+# The agent browser's image for Macs (#435 W11): an OCI archive beside the
+# backend, its digest and SHA-256 compiled into factoryd, once the source's
+# Mac host reads them (Cioccolata's P6); CLAKTORY_BROWSER_IMAGE_BUILD=1 builds
+# it before then, to try it.
+BROWSER=false
+if [[ -f "$SRC_ROOT/scripts/browser-image/Containerfile" ]] &&
+   { [[ "${CLAKTORY_BROWSER_IMAGE_BUILD:-}" == 1 ]] || grep -rq CLAKTORY_BROWSER_ARCHIVE_SHA256 "$SRC_ROOT/crates/factoryd/src/browser_host" 2>/dev/null; }; then
+  BROWSER=true
+fi
 if [[ -n "$PREVIOUS" && -f "$PREVIOUS/factoryd" && -f "$PREVIOUS/claktory-apps" && -f "$PREVIOUS/claktory-speech" && -f "$PREVIOUS/backend-version" && "$(cat "$PREVIOUS/backend-fingerprint" 2>/dev/null)" == "$FINGERPRINT" ]] &&
-   { ! $VIDEO_PREVIEW || [[ -f "$PREVIOUS/claktory-video-preview" ]]; } && { ! $RG || [[ -f "$PREVIOUS/tools/rg" ]]; } && { ! $JQ || [[ -f "$PREVIOUS/tools/jq" ]]; }; then
+   { ! $VIDEO_PREVIEW || [[ -f "$PREVIOUS/claktory-video-preview" ]]; } && { ! $RG || [[ -f "$PREVIOUS/tools/rg" ]]; } && { ! $JQ || [[ -f "$PREVIOUS/tools/jq" ]]; } &&
+   { ! $BROWSER || [[ -f "$PREVIOUS/claktory-browser.oci.tar.zst" && -f "$PREVIOUS/browser-image.env" ]]; }; then
   BACKEND="$PREVIOUS"
+  BROWSER_DIR="$PREVIOUS"
   BACKEND_VERSION="$(cat "$PREVIOUS/backend-version")"
   echo "backend unchanged since $BACKEND_VERSION; this release only updates the app"
 else
+  # The browser image first: it holds this source's Linux runner, and its
+  # digest goes into the Mac factoryd built next. The runner is the
+  # linux-aarch64 factoryd, built natively in this Mac's container VM.
+  BROWSER_DIR=""
+  if $BROWSER; then
+    BROWSER_DIR="$(mktemp -d)"
+    FACTORY_LINUX_SRC="$SRC_ROOT" "$SRC_ROOT/scripts/build-linux.sh" aarch64 "$BROWSER_DIR/runner"
+    check_no_qa_provider "$BROWSER_DIR/runner" || exit 1
+    dev_image=(); [[ "$APP_NAME" == "Factory.app" ]] || dev_image=(--dev)
+    "$SRC_ROOT/scripts/browser-image.sh" archive "$FACTORY_VERSION" "$BROWSER_DIR/runner" "$BROWSER_DIR" ${dev_image[@]+"${dev_image[@]}"}
+    rm -f "$BROWSER_DIR/runner"
+    # Where P6 downloads it when the release folder doesn't have it: this
+    # version's asset on the channel's GitHub releases (scripts/publish.sh
+    # uploads it); none for a channel elsewhere or a dev release.
+    url=""
+    if [[ "$APP_NAME" == "Factory.app" && "${FACTORY_UPDATE_URL:-}" =~ ^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/releases/latest/download/latest\.json$ ]]; then
+      url="https://github.com/${BASH_REMATCH[1]}/releases/download/$FACTORY_VERSION/claktory-browser-$FACTORY_VERSION-arm64.oci.tar.zst"
+    fi
+    echo "CLAKTORY_BROWSER_ARCHIVE_URL=$url" >>"$BROWSER_DIR/browser-image.env"
+    set -a
+    # shellcheck disable=SC1091
+    source "$BROWSER_DIR/browser-image.env"
+    set +a
+  fi
   # In the source folder: cargo reads the configuration of the folder it runs in.
   (cd "$SRC_ROOT" && cargo build --manifest-path "$SRC_ROOT/Cargo.toml" --release -p factoryd -p claktory-apps -p claktory-speech)
   BACKEND="$SRC_ROOT/target/release"
@@ -215,6 +250,10 @@ mkdir -p "$partial"
 cp "$BACKEND/factoryd" "$BACKEND/claktory-apps" "$BACKEND/claktory-speech" "$partial/"
 if $VIDEO_PREVIEW; then cp "$BACKEND/claktory-video-preview" "$partial/"; fi
 if $RG || $JQ; then cp -R "$BACKEND/tools" "$partial/tools"; fi
+if $BROWSER; then
+  cp -c "$BROWSER_DIR/claktory-browser.oci.tar.zst" "$BROWSER_DIR/browser-image.env" "$partial/"
+  [[ "$BROWSER_DIR" == "${PREVIOUS:-}" ]] || rm -rf "$BROWSER_DIR"
+fi
 echo "$BACKEND_VERSION" >"$partial/backend-version"
 echo "$FINGERPRINT" >"$partial/backend-fingerprint"
 # What it was built from, for scripts/publish.sh --built: the commit, and the

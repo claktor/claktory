@@ -767,7 +767,7 @@ pub(crate) fn refresh(factory: &Arc<Factory>, pipe: &str, id: &str) -> Result<St
         reaches(factory, &share.id).into_iter().find(|reach| reach.pipe == pipe).ok_or("That website isn't shared with this pipe.")?;
     if reach.ended {
         return Err(format!(
-            "{} ended on this pipe ({}), so offering it again shares it again: only the person does that, on a card (pipes_share).",
+            "{} ended on this pipe ({}), so offering it again shares it again: only the person does that, in a request (pipes_share).",
             share.name,
             ended_words(factory, &reach.ended_why)
         ));

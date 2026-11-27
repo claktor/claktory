@@ -711,16 +711,12 @@ void main() {
     await tester.pump();
 
     // A typed comment is a reply (#370): one Submit, nothing connected.
-    await tester.tap(find.text('Add a comment'));
-    await tester.pump();
     await tester.enterText(find.byType(EditableText).last, 'Only DNS, please');
     await tester.pump();
     expect(find.text('Connect Cloudflare'), findsNothing);
     expect(find.text('Dismiss'), findsNothing);
     expect(
-      find.text(
-        'Nothing is connected. June gets your comment and can ask again.',
-      ),
+      find.text('Submit sends your words instead of connecting.'),
       findsOneWidget,
     );
     await tester.tap(find.text('Submit'));
@@ -752,8 +748,6 @@ void main() {
     expect(dismiss.reply, isFalse);
     expect(dismiss.comment, isEmpty);
 
-    await tester.tap(find.text('Add a comment'));
-    await tester.pump();
     await tester.enterText(find.byType(EditableText).last, 'Not yet');
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
     await tester.pump();

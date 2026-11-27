@@ -57,7 +57,9 @@ pub(super) fn main(args: &[String]) -> ExitCode {
         mounts.lines().rfind(|line| line.split_whitespace().nth(1) == Some("/tmp/.X11-unix") && line.starts_with("tmpfs ")).map(str::to_owned).ok_or_else(|| "not its own".to_owned())
     });
     check("/tmp/.X11-unix is the runner's own (another runner can't take its screen)", false, sockets);
+    check("Chrome's policy is the runner's own (the person's Chrome never reads it)", false, namespace::policy_in_place());
     check("the firewall refuses this computer's own addresses", false, super::firewall_holds().map(|()| "refused at each".to_owned()));
+    check("the firewall refuses a public IPv6 address (no IPv6 beyond DNS)", false, super::no_ipv6_out());
     if let Some((pid, existed)) = outside {
         check(&format!("see the person's process {pid} (it exists outside: {existed})"), true, read_some(&format!("/proc/{pid}/cmdline")));
     }

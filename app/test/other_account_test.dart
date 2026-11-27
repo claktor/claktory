@@ -37,8 +37,9 @@ Future<Harness> _show(
 }
 
 /// What a Claktory on another account says when it turns this device away.
-void _turnAway(Harness harness, String said) {
+void _turnAway(Harness harness, String said, {bool before = false}) {
   harness.backend.connected.value = false;
+  harness.backend.otherAccountBefore = before;
   harness.backend.otherAccount.value = said;
   harness.backend.refused.value = said;
 }
@@ -67,7 +68,7 @@ void main() {
       // own, how to move it to that one, in the app (V3; Fugo: no
       // commands, only the person may run them).
       expect(
-        find.text('This $thisDeviceKind is signed in as m…@example.com.'),
+        find.text('This $thisDeviceKind is signed in as m…\u2060@example.com.'),
         findsOneWidget,
       );
       expect(
@@ -104,7 +105,7 @@ void main() {
       );
       expect(find.text(said), findsOneWidget);
       expect(
-        find.text('This $thisDeviceKind is signed in as m…@example.com.'),
+        find.text('This $thisDeviceKind is signed in as m…\u2060@example.com.'),
         findsOneWidget,
       );
       expect(find.textContaining('If fred is yours'), findsNothing);
@@ -116,8 +117,23 @@ void main() {
       expect(find.text('Sign in with the account fred uses'), findsOneWidget);
     });
 
-    testWidgets('${platform.name}: Remove… asks the rail\'s own question, '
-        'Try again nearest the thumb on a phone', (tester) async {
+    testWidgets('${platform.name}: the backend saying it let this device '
+        'in before is enough, whatever its words (#529, V5)', (tester) async {
+      final harness = await _show(tester, platform, size);
+      _turnAway(harness, 'Sign in with the right account.', before: true);
+      await pumpFrames(tester);
+      expect(
+        find.text('fred no longer lets this $thisDeviceKind in'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('If fred is yours'), findsNothing);
+      expect(find.text('Sign in…'), findsOneWidget);
+    });
+
+    testWidgets('${platform.name}: Remove… asks the rail\'s own question; '
+        'on a phone Try again first, the ways out under it (§7)', (
+      tester,
+    ) async {
       debugDefaultTargetPlatformOverride = platform;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
       final harness = Harness(Workspace(), localBackend: false);
@@ -145,8 +161,8 @@ void main() {
       expect(remove, findsOneWidget);
       if (platform == TargetPlatform.iOS) {
         expect(
-          tester.getRect(find.text('Try again')).top,
-          greaterThan(tester.getRect(remove).bottom),
+          tester.getRect(remove).top,
+          greaterThan(tester.getRect(find.text('Try again')).bottom),
         );
       }
       await tester.tap(remove);

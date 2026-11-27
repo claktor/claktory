@@ -16,6 +16,25 @@ import 'resources.dart' show formatBytes;
 import 'scope.dart' show AppScope;
 import 'visible_codes.dart' show shownName;
 
+/// A picture on this device at [path], as a conversation shows it sent:
+/// decoded at its frame's width (240 points) and no bigger.
+ImageProvider sentPicture(String path, double ratio) =>
+    ResizeImage.resizeIfNeeded(
+      (240 * ratio).round(),
+      null,
+      FileImage(File(path)),
+    );
+
+/// Starts decoding the picture at [path] as a conversation will show it
+/// once sent, while it waits in the message box: sent, it's in its bubble
+/// from the first frame, rather than joining it a moment later and moving
+/// what's under it (Zucchero's row 675: the conversation lost the bottom).
+void warmSentPicture(BuildContext context, String path) {
+  // Once decoded, it's taken from the image cache at once.
+  final picture = sentPicture(path, MediaQuery.devicePixelRatioOf(context));
+  unawaited(precacheImage(picture, context, onError: (_, _) {}));
+}
+
 /// A file on this device, to send with a message.
 class LocalFile {
   const LocalFile({required this.path, required this.name, required this.size});
@@ -270,16 +289,24 @@ class FileDrop {
   /// [owner], a message box, is the one showing: files dropped on the
   /// window go to it if it [takesFiles]. A new box claims before the one
   /// it replaces lets go, so the last to claim keeps it.
-  static void claim(Object owner, {required bool takesFiles}) {
+  static void claim(Object owner, {required bool takesFiles, String? key}) {
     _owner = owner;
+    claimedKey = key;
     FileDrop.takesFiles.value = takesFiles;
     _sync();
   }
+
+  /// The key of the target ([MessageTarget.key]: an agent's id) of the box
+  /// that claimed the window last, so the overlay names whom files go to:
+  /// the box in focus mode's Context, not the agent selected under it
+  /// (Abbacchio's row 1607).
+  static String? claimedKey;
 
   /// [owner] is gone; if it was the one showing, no box is.
   static void release(Object owner) {
     if (!identical(_owner, owner)) return;
     _owner = null;
+    claimedKey = null;
     takesFiles.value = null;
     _sync();
   }

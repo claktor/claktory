@@ -47,6 +47,14 @@ build=(flutter build ios --simulator --debug)
 if [ -n "$target" ]; then build+=("--target=$target"); fi
 
 cd "$root/app"
+# Xcode's intermediates under app/build, where the cache trim sees them, not a
+# new ~180 MB Runner-* folder in ~/Library/Developer/Xcode/DerivedData per
+# checkout (Bruno 49137): flutter build ios takes no -derivedDataPath, but it
+# passes FLUTTER_XCODE_* to xcodebuild as build settings.
+export FLUTTER_XCODE_OBJROOT="$root/app/build/ios/Intermediates"
+# arm64 only: nothing is built for x86_64 on this Mac (Matt's rule), and a
+# simulator build would otherwise build x86_64 too.
+export FLUTTER_XCODE_ARCHS=arm64 FLUTTER_XCODE_ONLY_ACTIVE_ARCH=YES FLUTTER_XCODE_EXCLUDED_ARCHS=x86_64
 if $dev; then
   build+=(--dart-define=FACTORY_DEV=true)
   # Built as Claktory Dev from the start (its bundle id, so its own keychain

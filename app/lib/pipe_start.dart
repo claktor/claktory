@@ -308,20 +308,24 @@ class _PipeStartCardState extends State<PipeStartCard>
     if (!_accept) {
       return [
         ..._fields(store, theySee: true),
-        _actions(palette, [
-          _dismissButton(),
-          ListenableBuilder(
-            listenable: _name,
-            builder: (context, _) => Button(
-              label: 'Make invite',
-              primary: true,
-              onPressed: _busy || _name.text.trim().isEmpty || _project.isEmpty
-                  ? null
-                  : _makeInvite,
+        _withComment(
+          store,
+          _actions(
+            palette,
+            [_dismissButton()],
+            ListenableBuilder(
+              listenable: _name,
+              builder: (context, _) => Button(
+                label: 'Make invite',
+                primary: true,
+                onPressed:
+                    _busy || _name.text.trim().isEmpty || _project.isEmpty
+                    ? null
+                    : _makeInvite,
+              ),
             ),
           ),
-        ]),
-        _dismissComment(store),
+        ),
       ];
     }
     final preview = _preview;
@@ -340,36 +344,44 @@ class _PipeStartCardState extends State<PipeStartCard>
             onSubmitted: (_) => _code.text.trim().isEmpty ? null : _read(),
           ),
         ),
-        _actions(palette, [
-          _dismissButton(),
-          if (_canScan)
-            Button(label: 'Scan code', onPressed: _busy ? null : _scan),
-          ListenableBuilder(
-            listenable: _code,
-            builder: (context, _) => Button(
-              label: 'Continue',
-              primary: true,
-              onPressed: _busy || _code.text.trim().isEmpty ? null : _read,
+        _withComment(
+          store,
+          _actions(
+            palette,
+            [
+              _dismissButton(),
+              if (_canScan)
+                Button(label: 'Scan code', onPressed: _busy ? null : _scan),
+            ],
+            ListenableBuilder(
+              listenable: _code,
+              builder: (context, _) => Button(
+                label: 'Continue',
+                primary: true,
+                onPressed: _busy || _code.text.trim().isEmpty ? null : _read,
+              ),
             ),
           ),
-        ]),
-        _dismissComment(store),
+        ),
       ];
     }
     return [
       _TheySay(preview: preview),
       const SizedBox(height: Space.m),
       ..._fields(store, theySee: false, peer: preview.peer),
-      _actions(palette, [
-        Button(
-          label: 'Back',
-          onPressed: _busy
-              ? null
-              : () => setState(() {
-                  _preview = null;
-                  _error = null;
-                }),
-        ),
+      _actions(
+        palette,
+        [
+          Button(
+            label: 'Back',
+            onPressed: _busy
+                ? null
+                : () => setState(() {
+                    _preview = null;
+                    _error = null;
+                  }),
+          ),
+        ],
         ListenableBuilder(
           listenable: _name,
           builder: (context, _) => Button(
@@ -378,7 +390,7 @@ class _PipeStartCardState extends State<PipeStartCard>
             onPressed: _busy || _project.isEmpty ? null : _connect,
           ),
         ),
-      ]),
+      ),
     ];
   }
 
@@ -427,41 +439,33 @@ class _PipeStartCardState extends State<PipeStartCard>
     ];
   }
 
-  /// A comment for the card's agent, sent with Dismiss.
-  Widget _dismissComment(WorkspaceStore store) {
+  /// The field for the card's agent, sent only with Dismiss, which says
+  /// so before anything's typed (Lucy's §3.1), above the card's [row].
+  Widget _withComment(WorkspaceStore store, Widget row) {
     final name = store.agent(start.agentId)?.name ?? start.agentId;
-    return DecisionComment(
-      controller: _comment,
-      agent: name,
-      note: '$name gets it if you dismiss this.',
-      enabled: !_busy,
+    return CardAnswerBlock(
+      field: (focus) => DecisionComment(
+        controller: _comment,
+        focusNode: focus,
+        agent: name,
+        placeholder: 'Why not? $name sees this only if you dismiss.',
+        enabled: !_busy,
+      ),
+      row: row,
     );
   }
 
   Widget _dismissButton() =>
       Button(label: 'Dismiss', onPressed: _busy ? null : _dismiss);
 
-  /// The error, if any, then the buttons at the end; they wrap under each
-  /// other where the card is narrow.
-  Widget _actions(Palette palette, List<Widget> buttons) => Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    children: [
-      if (_error case final error?)
-        Padding(
-          padding: const EdgeInsets.only(bottom: Space.s),
-          child: Text(
-            error,
-            style: TextStyles.caption.copyWith(color: palette.danger),
-          ),
-        ),
-      Wrap(
-        alignment: WrapAlignment.end,
-        spacing: Space.s,
-        runSpacing: Space.s,
-        children: buttons,
-      ),
-    ],
-  );
+  /// The card's row (Lucy's rule 2): the error, if any, in its line, then
+  /// the [quiet] buttons and the [primary].
+  Widget _actions(Palette palette, List<Widget> quiet, Widget primary) =>
+      CardRow(
+        line: _error == null ? null : CardLine(_error!, color: palette.danger),
+        quiet: quiet,
+        primary: primary,
+      );
 
   /// The invite just made: its code, to copy and send privately, and the
   /// pipe it waits in.
@@ -514,30 +518,44 @@ class _PipeStartCardState extends State<PipeStartCard>
         style: TextStyles.caption.copyWith(color: palette.textFaint),
       ),
       const SizedBox(height: Space.m),
-      _actions(palette, [
-        if (pipe != null)
-          Button(label: 'Open pipe', onPressed: () => openPipe(context, pipe)),
-        if (!_qr)
-          Button(
-            label: 'Show QR code',
-            onPressed: () => setState(() => _qr = true),
-          ),
-        Button(
-          label: _copied ? 'Copied' : 'Copy code',
-          primary: !share,
-          onPressed: () => _copy(invite.code, expires),
-        ),
-        // Where there's a share sheet, it's the way to send the code, last.
-        if (share)
-          Builder(
-            builder: (button) => Button(
-              label: 'Share',
-              primary: true,
-              onPressed: () =>
-                  shareText(context, invite.code, from: globalRectOf(button)),
+      _actions(
+        palette,
+        [
+          if (pipe != null)
+            Button(
+              label: 'Open pipe',
+              onPressed: () => openPipe(context, pipe),
             ),
-          ),
-      ]),
+          if (!_qr)
+            Button(
+              label: 'Show QR code',
+              onPressed: () => setState(() => _qr = true),
+            ),
+          if (share)
+            Button(
+              label: _copied ? 'Copied' : 'Copy code',
+              onPressed: () => _copy(invite.code, expires),
+            ),
+        ],
+        // Where there's a share sheet, it's the way to send the code, last.
+        share
+            ? Builder(
+                builder: (button) => Button(
+                  label: 'Share',
+                  primary: true,
+                  onPressed: () => shareText(
+                    context,
+                    invite.code,
+                    from: globalRectOf(button),
+                  ),
+                ),
+              )
+            : Button(
+                label: _copied ? 'Copied' : 'Copy code',
+                primary: true,
+                onPressed: () => _copy(invite.code, expires),
+              ),
+      ),
     ];
   }
 

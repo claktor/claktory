@@ -201,7 +201,7 @@ void main() {
         );
         expect(header.dy, greaterThanOrEqualTo(phone.top));
 
-        await tester.tap(find.bySemanticsLabel('Extensions'));
+        await tester.tap(find.bySemanticsLabel(RegExp('^More options for ')));
         await pumpFrames(tester);
         expect(find.text('Files'), findsOneWidget);
         await tester.tap(find.text('a-file-with-a-long-name-that-goes-on.md'));

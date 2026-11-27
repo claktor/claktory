@@ -489,7 +489,7 @@ void main() {
     final harness = Harness(snapshot(layout: withFilesOf('p1')));
     await harness.show(tester, size: const Size(390, 844));
     await pumpFrames(tester);
-    await tester.tap(find.bySemanticsLabel('Extensions'));
+    await tester.tap(find.bySemanticsLabel(RegExp('^More options for ')));
     await pumpFrames(tester);
     expect(find.text('Files'), findsNothing);
   });

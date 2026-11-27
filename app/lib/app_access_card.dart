@@ -8,12 +8,19 @@ import 'avatar.dart';
 import 'backend.dart';
 import 'characters/character.dart';
 import 'controls.dart';
-import 'card_answer.dart' show CardAnswer, PublishesAnswer, noComment;
-import 'decision.dart' show CommentTyped, DecisionComment, SubmitButton;
+import 'card_answer.dart'
+    show CardAnswer, PublishesAnswer, insteadLine, noComment;
+import 'decision.dart'
+    show
+        CardAnswerBlock,
+        CardLine,
+        CardRow,
+        CommentTyped,
+        DecisionComment,
+        SubmitButton;
 import 'extensions.dart' show logTime;
 import 'forms.dart' show rivetIn;
 import 'identity.dart';
-import 'mobile/lines.dart';
 import 'mobile/metrics.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
@@ -347,46 +354,45 @@ class _AppAccessCardState extends State<AppAccessCard>
   List<Widget> _pending(Palette palette, TypeScale type, String rivetName) {
     final busy = _deciding != null;
     return [
-      // Once a comment is typed, one Submit: a reply, allowing nothing.
-      CommentTyped(
-        controller: _comment,
-        builder: (context, typed) => ActionLine(
-          lead: Text(
-            _error ??
-                (typed
-                    ? 'Nothing is allowed. $rivetName gets your comment and '
-                          'can suggest it again.'
-                    : _deciding == true
-                    ? 'Approving…'
-                    : 'Approving allows exactly this, and nothing more.'),
-            style: type.caption.copyWith(
-              color: _error == null ? palette.textFaint : palette.danger,
-            ),
-          ),
-          action: typed
-              ? SubmitButton(onPressed: busy ? null : _submit)
-              : ControlsLine(
-                  children: [
-                    Button(
-                      label: 'Decline',
-                      onPressed: busy ? null : () => _decide(approve: false),
-                    ),
-                    Button(
-                      label: 'Approve',
-                      primary: true,
-                      onPressed: busy ? null : () => _decide(approve: true),
-                    ),
-                  ],
-                ),
+      // The field, open from the start, above the row (Lucy's rules 2 and
+      // 4). Once something's typed, one Submit: a reply, allowing nothing;
+      // Return too.
+      CardAnswerBlock(
+        field: (focus) => DecisionComment(
+          controller: _comment,
+          focusNode: focus,
+          agent: rivetName,
+          enabled: !busy,
+          onSubmit: _submit,
         ),
-      ),
-      // The shared Add a comment: typed, it's Submit's, Return too.
-      const SizedBox(height: Space.xs),
-      DecisionComment(
-        controller: _comment,
-        agent: rivetName,
-        enabled: !busy,
-        onSubmit: _submit,
+        row: CommentTyped(
+          controller: _comment,
+          builder: (context, typed) => CardRow(
+            line: CardLine(
+              _error ??
+                  (_deciding != null
+                      ? 'Sending…'
+                      : typed
+                      ? insteadLine('approving')
+                      : 'Approving allows exactly this, and nothing more.'),
+              color: _error == null ? null : palette.danger,
+            ),
+            quiet: [
+              if (!typed)
+                Button(
+                  label: 'Decline',
+                  onPressed: busy ? null : () => _decide(approve: false),
+                ),
+            ],
+            primary: typed
+                ? SubmitButton(onPressed: busy ? null : _submit)
+                : Button(
+                    label: 'Approve',
+                    primary: true,
+                    onPressed: busy ? null : () => _decide(approve: true),
+                  ),
+          ),
+        ),
       ),
     ];
   }

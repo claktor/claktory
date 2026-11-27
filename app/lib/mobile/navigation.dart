@@ -39,6 +39,11 @@ abstract class PhoneRoutes {
   /// Pops the page on top, with [result].
   void pop<T>([T? result]);
 
+  /// Focus mode on a screen of its own, over what shows (an iPhone's,
+  /// #599); false where the window lays it out itself (an iPad's, a Mac's)
+  /// or there's none.
+  bool openFocus();
+
   /// Whether there's a page to go back from (rather than the conversation
   /// itself, whose leading button opens the drawer).
   bool get canPop;

@@ -4,7 +4,6 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/resources.dart';
 import 'package:factory_app/scope.dart';
 import 'package:fixnum/fixnum.dart';
-import 'package:factory_app/settings_view.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -345,16 +344,10 @@ void main() {
     await harness.show(tester);
     harness.page.value = AppPage.settings;
     await settle(tester);
-    final settings = find
-        .descendant(
-          of: find.byType(SettingsView),
-          matching: find.byType(Scrollable),
-        )
-        .first;
-    await tester.scrollUntilVisible(
+    await revealInSettings(
+      tester,
       find.text('Processors'),
-      200,
-      scrollable: settings,
+      section: 'resources',
     );
     expect(find.text('Resources'), findsWidgets);
     expect(find.text('Off'), findsOneWidget, reason: 'the processors alert');
@@ -404,16 +397,7 @@ void main() {
       "When one grows past this, Claktory clears it while nothing's using "
       'it. 0 means never.',
     );
-    await tester.scrollUntilVisible(
-      note,
-      200,
-      scrollable: find
-          .descendant(
-            of: find.byType(SettingsView),
-            matching: find.byType(Scrollable),
-          )
-          .first,
-    );
+    await revealInSettings(tester, note);
     expect(find.text('Build caches'), findsOneWidget);
     final field = find.descendant(
       of: find.ancestor(of: find.text('GB each'), matching: find.byType(Wrap)),
@@ -451,16 +435,7 @@ void main() {
     harness.page.value = AppPage.settings;
     await settle(tester);
     final heard = find.text('Who hears');
-    await tester.scrollUntilVisible(
-      heard,
-      200,
-      scrollable: find
-          .descendant(
-            of: find.byType(SettingsView),
-            matching: find.byType(Scrollable),
-          )
-          .first,
-    );
+    await revealInSettings(tester, heard);
     expect(
       find.text('Rivet tells you when Mac Studio runs low. Alert when:'),
       findsOneWidget,

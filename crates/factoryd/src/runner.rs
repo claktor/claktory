@@ -350,10 +350,12 @@ fn app_changes(frame: &Frame, apps: &BTreeMap<String, String>, sections: &BTreeM
 /// extension's that was turned off, are refused, saying why.
 fn fit(factory: &Factory, mut tools: Vec<Tool>, specs: &[ToolSpec], agent: &AgentConfig) -> Vec<Tool> {
     let mut fitted = Vec::with_capacity(specs.len());
+    // Still on a pipe, only sending to each (#414, or reading given up).
+    let sends = tools.iter().any(|tool| tool.spec.name == "pipe_send");
     for spec in specs {
         let mut tool = match tools.iter().position(|tool| tool.spec.name == spec.name) {
             Some(index) => tools.swap_remove(index),
-            None => refused(spec, agent, crate::apps::tool_app(factory, &spec.name)),
+            None => refused(spec, agent, crate::apps::tool_app(factory, &spec.name), sends),
         };
         tool.spec = spec.clone();
         fitted.push(tool);
@@ -361,13 +363,17 @@ fn fit(factory: &Factory, mut tools: Vec<Tool>, specs: &[ToolSpec], agent: &Agen
     fitted
 }
 
-/// A tool of the frame that's gone: calling it says why.
-fn refused(spec: &ToolSpec, agent: &AgentConfig, app: Option<String>) -> Tool {
+/// A tool of the frame that's gone: calling it says why. `sends`: the
+/// agent still sends to a pipe.
+fn refused(spec: &ToolSpec, agent: &AgentConfig, app: Option<String>, sends: bool) -> Tool {
     let name = spec.name.to_string();
     let owner = crate::extensions::ALL.into_iter().find(|extension| extension.owns_tool(&name)).map(|extension| extension.manifest());
     let reason = match owner {
         _ if app.is_some() => {
             format!("You no longer have {name} of the {} app, so it doesn't work any more.", app.unwrap_or_default())
+        }
+        _ if name.starts_with("pipe_") && sends => {
+            format!("You only send to your pipes now, so {name} doesn't work any more. pipe_send still does.")
         }
         _ if name.starts_with("pipe_") => format!("You no longer have a pipe, so {name} doesn't work any more."),
         _ if name == crate::given_up::APPS_TOOL => format!("You no longer have any app, so {name} has nothing to give up."),
@@ -1295,6 +1301,13 @@ impl Factory {
                 crate::errands::downloads::touched(self, id, &folder, path);
             }
         }
+        // macOS refused a tool a protected place (item 12): kept, once
+        // checked again, for the person to see.
+        if let AgentEvent::ToolExecutionEnd { result, .. } = &event
+            && let Some(root) = result.details.get(factory_agent::tools::protected::DETAILS_KEY).and_then(serde_json::Value::as_str)
+        {
+            crate::protected::refused_by_tool(self, id, root);
+        }
         // The images a compaction let go of: their files at the provider go.
         let mut forgotten = Vec::new();
         let persist = {
@@ -1537,7 +1550,29 @@ impl Factory {
             Some(factoryd) => vec![factoryd.clone().into_os_string(), "redact".into()],
             None => Vec::new(),
         };
-        factory_agent::Secrets { agent: id.to_owned(), resolve, used, redaction: self.redaction.clone(), filter }
+        let factory = Arc::downgrade(self);
+        let check: factory_agent::secrets::CheckSave = Arc::new(move |agent, save, parents| {
+            let factory = factory.clone();
+            Box::pin(async move {
+                let Some(factory) = factory.upgrade() else {
+                    return Err("Claktory is stopping.".to_owned());
+                };
+                crate::account::unlock_now(&factory).await;
+                crate::vault::saved::check(&factory, &agent, &save, &parents).map(|_| ())
+            })
+        });
+        let factory = Arc::downgrade(self);
+        let store: factory_agent::secrets::StoreSave = Arc::new(move |agent, save, parents, value| {
+            let factory = factory.clone();
+            Box::pin(async move {
+                let Some(factory) = factory.upgrade() else {
+                    return Err("Claktory is stopping, so nothing was saved.".to_owned());
+                };
+                crate::vault::saved::store(&factory, &agent, &save, &parents, &value)
+            })
+        });
+        let save = Some(factory_agent::secrets::Save { check, store });
+        factory_agent::Secrets { agent: id.to_owned(), resolve, used, redaction: self.redaction.clone(), filter, save }
     }
 }
 

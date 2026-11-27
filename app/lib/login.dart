@@ -621,8 +621,9 @@ class _ProviderCardState extends State<ProviderCard> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Expanded(
+              Flexible(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -647,11 +648,15 @@ class _ProviderCardState extends State<ProviderCard> {
                   ],
                 ),
               ),
+              // At the largest text on a narrow phone it gives way to the
+              // name, its word on two lines, rather than past the edge.
               if (!listsAccounts && provider.canSignOut)
-                Button(
-                  label: 'Sign out',
-                  onPressed: () =>
-                      _run(() => scope.backend.signOut(provider.id)),
+                Flexible(
+                  child: Button(
+                    label: 'Sign out',
+                    onPressed: () =>
+                        _run(() => scope.backend.signOut(provider.id)),
+                  ),
                 ),
             ],
           ),
@@ -974,6 +979,9 @@ class _AccountRowState extends State<_AccountRow> {
         );
         final details = [
           if (account.plan.isNotEmpty) account.plan,
+          // An API key's spending limit, what's left of it ("\$12.40 left").
+          if (meter.credit?.leftShown case final left? when left.isNotEmpty)
+            left,
           // Its own lines below say these.
           if (!account.outOfCredit && !account.signInAgain) state.text,
           if (weekly != null)

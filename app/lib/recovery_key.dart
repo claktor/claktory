@@ -6,9 +6,12 @@ import 'claktory_identity.dart' show claktoryNameInText;
 import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
+import 'message_time.dart' show dayLine;
 import 'mobile/metrics.dart' show TypeScale;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
+import 'settings_view.dart' show SettingRow;
+import 'visible_codes.dart' show visibleCodes;
 
 /// Saving the recovery key (R1): Needs you asks once a Claktory signs in,
 /// until the person shows that they kept it by typing back one block of
@@ -191,6 +194,157 @@ class RecoveryKeyBox extends StatelessWidget {
         text,
         style: TypeScale.of(context).code.copyWith(color: palette.text),
       ),
+    );
+  }
+}
+
+/// Who made an account recovery key, as claktory.com says (VaultState
+/// recovery_key_made_on, _change_made_on): untrusted words on one line,
+/// every hidden character by its code, cut at 60 characters whatever
+/// claktory.com's own cap (Fugo 50510); empty, a Claktory since removed.
+String recoveryKeyMaker(String name) {
+  if (name.trim().isEmpty) return 'a Claktory no longer on your account';
+  final shown = visibleCodes(name.replaceAll(RegExp(r'\s+'), ' ').trim());
+  final runes = shown.runes;
+  return runes.length <= 60
+      ? shown
+      : '${String.fromCharCodes(runes.take(59))}…';
+}
+
+/// The account's recovery key in Settings → Secrets (#239, main's half):
+/// "Covered by your account's recovery key" with where and when it was
+/// made, when it covers this vault; and when claktory.com has a new key
+/// this Claktory couldn't check by itself, the warning Claktory's alert
+/// sends the person here for, with Use the key here (UseRecoveryKey).
+/// Nothing for a vault with its own key: Account's Show recovery key… is
+/// that one's. Never Make a new recovery key, which comes with v0.2.0.
+class AccountRecoveryKey extends StatefulWidget {
+  const AccountRecoveryKey({super.key});
+
+  @override
+  State<AccountRecoveryKey> createState() => _AccountRecoveryKeyState();
+}
+
+class _AccountRecoveryKeyState extends State<AccountRecoveryKey> {
+  var _busy = false;
+  String? _error;
+
+  Future<void> _use() async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await AppScope.of(context).useRecoveryKey();
+      if (mounted) setState(() => _busy = false);
+    } on RequestFailure catch (failure) {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _error = failure.message;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final backend = AppScope.of(context);
+    return ListenableBuilder(
+      listenable: backend.workspace,
+      builder: (context, _) {
+        final vault = backend.workspace.workspace.vault;
+        if (!vault.recoveryKeyCovered && !vault.recoveryKeyChangeWaiting) {
+          return const SizedBox.shrink();
+        }
+        final palette = Palette.of(context);
+        final type = TypeScale.of(context);
+        final now = DateTime.now();
+        String made(String on, int ms) => [
+          'Made on ${recoveryKeyMaker(on)}',
+          // "today", "yesterday", "Monday", "Mon 17 Nov" (dayLine's).
+          if (ms > 0)
+            switch (dayLine(ms, now)) {
+              'Today' || 'Yesterday' => dayLine(ms, now).toLowerCase(),
+              final day => day,
+            },
+        ].join(', ');
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (vault.recoveryKeyChangeWaiting) ...[
+              Container(
+                key: const ValueKey('recovery-key-change'),
+                padding: const EdgeInsets.all(Space.m),
+                decoration: BoxDecoration(
+                  color: palette.signal.withValues(alpha: 0.06),
+                  border: Border.all(
+                    color: palette.signal.withValues(alpha: 0.4),
+                  ),
+                  borderRadius: BorderRadius.circular(Radii.panel),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Your account has a new recovery key',
+                      style: type.body.copyWith(
+                        color: palette.text,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: Space.xs),
+                    Text(
+                      '${made(vault.recoveryKeyChangeMadeOn, vault.recoveryKeyChangeMadeMs.toInt())}. '
+                      'Use it here only if you made it. Until you do, the key '
+                      'you saved before still opens your secrets here.',
+                      style: type.body.copyWith(color: palette.textMuted),
+                    ),
+                    const SizedBox(height: Space.m),
+                    Button(
+                      label: _busy ? 'Using…' : 'Use the key here',
+                      onPressed: _busy ? null : _use,
+                    ),
+                    if (_error case final error?) ...[
+                      const SizedBox(height: Space.xs),
+                      Text(
+                        error,
+                        style: type.caption.copyWith(color: palette.danger),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const SizedBox(height: Space.l),
+            ],
+            if (vault.recoveryKeyCovered)
+              SettingRow(
+                label: 'Recovery key',
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "Covered by your account's recovery key",
+                      style: type.body.copyWith(color: palette.text),
+                    ),
+                    const SizedBox(height: Space.xs),
+                    Text(
+                      [
+                        '${made(vault.recoveryKeyMadeOn, vault.recoveryKeyMadeMs.toInt())}.',
+                        if (vault.recoveryKeyUsed)
+                          'You used it here to open your secrets.',
+                      ].join(' '),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: type.caption.copyWith(color: palette.textMuted),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 }

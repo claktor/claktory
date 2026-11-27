@@ -41,7 +41,7 @@ Future<Harness> _phone(WidgetTester tester, {String appId = 'charts'}) async {
 }
 
 Future<void> _openFromExtensions(WidgetTester tester, String name) async {
-  await tester.tap(find.bySemanticsLabel('Extensions'));
+  await tester.tap(find.bySemanticsLabel(RegExp('^More options for ')));
   await pumpFrames(tester);
   await tester.tap(find.text(name));
   await pumpFrames(tester, const Duration(seconds: 1));

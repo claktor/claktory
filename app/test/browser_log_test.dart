@@ -7,7 +7,6 @@ import 'package:factory_app/scope.dart' show AppPage;
 import 'package:factory_app/browser/browser_log.dart';
 import 'package:factory_app/controls.dart' show Select;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
-import 'package:factory_app/settings_view.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -74,16 +73,13 @@ Future<Harness> _show(
   harness.page.value = AppPage.settings;
   await harness.show(tester, size: const Size(1200, 2400));
   await pumpFrames(tester);
-  await tester.scrollUntilVisible(
-    find.text('Display'),
-    300,
-    scrollable: find
-        .descendant(
-          of: find.byType(SettingsView),
-          matching: find.byType(Scrollable),
-        )
-        .first,
-  );
+  if (browser) {
+    await revealInSettings(
+      tester,
+      find.byType(BrowserLogSettings),
+      section: 'browser',
+    );
+  }
   await pumpFrames(tester);
   await pumpFrames(tester);
   return harness;
@@ -185,6 +181,7 @@ void main() {
     );
     expect(find.byType(BrowserLogRow), findsNWidgets(100));
     await tester.ensureVisible(find.text('Show earlier'));
+    await tester.pump();
     await tester.tap(find.text('Show earlier'));
     await pumpFrames(tester);
     expect(
@@ -255,15 +252,10 @@ void main() {
     harness.page.value = AppPage.settings;
     await harness.show(tester, size: const Size(1200, 2400));
     await pumpFrames(tester);
-    await tester.scrollUntilVisible(
-      find.text('Display'),
-      300,
-      scrollable: find
-          .descendant(
-            of: find.byType(SettingsView),
-            matching: find.byType(Scrollable),
-          )
-          .first,
+    await revealInSettings(
+      tester,
+      find.byType(BrowserLogSettings),
+      section: 'browser',
     );
     await pumpFrames(tester);
     await pumpFrames(tester);

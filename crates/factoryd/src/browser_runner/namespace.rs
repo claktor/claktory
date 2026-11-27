@@ -36,6 +36,7 @@ extern "C" fn pass_on(signal: libc::c_int) {
 pub(crate) fn enter() -> Result<(), String> {
     // Before the user namespace, where root shows as nobody.
     x_sockets_folder_ok()?;
+    let policy_folders = policy_folders()?;
     // SAFETY: getuid and getgid can't fail.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     // SAFETY: a single-threaded process unsharing its own namespaces.
@@ -56,7 +57,7 @@ pub(crate) fn enter() -> Result<(), String> {
     if child > 0 {
         parent(child);
     }
-    inside()
+    inside(&policy_folders)
 }
 
 /// The parent, outside: passes its signals on and ends as the child does.
@@ -82,7 +83,7 @@ fn parent(child: libc::pid_t) -> ! {
 }
 
 /// PID 1, inside.
-fn inside() -> Result<(), String> {
+fn inside(policy_folders: &[&str]) -> Result<(), String> {
     // Gone with the parent (factoryd's sudo ended, say): the kernel then
     // ends everything in the namespace.
     // SAFETY: a prctl on ourselves.
@@ -105,6 +106,7 @@ fn inside() -> Result<(), String> {
         }
     }
     own_x_sockets()?;
+    own_policy(policy_folders)?;
     sees_only_itself()?;
     drop_capabilities()?;
     // SAFETY: a prctl on ourselves.
@@ -143,6 +145,104 @@ fn own_x_sockets() -> Result<(), String> {
         return Err(format!("couldn't give the browser's screen a folder of its own: {}", std::io::Error::last_os_error()));
     }
     Ok(())
+}
+
+/// Chrome's managed policy (C4; Fugo 49031): pages kept off the local
+/// network, no sign-in to Chrome itself or sync, so a site's sign-in stays
+/// that site's cookies (Fugo 41236), no warning bar for the runner's fixed
+/// flags (R11, Fugo 41700), and Chrome never filling or saving a card or an
+/// address itself (W9, Fugo 41400). LocalNetworkAccessRestrictionsEnabled
+/// is for Chromes before 158, which call it unknown.
+pub(crate) const POLICY: &str = r#"{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"], "BrowserSignin": 0, "SyncDisabled": true, "CommandLineFlagSecurityWarningsEnabled": false, "AutofillCreditCardEnabled": false, "AutofillAddressEnabled": false}"#;
+
+/// Where Google Chrome and Chromium read their managed policy on Linux.
+pub(crate) const CHROME_POLICY: &str = "/etc/opt/chrome/policies/managed";
+pub(crate) const CHROMIUM_POLICY: &str = "/etc/chromium/policies/managed";
+/// The policy's file in them, which only this namespace's tmpfs holds.
+pub(crate) const POLICY_FILE: &str = "claktory.json";
+
+/// The policy folders the runner mounts its own over: each that's a real
+/// folder of root's (setup makes Chrome's; a person's Chromium may have its
+/// own), and Chrome's always, since that's the one Google's Chrome reads,
+/// and the Chromium one when Chromium is the browser. Read before the user
+/// namespace, where root shows as nobody; a link or anyone else's folder
+/// is refused, never used.
+fn policy_folders() -> Result<Vec<&'static str>, String> {
+    use std::os::unix::fs::MetadataExt;
+    let read = read_by_the_browser();
+    let mut folders = Vec::new();
+    for folder in [CHROME_POLICY, CHROMIUM_POLICY] {
+        let needed = folder == read;
+        match std::fs::symlink_metadata(folder) {
+            Ok(found) if found.is_dir() && found.uid() == 0 => folders.push(folder),
+            Ok(_) => return Err(format!("{folder} isn't a folder of root's, so Claktory's browser won't use it: run Claktory's browser setup again")),
+            Err(_) if needed => {
+                return Err(format!("this computer has no {folder}, where Claktory's browser keeps Chrome's policy: run Claktory's browser setup again"));
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(folders)
+}
+
+/// Chrome's policy, only in this mount namespace (Fugo 49031): a tmpfs of
+/// its own over each policy folder, holding `POLICY`, so the person's own
+/// Chrome on this computer never reads it (and the browser stays Google's
+/// Chrome, with its updates). Fails closed: no policy, no runner.
+fn own_policy(folders: &[&str]) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let kind = CString::new("tmpfs").unwrap_or_default();
+    let options = CString::new("mode=0755,size=64k").unwrap_or_default();
+    for folder in folders {
+        let at = CString::new(*folder).unwrap_or_default();
+        // SAFETY: a mount in our own mount namespace, with C strings of ours.
+        if unsafe { libc::mount(kind.as_ptr(), at.as_ptr(), kind.as_ptr(), libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, options.as_ptr().cast()) } != 0 {
+            return Err(format!("couldn't give Chrome's policy a folder of its own ({folder}): {}", std::io::Error::last_os_error()));
+        }
+        let path = std::path::Path::new(folder).join(POLICY_FILE);
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o644)
+            .open(&path)
+            .and_then(|mut file| std::io::Write::write_all(&mut file, POLICY.as_bytes()));
+        if let Err(error) = written {
+            return Err(format!("couldn't write Chrome's policy ({}): {error}", path.display()));
+        }
+    }
+    policy_in_place().map(drop)
+}
+
+/// The policy folder the browser reads: Chromium's when the browser is
+/// Chromium (NixOS where nixpkgs has no Google Chrome), else Chrome's.
+fn read_by_the_browser() -> &'static str {
+    let chromium = super::chrome::binary().is_ok_and(|binary| binary.to_string_lossy().contains("chromium"));
+    if chromium { CHROMIUM_POLICY } else { CHROME_POLICY }
+}
+
+/// Whether Chrome's policy is this namespace's own: a tmpfs at the policy
+/// folder the browser reads, holding exactly `POLICY`, and the same in any
+/// other it mounted. The selftest's check, and Chrome's before each start:
+/// never a Chrome without it (Fugo 49031).
+pub(crate) fn policy_in_place() -> Result<String, String> {
+    let mounts = std::fs::read_to_string("/proc/self/mounts").map_err(|error| format!("couldn't read the browser's mounts: {error}"))?;
+    let read = read_by_the_browser();
+    let mut found = Vec::new();
+    for folder in [CHROME_POLICY, CHROMIUM_POLICY] {
+        let own = mounts.lines().rfind(|line| line.split_whitespace().nth(1) == Some(folder)).is_some_and(|line| line.starts_with("tmpfs "));
+        if !own {
+            if folder == read {
+                return Err(format!("Chrome's policy isn't the browser's own: {folder} isn't a folder of its own"));
+            }
+            continue;
+        }
+        let text = std::fs::read_to_string(std::path::Path::new(folder).join(POLICY_FILE)).unwrap_or_default();
+        if text != POLICY {
+            return Err(format!("Chrome's policy in {folder} isn't Claktory's"));
+        }
+        found.push(folder);
+    }
+    Ok(found.join(", "))
 }
 
 /// The fail-closed check (Fugo 36609): /proc is this namespace's, so this

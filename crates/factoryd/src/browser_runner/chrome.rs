@@ -58,8 +58,9 @@ const NEVER: [&str; 15] = [
 /// Every flag the runner gives Chrome, by its exact text or, ending in
 /// `=`, its name (the value is the runner's own: the profile, the window,
 /// the language). `arguments` refuses anything else.
-const ALLOWED: [&str; 12] = [
+const ALLOWED: [&str; 13] = [
     "--user-data-dir=",
+    "--disk-cache-dir=",
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-sync",
@@ -277,6 +278,17 @@ fn allowed(flag: &str) -> bool {
     ALLOWED.iter().any(|known| if known.ends_with('=') { flag.starts_with(known) && flag.len() > known.len() } else { flag == *known })
 }
 
+/// `--disk-cache-dir=` and the runner's private folder's `cache`: Chrome's
+/// HTTP cache never in the kept profile, so no stop, crash or restart
+/// leaves a page it showed (recovery codes, say) on its disk (Fugo 50272,
+/// row 1699). The folder goes with the session (`finish`), and on a Mac
+/// with its VM.
+fn cache_flag(tmp: &Path) -> OsString {
+    let mut flag = OsString::from("--disk-cache-dir=");
+    flag.push(tmp.join("cache"));
+    flag
+}
+
 /// `--user-data-dir=` and `profile`.
 fn profile_flag(profile: &Path) -> OsString {
     let mut flag = OsString::from("--user-data-dir=");
@@ -295,6 +307,7 @@ const NO_RESTORE: i64 = 5;
 pub(crate) fn arguments(launch: &Launch<'_>) -> Result<Vec<OsString>, String> {
     let mut arguments: Vec<OsString> = vec![
         profile_flag(launch.profile),
+        cache_flag(launch.tmp),
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
         "--disable-sync".into(),
@@ -336,6 +349,12 @@ pub(crate) fn arguments(launch: &Launch<'_>) -> Result<Vec<OsString>, String> {
     let profiles: Vec<&OsString> = flags.filter(|argument| argument.to_string_lossy().starts_with("--user-data-dir=")).collect();
     if profiles.len() != 1 || profiles[0].as_os_str() != profile_flag(launch.profile) {
         return Err("refused a profile other than the runner's".to_owned());
+    }
+    // One disk cache, in the runner's private folder.
+    let caches: Vec<&OsString> =
+        arguments.iter().take_while(|argument| *argument != "--").filter(|argument| argument.to_string_lossy().starts_with("--disk-cache-dir=")).collect();
+    if caches.len() != 1 || caches[0].as_os_str() != cache_flag(launch.tmp) {
+        return Err("refused a disk cache other than the runner's".to_owned());
     }
     Ok(arguments)
 }
@@ -393,7 +412,13 @@ impl Chrome {
     /// `events` tagged `generation`.
     pub fn launch(launch: &Launch<'_>, events: Sender<Event>, generation: u64) -> Result<Chrome, String> {
         let arguments = arguments(launch)?;
+        // Never a Chrome without the namespace's own policy (Fugo 49031).
+        #[cfg(target_os = "linux")]
+        super::namespace::policy_in_place()?;
         clear_singletons(launch.profile);
+        // What an older runner, or a Chrome before the flag, cached in the
+        // kept profile goes before Chrome starts (row 1699).
+        let _ = std::fs::remove_dir_all(launch.profile.join("Default").join("Cache"));
         prepare_preferences(launch.profile, launch.person, launch.mode).map_err(|error| format!("couldn't prepare the browser's settings: {error}"))?;
         let log = File::create(launch.tmp.join("chrome.log")).map_err(|error| format!("couldn't make Chrome's log: {error}"))?;
         let log_too = log.try_clone().map_err(|error| format!("couldn't make Chrome's log: {error}"))?;
@@ -617,6 +642,19 @@ mod tests {
             width: 1280,
             height: 800,
             fence: None,
+        }
+    }
+
+    /// Row 1699: Chrome's HTTP cache is in the runner's private folder,
+    /// never the kept profile, in both modes.
+    #[test]
+    fn chromes_disk_cache_is_the_runners_private_folders() {
+        let display = Display { number: 10, cookie_path: PathBuf::from("/tmp/x/Xauthority"), cookie: [0; 16] };
+        for mode in [Mode::Driven, Mode::Undriven] {
+            let arguments: Vec<String> =
+                arguments(&launch(&display, mode, None)).unwrap().iter().map(|argument| argument.to_string_lossy().into_owned()).collect();
+            let caches: Vec<&String> = arguments.iter().filter(|argument| argument.starts_with("--disk-cache-dir=")).collect();
+            assert_eq!(caches, ["--disk-cache-dir=/tmp/claktory-browser-x/cache"]);
         }
     }
 

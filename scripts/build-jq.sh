@@ -103,7 +103,10 @@ case "${1:-}" in
     case "$ARCH" in x86_64) PLATFORM=linux/amd64 ;; aarch64) PLATFORM=linux/arm64 ;; *) usage ;; esac
     TARBALL="$(tarball)"
     cp "$TARBALL" "$FRESH/"
-    ENGINE="${FACTORY_CONTAINER:-$(command -v podman >/dev/null && echo podman || echo docker)}"
+    # Natively: an x86_64 build runs on FACTORY_X86_HOST (scripts/lib.sh
+    # container_for), never on an arm64 Mac.
+    source "$ROOT/scripts/lib.sh"
+    container_for "$ARCH"
     # scripts/build-linux.sh's image, by its digest (one pin for every Linux
     # build). Pulled by that digest when this machine doesn't have it; a
     # release's run pulled it again already (FACTORY_LINUX_FRESH).
@@ -111,12 +114,12 @@ case "${1:-}" in
     [[ -n "$IMAGE" ]] || { echo "no pinned image in scripts/build-linux.sh" >&2; exit 1; }
     # The container runs natively and cross-compiles with zig, as
     # scripts/build-linux.sh does (emulation takes far longer).
-    case "$(uname -m)" in arm64 | aarch64) NATIVE=linux/arm64 NATIVE_ARCH=aarch64 ;; *) NATIVE=linux/amd64 NATIVE_ARCH=x86_64 ;; esac
-    "$ENGINE" image inspect "$IMAGE" >/dev/null 2>&1 || "$ENGINE" pull -q --platform "$NATIVE" "$IMAGE" >/dev/null
+    NATIVE="$CONTAINER_PLATFORM" NATIVE_ARCH="$CONTAINER_ARCH"
+    engine image inspect "$IMAGE" >/dev/null 2>&1 || engine pull -q --platform "$NATIVE" "$IMAGE" >/dev/null
     mkdir -p "$(dirname "$OUT")"
     OUT_DIR="$(cd "$(dirname "$OUT")" && pwd -P)"
     rm -f "$OUT_DIR/.$(basename "$OUT").partial"
-    if ! "$ENGINE" run --rm --platform "$NATIVE" \
+    if ! engine run --rm --platform "$NATIVE" \
       -v "$FRESH:/in:ro" -v "$OUT_DIR:/out" \
       "$IMAGE" sh -euc '
         VERSION=$1 ARCH=$2 NATIVE_ARCH=$3 NAME=$4
@@ -142,9 +145,9 @@ case "${1:-}" in
       echo "jq's Linux build ($ARCH) failed" >&2; exit 1
     fi
     mv -f "$OUT_DIR/.$(basename "$OUT").partial" "$OUT"
-    # Checked in a container of its own architecture (emulated when it isn't
-    # this machine's): the pinned version, and it reads JSON.
-    GOT="$("$ENGINE" run --rm --platform "$PLATFORM" -v "$OUT_DIR:/out:ro" docker.io/library/alpine:3 \
+    # Checked in a container of its own architecture, natively: the pinned
+    # version, and it reads JSON.
+    GOT="$(engine run --rm --platform "$PLATFORM" -v "$OUT_DIR:/out:ro" docker.io/library/alpine:3 \
       sh -c "/out/$(basename "$OUT") --version; printf '{\"a\":[1,{\"b\":\"claktory\"}]}' | /out/$(basename "$OUT") -r '.a[1].b'" 2>/dev/null)" || true
     [[ "$GOT" == "jq-$JQ_VERSION"$'\n'"claktory" ]] || { echo "$OUT isn't a working jq $JQ_VERSION for $ARCH: $GOT" >&2; rm -f "$OUT"; exit 1; }
     if strings "$OUT" | grep -q "$HOME"; then echo "$OUT holds this Mac's home folder ($HOME)" >&2; rm -f "$OUT"; exit 1; fi

@@ -77,6 +77,42 @@ fn refuse_web_pages(request: &Request, response: Response) -> Result<Response, E
     Err(refusal)
 }
 
+/// Whether a handshake's Host names this computer's loopback port: 127.0.0.1,
+/// localhost or [::1], with the port the backend listens on. Anything else
+/// (no Host, another name, another port) is a page that rebound its own name.
+fn loopback_host(host: Option<&str>, port: Option<u16>) -> bool {
+    let (Some(host), Some(port)) = (host, port) else { return false };
+    let Some((name, given)) = host.trim().rsplit_once(':') else { return false };
+    given == port.to_string() && (name == "127.0.0.1" || name == "[::1]" || name.eq_ignore_ascii_case("localhost"))
+}
+
+/// Whether `given` (a Hello's token) is the app's token held for this start
+/// of the backend, compared in constant time. None held, or an empty one on
+/// either side, never matches.
+#[cfg_attr(not(test), allow(dead_code, reason = "the authority half (v2) checks Hello.token with it"))]
+fn app_token_matches(held: Option<&str>, given: &str) -> bool {
+    held.is_some_and(|held| !held.is_empty() && !given.is_empty() && crate::encoding::same(held, given))
+}
+
+/// The app's token on Windows (windows.md Part I B; Jotaro 49761): written
+/// once the port is bound and before it's served (`windows::app_token::rotate`),
+/// held here in memory only. Until LocalUncontained lands (v2) it grants
+/// nothing: a Hello with it is treated exactly as one without (Giorno 49758).
+#[cfg(windows)]
+impl Factory {
+    /// Holds this start's token; None when it couldn't be written.
+    pub fn set_app_token(&self, token: Option<zeroize::Zeroizing<String>>) {
+        *self.app_token.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = token;
+    }
+
+    /// Whether `given` is this start's token.
+    #[allow(dead_code, reason = "the authority half (v2) checks Hello.token with it")]
+    pub(crate) fn is_app_token(&self, given: &str) -> bool {
+        let held = self.app_token.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        app_token_matches(held.as_ref().map(|token| token.as_str()), given)
+    }
+}
+
 enum Frame {
     Message(Box<ClientMessage>),
     Closed,
@@ -97,7 +133,24 @@ pub(crate) async fn serve_stream<S: Stream>(
     factory: Arc<Factory>,
     peer: Option<crate::remote::Peer>,
 ) -> Result<(), ConnectionError> {
-    let mut socket = match tokio_tungstenite::accept_hdr_async(stream, refuse_web_pages).await {
+    // On Windows the loopback port is how the person's app reaches the
+    // backend (`windows::app_token`), so a page that rebinds a name of its
+    // own to 127.0.0.1 is turned away by its Host as well as its Origin.
+    let port = factory.remote.listener_port();
+    let checks_host = cfg!(windows) && peer.is_none();
+    #[allow(clippy::result_large_err)] // The shape tungstenite's callback takes.
+    let handshake = move |request: &Request, response: Response| {
+        let response = refuse_web_pages(request, response)?;
+        let host = request.headers().get(http::header::HOST).and_then(|host| host.to_str().ok());
+        if checks_host && !loopback_host(host, port) {
+            tracing::warn!(?host, "refused a WebSocket connection naming another host");
+            let mut refusal = ErrorResponse::new(Some("Claktory accepts connections on this port only as 127.0.0.1 or localhost.".into()));
+            *refusal.status_mut() = http::StatusCode::FORBIDDEN;
+            return Err(refusal);
+        }
+        Ok(response)
+    };
+    let mut socket = match tokio_tungstenite::accept_hdr_async(stream, handshake).await {
         Ok(socket) => socket,
         // Port checks and stray connections that never speak WebSocket.
         Err(error) => {
@@ -257,7 +310,7 @@ pub(crate) async fn serve_stream<S: Stream>(
     if remote {
         sent = sent.paced(crate::patch::REMOTE_EVERY, crate::patch::REMOTE_TEXT_EVERY);
     }
-    let ended = session(&mut socket, &factory, connection, &mut sent, device.closed.clone()).await;
+    let ended = session(&mut socket, &factory, connection, &mut sent, device.closed.clone(), device.refusal.clone()).await;
     let how = match &ended {
         Ok(()) => "closed".to_owned(),
         Err(ConnectionError::Io(error) | ConnectionError::WebSocket(tungstenite::Error::Io(error))) => {
@@ -342,6 +395,7 @@ async fn session<S: Stream>(
     connection: Connection,
     sent: &mut Workspaces,
     unpaired: Arc<tokio::sync::Notify>,
+    refusal: crate::remote::Refusal,
 ) -> Result<(), ConnectionError> {
     let mut vault_session = crate::vault::requests::Session::new(connection.device.clone(), connection.zoom_device.clone());
     let mut reads = Reads::new(factory);
@@ -362,7 +416,17 @@ async fn session<S: Stream>(
     loop {
         tokio::select! {
             () = unpaired.notified() => {
-                tracing::info!("closing an unpaired device's connection");
+                // Turned away now as a new connection would be (row 713:
+                // the account it came through signed out), it hears why;
+                // unpaired, it just closes.
+                let why = refusal.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+                match why {
+                    Some(why) => {
+                        tracing::info!(code = ?why.code(), "closing a connection the account no longer lets in");
+                        send(socket, 0, Body::Error(why)).await?;
+                    }
+                    None => tracing::info!("closing an unpaired device's connection"),
+                }
                 socket.close(None).await?;
                 return Ok(());
             }
@@ -852,6 +916,15 @@ async fn handle(
             factory.confirm_signed_in_device(&connection.zoom_device, &connection.endpoint_id, &account_id);
         }),
         Some(Request::AccountResend(_)) => crate::account::resend(factory).await,
+        Some(Request::AccountSignInCancel(_)) => crate::account::cancel_sign_in(factory).await,
+        // The account's recovery key (#239). A new key made on a device needs
+        // the device's account key on its connection, which this version
+        // doesn't have yet.
+        Some(Request::PublishRecoveryKey(_)) => Err(RequestError::Account(
+            ErrorCode::InvalidRequest,
+            "This version of Claktory can't make a new recovery key for your account yet.".to_owned(),
+        )),
+        Some(Request::UseRecoveryKey(_)) => crate::account::recovery::use_new(factory, &connection.zoom_device, connection.tool).await,
         Some(Request::AccountSignOut(_)) => crate::account::sign_out(factory).await,
         Some(Request::SkipAccountSignIn(_)) => crate::account::skip(factory),
         // Pipes (#196): `crate::pipes`.
@@ -970,6 +1043,13 @@ async fn handle(
         // Pinned agents (rivet_reach: the settings file's pinned_agents).
         Some(Request::PinAgent(request)) => crate::pins::pin(factory, &request).await,
         Some(Request::UnpinAgent(request)) => crate::pins::unpin(factory, &request).await,
+        // macOS's protected places (item 12): the person's devices only
+        // (rivet_reach: Person).
+        Some(Request::CheckProtectedPlaces(request)) => {
+            crate::protected::checks_asked(factory, &request.roots).await;
+            Ok(())
+        }
+        Some(Request::DismissProtectedPlace(request)) => crate::protected::dismiss(factory, &request.root),
         // Answered in `session`, its snapshot first.
         Some(Request::WatchTranscript(_)) => return error(ErrorCode::InvalidRequest, "watched in the session"),
         // History (#458): the person's devices only (rivet_reach: Person).
@@ -1147,8 +1227,14 @@ async fn handle(
         // Notifications: `crate::notify`.
         Some(Request::SetActive(request)) => {
             connection.presence.set_active(request.active);
+            if connection.presence.set_permission(request.notifications()) {
+                factory.broadcast_workspace(&factory.lock());
+            }
+            crate::notify::push::set_permission(factory, &connection.zoom_device, request.notifications());
+            factory.notifications_reported(&connection.zoom_device, request.notifications());
             Ok(())
         }
+        Some(Request::DismissNotificationsOffer(_)) => factory.dismiss_notifications_offer(&connection.zoom_device).await,
         Some(Request::RegisterNotifications(request)) => crate::notify::push::register(factory, &connection.zoom_device, &request),
         Some(Request::SendTestNotification(_)) => {
             crate::notify::send_test(factory);
@@ -1360,4 +1446,35 @@ fn answer<T>(result: Result<T, RequestError>, body: impl FnOnce(T) -> Body) -> B
 
 fn error(code: ErrorCode, message: impl Into<String>) -> Body {
     Body::Error(v1::Error { code: code.into(), message: message.into(), ..Default::default() })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_this_computers_loopback_names_with_the_port_pass_the_host_check() {
+        let port = Some(7420);
+        for host in ["127.0.0.1:7420", "localhost:7420", "LocalHost:7420", "[::1]:7420"] {
+            assert!(loopback_host(Some(host), port), "{host}");
+        }
+        let others = ["127.0.0.1", "localhost", "127.0.0.1:7421", "evil.example:7420", "127.0.0.2:7420", "localhost.evil.example:7420"];
+        for host in others.into_iter().chain(["[::1]", ""]) {
+            assert!(!loopback_host(Some(host), port), "{host}");
+        }
+        assert!(!loopback_host(None, port), "no Host");
+        assert!(!loopback_host(Some("127.0.0.1:7420"), None), "no port known");
+    }
+
+    #[test]
+    fn the_app_token_matches_only_itself_and_never_when_empty_or_missing() {
+        let held = "a".repeat(64);
+        assert!(app_token_matches(Some(&held), &held));
+        assert!(!app_token_matches(Some(&held), &"b".repeat(64)));
+        assert!(!app_token_matches(Some(&held), &held[..63]));
+        assert!(!app_token_matches(Some(&held), ""));
+        assert!(!app_token_matches(Some(""), ""));
+        assert!(!app_token_matches(None, ""));
+        assert!(!app_token_matches(None, &held));
+    }
 }

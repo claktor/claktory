@@ -9,7 +9,6 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
-import 'ipad/as_ipad.dart';
 
 final agentsExtension = Extension(
   id: 'agents',
@@ -192,41 +191,28 @@ void main() {
     expect(star.bottom, closeTo(22, 0.1));
   });
 
-  testWidgets("the bar is a finger's width where touch comes first", (
-    tester,
-  ) async {
-    // A Mac's: 40.
-    await showWith(tester, workspace());
-    expect(tester.getSize(find.byType(ExtensionBar)).width, extensionBarWidth);
-    // An iPad's or an Android tablet's: its 44pt glyph buttons fit whole.
-    asIPad();
-    await tester.pumpWidget(
-      const Directionality(
-        textDirection: TextDirection.ltr,
-        child: Align(
-          alignment: Alignment.topLeft,
-          child: SizedBox(height: 400, child: ExtensionBar(agent: null)),
-        ),
-      ),
-    );
-    final bar = tester.element(find.byType(ExtensionBar));
-    expect(extensionBarWidthOf(bar), 44);
-    expect(tester.getSize(find.byType(ExtensionBar)).width, 44);
-  });
-
-  testWidgets('the bar shows the selected agent\'s extensions and opens one', (
-    tester,
-  ) async {
+  testWidgets("⋯ lists the agent's panels and opens one; Checklist is "
+      'its own button', (tester) async {
     final harness = await showWith(tester, workspace(checklist: false));
-    expect(glyphButton('Agents'), findsOneWidget);
     expect(glyphButton('Checklist'), findsNothing, reason: "it's off");
+    // The panels with something to show, then its settings.
+    await tester.tap(glyphButton('More options for Builder'));
+    await settle(tester);
+    expect(find.text('Agents'), findsOneWidget);
+    expect(find.text('Checklist'), findsNothing);
+    expect(find.text('Agent settings…'), findsOneWidget);
+    expect(find.text('Extensions…'), findsOneWidget);
+    await tester.tap(find.text('Agents'));
+    await settle(tester);
+    expect(harness.last.openPanel.extensionId, 'agents');
+    expect(harness.last.openPanel.agentId, 'a1', reason: "Builder's panel");
+    expect(find.text('Agent settings…'), findsNothing, reason: 'it closed');
 
     await harness.apply(tester, workspace());
     expect(glyphButton('Checklist'), findsOneWidget);
     await tester.tap(glyphButton('Checklist'));
     await settle(tester);
     expect(harness.last.openPanel.extensionId, 'checklist');
-    expect(harness.last.openPanel.agentId, 'a1', reason: "Builder's panel");
 
     // Open: clicking it again closes it.
     await harness.apply(tester, workspace(openPanel: 'checklist'));
@@ -436,14 +422,16 @@ void main() {
     final harness = await showWith(tester, workspace(checklist: false));
     await tester.tap(find.text('Builder').last);
     await settle(tester);
+    // Folded at first: how many are on, and Change… to unfold them.
     expect(find.text('Extensions'), findsOneWidget);
+    expect(find.text('Other agents can message it'), findsNothing);
+    await pumpFrames(tester);
+    await unfoldExtensions(tester);
     // Checklist is off, so its options (none) and Agents' show only for
     // Agents.
     expect(find.text('Other agents can message it'), findsOneWidget);
 
-    // The form is taller than the window here, so it scrolls to each, once
-    // the name field has settled into view on opening.
-    await pumpFrames(tester);
+    // The form is taller than the window here, so it scrolls to each.
     Future<void> reach(Finder target) async {
       await tester.ensureVisible(target);
       await pumpFrames(tester);
@@ -501,6 +489,7 @@ void main() {
     // In the list of agents to choose from.
     await tester.tap(find.text('Builder').last);
     await pumpFrames(tester);
+    await unfoldExtensions(tester);
     await tester.ensureVisible(find.text('No one outside its project'));
     await pumpFrames(tester);
     await tester.tap(find.text('No one outside its project'));
@@ -540,6 +529,7 @@ void main() {
     final harness = await showWith(tester, snapshot);
     await tester.tap(find.text('Builder').last);
     await pumpFrames(tester);
+    await unfoldExtensions(tester);
     final nudge = glyphButton('Remind it when it stops with work outstanding');
     await tester.ensureVisible(nudge);
     await pumpFrames(tester);

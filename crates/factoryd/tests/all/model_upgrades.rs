@@ -93,7 +93,7 @@ impl Models for Versions {
         provider == "scripted"
     }
 
-    fn fetch_models<'a>(&'a self, _provider: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
+    fn fetch_models<'a>(&'a self, _provider: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, factory_agent::Error>> {
         let newest = self.newest.load(Ordering::Relaxed);
         Box::pin(async move { Ok(Some(newest.to_string().into_bytes())) })
     }
@@ -251,7 +251,7 @@ async fn this_versions_first_start_tells_rivet_once_of_every_newer_model_already
     assert!(
         told[0].contains("Echo 2 (scripted/echo-2), from Scripted. These agents run on an older version:\n- Mike (mike), on Echo 1 (scripted/echo-1)")
             && told[0].contains("scripted/talk-2 (scripted/talk-2), from Scripted. These agents run on an older version:\n- Ana (ana), on scripted/talk-1 (scripted/talk-1)")
-            && told[0].contains("on one ask_person card for them all"),
+            && told[0].contains("in one ask_person request for them all"),
         "{}",
         told[0]
     );

@@ -98,7 +98,7 @@ async fn the_person_and_the_agent_talk_on_a_card_until_it_is_resolved() {
     assert!(told.contains("Is QA done?"), "{told}");
     assert!(
         told.contains(&format!(
-            "They answered from Needs you, not in your conversation. If what they wrote needs an answer from you, reply on the card with ask_reply (id {id}) so it reaches them where they are, rather than in your chat."
+            "They answered from Needs you, not in your conversation. If what they wrote needs an answer from you, reply in the request with ask_reply (id {id}) so it reaches them where they are, rather than in your chat."
         )),
         "{told}"
     );
@@ -137,7 +137,7 @@ async fn the_person_and_the_agent_talk_on_a_card_until_it_is_resolved() {
     view.follow(&mut client, |view| events(view).len() > events_before && idle(view, "builder")).await;
     let (told, quiet) = events(&view).pop().expect("told");
     assert!(quiet, "a bare Resolve is told quietly");
-    assert!(told.starts_with("The person resolved your question \"Deploy Friday? QA is done\" on its card: you talked it through"), "{told}");
+    assert!(told.starts_with("The person resolved your question \"Deploy Friday? QA is done\" in its request: you talked it through"), "{told}");
     let over = call(&mut client, &mut view, "ask_reply", serde_json::json!({"id": id, "text": "Thanks."})).await;
     assert!(over.starts_with(&format!("The person resolved question {id}")), "{over}");
 
@@ -153,7 +153,7 @@ async fn the_person_and_the_agent_talk_on_a_card_until_it_is_resolved() {
     let bare = v1::AnswerAsk { agent_id: "builder".into(), seq: plain_seq, resolve: true, revision: Some(1), ..Default::default() };
     assert_eq!(
         answered(&mut client, &mut view, bare).await,
-        Err("Only a card talked over with its agent can be resolved: answer or dismiss it.".to_owned())
+        Err("Only a request talked over with its agent can be resolved: answer or dismiss it.".to_owned())
     );
     let yes = v1::AnswerAsk { agent_id: "builder".into(), seq: plain_seq, revision: Some(1), ..Default::default() };
     assert_eq!(answered(&mut client, &mut view, yes).await, Ok(()));
@@ -186,7 +186,7 @@ async fn a_procedure_they_couldnt_finish_is_talked_over_and_asked_again() {
     assert_eq!(answered(&mut client, &mut view, step(1, true, "Which key? There are two.", 1)).await, Ok(()));
     view.follow(&mut client, |view| events(view).len() == 2 && idle(view, "builder")).await;
     let (told, _) = events(&view).pop().expect("told");
-    assert!(told.contains("They answered on the card in your conversation. If what they wrote needs an answer from you, reply on the card with ask_reply"), "{told}");
+    assert!(told.contains("They answered in the request in your conversation. If what they wrote needs an answer from you, reply in the request with ask_reply"), "{told}");
     // Before "You asked", as in the other events.
     assert!(told.contains("rather than in your chat.\n\nYou asked: Set up signing"), "{told}");
 
@@ -240,7 +240,7 @@ async fn words_on_a_step_leave_it_waiting_for_the_agent_to_fix_or_answer() {
 
     // Said of a step that isn't the one waiting: refused.
     let elsewhere = v1::AnswerAsk { step: Some(2), ..send("Wrong one.", 1) };
-    assert_eq!(answered(&mut client, &mut view, elsewhere).await, Err("That isn't the step waiting: look at the card again.".to_owned()));
+    assert_eq!(answered(&mut client, &mut view, elsewhere).await, Err("That isn't the step waiting: look at the request again.".to_owned()));
 
     // Sent on step 2, with no talk yet: nothing marked, and it waits on Builder.
     assert_eq!(answered(&mut client, &mut view, send("The menu isn't there.", 1)).await, Ok(()));
@@ -253,7 +253,7 @@ async fn words_on_a_step_leave_it_waiting_for_the_agent_to_fix_or_answer() {
     assert!(!quiet);
     assert!(
         told.starts_with(&format!(
-            "The person replied on step 2 of 3 of \"Rotate the key\": Delete the old key.\n\nTheir words:\n\nThe menu isn't there.\n\nStep 2 still waits; nothing was marked done. If the step is wrong, fix it on the card with ask_reply (id {id}, steps: the steps, step 2 rewritten) and a short answer; if it only needs an answer, ask_reply with text. They're shown step 2 again either way."
+            "The person replied on step 2 of 3 of \"Rotate the key\": Delete the old key.\n\nTheir words:\n\nThe menu isn't there.\n\nStep 2 still waits; nothing was marked done. If the step is wrong, fix it in the request with ask_reply (id {id}, steps: the steps, step 2 rewritten) and a short answer; if it only needs an answer, ask_reply with text. They're shown step 2 again either way."
         )),
         "{told}"
     );
@@ -289,7 +289,7 @@ async fn words_on_a_step_leave_it_waiting_for_the_agent_to_fix_or_answer() {
     assert_eq!(answered(&mut client, &mut view, cant).await, Ok(()));
     view.follow(&mut client, |view| events(view).len() == 5 && idle(view, "builder")).await;
     let (told, _) = events(&view).pop().expect("told");
-    assert!(told.contains(&format!("If they can't, find a way without them and rewrite the steps on this card: ask_reply (id {id}) with steps, step 3 rewritten")), "{told}");
+    assert!(told.contains(&format!("If they can't, find a way without them and rewrite the steps in this request: ask_reply (id {id}) with steps, step 3 rewritten")), "{told}");
     let again = serde_json::json!({"id": id, "text": "Use the new key from 1Password.", "steps": ["Open Keychain.", "Delete the old key from the sidebar.", "Add the new key from 1Password."]});
     let said = call(&mut client, &mut view, "ask_reply", again).await;
     assert!(said.contains("at step 3 of 3"), "{said}");
@@ -311,10 +311,13 @@ async fn words_on_a_step_leave_it_waiting_for_the_agent_to_fix_or_answer() {
     assert_eq!((stopped.state(), stopped.resolved), (AskPersonState::Dismissed, true));
     assert_eq!(states, [AskStepState::Done, AskStepState::Done, AskStepState::Cant]);
     assert_eq!(talk_steps(&dir, &id).last().cloned(), Some((true, "I'll do it from the server instead.".to_owned(), Some(3))));
-    // Over: neither stopped nor opened again a second time.
-    assert!(call(&mut client, &mut view, "ask_reply", stop).await.contains("it's over"));
+    // Over: neither stopped nor opened again a second time, and it was the
+    // agent that stopped it (Abbacchio's NIT 1580).
+    let again = call(&mut client, &mut view, "ask_reply", stop).await;
+    assert!(again.starts_with(&format!("You closed question {id}: it's over")), "{again}");
     let reopen = serde_json::json!({"id": id, "text": "Try again.", "steps": ["Open Keychain.", "Delete the old key from the sidebar.", "Add it."]});
-    assert!(call(&mut client, &mut view, "ask_reply", reopen).await.contains("it's over"));
+    let again = call(&mut client, &mut view, "ask_reply", reopen).await;
+    assert!(again.starts_with(&format!("You closed question {id}: it's over")), "{again}");
 }
 
 #[tokio::test]
@@ -345,7 +348,7 @@ async fn a_comment_on_a_step_is_answered_on_the_card_while_it_waits() {
     let (told, _) = events(&view).pop().expect("told");
     assert!(
         told.contains(&format!(
-            "Done, but it asked me for a password.\n\nThey answered from Needs you, not in your conversation. If what they wrote needs an answer from you, reply on the card with ask_reply (id {id}) so it reaches them where they are, rather than in your chat.\n\nThey see step 2 next"
+            "Done, but it asked me for a password.\n\nThey answered from Needs you, not in your conversation. If what they wrote needs an answer from you, reply in the request with ask_reply (id {id}) so it reaches them where they are, rather than in your chat.\n\nThey see step 2 next"
         )),
         "{told}"
     );
@@ -355,7 +358,7 @@ async fn a_comment_on_a_step_is_answered_on_the_card_while_it_waits() {
     let said =
         crate::notify::call(&mut client, &mut view, &mut notes, "builder", "ask_reply", serde_json::json!({"id": id, "text": "That's your login password."})).await;
     assert!(
-        said.starts_with(&format!("Answered on question {id}, \"Rotate the key\": your answer shows under their comment, on the card that still waits at step 2 of 3")),
+        said.starts_with(&format!("Answered on question {id}, \"Rotate the key\": your answer shows under their comment, in the request that still waits at step 2 of 3")),
         "{said}"
     );
     let (_, open) = card(&view, &id);
@@ -375,7 +378,7 @@ async fn a_comment_on_a_step_is_answered_on_the_card_while_it_waits() {
     assert_eq!(answered(&mut client, &mut view, step(1, "", 2, AskAnsweredFrom::Conversation)).await, Ok(()));
     view.follow(&mut client, |view| events(view).len() == 2 && idle(view, "builder")).await;
     let (told, _) = events(&view).pop().expect("told");
-    assert!(told.contains("They answered on the card in your conversation.\n\nThey see step 3 next") && !told.contains("ask_reply"), "{told}");
+    assert!(told.contains("They answered in the request in your conversation.\n\nThey see step 3 next") && !told.contains("ask_reply"), "{told}");
     let wordless = call(&mut client, &mut view, "ask_reply", serde_json::json!({"id": id, "text": "Good."})).await;
     assert!(wordless.starts_with(&format!("Question {id} still waits")), "{wordless}");
 }
@@ -416,12 +419,12 @@ async fn approving_after_the_agents_reply_agrees_with_where_the_talk_ended() {
     // the talk is told the card changed.
     assert_eq!(
         answered(&mut client, &mut view, answer(seq, 1, Some(0))).await,
-        Err("Builder replied on this card since you looked at it. Read the reply, then answer again.".to_owned())
+        Err("Builder replied in this request since you looked at it. Read the reply, then answer again.".to_owned())
     );
     assert_eq!(answered(&mut client, &mut view, answer(seq, 1, None)).await, Err("This card changed. Look at it again.".to_owned()));
     assert_eq!(
         answered(&mut client, &mut view, answer(seq, 2, Some(0))).await,
-        Err("Builder replied on this card since you looked at it. Read the reply, then answer again.".to_owned())
+        Err("Builder replied in this request since you looked at it. Read the reply, then answer again.".to_owned())
     );
     assert_eq!(card(&view, &id).1.state(), AskPersonState::Pending);
     // Approved having seen it: the agent is told the talk, fenced, and to
@@ -431,11 +434,11 @@ async fn approving_after_the_agents_reply_agrees_with_where_the_talk_ended() {
     let (told, quiet) = events(&view).pop().expect("told");
     assert!(!quiet);
     assert!(
-        told.starts_with("The person approved your question \"OK to spend up to $20 on Pangram?\" after your last reply on its card, without the card changing: they agreed to where your talk there ended, not only to the card's words."),
+        told.starts_with("The person approved your question \"OK to spend up to $20 on Pangram?\" after your last reply in its request, without the request changing: they agreed to where your talk there ended, not only to the request's words."),
         "{told}"
     );
     assert!(
-        told.contains("The talk on the card, oldest first:\n\n```\nThe person: No paid detectors.\n\nYou: Then GPTZero's free plan, at no cost.\n```"),
+        told.contains("The talk in the request, oldest first:\n\n```\nThe person: No paid detectors.\n\nYou: Then GPTZero's free plan, at no cost.\n```"),
         "{told}"
     );
     assert!(!told.contains("yes, go ahead"), "{told}");
@@ -453,7 +456,7 @@ async fn approving_after_the_agents_reply_agrees_with_where_the_talk_ended() {
     call(&mut client, &mut view, "ask_reply", changed).await;
     let (_, open) = card(&view, &id);
     assert_eq!((open.title.as_str(), open.body.as_str()), ("OK to use the free hosting tier?", "No cost."));
-    assert!(!open.approve_follows_talk, "the card itself asks it now");
+    assert!(!open.approve_follows_talk, "the request itself asks it now");
     // Dismissed with a stale count: not refused.
     let dismiss = v1::AnswerAsk { dismiss: true, text: "Not now.".into(), ..answer(seq, 2, Some(0)) };
     assert_eq!(answered(&mut client, &mut view, dismiss).await, Ok(()));
@@ -495,7 +498,7 @@ async fn the_agent_closes_a_card_the_talk_settled_with_its_last_words() {
     let record = history.records.iter().find(|record| record.title == "Deploy to production?").expect("listed");
     assert_eq!((record.outcome(), record.agent_reason.as_str(), record.reply.as_str()), (NeedsYouOutcome::Resolved, "Staging today, production tomorrow.", ""));
     let again = call(&mut client, &mut view, "ask_reply", serde_json::json!({"id": id, "text": "Done.", "resolve": true})).await;
-    assert!(again.contains("it's over already"), "{again}");
+    assert!(again.starts_with(&format!("You closed question {id}: it's over already")), "{again}");
 
     // One that waits again after the agent's answer can be closed too.
     let id = id_in(&call(&mut client, &mut view, "ask_person", serde_json::json!({"title": "Rename the repo?", "body": "B"})).await);
@@ -525,7 +528,7 @@ async fn the_agent_closes_a_card_the_talk_settled_with_its_last_words() {
     let early = call(&mut client, &mut view, "ask_reply", serde_json::json!({"id": id, "text": "Never mind.", "resolve": true})).await;
     assert!(early.contains("take it back with ask_withdraw"), "{early}");
     let worded = call(&mut client, &mut view, "ask_reply", serde_json::json!({"id": id, "text": "x", "resolve": true, "title": "T"})).await;
-    assert!(worded.starts_with("Closing a card changes nothing on it"), "{worded}");
+    assert!(worded.starts_with("Closing a request changes nothing on it"), "{worded}");
 }
 
 /// One of Builder's uploads, as the app makes it before answering with it.
@@ -583,7 +586,7 @@ async fn files_go_with_every_answer_on_a_card_and_stay_on_its_talk() {
         )),
         "{told}"
     );
-    assert!(told.contains(&format!("If what they sent needs an answer from you, reply on the card with ask_reply (id {id})")), "{told}");
+    assert!(told.contains(&format!("If what they sent needs an answer from you, reply in the request with ask_reply (id {id})")), "{told}");
 
     // Answered on, the files stay on the talk, with the turn they came with.
     call(&mut client, &mut view, "ask_reply", serde_json::json!({"id": id, "text": "The log says the disk is full."})).await;

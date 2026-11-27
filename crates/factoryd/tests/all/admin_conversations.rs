@@ -127,7 +127,7 @@ async fn rivet_compacts_an_agent_when_asked_and_clears_one_only_with_the_persons
     assert!(!card.wants_text);
     let said = call(&mut client, &mut view, "rivet", "agents_clear", r#"{"agent":"Tiziano"}"#).await;
     assert!(said.contains("it's waiting for them"), "{said}");
-    assert_eq!(cards(&view).len(), 1, "one card per agent at a time");
+    assert_eq!(cards(&view).len(), 1, "one request per agent at a time");
 
     // Dismissed, it stays as it is.
     // Without a comment, Rivet is told quietly (friend bug #19), with
@@ -183,7 +183,7 @@ async fn a_clear_card_closes_when_its_agent_is_deleted_and_never_clears_another_
     let text = told(&mut client, &mut view, 1).await;
     assert_eq!(
         text,
-        "The agent your card \"Clear Tiziano's conversation\" was for was deleted, so the card is closed and nothing was cleared."
+        "The agent your request \"Clear Tiziano's conversation\" was for was deleted, so the request is closed and nothing was cleared."
     );
     assert_eq!(cards(&view).pop().expect("the card").1.state(), v1::AskPersonState::Dismissed);
 
@@ -205,7 +205,7 @@ async fn a_clear_card_closes_when_its_agent_is_deleted_and_never_clears_another_
     match apply_request(&mut client, &mut view, answer(seq, false)).await {
         Body::Error(error) => assert_eq!(
             error.message,
-            "The agent this card asked to clear was deleted, and Tiziano is another agent made since, so nothing was cleared: dismiss this card."
+            "The agent this request asked to clear was deleted, and Tiziano is another agent made since, so nothing was cleared: dismiss this request."
         ),
         other => panic!("expected a refusal, got {other:?}"),
     }
@@ -247,7 +247,7 @@ async fn a_clear_card_closes_when_its_agent_is_taken_out_of_the_settings() {
     let text = told(&mut client, &mut view, 1).await;
     assert_eq!(
         text,
-        "The agent your card \"Clear Tiziano's conversation\" was for was deleted, so the card is closed and nothing was cleared."
+        "The agent your request \"Clear Tiziano's conversation\" was for was deleted, so the request is closed and nothing was cleared."
     );
     let card = cards(&view).into_iter().find(|(shown, _)| *shown == seq).expect("the card").1;
     assert_eq!(card.state(), v1::AskPersonState::Dismissed);
@@ -256,7 +256,7 @@ async fn a_clear_card_closes_when_its_agent_is_taken_out_of_the_settings() {
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     apply_request(&mut client, &mut view, select("rivet")).await;
     let closing = |view: &View| {
-        view.entries.iter().filter(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.text.contains("the card is closed"))).count()
+        view.entries.iter().filter(|entry| matches!(&entry.kind, Some(Kind::Event(event)) if event.text.contains("the request is closed"))).count()
     };
     assert_eq!(closing(&view), 1);
 }

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart' show SchedulerBinding;
@@ -32,6 +33,7 @@ import 'identity.dart';
 import 'loopback_forward.dart' show ForwardingsLine;
 import 'markdown.dart';
 import 'quiet_copies.dart' show quietWaitingAbout, quietWaitingShort;
+import 'mobile/drawer.dart' show largeText;
 import 'mobile/haptics.dart';
 import 'mobile/header.dart';
 import 'mobile/metrics.dart';
@@ -41,11 +43,13 @@ import 'kept.dart';
 import 'mobile/platform_policy.dart';
 import 'people/people_view.dart' show peopleAvailable, showPeople;
 import 'phone.dart' show PhoneProjects;
+import 'pinned_agents.dart';
 import 'pipe_groups.dart';
 import 'pipe_timeline.dart' show pipeLiaison;
 import 'pipes.dart';
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
+import 'settings_view.dart' show versionLabel;
 import 'state.dart' show isAdminAgent;
 import 'usage.dart';
 import 'usage_wait.dart';
@@ -69,7 +73,7 @@ class Sidebar extends StatelessWidget {
     final palette = Palette.of(context);
     // On a phone it's the drawer's tree, which draws its own edge.
     final phone = isPhoneLayout(context);
-    return DecoratedBox(
+    final sidebar = DecoratedBox(
       decoration: BoxDecoration(
         color: palette.sidebar,
         border: phone
@@ -103,16 +107,23 @@ class Sidebar extends StatelessWidget {
             // Rivet stays reachable in a focused project, since it's the
             // one who changes the project for the person.
             final rivet = rivetIn(workspace);
-            final pinned =
+            final rivetBeside =
                 focused != null &&
                     rivet != null &&
                     isAdminAgent(rivet) &&
                     rivet.projectId != focused.id
                 ? rivet
                 : null;
+            // The agents the person pinned under Rivet, from any project.
+            final pins = pinnedAgents(workspace);
+            final pinIds = {for (final agent in pins) agent.id};
             // Above both sections, where they don't scroll away (on a
-            // Mac): what waits for the person, and the workspace's agents
-            // (Rivet), or Rivet pinned beside a focused project.
+            // Mac, while they take no more than a third of it): what waits
+            // for the person, and the workspace's agents (Rivet), or Rivet
+            // beside a focused project, then the pins.
+            final topAgents = focused == null
+                ? backend.workspace.agentsIn('')
+                : [?rivetBeside];
             final top = <Widget>[
               // Everything that waits for the person in one place, on a
               // Mac and in a phone's drawer alike: there only while
@@ -121,51 +132,59 @@ class Sidebar extends StatelessWidget {
                 _NeedsYouRow(count: count),
                 SizedBox(height: phone ? Space.m : Space.s),
               ],
-              if (focused == null &&
-                  backend.workspace.agentsIn('').isNotEmpty) ...[
+              if (topAgents.isNotEmpty)
                 _Place(
-                  projectId: '',
+                  projectId: focused == null ? '' : rivetBeside!.projectId,
                   header: null,
-                  agents: backend.workspace.agentsIn(''),
+                  agents: topAgents,
                   selectedAgentId: selected,
                 ),
-                const SizedBox(height: Space.l),
-              ],
-              if (pinned != null) ...[
-                _Place(
-                  projectId: pinned.projectId,
-                  header: null,
-                  agents: [pinned],
+              if (pins.isNotEmpty)
+                _Pins(
+                  pins: pins,
                   selectedAgentId: selected,
+                  // In line with the agents above them.
+                  gutter:
+                      !phone &&
+                      topAgents.any(
+                        (agent) => topAgents.any(
+                          (other) => other.parentId == agent.id,
+                        ),
+                      ),
                 ),
-                const SizedBox(height: Space.s),
-              ],
+              if (topAgents.isNotEmpty || pins.isNotEmpty)
+                SizedBox(height: focused == null ? Space.l : Space.s),
             ];
             final projects = <Widget>[
               if (focused != null) ...[
-                // What's out of sight elsewhere glows here.
-                Glow(
-                  store: backend.highlights,
-                  matches: (key) => _elsewhere(
-                    key,
-                    workspace,
-                    focused!.id,
-                    shown: pinned?.id,
-                  ),
-                  child: _QuietRow(
-                    label: '‹ All projects',
-                    waiting: waitingIn([
-                      for (final agent in workspace.agents)
-                        if (agent.projectId != focused.id &&
-                            agent.id != pinned?.id &&
-                            archivedProjectOf(workspace, agent) == null)
-                          agent,
-                    ]),
-                    onTap: () {
-                      AppScope.scope(context).history.clear();
-                      fireAndLog(backend.focusProject(''));
-                    },
-                  ),
+                // What's out of sight elsewhere glows here: not Rivet
+                // beside it, nor the pins while they stay in sight.
+                Builder(
+                  builder: (context) {
+                    final shown = {
+                      ?rivetBeside?.id,
+                      if (_pinsStay(context)) ...pinIds,
+                    };
+                    return Glow(
+                      store: backend.highlights,
+                      matches: (key) =>
+                          _elsewhere(key, workspace, focused!.id, shown: shown),
+                      child: _QuietRow(
+                        label: '‹ All projects',
+                        waiting: waitingIn([
+                          for (final agent in workspace.agents)
+                            if (agent.projectId != focused!.id &&
+                                !shown.contains(agent.id) &&
+                                archivedProjectOf(workspace, agent) == null)
+                              agent,
+                        ]),
+                        onTap: () {
+                          AppScope.scope(context).history.clear();
+                          fireAndLog(backend.focusProject(''));
+                        },
+                      ),
+                    );
+                  },
                 ),
                 const SizedBox(height: Space.s),
                 _Place(
@@ -219,23 +238,30 @@ class Sidebar extends StatelessWidget {
             final projectCount = workspace.projects
                 .where((p) => !p.archived)
                 .length;
-            final projectsWaiting = waitingIn([
+            final inProjects = [
               for (final agent in workspace.agents)
                 if (agent.projectId.isNotEmpty &&
                     archivedProjectOf(workspace, agent) == null)
                   agent,
+            ];
+            final projectsWaiting = waitingIn(inProjects);
+            // Folded, it leaves out the pins while they stay in sight.
+            final unpinnedWaiting = waitingIn([
+              for (final agent in inProjects)
+                if (!pinIds.contains(agent.id)) agent,
             ]);
             final projectsHeading = Kept(
               inputs: [
                 workspace.projectsCollapsed,
                 projectCount,
                 projectsWaiting,
+                unpinnedWaiting,
               ],
               builder: (context) => _SectionHeading(
                 label: 'Projects',
                 open: !workspace.projectsCollapsed,
                 count: projectCount,
-                waiting: projectsWaiting,
+                waiting: _pinsStay(context) ? unpinnedWaiting : projectsWaiting,
                 onToggle: () => fireAndLog(
                   backend.updateSettings(
                     UpdateSettings(
@@ -339,7 +365,71 @@ class Sidebar extends StatelessWidget {
         ),
       ),
     );
+    // ⌘1 to ⌘9 open the pins on a Mac; an iPad lists them in its own
+    // commands.
+    return defaultTargetPlatform == TargetPlatform.macOS
+        ? _PinKeys(child: sidebar)
+        : sidebar;
   }
+}
+
+/// ⌘1 to ⌘9 open the pins' conversations in order, as Messages does its
+/// pinned conversations: wherever the keys are, a field's or nothing's,
+/// but not under a dialog or a page opened over the window.
+class _PinKeys extends StatefulWidget {
+  const _PinKeys({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_PinKeys> createState() => _PinKeysState();
+}
+
+class _PinKeysState extends State<_PinKeys> {
+  static const _digits = [
+    LogicalKeyboardKey.digit1,
+    LogicalKeyboardKey.digit2,
+    LogicalKeyboardKey.digit3,
+    LogicalKeyboardKey.digit4,
+    LogicalKeyboardKey.digit5,
+    LogicalKeyboardKey.digit6,
+    LogicalKeyboardKey.digit7,
+    LogicalKeyboardKey.digit8,
+    LogicalKeyboardKey.digit9,
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    HardwareKeyboard.instance.addHandler(_key);
+  }
+
+  @override
+  void dispose() {
+    HardwareKeyboard.instance.removeHandler(_key);
+    super.dispose();
+  }
+
+  bool _key(KeyEvent event) {
+    if (event is! KeyDownEvent) return false;
+    final keys = HardwareKeyboard.instance;
+    if (!keys.isMetaPressed ||
+        keys.isShiftPressed ||
+        keys.isAltPressed ||
+        keys.isControlPressed) {
+      return false;
+    }
+    final at = _digits.indexOf(event.logicalKey);
+    if (at < 0 || !mounted) return false;
+    if (ModalRoute.of(context)?.isCurrent == false) return false;
+    final pins = pinnedAgents(AppScope.of(context).workspace.workspace);
+    if (at >= pins.length) return false;
+    openPinned(context, pins[at].id);
+    return true;
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 /// Opens [agent]'s conversation: at what waits for the person if it's
@@ -381,19 +471,19 @@ void _toConversation(BuildContext context) {
 
 /// Whether [key] is something outside the focused project [projectId]:
 /// another project, its folders and agents, or the workspace's agents,
-/// except the agent [shown] beside it (Rivet, pinned at the top).
+/// except the agents [shown] beside it (Rivet, and the pins in sight).
 bool _elsewhere(
   String key,
   Workspace workspace,
   String projectId, {
-  String? shown,
+  Set<String> shown = const {},
 }) {
   if (key.startsWith('project:')) return key != 'project:$projectId';
   if (key.startsWith('folder:')) return !key.startsWith('folder:$projectId/');
   final others = {
     for (final agent in workspace.agents)
       if (agent.projectId != projectId &&
-          agent.id != shown &&
+          !shown.contains(agent.id) &&
           archivedProjectOf(workspace, agent) == null)
         agent.id,
   };
@@ -440,8 +530,70 @@ class _SectionsState extends State<_Sections> {
   double? _needed;
   Object? _neededFor;
 
+  /// How tall [_Sections.top] last was: past a third of the sidebar (Rivet
+  /// and many pins), it scrolls with the projects instead of staying put.
+  double _topHeight = 0;
+
+  bool get _topScrolls => _topHeight > widget.height / 3;
+
+  /// What the sections measured while an agent was dragged, applied once
+  /// it's let go: laid out again mid-drag (the dragged row's gap changing
+  /// the top's height), the rows would be built anew and the drag lost
+  /// with its end, and the menu a hold opens (Gelato, an iPad at AX5).
+  double? _heldTop;
+  double? _heldNeeded;
+
+  /// Rivet and the pins keep their rows (and a drag one of them holds)
+  /// when the sections change how they're laid out: staying put, scrolling
+  /// with the projects, or one list (Gelato: a hold's drag lost, an iPad
+  /// at AX5).
+  final _topKey = GlobalKey(debugLabel: 'sidebar top');
+
+  @override
+  void initState() {
+    super.initState();
+    sidebarDragging.addListener(_dragged);
+  }
+
+  @override
+  void dispose() {
+    sidebarDragging.removeListener(_dragged);
+    super.dispose();
+  }
+
+  void _dragged() {
+    if (sidebarDragging.value || !mounted) return;
+    final top = _heldTop;
+    final needed = _heldNeeded;
+    _heldTop = null;
+    _heldNeeded = null;
+    if (top == null && needed == null) return;
+    setState(() {
+      if (top != null) _topHeight = top;
+      if (needed != null) _needed = needed;
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
+    final sections = _sections(context);
+    // Folded rows leave out the pins only while they can't scroll away.
+    return _PinsInSight(stay: !_topScrolls && _needed == null, child: sections);
+  }
+
+  Widget _measured(Widget top) => _SizeReport(
+    onSize: (size) {
+      if (!mounted || (size.height - _topHeight).abs() <= 0.5) return;
+      if (sidebarDragging.value) {
+        _heldTop = size.height;
+        return;
+      }
+      setState(() => _topHeight = size.height);
+    },
+    child: top,
+  );
+
+  Widget _sections(BuildContext context) {
     final projects = widget.projects;
     final chats = widget.chats;
     // What they take changes with the text's size and what's fixed.
@@ -455,19 +607,24 @@ class _SectionsState extends State<_Sections> {
       _neededFor = holding;
       _needed = null;
     }
+    final top = widget.top.isEmpty
+        ? null
+        : Padding(
+            padding: _inset,
+            child: _measured(
+              Column(
+                key: _topKey,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: widget.top,
+              ),
+            ),
+          );
     if (_needed case final needed? when widget.height < needed) {
       return ListView(
         key: const ValueKey('sidebar-one-list'),
         padding: const EdgeInsets.only(bottom: Space.m),
         children: [
-          if (widget.top.isNotEmpty)
-            Padding(
-              padding: _inset,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: widget.top,
-              ),
-            ),
+          ?top,
           Padding(padding: _inset, child: widget.projectsHeading),
           for (final row in projects ?? const <Widget>[])
             Padding(padding: _inset, child: row),
@@ -485,19 +642,55 @@ class _SectionsState extends State<_Sections> {
       padding: _inset.copyWith(bottom: bottom),
       children: children,
     );
-    return _FitColumn(
-      onOverflow: (needed) {
-        if (mounted && needed != _needed) setState(() => _needed = needed);
-      },
-      children: [
-        if (widget.top.isNotEmpty)
-          Padding(
-            padding: _inset,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: widget.top,
+    // Taller than a third of the sidebar, Rivet and the pins scroll with
+    // the projects, above their heading.
+    if (_topScrolls && top != null) {
+      return _FitColumn(
+        onOverflow: (needed) {
+          if (!mounted || needed == _needed) return;
+          if (sidebarDragging.value) {
+            _heldNeeded = needed;
+            return;
+          }
+          setState(() => _needed = needed);
+        },
+        children: [
+          Flexible(
+            child: ListView(
+              shrinkWrap: true,
+              children: [
+                top,
+                Padding(padding: _inset, child: widget.projectsHeading),
+                for (final row in projects ?? const <Widget>[])
+                  Padding(padding: _inset, child: row),
+              ],
             ),
           ),
+          Padding(
+            padding: _inset.copyWith(top: Space.s),
+            child: widget.chatsHeading,
+          ),
+          if (chats != null)
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: math.max(widget.height * 0.4, 3 * 28.0 + Space.m),
+              ),
+              child: list(chats, bottom: Space.m),
+            ),
+        ],
+      );
+    }
+    return _FitColumn(
+      onOverflow: (needed) {
+        if (!mounted || needed == _needed) return;
+        if (sidebarDragging.value) {
+          _heldNeeded = needed;
+          return;
+        }
+        setState(() => _needed = needed);
+      },
+      children: [
+        ?top,
         Padding(padding: _inset, child: widget.projectsHeading),
         if (projects != null) Flexible(child: list(projects)),
         Padding(
@@ -516,6 +709,58 @@ class _SectionsState extends State<_Sections> {
             ),
       ],
     );
+  }
+}
+
+/// Whether the top group (Rivet and the pins) stays put above the
+/// projects ([_Sections]): then folded rows don't count the pins again,
+/// since they're in sight (Lucy's pinned-agents.md, rule 3). Where it
+/// scrolls with the rest (always on a phone) they count them.
+class _PinsInSight extends InheritedWidget {
+  const _PinsInSight({required this.stay, required super.child});
+
+  final bool stay;
+
+  @override
+  bool updateShouldNotify(_PinsInSight old) => stay != old.stay;
+}
+
+/// Whether folded rows here leave out the pinned agents ([_PinsInSight]).
+bool _pinsStay(BuildContext context) =>
+    context.dependOnInheritedWidgetOfExactType<_PinsInSight>()?.stay ?? false;
+
+/// Says [child]'s size after each layout that changed it, once the frame
+/// is done.
+class _SizeReport extends SingleChildRenderObjectWidget {
+  const _SizeReport({required this.onSize, super.child});
+
+  final ValueChanged<Size> onSize;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _RenderSizeReport(onSize);
+
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    covariant _RenderSizeReport renderObject,
+  ) => renderObject.onSize = onSize;
+}
+
+class _RenderSizeReport extends RenderProxyBox {
+  _RenderSizeReport(this.onSize);
+
+  ValueChanged<Size> onSize;
+  Size? _said;
+
+  @override
+  void performLayout() {
+    super.performLayout();
+    if (size == _said) return;
+    _said = size;
+    final report = onSize;
+    final now = size;
+    SchedulerBinding.instance.addPostFrameCallback((_) => report(now));
   }
 }
 
@@ -869,6 +1114,7 @@ class _Place extends StatelessWidget {
 
     void select(Agent agent, {bool reach = false}) =>
         _selectAgent(context, agent, reach: reach);
+    final pinIds = [for (final agent in pinnedAgents(workspace)) agent.id];
 
     // Reports sit in under their lead, up to a few levels: deeper ones
     // line up with the last, so names keep their room.
@@ -904,6 +1150,8 @@ class _Place extends StatelessWidget {
               gutter && !phone,
               inset,
               siblingIds,
+              // Pin or Unpin, and what a folded row leaves out.
+              pinIds,
             ],
             builder: (_) => _AgentRow(
               agent: agent,
@@ -940,29 +1188,40 @@ class _Place extends StatelessWidget {
       );
     }
 
+    // In the top group, a project's agent dropped in a gap is pinned first
+    // under it rather than moved out of its project: only Rivet's row
+    // itself takes it out (Lucy's pinned-agents.md §5).
+    bool pins(Agent agent) =>
+        projectId.isEmpty && pinLabel(workspace, agent) != null;
     return DragTarget<String>(
       // Takes what the rows don't: to this place's top level, last.
       onWillAcceptWithDetails: (details) {
         final agent = backend.workspace.agent(details.data);
         return agent != null &&
-            (agent.projectId != projectId ||
+            (pins(agent) ||
+                agent.projectId != projectId ||
                 agent.parentId.isNotEmpty ||
                 agent.folderId.isNotEmpty);
       },
       onMove: (details) {
         final agent = backend.workspace.agent(details.data);
         if (agent == null) return;
-        _dropSays.value = _sayDrop(
-          backend.workspace.workspace,
-          agent,
-          _toPlace(agent),
-        );
+        _dropSays.value = pins(agent)
+            ? _sayPin(backend.workspace.workspace, agent)
+            : _sayDrop(backend.workspace.workspace, agent, _toPlace(agent));
       },
       onLeave: (_) => _dropSays.value = null,
       onAcceptWithDetails: (details) {
         _dropSays.value = null;
         final agent = backend.workspace.agent(details.data);
-        if (agent != null) _arrangeOrSay(context, agent, _toPlace(agent));
+        if (agent == null) return;
+        if (pins(agent)) {
+          unawaited(
+            pinAgentBefore(context, agent, _firstPin(workspace, agent)),
+          );
+        } else {
+          _arrangeOrSay(context, agent, _toPlace(agent));
+        }
       },
       builder: (context, candidates, _) => AnimatedContainer(
         duration: Motion.fast,
@@ -1152,7 +1411,16 @@ class _FolderGroupState extends State<_FolderGroup> {
     final backend = AppScope.of(context);
     final folder = widget.folder;
     final roots = widget.roots;
-    final hidden = folder.collapsed ? _all(roots) : const <Agent>[];
+    // Pinned agents folded away are left out while the pins are in sight.
+    final pinned = _pinsStay(context)
+        ? pinnedIds(backend.workspace.workspace)
+        : const <String>{};
+    final hidden = folder.collapsed
+        ? [
+            for (final agent in _all(roots))
+              if (!pinned.contains(agent.id)) agent,
+          ]
+        : const <Agent>[];
     final working = hidden.any(atWork);
     final unseen = hidden.any((agent) => agent.unseen);
     final waiting = waitingIn(hidden);
@@ -1447,6 +1715,7 @@ class _Row extends StatefulWidget {
     required this.builder,
     this.selected = false,
     this.onSecondaryTap,
+    this.onMenuKey,
     this.underlay,
     this.height = 28,
     this.holdForMenu = true,
@@ -1466,11 +1735,21 @@ class _Row extends StatefulWidget {
 
   /// A right click.
   final VoidCallback? onSecondaryTap;
+
+  /// The menu from the keyboard, the row focused: Shift-F10 or the menu
+  /// key, where VoiceOver on a Mac reaches it (Abbacchio's row 1661); else
+  /// [onSecondaryTap].
+  final VoidCallback? onMenuKey;
   final bool selected;
   final Widget Function(BuildContext context, bool hovered) builder;
 
   @override
   State<_Row> createState() => _RowState();
+}
+
+/// Opens a row's menu from the keyboard.
+class _MenuIntent extends Intent {
+  const _MenuIntent();
 }
 
 class _RowState extends State<_Row> {
@@ -1483,12 +1762,29 @@ class _RowState extends State<_Row> {
     final phone = touchFirst(context);
     return FocusableActionDetector(
       mouseCursor: SystemMouseCursors.click,
-      onShowHoverHighlight: (value) => setState(() => _hovered = value),
+      // Not while an agent is dragged over it: only where it can land
+      // says so (Abbacchio's pinned-agents NIT).
+      onShowHoverHighlight: (value) =>
+          setState(() => _hovered = value && !sidebarDragging.value),
       onShowFocusHighlight: (value) => setState(() => _focused = value),
+      shortcuts: {
+        if ((widget.onMenuKey ?? widget.onSecondaryTap) != null) ...{
+          const SingleActivator(LogicalKeyboardKey.f10, shift: true):
+              const _MenuIntent(),
+          const SingleActivator(LogicalKeyboardKey.contextMenu):
+              const _MenuIntent(),
+        },
+      },
       actions: {
         ActivateIntent: CallbackAction<ActivateIntent>(
           onInvoke: (_) {
             widget.onTap();
+            return null;
+          },
+        ),
+        _MenuIntent: CallbackAction<_MenuIntent>(
+          onInvoke: (_) {
+            (widget.onMenuKey ?? widget.onSecondaryTap)?.call();
             return null;
           },
         ),
@@ -2079,7 +2375,13 @@ class _AgentRow extends StatefulWidget {
     required this.children,
     required this.siblings,
     this.inset = Space.l,
+    this.pinOrder,
   });
+
+  /// Set on a pin under Rivet: the pins' ids in order. Its second line is
+  /// its role and project, it has no disclosure, and it drags only among
+  /// the pins.
+  final List<String>? pinOrder;
 
   final Agent agent;
 
@@ -2115,13 +2417,29 @@ class _AgentRowState extends State<_AgentRow> {
   /// Where the agent being dragged over this row would go.
   _Drop? _drop;
 
+  /// Where and with what the row was last pressed: a right click's menu
+  /// opens there, and a finger that holds and lets go without moving
+  /// opens the row's menu.
+  Offset? _downAt;
+  PointerDeviceKind? _downKind;
+
+  /// This row is the one being dragged.
+  var _dragging = false;
+
+  /// Scrolls the list the row is in while a drag holds near its edges.
+  EdgeDraggingAutoScroller? _scroller;
+
   Agent get agent => widget.agent;
+
+  bool get _pin => widget.pinOrder != null;
 
   bool get _open => widget.children.isNotEmpty && !agent.collapsed;
 
   _Drop _zone(Offset global) {
     final box = context.findRenderObject()! as RenderBox;
     final y = box.globalToLocal(global).dy / box.size.height;
+    // Between pins only: nothing nests in a pin.
+    if (_pin) return y < 0.5 ? _Drop.before : _Drop.after;
     if (y < 0.28) return _Drop.before;
     if (y > 0.72) return _Drop.after;
     return _Drop.onto;
@@ -2180,60 +2498,221 @@ class _AgentRowState extends State<_AgentRow> {
         dragged,
       ).contains(agent.id);
 
+  /// The pin [dragged] goes before when dropped at [drop] on this pin
+  /// ("" for last); null when that's where it is already.
+  String? _pinBefore(String dragged, _Drop drop) {
+    // Let go over itself: where it is.
+    if (dragged == agent.id) return null;
+    final order = widget.pinOrder!;
+    final others = [
+      for (final id in order)
+        if (id != dragged) id,
+    ];
+    final at = others.indexOf(agent.id) + (drop == _Drop.after ? 1 : 0);
+    final before = at < others.length ? others[at] : '';
+    final now = order.indexOf(dragged);
+    if (now < 0) return before;
+    final current = now + 1 < order.length ? order[now + 1] : '';
+    return before == current ? null : before;
+  }
+
+  /// Whether dropping [dragged] at [drop] here pins it: on a pin, or on
+  /// the edge of a workspace agent's row (a gap in the top group). Onto
+  /// Rivet's row is still the move to the workspace.
+  bool _pins(Agent dragged, _Drop drop) {
+    if (_pin) return true;
+    return widget.projectId.isEmpty &&
+        drop != _Drop.onto &&
+        pinLabel(AppScope.of(context).workspace.workspace, dragged) != null;
+  }
+
+  /// What dropping [data] at [drop] does, for its feedback.
+  String? _says(Object data, _Drop drop) {
+    final backend = AppScope.of(context);
+    if (data is _PinDrag) return null;
+    final dragged = backend.workspace.agent(data as String);
+    if (dragged == null) return null;
+    if (_pins(dragged, drop)) {
+      return _sayPin(backend.workspace.workspace, dragged);
+    }
+    return _sayDrop(
+      backend.workspace.workspace,
+      dragged,
+      _arrange(dragged, drop),
+    );
+  }
+
+  /// Whether this row takes [data]: a pin takes the pins (reordering) and
+  /// any agent that can be pinned; any other row takes agents, as before.
+  bool _takes(Object? data) {
+    if (data is _PinDrag) return _pin;
+    if (data is! String) return false;
+    if (!_pin) return _accepts(data) || _isOwn(data);
+    final dragged = AppScope.of(context).workspace.agent(data);
+    return dragged != null &&
+        pinLabel(AppScope.of(context).workspace.workspace, dragged) != null;
+  }
+
+  void _dropped(Object data, _Drop drop) {
+    final backend = AppScope.of(context);
+    final id = data is _PinDrag ? data.agentId : data as String;
+    final dragged = backend.workspace.agent(id);
+    if (dragged == null) return;
+    if (_pin) {
+      if (_pinBefore(id, drop) case final before?) {
+        unawaited(pinAgentBefore(context, dragged, before));
+      }
+      return;
+    }
+    if (_isOwn(id)) return;
+    if (_pins(dragged, drop)) {
+      unawaited(
+        pinAgentBefore(
+          context,
+          dragged,
+          _firstPin(backend.workspace.workspace, dragged),
+        ),
+      );
+      return;
+    }
+    _arrangeOrSay(context, dragged, _arrange(dragged, drop));
+  }
+
+  void _dragStarted() {
+    _dragging = true;
+    _touchDrag =
+        _downKind == PointerDeviceKind.touch ||
+        _downKind == PointerDeviceKind.stylus;
+    sidebarDragging.value = true;
+  }
+
+  void _dragEnded(DraggableDetails details) {
+    _dragDone();
+    // A finger held the row and let go where it was: the row's menu.
+    final at = _downAt;
+    if (!_touchDrag || at == null) return;
+    if ((details.offset - at).distance > kTouchSlop) return;
+    unawaited(_agentMenu(context, agent, pinRow: _pin));
+  }
+
+  void _dragDone() {
+    if (!_dragging) return;
+    _dragging = false;
+    _dropSays.value = null;
+    sidebarDragging.value = false;
+    _scroller?.stopAutoScroll();
+    _scroller = null;
+  }
+
+  /// While a drag holds within [_edge] of the top or bottom of the list
+  /// this row is in, the list scrolls that way, so the pins under Rivet
+  /// can be reached from a project far down. Over anything outside the
+  /// list (the top group above it, on a Mac) it doesn't.
+  void _autoScroll(DragUpdateDetails details) {
+    final scrollable = Scrollable.maybeOf(context);
+    final box = scrollable?.context.findRenderObject();
+    if (scrollable == null || box is! RenderBox || !box.hasSize) return;
+    final view = box.localToGlobal(Offset.zero) & box.size;
+    if (!view.contains(details.globalPosition)) {
+      _scroller?.stopAutoScroll();
+      return;
+    }
+    _scroller ??= EdgeDraggingAutoScroller(scrollable, velocityScalar: 20);
+    _scroller!.startAutoScrollIfNecessary(
+      Rect.fromCenter(
+        center: details.globalPosition,
+        width: 1,
+        height: _edge * 2,
+      ),
+    );
+  }
+
+  static const _edge = 32.0;
+
+  @override
+  void dispose() {
+    // Scrolled away mid-drag: what the drag set doesn't stay set.
+    _dragDone();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final backend = AppScope.of(context);
-    // It glows for itself, and for what's folded under it.
+    final workspace = backend.workspace.workspace;
+    // A pin, just pinned from a menu, comes into view.
+    if (_pin && justPinned.value == agent.id) {
+      justPinned.value = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          unawaited(
+            Scrollable.ensureVisible(
+              context,
+              duration: Motion.base,
+              alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
+            ),
+          );
+        }
+      });
+    }
+    // It glows for itself, and for what's folded under it (the pins left
+    // out while they're in sight).
+    final pinned = _pinsStay(context) ? pinnedIds(workspace) : const <String>{};
     final stands = {
       agent.id,
       if (agent.collapsed)
-        for (final hidden in _all(widget.children)) hidden.id,
+        for (final hidden in _all(widget.children))
+          if (!pinned.contains(hidden.id)) hidden.id,
     };
-    final shown = backend.workspace.workspace.selectedAgentId;
+    final shown = workspace.selectedAgentId;
     final row = Glow(
       store: backend.highlights,
-      matches: (key) => matchesAgents(key, stands, shownAgentId: shown),
+      matches: (key) =>
+          (_pin && key == 'pin:${agent.id}') ||
+          matchesAgents(key, stands, shownAgentId: shown),
       child: _row(palette, backend),
     );
-    final draggable = _SidebarDraggable<String>(
-      data: agent.id,
+    final draggable = _SidebarDraggable<Object>(
+      data: _pin ? _PinDrag(agent.id) : agent.id,
       dragAnchorStrategy: pointerDragAnchorStrategy,
-      onDragEnd: (_) => _dropSays.value = null,
+      onDragStarted: _dragStarted,
+      onDragUpdate: _autoScroll,
+      onDragEnd: _dragEnded,
       feedback: _DragFeedback(name: agent.name, palette: palette),
       childWhenDragging: Opacity(opacity: 0.4, child: row),
       child: row,
     );
-    return DragTarget<String>(
-      onWillAcceptWithDetails: (details) =>
-          _accepts(details.data) || _isOwn(details.data),
+    final target = DragTarget<Object>(
+      onWillAcceptWithDetails: (details) => _takes(details.data),
       onMove: (details) {
-        if (!_accepts(details.data)) {
+        final data = details.data;
+        // Another kind of drag (a project's), or a pin over a tree row.
+        if (!_takes(data)) return;
+        if (data is String && !_pin && !_accepts(data)) {
           _dropSays.value = null;
           return;
         }
         final drop = _zone(details.offset);
-        final dragged = backend.workspace.agent(details.data)!;
-        _dropSays.value = _sayDrop(
-          backend.workspace.workspace,
-          dragged,
-          _arrange(dragged, drop),
-        );
-        if (drop != _drop) setState(() => _drop = drop);
+        _dropSays.value = _says(data, drop);
+        if (drop != _drop) {
+          // By touch, a tick each time the slot changes.
+          if (_touchDrag && (_pin || _drop != null)) {
+            unawaited(HapticFeedback.selectionClick());
+          }
+          setState(() => _drop = drop);
+        }
       },
-      onLeave: (_) {
+      onLeave: (data) {
+        if (!_takes(data)) return;
         _dropSays.value = null;
         setState(() => _drop = null);
       },
       onAcceptWithDetails: (details) {
         _dropSays.value = null;
-        if (_isOwn(details.data)) return;
-        final dragged = backend.workspace.agent(details.data);
         final drop = _drop ?? _zone(details.offset);
         setState(() => _drop = null);
-        if (dragged != null) {
-          _arrangeOrSay(context, dragged, _arrange(dragged, drop));
-        }
+        _dropped(details.data, drop);
       },
       builder: (context, _, _) => Stack(
         clipBehavior: Clip.none,
@@ -2271,12 +2750,55 @@ class _AgentRowState extends State<_AgentRow> {
         ],
       ),
     );
+    return Listener(
+      onPointerDown: (event) {
+        _downAt = event.position;
+        _downKind = event.kind;
+      },
+      child: Semantics(
+        customSemanticsActions: _actions(workspace),
+        child: target,
+      ),
+    );
+  }
+
+  /// Pin or Unpin, and on a pin Move up and Move down, for VoiceOver (the
+  /// row's menu otherwise).
+  Map<CustomSemanticsAction, VoidCallback> _actions(Workspace workspace) {
+    final pin = pinLabel(workspace, agent);
+    if (pin == null) return const {};
+    return {
+      CustomSemanticsAction(label: pin): () =>
+          unawaited(togglePin(context, agent)),
+      if (_pin) ...{
+        const CustomSemanticsAction(label: 'Move up'): ?movePin(
+          context,
+          agent,
+          -1,
+        ),
+        const CustomSemanticsAction(label: 'Move down'): ?movePin(
+          context,
+          agent,
+          1,
+        ),
+      },
+    };
   }
 
   Widget _row(Palette palette, Backend backend) {
     // A collapsed agent speaks for the agents hidden under it: it pulses
     // while one works and is marked while one has news.
-    final hidden = agent.collapsed ? _all(widget.children) : const <Agent>[];
+    // Pinned agents folded under it are left out while the pins are in
+    // sight.
+    final pinned = _pinsStay(context)
+        ? pinnedIds(backend.workspace.workspace)
+        : const <String>{};
+    final hidden = agent.collapsed
+        ? [
+            for (final other in _all(widget.children))
+              if (!pinned.contains(other.id)) other,
+          ]
+        : const <Agent>[];
     final working = atWork(agent) || hidden.any(atWork);
     // Held up by usage limits: its line under the name says what it waits
     // for, in place of its role.
@@ -2290,11 +2812,48 @@ class _AgentRowState extends State<_AgentRow> {
     final waiting = waitingIn([agent, ...hidden]);
     final stands = unseen || waiting > 0;
     final color = agentColor(agent.color);
+    // A pin's second line: its role (or wait), then its project.
+    final project = _pin
+        ? projectById(backend.workspace.workspace, agent.projectId)?.name ?? ''
+        : '';
     return _Row(
-      // Taller with a role or a wait, for its line under the name.
-      height: agent.role.isEmpty && wait.isEmpty ? 32 : 40,
+      // Taller with a role or a wait, for its line under the name; a pin
+      // always has its project, on two lines at the largest text.
+      height: _pin
+          ? (largeText(context) ? 56 : 40)
+          : agent.role.isEmpty && wait.isEmpty
+          ? 32
+          : 40,
       selected: widget.selected,
       onTap: widget.onTap,
+      onSecondaryTap: () => unawaited(
+        _agentMenu(
+          context,
+          agent,
+          pinRow: _pin,
+          at:
+              _downKind == PointerDeviceKind.touch ||
+                  _downKind == PointerDeviceKind.stylus
+              ? null
+              : _downAt,
+        ),
+      ),
+      // From the keyboard, under the row's start, as a menu bar's would.
+      onMenuKey: () {
+        final box = context.findRenderObject();
+        unawaited(
+          _agentMenu(
+            context,
+            agent,
+            pinRow: _pin,
+            at: box is RenderBox && box.hasSize
+                ? box.localToGlobal(Offset(Space.l, box.size.height))
+                : null,
+          ),
+        );
+      },
+      // A finger's hold picks the row up; let go there, it's the menu.
+      holdForMenu: false,
       // While it (or an agent folded under it) works, a wave of its color
       // sweeps across the row; it says so plainer than a pulse.
       underlay: working
@@ -2365,25 +2924,50 @@ class _AgentRowState extends State<_AgentRow> {
               child: _QuietAfterName(
                 count: agent.quietWaiting,
                 about: quietWaitingAbout(agent),
-                name: _NameOverRole(
-                  name: agent.name,
-                  role: wait.isEmpty ? agent.role : wait,
-                  style: nameStyle,
-                  roleColor: widget.selected || hovered
-                      ? palette.textMuted
-                      : palette.textFaint,
-                ),
+                name: _pin
+                    ? Semantics(
+                        label: [
+                          agent.name,
+                          if (wait.isNotEmpty)
+                            wait
+                          else if (agent.role.isNotEmpty)
+                            agent.role,
+                          if (project.isNotEmpty) 'in $project',
+                          'pinned',
+                        ].join(', '),
+                        child: ExcludeSemantics(
+                          child: _PinName(
+                            name: agent.name,
+                            role: wait.isEmpty ? agent.role : wait,
+                            project: project,
+                            style: nameStyle,
+                            roleColor: widget.selected || hovered
+                                ? palette.textMuted
+                                : palette.textFaint,
+                          ),
+                        ),
+                      )
+                    : _NameOverRole(
+                        name: agent.name,
+                        role: wait.isEmpty ? agent.role : wait,
+                        style: nameStyle,
+                        roleColor: widget.selected || hovered
+                            ? palette.textMuted
+                            : palette.textFaint,
+                      ),
                 nameText: agent.name,
                 nameStyle: nameStyle,
               ),
             ),
             // Whom it reports to, for VoiceOver: what the nesting shows, and
-            // an admin lead (Rivet) the nesting can't.
-            if (backend.workspace.agent(agent.leadId) case final lead?)
-              Semantics(
-                label: 'reports to ${lead.name}',
-                child: const SizedBox(),
-              ),
+            // an admin lead (Rivet) the nesting can't. Not on a pin, which
+            // isn't nested and says only what it shows (Sale row 197).
+            if (!_pin)
+              if (backend.workspace.agent(agent.leadId) case final lead?)
+                Semantics(
+                  label: 'reports to ${lead.name}',
+                  child: const SizedBox(),
+                ),
             // Held up by usage limits: Try now (or Sign in…) under the
             // pointer, to ask again without opening it. Its conversation
             // has it too, by touch as well.
@@ -2653,6 +3237,287 @@ String? _sayDrop(Workspace workspace, Agent dragged, ArrangeAgent arrange) {
     return 'Moves to ${project?.name ?? 'the workspace'}';
   }
   return dragged.parentId.isEmpty ? null : 'Reports to no one';
+}
+
+/// A pin under Rivet being dragged: it reorders among the pins only, so
+/// rows elsewhere don't take it, and dropped anywhere else it goes back.
+@immutable
+class _PinDrag {
+  const _PinDrag(this.agentId);
+
+  final String agentId;
+}
+
+/// Whether the drag going on started with a finger (or a pen): its slots
+/// tick as they change.
+var _touchDrag = false;
+
+/// What dropping [dragged] in the top group does: "Pins June here", or
+/// nothing to say when it only moves its pin.
+String? _sayPin(Workspace workspace, Agent dragged) =>
+    pinnedIds(workspace).contains(dragged.id)
+    ? null
+    : 'Pins ${dragged.name} here';
+
+/// The pin [dragged] goes before when dropped in a gap above the pins:
+/// the first other pin, or "" (last) when there's none.
+String _firstPin(Workspace workspace, Agent dragged) =>
+    pinnedAgents(workspace)
+        .map((agent) => agent.id)
+        .firstWhere((id) => id != dragged.id, orElse: () => '');
+
+/// An agent row's menu: Pin or Unpin (on a pin also Move up and Move
+/// down), then Agent settings…. With a pointer, a menu at [at]; by touch,
+/// the actions sheet (a popover on an iPad's wide window), titled with the
+/// agent, its role and project, since it shows twice when pinned.
+Future<void> _agentMenu(
+  BuildContext context,
+  Agent agent, {
+  required bool pinRow,
+  Offset? at,
+}) async {
+  final workspace = AppScope.of(context).workspace.workspace;
+  final pin = pinLabel(workspace, agent);
+  final up = pinRow ? movePin(context, agent, -1) : null;
+  final down = pinRow ? movePin(context, agent, 1) : null;
+  final items = <PointerMenuItem<String>?>[
+    if (pin != null)
+      PointerMenuItem(
+        pin,
+        'pin',
+        glyph: (color) => ExtensionGlyph(
+          icon: pin == 'Pin' ? 'pin' : 'pin-off',
+          name: '',
+          color: color,
+        ),
+      ),
+    if (up != null)
+      PointerMenuItem(
+        'Move up',
+        'up',
+        glyph: (color) =>
+            ExtensionGlyph(icon: 'chevron-up', name: '', color: color),
+      ),
+    if (down != null)
+      PointerMenuItem(
+        'Move down',
+        'down',
+        glyph: (color) =>
+            ExtensionGlyph(icon: 'chevron-down', name: '', color: color),
+      ),
+    if (pin != null) null,
+    PointerMenuItem(
+      'Agent settings…',
+      'settings',
+      glyph: (color) => CogGlyph(color: color),
+    ),
+  ];
+  final project = projectById(workspace, agent.projectId)?.name ?? '';
+  final title = at != null
+      ? [agent.name, agent.role, project].where((s) => s.isNotEmpty).join(' · ')
+      : _menuTitle(context, agent.name, agent.role, project);
+  final chosen = at != null
+      ? await showPointerMenu<String>(
+          context,
+          at: at,
+          items: items,
+          label: title,
+        )
+      : await showActions<String>(
+          context,
+          title: title,
+          actions: sheetActionsOf(items),
+          // On an iPad's wide window, a popover to the row's right.
+          beside: true,
+        );
+  if (chosen == null || !context.mounted) return;
+  switch (chosen) {
+    case 'pin':
+      await togglePin(context, agent);
+    case 'up':
+      up?.call();
+    case 'down':
+      down?.call();
+    case 'settings':
+      final now = AppScope.of(context).workspace.agent(agent.id) ?? agent;
+      await showModal(
+        context,
+        (context, close) => AgentSettingsForm(agent: now, close: close),
+      );
+  }
+}
+
+/// The touch menu's caption: "Bruno · Project Manager · Claktory" in at
+/// most two lines (Lucy 47558). The name stays whole; past two lines the
+/// role goes first, then the project.
+String _menuTitle(
+  BuildContext context,
+  String name,
+  String role,
+  String project,
+) {
+  // As the sheet draws it: its own type, never the drawer's denser one
+  // (Zucchero's row 716: measured at 13pt, drawn at 15pt, it took three
+  // lines at the largest text).
+  final style = (touchFirst(context) ? PhoneType.secondary : TextStyles.body)
+      .copyWith(fontWeight: FontWeight.w600);
+  // The sheet's text runs the window's width less its margins; a popover
+  // is narrower.
+  final width = math.min(MediaQuery.sizeOf(context).width, 420.0) - 64;
+  final candidates = [
+    [name, role, project],
+    [name, project],
+    [name],
+  ];
+  for (final parts in candidates) {
+    final title = parts.where((part) => part.isNotEmpty).join(' · ');
+    final painter = TextPainter(
+      text: TextSpan(text: title, style: style),
+      textDirection: TextDirection.ltr,
+      textScaler: MediaQuery.textScalerOf(context),
+    )..layout(maxWidth: math.max(1, width));
+    final lines = painter.computeLineMetrics().length;
+    painter.dispose();
+    if (lines <= 2) return title;
+  }
+  return name;
+}
+
+/// The agents pinned under Rivet, from any project, in the person's order
+/// (Lucy's pinned-agents.md §3): each the agent row people know, its role
+/// and project on its second line, with no disclosure and no reports
+/// under it. They drag among themselves to reorder.
+class _Pins extends StatelessWidget {
+  const _Pins({
+    required this.pins,
+    required this.selectedAgentId,
+    required this.gutter,
+  });
+
+  final List<Agent> pins;
+  final String selectedAgentId;
+
+  /// Room for a disclosure, as the agents above have.
+  final bool gutter;
+
+  @override
+  Widget build(BuildContext context) {
+    final backend = AppScope.of(context);
+    final workspace = backend.workspace.workspace;
+    final order = [for (final pin in pins) pin.id];
+    // In line with the rows above, inside their place's 1px edge.
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 1),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (final pin in pins)
+            Kept(
+              key: ValueKey('pin/${pin.id}'),
+              inputs: [
+                pin,
+                projectById(workspace, pin.projectId)?.name,
+                backend.workspace.agent(pin.leadId),
+                selectedAgentId,
+                order,
+                gutter,
+              ],
+              builder: (_) => _AgentRow(
+                agent: pin,
+                projectId: pin.projectId,
+                folderId: '',
+                selected: pin.id == selectedAgentId,
+                onTap: () => _selectAgent(context, pin),
+                onReach: () => _selectAgent(context, pin, reach: true),
+                gutter: gutter,
+                children: const [],
+                siblings: order,
+                pinOrder: order,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A pin's name over its role and project ("Product Marketing ·
+/// Claktory"): the role cut first, the project kept whole. At the largest
+/// text, the role and the project each take a line, the role cut and the
+/// project whole.
+class _PinName extends StatelessWidget {
+  const _PinName({
+    required this.name,
+    required this.role,
+    required this.project,
+    required this.style,
+    required this.roleColor,
+  });
+
+  final String name;
+  final String role;
+  final String project;
+  final TextStyle style;
+  final Color roleColor;
+
+  @override
+  Widget build(BuildContext context) {
+    final touch = touchFirst(context);
+    final small = touch
+        ? TypeScale.of(context).caption.copyWith(height: 1.25, color: roleColor)
+        : roleStyle(roleColor);
+    Text line(String text) => Text(
+      text,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      softWrap: false,
+      style: small,
+    );
+    final Widget second;
+    if (role.isEmpty || project.isEmpty) {
+      second = line(role.isEmpty ? project : role);
+    } else if (largeText(context)) {
+      second = Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [line(role), line(project)],
+      );
+    } else {
+      second = LayoutBuilder(
+        builder: (context, box) {
+          final painter = TextPainter(
+            text: TextSpan(text: ' · $project', style: small),
+            textDirection: TextDirection.ltr,
+            textScaler: MediaQuery.textScalerOf(context),
+            maxLines: 1,
+          )..layout();
+          final tail = painter.width;
+          painter.dispose();
+          // No room even for the project: it alone, cut at its end.
+          if (tail >= box.maxWidth) return line(project);
+          return Row(
+            children: [
+              Flexible(child: line(role)),
+              Text(' · $project', maxLines: 1, softWrap: false, style: small),
+            ],
+          );
+        },
+      );
+    }
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          name,
+          maxLines: largeText(context) ? null : 1,
+          overflow: largeText(context) ? null : TextOverflow.ellipsis,
+          style: style.copyWith(height: 1.25),
+        ),
+        second,
+      ],
+    );
+  }
 }
 
 /// Sends [arrange]; a refusal (a lead the backend won't take) says why.
@@ -4150,8 +5015,10 @@ class _ConfigErrorState extends State<_ConfigError> {
 /// Which Factory this is: the backend's version, and the app's too when it
 /// differs.
 String _versions(String backend, String app) {
-  if (backend.isEmpty) return 'Claktory · app $app';
-  return backend == app ? 'Claktory $backend' : 'Claktory $backend · app $app';
+  // Versions carry their "v" (settings.md, Words).
+  final (b, a) = (versionLabel(backend), versionLabel(app));
+  if (backend.isEmpty) return 'Claktory · app $a';
+  return backend == app ? 'Claktory $b' : 'Claktory $b · app $a';
 }
 
 /// A [Draggable] that starts only once the pointer has moved a few pixels,
@@ -4166,6 +5033,8 @@ class _SidebarDraggable<T extends Object> extends Draggable<T> {
     super.data,
     super.childWhenDragging,
     super.dragAnchorStrategy,
+    super.onDragStarted,
+    super.onDragUpdate,
     super.onDragEnd,
   });
 

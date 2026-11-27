@@ -201,6 +201,12 @@ fn prompt_cache_key(session: &str) -> String {
     session.chars().take(PROMPT_CACHE_KEY_MAX_CHARS).collect()
 }
 
+#[cfg(windows)]
+fn kernel_release() -> String {
+    crate::windows::system::kernel_release()
+}
+
+#[cfg(unix)]
 fn kernel_release() -> String {
     // SAFETY: uname fills a zeroed utsname; the release field is NUL-terminated by the kernel.
     unsafe {
@@ -221,7 +227,9 @@ pub fn user_agent() -> &'static str {
             "x86" => "ia32",
             other => other,
         };
-        format!("pi ({} {}; {arch})", std::env::consts::OS, kernel_release())
+        // Node calls Windows "win32".
+        let platform = if cfg!(windows) { "win32" } else { std::env::consts::OS };
+        format!("pi ({platform} {}; {arch})", kernel_release())
     });
     &AGENT
 }

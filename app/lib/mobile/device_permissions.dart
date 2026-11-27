@@ -101,9 +101,14 @@ class CameraPermission extends Permission {
     this.pairing = true,
     this.paste = true,
     this.photo = false,
+    this.settings = false,
   });
 
   final Camera camera;
+
+  /// Turned on from Settings' row, for everything the camera's for:
+  /// scanning codes and taking photos (Lucy 49815, Trish 49822).
+  final bool settings;
 
   /// Taking a photo to send (the paperclip's Take Photo), not scanning.
   final bool photo;
@@ -119,6 +124,19 @@ class CameraPermission extends Permission {
   @override
   PermissionWords words(BuildContext context) {
     final device = thisDeviceKind;
+    if (settings) {
+      return PermissionWords(
+        glyph: 'camera',
+        drawGlyph: (color, size) => CameraGlyph(color: color, size: size),
+        title: 'Use the camera',
+        body:
+            'Claktory uses the camera to scan codes and take photos for your '
+            'agents. Your $device asks next.',
+        offTitle: 'The camera is off for Claktory',
+        offBody: 'Turn it on in ${settingsAppName()}.',
+        openSettings: openSettingsLabel(),
+      );
+    }
     if (photo) {
       return PermissionWords(
         glyph: 'camera',

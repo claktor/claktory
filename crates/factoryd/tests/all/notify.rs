@@ -65,7 +65,7 @@ fn alert(title: &str) -> serde_json::Value {
 }
 
 fn set_active(active: bool) -> client_message::Body {
-    client_message::Body::SetActive(v1::SetActive { active })
+    client_message::Body::SetActive(v1::SetActive { active, ..Default::default() })
 }
 
 fn settings(change: impl FnOnce(&mut v1::NotificationSettings)) -> client_message::Body {
@@ -439,6 +439,7 @@ async fn a_registered_device_gets_pushes_sealed_with_its_key_while_it_isnt_in_us
             handle: handle.into(),
             key: key.to_vec(),
             platform: v1::PushPlatform::Apns.into(),
+            ..Default::default()
         })
     };
     let wrong = apply_request(&mut client, &mut view, register(&handle, &key[..16])).await;
@@ -511,6 +512,70 @@ async fn a_registered_device_gets_pushes_sealed_with_its_key_while_it_isnt_in_us
     panic!("the handle wasn't forgotten");
 }
 
+/// Area 5a item 13: a device whose notifications are off counts as reaching
+/// no one, gets no pushes, and notify_person says where they're off; once
+/// it says they're allowed, both work again.
+#[tokio::test]
+async fn a_device_with_notifications_off_isnt_counted_or_pushed_to() {
+    let relay = relay().await;
+    let (_dir, factory, mut client, mut view) = setup(v1::DeviceKind::Desktop).await;
+    apply_request(&mut client, &mut view, settings(|settings| settings.relay = relay.url.clone())).await;
+    let key = [5u8; 32];
+    let register = client_message::Body::RegisterNotifications(v1::RegisterNotifications {
+        handle: URL_SAFE_NO_PAD.encode([6u8; 32]),
+        key: key.to_vec(),
+        platform: v1::PushPlatform::Apns.into(),
+        permission: v1::NotificationPermission::Denied.into(),
+    });
+    assert!(matches!(apply_request(&mut client, &mut view, register).await, Body::Ack(_)));
+    let said_off = |off: v1::NotificationPermission| {
+        client_message::Body::SetActive(v1::SetActive { active: false, notifications: off.into() })
+    };
+    client.ok(said_off(v1::NotificationPermission::Denied)).await;
+
+    let mut notes = Vec::new();
+    let said = call(&mut client, &mut view, &mut notes, "builder", "notify_person", alert("Down")).await;
+    assert_eq!(
+        said,
+        "Not delivered as a notification: notifications are turned off on this computer, and no other device of the person's shows them. It waits in their Needs you until they read it."
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(relay.pushes.lock().expect("lock").is_empty(), "nothing pushed to a device that wouldn't show it");
+
+    // Allowed in its Settings: shown by the app, and pushed while it's away.
+    client.ok(said_off(v1::NotificationPermission::Allowed)).await;
+    notes.clear();
+    let said = call(&mut client, &mut view, &mut notes, "builder", "notify_person", alert("Up")).await;
+    assert_eq!(said, "Sent: the person gets it as a notification, and it waits in their Needs you until they read it.");
+    relay.next(1).await;
+    assert!(factoryd::notify::registered_for_test(&factory, "local"));
+}
+
+/// Area 5a item 4: the "Get notified…" offer, dismissed on this computer's
+/// own app, stays dismissed while its notifications aren't allowed, and is
+/// cleared once they are.
+#[tokio::test]
+async fn the_notifications_offer_dismissed_on_a_device_is_cleared_once_they_are_allowed() {
+    let (dir, _factory, mut client, mut view) = setup(v1::DeviceKind::Desktop).await;
+    let dismissed = |view: &View| view.workspace.remote.as_ref().is_some_and(|remote| remote.local_notifications_offer_dismissed);
+    assert!(!dismissed(&view));
+    let dismiss = client_message::Body::DismissNotificationsOffer(v1::DismissNotificationsOffer {});
+    assert!(matches!(apply_request(&mut client, &mut view, dismiss.clone()).await, Body::Ack(_)));
+    view.follow(&mut client, dismissed).await;
+    assert!(matches!(apply_request(&mut client, &mut view, dismiss).await, Body::Ack(_)), "again is no error");
+
+    let said = |permission: v1::NotificationPermission| {
+        client_message::Body::SetActive(v1::SetActive { active: true, notifications: permission.into() })
+    };
+    for still in [v1::NotificationPermission::Denied, v1::NotificationPermission::NotAsked, v1::NotificationPermission::Unspecified] {
+        client.ok(said(still)).await;
+    }
+    let kept = std::fs::read_to_string(dir.join("home/remote/devices.json")).expect("devices.json");
+    assert!(kept.contains("notifications_offer_dismissed"), "kept while they aren't allowed: {kept}");
+    assert!(matches!(apply_request(&mut client, &mut view, said(v1::NotificationPermission::Allowed)).await, Body::Ack(_)));
+    view.follow(&mut client, |view| !dismissed(view)).await;
+}
+
 /// Friend bug #36: when the disk turns read-only, the person hears it on
 /// every device, from what was saved while it worked: a push to each
 /// registered device, with a counter saved ahead (none used twice, after a
@@ -526,6 +591,7 @@ async fn a_disk_that_cant_be_written_is_told_to_every_device_without_saving_anyt
         handle: URL_SAFE_NO_PAD.encode([3u8; 32]),
         key: key.to_vec(),
         platform: v1::PushPlatform::Apns.into(),
+        ..Default::default()
     });
     assert!(matches!(apply_request(&mut client, &mut view, register).await, Body::Ack(_)));
     // Counters are saved ahead from the start.
@@ -654,7 +720,7 @@ async fn alerts_held_or_not_sent_wait_in_needs_you_too() {
     assert_eq!(view.workspace.alerts.len(), 7);
     assert_eq!(view.workspace.alerts_unread, 7);
     assert_eq!(view.workspace.alerts.last().map(|alert| alert.title.as_str()), Some("Alert 7"));
-    assert!(view.agent("builder").waiting_seqs.is_empty(), "not a card");
+    assert!(view.agent("builder").waiting_seqs.is_empty(), "not a request");
 
     apply_request(&mut client, &mut view, settings(|settings| settings.alerts = false)).await;
     let said = call(&mut client, &mut view, &mut notes, "builder", "notify_person", alert("Off")).await;

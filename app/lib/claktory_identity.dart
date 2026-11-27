@@ -21,6 +21,17 @@ String claktoryName(Backend backend) {
   return backend.target?.label ?? thisMacName;
 }
 
+/// [claktoryName] where Settings heads the Claktory's sections or names
+/// the computer its version runs on (settings.md §3, ST1): never "This
+/// Mac", which is the device's own row there, so this Mac's own Claktory
+/// with no name yet goes by its computer's name ("mac-studio").
+String claktoryNameInSettings(Backend backend) {
+  final name = claktoryName(backend);
+  if (name != thisMacName) return name;
+  final machine = backend.workspace.workspace.remote.machine;
+  return machine.isEmpty ? name : machine;
+}
+
 /// [claktoryName] as it reads inside a sentence ("Save the recovery key
 /// for nixos"): "this Mac" while this Mac's own has no name yet.
 String claktoryNameInText(Backend backend) {
@@ -127,12 +138,26 @@ class _ClaktoryIdentityState extends State<ClaktoryIdentity>
                   ],
                 );
               }
-              return Row(
-                children: [
-                  SizedBox(width: 200, child: field),
-                  const SizedBox(width: Space.m),
-                  Expanded(child: after),
-                ],
+              // Wide: Save beside the field while it's changed; else the
+              // help under it, never beside (settings.md §4.1).
+              return ListenableBuilder(
+                listenable: _name,
+                builder: (context, _) => _name.text.trim() == settings.name
+                    ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SizedBox(width: 200, child: field),
+                          const SizedBox(height: Space.xs),
+                          after,
+                        ],
+                      )
+                    : Row(
+                        children: [
+                          SizedBox(width: 200, child: field),
+                          const SizedBox(width: Space.m),
+                          Button(label: 'Save', onPressed: _save),
+                        ],
+                      ),
               );
             },
           ),

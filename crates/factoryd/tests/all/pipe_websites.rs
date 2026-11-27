@@ -164,7 +164,7 @@ async fn a_website_the_person_shares_is_listed_stopped_and_shared_again_only_on_
     let listed = call(&mut client, &mut view, "rivet", "pipes_shares", r#"{"pipe": "Website"}"#).await;
     assert!(listed.contains("ended on this pipe: the other side's Claktory answered that it can't open shared websites"), "{listed}");
     let refused = call(&mut client, &mut view, "rivet", "pipes_shares", r#"{"pipe": "Website", "refresh": "Dashboard"}"#).await;
-    assert!(refused.contains("only the person does that, on a card (pipes_share)"), "{refused}");
+    assert!(refused.contains("only the person does that, in a request (pipes_share)"), "{refused}");
     let args = json!({"pipe": "Website", "port": port, "name": "Other name", "reason": "Ana lost it."});
     let asked = call(&mut client, &mut view, "rivet", "pipes_share", &args.to_string()).await;
     assert!(asked.starts_with("Asked "), "{asked}");

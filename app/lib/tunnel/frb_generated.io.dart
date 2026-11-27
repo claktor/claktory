@@ -7,6 +7,7 @@ import 'api/account.dart';
 import 'api/dm.dart';
 import 'api/dm_transfer.dart';
 import 'api/tunnel.dart';
+import 'api/windows.dart';
 
 import 'dart:async';
 import 'dart:convert';

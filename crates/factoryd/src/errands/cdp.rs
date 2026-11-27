@@ -261,6 +261,12 @@ pub(crate) struct Local {
 impl Local {
     /// Starts `chrome` headless on about:blank in `profile`.
     pub(crate) fn start(chrome: &Path, profile: &Path) -> std::io::Result<Local> {
+        Local::start_with(chrome, profile, &[])
+    }
+
+    /// Starts it with `more` switches too (tests: names resolved to this
+    /// machine, its own certificates taken).
+    pub(crate) fn start_with(chrome: &Path, profile: &Path, more: &[String]) -> std::io::Result<Local> {
         use std::os::fd::{AsRawFd, OwnedFd};
 
         let (chrome_reads, we_write) = std::io::pipe()?;
@@ -280,6 +286,7 @@ impl Local {
                 "--password-store=basic",
             ])
             .arg(format!("--user-data-dir={}", profile.display()))
+            .args(more)
             .arg("about:blank")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())

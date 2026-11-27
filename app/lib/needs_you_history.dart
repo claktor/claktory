@@ -8,6 +8,7 @@ import 'apps.dart' show undoAppAccess;
 import 'backend.dart';
 import 'characters/character.dart';
 import 'chats.dart' show ChatGlyph, chatTitle, openChat;
+import 'command_card.dart' show commandRunLine, commandSummary;
 import 'controls.dart';
 import 'needs_you_alerts.dart' show withheldTitle;
 import 'find.dart' show FindScope;
@@ -318,10 +319,29 @@ bool _ofModel(NeedsYouRecord record) =>
 bool _ofConversation(NeedsYouRecord record) =>
     record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_CONVERSATION;
 
-/// Whether [record] is an agent giving up a secret of its own (#449): no
-/// card; Claktory's sentence, and its why in its own words.
+/// Whether [record] is an agent giving up access of its own: a secret
+/// (#449), or a pipe, reading or leading one, an app, or messaging an agent
+/// of another project (#561). No card; Claktory's sentence ("Mista left the
+/// pipe with Fred"), and its why in its own words.
 bool _ofGivenUp(NeedsYouRecord record) =>
-    record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_SECRET_GIVEN_UP;
+    record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_SECRET_GIVEN_UP ||
+    record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_GIVEN_UP ||
+    // An agent saving a command's output as a new secret (save_as, #589):
+    // no card either; Claktory's sentence, and the secret's description
+    // in the agent's words.
+    record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_SECRET_SAVED;
+
+/// Whether [record] is the person's own decision about this Claktory, made
+/// in Settings rather than on an agent's card: using the account's new
+/// recovery key here (#239), or a place macOS keeps from the agents
+/// (item 12). It opens where it was decided.
+String? _settingsPlace(NeedsYouRecord record) => switch (record.kind) {
+  NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_RECOVERY_KEY_CHANGED =>
+    'secrets#recovery-key',
+  NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PROTECTED_PLACE =>
+    'device#permissions',
+  _ => null,
+};
 
 /// The change Undo undoes: an app access change's or a model change's; ""
 /// for none (a declined card, another kind).
@@ -363,7 +383,97 @@ String updatedTimes(int times) => switch (times) {
 /// What a record's outcome is called: as its card's buttons said it; ""
 /// for one this app doesn't know (a newer Claktory's). [agent] is the name
 /// of the agent the card is from, as it is now.
-String historyOutcome(
+String historyOutcome(NeedsYouRecord record, {String? agent, String? subject}) {
+  // A procedure, where it ended; a secret, how it was given: the card's
+  // own words (askOutcome, secretOutcome; #533 §7).
+  if (_stepOutcome(record) case final words?) return words;
+  if (_secretOutcome(record, agent: agent, subject: subject)
+      case final words?) {
+    return words;
+  }
+  if (_commandOutcome(record) case final words?) return words;
+  return _outcome(record, agent: agent);
+}
+
+/// An Execute card that ran (Secco's NEEDS_YOU_RECORD_KIND_COMMAND), as
+/// its card says it: "Ran", then how it went ("Ran · Exited with code 1 ·
+/// 3.4s"). Null for every other record and outcome.
+String? _commandOutcome(NeedsYouRecord record) {
+  if (record.kind != NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_COMMAND ||
+      record.outcome != NeedsYouOutcome.NEEDS_YOU_OUTCOME_APPROVED) {
+    return null;
+  }
+  final how = record.hasCommand() ? commandRunLine(record.command) : '';
+  return how.isEmpty ? 'Ran' : 'Ran · $how';
+}
+
+/// Whether [record] is a yes to a question or a review: the backend counts
+/// it answered, though only a written answer has words (Zucchero row 708).
+bool _approval(NeedsYouRecord record) =>
+    (record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_QUESTION ||
+        record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_REVIEW) &&
+    record.reply.trim().isEmpty;
+
+/// A procedure's outcome by its step (NeedsYouRecord.step, 1 for the
+/// first, of steps): stopped by its agent after Can't do this, couldn't be
+/// done (a procedure's only no), replied on, or every step done. Null for
+/// a card without steps, and for the rest of a procedure's outcomes.
+String? _stepOutcome(NeedsYouRecord record) {
+  final steps = record.steps;
+  if (steps == 0 || record.step == 0) return null;
+  final step = record.step;
+  return switch (record.outcome) {
+    NeedsYouOutcome.NEEDS_YOU_OUTCOME_RESOLVED when record.stepStopped =>
+      'Stopped at step $step of $steps',
+    NeedsYouOutcome.NEEDS_YOU_OUTCOME_DISMISSED =>
+      "Couldn't do step $step of $steps",
+    NeedsYouOutcome.NEEDS_YOU_OUTCOME_REPLIED => 'Replied on step $step',
+    NeedsYouOutcome.NEEDS_YOU_OUTCOME_APPROVED ||
+    NeedsYouOutcome.NEEDS_YOU_OUTCOME_ANSWERED => switch (steps) {
+      1 => 'Done',
+      2 => 'Both steps done',
+      _ => 'All $steps steps done',
+    },
+    _ => null,
+  };
+}
+
+/// An approved secret request, as its card says it ended: which secret
+/// the agent got and how; left to the admin agent ([subject], its name),
+/// that it went to it. One generated or imported says whom the vault
+/// gave it to: [agent], the one that asked, or no one. Null for every
+/// other record.
+String? _secretOutcome(
+  NeedsYouRecord record, {
+  String? agent,
+  String? subject,
+}) {
+  if (record.kind != NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_SECRET_REQUEST ||
+      record.outcome != NeedsYouOutcome.NEEDS_YOU_OUTCOME_APPROVED) {
+    return null;
+  }
+  final given = record.secretGivenName.isNotEmpty
+      ? record.secretGivenName
+      : record.title;
+  final asker = agent ?? (record.agentName.isEmpty ? null : record.agentName);
+  final to = record.secretToNoOne
+      ? 'given to no one'
+      : 'given to ${asker ?? 'the agent that asked'}';
+  return switch (record.secretOutcome) {
+    NeedsYouSecretOutcome.NEEDS_YOU_SECRET_OUTCOME_GAVE => 'Gave $given',
+    NeedsYouSecretOutcome.NEEDS_YOU_SECRET_OUTCOME_ADDED =>
+      'Added and gave $given',
+    // As the card says it (secretOutcome).
+    NeedsYouSecretOutcome.NEEDS_YOU_SECRET_OUTCOME_GENERATED =>
+      record.secretToNoOne ? 'Generated $given, $to' : 'Generated $given',
+    NeedsYouSecretOutcome.NEEDS_YOU_SECRET_OUTCOME_IMPORTED => 'Imported, $to',
+    NeedsYouSecretOutcome.NEEDS_YOU_SECRET_OUTCOME_ADMIN =>
+      'Left to ${subject ?? 'the admin agent'}',
+    _ => null,
+  };
+}
+
+String _outcome(
   NeedsYouRecord record, {
   String? agent,
 }) => switch (record.outcome) {
@@ -377,9 +487,16 @@ String historyOutcome(
   NeedsYouOutcome.NEEDS_YOU_OUTCOME_APPROVED
       when record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PIPE_LOOP =>
     'Continued',
+  // A yes, as its card's button said it; words, an answer.
+  NeedsYouOutcome.NEEDS_YOU_OUTCOME_ANSWERED when _approval(record) =>
+    'Approved',
   NeedsYouOutcome.NEEDS_YOU_OUTCOME_ANSWERED => 'Answered',
   // A comment sent back with Submit, rather than a yes or a no.
   NeedsYouOutcome.NEEDS_YOU_OUTCOME_REPLIED => 'Replied',
+  // A secret's use as its card says it (Lucy's §8).
+  NeedsYouOutcome.NEEDS_YOU_OUTCOME_APPROVED
+      when record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_SECRET_USE =>
+    'Allowed',
   NeedsYouOutcome.NEEDS_YOU_OUTCOME_APPROVED => 'Approved',
   // A secret's use as its card says it, the rest Declined (never Denied).
   NeedsYouOutcome.NEEDS_YOU_OUTCOME_DENIED
@@ -404,6 +521,11 @@ String historyOutcome(
       when record.answeredOn.deviceName.isNotEmpty =>
     'Read on ${record.answeredOn.deviceName}',
   NeedsYouOutcome.NEEDS_YOU_OUTCOME_READ => 'Read',
+  // A protected place dismissed, then found let in by a later check.
+  NeedsYouOutcome.NEEDS_YOU_OUTCOME_CHANGED
+      when record.kind ==
+          NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PROTECTED_PLACE =>
+    'Allowed later',
   _ => '',
 };
 
@@ -467,9 +589,9 @@ class HistoryRow extends StatelessWidget {
         (record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_REPORT_TYPE &&
             record.agentId.isEmpty) ||
         // A change to an app's access the person made, or an undo.
-        (_ofApp(record) && record.agentId.isEmpty);
-    final alert =
-        record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_ALERT;
+        (_ofApp(record) && record.agentId.isEmpty) ||
+        _settingsPlace(record) != null;
+    final alert = record.kind == NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_ALERT;
     final who = yours
         ? 'You'
         // Claktory's own alert, by the name it was sent with.
@@ -492,7 +614,16 @@ class HistoryRow extends StatelessWidget {
     final reply = _shortened(record.reply, 120);
     // An app access change undone since says so after how it ended.
     final outcome = [
-      historyOutcome(record, agent: agentName),
+      historyOutcome(
+        record,
+        agent: agentName,
+        subject: record.subjectAgentId.isEmpty
+            ? null
+            : workspace.agents
+                  .where((agent) => agent.id == record.subjectAgentId)
+                  .firstOrNull
+                  ?.name,
+      ),
       if ((_ofApp(record) || _ofModel(record)) && record.undone) 'Undone',
       // Changed again since, so Undo would be refused (row 684).
       if (_ofModel(record) && record.superseded && !record.undone)
@@ -528,6 +659,8 @@ class HistoryRow extends StatelessWidget {
         ? 'Show in Apps'
         : _ofPipe(record)
         ? 'Open pipe'
+        : _settingsPlace(record) != null
+        ? 'Open Settings'
         : 'Open conversation';
     return Semantics(
       button: true,
@@ -560,6 +693,22 @@ class HistoryRow extends StatelessWidget {
                       ? ChatGlyph(color: palette.textMuted)
                       : pipe != null || _ofPipe(record)
                       ? const PortalGlyph(color: pipeColor)
+                      : record.kind ==
+                            NeedsYouRecordKind
+                                .NEEDS_YOU_RECORD_KIND_RECOVERY_KEY_CHANGED
+                      ? ExtensionGlyph(
+                          icon: 'key-round',
+                          name: '',
+                          color: palette.textMuted,
+                        )
+                      : record.kind ==
+                            NeedsYouRecordKind
+                                .NEEDS_YOU_RECORD_KIND_PROTECTED_PLACE
+                      ? ExtensionGlyph(
+                          icon: 'folder-lock',
+                          name: '',
+                          color: palette.textMuted,
+                        )
                       : ExtensionGlyph(
                           icon: 'user',
                           name: '',
@@ -612,6 +761,10 @@ class HistoryRow extends StatelessWidget {
                         // every hidden character by its code (Fugo).
                         record.proposalId.isNotEmpty
                             ? visibleCodes(record.title)
+                            // An Execute card: Claktory's heading, then the
+                            // command's first line, as Needs you shows it.
+                            : record.hasCommand()
+                            ? commandSummary(record.command)
                             : record.title,
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
@@ -736,6 +889,15 @@ void openHistoryRecord(BuildContext context, NeedsYouRecord record) {
   if (_opensApp(record)) {
     openAppsTab(context);
     backend.marketplaceApp.value = record.appId;
+    return;
+  }
+  // Decided in Settings: there, glowing.
+  if (_settingsPlace(record) case final place?) {
+    final (section, setting) = switch (place.split('#')) {
+      [final section, final setting] => (section, setting),
+      _ => (place, ''),
+    };
+    AppScope.openSettingsAt(context, section, setting: setting);
     return;
   }
   // A kind of report made, changed or deleted: what crosses with it.

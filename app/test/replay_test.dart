@@ -94,7 +94,7 @@ void main() {
       final log = HistoryLog()
         ..add(runs([(day1 + 10 * hour, 0)]))
         ..add(runs([(day1 + 2 * hour, hour), (day1 + 5 * hour, 10 * hour)]));
-      expect(log.runStarts[kai], [
+      expect(log.runStarts(kai), [
         day1 + 2.0 * hour,
         day1 + 5.0 * hour,
         day1 + 10.0 * hour,
@@ -102,7 +102,7 @@ void main() {
       // One still open when the next began ended by then.
       expect(log.running(kai, day1 + 9.0 * hour), isTrue);
       expect(log.running(kai, day1 + 10.0 * hour), isTrue);
-      expect(log.runEnds[kai]![1], day1 + 10.0 * hour);
+      expect(log.runEnds(kai)[1], day1 + 10.0 * hour);
       expect(log.running(kai, day1 + 4.0 * hour), isFalse);
     });
   });
@@ -140,6 +140,32 @@ void main() {
         warp.gapBefore(day1 + 6.0 * hour + 1)!.length,
         closeTo(2 * hour + 50 * 60000, 1),
       );
+    });
+
+    test("re-timed, it's the warp built for that length, quiet stretches "
+        'and all (a video tries many lengths)', () {
+      final timeline = HistoryTimeline.of(fixtureOverview());
+      final log = HistoryLog()..add(fixtureEvents());
+      TimeWarp build(double seconds) => TimeWarp.build(
+        start: timeline.start,
+        end: timeline.end,
+        speed: HistorySpeed.auto,
+        times: log.times,
+        loadedUntil: timeline.end,
+        seconds: seconds,
+        limited: false,
+      );
+      final found = build(autoSeconds);
+      for (final seconds in [0.5, 7.0, 28.0, 58.0]) {
+        final built = build(seconds);
+        final retimed = found.retimed(seconds);
+        expect(retimed.duration, closeTo(built.duration, 1e-9));
+        expect(retimed.rate, built.rate);
+        expect(retimed.gaps, hasLength(built.gaps.length));
+        for (final h in [day1 + 1.0 * hour, day1 + 20.0 * hour]) {
+          expect(retimed.playAt(h), closeTo(built.playAt(h), 1e-9));
+        }
+      }
     });
 
     test('auto plays the whole history in about a minute', () {
@@ -225,6 +251,56 @@ void main() {
       expect(controller.log.length, 6);
       expect(controller.log.times, (HistoryLog()..add(fixtureEvents())).times);
       expect(controller.time.value, target);
+      controller.dispose();
+    });
+
+    test("one project's history is asked of the backend, from where the "
+        'playhead is, and an empty page with more to come goes on', () async {
+      final source = _Source();
+      final controller = HistoryController(source);
+      unawaited(controller.open());
+      await pumpEventQueue();
+      source.answer();
+      await pumpEventQueue();
+      final target = day1 + 41.2 * hour;
+      controller.seek(target);
+      expect(source.watched, [(true, '')]);
+
+      controller.showProject('app');
+      await pumpEventQueue();
+      expect(source.overviews, ['', 'app']);
+      expect(source.watched.last, (true, 'app'));
+      expect(controller.time.value, target, reason: 'the playhead stays');
+      // The playhead's stretch first, that project's only.
+      expect(source.projects.last, 'app');
+      expect(source.said.last, '[2] until -');
+      // What was drawn stays until the first page comes.
+      expect(controller.log.length, greaterThan(0));
+      source.answerNone([2]);
+      await pumpEventQueue();
+      expect(source.said.last, '[2] until -', reason: 'nothing moved on');
+      // A page with none, more to come: asked on.
+      final asked = source.asked.length;
+      controller.showProject('app');
+      expect(source.asked.length, asked, reason: 'the same project again');
+      controller.dispose();
+    });
+
+    test('an empty page with more to come is asked on', () async {
+      final source = _Source();
+      final controller = HistoryController(source);
+      unawaited(controller.open());
+      await pumpEventQueue();
+      source.answerNone([1]);
+      await pumpEventQueue();
+      expect(source.said.last, '[1] until -');
+      expect(controller.loaded, isFalse);
+      source.answer();
+      await pumpEventQueue();
+      source.answer();
+      await pumpEventQueue();
+      expect(controller.loaded, isTrue);
+      expect(controller.log.length, 4);
       controller.dispose();
     });
 
@@ -910,6 +986,11 @@ class _Source implements HistorySource {
   final _pending = <Completer<HistoryEvents>>[];
   final _pages = fixturePages();
 
+  /// Answers the oldest request waiting with no events, more to come
+  /// from [next], as one project's page can.
+  void answerNone(List<int> next) =>
+      _pending.removeAt(0).complete(HistoryEvents(nextCursor: next));
+
   /// Answers the oldest request waiting.
   void answer() {
     final (cursor, _) = asked[asked.length - _pending.length];
@@ -917,20 +998,33 @@ class _Source implements HistorySource {
     _pending.removeAt(0).complete(_pages[page]);
   }
 
-  @override
-  Future<HistoryOverview> overview() async =>
-      fixtureOverview()..cursors.addAll(fixtureCursors());
+  /// The projects the overview, the pages and the watch were asked for.
+  final overviews = <String>[];
+  final projects = <String>[];
+  final watched = <(bool, String)>[];
 
   @override
-  Future<HistoryEvents> events(List<int> cursor, {double? until}) {
+  Future<HistoryOverview> overview({String project = ''}) async {
+    overviews.add(project);
+    return fixtureOverview()..cursors.addAll(fixtureCursors());
+  }
+
+  @override
+  Future<HistoryEvents> events(
+    List<int> cursor, {
+    double? until,
+    String project = '',
+  }) {
     asked.add((cursor, until));
+    projects.add(project);
     final done = Completer<HistoryEvents>();
     _pending.add(done);
     return done.future;
   }
 
   @override
-  Future<void> watch(bool on) async {}
+  Future<void> watch(bool on, {String project = ''}) async =>
+      watched.add((on, project));
 
   @override
   Stream<HistoryEvents> get pushes => const Stream.empty();

@@ -23,7 +23,7 @@ const MAX_TITLE: usize = 120;
 /// anything longer is for ask_person with review (Bruno 44235).
 pub(crate) const MAX_TEXT: usize = 300;
 
-const ABOUT: &str = "Notify the person with a one-line ping on their devices (their Mac, their phone's lock screen) when something can't wait until they next look at Claktory: work they're waiting on is done or stuck, a service is down, a deadline is about to pass. title: what happened, in a short line (\"account.claktory.com isn't answering\"). text: a sentence more at most (300 characters), or nothing. Anything to explain, or for them to read (a report, a summary, findings, a file), goes as ask_person with review, never in an alert, even when they said \"notify me\": an alert about it only points at the card. Never instead of ask_person when you need an answer: an alert is one-way. Not for routine progress. Every alert also waits in their Needs you until they read it. urgent: true only when it can't wait for the morning; their settings decide whether it breaks quiet hours. You notify at most 6 times an hour; past that, they're told only how many more you sent. Says whether it reached anyone.";
+const ABOUT: &str = "Notify the person with a one-line ping on their devices (their Mac, their phone's lock screen) when something can't wait until they next look at Claktory: work they're waiting on is done or stuck, a service is down, a deadline is about to pass. title: what happened, in a short line (\"account.claktory.com isn't answering\"). text: a sentence more at most (300 characters), or nothing. Anything to explain, or for them to read (a report, a summary, findings, a file), goes as ask_person with review, never in an alert, even when they said \"notify me\": an alert about it only points at the request. Never instead of ask_person when you need an answer: an alert is one-way. Not for routine progress. Every alert also waits in their Needs you until they read it. urgent: true only when it can't wait for the morning; their settings decide whether it breaks quiet hours. You notify at most 6 times an hour; past that, they're told only how many more you sent. Says whether it reached anyone.";
 
 /// The tool, for the Ask extension's tools.
 pub(crate) fn tool(factory: &Arc<Factory>, agent: &str) -> Tool {
@@ -86,9 +86,15 @@ fn notify(factory: &Arc<Factory>, agent: &str, args: Args) -> Result<ToolResult,
     let (alert, delivered) = super::alert(factory, &config, &settings, note, &title, &text);
     let kept = "It waits in their Needs you until they read it.";
     let said = match delivered {
-        Delivered::Sent { apps: 0, pushed: 0 } => format!(
-            "Not delivered as a notification: {person} has no Claktory app open that shows notifications, and no device that gets them pushed. {kept}"
-        ),
+        Delivered::Sent { apps: 0, pushed: 0 } => match factory.notify.off_on(factory).as_slice() {
+            [] => format!(
+                "Not delivered as a notification: {person} has no Claktory app open that shows notifications, and no device that gets them pushed. {kept}"
+            ),
+            off => format!(
+                "Not delivered as a notification: notifications are turned off on {}, and no other device of {person}'s shows them. {kept}",
+                factory_agent::text::list_and(off)
+            ),
+        },
         Delivered::Sent { .. } => format!("Sent: {person} gets it as a notification, and it waits in their Needs you until they read it."),
         Delivered::Skipped(Skipped::Off) if settings.mode(agent) == Mode::Never => {
             format!("Not sent as a notification: {person} turned notifications from you off. {kept}")

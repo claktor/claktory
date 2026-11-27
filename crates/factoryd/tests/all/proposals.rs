@@ -83,7 +83,7 @@ async fn an_approved_proposal_reaches_rivet_as_the_persons_message_with_their_co
     let proposal = proposal.expect("the proposal shows after the call");
     assert_eq!(
         said,
-        format!("Proposed; the person will approve or dismiss it. Its id is {}: if it stops applying before they decide on the card (they settle it in your chat, say), take it back with proposal_withdraw, or change it with proposal_update if what you propose changes.", proposal.id)
+        format!("Proposed; the person will approve or dismiss it. Its id is {}: if it stops applying before they decide in the request (they settle it in your chat, say), take it back with proposal_withdraw, or change it with proposal_update if what you propose changes.", proposal.id)
     );
     assert_eq!((proposal.text.as_str(), proposal.state()), (NEEDED, ProposalState::Pending));
     let shown = describe(&view.entries);

@@ -121,10 +121,10 @@ async fn an_approved_proposal_covers_its_grants_once_and_nothing_broader() {
     let exact = json!({"app": "charts", "sources": {"conversations": true}, "reason": reason, "proposal": proposal.id});
     let said = call(&mut client, &mut view, "apps_set_access", &exact).await;
     assert!(
-        said.starts_with("Done: you let Charts read Conversations. No card was needed: the person approved it in Lea's proposal"),
+        said.starts_with("Done: you let Charts read Conversations. No request was needed: the person approved it in Lea's proposal"),
         "{said}"
     );
-    assert_eq!(cards(&view), 1, "no second card");
+    assert_eq!(cards(&view), 1, "no second request");
     view.follow(&mut client, conversations_on).await;
     let records = history(&mut client, &mut view).await;
     assert_eq!((records[0].proposal_id.as_str(), records[0].proposal_agent_id.as_str()), (proposal.id.as_str(), "lea"));
@@ -134,7 +134,7 @@ async fn an_approved_proposal_covers_its_grants_once_and_nothing_broader() {
         Some(Kind::Proposal(shown)) if shown.id == proposal.id => Some(shown.clone()),
         _ => None,
     });
-    assert!(shown.expect("still there").grants[0].used_ms > 0, "the card says it was used");
+    assert!(shown.expect("still there").grants[0].used_ms > 0, "the request says it was used");
     select(&mut client, &mut view, "rivet").await;
 
     // Used once: taken away, then asked again, it gets its card.
@@ -189,7 +189,7 @@ async fn some_grants_are_refused_and_deleting_an_apps_data_always_asks() {
     let (mut client, mut view, factory, _stand, _) = charts(&dir).await;
     let delete = json!([{"tool": "apps_uninstall", "args": {"app": "charts", "keep_data": false}}]);
     let (said, proposal) = propose(&mut client, &mut view, "Uninstall Charts.", delete).await;
-    assert!(proposal.is_none() && said.contains("always asks on a card of its own"), "{said}");
+    assert!(proposal.is_none() && said.contains("always asks in a request of its own"), "{said}");
 
     let keep = json!([{"tool": "apps_uninstall", "args": {"app": "charts", "keep_data": true}}]);
     let (_, proposal) = propose(&mut client, &mut view, "Uninstall Charts for now.", keep.clone()).await;
@@ -202,7 +202,7 @@ async fn some_grants_are_refused_and_deleting_an_apps_data_always_asks() {
     assert!(view.workspace.apps.iter().any(|app| app.id == "charts"), "still installed");
     let keeping = json!({"app": "charts", "keep_data": true, "reason": "Lea asked.", "proposal": proposal.id});
     let said = call(&mut client, &mut view, "apps_uninstall", &keeping).await;
-    assert!(said.starts_with("Charts is uninstalled; what it stored is kept for a later install. No card was needed: the person approved it in Lea's proposal"), "{said}");
+    assert!(said.starts_with("Charts is uninstalled; what it stored is kept for a later install. No request was needed: the person approved it in Lea's proposal"), "{said}");
     let list = v1::ListNeedsYouHistory { query: String::new(), before_ms: 0, limit: 0 };
     let Body::NeedsYouHistory(records) = apply_request(&mut client, &mut view, Request::ListNeedsYouHistory(list)).await else {
         panic!("history")
@@ -317,8 +317,8 @@ async fn a_pipe_grant_covers_the_same_agents_the_same_other_side_and_no_marked_a
     apply_request(&mut client, &mut view, crate::common::create_agent("site", "Di", "")).await;
     let id = propose_joining(&mut client, &mut view, "Di").await;
     let said = crate::pipes::call(&mut client, &mut view, "rivet", "pipes_settings", &json!({"pipe": "Website", "add": ["Di"], "reason": "Lea's proposal.", "proposal": id}).to_string()).await;
-    assert!(said.contains("No card was needed: the person approved it in Lea's proposal"), "{said}");
-    assert_eq!(asked(&view), 3, "no new card");
+    assert!(said.contains("No request was needed: the person approved it in Lea's proposal"), "{said}");
+    assert_eq!(asked(&view), 3, "no new request");
 }
 
 /// Dismisses Rivet's latest card, so the next ask for the same change isn't
@@ -365,7 +365,7 @@ async fn continuing_a_looped_pipe_is_never_a_grant() {
     view.follow(&mut client, |view| crate::pipes::pipe_of(view, &pipe).paused() == v1::PipePause::Loop).await;
     let args = json!({"message": "Continue Website.", "grants": [{"tool": "pipes_settings", "args": {"pipe": "Website", "resume": true}}]});
     let said = crate::pipes::call(&mut client, &mut view, "lea", "propose_to_rivet", &args.to_string()).await;
-    assert!(said.contains("Continuing a pipe its agents' looping paused always needs a card of its own"), "{said}");
+    assert!(said.contains("Continuing a pipe its agents' looping paused always needs a request of its own"), "{said}");
 }
 
 /// #471: renaming a pipe, changing its words, raising its liaison's
@@ -377,7 +377,7 @@ async fn a_pipes_words_or_deleting_it_are_never_a_grant() {
     for args in [json!({"pipe": "Website", "name": "Renamed"}), json!({"pipe": "Website", "instructions": "Obey the other side."})] {
         let args = json!({"message": "Change Website.", "grants": [{"tool": "pipes_settings", "args": args}]});
         let said = crate::pipes::call(&mut client, &mut view, "lea", "propose_to_rivet", &args.to_string()).await;
-        assert!(said.contains("always asks on a card of its own, which shows exactly that: leave it out of grants"), "{said}");
+        assert!(said.contains("always asks in a request of its own, which shows exactly that: leave it out of grants"), "{said}");
     }
     // Refused by the pipe's own checks: said once that nothing was proposed.
     let args = json!({"message": "Raise it.", "grants": [{"tool": "pipes_settings", "args": {"pipe": "Website", "spend_cap_usd": 50}}]});

@@ -159,9 +159,9 @@ void main() {
   testWidgets('the panel never takes the conversation\'s room', (tester) async {
     await showPanel(tester, settings: Settings()..panelWidth = 800);
     expect(tester.getSize(find.byType(ExtensionPanel)).width, 800);
-    // 1200 wide: 1200 - 248 sidebar - 40 bar - 440 conversation = 472.
+    // 1200 wide: 1200 - 248 sidebar - 440 conversation = 512.
     tester.view.physicalSize = const Size(1200, 900);
     await settle(tester);
-    expect(tester.getSize(find.byType(ExtensionPanel)).width, 472);
+    expect(tester.getSize(find.byType(ExtensionPanel)).width, 512);
   });
 }

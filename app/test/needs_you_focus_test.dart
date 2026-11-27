@@ -1,4 +1,9 @@
+import 'dart:io';
+
+import 'package:factory_app/attachments.dart' show FileDrop;
+import 'package:factory_app/card_files.dart' show cardFilesKey;
 import 'package:factory_app/connections.dart';
+import 'package:factory_app/controls.dart' show GlyphButton;
 import 'package:factory_app/dictation.dart' show DictationHold;
 import 'package:factory_app/drafts.dart';
 import 'package:factory_app/main.dart' show FactoryApp;
@@ -17,6 +22,7 @@ import 'dart:async';
 
 import 'package:factory_app/backend.dart' show RequestFailure;
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -226,6 +232,45 @@ void main() {
     expect(focusModeOf(backend).value, isFalse);
   });
 
+  test('every run starts out of focus mode (#599, Squalo\'s F1): a device '
+      'still listed when the app first hears from its Claktory (quit in '
+      'focus mode) is taken out, and never shown in it', () async {
+    expect(focusModeOf(backend).value, isFalse);
+    backend.workspace.apply(
+      _waiting(june: [1])..settings = Settings(focusMode: ['local']),
+    );
+    expect(focusModeOf(backend).value, isFalse);
+    expect(backend.sent.last.setFocusMode.on, isFalse);
+    // Its echo, then on again in this run: kept, through what comes after.
+    backend.workspace.apply(_waiting(june: [1]));
+    setFocusMode(backend, true);
+    backend.workspace.apply(
+      _waiting(june: [1])..settings = Settings(focusMode: ['local']),
+    );
+    expect(focusModeOf(backend).value, isTrue);
+    expect(
+      backend.sent
+          .where((m) => m.hasSetFocusMode())
+          .map((m) => m.setFocusMode.on),
+      [false, true],
+    );
+  });
+
+  test('another Claktory opened in focus mode from the queue before this '
+      'run heard from it stays in it (Polnareff 48256)', () async {
+    setFocusMode(backend, true);
+    backend.workspace.apply(
+      _waiting(june: [1])..settings = Settings(focusMode: ['local']),
+    );
+    expect(focusModeOf(backend).value, isTrue);
+    expect(
+      backend.sent
+          .where((m) => m.hasSetFocusMode())
+          .map((m) => m.setFocusMode.on),
+      [true],
+    );
+  });
+
   test('a card asked for (a notification tapped) comes up once it has '
       'come', () async {
     backend.needsYouCard.value = 'agent:june/2';
@@ -335,6 +380,118 @@ void main() {
       await settle(tester);
       expect(find.byType(NeedsYouFocus), findsNothing);
     });
+
+    testWidgets("Needs you's Focus mode: at the end of Waiting while "
+        'something waits, says its key on hover, and goes in as ⌘⇧N', (
+      tester,
+    ) async {
+      final harness = await show(tester);
+      await tester.tap(find.text('Needs you'));
+      await settle(tester);
+      final button = find.text('Focus mode');
+      expect(button, findsOneWidget);
+      // A screen reader says what it does.
+      expect(find.bySemanticsLabel('Focus on Needs you'), findsOneWidget);
+      // Its tooltip, a moment after the pointer rests on it.
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: Offset.zero);
+      addTearDown(mouse.removePointer);
+      await mouse.moveTo(tester.getCenter(button));
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.text('Focus on Needs you · ⌘⇧N'), findsOneWidget);
+      await mouse.moveTo(Offset.zero);
+      await tester.pump();
+      // Not on History: focus mode shows what waits.
+      await tester.tap(find.text('History'));
+      await settle(tester);
+      expect(button, findsNothing);
+      await tester.tap(find.text('Waiting'));
+      await settle(tester);
+      await tester.tap(button);
+      await settle(tester);
+      expect(find.byType(NeedsYouFocus), findsOneWidget);
+      expect(onStage('Question 7'), findsOneWidget);
+      await tester.tap(find.text('Done'));
+      await settle(tester);
+      // Back on the page as it was; with nothing waiting, it's gone.
+      expect(find.byType(NeedsYouFocus), findsNothing);
+      expect(button, findsOneWidget);
+      harness.backend.workspace.apply(_waiting());
+      await settle(tester);
+      expect(button, findsNothing);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
+
+    testWidgets("on Android Needs you has no Focus mode", (tester) async {
+      await show(tester);
+      await tester.tap(find.text('Needs you'));
+      await settle(tester);
+      expect(find.text('Waiting'), findsOneWidget);
+      expect(find.text('Focus mode'), findsNothing);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.android));
+
+    testWidgets("the stage's answer bar takes files, as the card does: the "
+        'paperclip, and what is dropped while its field has the keys '
+        "(Zucchero's row 666)", (tester) async {
+      final folder = Directory.systemTemp.createTempSync('focus-files');
+      addTearDown(() => folder.deleteSync(recursive: true));
+      final logo = '${folder.path}/logo.png';
+      final notes = '${folder.path}/notes.txt';
+      File(logo).writeAsBytesSync(List.filled(3000, 7));
+      File(notes).writeAsStringSync('x' * 2048);
+      final window =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      window.setMockMethodCallHandler(const MethodChannel('factory/window'), (
+        call,
+      ) async {
+        if (call.method == 'pickFiles') return [logo];
+        return null;
+      });
+      addTearDown(
+        () => window.setMockMethodCallHandler(
+          const MethodChannel('factory/window'),
+          null,
+        ),
+      );
+      Future<void> io() async {
+        for (var i = 0; i < 12; i++) {
+          await tester.pump();
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 10)),
+          );
+        }
+        await settle(tester);
+      }
+
+      final harness = await show(tester);
+      await focusKey(tester);
+      expect(onStage('Question 7'), findsOneWidget);
+      final waiting = harness.backend.attachments;
+      final key = cardFilesKey('mista', 'q7');
+      final clip = find.descendant(
+        of: find.byType(FocusStage),
+        matching: find.byWidgetPredicate(
+          (widget) => widget is GlyphButton && widget.label == 'Attach files',
+        ),
+      );
+      expect(clip, findsOneWidget);
+      await tester.tap(clip);
+      await io();
+      expect(waiting.of(key).map((file) => file.name), ['logo.png']);
+      // On the card, under its words.
+      expect(onStage('logo.png'), findsOneWidget);
+      // Into the field: what's dropped on the window comes here.
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyR);
+      await settle(tester);
+      expect(FileDrop.divertedTo.value, 'your answer to Mista');
+      FileDrop.deliver([notes]);
+      await io();
+      expect(waiting.of(key).map((file) => file.name), [
+        'logo.png',
+        'notes.txt',
+      ]);
+      expect(waiting.of('mista'), isEmpty);
+    }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
     testWidgets('answered with its own button, the next card comes up', (
       tester,
@@ -761,7 +918,7 @@ void main() {
       Finder inContext(Finder finder) =>
           find.descendant(of: context, matching: finder);
       expect(inContext(find.text('Ship the migration')), findsOneWidget);
-      expect(inContext(find.text('▸ This card')), findsOneWidget);
+      expect(inContext(find.text('▸ This request')), findsOneWidget);
       expect(inContext(find.text('Question 7')), findsNothing);
       expect(inContext(find.byType(MessageBox)), findsOneWidget);
       // Nothing selected: the other devices' view stays.
@@ -776,6 +933,34 @@ void main() {
       await settle(tester);
       expect(context, findsNothing);
       expect(watched().last, WatchTranscript());
+    });
+
+    testWidgets('in a window too narrow for Context beside the stage, it '
+        "starts closed, so the stage's answers stay in reach; its button "
+        'opens it over the stage; widened, it is back beside (row 1608)', (
+      tester,
+    ) async {
+      await show(tester);
+      tester.view.physicalSize = const Size(1123, 900);
+      await settle(tester);
+      await focusKey(tester);
+      final context = find.byType(FocusContext);
+      expect(context, findsNothing);
+      expect(onStage('Question 7'), findsOneWidget);
+      await tester.tap(
+        find.descendant(
+          of: find.byType(FocusStage),
+          matching: find.text('Context'),
+        ),
+      );
+      await settle(tester);
+      expect(context, findsOneWidget);
+      tester.view.physicalSize = const Size(1440, 900);
+      await settle(tester);
+      expect(context, findsOneWidget);
+      tester.view.physicalSize = const Size(1123, 900);
+      await settle(tester);
+      expect(context, findsNothing);
     });
 
     testWidgets("the header's actions turn to glyphs when the words don't fit "

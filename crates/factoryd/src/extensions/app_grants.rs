@@ -34,10 +34,10 @@ static MANIFEST: Manifest = Manifest {
     options: &[],
 };
 
-const UNINSTALL: &str = "Ask the person to uninstall an app installed in this Claktory, when they ask: app, its id, as apps_list gives it; keep_data: true to keep what it stored, for a later install; reason: why, in a sentence they read on the card. A card opens in your conversation (and their Needs you), and only their approval uninstalls it; you're told which in an event. To stop an app for a while instead, use apps_set_running. proposal: the id of an approved proposal whose grants name it (keep_data true), once you've reviewed it: then it's made without a card when it's within one of them; otherwise the card opens as usual and the answer says why.";
+const UNINSTALL: &str = "Ask the person to uninstall an app installed in this Claktory, when they ask: app, its id, as apps_list gives it; keep_data: true to keep what it stored, for a later install; reason: why, in a sentence they read in the request. A request opens in your conversation (and their Needs you), and only their approval uninstalls it; you're told which in an event. To stop an app for a while instead, use apps_set_running. proposal: the id of an approved proposal whose grants name it (keep_data true), once you've reviewed it: then it's made without a request when it's within one of them; otherwise the request opens as usual and the answer says why.";
 const RUNNING: &str = "Start or stop an app installed in this Claktory, as the person's switch in Marketplace → Apps does, when they ask (or to start again one Claktory paused after it crashed). app: its id, as apps_list gives it. running: true to start it, false to stop it. Stopped, it stays installed and set up, and its agents can't use it until it starts again.";
 
-const PROPOSE: &str = "Propose giving an agent access to an app at the person's account, when they ask for it: agent, its id or name; app, \"dms\" (direct messages); scopes, what it may do there (dm.read, dm.draft, dm.send, dm.subscribe); resources, what it reaches ([{\"kind\": \"conversation\", \"id\": …}], at least one); days, how long it lasts (left out: until the person takes it back); reason, why, for the person. It opens a card in your conversation where the person approves or declines it, and you're told which. Ask only for what the work needs. Approved, it replaces what that agent had in the app.";
+const PROPOSE: &str = "Propose giving an agent access to an app at the person's account, when they ask for it: agent, its id or name; app, \"dms\" (direct messages); scopes, what it may do there (dm.read, dm.draft, dm.send, dm.subscribe); resources, what it reaches ([{\"kind\": \"conversation\", \"id\": …}], at least one); days, how long it lasts (left out: until the person takes it back); reason, why, for the person. It opens a request in your conversation where the person approves or declines it, and you're told which. Ask only for what the work needs. Approved, it replaces what that agent had in the app.";
 
 /// The longest reason a card shows, and the longest a grant lasts.
 const MAX_REASON: usize = 500;
@@ -53,7 +53,7 @@ impl Extension for AppGrants {
     fn prompt(&self, _factory: &Factory, inner: &Inner, _agent: &AgentConfig) -> Vec<PromptSection> {
         let person = inner.config.person();
         let text = format!(
-            "## App grants\n\nSome of {person}'s apps live at their account rather than in this Claktory, such as their direct messages. An agent uses one only with a grant {person} approved. When they ask you to give an agent access, propose it with app_grants_propose: it opens a card for them to approve or decline. You never approve it yourself, and nothing is given by default.\n\nThe apps installed in this Claktory, such as Charts, start with nothing: no data to read and no agent to use them. {person} doesn't set them up: they tell you what they want (\"have Ingrid keep a chart of her bugs by severity\"), and you set it up with apps_list and apps_set_access, giving the least that does it: the sources it needs (activity, with no message text, for most charts; conversations or an agent's database only when what they want is in there) and the agents that make or keep up its dashboards, with their scopes; then tell those agents what to keep up. Taking away, and giving what isn't private to an app that reaches no site, is applied at once; private data, an app that reaches the internet, or agents (or you) that have read a web page go on a card for {person} to approve: apps_list says which, so tell them before. Every change shows in their History, where they can undo it. Change what apps read and who uses them only with these tools, never by editing config.json.\n"
+            "## App grants\n\nSome of {person}'s apps live at their account rather than in this Claktory, such as their direct messages. An agent uses one only with a grant {person} approved. When they ask you to give an agent access, propose it with app_grants_propose: it opens a request for them to approve or decline. You never approve it yourself, and nothing is given by default.\n\nThe apps installed in this Claktory, such as Charts, start with nothing: no data to read and no agent to use them. {person} doesn't set them up: they tell you what they want (\"have Ingrid keep a chart of her bugs by severity\"), and you set it up with apps_list and apps_set_access, giving the least that does it: the sources it needs (activity, with no message text, for most charts; conversations or an agent's database only when what they want is in there) and the agents that make or keep up its dashboards, with their scopes; then tell those agents what to keep up. Taking away, and giving what isn't private to an app that reaches no site, is applied at once; private data, an app that reaches the internet, or agents (or you) that have read a web page go in a request for {person} to approve: apps_list says which, so tell them before. Every change shows in their History, where they can undo it. Change what apps read and who uses them only with these tools, never by editing config.json.\n"
         );
         vec![PromptSection { kind: PromptKind::Static, text }]
     }
@@ -273,7 +273,7 @@ fn propose(factory: &Arc<Factory>, agent: &str, args: ProposeArgs) -> Result<Too
     };
     user_apps::open(&factory.store, agent, &incarnation, &card)?;
     let mut text = format!(
-        "Opened a card in your conversation for {person} to approve or decline giving {name} access to {}. You'll be told which.",
+        "Opened a request in your conversation for {person} to approve or decline giving {name} access to {}. You'll be told which.",
         app.name
     );
     for (held_app, held_scopes, held_resources) in user_apps::held(&factory.store, &grantee) {
@@ -373,7 +373,7 @@ async fn uninstall_app(factory: Arc<Factory>, agent: String, args: UninstallArgs
         return Err(format!("There's no app \"{wanted}\" installed: apps_list gives their ids. Nothing was asked."));
     }
     if reason.is_empty() {
-        return Err(format!("Give reason: why, in a sentence {person} reads on the card. Nothing was asked."));
+        return Err(format!("Give reason: why, in a sentence {person} reads in the request. Nothing was asked."));
     }
     let name = factory.apps.manifest(&wanted).map_or_else(|| wanted.clone(), |manifest| manifest.name.clone());
     let data = if args.keep_data { "what it stored is kept for a later install" } else { "what it stored is deleted too" };

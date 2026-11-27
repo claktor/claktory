@@ -57,6 +57,7 @@ pub fn command_environment(
     mut prepare: impl FnMut() -> std::io::Result<()>,
 ) -> std::io::Result<Vec<(String, Zeroizing<String>)>> {
     use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     let mut environment = Vec::with_capacity(variables.len());
     let mut made = false;
@@ -67,13 +68,19 @@ pub fn command_environment(
         }
         if !made {
             prepare()?;
+            #[cfg(unix)]
             std::fs::DirBuilder::new().mode(0o700).create(dir)?;
+            #[cfg(windows)]
+            crate::windows::private::create_dir(dir)?;
             made = true;
         }
         let safe = !variable.variable.is_empty() && variable.variable.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
         let name = if safe { variable.variable.clone() } else { format!("secret-{index}") };
         let path = dir.join(name);
+        #[cfg(unix)]
         let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+        #[cfg(windows)]
+        let mut file = crate::windows::private::create_new(&path)?;
         file.write_all(&variable.bytes())?;
         environment.push((variable.variable.clone(), Zeroizing::new(path.display().to_string())));
     }
@@ -125,6 +132,39 @@ pub struct SecretUse {
 /// background (then with its task).
 pub type Used = Arc<dyn Fn(SecretUse) + Send + Sync>;
 
+/// The most a secret saved from a command's output holds, in bytes.
+pub const SAVE_MOST: usize = 64 * 1024;
+
+/// A command's whole output to save as a new secret (bash's `save_as`):
+/// its name, its one variable, whether that's a file, and what it's for.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct SaveAs {
+    pub name: String,
+    pub variable: String,
+    #[serde(default)]
+    pub file: bool,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// Checks a save before its command runs, so a key made at a service is
+/// never lost to a refusal after: given the agent's id, the save and the
+/// secrets the command runs with, why not, if it may not.
+pub type CheckSave = Arc<dyn Fn(String, SaveAs, Vec<String>) -> BoxFuture<Result<(), String>> + Send + Sync>;
+
+/// Saves the command's whole output (stdout) as the new secret, granted to
+/// the agent alone: the record of it (for its History line), or why not,
+/// and nothing is kept.
+pub type StoreSave = Arc<dyn Fn(String, SaveAs, Vec<String>, Zeroizing<Vec<u8>>) -> BoxFuture<Result<String, String>> + Send + Sync>;
+
+/// Saving a command's output as a secret, from the program running the
+/// agent.
+#[derive(Clone)]
+pub struct Save {
+    pub check: CheckSave,
+    pub store: StoreSave,
+}
+
 /// What an agent's bash needs for secrets, from the program running it.
 #[derive(Clone)]
 pub struct Secrets {
@@ -138,6 +178,9 @@ pub struct Secrets {
     /// its log through, so the log holds no value: one that runs
     /// `filter_main`. Empty: such logs hold what the command printed.
     pub filter: Vec<std::ffi::OsString>,
+    /// Saving a command's output as a secret (bash's `save_as`); None
+    /// where it can't be.
+    pub save: Option<Save>,
 }
 
 /// Hides secret values in text: each value of at least `MIN_REDACTED`

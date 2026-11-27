@@ -33,6 +33,25 @@ val keyProperties = Properties().apply {
 }
 val debugSignedRelease = providers.gradleProperty("claktoryDebugSignedRelease").orNull == "true"
 
+/// The ABIs packaged: toolchain.properties' android.abis, or a part of them
+/// that -PclaktoryAbis=arm64-v8a names (a build on an Apple-silicon Mac).
+val pinnedAbis = pin("android.abis").split(",")
+val shippedAbis = providers.gradleProperty("claktoryAbis").orNull
+    ?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() }
+    ?.also { asked -> require(asked.isNotEmpty() && asked.all { it in pinnedAbis }) { "claktoryAbis must name some of $pinnedAbis, not $asked" } }
+    ?: pinnedAbis
+
+/// Nothing is built for x86 on an Apple-silicon Mac (Matt's rule, Bruno
+/// 48603/48619): Flutter compiles the app, the Rust tunnel included, for
+/// every platform in -Ptarget-platform (all of them, android-x64 too, when
+/// it's not given), so a build here that would compile android-x64 stops
+/// before it does. Builds here pass --target-platform android-arm64; a
+/// release with x86_64 is built on prime (DESIGN.md, "Where builds run").
+val appleSilicon = System.getProperty("os.name").orEmpty().startsWith("Mac") && System.getProperty("os.arch") == "aarch64"
+val flutterTargets = providers.gradleProperty("target-platform").orNull?.split(",")?.map { it.trim() }
+    ?: listOf("android-arm", "android-arm64", "android-x64")
+val compilesX86 = "android-x64" in flutterTargets
+
 android {
     namespace = "com.claktory.app"
     compileSdk = pin("android.compileSdk").toInt()
@@ -51,7 +70,7 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         // 64-bit only: no ABI is advertised without its tunnel library.
-        ndk { abiFilters += pin("android.abis").split(",") }
+        ndk { abiFilters += shippedAbis }
         resValue("string", "app_name", "Claktory")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -181,5 +200,20 @@ androidComponents {
             variant.makeResValueKey("string", "link_scheme"),
             com.android.build.api.variant.ResValue(scheme),
         )
+    }
+}
+
+// The stop for x86 on this kind of Mac, at the step that would compile it
+// (Flutter's, which runs the Rust build too), so configuring, lint and
+// unit tests that compile nothing for a platform aren't stopped.
+if (appleSilicon && compilesX86) {
+    tasks.matching { it.name.startsWith("compileFlutterBuild") }.configureEach {
+        doFirst {
+            throw GradleException(
+                "This build would compile for android-x64 (x86_64), and nothing is built for x86 on an " +
+                    "Apple-silicon Mac. Build arm64 only here (--target-platform android-arm64), and build " +
+                    "a release with x86_64 on prime (app/android/DESIGN.md, \"Where builds run\").",
+            )
+        }
     }
 }

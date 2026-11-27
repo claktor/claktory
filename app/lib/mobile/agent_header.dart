@@ -94,7 +94,10 @@ class PhoneAgentHeader extends StatelessWidget {
           onOpen: () => AppScope.openPage(context, AppPage.inbox),
         ),
         if (onMore != null)
-          HeaderButton.more(label: 'Agent menu', onTap: onMore!),
+          HeaderButton.more(
+            label: 'More options for ${agent.name}',
+            onTap: onMore!,
+          ),
       ],
       // Its colored line, with a brighter stretch running along it while
       // it works, in step with its sidebar row's wave.
@@ -136,9 +139,8 @@ class RoleAndModel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
-    final style = TypeScale.of(context).caption.copyWith(
-      color: palette.textMuted,
-    );
+    final style = TypeScale.of(context).caption
+        .copyWith(color: palette.textMuted);
     final missing = style;
     return LayoutBuilder(
       builder: (context, constraints) {

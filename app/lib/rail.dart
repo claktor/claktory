@@ -13,11 +13,13 @@ import 'claktory_identity.dart';
 import 'connection.dart';
 import 'connections.dart';
 import 'controls.dart';
+import 'device_kind.dart' show thisDeviceKindForHello;
 import 'devices.dart';
 import 'drafts.dart';
 import 'forms.dart';
 import 'history.dart';
 import 'identity.dart';
+import 'links.dart' show LinkOpener;
 import 'login.dart';
 import 'mobile/back.dart';
 import 'mobile/drawer.dart' show PhoneDrawerHost;
@@ -215,8 +217,13 @@ class Claktories extends ChangeNotifier {
   /// one that waits to be paired.
   Claktory get selected => _open[connections.current?.code ?? ''] ?? _open['']!;
 
-  /// Shows [claktory] in the window.
-  void select(Claktory claktory) => connections.use(claktory.target);
+  /// Shows [claktory] in the window. One turned away until this device
+  /// signs in asks once more, quietly: chosen again, it connects if the
+  /// Claktory has let it in meanwhile (Sale's row 189).
+  void select(Claktory claktory) {
+    connections.use(claktory.target);
+    claktory.backend.probeSignIn();
+  }
 
   /// Which of them are on the person's Claktory account, read when first
   /// asked.
@@ -448,9 +455,33 @@ class _Glance {
     unseen = agents.any((agent) => agent.unseen);
     waiting = needsYouCount(workspace);
     connection = Connection(backend);
-    problem = connection.problem ? connection.line : null;
+    // Turned away until something is done here or there: it isn't trying,
+    // so never "Connecting…" (Zucchero's row 720).
+    final words = backend.signInRequired.value;
+    stopped = backend.otherAccount.value != null
+        ? 'On another account'
+        : words == null
+        ? null
+        : words.contains('was signed out of your Claktory account')
+        ? 'Signed out'
+        : 'Sign in to connect';
+    problem = stopped ?? (connection.problem ? connection.line : null);
     offAccount = claktory.offAccount;
   }
+
+  /// What keeps it from connecting until someone acts (this device signs
+  /// in, the Claktory is signed in again or moves to this account): in a
+  /// word, in place of the connection's; null otherwise.
+  late final String? stopped;
+
+  /// The connection in a word or two, or what stops it ([stopped]).
+  String get short => stopped ?? connection.short;
+
+  /// The connection in a line, or what stops it ([stopped]).
+  String get line => stopped ?? connection.line;
+
+  /// How it connects; nothing while it's [stopped], when nothing tries.
+  String get details => stopped == null ? connection.details : '';
 
   /// Known not to be on the person's Claktory account: marked, its tile
   /// ringed in `danger`.
@@ -471,12 +502,14 @@ class _Glance {
   late final String? problem;
 
   /// Opening, or coming back: its tile's mark pulses.
-  bool get connecting => connection.link == Link.connecting;
+  bool get connecting => stopped == null && connection.link == Link.connecting;
 
   /// What a Claktory's glance depends on.
   static Listenable of(Claktory claktory) => Listenable.merge([
     claktory.backend.workspace,
     Connection.of(claktory.backend),
+    claktory.backend.signInRequired,
+    claktory.backend.otherAccount,
     ?claktory.match?.call(),
   ]);
 }
@@ -769,19 +802,20 @@ class _RailTile extends StatelessWidget {
                       style: TextStyles.label.copyWith(color: palette.text),
                     ),
                     Text(
-                      glance.connection.line,
+                      glance.line,
                       style: TextStyles.caption.copyWith(
                         color: glance.problem != null
                             ? palette.danger
                             : palette.textMuted,
                       ),
                     ),
-                    Text(
-                      glance.connection.details,
-                      style: TextStyles.caption.copyWith(
-                        color: palette.textFaint,
+                    if (glance.details.isNotEmpty)
+                      Text(
+                        glance.details,
+                        style: TextStyles.caption.copyWith(
+                          color: palette.textFaint,
+                        ),
                       ),
-                    ),
                     if (glance.offAccount) ...[
                       const SizedBox(height: Space.xs),
                       OffAccountMark(claktory: claktory, explained: true),
@@ -899,9 +933,16 @@ class _Tile extends StatelessWidget {
             ),
           Center(
             child: claktory.key.isEmpty
-                ? CustomPaint(
-                    size: Size.square(16 * size / 28),
-                    painter: _LaptopPainter(color),
+                // This Mac: a laptop, or a monitor on a Mac Studio, iMac or
+                // Mac mini (area 2, MC13 and 8.7).
+                ? FutureBuilder<DeviceKind>(
+                    future: thisDeviceKindForHello(),
+                    builder: (context, kind) => CustomPaint(
+                      size: Size.square(16 * size / 28),
+                      painter: kind.data == DeviceKind.DEVICE_KIND_DESKTOP
+                          ? _DesktopPainter(color)
+                          : _LaptopPainter(color),
+                    ),
                   )
                 // They grow with the text size until they fill the tile,
                 // and no further: the tile keeps its size in the rail, and
@@ -947,7 +988,7 @@ class _Tile extends StatelessWidget {
                 label:
                     glance.problem ??
                     (glance.connecting
-                        ? glance.connection.line
+                        ? glance.line
                         : '$name has something new'),
                 child: Container(
                   width: 11,
@@ -972,6 +1013,37 @@ class _Tile extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Lucide's monitor at 16px: this Mac's own Claktory, on a desktop Mac.
+class _DesktopPainter extends CustomPainter {
+  const _DesktopPainter(this.color);
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final scale = size.width / 24;
+    canvas.scale(scale);
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.5 / scale
+      ..strokeJoin = StrokeJoin.round
+      ..strokeCap = StrokeCap.round;
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        const Rect.fromLTWH(2, 3, 20, 14),
+        const Radius.circular(2),
+      ),
+      paint,
+    );
+    canvas.drawLine(const Offset(8, 21), const Offset(16, 21), paint);
+    canvas.drawLine(const Offset(12, 17), const Offset(12, 21), paint);
+  }
+
+  @override
+  bool shouldRepaint(_DesktopPainter old) => old.color != color;
 }
 
 /// Lucide's laptop-minimal at 16px: this Mac's own Claktory.
@@ -1385,39 +1457,66 @@ class _BackRow extends StatelessWidget {
             constraints: const BoxConstraints(minHeight: 44),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: Space.s),
-              child: Row(
-                children: [
-                  ExtensionGlyph(
-                    icon: 'chevron-left',
-                    name: '‹',
-                    color: hovered ? palette.text : palette.textMuted,
-                  ),
-                  const SizedBox(width: Space.xs),
-                  Flexible(
-                    child: Text(
-                      label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: PhoneType.label.copyWith(
-                        color: hovered ? palette.text : palette.textMuted,
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final color = hovered ? palette.text : palette.textMuted;
+                  final style = PhoneType.label.copyWith(color: color);
+                  final scaler = MediaQuery.textScalerOf(context);
+                  // The chevron grows with its words, as iOS's does.
+                  final chevron = scaler.scale(16).clamp(16.0, 40.0);
+                  // The whole label where it fits, else the chevron alone,
+                  // as iOS's back button: never cut, never wrapped (Lucy
+                  // 50050). Its Semantics says where it goes either way.
+                  final words = TextPainter(
+                    text: TextSpan(text: label, style: style),
+                    textDirection: Directionality.of(context),
+                    textScaler: scaler,
+                    maxLines: 1,
+                  )..layout();
+                  final extra = waiting > 0 || news ? Space.s + 24 : 0.0;
+                  final fits =
+                      chevron + Space.xs + words.width + extra <=
+                      (trailing == null
+                          ? constraints.maxWidth
+                          : constraints.maxWidth / 2);
+                  words.dispose();
+                  return Row(
+                    children: [
+                      ExtensionGlyph(
+                        icon: 'chevron-left',
+                        name: '‹',
+                        color: color,
+                        size: chevron,
                       ),
-                    ),
-                  ),
-                  if (waiting > 0) ...[
-                    const SizedBox(width: Space.s),
-                    NeedsYouMark(count: waiting, label: ''),
-                  ] else if (news) ...[
-                    const SizedBox(width: Space.s),
-                    Dot(color: palette.text, size: 7),
-                  ],
-                  if (trailing case final trailing?)
-                    Expanded(
-                      child: Align(
-                        alignment: AlignmentDirectional.centerEnd,
-                        child: trailing,
-                      ),
-                    ),
-                ],
+                      if (fits) ...[
+                        const SizedBox(width: Space.xs),
+                        Flexible(
+                          child: Text(
+                            label,
+                            maxLines: 1,
+                            softWrap: false,
+                            overflow: TextOverflow.clip,
+                            style: style,
+                          ),
+                        ),
+                      ],
+                      if (waiting > 0) ...[
+                        const SizedBox(width: Space.s),
+                        NeedsYouMark(count: waiting, label: ''),
+                      ] else if (news) ...[
+                        const SizedBox(width: Space.s),
+                        Dot(color: palette.text, size: 7),
+                      ],
+                      if (trailing case final trailing?)
+                        Expanded(
+                          child: Align(
+                            alignment: AlignmentDirectional.centerEnd,
+                            child: trailing,
+                          ),
+                        ),
+                    ],
+                  );
+                },
               ),
             ),
           ),
@@ -1538,6 +1637,18 @@ class PhoneClaktories extends StatefulWidget {
     });
   }
 
+  /// Add a Claktory, pushed over what shows, at "Use a code instead" when
+  /// [code] (a Claktory's Use a new code: area 2, §4); Back returns to
+  /// where it came from.
+  /// False when no list of Claktories is up to push it over.
+  static bool showAdding({bool code = false}) {
+    final hosts = _PhoneClaktoriesState._live.toList();
+    for (final host in hosts) {
+      host._add(code: code);
+    }
+    return hosts.isNotEmpty;
+  }
+
   @override
   State<PhoneClaktories> createState() => _PhoneClaktoriesState();
 }
@@ -1554,6 +1665,11 @@ class _PhoneClaktoriesState extends State<PhoneClaktories> {
   }
 
   var _screen = _PhoneScreen.claktory;
+
+  /// Add a Claktory opened at its code, and the screen it came from, which
+  /// its Back returns to.
+  var _addingCode = false;
+  var _addedFrom = _PhoneScreen.list;
   Claktory? _shown;
   Claktory? _returnTo;
   Claktories? _claktories;
@@ -1596,9 +1712,7 @@ class _PhoneClaktoriesState extends State<PhoneClaktories> {
       CallbackBackToken(
         onBack: () {
           if (!mounted || _screen != screen) return;
-          screen == _PhoneScreen.adding
-              ? _go(_PhoneScreen.list)
-              : _returnFromList();
+          screen == _PhoneScreen.adding ? _leaveAdding() : _returnFromList();
         },
       ),
     );
@@ -1616,6 +1730,16 @@ class _PhoneClaktoriesState extends State<PhoneClaktories> {
     claktories.select(destination);
     _go(_PhoneScreen.claktory);
   }
+
+  void _add({bool code = false}) {
+    _addingCode = code;
+    _addedFrom = _screen == _PhoneScreen.claktory
+        ? _PhoneScreen.claktory
+        : _PhoneScreen.list;
+    _go(_PhoneScreen.adding);
+  }
+
+  void _leaveAdding() => _go(_addedFrom);
 
   void _go(_PhoneScreen screen) {
     if (_screen == _PhoneScreen.claktory && screen != _PhoneScreen.claktory) {
@@ -1653,7 +1777,7 @@ class _PhoneClaktoriesState extends State<PhoneClaktories> {
           key: const ValueKey('claktory'),
           back: () => _go(_PhoneScreen.list),
           child: PhoneDrawerHost(
-            rail: PhoneClaktoryRail(onAdd: () => _go(_PhoneScreen.adding)),
+            rail: PhoneClaktoryRail(onAdd: () => _add()),
             onClaktories: () => _go(_PhoneScreen.list),
             child: widget.shell,
           ),
@@ -1666,7 +1790,7 @@ class _PhoneClaktoriesState extends State<PhoneClaktories> {
               claktories.select(claktory);
               _go(_PhoneScreen.claktory);
             },
-            onAdd: () => _go(_PhoneScreen.adding),
+            onAdd: () => _add(),
           ),
         );
       case _PhoneScreen.adding:
@@ -1676,21 +1800,34 @@ class _PhoneClaktoriesState extends State<PhoneClaktories> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               _BackRow(
-                label: 'Claktories',
-                onTap: () => _go(_PhoneScreen.list),
+                label: _addedFrom == _PhoneScreen.claktory
+                    ? (_shown == null ? 'Back' : claktoryName(_shown!.backend))
+                    : 'Claktories',
+                onTap: _leaveAdding,
               ),
-              const Expanded(child: PairScreen()),
+              Expanded(
+                child: PairScreen(
+                  key: ValueKey(_addingCode),
+                  code: _addingCode,
+                ),
+              ),
             ],
           ),
         );
     }
+    // Links (a pairing code from the Camera, claktory://add) are taken
+    // over the list and Add a Claktory too, not only in a Claktory's
+    // window, whose own opener isn't there then (Zucchero's row 685).
+    final screen = _screen == _PhoneScreen.claktory
+        ? child
+        : LinkOpener(key: child.key, child: child);
     return AnimatedSwitcher(
       duration: Motion.base,
       switchInCurve: Curves.easeOut,
       switchOutCurve: Curves.easeIn,
       child: _screenBack == null
-          ? child
-          : PhoneBackScope(key: child.key, back: _screenBack!, child: child),
+          ? screen
+          : PhoneBackScope(key: child.key, back: _screenBack!, child: screen),
     );
   }
 }
@@ -2042,7 +2179,7 @@ class _ListRow extends StatelessWidget {
                             glance.connection.link == Link.live &&
                                     glance.working
                                 ? 'Working'
-                                : glance.connection.short,
+                                : glance.short,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: DenseType.caption.copyWith(

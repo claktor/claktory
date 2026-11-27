@@ -291,7 +291,7 @@ async fn a_wait_on_the_person_shows_in_needs_you_and_claktory_follows_up_as_set(
         (item.item, item.text.as_str(), item.kind(), item.has_pending_ask, item.card_agent_id.as_str()),
         (1, "Pick the logo", v1::BlockedKind::PersonDecision, true, "")
     );
-    assert_eq!(card, [item.card_seq], "the card about it");
+    assert_eq!(card, [item.card_seq], "the request about it");
 
     // A question that names no item, with nothing just blocked, is about
     // none: its card is its own entry, and the item gains nothing.

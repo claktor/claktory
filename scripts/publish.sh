@@ -241,6 +241,15 @@ if [[ ${#LINUX[@]} -gt 0 ]]; then
     echo "the Linux builds need podman or docker, running (or publish with --no-linux)" >&2
     exit 1
   }
+  # x86_64 builds never run on an arm64 Mac: they need the x86_64 host, and
+  # its podman, before anything is built (scripts/lib.sh container_for).
+  if [[ " ${LINUX[*]} " == *" x86_64 "* ]]; then
+    container_for x86_64 || exit 1
+    if [[ -n "$X86_REMOTE" ]] && ! x86_ssh 'podman info >/dev/null 2>&1' </dev/null; then
+      echo "the x86_64 Linux build runs on $X86_REMOTE, which doesn't answer with a working podman over ssh" >&2
+      exit 1
+    fi
+  fi
 fi
 
 if [[ ${#DEV[@]} -eq 0 ]]; then
@@ -349,6 +358,10 @@ if [[ ${#DEV[@]} -eq 0 ]]; then
     command -v "$engine" >/dev/null || engine=docker
     for arch in x86_64 aarch64; do "$engine" volume rm -f "factory-linux-run-$FACTORY_LINUX_RUN-target-$arch" >/dev/null 2>&1 || true; done
     "$engine" volume rm -f "factory-linux-run-$FACTORY_LINUX_RUN-cargo" >/dev/null 2>&1 || true
+    # And the x86_64 host's, where its builds ran.
+    if [[ -n "${X86_REMOTE:-}" ]]; then
+      x86_ssh "podman volume rm -f factory-linux-run-$FACTORY_LINUX_RUN-target-x86_64 factory-linux-run-$FACTORY_LINUX_RUN-cargo" </dev/null >/dev/null 2>&1 || true
+    fi
   }
   trap 'rm -rf "$STAGE"; linux_run_cleanup; release_unlock' EXIT
   # The real path: the container engine's VM shares /private, not /tmp.
@@ -475,6 +488,24 @@ if [[ ${#DEV[@]} -eq 0 ]]; then
   cp "$DMG" "$STAGE/Claktory.dmg"
   FILES+=("$DMG" "$STAGE/Claktory.dmg")
   DMG_JSON="  \"dmg\": {\"url\": \"$(url_of "$(basename "$DMG")")\", \"sha256\": \"$(shasum -a 256 "$DMG" | cut -d' ' -f1)\", \"size\": $(stat -f %z "$DMG")},"
+fi
+
+# The agent browser's Mac image (#435 W11), with the release that built it,
+# under the name its factoryd downloads (CLAKTORY_BROWSER_ARCHIVE_URL,
+# compiled in, as is its SHA-256). A release that reuses an older backend
+# carries that backend's image, already uploaded with its own release.
+if [[ -f "$RELEASE/claktory-browser.oci.tar.zst" && "$BACKEND_VERSION" == "$VERSION" ]]; then
+  browser_name="claktory-browser-$VERSION-arm64.oci.tar.zst"
+  want_url="$(sed -n 's/^CLAKTORY_BROWSER_ARCHIVE_URL=//p' "$RELEASE/browser-image.env")"
+  want_sha="$(sed -n 's/^CLAKTORY_BROWSER_ARCHIVE_SHA256=//p' "$RELEASE/browser-image.env")"
+  if [[ -n "$REPO" && "$want_url" != "$(url_of "$browser_name")" ]]; then
+    echo "the browser image's address compiled into factoryd, ${want_url:-none}, isn't where this publishes it, $(url_of "$browser_name")" >&2
+    exit 1
+  fi
+  [[ "$(shasum -a 256 "$RELEASE/claktory-browser.oci.tar.zst" | cut -d' ' -f1)" == "$want_sha" ]] ||
+    { echo "$RELEASE/claktory-browser.oci.tar.zst isn't the image factoryd was built for" >&2; exit 1; }
+  cp -c "$RELEASE/claktory-browser.oci.tar.zst" "$STAGE/$browser_name"
+  FILES+=("$STAGE/$browser_name")
 fi
 
 # The last gate before anything is signed or uploaded: no binary going

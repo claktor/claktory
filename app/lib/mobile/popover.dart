@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import '../identity.dart';
+import 'back.dart' show BackHandle, CallbackBackToken, PhoneBack;
 import 'presentation.dart' show SheetOverlay;
 import 'device.dart' as device;
 
@@ -38,12 +39,20 @@ const _leastRoom = 120.0;
 /// null when it goes with the window's overlay (frozen for a move). Nothing behind it
 /// dims, as iPadOS shows a popover; nothing behind it takes a tap while
 /// it's up but the one that closes it.
+///
+/// [beside]: to the right of its anchor instead, the arrow on its left
+/// edge, as iPadOS shows a sidebar row's menu; under or over it as above
+/// where there isn't the room, and always in a right-to-left window (not
+/// mirrored yet).
 Future<T?> presentPopover<T>(
   BuildContext context, {
   required Widget Function(BuildContext context, void Function([T?]) close)
   builder,
   Widget Function(Widget child)? wrap,
+  bool beside = false,
 }) {
+  final sideways =
+      beside && Directionality.maybeOf(context) != TextDirection.rtl;
   // The window's overlay, which a window frozen for a move takes with it.
   final overlay = SheetOverlay.of(context);
   final box = context.findRenderObject() as RenderBox?;
@@ -70,9 +79,12 @@ Future<T?> presentPopover<T>(
       before?.context?.findAncestorWidgetOfExactType<EditableText>() == null;
   final done = Completer<T?>();
   late final OverlayEntry entry;
+  BackHandle? back;
   var removed = false;
   void close([T? value]) {
     if (done.isCompleted) return;
+    back?.release();
+    back = null;
     done.complete(value);
     if (removed) return;
     removed = true;
@@ -84,6 +96,8 @@ Future<T?> presentPopover<T>(
   // for a move takes everything in it): it ends as if dismissed, and the
   // entry is let go once the frame that took it is over.
   void gone() {
+    back?.release();
+    back = null;
     if (!done.isCompleted) done.complete(null);
     if (removed) return;
     removed = true;
@@ -97,6 +111,7 @@ Future<T?> presentPopover<T>(
     builder: (context) {
       final popover = _Popover(
         measure: anchor,
+        beside: sideways,
         takesFocus: takesFocus,
         close: close,
         gone: gone,
@@ -106,12 +121,17 @@ Future<T?> presentPopover<T>(
     },
   );
   overlay.insert(entry);
+  // Android's Back closes it, as a tap outside does, before anything
+  // under it; never leaving the app with it still up (Risotto 49784).
+  back = PhoneBack.maybeOf(context)
+      ?.register(CallbackBackToken(onBack: close, onRetired: gone));
   return done.future;
 }
 
 class _Popover extends StatefulWidget {
   const _Popover({
     required this.measure,
+    required this.beside,
     required this.takesFocus,
     required this.close,
     required this.gone,
@@ -121,6 +141,9 @@ class _Popover extends StatefulWidget {
   /// What it's about, in the overlay's coordinates; null: the window's
   /// middle.
   final Rect? Function() measure;
+
+  /// To the anchor's right when there's room ([presentPopover]).
+  final bool beside;
 
   /// Whether it takes focus as it opens (see [presentPopover]).
   final bool takesFocus;
@@ -139,9 +162,9 @@ class _PopoverState extends State<_Popover>
   late final _shown = AnimationController(vsync: this, duration: Motion.fast)
     ..forward();
 
-  /// Where the arrow is, as laid out: on top (the popover under the
-  /// anchor) or at the bottom, and how far along.
-  final _arrowAt = ValueNotifier<({bool up, double x})?>(null);
+  /// Where the arrow is, as laid out: which edge of the popover it's on,
+  /// and how far along that edge its tip is.
+  final _arrowAt = ValueNotifier<_ArrowAt?>(null);
 
   /// Where what it's about is now ([_Popover.measure]).
   late Rect? _anchor = widget.measure();
@@ -246,6 +269,7 @@ class _PopoverState extends State<_Popover>
             delegate: _PopoverLayout(
               anchor: _anchor,
               safe: safe,
+              beside: widget.beside,
               arrowAt: _arrowAt,
             ),
             children: [
@@ -292,6 +316,14 @@ class _PopoverState extends State<_Popover>
 
 enum _Part { panel, arrow }
 
+/// The popover's edge the arrow is on: [top] with the popover under its
+/// anchor, [bottom] over it, [left] beside it.
+enum _Edge { top, bottom, left }
+
+/// The arrow's edge, and its tip's distance along it from the overlay's
+/// left ([top], [bottom]) or top ([left]).
+typedef _ArrowAt = ({_Edge edge, double at});
+
 /// Lays the popover out by its anchor: under it if it fits there, else
 /// over it if it fits there, else on whichever side has more room, its
 /// height then held to that room; across, centered on the anchor and kept
@@ -300,12 +332,14 @@ class _PopoverLayout extends MultiChildLayoutDelegate {
   _PopoverLayout({
     required this.anchor,
     required this.safe,
+    required this.beside,
     required this.arrowAt,
   });
 
   final Rect? anchor;
   final EdgeInsets safe;
-  final ValueNotifier<({bool up, double x})?> arrowAt;
+  final bool beside;
+  final ValueNotifier<_ArrowAt?> arrowAt;
 
   @override
   void performLayout(Size size) {
@@ -339,6 +373,7 @@ class _PopoverLayout extends MultiChildLayoutDelegate {
       _tell(null);
       return;
     }
+    if (beside && _layBeside(size, anchor, top, bottom)) return;
     final below = bottom - (anchor.bottom + _arrow + _margin);
     final above = (anchor.top - _arrow - _margin) - top;
     final width = math.min(popoverWidth, size.width - 2 * _margin);
@@ -377,25 +412,60 @@ class _PopoverLayout extends MultiChildLayoutDelegate {
       _Part.arrow,
       Offset(tip - _arrow, down ? y - _arrow : y + panel.height - 1),
     );
-    _tell((up: down, x: tip));
+    _tell((edge: down ? _Edge.top : _Edge.bottom, at: tip));
   }
 
-  void _tell(({bool up, double x})? at) {
+  /// To [anchor]'s right, the arrow at the anchor's middle near the
+  /// popover's top (just clear of its rounded corner), kept inside the
+  /// window; false, having laid out nothing, when there isn't a whole
+  /// popover's width of room there.
+  bool _layBeside(Size size, Rect anchor, double top, double bottom) {
+    final x = anchor.right + _arrow + _margin;
+    final right = size.width - safe.right - _margin;
+    if (right - x < popoverWidth || bottom - top < _leastRoom) return false;
+    final panel = layoutChild(
+      _Part.panel,
+      BoxConstraints(maxWidth: popoverWidth, maxHeight: bottom - top),
+    );
+    final y = (anchor.center.dy - Radii.floating - _arrow)
+        .clamp(top, math.max(top, bottom - panel.height))
+        .toDouble();
+    positionChild(_Part.panel, Offset(x, y));
+    final tip = anchor.center.dy
+        .clamp(
+          y + Radii.floating + _arrow,
+          math.max(
+            y + Radii.floating + _arrow,
+            y + panel.height - Radii.floating - _arrow,
+          ),
+        )
+        .toDouble();
+    layoutChild(
+      _Part.arrow,
+      BoxConstraints.tight(const Size(_arrow + 1, _arrow * 2)),
+    );
+    positionChild(_Part.arrow, Offset(x - _arrow, tip - _arrow));
+    _tell((edge: _Edge.left, at: tip));
+    return true;
+  }
+
+  void _tell(_ArrowAt? at) {
     if (arrowAt.value != at) arrowAt.value = at;
   }
 
   @override
   bool shouldRelayout(_PopoverLayout old) =>
-      old.anchor != anchor || old.safe != safe;
+      old.anchor != anchor || old.safe != safe || old.beside != beside;
 }
 
 /// The arrow: a triangle in the popover's color, its two outer edges in
-/// its hairline, pointing up (the popover under the anchor) or down.
+/// its hairline, pointing up (the popover under the anchor), down (over
+/// it) or left (beside it).
 class _ArrowPainter extends CustomPainter {
   _ArrowPainter({required this.at, required this.fill, required this.edge})
     : super(repaint: at);
 
-  final ValueNotifier<({bool up, double x})?> at;
+  final ValueNotifier<_ArrowAt?> at;
   final Color fill;
   final Color edge;
 
@@ -407,7 +477,15 @@ class _ArrowPainter extends CustomPainter {
     final h = size.height - 1;
     final Path outline;
     final Path shape;
-    if (where.up) {
+    if (where.edge == _Edge.left) {
+      // Its base one point into the popover, over the popover's edge.
+      final b = w - 1;
+      outline = Path()
+        ..moveTo(b + 1, 0)
+        ..lineTo(0, size.height / 2)
+        ..lineTo(b + 1, size.height);
+      shape = Path.from(outline)..close();
+    } else if (where.edge == _Edge.top) {
       outline = Path()
         ..moveTo(0, h + 1)
         ..lineTo(w / 2, 0)

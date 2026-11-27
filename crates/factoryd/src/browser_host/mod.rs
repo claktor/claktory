@@ -16,6 +16,7 @@
 //! Workspace leaves it unset and every request is refused.
 
 pub(crate) mod downloads;
+mod image;
 pub(crate) mod linux;
 pub(crate) mod locale;
 pub(crate) mod mac;
@@ -26,6 +27,7 @@ pub(crate) mod standin;
 pub(crate) mod view;
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
@@ -330,10 +332,57 @@ fn aimed(inner: &Inner) -> Option<Mode> {
     inner.asked.or(inner.mode)
 }
 
-/// The kept profile's name: one for the real Claktory, one for the dev
-/// one, so they never share sign-ins.
-fn profile(factory: &Factory) -> &'static str {
-    if factory.home().root().file_name().is_some_and(|name| name == ".factory-dev") { "dev" } else { "claktory" }
+/// The kept profile's name: one per Claktory home (Fugo 50272), so a QA
+/// sandbox, a copy or a second Claktory under the same user never drives
+/// another's signed-in profile: `c` and the home's id; "dev" for this
+/// user's own dev Claktory.
+fn profile(factory: &Factory) -> String {
+    let home = factory.home().root();
+    if dev_home(home) { "dev".to_owned() } else { format!("c{}", home_id(home)) }
+}
+
+/// Whether `home` is this user's own dev Claktory (`~/.factory-dev`, the
+/// home folder as the user database has it, never $HOME, which a sandbox
+/// sets): only it keeps the dev names, and takes the dev image overrides.
+pub(crate) fn dev_home(home: &Path) -> bool {
+    account_home().is_some_and(|account| same_folder(home, &account.join(".factory-dev")))
+}
+
+/// A Claktory home's id for its browser (Fugo 50272): the first 8 bytes of
+/// the SHA-256 of its canonical path, in hex.
+pub(crate) fn home_id(home: &Path) -> String {
+    use sha2::Digest;
+    let canonical = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+    let digest = sha2::Sha256::digest(canonical.as_os_str().as_encoded_bytes());
+    crate::encoding::hex(&digest[..8])
+}
+
+fn same_folder(a: &Path, b: &Path) -> bool {
+    let canonical = |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    canonical(a) == canonical(b)
+}
+
+/// This user's home folder, as the user database names it.
+#[cfg(unix)]
+fn account_home() -> Option<std::path::PathBuf> {
+    let mut buffer = vec![0_u8; 16 * 1024];
+    // SAFETY: zeroed is a valid passwd (null pointers, zero ids).
+    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: the buffer outlives the entry read from it, and found is
+    // either null or points at entry.
+    let result = unsafe { libc::getpwuid_r(libc::getuid(), &raw mut entry, buffer.as_mut_ptr().cast(), buffer.len(), &raw mut found) };
+    if result != 0 || found.is_null() || entry.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: pw_dir points into buffer, a C string.
+    let dir = unsafe { std::ffi::CStr::from_ptr(entry.pw_dir) }.to_string_lossy().into_owned();
+    (!dir.is_empty()).then(|| std::path::PathBuf::from(dir))
+}
+
+#[cfg(not(unix))]
+fn account_home() -> Option<std::path::PathBuf> {
+    None
 }
 
 /// Starts the runner (state STARTING), Chrome in `mode` at `url`.
@@ -353,7 +402,7 @@ fn start(
     set_state(&factory.agent_browser, inner, State::Starting);
     let (time_zone, languages) = locale;
     let start =
-        Control::Start { profile: profile(factory).to_owned(), mode, url, width: DESKTOP.0, height: DESKTOP.1, time_zone, languages };
+        Control::Start { profile: profile(factory), mode, url, width: DESKTOP.0, height: DESKTOP.1, time_zone, languages };
     inner.asked = Some(mode);
     control(inner, &start);
     Ok(())
@@ -499,7 +548,9 @@ fn reported(factory: &Arc<Factory>, report: Report) {
                     tracing::warn!(version, "Claktory's browser runner speaks another wire: stopped");
                     stop = true;
                 } else {
-                    inner.chrome = view::cleaned(&chrome, 40);
+                    // The bare version, as the protocol says ("158.0.8127.88"),
+                    // whether the runner said Chrome's product ("Chrome/…").
+                    inner.chrome = view::cleaned(chrome.rsplit('/').next().unwrap_or_default(), 40);
                     set_mode(&mut inner, mode);
                     settle(factory, &mut inner, mode);
                     sites::read_sites(&mut inner);
@@ -1053,7 +1104,7 @@ impl Port {
                 }
                 spawn(&factory, &mut inner)?;
             }
-            control(&inner, &Control::DeleteData { profile: profile(&factory).to_owned() });
+            control(&inner, &Control::DeleteData { profile: profile(&factory) });
             set_state(&factory.agent_browser, &mut inner, State::Stopping);
             inner.sites.clear();
         }
@@ -1441,7 +1492,7 @@ fn live_view(factory: &Factory) -> Result<(), RequestError> {
     if factory.lock().config.browser.live_view {
         return Ok(());
     }
-    Err(refused("Claktory's browser has no live view: agents use it on their own, and ask you on a card when they need you."))
+    Err(refused("Claktory's browser has no live view: agents use it on their own, and ask you in a request when they need you."))
 }
 
 impl crate::errands::cdp::Transport for Handle {
@@ -1700,4 +1751,28 @@ pub async fn sign_out_for_test(factory: &Arc<Factory>, provider: &str) -> Result
 #[doc(hidden)]
 pub fn signing_out_for_test(factory: &Arc<Factory>, provider: &str) -> bool {
     Handle::new(factory).signing_out(provider)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dev_home, home_id};
+    use std::path::Path;
+
+    /// Fugo 50272: each Claktory home has its own browser id, the same each
+    /// time; only this user's own ~/.factory-dev is the dev one.
+    #[test]
+    fn each_claktory_home_has_its_own_browser_id() {
+        let a = home_id(Path::new("/Users/someone/.factory"));
+        let b = home_id(Path::new("/Users/someone/qa/sandboxes/h1/user/.factory"));
+        assert_ne!(a, b);
+        assert_eq!(a, home_id(Path::new("/Users/someone/.factory")));
+        assert!(a.len() == 16 && a.bytes().all(|byte| byte.is_ascii_hexdigit()), "{a}");
+        // A wire profile name: [a-z0-9-], 1 to 32.
+        assert!(crate::browser_runner::wire::profile_name_ok(&format!("c{a}")));
+        assert!(!dev_home(Path::new("/Users/someone/qa/sandboxes/h1/user/.factory-dev")));
+        if let Some(account) = super::account_home() {
+            assert!(dev_home(&account.join(".factory-dev")));
+            assert!(!dev_home(&account.join(".factory")));
+        }
+    }
 }

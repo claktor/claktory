@@ -64,7 +64,7 @@ fn vault() -> (Secrets, Arc<Mutex<Vec<SecretUse>>>) {
         let uses = uses.clone();
         Arc::new(move |used: SecretUse| uses.lock().push(used))
     };
-    (Secrets { agent: "june".into(), resolve, used, redaction, filter: Vec::new() }, uses)
+    (Secrets { agent: "june".into(), resolve, used, redaction, filter: Vec::new(), save: None }, uses)
 }
 
 fn text(result: &ToolResult) -> String {
@@ -244,6 +244,8 @@ async fn bash_takes_secrets_only_where_it_was_given_them() {
     let bash = tools.iter().find(|tool| tool.spec.name == "bash").expect("bash");
     assert_eq!(bash.spec.parameters["properties"]["secrets"]["anyOf"][0]["type"], "array");
     assert_eq!(bash.spec.description.matches("secrets names").count(), 1, "said once");
+    assert_eq!(bash.spec.parameters["properties"]["save_as"]["anyOf"][0]["required"], json!(["name", "variable", "description"]));
+    assert_eq!(bash.spec.description.matches("save_as saves").count(), 1, "said once");
     assert_eq!(tools.iter().filter(|tool| tool.spec.parameters["properties"].get("secrets").is_some()).count(), 1, "bash only");
 }
 
@@ -345,4 +347,80 @@ async fn a_command_with_secrets_writes_its_log_through_the_filter() {
     // A command without secrets doesn't go through it.
     let (result, _) = call(&tool, json!({"command": "echo plain"}), Some(&secrets)).await;
     assert!(text(&result.expect("ran")).starts_with("plain\n"));
+}
+
+/// What a fake Save stored: each secret's name, the secrets its command
+/// ran with, and its value.
+type Stored = Arc<Mutex<Vec<(String, Vec<String>, Vec<u8>)>>>;
+
+/// A Save that records what it was given; `check` refuses with `refuse`.
+fn saving(refuse: Option<&'static str>) -> (factory_agent::secrets::Save, Stored) {
+    let stored: Stored = Arc::default();
+    let check: factory_agent::secrets::CheckSave = Arc::new(move |agent, _save, _parents| {
+        Box::pin(async move {
+            assert_eq!(agent, "june");
+            refuse.map_or(Ok(()), |why| Err(why.to_owned()))
+        })
+    });
+    let sink = stored.clone();
+    let store: factory_agent::secrets::StoreSave = Arc::new(move |_agent, save, parents, value| {
+        let sink = sink.clone();
+        Box::pin(async move {
+            sink.lock().push((save.name, parents, value.to_vec()));
+            Ok("7".to_owned())
+        })
+    });
+    (factory_agent::secrets::Save { check, store }, stored)
+}
+
+/// bash's save_as: stdout goes to the store alone, never to an update or
+/// the result; stderr comes back once the command ended, the new value and
+/// the command's secrets hidden; a refused check runs nothing; and it runs
+/// in the foreground only, with or without a log for background tasks.
+#[tokio::test]
+async fn save_as_gives_the_output_to_the_vault_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let watched = watched(dir.path());
+    const NEW: &str = "nk-864192-296295";
+    let make = "printf 'nk-%s-%s' $((123456*7)) $((98765*3))";
+    for background in [None, Some(&watched.background)] {
+        let (mut secrets, uses) = vault();
+        let (save, stored) = saving(None);
+        secrets.save = Some(save);
+        let tool = bash(dir.path(), background);
+        let command = format!("echo \"made $({make}) with $STRIPE_KEY\" >&2; {make}; echo");
+        let args = json!({"command": command, "secrets": ["Stripe"], "save_as": {"name": "Narrow", "variable": "NARROW", "description": "Made."}});
+        let (result, updates) = call(&tool, args, Some(&secrets)).await;
+        let result = result.expect("saved");
+        let shown = text(&result);
+        assert!(shown.starts_with("Saved the command's output (17 bytes) as the secret Narrow, which sets NARROW"), "{shown}");
+        assert!(shown.contains(&format!("It said (stderr):\nmade [secret Narrow/NARROW] with {HIDDEN}")), "{shown}");
+        assert!(!leaks(&shown, NEW) && !leaks(&shown, KEY), "{shown}");
+        assert!(updates.iter().all(|update| !update.contains("nk-")), "{updates:?}");
+        assert_eq!(result.details["secret_saved"], "7");
+        assert_eq!(*stored.lock(), [("Narrow".to_owned(), vec!["Stripe".to_owned()], format!("{NEW}\n").into_bytes())]);
+        assert_eq!(uses.lock().len(), 1, "its secrets' use is logged");
+        assert!(std::fs::read_dir(dir.path().join("tasks")).map_or(true, |mut logs| logs.next().is_none()), "no log");
+    }
+
+    // A refused check: nothing runs.
+    let (mut secrets, _) = vault();
+    let (save, stored) = saving(Some("There's a secret named Narrow already."));
+    secrets.save = Some(save);
+    let tool = bash(dir.path(), Some(&watched.background));
+    let args = json!({"command": "touch ran; echo key-0123456789", "save_as": {"name": "Narrow", "variable": "NARROW", "description": "Made."}});
+    let refused = call(&tool, args.clone(), Some(&secrets)).await.0.expect_err("refused").to_string();
+    assert!(refused.contains("There's a secret named Narrow already."), "{refused}");
+    // Nor in the background, nor where there's no vault to save to.
+    let mut background = args.clone();
+    background["run_in_background"] = true.into();
+    let (save, _) = saving(None);
+    secrets.save = Some(save);
+    let refused = call(&tool, background, Some(&secrets)).await.0.expect_err("refused").to_string();
+    assert!(refused.contains("runs in the foreground only"), "{refused}");
+    let (plain, _) = vault();
+    let refused = call(&tool, args, Some(&plain)).await.0.expect_err("refused").to_string();
+    assert!(refused.contains("isn't available here"), "{refused}");
+    assert!(!dir.path().join("ran").exists(), "it ran");
+    assert!(stored.lock().is_empty());
 }

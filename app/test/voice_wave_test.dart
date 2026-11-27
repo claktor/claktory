@@ -118,9 +118,19 @@ void main() {
         .show(tester, size: const Size(1200, 800));
     await tester.tap(mic);
     await io(tester);
-    expect(find.byType(RecordingStrip), findsOneWidget);
+    // The microphone's popover first (permissions spec, P5): Continue
+    // brings the system's prompt; allowed, the next click records.
+    expect(find.text('Talk instead of typing'), findsOneWidget);
+    expect(find.byType(RecordingStrip), findsNothing);
+    await tester.tap(find.text('Continue'));
+    await io(tester);
     allowed.complete(true);
     await io(tester);
+    expect(find.text('Talk instead of typing'), findsNothing);
+    expect(find.byType(RecordingStrip), findsNothing);
+    await tester.tap(mic);
+    await io(tester);
+    expect(find.byType(RecordingStrip), findsOneWidget);
     recorder.hear(0.5, const Duration(milliseconds: 50));
     await tester.pump();
     expect(find.text('Send'), findsOneWidget);

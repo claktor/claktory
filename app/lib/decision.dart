@@ -1,12 +1,14 @@
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'card_answer.dart' show replyPlaceholder;
 import 'controls.dart';
 import 'dictation.dart';
+import 'find.dart' show FindHighlight;
 import 'identity.dart';
+import 'mobile/lines.dart'
+    show CardActions, CardFieldRoom, KeepInSight, cardFieldMaxLines;
 import 'mobile/metrics.dart' show Metrics, TypeScale;
-import 'scope.dart';
-import 'voice_keep.dart' show KeptVoices;
 
 /// The most a comment may say, as the backend checks too.
 const decisionCommentLimit = 2000;
@@ -81,17 +83,18 @@ class SubmitButton extends StatelessWidget {
       Button(label: 'Submit', primary: true, onPressed: onPressed);
 }
 
-/// A comment to go with the person's decision on a card an agent waits on
-/// (Matt's: approve or dismiss, always with an optional comment): under
-/// the card's buttons, "Add a comment", quiet; tapped, a field. The card
-/// owns [controller] and sends its text trimmed; nothing is kept once the
-/// card is answered.
+/// The field on a card an agent waits on (Lucy's Needs you cards, rule 4):
+/// open from the start, one line growing to six, above the card's row
+/// ([CardRow]), with the mic (and #511's paperclip). Its placeholder says
+/// where the words go before anything's typed: "Reply to June". It never
+/// takes focus by itself: in focus mode bare keys would type into it, and a
+/// stray letter would turn Approve into Submit. The card owns [controller]
+/// and sends its text trimmed; nothing is kept once the card is answered.
 ///
-/// With [onSubmit] (#370), once something is typed the card shows one
-/// Submit in place of its buttons ([CommentTyped], [SubmitButton]), Return
-/// in the field is Submit, and what's typed goes as a reply to [agent],
-/// never as a yes or a no. Without it, whatever is typed goes with either
-/// button, as the person's own words, to [agent] only.
+/// Return never decides (rule 6): with [onSubmit], where words alone are an
+/// answer (Submit, Send, a written answer), Return does it once something
+/// is typed; without it, Return does nothing. Shift+Return is a new line,
+/// and so is a phone's on-screen return, which sends no key.
 class DecisionComment extends StatefulWidget {
   const DecisionComment({
     super.key,
@@ -99,13 +102,15 @@ class DecisionComment extends StatefulWidget {
     required this.agent,
     this.peer = '',
     this.enabled = true,
-    this.onSubmitted,
     this.onSubmit,
     this.note,
     this.keep,
     this.attach,
     this.files,
     this.holdsFiles = false,
+    this.placeholder,
+    this.above,
+    this.focusNode,
   });
 
   final TextEditingController controller;
@@ -114,25 +119,27 @@ class DecisionComment extends StatefulWidget {
   final String agent;
 
   /// For a pipe's card, the other side ("Ana's Claktory"), which never
-  /// sees it; empty otherwise.
+  /// sees it: said under the field; empty otherwise.
   final String peer;
 
   /// False while the decision is being sent.
   final bool enabled;
 
-  /// Enter in the field, where the card has a main action for it.
-  final VoidCallback? onSubmitted;
-
-  /// The card's Submit: sends what's typed as a reply. Return in the field
-  /// does it, once something is typed, and the note under the field goes:
-  /// the line beside Submit says what happens.
+  /// Where words alone are the card's answer (Submit, Send, Answer): Return
+  /// in the field does it, once something is typed.
   final VoidCallback? onSubmit;
 
-  /// Who gets it, said otherwise, where it depends on the answer.
+  /// A line under the field, where the placeholder can't say it all (who
+  /// never sees it); none when null or empty.
   final String? note;
 
-  /// What a recording for it is kept as until its words come (#401): one
-  /// kept from before opens the field, for it to come back to.
+  /// The field's placeholder, in place of "Reply to June".
+  final String? placeholder;
+
+  /// A caption over the field (N4b: the card changed while typing).
+  final String? above;
+
+  /// What a recording for it is kept as until its words come (#401).
   final DictationFor? keep;
 
   /// Files with the comment (#511): the paperclip, beside the mic, and the
@@ -140,78 +147,237 @@ class DecisionComment extends StatefulWidget {
   final Widget? attach;
   final Widget? files;
 
-  /// Files wait to go with it: the field shows, with them.
+  /// Files wait to go with it.
   final bool holdsFiles;
+
+  /// The field's focus, where the card puts the cursor in it itself (a
+  /// step's first Can't do this); its own otherwise.
+  final FocusNode? focusNode;
 
   @override
   State<DecisionComment> createState() => _DecisionCommentState();
 }
 
 class _DecisionCommentState extends State<DecisionComment> {
-  late var _open = widget.controller.text.isNotEmpty || widget.holdsFiles;
+  final _own = FocusNode();
 
-  @override
-  void didUpdateWidget(DecisionComment old) {
-    super.didUpdateWidget(old);
-    if (widget.holdsFiles && !_open) _open = true;
-  }
-
-  /// The field's, asked for once it opens: autofocus does nothing while
-  /// something else in the scope has focus (a PDF's pane after a reload).
-  final _focus = FocusNode();
-
-  KeptVoices? _voices;
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final voices = KeptVoices.of(AppScope.of(context));
-    if (identical(voices, _voices)) return;
-    _voices?.removeListener(_kept);
-    _voices = voices..addListener(_kept);
-    _open = _open || _holdsKept();
-  }
-
-  bool _holdsKept() {
-    final key = widget.keep?.key;
-    return key != null &&
-        ((_voices?.holds(key) ?? false) || dictationLive(key));
-  }
-
-  /// A recording kept for this comment from before: the field opens, so
-  /// it comes back to it.
-  void _kept() {
-    if (_open || !_holdsKept() || !mounted) return;
-    setState(() => _open = true);
-  }
+  FocusNode get _focus => widget.focusNode ?? _own;
 
   @override
   void dispose() {
-    _voices?.removeListener(_kept);
-    _focus.dispose();
+    _own.dispose();
     super.dispose();
-  }
-
-  void _openField() {
-    setState(() => _open = true);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) _focus.requestFocus();
-    });
   }
 
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    if (!_open) {
-      return Align(
-        alignment: AlignmentDirectional.centerStart,
-        child: Semantics(
-          button: true,
-          child: Pressable(
-            onTap: widget.enabled ? _openField : null,
-            builder: (context, hovered) => ConstrainedBox(
-              // A finger's height on a phone or iPad.
+    final submit = widget.onSubmit;
+    void submitted() {
+      if (widget.enabled && commentTyped(widget.controller)) submit!();
+    }
+
+    final note =
+        widget.note ??
+        (widget.peer.isEmpty
+            ? ''
+            : 'Only ${widget.agent} sees it, not ${widget.peer}.');
+    // A limit on its height (a phone's card field over the keyboard,
+    // CardFieldRoom) shrinks the field, which then scrolls inside; with
+    // none, a bound too far to reach, as a flexible field needs one.
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxHeight: 100000),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (widget.above case final above? when above.isNotEmpty) ...[
+            Text(above, style: type.caption.copyWith(color: palette.textMuted)),
+            const SizedBox(height: Space.xs),
+          ],
+          // What's typed stays when the card scrolls away and back. Or
+          // said: the mic puts what's said in, to check before sending.
+          Flexible(
+            child: KeepWhileTyped(
+              controller: widget.controller,
+              child: Dictation(
+                controller: widget.controller,
+                focusNode: _focus,
+                enabled: widget.enabled,
+                keep: widget.keep,
+                trailing: widget.attach,
+                child: CallbackShortcuts(
+                  bindings: {
+                    if (submit != null) ...{
+                      const SingleActivator(LogicalKeyboardKey.enter):
+                          submitted,
+                      const SingleActivator(LogicalKeyboardKey.numpadEnter):
+                          submitted,
+                    } else ...{
+                      // Return decides nothing here: no new line either, as
+                      // Shift+Return gives one.
+                      const SingleActivator(LogicalKeyboardKey.enter): () {},
+                      const SingleActivator(LogicalKeyboardKey.numpadEnter):
+                          () {},
+                    },
+                  },
+                  child: TextField(
+                    controller: widget.controller,
+                    focusNode: _focus,
+                    placeholder:
+                        widget.placeholder ?? replyPlaceholder(widget.agent),
+                    // Named once typed in, when the placeholder is gone.
+                    semanticsLabel: 'A comment for ${widget.agent}',
+                    minLines: 1,
+                    // Three on a phone at large text, so the title stays in
+                    // sight over the keyboard.
+                    maxLines: cardFieldMaxLines(context),
+                    // As much as the backend takes.
+                    inputFormatters: [
+                      LengthLimitingTextInputFormatter(decisionCommentLimit),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          ?widget.files,
+          if (note.isNotEmpty) ...[
+            const SizedBox(height: Space.xs),
+            Text(note, style: type.caption.copyWith(color: palette.textFaint)),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// A card's action row (Lucy's Needs you cards, rule 2), the same on every
+/// card: [line], saying what pressing does, at the left; then [quiet] (the
+/// no, then any second action); then [primary], filled, last, the one
+/// filled button on the card. With no [line] (a plain card waiting, whose
+/// buttons say it), the buttons alone at the end. When they don't fit
+/// beside the line, the line goes above and the buttons stay together.
+class CardRow extends StatelessWidget {
+  const CardRow({
+    super.key,
+    this.line,
+    this.quietLine = false,
+    this.quiet = const [],
+    this.primary,
+  });
+
+  final Widget? line;
+
+  /// [line] is only a hint, which steps aside on a phone at large text
+  /// while the card's field has the keyboard ([CardActions.quietLine]).
+  final bool quietLine;
+  final List<Widget> quiet;
+  final Widget? primary;
+
+  // On a phone, the thumb row (Prosciutto's CardActions, §5.2).
+  @override
+  Widget build(BuildContext context) => CardActions(
+    line: line,
+    quietLine: quietLine,
+    quiet: quiet,
+    primary: primary,
+  );
+}
+
+/// A card's field ([field], given the focus it's to use) and its [row],
+/// one block: on a phone, kept in sight together above the keyboard while
+/// the field has it (§5.2). [focus]: the field's, where the card moves it
+/// itself; else the block's own.
+class CardAnswerBlock extends StatefulWidget {
+  const CardAnswerBlock({
+    super.key,
+    this.focus,
+    required this.field,
+    required this.row,
+  });
+
+  final FocusNode? focus;
+  final Widget Function(FocusNode focus) field;
+  final Widget row;
+
+  @override
+  State<CardAnswerBlock> createState() => _CardAnswerBlockState();
+}
+
+class _CardAnswerBlockState extends State<CardAnswerBlock> {
+  final _own = FocusNode();
+
+  @override
+  void dispose() {
+    _own.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final focus = widget.focus ?? _own;
+    return KeepInSight(
+      focus: focus,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Shrinks, to one line at least, where the buttons wouldn't
+          // otherwise fit above the keyboard (Lucy, §5.2).
+          CardFieldRoom(child: widget.field(focus)),
+          const SizedBox(height: Space.s),
+          widget.row,
+        ],
+      ),
+    );
+  }
+}
+
+/// The words of a [CardRow]'s line: caption, `textFaint` unless [color]
+/// says otherwise (`danger` for a refusal).
+class CardLine extends StatelessWidget {
+  const CardLine(this.text, {super.key, this.color});
+
+  final String text;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) => Text(
+    text,
+    style: TypeScale.of(context).caption
+        .copyWith(color: color ?? Palette.of(context).textFaint),
+  );
+}
+
+/// One quiet link under a card's row (rule 3: Other ways…, Edit, Resolve):
+/// underlined at rest, so it reads as something to press before a pointer
+/// finds it; a finger's height on a touch screen.
+class QuietLink extends StatelessWidget {
+  const QuietLink({super.key, required this.label, required this.onTap});
+
+  final String label;
+
+  /// Null while it can't be pressed (the card's answer on its way).
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Align(
+      alignment: AlignmentDirectional.centerStart,
+      widthFactor: 1,
+      child: Semantics(
+        button: true,
+        label: label,
+        child: Pressable(
+          onTap: onTap,
+          builder: (context, hovered) {
+            final color = hovered && onTap != null
+                ? palette.text
+                : palette.textMuted;
+            return ConstrainedBox(
               constraints: BoxConstraints(
                 minHeight: touchFirst(context) ? Metrics.of(context).target : 0,
               ),
@@ -221,87 +387,23 @@ class _DecisionCommentState extends State<DecisionComment> {
                   alignment: AlignmentDirectional.centerStart,
                   widthFactor: 1,
                   heightFactor: 1,
-                  child: Text(
-                    'Add a comment',
-                    style: type.caption.copyWith(
-                      color: hovered ? palette.text : palette.textMuted,
-                      fontWeight: FontWeight.w500,
+                  child: ExcludeSemantics(
+                    child: Text(
+                      label,
+                      style: TypeScale.of(context).caption.copyWith(
+                        color: color,
+                        fontWeight: FontWeight.w500,
+                        decoration: TextDecoration.underline,
+                        decorationColor: color,
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-          ),
+            );
+          },
         ),
-      );
-    }
-    final submit = widget.onSubmit;
-    final onSubmitted = submit == null
-        ? widget.onSubmitted
-        : () {
-            if (widget.enabled && commentTyped(widget.controller)) submit();
-          };
-    final note = Text(
-      widget.note ??
-          (widget.peer.isEmpty
-              ? '${widget.agent} gets it with your answer.'
-              : 'Only ${widget.agent} sees it, not ${widget.peer}.'),
-      style: type.caption.copyWith(color: palette.textFaint),
-    );
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        // Enter does the card's main action, where it has one, or Submit;
-        // Shift+Enter starts a new line.
-        // Or said: the mic puts what's said in, to check before sending.
-        KeepWhileTyped(
-          controller: widget.controller,
-          child: Dictation(
-            controller: widget.controller,
-            focusNode: _focus,
-            enabled: widget.enabled,
-            keep: widget.keep,
-            trailing: widget.attach,
-            child: CallbackShortcuts(
-              bindings: {
-                const SingleActivator(LogicalKeyboardKey.enter): ?onSubmitted,
-                if (submit != null)
-                  const SingleActivator(LogicalKeyboardKey.numpadEnter):
-                      onSubmitted!,
-              },
-              child: TextField(
-                controller: widget.controller,
-                focusNode: _focus,
-                placeholder: 'A comment for ${widget.agent}, if you like',
-                // Named once typed in, when the placeholder is gone.
-                semanticsLabel: 'A comment for ${widget.agent}',
-                minLines: 1,
-                maxLines: 6,
-                // As much as the backend takes.
-                inputFormatters: [
-                  LengthLimitingTextInputFormatter(decisionCommentLimit),
-                ],
-              ),
-            ),
-          ),
-        ),
-        ?widget.files,
-        // With Submit, the line beside it says what happens once typed.
-        if (submit == null) ...[
-          const SizedBox(height: Space.xs),
-          note,
-        ] else
-          CommentTyped(
-            controller: widget.controller,
-            builder: (context, typed) => typed
-                ? const SizedBox.shrink()
-                : Padding(
-                    padding: const EdgeInsets.only(top: Space.xs),
-                    child: note,
-                  ),
-          ),
-      ],
+      ),
     );
   }
 }
@@ -367,4 +469,136 @@ class _KeepWhileTypedState extends State<KeepWhileTyped>
     super.build(context);
     return widget.child;
   }
+}
+
+/// The most lines a card's body shows before it folds its middle (Lucy's
+/// Needs you cards): its first lines, Show all, then its last paragraph,
+/// which stays in sight because agents usually put the question last.
+const cardBodyFoldLines = 8;
+
+/// A card's body ([body], Markdown, drawn a piece at a time by [build]),
+/// folded as [cardBodyFoldLines] says when it runs longer, everywhere a
+/// card shows. Find opens a fold its words are in.
+class FoldedBody extends StatefulWidget {
+  const FoldedBody({super.key, required this.body, required this.build});
+
+  final String body;
+
+  /// Draws a run of the body's paragraphs, as Markdown.
+  final Widget Function(String text) build;
+
+  @override
+  State<FoldedBody> createState() => _FoldedBodyState();
+}
+
+class _FoldedBodyState extends State<FoldedBody> {
+  var _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final whole = widget.build(widget.body);
+    if (_open) return whole;
+    final paragraphs = bodyParagraphs(widget.body);
+    if (paragraphs.length < 3) return whole;
+    final style = TypeScale.of(context).body;
+    final scaler = MediaQuery.textScalerOf(context);
+    final direction = Directionality.of(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        int lines(String text) {
+          if (text.trimLeft().startsWith('```')) {
+            return '\n'.allMatches(text).length + 1;
+          }
+          final painter = TextPainter(
+            text: TextSpan(text: text, style: style),
+            textDirection: direction,
+            textScaler: scaler,
+          )..layout(maxWidth: constraints.maxWidth);
+          final count = painter.computeLineMetrics().length;
+          painter.dispose();
+          return count;
+        }
+
+        final counts = [for (final each in paragraphs) lines(each)];
+        if (counts.fold(0, (sum, n) => sum + n) <= cardBodyFoldLines) {
+          return whole;
+        }
+        // The last paragraph stays, unless it's long itself; the first
+        // ones as far as the fold leaves room, at least one.
+        final last = counts.last <= cardBodyFoldLines ~/ 2 ? 1 : 0;
+        final budget = cardBodyFoldLines - (last == 1 ? counts.last : 0) - 1;
+        var room = budget;
+        var head = 0;
+        while (head < paragraphs.length - last - 1 &&
+            (head == 0 || counts[head] <= room)) {
+          room -= counts[head];
+          head++;
+        }
+        final hidden = paragraphs.sublist(head, paragraphs.length - last);
+        // Find's words in what's folded away: it opens.
+        final find = context
+            .dependOnInheritedWidgetOfExactType<FindHighlight>()
+            ?.query
+            .toLowerCase();
+        if (find != null &&
+            find.isNotEmpty &&
+            hidden.any((each) => each.toLowerCase().contains(find))) {
+          return whole;
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // A first paragraph longer than the fold shows its first lines.
+            if (head == 1 && counts.first > budget)
+              ClipRect(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight:
+                        scaler.scale(style.fontSize ?? 14) *
+                        (style.height ?? 1.4) *
+                        budget.clamp(2, cardBodyFoldLines),
+                  ),
+                  child: SingleChildScrollView(
+                    physics: const NeverScrollableScrollPhysics(),
+                    child: widget.build(paragraphs.first),
+                  ),
+                ),
+              )
+            else
+              widget.build(paragraphs.sublist(0, head).join('\n\n')),
+            QuietLink(
+              label: 'Show all',
+              onTap: () => setState(() => _open = true),
+            ),
+            if (last == 1) widget.build(paragraphs.last),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// [body]'s paragraphs, split at blank lines outside code fences.
+List<String> bodyParagraphs(String body) {
+  final paragraphs = <String>[];
+  final current = <String>[];
+  var fenced = false;
+  void end() {
+    if (current.any((line) => line.trim().isNotEmpty)) {
+      paragraphs.add(current.join('\n'));
+    }
+    current.clear();
+  }
+
+  for (final line in body.split('\n')) {
+    if (line.trimLeft().startsWith('```')) fenced = !fenced;
+    if (!fenced && line.trim().isEmpty) {
+      end();
+    } else {
+      current.add(line);
+    }
+  }
+  end();
+  return paragraphs;
 }

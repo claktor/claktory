@@ -299,7 +299,7 @@ fn remind_owner(factory: &Arc<Factory>, owning: &str, items: &[Blocked], person:
         let _ = write!(text, ", +{} more", items.len() - NAMED);
     }
     text.push_str(
-        ". None of it shows in their Needs you until you ask: file ask_person now with item naming it, one card per \
+        ". None of it shows in their Needs you until you ask: file ask_person now with item naming it, one request per \
          decision or action (secrets_request or propose_to_rivet with item, if one waits on a secret or on Rivet) — or note \
          on the item why you can't ask yet.",
     );

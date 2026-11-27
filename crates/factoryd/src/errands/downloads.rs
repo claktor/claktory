@@ -120,6 +120,12 @@ impl Tracker {
         crate::locking::lock(&self.state).expecting = None;
     }
 
+    /// Whether a download that begins now would be the agent's.
+    #[cfg(test)]
+    pub(crate) fn expecting(&self) -> bool {
+        crate::locking::lock(&self.state).expecting.is_some()
+    }
+
     /// How many have begun so far.
     pub(crate) fn count(&self) -> usize {
         crate::locking::lock(&self.state).count

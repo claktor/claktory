@@ -964,7 +964,9 @@ void main() {
             ),
           );
           await settle(1200);
-          await tester.tap(find.bySemanticsLabel('Extensions').first);
+          await tester.tap(
+            find.bySemanticsLabel(RegExp('^More options for ')).first,
+          );
           await settle(900);
           await tester.tap(find.text(name).last);
           await settle(2500);

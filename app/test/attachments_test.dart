@@ -170,6 +170,24 @@ void main() {
     await tester.pump(const Duration(milliseconds: 200));
   });
 
+  macWidgets('the overlay names the agent of the box that takes them, not '
+      'the one selected under it (focus mode\'s Context, row 1607)', (
+    tester,
+  ) async {
+    await showWindow(tester, two());
+    // Another box claims the window last, as Context's does over focus
+    // mode.
+    final context = Object();
+    FileDrop.claim(context, takesFiles: true, key: 'a2');
+    addTearDown(() => FileDrop.release(context));
+    await fromWindow(tester, 'filesOver', 1);
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(find.text('Drop to add to your message to Writer'), findsOneWidget);
+    expect(find.text('Drop to add to your message to Builder'), findsNothing);
+    await fromWindow(tester, 'filesOver', 0);
+    await tester.pump(const Duration(milliseconds: 200));
+  });
+
   macWidgets('files dragged over the window dim it all and say where they '
       'go', (tester) async {
     await showWindow(tester, two());

@@ -57,6 +57,7 @@ class CardAnswer {
     this.wantsText = false,
     required this.yes,
     required this.no,
+    this.submit = 'Submit',
     this.typed = false,
     this.busy = false,
     this.status,
@@ -98,6 +99,12 @@ class CardAnswer {
   /// Words are typed: on a card that doesn't ask for them, Submit takes
   /// the place of yes and no (#370).
   final bool typed;
+
+  /// What [onSubmit]'s button and ⌘↩ are called once [typed]: 'Submit'
+  /// (#370), or the card's own word where words alone answer it. A
+  /// written answer's words are its yes ([wantsText], never [typed]); a
+  /// step's ⌘↩ stays Done (Lucy's §4.2), its Send being ↩ in the field.
+  final String submit;
 
   /// Its answer is on its way.
   final bool busy;
@@ -150,6 +157,7 @@ class CardAnswer {
     wantsText: wantsText,
     yes: yes,
     no: no,
+    submit: submit,
     typed: typed,
     busy: busy,
     status: status,
@@ -172,6 +180,7 @@ class CardAnswer {
       wantsText == other.wantsText &&
       yes == other.yes &&
       no == other.no &&
+      submit == other.submit &&
       typed == other.typed &&
       busy == other.busy &&
       status == other.status &&

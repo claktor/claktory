@@ -64,7 +64,9 @@ class _WindowDropOverlayState extends State<WindowDropOverlay> {
     if (!takes || selectedChat(workspace.workspace) != null) {
       return (where: DropWhere.textOnly, name: '', color: null);
     }
-    final agent = workspace.selectedAgent;
+    // The agent of the box that takes them, else the one showing.
+    final agent =
+        workspace.agent(FileDrop.claimedKey ?? '') ?? workspace.selectedAgent;
     return (
       where: agent != null && !agent.modelAvailable
           ? DropWhere.blocked

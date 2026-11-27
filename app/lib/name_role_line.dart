@@ -45,8 +45,17 @@ class NameRoleLine extends StatelessWidget {
   TextSpan get _role =>
       TextSpan(text: ' · $role', semanticsLabel: ', $role', style: roleStyle);
 
+  /// One label, read in one go: "June, Project Manager · 14:32", the role
+  /// said even where there's no room to show it, never split in pieces.
+  String get _label => TextSpan(
+    children: [...before, _name, if (role.isNotEmpty) _role, ...after],
+  ).toPlainText();
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      Semantics(label: _label, excludeSemantics: true, child: _line(context));
+
+  Widget _line(BuildContext context) {
     if (wrap || role.isEmpty) {
       return Text.rich(
         TextSpan(
@@ -83,7 +92,12 @@ class NameRoleLine extends StatelessWidget {
         // No room for the role: the name (cut last of all) and what's
         // around it.
         if (!box.hasBoundedWidth || box.maxWidth - rest < least) {
-          if (box.hasBoundedWidth && rest > box.maxWidth) {
+          // What follows the name kept whole, the name cut, unless that
+          // alone is too wide (a narrow row, a long age): then it all
+          // reads as one line, cut at its end.
+          if (box.hasBoundedWidth &&
+              rest > box.maxWidth &&
+              width(after) < box.maxWidth) {
             return Row(
               children: [
                 Flexible(

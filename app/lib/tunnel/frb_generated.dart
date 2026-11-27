@@ -7,6 +7,7 @@ import 'api/account.dart';
 import 'api/dm.dart';
 import 'api/dm_transfer.dart';
 import 'api/tunnel.dart';
+import 'api/windows.dart';
 
 import 'dart:async';
 import 'dart:convert';
@@ -70,7 +71,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -16327064;
+  int get rustContentHash => 1974264993;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -598,6 +599,11 @@ abstract class RustLibApi extends BaseApi {
   Future<DmView> crateApiDmDmViewDefault();
 
   void crateApiTunnelFreshRuntime();
+
+  Future<bool> crateApiWindowsLoopbackPeerSameUser({
+    required int serverPort,
+    required int clientPort,
+  });
 
   Future<TunnelHandle> crateApiTunnelOpenTunnel({
     required String deviceKey,
@@ -4604,6 +4610,41 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "fresh_runtime", argNames: []);
 
   @override
+  Future<bool> crateApiWindowsLoopbackPeerSameUser({
+    required int serverPort,
+    required int clientPort,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_u_16(serverPort, serializer);
+          sse_encode_u_16(clientPort, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 108,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateApiWindowsLoopbackPeerSameUserConstMeta,
+        argValues: [serverPort, clientPort],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiWindowsLoopbackPeerSameUserConstMeta =>
+      const TaskConstMeta(
+        debugName: "loopback_peer_same_user",
+        argNames: ["serverPort", "clientPort"],
+      );
+
+  @override
   Future<TunnelHandle> crateApiTunnelOpenTunnel({
     required String deviceKey,
     required String endpointId,
@@ -4621,7 +4662,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 108,
+            funcId: 109,
             port: port_,
           );
         },
@@ -4656,7 +4697,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           return pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 109,
+            funcId: 110,
           )!;
         },
         codec: SseCodec(
@@ -4684,7 +4725,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 110,
+            funcId: 111,
             port: port_,
           );
         },

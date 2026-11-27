@@ -6,6 +6,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'backend.dart' show Backend, RequestFailure;
+import 'claktory_problem.dart'
+    show ClaktoryProblemPage, ProblemAction, ProblemText;
 import 'controls.dart';
 import 'devices.dart' show thisDeviceKind;
 import 'identity.dart';
@@ -95,7 +97,11 @@ class _AllowCommandState extends State<AllowCommand> {
   @override
   Widget build(BuildContext context) => Row(
     children: [
-      Expanded(child: CodeBlock(widget.command)),
+      Expanded(
+        child: isPhoneLayout(context)
+            ? _WrappedCommand(widget.command)
+            : CodeBlock(widget.command),
+      ),
       const SizedBox(width: Space.s),
       Button(
         label: _copied ? 'Copied' : 'Copy',
@@ -106,6 +112,41 @@ class _AllowCommandState extends State<AllowCommand> {
       ),
     ],
   );
+}
+
+/// A command on a phone: CodeBlock's box, wrapped onto more lines (broken
+/// anywhere) rather than scrolled sideways out of sight, so what Copy
+/// copies can be read (Lucy 49057).
+class _WrappedCommand extends StatelessWidget {
+  const _WrappedCommand(this.command);
+
+  final String command;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    return Container(
+      decoration: BoxDecoration(
+        color: palette.sidebar,
+        borderRadius: BorderRadius.circular(Radii.panel),
+        border: Border.all(color: palette.hairline),
+      ),
+      padding: const EdgeInsets.symmetric(
+        horizontal: Space.m,
+        vertical: Space.s + 2,
+      ),
+      child: Semantics(
+        label: command,
+        excludeSemantics: true,
+        // A zero-width space after every character lets it break
+        // anywhere; Copy copies [command] itself.
+        child: Text(
+          command.characters.join('\u200B'),
+          style: TypeScale.of(context).code.copyWith(color: palette.text),
+        ),
+      ),
+    );
+  }
 }
 
 /// This device used a pairing code and waits for the person to allow it
@@ -135,90 +176,71 @@ class _PairingWaitViewState extends State<PairingWaitView> {
       builder: (context, _) {
         final wait = backend.pairing.value;
         final refused = backend.refused.value;
-        final machine = wait?.pending.machine.isNotEmpty ?? false
+        // The code's name, as the strip and the confirm sheet say it
+        // (Zucchero's row 720); without one, the backend's hostname
+        // rather than an address.
+        final target = backend.target;
+        final machine = target != null && target.name.isNotEmpty
+            ? target.name
+            : wait?.pending.machine.isNotEmpty ?? false
             ? wait!.pending.machine
-            : backend.target?.label ?? 'your Mac';
-        return Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(Space.xl),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text(
-                    refused != null
-                        ? "Couldn't connect to $machine"
-                        : 'Waiting for $machine',
-                    style: TextStyles.title.copyWith(color: palette.text),
-                  ),
-                  const SizedBox(height: Space.s),
-                  if (refused != null)
-                    Text(
-                      refused,
-                      style: TextStyles.body.copyWith(color: palette.danger),
-                    )
-                  else ...[
-                    Text(
-                      'Allow this $thisDeviceKind on $machine. Its screen '
-                      'shows the same number:',
-                      style: TextStyles.body.copyWith(color: palette.textMuted),
-                    ),
-                    if (wait != null && wait.number.isNotEmpty) ...[
-                      const SizedBox(height: Space.xl),
-                      PairingDigits(wait.number),
-                      // A server has no screen: it's allowed from its
-                      // terminal, with the number checked there. Folded
-                      // away until asked for.
-                      if (wait.pending.deviceId.isNotEmpty) ...[
-                        const SizedBox(height: Space.xl),
-                        if (_commandShown) ...[
-                          Text(
-                            'No screen on $machine? Run this in a terminal '
-                            'there:',
-                            style: TextStyles.body.copyWith(
-                              color: palette.textMuted,
-                            ),
-                          ),
-                          const SizedBox(height: Space.s),
-                          AllowCommand(allowCommand(wait)),
-                          // Without a terminal (ssh without -t), a
-                          // Claktory that has devices refuses it (Matt's
-                          // case, Fugo's ruling 35297).
-                          const SizedBox(height: Space.s),
-                          Text(
-                            'Over SSH, connect with ssh -t so it runs in a '
-                            'terminal.',
-                            style: TextStyles.body.copyWith(
-                              color: palette.textMuted,
-                            ),
-                          ),
-                        ] else
-                          Align(
-                            alignment: AlignmentDirectional.centerStart,
-                            child: Button(
-                              label: 'No screen on $machine?',
-                              onPressed: () =>
-                                  setState(() => _commandShown = true),
-                            ),
-                          ),
-                      ],
-                    ],
-                  ],
-                  const SizedBox(height: Space.xl),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: Button(
-                      label: refused != null ? 'Use a new code' : 'Cancel',
-                      primary: refused != null,
-                      onPressed: widget.onCancel,
-                    ),
-                  ),
-                ],
+            : target?.label ?? 'your Mac';
+        final muted = TextStyles.body.copyWith(color: palette.textMuted);
+        if (refused != null) {
+          return ClaktoryProblemPage(
+            title: "Couldn't connect to $machine",
+            body: [
+              Text(
+                refused,
+                style: TextStyles.body.copyWith(color: palette.danger),
               ),
+            ],
+            primary: ProblemAction('Use a new code', widget.onCancel),
+          );
+        }
+        return ClaktoryProblemPage(
+          title: 'Waiting for $machine',
+          body: [
+            // Since #546 the allowing device is never sent the digits:
+            // the person types what this screen shows there (Trish).
+            ProblemText(
+              'Allow this $thisDeviceKind on $machine, or on another device '
+              'that uses $machine, by typing the number this '
+              '$thisDeviceKind shows there:',
             ),
-          ),
+            if (wait != null && wait.number.isNotEmpty) ...[
+              const SizedBox(height: Space.m),
+              PairingDigits(wait.number),
+              // A server has no screen: it's allowed from its terminal,
+              // with the number checked there. Folded away until asked
+              // for.
+              if (wait.pending.deviceId.isNotEmpty) ...[
+                const SizedBox(height: Space.m),
+                if (_commandShown) ...[
+                  Text(
+                    'No screen on $machine? Run this in a terminal there:',
+                    style: muted,
+                  ),
+                  AllowCommand(allowCommand(wait)),
+                  // Without a terminal (ssh without -t), a Claktory that
+                  // has devices refuses it (Matt's case, Fugo's ruling
+                  // 35297).
+                  Text(
+                    'Over SSH, connect with ssh -t so it runs in a terminal.',
+                    style: muted,
+                  ),
+                ] else
+                  Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: Button(
+                      label: 'No screen on $machine?',
+                      onPressed: () => setState(() => _commandShown = true),
+                    ),
+                  ),
+              ],
+            ],
+          ],
+          quiet: [ProblemAction('Cancel', widget.onCancel)],
         );
       },
     );

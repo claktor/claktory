@@ -56,7 +56,7 @@ async fn a_suggestion_carries_the_agent_and_the_drafted_message_and_sends_nothin
     let (said, details) = suggest(&mut client, &mut view, args).await;
     assert_eq!(
         said,
-        "Suggested. The person sees a card with a button that opens Arjun's conversation with your message drafted; nothing is sent until they send it."
+        "Suggested. The person sees a request with a button that opens Arjun's conversation with your message drafted; nothing is sent until they send it."
     );
     let details: serde_json::Value = serde_json::from_str(&details).expect("details are JSON");
     assert_eq!(
@@ -83,7 +83,7 @@ async fn a_suggestion_names_an_agent_the_proposer_can_message_and_says_something
     let nobody = serde_json::json!({"agent": "Nobody", "message": MESSAGE, "reason": "Why not."});
     let (said, details) = suggest(&mut client, &mut view, nobody).await;
     assert_eq!(said, "No agent you can message is called \"Nobody\"; you can message: arjun.");
-    assert!(details.is_empty() || details == "{}", "no card for a refusal: {details}");
+    assert!(details.is_empty() || details == "{}", "no request for a refusal: {details}");
 
     let me = serde_json::json!({"agent": "Builder", "message": MESSAGE, "reason": "Why not."});
     assert_eq!(suggest(&mut client, &mut view, me).await.0, "That's you.");

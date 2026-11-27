@@ -19,11 +19,13 @@ import 'workbench.dart';
 /// keys, and what it does; one with nothing to do is disabled rather than
 /// left out, so the list doesn't shift.
 ///
-/// The keys are bound here, in Flutter. Showing them in the system's menu
-/// (UIKeyCommand, the menu bar and the ⌘-hold list) is the native side's,
-/// through the `factory/commands` channel (phase 1, with Tomás): once it
-/// takes them, the native menu runs them and these bindings stand down, so
-/// no key is handled twice.
+/// The keys are bound here, in Flutter, always. Showing them in the
+/// system's menu (UIKeyCommand, the menu bar and the ⌘-hold list) is the
+/// native side's, through the `factory/commands` channel (phase 1, with
+/// Tomás). A key UIKit runs as a menu command never reaches Flutter, and
+/// one that reaches Flutter isn't run again by the menu ([CommandMenu]),
+/// so no key is handled twice, whether or not the menu's keys fire (in the
+/// Simulator they don't: Zucchero's row 701).
 class WorkbenchCommand {
   const WorkbenchCommand({
     required this.id,
@@ -54,6 +56,8 @@ List<WorkbenchCommand> workbenchCommands({
   required WorkbenchFocus focus,
   required Agent? agent,
   VoidCallback? showPanes,
+  List<Agent> pins = const [],
+  void Function(Agent agent)? openPin,
 }) {
   final pinned = tier == WorkbenchTier.full && !focus.sidebarHidden;
   final sidebarShown = pinned || focus.overlayOpen;
@@ -145,8 +149,30 @@ List<WorkbenchCommand> workbenchCommands({
                 .of(agent.id, document)
                 .openPanel(DocumentPanel.search),
     ),
+    // The person's pinned agents (pinned-agents.md §7b): ⌘1 to ⌘9 open the
+    // first nine, named, as clicking a pin does. Only the pins there are:
+    // they end the list, so nothing after them shifts.
+    for (final (i, pin) in pins.take(9).indexed)
+      WorkbenchCommand(
+        id: 'open-pin-${i + 1}',
+        title: 'Open ${pin.name}',
+        keys: SingleActivator(_digits[i], meta: true),
+        run: openPin == null ? null : () => openPin(pin),
+      ),
   ];
 }
+
+const _digits = [
+  LogicalKeyboardKey.digit1,
+  LogicalKeyboardKey.digit2,
+  LogicalKeyboardKey.digit3,
+  LogicalKeyboardKey.digit4,
+  LogicalKeyboardKey.digit5,
+  LogicalKeyboardKey.digit6,
+  LogicalKeyboardKey.digit7,
+  LogicalKeyboardKey.digit8,
+  LogicalKeyboardKey.digit9,
+];
 
 /// Opens the find bar of the conversation on show.
 void _findInConversation() => FindSessions.instance.sessions.value
@@ -171,15 +197,21 @@ List<String> _cycle(WorkbenchTier tier, WorkbenchFocus focus, Agent agent) {
 /// (app/test/ipad/fixtures/commands/ has the messages).
 ///
 /// [publish] sends the commands whenever they change; native answers true
-/// when it shows them as UIKeyCommands and runs them itself (calling back
-/// `run` with the id), and from then on [native] is true and the Flutter
-/// bindings stand down, so no key is handled twice. Where nothing answers
-/// (the Mac, an iPhone, an older build), [native] stays false and Flutter
-/// binds the keys.
+/// when it shows them as UIKeyCommands (calling back `run` with the id when
+/// one is chosen or its keys pressed), and [native] is then true. Where
+/// nothing answers (the Mac, an iPhone, an older build) it stays false.
+/// Flutter binds the keys either way ([WorkbenchShortcuts], focus mode's
+/// own): a `run` for a command whose keys Flutter has just had is the same
+/// press, already handled there, and isn't run again.
 class CommandMenu extends ChangeNotifier {
   CommandMenu({this.channel = const MethodChannel(channelName)}) {
     channel.setMethodCallHandler(_handle);
+    HardwareKeyboard.instance.addHandler(_saw);
   }
+
+  /// How long after Flutter had a command's keys a `run` for it counts as
+  /// the same press.
+  static const samePress = Duration(milliseconds: 500);
 
   static const channelName = 'factory/commands';
 
@@ -189,12 +221,27 @@ class CommandMenu extends ChangeNotifier {
   var _native = false;
 
   var _runs = <String, VoidCallback>{};
+  var _keys = <String, SingleActivator>{};
+
+  /// When Flutter last had each command's keys, by id.
+  final _had = <String, DateTime>{};
   String? _sent;
   var _disposed = false;
+
+  /// Notes which commands' keys a key going down is; never handles it.
+  bool _saw(KeyEvent event) {
+    if (event is! KeyDownEvent) return false;
+    final now = DateTime.now();
+    for (final MapEntry(:key, :value) in _keys.entries) {
+      if (value.accepts(event, HardwareKeyboard.instance)) _had[key] = now;
+    }
+    return false;
+  }
 
   /// Sends [commands] unless they're what was sent last.
   Future<void> publish(List<WorkbenchCommand> commands) async {
     _runs = {for (final command in commands) command.id: ?command.run};
+    _keys = {for (final command in commands) command.id: command.keys};
     final payload = encodeCommands(commands);
     final text = jsonEncode(payload);
     if (text == _sent) return;
@@ -217,6 +264,9 @@ class CommandMenu extends ChangeNotifier {
     final id = (call.arguments as Map?)?['id'];
     final run = _runs[id];
     if (run == null) return false;
+    final had = _had.remove(id);
+    // The press Flutter's binding already ran.
+    if (had != null && DateTime.now().difference(had) < samePress) return true;
     run();
     return true;
   }
@@ -224,6 +274,7 @@ class CommandMenu extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    HardwareKeyboard.instance.removeHandler(_saw);
     channel.setMethodCallHandler(null);
     super.dispose();
   }
@@ -268,9 +319,9 @@ String keyCommandInput(LogicalKeyboardKey key) => switch (key) {
   _ => key.keyLabel.toLowerCase(),
 };
 
-/// Binds [commands]' keys over [child], unless the system's menu runs them
-/// ([native]); disabled ones are left unbound, so their keys reach what's
-/// focused. Esc ([escape]) is never a menu item: it's always bound here.
+/// Binds [commands]' keys over [child], whether or not the system's menu
+/// shows them too ([CommandMenu]); disabled ones are left unbound, so their
+/// keys reach what's focused. Esc ([escape]) is never a menu item: it's always bound here.
 /// [child] is a focus scope of its own, so a hardware keyboard's keys
 /// reach these bindings even when nothing in it is focused.
 class WorkbenchShortcuts extends StatefulWidget {
@@ -279,7 +330,6 @@ class WorkbenchShortcuts extends StatefulWidget {
     required this.commands,
     required this.child,
     this.escape,
-    this.native = false,
   });
 
   final List<WorkbenchCommand> commands;
@@ -287,9 +337,6 @@ class WorkbenchShortcuts extends StatefulWidget {
 
   /// What Esc does here, if anything: close what's open over the window.
   final VoidCallback? escape;
-
-  /// Whether the system's menu handles [commands]' keys.
-  final bool native;
 
   @override
   State<WorkbenchShortcuts> createState() => _WorkbenchShortcutsState();
@@ -331,8 +378,7 @@ class _WorkbenchShortcutsState extends State<WorkbenchShortcuts> {
   @override
   Widget build(BuildContext context) => CallbackShortcuts(
     bindings: {
-      if (!widget.native)
-        for (final command in widget.commands) command.keys: ?command.run,
+      for (final command in widget.commands) command.keys: ?command.run,
       const SingleActivator(LogicalKeyboardKey.escape): ?widget.escape,
     },
     child: FocusScope(node: _scope, autofocus: true, child: widget.child),

@@ -202,3 +202,83 @@ async fn a_files_pane_or_a_watching_connection_gets_that_projects_tree_too() {
     };
     tokio::time::timeout(std::time::Duration::from_secs(10), closed).await.expect("Blog's files close when no one shows them");
 }
+
+/// How long until the focused project's tree is `want`, after `change`.
+async fn shown_after(client: &mut Client, view: &mut View, change: impl FnOnce(), want: &[&str]) -> std::time::Duration {
+    let started = std::time::Instant::now();
+    change();
+    let seen = tokio::time::timeout(std::time::Duration::from_secs(10), view.follow(client, |view| view.tree() == want)).await;
+    assert!(seen.is_ok(), "never shown: {want:?}, the tree is {:?}", view.tree());
+    started.elapsed()
+}
+
+/// Polpo's explorer.md: the folders an explorer lists are watched rather
+/// than listed twice a second, so a file made, removed or renamed shows
+/// within a moment (about 150 ms; a second at most here, under a loaded
+/// test run), in a root and in a folder opened after the watch began; the
+/// .factoryignore written in place too. The backstop is 20 seconds, so
+/// none of these is it.
+#[tokio::test]
+async fn files_made_removed_or_renamed_show_within_a_moment() {
+    let dir = temp_dir();
+    let (addr, _factory) = start(&dir).await;
+    let (mut client, _, _) = Client::connect(addr).await;
+    let mut view = View::default();
+    apply_request(&mut client, &mut view, create_project("Site", Path::new(""))).await;
+    let folder = dir.join("home/workspace/site");
+    std::fs::create_dir_all(folder.join("src")).expect("mkdir");
+    std::fs::write(folder.join("src/main.rs"), "").expect("write");
+    apply_request(&mut client, &mut view, focus("site")).await;
+    assert_eq!(view.tree(), ["src/", ".factoryignore"]);
+    let moment = std::time::Duration::from_secs(1);
+    let path = |name: &str| folder.join(name);
+
+    // In the root.
+    let took = shown_after(&mut client, &mut view, || std::fs::write(path("a.md"), "").unwrap(), &["src/", ".factoryignore", "a.md"]).await;
+    assert!(took < moment, "made: {took:?}");
+    let renamed = || std::fs::rename(path("a.md"), path("b.md")).unwrap();
+    let took = shown_after(&mut client, &mut view, renamed, &["src/", ".factoryignore", "b.md"]).await;
+    assert!(took < moment, "renamed: {took:?}");
+    let took = shown_after(&mut client, &mut view, || std::fs::remove_file(path("b.md")).unwrap(), &["src/", ".factoryignore"]).await;
+    assert!(took < moment, "removed: {took:?}");
+
+    // In a folder opened since.
+    apply_request(&mut client, &mut view, expand("src", true)).await;
+    assert_eq!(view.tree(), ["src/", "  main.rs", ".factoryignore"]);
+    let made = || std::fs::write(path("src/lib.rs"), "").unwrap();
+    let took = shown_after(&mut client, &mut view, made, &["src/", "  lib.rs", "  main.rs", ".factoryignore"]).await;
+    assert!(took < moment, "made in src: {took:?}");
+    let renamed = || std::fs::rename(path("src/lib.rs"), path("src/mod.rs")).unwrap();
+    let took = shown_after(&mut client, &mut view, renamed, &["src/", "  main.rs", "  mod.rs", ".factoryignore"]).await;
+    assert!(took < moment, "renamed in src: {took:?}");
+    let made = || std::fs::create_dir(path("src/ui")).unwrap();
+    let took = shown_after(&mut client, &mut view, made, &["src/", "  ui/", "  main.rs", "  mod.rs", ".factoryignore"]).await;
+    assert!(took < moment, "a folder made in src: {took:?}");
+    let removed = || std::fs::remove_file(path("src/mod.rs")).unwrap();
+    let took = shown_after(&mut client, &mut view, removed, &["src/", "  ui/", "  main.rs", ".factoryignore"]).await;
+    assert!(took < moment, "removed in src: {took:?}");
+
+    // A file written in place changes nothing shown; the .factoryignore
+    // written in place does.
+    std::fs::write(path("src/main.rs"), "fn main() {}").unwrap();
+    let hide = || std::fs::write(path(".factoryignore"), "ui/\n").unwrap();
+    let took = shown_after(&mut client, &mut view, hide, &["src/", "  main.rs", ".factoryignore"]).await;
+    assert!(took < moment, ".factoryignore written: {took:?}");
+    // Replaced by a rename, as editors save it, and written in place after.
+    let replaced = || {
+        std::fs::write(path(".factoryignore.new"), "main.rs\n").unwrap();
+        std::fs::rename(path(".factoryignore.new"), path(".factoryignore")).unwrap();
+    };
+    let took = shown_after(&mut client, &mut view, replaced, &["src/", "  ui/", ".factoryignore"]).await;
+    assert!(took < moment, ".factoryignore replaced: {took:?}");
+    let written = || std::fs::write(path(".factoryignore"), "").unwrap();
+    let took = shown_after(&mut client, &mut view, written, &["src/", "  ui/", "  main.rs", ".factoryignore"]).await;
+    assert!(took < moment, ".factoryignore written after its rename: {took:?}");
+
+    // A folder closed isn't watched for the tree: what changes there shows
+    // once it's opened again.
+    apply_request(&mut client, &mut view, expand("src", false)).await;
+    std::fs::write(path("src/later.rs"), "").unwrap();
+    apply_request(&mut client, &mut view, expand("src", true)).await;
+    assert_eq!(view.tree(), ["src/", "  ui/", "  later.rs", "  main.rs", ".factoryignore"]);
+}

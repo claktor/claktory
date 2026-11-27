@@ -72,11 +72,11 @@ pub(crate) const WITHDRAW_TOOL: &str = "proposal_withdraw";
 /// Changes one of the agent's own proposals still waiting (#428).
 pub(crate) const UPDATE_TOOL: &str = "proposal_update";
 
-const UPDATE_ABOUT: &str = "Change one of your proposals to Rivet still waiting for the person, in place, when what you propose changes but still needs Rivet: a detail was wrong, or the need moved. id: the proposal's id, which propose_to_rivet's result gave; message: the whole new message, standing alone; reason: optional, why it changed, in a short line they read on the card (at most 300 characters). Their card redraws where it is, marked updated, without counting again or notifying them again; approving the version before is refused, so they look again. At most 10 changes per proposal; take back one that no longer applies with proposal_withdraw instead. You can change only your own proposals.";
+const UPDATE_ABOUT: &str = "Change one of your proposals to Rivet still waiting for the person, in place, when what you propose changes but still needs Rivet: a detail was wrong, or the need moved. id: the proposal's id, which propose_to_rivet's result gave; message: the whole new message, standing alone; reason: optional, why it changed, in a short line they read in the request (at most 300 characters). Their request redraws where it is, marked updated, without counting again or notifying them again; approving the version before is refused, so they look again. At most 10 changes per proposal; take back one that no longer applies with proposal_withdraw instead. You can change only your own proposals.";
 
 const WITHDRAW_ABOUT: &str = "Take back one of your proposals to Rivet still waiting for the person, as soon as it no longer applies: the need went away, or it was settled elsewhere. id: the proposal's id, which propose_to_rivet's result gave; reason: why, in a short line they read in Needs you's History (at most 300 characters). Without id, lists your proposals waiting, with their ids. It leaves their Needs you at once; a checklist item it was for stays as it is, so update the item yourself. You can take back only your own proposals.";
 
-const ABOUT: &str = "Propose a message for Rivet, the admin agent, which only the person can message: for a conclusion Rivet should act on, such as adding an agent. The person approves it, with a comment, or dismisses it, and you're told which; approved, Rivet gets it from the person. Write it to stand alone, with all the context Rivet needs: Rivet can't see your conversation. Say what's needed and why (the job, its scope, who it works with, the access it needs), never which model or effort: Rivet chooses those. item: the checklist item it's for (12 for #12, or Ana#12), whenever one waits on it: the proposal shows as that item in the person's Needs you, so don't also ask them about it. grants: when it asks Rivet to give something it gives only on the person's card (an app's access, a pipe widened, an app uninstalled keeping its data, Continue automatically), name each exactly, as that tool's arguments: {tool: \"apps_set_access\", args: {app, sources, agents}}, or pipes_settings, apps_uninstall (keep_data true) or models_auto_continue with theirs, reason left out. The card shows them in Claktory's words, and approving it lets Rivet make each once, within a day, without asking again; name only what the work needs.";
+const ABOUT: &str = "Propose a message for Rivet, the admin agent, which only the person can message: for a conclusion Rivet should act on, such as adding an agent. The person approves it, with a comment, or dismisses it, and you're told which; approved, Rivet gets it from the person. Write it to stand alone, with all the context Rivet needs: Rivet can't see your conversation. Say what's needed and why (the job, its scope, who it works with, the access it needs), never which model or effort: Rivet chooses those. item: the checklist item it's for (12 for #12, or Ana#12), whenever one waits on it: the proposal shows as that item in the person's Needs you, so don't also ask them about it. grants: when it asks Rivet to give something it gives only in a request the person approves (an app's access, a pipe widened, an app uninstalled keeping its data, Continue automatically), name each exactly, as that tool's arguments: {tool: \"apps_set_access\", args: {app, sources, agents}}, or pipes_settings, apps_uninstall (keep_data true) or models_auto_continue with theirs, reason left out. The request shows them in Claktory's words, and approving it lets Rivet make each once, within a day, without asking again; name only what the work needs.";
 
 /// Rivet: the admin agent proposals go to. The one with Rivet's id if it's
 /// an admin agent, else the first admin agent in the settings.
@@ -228,7 +228,7 @@ fn propose(
         String::new()
     } else {
         format!(
-            " Its id is {id}: if it stops applying before they decide on the card (they settle it in your chat, say), take it back with proposal_withdraw, or change it with proposal_update if what you propose changes."
+            " Its id is {id}: if it stops applying before they decide in the request (they settle it in your chat, say), take it back with proposal_withdraw, or change it with proposal_update if what you propose changes."
         )
     };
     let said =
@@ -753,7 +753,7 @@ fn update(factory: &Arc<Factory>, agent: &str, args: UpdateArgs) -> Result<ToolR
     }
     let left = MAX_UPDATES - (proposal.revision - 1);
     let mut said = format!(
-        "Changed proposal {number}: {person}'s card shows it as it is now, marked updated{}, without notifying them again. Approving the version before is refused, so they look again.",
+        "Changed proposal {number}: {person}'s request shows it as it is now, marked updated{}, without notifying them again. Approving the version before is refused, so they look again.",
         if proposal.update_reason.is_empty() { "" } else { " with your reason" }
     );
     said.push_str(&match left {

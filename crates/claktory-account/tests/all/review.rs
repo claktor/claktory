@@ -437,3 +437,51 @@ async fn only_the_review_box_gets_a_relay_token_for_a_review_account() {
     let answer = relay_token(&instance, &earlier).await;
     assert_eq!((answer.status, answer.error().as_str()), (403, "review_account"), "{}", answer.text());
 }
+
+/// Fugo 46822: the box's key is pinned, so a reviewer signing it out
+/// (#524) doesn't keep it out: it signs in to the review email again with
+/// the same key, its verify still signed by it, and gets a relay token.
+/// Any other retired key stays retired, the box's too with another email.
+#[tokio::test]
+async fn the_review_box_signs_in_again_with_its_pinned_key_after_signing_out() {
+    let mut review_box = Claktory::new("198.51.100.60");
+    let instance = with_review_box(&review_box).await;
+    let first = sign_in_box(&instance, &review_box).await.json::<SignedIn>();
+    review_box.token = first.machine_token;
+    review_box.epoch = first.epoch;
+    let answer = instance.signed(&review_box, "POST", "/v1/claktories/sign-out", &json!({}), None).await;
+    assert_eq!(answer.status, 200, "{}", answer.text());
+    assert_eq!(relay_token(&instance, &review_box).await.status, 401, "signed out");
+
+    // With any email but a review one, its key is retired as any is.
+    let answer = instance.start_sign_in(&review_box, "ana@example.com", "Review Mac").await;
+    assert_eq!((answer.status, answer.error().as_str()), (409, "backend_key_retired"), "{}", answer.text());
+
+    // Unsigned, its verify is refused as before.
+    let started: SignInStarted = instance.start_sign_in(&review_box, EMAIL, "Review Mac").await.json();
+    let answer = verify_signed(&instance, &review_box.ip, &started.request_id, None).await;
+    assert_eq!((answer.status, answer.error().as_str()), (403, "review_account"), "{}", answer.text());
+
+    // Signed: it's back, the same Claktory at the next epoch, on the relay.
+    instance.advance(1);
+    let answer = sign_in_box(&instance, &review_box).await;
+    assert_eq!(answer.status, 200, "{}", answer.text());
+    let again: SignedIn = answer.json();
+    assert_eq!((again.claktory_id.as_str(), again.epoch), (review_box.id.as_str(), first.epoch + 1));
+    review_box.token = again.machine_token;
+    review_box.epoch = again.epoch;
+    let answer = relay_token(&instance, &review_box).await;
+    assert_eq!(answer.status, 200, "{}", answer.text());
+
+    // An ordinary email's retired key: 409, as always.
+    let mut ordinary = Claktory::new("203.0.113.60");
+    instance.sign_in(&mut ordinary, "ana@example.com", "Mac mini").await;
+    instance.advance(1);
+    assert_eq!(instance.signed(&ordinary, "POST", "/v1/claktories/sign-out", &json!({}), None).await.status, 200);
+    let answer = instance.start_sign_in(&ordinary, "ana@example.com", "Mac mini").await;
+    assert_eq!((answer.status, answer.error().as_str()), (409, "backend_key_retired"), "{}", answer.text());
+
+    // A retired key that isn't the box's, with the review email: refused.
+    let answer = instance.start_sign_in(&ordinary, EMAIL, "Mac mini").await;
+    assert_eq!((answer.status, answer.error().as_str()), (409, "backend_key_retired"), "{}", answer.text());
+}

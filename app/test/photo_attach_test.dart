@@ -6,6 +6,7 @@
 // link; any other picture comes as a preview made for the screen, never
 // the whole original.
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:factory_app/agent_view.dart' show AgentView;
@@ -21,6 +22,10 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'harness.dart';
+
+/// A one-pixel PNG, a picture that really decodes.
+const _onePixel =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 
 Workspace _workspace() => Workspace(
   projects: [Project(id: 'p1', name: 'Factory', path: '/Users/me/factory')],
@@ -185,8 +190,7 @@ void main() {
       ),
     );
     await settle(tester);
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
+    // The card's field is open from the start.
     await tester.tap(find.bySemanticsLabel('Attach files').first);
     await pumpFrames(tester);
     final card = cardFilesKey('june', 'ask4');
@@ -275,6 +279,48 @@ void main() {
       backend.sent.where((m) => m.hasReadFile() && m.readFile.path == path),
       isEmpty,
     );
+  });
+
+  testWidgets('a photo waiting in the message box is decoded meanwhile, so '
+      "sent, it's in its bubble from the first frame (Zucchero's row 675)", (
+    tester,
+  ) async {
+    _iPhone();
+    final png = '${folder.path}/IMG_0001.png';
+    File(png).writeAsBytesSync(base64Decode(_onePixel));
+    final harness = await conversation(tester);
+    final backend = harness.backend;
+    await tester.runAsync(() => backend.attachments.add('june', [png]));
+    await pumpFrames(tester);
+    final ratio = MediaQuery.devicePixelRatioOf(
+      tester.element(find.byType(AgentView)),
+    );
+    final picture = sentPicture(png, ratio);
+    final cache = PaintingBinding.instance.imageCache;
+    final key = await picture.obtainKey(ImageConfiguration.empty);
+    expect(cache.containsKey(key), isTrue);
+    // Read and decoded for real, between frames.
+    for (var i = 0; i < 100 && !cache.statusForKey(key).keepAlive; i++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 10)),
+      );
+      await tester.pump();
+    }
+    expect(cache.statusForKey(key).keepAlive, isTrue);
+
+    backend.outbox.send(
+      'june',
+      'Look',
+      files: [backend.attachments.of('june').single],
+    );
+    await tester.pump();
+    final shown = find.descendant(
+      of: find.byType(TranscriptView),
+      matching: find.byWidgetPredicate((w) => w is RawImage && w.image != null),
+    );
+    expect(shown, findsOneWidget);
+    await _io(tester);
+    await tester.pump(const Duration(seconds: 2));
   });
 
   testWidgets("a picture sent from elsewhere comes as a preview made for "

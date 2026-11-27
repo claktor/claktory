@@ -607,13 +607,6 @@ void main() {
 
       // A comment is a reply (#370): one Submit, which neither accepts
       // nor rejects; the change stays open.
-      await tester.tap(
-        find.descendant(
-          of: find.byType(Commented),
-          matching: find.text('Add a comment'),
-        ),
-      );
-      await settle(tester);
       final field = find.descendant(
         of: find.byType(DecisionComment),
         matching: find.byType(EditableText),
@@ -623,7 +616,7 @@ void main() {
       expect(button('Accept'), findsNothing);
       expect(button('Reject'), findsNothing);
       expect(
-        button('The change stays open, and Builder gets your comment.'),
+        button('Submit sends your words instead of accepting.'),
         findsOneWidget,
       );
       await tester.tap(button('Submit'));

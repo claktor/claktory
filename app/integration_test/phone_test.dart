@@ -199,7 +199,7 @@ Future<void> tour(WidgetTester tester) async {
       ),
     ),
   );
-  await tester.tap(find.bySemanticsLabel('Extensions'));
+  await tester.tap(find.bySemanticsLabel(RegExp('^More options for ')));
   await hold(tester, seconds: 5);
   await tester.tap(find.text(_tourFile.split('/').last));
   await hold(tester, seconds: 6);

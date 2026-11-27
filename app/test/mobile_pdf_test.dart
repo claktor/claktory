@@ -146,7 +146,7 @@ Future<Harness> _phone(
   addTearDown(tester.view.resetPadding);
   await harness.show(tester, size: size);
   await pumpFrames(tester);
-  await tester.tap(find.bySemanticsLabel('Extensions'));
+  await tester.tap(find.bySemanticsLabel(RegExp('^More options for ')));
   await pumpFrames(tester);
   await tester.tap(find.text('paper.pdf').last);
   for (var i = 0; i < 4; i++) {
@@ -390,7 +390,7 @@ void main() {
     addTearDown(tester.view.resetPadding);
     await harness.show(tester, size: const Size(393, 852));
     await pumpFrames(tester);
-    await tester.tap(find.bySemanticsLabel('Extensions'));
+    await tester.tap(find.bySemanticsLabel(RegExp('^More options for ')));
     await pumpFrames(tester);
     await tester.tap(find.text('paper.pdf').last);
     for (var i = 0; i < 6; i++) {
@@ -486,7 +486,7 @@ void main() {
       };
     await harness.show(tester, size: const Size(393, 852));
     await pumpFrames(tester);
-    await tester.tap(find.bySemanticsLabel('Extensions'));
+    await tester.tap(find.bySemanticsLabel(RegExp('^More options for ')));
     await pumpFrames(tester);
     await tester.tap(find.text('paper.pdf').last);
     for (var i = 0; i < 6; i++) {

@@ -179,7 +179,7 @@ async fn the_person_runs_a_command_once_and_the_agent_hears_how_it_went_secrets_
     // A reply is no answer to it: Execute or dismiss.
     let reply = v1::AnswerAsk { agent_id: "builder".into(), seq, reply: true, text: "Which folder?".into(), ..Default::default() };
     let refused = apply_request(&mut client, &mut view, client_message::Body::AnswerAsk(reply)).await;
-    assert_eq!(error(&refused), "This card runs a command: Execute it or dismiss it.");
+    assert_eq!(error(&refused), "This request runs a command: Execute it or dismiss it.");
     // And the agent can't change what it runs.
     let (said, _) = call(&mut client, &mut view, "ask_update", json!({"id": "1", "body": "Another reason."})).await;
     assert!(said.contains("can't be changed"), "{said}");
@@ -207,6 +207,34 @@ async fn the_person_runs_a_command_once_and_the_agent_hears_how_it_went_secrets_
     // Once: a second Execute runs nothing.
     let again = apply_request(&mut client, &mut view, execute(seq)).await;
     assert_eq!(error(&again), "This question was already answered.");
+
+    // History keeps it as a command, under Claktory's heading, with how it
+    // ran but not what it printed; one dismissed, likewise.
+    let dismissed = ask_to_run(&mut client, &mut view, "rm -rf build", None).await;
+    let dismiss = v1::AnswerAsk { agent_id: "builder".into(), seq: dismissed, dismiss: true, ..Default::default() };
+    assert!(matches!(apply_request(&mut client, &mut view, client_message::Body::AnswerAsk(dismiss)).await, Body::Ack(_)));
+    let history = |query: &str| client_message::Body::ListNeedsYouHistory(v1::ListNeedsYouHistory { query: query.into(), before_ms: 0, limit: 10 });
+    let Body::NeedsYouHistory(found) = client.request(history("")).await.body else { panic!("no history") };
+    let kinds: Vec<_> = found.records.iter().map(|record| (record.kind(), record.outcome())).collect();
+    assert_eq!(
+        kinds,
+        [(v1::NeedsYouRecordKind::Command, v1::NeedsYouOutcome::Dismissed), (v1::NeedsYouRecordKind::Command, v1::NeedsYouOutcome::Approved)]
+    );
+    let ran_record = &found.records[1];
+    assert_eq!(ran_record.title, format!("Run this command on {}", asked.machine));
+    assert_eq!(ran_record.seq, seq);
+    let kept = ran_record.command.clone().expect("its command");
+    assert_eq!((kept.command.as_str(), kept.cwd.as_str()), (command.as_str(), asked.cwd.as_str()));
+    let kept_run = kept.run.expect("how it ran");
+    assert_eq!((kept_run.state(), kept_run.exit_code, kept_run.duration_ms), (CommandRunState::Exited, 3, ran.duration_ms));
+    assert!(kept_run.output.is_empty(), "never what it printed: {kept_run:?}");
+    let not_run = found.records[0].command.clone().expect("its command");
+    assert_eq!((not_run.command.as_str(), not_run.run.is_none()), ("rm -rf build", true));
+    // Found by its command, and by the agent's own title.
+    for query in ["token.txt", "build folder"] {
+        let Body::NeedsYouHistory(found) = client.request(history(query)).await.body else { panic!("no history") };
+        assert_eq!(found.records.iter().map(|record| record.seq).collect::<Vec<_>>(), [seq], "{query}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -271,7 +299,7 @@ async fn only_an_app_that_shows_the_command_runs_it_and_nothing_waits_for_a_term
     // it showed only the title and body, so nothing runs.
     let approve = v1::AnswerAsk { agent_id: "builder".into(), seq, ..Default::default() };
     let unconfirmed = apply_request(&mut client, &mut view, client_message::Body::AnswerAsk(approve)).await;
-    assert_eq!(error(&unconfirmed), "This card runs a command, which this version of the app can't show: update Claktory to run it, or dismiss it.");
+    assert_eq!(error(&unconfirmed), "This request runs a command, which this version of the app can't show: update Claktory to run it, or dismiss it.");
     assert_eq!(card(&view, seq).state(), AskPersonState::Pending, "still waiting");
     let executed = apply_request(&mut client, &mut view, execute(seq)).await;
     assert!(matches!(executed, Body::Ack(_)), "{executed:?}");
@@ -279,7 +307,7 @@ async fn only_an_app_that_shows_the_command_runs_it_and_nothing_waits_for_a_term
     assert_eq!(ran.state(), CommandRunState::Exited, "{ran:?}");
     assert!(ran.output.contains("not a tty") && ran.output.contains("read=1"), "{ran:?}");
     assert!(ran.duration_ms < 20_000, "nothing waited: {ran:?}");
-    assert!(card(&view, seq).command.expect("a command").warnings.len() == 1, "the warning stays on the card");
+    assert!(card(&view, seq).command.expect("a command").warnings.len() == 1, "the warning stays in the request");
 
     // sudo (never the real one: /bin/sleep, named sudo) shows as waiting
     // for a fingerprint or a password while it runs.

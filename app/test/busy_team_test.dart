@@ -108,7 +108,6 @@ void main() {
       '_Header',
       '_ProjectRow',
       '_FooterButtons',
-      'ExtensionBar',
     ]) {
       expect(built[untouched], isNull, reason: '$untouched built: $built');
     }

@@ -101,13 +101,51 @@ class TimeWarp {
       while (e < events.length && events[e] < a) {
         e++;
       }
-      for (; e < events.length && events[e] <= b; e++) {
-        busy(events[e], events[e]);
+      // busy() for each event, inline: millions at a year or more, so
+      // with no call for each (Polpo).
+      final n = events.length;
+      var last = previous;
+      for (; e < n; e++) {
+        final t = events[e];
+        if (t > b) break;
+        if (t - last > quietGap) gaps.add(Gap(last, t));
+        if (t > last) last = t;
       }
+      previous = last;
       at = math.max(at, b);
     }
     if (at < end) unknown(at, end);
     if (end - previous > quietGap) gaps.add(Gap(previous, end));
+    return TimeWarp._map(
+      start: start,
+      end: end,
+      gaps: gaps,
+      speed: speed,
+      seconds: seconds,
+      limited: limited,
+    );
+  }
+
+  /// The same history at Auto with its busy part in [seconds], whatever
+  /// its length (a video's): only re-timed, its quiet stretches as they
+  /// were found, so trying many lengths costs little (Polpo).
+  TimeWarp retimed(double seconds) => TimeWarp._map(
+    start: start,
+    end: end,
+    gaps: gaps,
+    speed: HistorySpeed.auto,
+    seconds: seconds,
+    limited: false,
+  );
+
+  factory TimeWarp._map({
+    required double start,
+    required double end,
+    required List<Gap> gaps,
+    required HistorySpeed speed,
+    required double seconds,
+    required bool limited,
+  }) {
     final total = math.max(0.0, end - start);
     final quiet = gaps.fold(0.0, (sum, gap) => sum + gap.length);
     // Auto: the busy part in [seconds], within Auto's limits unless not
@@ -154,12 +192,24 @@ class TimeWarp {
   /// How long the whole history plays, in seconds.
   double get duration => _p.last;
 
+  /// The segment [playAt] found last: a frame asks about times close
+  /// together, in order, tens of thousands of times (Polpo).
+  var _hint = 0;
+
   /// When [h] (history ms) plays, in seconds from the start.
   double playAt(double h) {
-    if (h <= _h.first) return 0;
-    if (h >= _h.last) return _p.last + (h - _h.last) / rate;
-    final i = _segment(_h, h);
-    return _lerp(_h[i], _h[i + 1], _p[i], _p[i + 1], h);
+    final hs = _h;
+    final n = hs.length;
+    if (h <= hs[0]) return 0;
+    if (h >= hs[n - 1]) return _p[n - 1] + (h - hs[n - 1]) / rate;
+    var i = _hint;
+    if (i >= n - 1 || hs[i] > h || hs[i + 1] <= h) {
+      i = i + 2 < n && hs[i + 1] <= h && hs[i + 2] > h
+          ? i + 1
+          : _segment(hs, h);
+      _hint = i;
+    }
+    return _lerp(hs[i], hs[i + 1], _p[i], _p[i + 1], h);
   }
 
   /// What history time plays at [p] seconds.

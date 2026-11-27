@@ -146,7 +146,7 @@ async fn the_watch_tells_once_when_a_sign_holds_in_both_windows() {
     factoryd::swarm_check_for_test(&factory, t).expect("checked");
     let [event] = told(&db).try_into().expect("one event");
     assert!(event.starts_with("Team health: a warning sign turned red"), "{event}");
-    assert!(event.contains("Silent waits: 1 item waits on the person with no card for them, the oldest 11 hours (owners: lea)."), "{event}");
+    assert!(event.contains("Silent waits: 1 item waits on the person with no request for them, the oldest 11 hours (owners: lea)."), "{event}");
     assert!(event.contains("approves") && !event.contains("MARKER"), "{event}");
 
     // An hour later, still red: nothing more.

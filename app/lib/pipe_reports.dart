@@ -52,7 +52,11 @@ List<Agent> reportCandidates(Workspace workspace, String projectId) {
 
 /// Whether [agent] can use extension [id]: any, unless it's limited to a
 /// pipe (then Ask and Reports) or reads reports (then also its database).
+/// Errands are only a contained agent's, and all it keeps besides Ask
+/// (#435: the backend's KEPT_EXTENSIONS).
 bool containedKeeps(Agent agent, String id) {
+  if (agent.contained) return id == 'errands' || id == 'ask';
+  if (id == 'errands') return false;
   if (agent.quarantined) return id == 'ask' || id == 'handoff';
   if (agent.readsReports) {
     return id == 'ask' || id == 'handoff' || id == 'database';

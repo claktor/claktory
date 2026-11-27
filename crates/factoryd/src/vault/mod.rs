@@ -13,6 +13,7 @@
 //! given to a command.
 
 mod account;
+pub(crate) mod account_recovery;
 pub(crate) mod asks;
 pub mod backup;
 pub(crate) mod connections;
@@ -27,6 +28,7 @@ pub(crate) mod import;
 pub mod memory;
 pub(crate) mod recovery;
 pub(crate) mod requests;
+pub(crate) mod saved;
 pub(crate) mod signins;
 pub(crate) mod sites;
 
@@ -728,7 +730,8 @@ impl Vault {
     pub(crate) fn protectors(&self) -> Result<(String, Vec<Protector>), VaultError> {
         let inner = self.lock();
         let Some(db) = &inner.db else { return Err(VaultError::NoVault) };
-        let mut statement = db.prepare("SELECT kind, params, salt, sealed_vmk FROM protectors WHERE kind IN ('passphrase', 'recovery')")?;
+        let mut statement =
+            db.prepare("SELECT kind, params, salt, sealed_vmk FROM protectors WHERE kind IN ('passphrase', 'recovery', 'account-recovery')")?;
         let protectors = statement
             .query_map([], |row| Ok(Protector { kind: row.get(0)?, params: row.get(1)?, salt: row.get(2)?, sealed_vmk: row.get(3)? }))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -737,9 +740,22 @@ impl Vault {
 
     /// The vault's key, if `given` is its passphrase or recovery key. Slow
     /// (Argon2): call it off the async threads, without the vault's lock.
+    #[cfg(test)]
     pub(crate) fn check(vault_id: &str, protectors: &[Protector], given: &str) -> Option<Key> {
+        Self::check_which(vault_id, protectors, given).map(|(vmk, _)| vmk)
+    }
+
+    /// `check`, with the hash of the protector that opened (a recovery
+    /// key's generation, for `note_recovery_used`).
+    pub(crate) fn check_which(vault_id: &str, protectors: &[Protector], given: &str) -> Option<(Key, String)> {
+        use sha2::Digest;
+        let hash = |protector: &Protector| crypto::hex(&sha2::Sha256::digest(&protector.sealed_vmk)[..16]);
         for protector in protectors {
             let kek = match protector.kind.as_str() {
+                account_recovery::KIND => match account_recovery::open_with(vault_id, protector, given) {
+                    Some(vmk) => return Some((vmk, hash(protector))),
+                    None => continue,
+                },
                 "recovery" => {
                     let Some(bytes) = crypto::parse_recovery(given) else { continue };
                     crypto::derive(bytes.as_slice(), vault_id.as_bytes(), "claktory vault recovery v1")
@@ -751,7 +767,7 @@ impl Vault {
                 _ => continue,
             };
             if let Some(vmk) = crypto::open_key(&kek, &protector.sealed_vmk, &aad(&["vmk", vault_id, &protector.kind])) {
-                return Some(vmk);
+                return Some((vmk, hash(protector)));
             }
         }
         None
@@ -1355,6 +1371,9 @@ impl Vault {
             // Requests show only in the conversation of the agent that asked.
             proposals: connections::pending_proposals(db)?,
             recovery_key_unconfirmed: Self::recovery_unconfirmed(inner)?,
+            recovery_key_showable: Self::recovery_showable(inner)?,
+            recovery_key_used: Self::recovery_used(inner)?,
+            // The account's (#239) are the account module's, added by Factory.
             ..v1::VaultState::default()
         };
         Ok((state, recent))

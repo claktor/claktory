@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'characters/character.dart';
@@ -27,16 +28,6 @@ import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
 import 'state.dart';
 import 'selection.dart';
-
-/// Width of the extension bar between the sidebar and the content, with
-/// a pointer (a Mac); [extensionBarWidthOf] is the width where it is.
-const extensionBarWidth = 40.0;
-
-/// The extension bar's width where [context] is: [extensionBarWidth] with
-/// a pointer, a finger's target where touch comes first (an iPad, an
-/// Android tablet's panes), so its glyph buttons fit it whole.
-double extensionBarWidthOf(BuildContext context) =>
-    touchFirst(context) ? Metrics.of(context).target : extensionBarWidth;
 
 /// Width of an extension's panel on the right by default; the person can
 /// drag it between [panelMinWidth] and [panelMaxWidth]
@@ -72,98 +63,23 @@ Extension? openPanelOf(Workspace workspace, Agent? agent) {
   return null;
 }
 
-/// A glyph button for each extension [agent] has on: clicking one opens its
-/// panel, clicking the open one closes it. In the extension bar, and in the
-/// agent's header on a phone.
-List<Widget> extensionButtons(BuildContext context, Agent agent) {
-  final backend = AppScope.of(context);
-  final workspace = backend.workspace.workspace;
-  final open = openPanelOf(workspace, agent);
-  return [
-    for (final extension in enabledExtensions(workspace, agent))
-      // Glows when it's pointed out, and for its panel's items while the
-      // panel is closed.
-      Glow(
-        store: backend.highlights,
-        matches: (key) =>
-            key == 'extension:${agent.id}/${extension.id}' ||
-            (open?.id != extension.id &&
-                extension.id == 'checklist' &&
-                key.startsWith('checklist_item:${agent.id}#')),
-        child: HoverCard(
-          beside: true,
-          card: (context) => Text(extension.name),
-          child: GlyphButton(
-            label: extension.name,
-            active: open?.id == extension.id,
-            onTap: () => fireAndLog(
-              backend.openPanel(
-                agent.id,
-                open?.id == extension.id ? '' : extension.id,
-              ),
-            ),
-            glyph: (color) => ExtensionGlyph(
-              icon: extension.icon,
-              name: extension.name,
-              color: color,
-            ),
-          ),
-        ),
-      ),
-  ];
-}
+/// Over the conversation (a window with no room beside it): Esc closes
+/// [agent]'s panel. It takes the focus as it opens, so Esc reaches it;
+/// a click back in the conversation leaves it open until Close.
+class EscClosesPanel extends StatelessWidget {
+  const EscClosesPanel({super.key, required this.agent, required this.child});
 
-/// A thin column right of the sidebar with an icon for each extension the
-/// selected agent has on. Clicking one opens its panel; clicking the open
-/// one closes it.
-class ExtensionBar extends StatelessWidget {
-  const ExtensionBar({super.key, required this.agent});
-
-  /// The selected agent; null shows an empty bar, so nothing jumps.
-  final Agent? agent;
+  final Agent agent;
+  final Widget child;
 
   @override
-  Widget build(BuildContext context) => LayoutBuilder(
-    builder: (context, constraints) =>
-        _bar(context, bounded: constraints.maxHeight.isFinite),
+  Widget build(BuildContext context) => CallbackShortcuts(
+    bindings: {
+      const SingleActivator(LogicalKeyboardKey.escape): () =>
+          fireAndLog(AppScope.of(context).openPanel(agent.id, '')),
+    },
+    child: FocusScope(autofocus: true, child: child),
   );
-
-  Widget _bar(BuildContext context, {required bool bounded}) {
-    final palette = Palette.of(context);
-    final agent = this.agent;
-    Widget buttons(Agent agent) => Column(
-      children: [
-        for (final button in extensionButtons(context, agent))
-          Padding(
-            padding: const EdgeInsets.only(bottom: Space.xs),
-            child: button,
-          ),
-      ],
-    );
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: palette.sidebar,
-        border: Border(right: BorderSide(color: palette.hairline)),
-      ),
-      child: SizedBox(
-        width: extensionBarWidthOf(context),
-        child: Column(
-          children: [
-            const TitleSpace(),
-            // Many extensions in a short window (an iPad on its side)
-            // scroll, so the last can still be reached; inside a scroll
-            // of its own (an iPad's workbench) the bar is as tall as they
-            // are.
-            if (agent != null)
-              if (bounded)
-                Expanded(child: SingleChildScrollView(child: buttons(agent)))
-              else
-                buttons(agent),
-          ],
-        ),
-      ),
-    );
-  }
 }
 
 /// An extension's panel on the right of the window, beside [agent]: its

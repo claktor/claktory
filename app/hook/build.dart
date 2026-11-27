@@ -85,6 +85,13 @@ String rustFlags(String triple, {required String home}) => [
   if (androidTriples.contains(triple)) androidPageSizeFlag,
 ].join(' ');
 
+/// The file a code asset names: a file URI, or on Windows a plain path,
+/// whose drive letter would otherwise read as a URI scheme ("c:").
+File assetFile(String file) {
+  final uri = Uri.tryParse(file);
+  return uri != null && uri.scheme == 'file' ? File.fromUri(uri) : File(file);
+}
+
 /// Builds the private tunnel's Rust crate (rust/) into the app, through
 /// Flutter's native assets: no CocoaPods or Xcode changes, the same for iOS
 /// later.
@@ -112,8 +119,7 @@ void main(List<String> args) async {
     ).run(input: input, output: output);
     List<File> libraries() => [
       for (final asset in output.build().assets.encodedAssets)
-        if (asset.encoding['file'] case final String file)
-          File.fromUri(Uri.parse(file)),
+        if (asset.encoding['file'] case final String file) assetFile(file),
     ];
     if (shared.isEmpty) {
       await rust();

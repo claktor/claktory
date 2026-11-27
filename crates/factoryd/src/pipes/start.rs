@@ -157,7 +157,7 @@ pub(crate) fn open(factory: &Factory, agent: &str, fill: Fill) -> Result<(String
     let purpose = fill.purpose.trim().to_owned();
     if code_like(&name) || code_like(&purpose) {
         return Err(format!(
-            "That looks like a pipe's code. Never pass one on: {person} pastes it on the card themselves, and you never see it."
+            "That looks like a pipe's code. Never pass one on: {person} pastes it in the request themselves, and you never see it."
         ));
     }
     if name.chars().count() > MAX_NAME || purpose.chars().count() > MAX_PURPOSE {
@@ -172,14 +172,14 @@ pub(crate) fn open(factory: &Factory, agent: &str, fill: Fill) -> Result<(String
         params![id, agent, kind_word(fill.kind), project, name, purpose, now_ms()],
     );
     if let Err(error) = inserted {
-        return Err(format!("Couldn't open the card: {error}"));
+        return Err(format!("Couldn't open the request: {error}"));
     }
     let said = match fill.kind {
         Kind::Accept => format!(
-            "Opened a card in your conversation for {person} to connect {project_name} with the code they were given: they paste it there themselves, see whom it says it's from, and connect; then both people approve the pipe in it. You never see the code. You'll be told when it's connected."
+            "Opened a request in your conversation for {person} to connect {project_name} with the code they were given: they paste it there themselves, see whom it says it's from, and connect; then both people approve the pipe in it. You never see the code. You'll be told when it's connected."
         ),
         _ => format!(
-            "Opened a card in your conversation for {person} to make the invite for \"{name}\" in {project_name}: they check it, make it, and send its code to the other person themselves. You never see the code. You'll be told when it's made."
+            "Opened a request in your conversation for {person} to make the invite for \"{name}\" in {project_name}: they check it, make it, and send its code to the other person themselves. You never see the code. You'll be told when it's made."
         ),
     };
     let details = serde_json::json!({
@@ -250,8 +250,8 @@ pub(crate) fn forget(store: &Store, agent: &str) -> rusqlite::Result<()> {
 pub(crate) fn check(factory: &Factory, start: &str, kind: Kind) -> Result<(), RequestError> {
     match row(&factory.store, start.trim()) {
         Some(row) if row.kind == kind && row.state == State::Waiting => Ok(()),
-        Some(row) if row.kind == kind => Err(RequestError::Pipe("This card is already closed.".to_owned())),
-        _ => Err(RequestError::Pipe("This card no longer exists.".to_owned())),
+        Some(row) if row.kind == kind => Err(RequestError::Pipe("This request is already closed.".to_owned())),
+        _ => Err(RequestError::Pipe("This request no longer exists.".to_owned())),
     }
 }
 
@@ -289,11 +289,11 @@ pub(crate) fn dismiss(factory: &Arc<Factory>, request: &v1::DismissPipeStart) ->
     match row(&factory.store, start) {
         Some(row) if row.agent == request.agent_id && row.state == State::Waiting => {}
         Some(row) if row.agent == request.agent_id => return Ok(()),
-        _ => return Err(RequestError::Pipe("This card no longer exists.".to_owned())),
+        _ => return Err(RequestError::Pipe("This request no longer exists.".to_owned())),
     }
     let Some(row) = end(factory, start, State::Dismissed, "") else { return Ok(()) };
     let person = factory.person_capitalized();
-    tell_closed(factory, &row, &format!("{person} closed the card"), &crate::decisions::note(&person, comment));
+    tell_closed(factory, &row, &format!("{person} closed the request"), &crate::decisions::note(&person, comment));
     Ok(())
 }
 
@@ -361,7 +361,7 @@ pub(crate) fn expire_before(factory: &Arc<Factory>, before: i64) {
     };
     for id in ids {
         if let Some(row) = end(factory, &id, State::Dismissed, "") {
-            tell_closed(factory, &row, "The card waited a day without being used, so it closed", "");
+            tell_closed(factory, &row, "The request waited a day without being used, so it closed", "");
         }
     }
 }
@@ -475,7 +475,7 @@ fn standing(record: &Record, person: &str) -> String {
         (Pipe::Open, _) => "open".to_owned(),
         (Pipe::Paused, Pause::Loop) => {
             format!(
-                "paused: the agents talked on their own; {person} can continue it, or you can ask them to on a card (pipes_settings resume)"
+                "paused: the agents talked on their own; {person} can continue it, or you can ask them to in a request (pipes_settings resume)"
             )
         }
         (Pipe::Paused, Pause::Peer) => "paused by the other side".to_owned(),

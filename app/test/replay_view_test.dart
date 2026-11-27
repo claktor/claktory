@@ -125,6 +125,110 @@ void main() {
     expect(find.text('Most with You'), findsOneWidget);
   });
 
+  testWidgets('paused, another project redraws the pulses and glows at '
+      "once, without the playhead moving (Abbacchio's row 1613)", (
+    tester,
+  ) async {
+    await showHistory(tester);
+    await tester.tap(mode('History'));
+    await pumpFrames(tester);
+    final board = tester.widget<HistoryBoard>(find.byType(HistoryBoard));
+    final controller = board.controller;
+    controller.pause();
+    await pumpFrames(tester);
+    final painters = [
+      for (final paint in tester.widgetList<CustomPaint>(
+        find.descendant(
+          of: find.byType(HistoryBoard),
+          matching: find.byType(CustomPaint),
+        ),
+      ))
+        if (paint.painter case final painter?
+            when const {
+              '_PulsePainter',
+              '_GlowPainter',
+            }.contains(painter.runtimeType.toString()))
+          painter,
+    ];
+    expect(painters, hasLength(2));
+    var repainted = 0;
+    for (final painter in painters) {
+      painter.addListener(() => repainted++);
+    }
+    final at = controller.time.value;
+    controller.showProject('app');
+    expect(controller.time.value, at);
+    expect(repainted, greaterThanOrEqualTo(2));
+  });
+
+  // Polpo 49940: a call for each dot was the frame's biggest cost at a
+  // year or more; they're drawn as round points, a call a color and size.
+  testWidgets('pulses in flight are drawn as points, a call per color and '
+      'size, not one per dot', (tester) async {
+    await showHistory(tester);
+    await tester.tap(mode('History'));
+    await pumpFrames(tester);
+    final controller = tester
+        .widget<HistoryBoard>(find.byType(HistoryBoard))
+        .controller;
+    controller.pause();
+    // Rivet's message to Kai at 3:00, a fifth of a second on its way.
+    controller.seek(
+      controller.historyAt(controller.playAt(day1 + 3.0 * hour) + 0.2),
+    );
+    await pumpFrames(tester);
+    final pulses = find.byWidgetPredicate(
+      (widget) =>
+          widget is CustomPaint &&
+          widget.painter.runtimeType.toString() == '_PulsePainter',
+    );
+    expect(pulses, findsOneWidget);
+    expect(
+      tester.renderObject(pulses),
+      paints..something((method, arguments) => method == #drawRawPoints),
+    );
+    expect(
+      tester.renderObject(pulses),
+      isNot(paints..circle()),
+      reason: 'no dot on its own',
+    );
+  });
+
+  testWidgets("one project's lines end at its box: none runs on into the "
+      "empty board (Abbacchio's row 1619)", (tester) async {
+    await showHistory(tester);
+    await tester.tap(mode('History'));
+    await pumpFrames(tester);
+    final controller = tester
+        .widget<HistoryBoard>(find.byType(HistoryBoard))
+        .controller;
+    Rect? clip() {
+      final painter = tester
+          .widgetList<CustomPaint>(
+            find.descendant(
+              of: find.byType(HistoryBoard),
+              matching: find.byType(CustomPaint),
+            ),
+          )
+          .map((paint) => paint.painter)
+          .firstWhere(
+            (painter) => painter.runtimeType.toString() == '_LinesPainter',
+          );
+      return (painter as dynamic).clip as Rect?;
+    }
+
+    expect(clip(), isNull, reason: 'every project: nothing to end at');
+    controller.showProject('app');
+    await pumpFrames(tester);
+    final box = controller.scene!.projectBox('app');
+    final drawn = tester.getRect(
+      find.byKey(ValueKey('box:$box:${controller.scene!.boxes[box].box.id}')),
+    );
+    final board = tester.getTopLeft(find.byType(HistoryBoard));
+    expect(clip()!.size, drawn.size);
+    expect(clip()!.topLeft + board, drawn.topLeft);
+  });
+
   testWidgets('going ahead of what is loaded says so, and loads there '
       'first', (tester) async {
     final harness = Harness(claktoryWorkspace());

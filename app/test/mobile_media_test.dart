@@ -56,7 +56,7 @@ Future<Harness> _phone(
   tester.view.padding = const FakeViewPadding(top: 59, bottom: 34);
   await harness.show(tester, size: const Size(393, 852));
   await pumpFrames(tester);
-  await tester.tap(find.bySemanticsLabel('Extensions'));
+  await tester.tap(find.bySemanticsLabel(RegExp('^More options for ')));
   await pumpFrames(tester);
   await tester.tap(find.text(path.split('/').last).last);
   await pumpFrames(tester);

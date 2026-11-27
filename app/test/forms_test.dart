@@ -44,6 +44,7 @@ void main() {
     expect(await outsideLabel(tester), 'Admin (no project)');
 
     // Turned off here, not saved yet.
+    await unfoldExtensions(tester);
     final admin = find.byWidgetPredicate(
       (widget) =>
           widget is Semantics &&
@@ -123,5 +124,120 @@ void main() {
     final cancel = tester.getRect(find.text('Cancel'));
     expect(delete.center.dy, closeTo(cancel.center.dy, 1));
     expect(delete.right, lessThan(cancel.left));
+  });
+
+  testWidgets("agent settings: Rivet's line on top, the extensions folded "
+      "(Lucy's agent view §6)", (tester) async {
+    final harness = await showWith(tester, workspace()..highlights = true);
+    await tester.tap(find.text('Builder').last);
+    await pumpFrames(tester);
+    expect(find.text('Or ask Rivet to change Builder'), findsOneWidget);
+    // Above the model.
+    expect(
+      tester.getTopLeft(find.text('Or ask Rivet to change Builder')).dy,
+      lessThan(tester.getTopLeft(find.text('Model')).dy),
+    );
+    // Messaging and Checklist are on: folded to how many, and Change….
+    expect(find.text('2 on ·'), findsOneWidget);
+    expect(find.text('Other agents can message it'), findsNothing);
+    await unfoldExtensions(tester);
+    expect(find.text('2 on ·'), findsNothing);
+    expect(find.text('Other agents can message it'), findsOneWidget);
+
+    // Unchanged, it goes straight to Rivet, its message box started.
+    await tester.ensureVisible(find.text('Or ask Rivet to change Builder'));
+    await pumpFrames(tester);
+    await tester.tap(find.text('Or ask Rivet to change Builder'));
+    await pumpFrames(tester);
+    expect(find.text('Agent settings'), findsNothing);
+    expect(harness.drafts.of('rivet'), 'Change Builder: ');
+    expect(
+      harness.backend.sent.where((m) => m.hasSelectAgent()).single
+          .selectAgent
+          .agentId,
+      'rivet',
+    );
+    expect(find.text('Tell Rivet what to change'), findsOneWidget);
+    expect(harness.backend.sent.where((m) => m.hasUpdateAgent()), isEmpty);
+    // The glow and its words run out.
+    await tester.pump(const Duration(seconds: 6));
+  });
+
+  testWidgets('with changes, asking Rivet first asks whether to save them', (
+    tester,
+  ) async {
+    final harness = await showWith(tester, workspace());
+    await tester.tap(find.text('Builder').last);
+    await pumpFrames(tester);
+    final role = find.descendant(
+      of: find.byWidgetPredicate(
+        (w) =>
+            w is TextField && w.placeholder == 'Such as Coordinator or Writer',
+      ),
+      matching: find.byType(EditableText),
+    );
+    await tester.enterText(role, 'Builds things');
+    await tester.pump();
+    await tester.tap(find.text('Or ask Rivet to change Builder'));
+    await pumpFrames(tester);
+    expect(find.text('Save your changes to Builder?'), findsOneWidget);
+    await tester.tap(find.text('Save'));
+    await pumpFrames(tester);
+    expect(harness.last.hasSelectAgent(), isTrue);
+    final update = harness.backend.sent
+        .where((m) => m.hasUpdateAgent())
+        .single
+        .updateAgent;
+    expect(update.role, 'Builds things');
+    expect(harness.drafts.of('rivet'), 'Change Builder: ');
+    expect(find.text('Agent settings'), findsNothing);
+
+    // Discarded: nothing saved, still to Rivet.
+    final other = await showWith(tester, workspace());
+    await tester.tap(find.text('Builder').last);
+    await pumpFrames(tester);
+    await tester.enterText(role, 'Builds things');
+    await tester.pump();
+    await tester.tap(find.text('Or ask Rivet to change Builder'));
+    await pumpFrames(tester);
+    await tester.tap(find.text('Discard'));
+    await pumpFrames(tester);
+    expect(other.backend.sent.where((m) => m.hasUpdateAgent()), isEmpty);
+    expect(other.drafts.of('rivet'), 'Change Builder: ');
+  });
+
+  testWidgets("Rivet's own settings don't offer to ask Rivet", (tester) async {
+    await showWith(tester, workspace()..selectedAgentId = 'rivet');
+    await tester.tap(find.text('Rivet').last);
+    await pumpFrames(tester);
+    expect(find.text('Agent settings'), findsOneWidget);
+    expect(find.textContaining('Or ask Rivet'), findsNothing);
+  });
+
+  testWidgets('a long prompt folds to six lines, with Show all', (
+    tester,
+  ) async {
+    final snapshot = workspace();
+    snapshot.agents[1].prompt = [
+      for (var line = 1; line <= 12; line++) 'Line $line of the prompt.',
+    ].join('\n');
+    await showWith(tester, snapshot);
+    await tester.tap(find.text('Builder').last);
+    await pumpFrames(tester);
+    expect(find.text('Show all'), findsOneWidget);
+    await tester.ensureVisible(find.text('Show all'));
+    await pumpFrames(tester);
+    await tester.tap(find.text('Show all'));
+    await pumpFrames(tester);
+    expect(find.text('Show all'), findsNothing);
+  });
+
+  testWidgets("a short prompt doesn't fold", (tester) async {
+    final short = workspace();
+    short.agents[1].prompt = 'Build things.';
+    await showWith(tester, short);
+    await tester.tap(find.text('Builder').last);
+    await pumpFrames(tester);
+    expect(find.text('Show all'), findsNothing);
   });
 }

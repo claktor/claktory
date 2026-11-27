@@ -193,15 +193,15 @@ pub(crate) fn ask(
     let cards = waiting(factory, &record.id);
     match cards.first() {
         Some((_, whose, _)) if whose != agent => Err(format!(
-            "{} already asked {person} to approve this pipe on a card that's still waiting. Nothing was asked.",
+            "{} already asked {person} to approve this pipe in a request that's still waiting. Nothing was asked.",
             factory.agent_name(whose)
         )),
-        Some((id, _, was)) if *was == approval => Err(format!("Your card {id} already proposes that. Nothing was changed.")),
+        Some((id, _, was)) if *was == approval => Err(format!("Your request {id} already proposes that. Nothing was changed.")),
         Some((id, _, _)) => {
             crate::extensions::ask::change_action(factory, agent, *id, (&title, &body), (&description, reason), &action)?;
             Ok(factory_agent::ToolResult::text(
                 format!(
-                    "Changed your card {id} to approve {called}: {person}'s card shows what you propose now, marked updated, without notifying them again."
+                    "Changed your request {id} to approve {called}: {person}'s request shows what you propose now, marked updated, without notifying them again."
                 ),
                 json!({}),
             ))
@@ -219,7 +219,7 @@ pub(crate) fn ask(
             });
             Ok(factory_agent::ToolResult::text(
                 format!(
-                    "Asked {person}: their card shows what you propose, each choice theirs to change, and the pipe's digits for them to compare with the other person themselves. Only their tap approves it, and you'll be told only whether they approved it or dismissed it. Its id is {id}; calling pipes_approve again while it waits changes it, and it's withdrawn by itself if the pipe is approved or closed some other way first, or its other side changes."
+                    "Asked {person}: their request shows what you propose, each choice theirs to change, and the pipe's digits for them to compare with the other person themselves. Only their tap approves it, and you'll be told only whether they approved it or dismissed it. Its id is {id}; calling pipes_approve again while it waits changes it, and it's withdrawn by itself if the pipe is approved or closed some other way first, or its other side changes."
                 ),
                 details,
             ))
@@ -279,7 +279,7 @@ pub(crate) fn claim(factory: &Factory, record: &Record, request: &v1::ApprovePip
     if card.is_empty() {
         return Ok(None);
     }
-    let void = || RequestError::Pipe("This card no longer waits for you: approve the pipe in its own view.".to_owned());
+    let void = || RequestError::Pipe("This request no longer waits for you: approve the pipe in its own view.".to_owned());
     let (id, agent, action) = crate::extensions::ask::pending_action(factory, card).ok_or_else(void)?;
     let Ok(Action::ApprovePipe(approval)) = serde_json::from_str::<Action>(&action) else { return Err(void()) };
     if approval.pipe != record.id || approval.key != key_of(record) || record.state != State::Approval {
@@ -319,6 +319,6 @@ pub(crate) fn changed(factory: &Factory, before: &Record, after: Option<&Record>
         Some(_) => return,
     };
     for (id, _, _) in waiting(factory, &before.id) {
-        crate::extensions::ask::withdraw_for(factory, id, &format!("This card is void: {why}."));
+        crate::extensions::ask::withdraw_for(factory, id, &format!("This request is void: {why}."));
     }
 }

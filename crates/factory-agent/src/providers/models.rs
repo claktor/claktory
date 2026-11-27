@@ -570,17 +570,19 @@ impl Registry {
     }
 
     /// Reads the provider's model list from the provider, as it came; None
-    /// when there's none to read (`fetches_models`, or not signed in).
-    pub async fn fetch_models(&self, id: &str) -> Result<Option<Vec<u8>>, String> {
+    /// when there's none to read (`fetches_models`, or not signed in). A
+    /// provider that didn't take the sign-in or key fails `is_unauthorized`
+    /// or `is_refused`.
+    pub async fn fetch_models(&self, id: &str) -> Result<Option<Vec<u8>>, Error> {
         if !self.fetches_models(id) {
             return Ok(None);
         }
         // A QA build's list from qa-model: public, like openrouter.ai's.
         if id == "openrouter" && crate::providers::catalog::qa_models() {
-            return crate::providers::catalog::fetch_openrouter().await.map(Some);
+            return crate::providers::catalog::fetch_openrouter().await.map(Some).map_err(Error::Other);
         }
-        let Some((base_url, auth, signed_in)) = self.listing_auth(id).await? else { return Ok(None) };
-        let provider = self.provider(id).ok_or("no such provider")?;
+        let Some((base_url, auth, signed_in)) = self.listing_auth(id).await.map_err(Error::Other)? else { return Ok(None) };
+        let provider = self.provider(id).ok_or_else(|| Error::Other("no such provider".to_owned()))?;
         let listing = |base_url: String, auth: RequestAuth| -> futures_util::future::BoxFuture<'static, Result<Vec<u8>, Error>> {
             let id = provider.id;
             Box::pin(async move { crate::providers::listing::fetch(id, &base_url, &auth).await })
@@ -590,7 +592,7 @@ impl Registry {
             Some(account) => self.calling(provider, &account, base_url, auth, listing).await,
             None => listing(base_url, auth).await,
         };
-        fetched.map(Some).map_err(|error| error.to_string())
+        fetched.map(Some)
     }
 
     /// Takes a list `fetch_models` brought, checked whole, in place of the

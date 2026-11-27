@@ -114,8 +114,6 @@ void main() {
     tester,
   ) async {
     final harness = await _inNeedsYou(tester, Harness(_workspace()));
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
     await tester.enterText(
       find.descendant(
         of: find.byType(AskPersonCard),
@@ -160,7 +158,7 @@ void main() {
     await tester.tap(find.text('Review the threat model'));
     await settle(tester);
     expect(find.text('Review'), findsNothing);
-    expect(find.text('Fugo carries on once you approve.'), findsOneWidget);
+    expect(find.text('Approve'), findsOneWidget);
   });
 
   test('videos open in the video viewer, images in the image one, the '

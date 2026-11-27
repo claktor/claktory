@@ -8,7 +8,9 @@ import androidx.test.platform.app.InstrumentationRegistry
 import io.flutter.plugin.common.MethodChannel
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.Collections
@@ -43,8 +45,12 @@ class CameraAccessTest {
         shell("pm set-permission-flags ${context.packageName} ${Manifest.permission.CAMERA} $set")
     }
 
+    @Before
+    fun setUp() = Refusals.forget()
+
     @After
     fun tearDown() {
+        Refusals.forget()
         shell("pm clear-permission-flags ${context.packageName} ${Manifest.permission.CAMERA} user-set user-fixed")
     }
 
@@ -123,6 +129,29 @@ class CameraAccessTest {
                 now = access.access()
             }
             assertEquals("undetermined", now)
+            var once = false
+            screen.onActivity { once = access.refusedOnce() }
+            assertTrue("the row's Off with Turn on…", once)
+        }
+    }
+
+    @Test
+    fun aRefusalForGoodIsStillKnownToTheNextActivity() {
+        notYetAllowed()
+        flags("user-set user-fixed")
+        Screen.launch().use { screen ->
+            lateinit var access: CameraAccess
+            screen.onActivity { access = it.adapter(CameraAccess::class.java)!! }
+            val answer = Answer()
+            screen.onActivity { access.request(answer) }
+            waitFor("Android's answer") { answer.values.isNotEmpty() }
+        }
+        // A turn of the phone or dark mode makes the activity, and its
+        // adapters, again; the process, and what was refused in it, stay.
+        Screen.launch().use { screen ->
+            var now = ""
+            screen.onActivity { now = it.adapter(CameraAccess::class.java)!!.access() }
+            assertEquals("denied", now)
         }
     }
 }

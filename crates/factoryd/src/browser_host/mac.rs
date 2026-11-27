@@ -1,13 +1,14 @@
 //! The runner on a Mac (#435 P6, SPLIT.md): macOS has no Landlock and no
 //! Xvfb, so Claktory's browser runs in a small Linux VM through Apple's
 //! `container` (Apple silicon, macOS 26 or later), from Claktory's browser
-//! image, pinned by digest in each release. The image's entrypoint loads
+//! image: an asset of each release, checked against the digest this build
+//! carries before each run (`image`). The image's entrypoint loads
 //! the browser's firewall as root (hence CAP_NET_ADMIN, for that step
 //! only), then becomes the browser's own user and runs the runner:
 //! `factoryd browser-runner run` built for Linux from the same release, so
 //! its wire is this factoryd's. C1 runs over the container's stdin and
 //! stdout as over sudo's on Linux (`linux::pipes`); the kept profile lives
-//! in a named volume, one for the real Claktory and one for the dev one.
+//! in a named volume of each Claktory home's own (Fugo 50272).
 //!
 //! The VM ends with its runner (stdin closing ends the runner; SIGTERM to
 //! `container run` stops the VM), and is killed once `container run` has
@@ -46,45 +47,36 @@ const DNS: &str = "1.1.1.1";
 const MOUNT: &str = "/var/lib/claktory-browser";
 /// The label each VM carries, its value the Claktory's kind.
 const LABEL: &str = "claktory.browser";
-/// The image this release runs, set by release.sh for the macOS build
-/// (Pericolo 36868): `ghcr.io/claktor/claktory-browser@sha256:<64 hex>`.
-const BUILT_IMAGE: Option<&str> = option_env!("CLAKTORY_BROWSER_IMAGE");
-
-/// Whether `home` is the dev Claktory's.
+/// Whether `home` is this user's own dev Claktory, which alone takes the
+/// dev image's overrides (`super::dev_home`).
 fn dev(home: &Path) -> bool {
-    home.file_name().is_some_and(|name| name == ".factory-dev")
+    super::dev_home(home)
 }
 
-/// The VMs' name and their volume's, by Claktory: the real one and the dev
-/// one never share a profile.
-fn name(home: &Path) -> &'static str {
+/// The VMs' name and their volume's, by Claktory home (Fugo 50272):
+/// `claktory-browser-<home id>`, so no two Claktories under one user share
+/// a profile or stop each other's VM; this user's own dev Claktory and
+/// tests keep theirs.
+fn name(home: &Path) -> String {
     if TEST_IMAGE.get().is_some() {
-        "claktory-browser-test"
+        "claktory-browser-test".to_owned()
     } else if dev(home) {
-        "claktory-browser-dev"
+        "claktory-browser-dev".to_owned()
     } else {
-        "claktory-browser"
+        format!("claktory-browser-{}", super::home_id(home))
     }
 }
 
-/// The image to run: this build's, or in the dev Claktory one named by
-/// FACTORY_BROWSER_IMAGE; only ever pinned by digest.
-fn image(home: &Path) -> Result<String, String> {
-    let chosen = match dev(home) {
-        true => std::env::var("FACTORY_BROWSER_IMAGE").ok().or(BUILT_IMAGE.map(str::to_owned)),
-        false => BUILT_IMAGE.map(str::to_owned),
-    };
-    // A test's image is one loaded on this Mac (`container image load`),
-    // which `container` can't run by digest without asking its registry:
-    // run by its name, only ever from a test.
+/// The image to run, by the reference it's loaded under (`image`), once
+/// it's loaded as this build says it must be; a test's, loaded on this
+/// Mac, by its name. Runs `container`: never under the Factory's lock.
+fn image(home: &Path, container: &Path) -> Result<String, String> {
     if let Some(image) = TEST_IMAGE.get() {
         return Ok(image.clone());
     }
-    let image = chosen.ok_or("This build of Claktory has no browser image, so its browser can't run on a Mac.")?;
-    if !pinned(&image) {
-        return Err("This build of Claktory names its browser image without a digest, so it won't run it.".to_owned());
-    }
-    Ok(image)
+    let built = super::image::Built::this(dev(home))?;
+    super::image::ensure(home, container, &built)?;
+    Ok(built.reference)
 }
 
 /// A test's options before the image and arguments after it (a stand-in
@@ -107,7 +99,7 @@ pub(crate) fn image_for_test(image: String) {
 
 /// Whether `image` is `name@sha256:` and 64 lowercase hex characters, its
 /// name a registry path with nothing a command line could take otherwise.
-fn pinned(image: &str) -> bool {
+pub(crate) fn pinned(image: &str) -> bool {
     let Some((name, digest)) = image.split_once("@sha256:") else { return false };
     let name_ok = !name.is_empty()
         && !name.starts_with('-')
@@ -130,7 +122,9 @@ pub(crate) fn problem(home: &Path) -> Option<v1::AgentBrowserSetup> {
     if macos_major().is_some_and(|major| major < 26) {
         return Some(unsupported("Claktory's browser needs macOS 26 or later. Update macOS in System Settings, then try again."));
     }
-    if let Err(why) = image(home) {
+    if TEST_IMAGE.get().is_none()
+        && let Err(why) = super::image::Built::this(dev(home))
+    {
         return Some(unsupported(&why));
     }
     let Some(container) = container() else {
@@ -170,7 +164,9 @@ pub(crate) fn problem(home: &Path) -> Option<v1::AgentBrowserSetup> {
             ..Default::default()
         });
     }
-    None
+    // Its image, got and loaded the first time (W11): what the card says
+    // meanwhile.
+    image(home, &container).err().map(|problem| v1::AgentBrowserSetup { problem, ..Default::default() })
 }
 
 /// `container --version`'s version ("container CLI version 1.7.1 (build: …)").
@@ -213,10 +209,10 @@ fn os_version() -> Option<String> {
 /// profile.
 pub(crate) fn spawn(factory: &Arc<Factory>) -> Result<Io, String> {
     let home = factory.home().root();
-    let image = image(home)?;
     let container = container().ok_or("Apple's container tool isn't on this Mac.")?;
+    let image = image(home, &container)?;
     let base = name(home);
-    let kind = base.strip_prefix("claktory-browser-").unwrap_or("claktory");
+    let kind = base.strip_prefix("claktory-browser-").unwrap_or_default().to_owned();
     // Its own name each time, so a VM still stopping never blocks the next.
     let own = format!("{base}-{:x}", crate::transcript::now_ms());
     let mut command = Command::new(&container);
@@ -242,7 +238,7 @@ pub(crate) fn spawn(factory: &Arc<Factory>) -> Result<Io, String> {
         // One VM at a time: the one before goes first, its runner told to
         // end and given its time (a profile written whole), then killed.
         let _turn = TURN.lock().await;
-        clear(&container, kind).await;
+        clear(&container, &base, &kind).await;
         // Let go of while it waited: none starts.
         if quitting.is_cancelled() {
             return;
@@ -318,8 +314,8 @@ async fn stop(container: &Path, id: &str) {
 
 /// Ends every VM of this Claktory's browser left from before (a factoryd
 /// that ended without ending them), before a new one starts.
-async fn clear(container: &Path, kind: &str) {
-    for id in leftovers(&listed(container).await, kind) {
+async fn clear(container: &Path, base: &str, kind: &str) {
+    for id in leftovers(&listed(container).await, base, kind) {
         tracing::info!(%id, "stopping a VM Claktory's browser left running");
         stop(container, &id).await;
     }
@@ -333,25 +329,26 @@ async fn listed(container: &Path) -> Vec<serde_json::Value> {
     serde_json::from_slice(&said.stdout).unwrap_or_default()
 }
 
-/// The ids of the VMs in `container list --format json` that carry this
-/// Claktory's label.
-fn leftovers(listed: &[serde_json::Value], kind: &str) -> Vec<String> {
+/// The ids of the VMs in `container list --format json` that are this
+/// Claktory home's own: its label's value exactly `kind`, and named
+/// `<base>-<hex>` as `spawn` names them, never another home's.
+fn leftovers(listed: &[serde_json::Value], base: &str, kind: &str) -> Vec<String> {
     listed
         .iter()
         .filter(|entry| {
             entry.pointer(&format!("/configuration/labels/{}", LABEL.replace('/', "~1"))).and_then(|value| value.as_str()) == Some(kind)
         })
         .filter_map(|entry| entry.get("id").and_then(|id| id.as_str()))
-        .filter(|id| pinned_id(id))
+        .filter(|id| own_id(id, base))
         .map(str::to_owned)
         .collect()
 }
 
-/// Whether `id` is one of the names this gives its VMs.
-fn pinned_id(id: &str) -> bool {
-    let Some(rest) = id.strip_prefix("claktory-browser-") else { return false };
-    let rest = rest.strip_prefix("dev-").or_else(|| rest.strip_prefix("test-")).unwrap_or(rest);
-    !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_hexdigit())
+/// Whether `id` is a name `spawn` gives this home's VMs: `<base>-<hex>`.
+fn own_id(id: &str, base: &str) -> bool {
+    id.strip_prefix(base)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 #[cfg(test)]
@@ -371,27 +368,42 @@ mod tests {
         assert!(!pinned(&format!("@sha256:{digest}")));
     }
 
+    /// Fugo 50272: two Claktory homes get their own volumes; this user's
+    /// own ~/.factory-dev keeps the dev one.
     #[test]
-    fn the_real_and_the_dev_claktory_keep_their_own_volume() {
-        assert_eq!(name(Path::new("/Users/someone/.factory")), "claktory-browser");
-        assert_eq!(name(Path::new("/Users/someone/.factory-dev")), "claktory-browser-dev");
+    fn each_claktory_home_keeps_its_own_volume() {
+        let real = name(Path::new("/Users/someone/.factory"));
+        let sandbox = name(Path::new("/Users/someone/qa/sandboxes/w12/user/.factory"));
+        assert_ne!(real, sandbox);
+        assert!(real.starts_with("claktory-browser-") && real != "claktory-browser-dev", "{real}");
+        assert_ne!(name(Path::new("/Users/someone/qa/.factory-dev")), "claktory-browser-dev");
+        if let Some(account) = super::super::account_home() {
+            assert_eq!(name(&account.join(".factory-dev")), "claktory-browser-dev");
+        }
     }
 
+    /// Cleanup for home A leaves home B's VMs (and the dev one's) alone.
     #[test]
-    fn leftovers_are_this_claktorys_own_vms_only() {
-        let listed: Vec<serde_json::Value> = serde_json::from_str(
+    fn leftovers_are_this_claktory_homes_own_vms_only() {
+        let a = name(Path::new("/Users/someone/.factory"));
+        let b = name(Path::new("/Users/someone/qa/sandboxes/w12/user/.factory"));
+        let (kind_a, kind_b) = (a.strip_prefix("claktory-browser-").unwrap(), b.strip_prefix("claktory-browser-").unwrap());
+        let listed: Vec<serde_json::Value> = serde_json::from_str(&format!(
             r#"[
-            {"id": "claktory-browser-18f2a", "configuration": {"labels": {"claktory.browser": "claktory"}}},
-            {"id": "claktory-browser-18f2b", "configuration": {"labels": {"claktory.browser": "claktory"}}},
-            {"id": "claktory-browser-dev-18f2c", "configuration": {"labels": {"claktory.browser": "dev"}}},
-            {"id": "someone-elses", "configuration": {"labels": {"claktory.browser": "claktory"}}},
-            {"id": "claktory-browser-18f2d", "configuration": {"labels": {}}}
-        ]"#,
-        )
+            {{"id": "{a}-18f2a", "configuration": {{"labels": {{"claktory.browser": "{kind_a}"}}}}}},
+            {{"id": "{b}-18f2b", "configuration": {{"labels": {{"claktory.browser": "{kind_b}"}}}}}},
+            {{"id": "{b}-18f2e", "configuration": {{"labels": {{"claktory.browser": "{kind_a}"}}}}}},
+            {{"id": "claktory-browser-dev-18f2c", "configuration": {{"labels": {{"claktory.browser": "dev"}}}}}},
+            {{"id": "claktory-browser-18f2f", "configuration": {{"labels": {{"claktory.browser": "claktory"}}}}}},
+            {{"id": "someone-elses", "configuration": {{"labels": {{"claktory.browser": "{kind_a}"}}}}}},
+            {{"id": "{a}-18f2d", "configuration": {{"labels": {{}}}}}}
+        ]"#
+        ))
         .unwrap();
-        assert_eq!(leftovers(&listed, "claktory"), ["claktory-browser-18f2a", "claktory-browser-18f2b"]);
-        assert_eq!(leftovers(&listed, "dev"), ["claktory-browser-dev-18f2c"]);
-        assert!(leftovers(&[], "claktory").is_empty());
+        assert_eq!(leftovers(&listed, &a, kind_a), [format!("{a}-18f2a")]);
+        assert_eq!(leftovers(&listed, &b, kind_b), [format!("{b}-18f2b")]);
+        assert_eq!(leftovers(&listed, "claktory-browser-dev", "dev"), ["claktory-browser-dev-18f2c"]);
+        assert!(leftovers(&[], &a, kind_a).is_empty());
     }
 
     #[test]

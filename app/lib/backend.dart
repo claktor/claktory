@@ -32,6 +32,7 @@ import 'pairing.dart';
 import 'state.dart';
 import 'tunnel_client.dart';
 import 'waiting.dart' show EntryReveal;
+import 'windows_local.dart';
 import 'workspace_patch.dart';
 
 /// Must match `PROTOCOL_VERSION` in the backend's factory-protocol crate.
@@ -61,6 +62,9 @@ const _localEndpoint = 'ws://127.0.0.1:$localPort';
 /// the private tunnel like any other, with this code's token. Null when
 /// there's none, from a backend before the tunnel.
 Future<RemoteFactory?> readLocalPairing() async {
+  // Windows reaches its own with its app-token instead ([WindowsLocal]): no
+  // code is ever read or shown there (windows.md, authority B).
+  if (Platform.isWindows) return null;
   final home = Platform.environment['HOME'] ?? '';
   const folder = bool.fromEnvironment('FACTORY_DEV')
       ? '.factory-dev'
@@ -124,15 +128,21 @@ class RequestFailure implements Exception {
   String toString() => message;
 }
 
-/// What the backend says to an answer for a card its agent has changed
-/// since the person saw it (#428): the card shows its new version, and
+/// What the backend says to an answer for a request its agent has changed
+/// since the person saw it (#428): the request shows its new version, and
 /// this, for them to look at it again.
-const cardChangedRefusal = 'This card changed. Look at it again.';
+const cardChangedRefusal = 'This request changed. Look at it again.';
+
+/// The same refusal in the words from before the Requests rename (#588),
+/// from a Claktory that hasn't updated yet. Matched too, so the app can
+/// ship a release before the backend changes its words.
+const _cardChangedBefore = 'This card changed. Look at it again.';
 
 /// Whether [failure] is that refusal: shown as it is, never as "Couldn't
 /// send".
 bool cardChanged(RequestFailure failure) =>
-    failure.message == cardChangedRefusal;
+    failure.message == cardChangedRefusal ||
+    failure.message == _cardChangedBefore;
 
 /// A try given up on, to try again after the backoff: it said why.
 class _NotNow implements Exception {
@@ -187,7 +197,10 @@ class Backend implements AppViewTransport {
     this.localBackend = true,
     Future<RemoteFactory?> Function()? localPairing,
     @visibleForTesting this.localEndpoint = _localEndpoint,
+    @visibleForTesting WindowsLocal? windowsLocal,
   }) : queued = queued ?? QueuedStore(),
+       _windowsLocal =
+           windowsLocal ?? (Platform.isWindows ? const WindowsLocal() : null),
        _tunnels = tunnels ?? RustTunnels(),
        _runtime =
            tunnelRuntime ??
@@ -598,6 +611,44 @@ class Backend implements AppViewTransport {
   Future<void> clearBrowserLog() =>
       _request(ClientMessage(clearBrowserLog: ClearBrowserLog()));
 
+  /// What the person does with Claktory's browser (#435): stop it, delete
+  /// its data, set its time zone and languages, sign it out of an identity
+  /// provider. One of those, nothing else: the person never drives it
+  /// (Matt, card 222).
+  Future<void> sendAgentBrowser(ClientMessage message) {
+    assert(
+      const {
+        ClientMessage_Body.stopAgentBrowser,
+        ClientMessage_Body.deleteAgentBrowserData,
+        ClientMessage_Body.setAgentBrowserLocale,
+        ClientMessage_Body.signOutAgentBrowserAccount,
+      }.contains(message.whichBody()),
+    );
+    return _request(message);
+  }
+
+  /// Every time zone Claktory's browser can use, by IANA name, sorted
+  /// (ListTimeZones).
+  Future<List<String>> listTimeZones() async {
+    final reply = await _call(ClientMessage(listTimeZones: ListTimeZones()));
+    if (!reply.hasTimeZones()) {
+      throw const RequestFailure('Claktory sent no time zones.');
+    }
+    return reply.timeZones.names;
+  }
+
+  /// An errand's log, oldest first ([errandId] empty: every errand's), the
+  /// last 7 days (ListErrandLog).
+  Future<ErrandLog> listErrandLog(String errandId) async {
+    final reply = await _call(
+      ClientMessage(listErrandLog: ListErrandLog(errandId: errandId)),
+    );
+    if (!reply.hasErrandLog()) {
+      throw const RequestFailure('Claktory sent no errand log.');
+    }
+    return reply.errandLog;
+  }
+
   /// This Claktory's direct-message leaf, for one of the person's devices
   /// to certify (DmLeafOfferRequest; dms-e2ee §2, Claktories).
   Future<DmLeafOffer> dmLeafOffer() async {
@@ -676,6 +727,18 @@ class Backend implements AppViewTransport {
   Future<void> setSpendCap(SetSpendCap ask) =>
       _request(ClientMessage(setSpendCap: ask));
 
+  /// Contains an agent for errands, or lets it out (SetAgentContained,
+  /// the person's alone).
+  Future<void> setAgentContained(String agentId, {required bool contained}) =>
+      _request(
+        ClientMessage(
+          setAgentContained: SetAgentContained(
+            agentId: agentId,
+            contained: contained,
+          ),
+        ),
+      );
+
   /// Makes an agent read reports, or lets it go back (SetReportReader).
   Future<void> setReportReader(SetReportReader ask) =>
       _request(ClientMessage(setReportReader: ask));
@@ -712,9 +775,32 @@ class Backend implements AppViewTransport {
     if (connected.value) fireAndLog(sendActive(active));
   }
 
-  /// Says whether the person is using this Claktory here (SetActive).
-  Future<void> sendActive(bool active) =>
-      _request(ClientMessage(setActive: SetActive(active: active)));
+  /// What this device's system says of Claktory's notifications, sent with
+  /// every SetActive (item 13): an iPhone's or iPad's push registrar sets it
+  /// (mobile/push.dart); UNSPECIFIED where nothing does, judged by its
+  /// platform as before.
+  static NotificationPermission Function() notificationPermission =
+      _unspecified;
+
+  static NotificationPermission _unspecified() =>
+      NotificationPermission.NOTIFICATION_PERMISSION_UNSPECIFIED;
+
+  /// Says whether the person is using this Claktory here (SetActive), and
+  /// whether this device shows notifications.
+  Future<void> sendActive(bool active) => _request(
+    ClientMessage(
+      setActive: SetActive(
+        active: active,
+        notifications: notificationPermission(),
+      ),
+    ),
+  );
+
+  /// Says SetActive again: this device's notifications changed (turned on
+  /// or off in its Settings).
+  void resendActive() {
+    if (connected.value) fireAndLog(sendActive(_active));
+  }
 
   /// Hands this device's push registration to the backend
   /// (RegisterNotifications): the relay's handle and the key it seals with.
@@ -949,6 +1035,9 @@ class Backend implements AppViewTransport {
     if (_qaStallResume && away >= const Duration(seconds: 3)) {
       _qaStallNext = true;
     }
+    // Turned away until this device signs in: back, it asks once more,
+    // quietly; the Claktory may have let it in meanwhile (row 189).
+    if (hiddenAt != null) probeSignIn();
     // One that can't connect and isn't on screen keeps to its backoff,
     // counting the time away: a try already due goes now (#454).
     if (_backingOff && !connected.value) {
@@ -1285,11 +1374,24 @@ class Backend implements AppViewTransport {
   /// otherwise. Like [refused], nothing's tried until [retry].
   final signInRequired = ValueNotifier<String?>(null);
 
+  /// With [signInRequired], what the Claktory said of its own account
+  /// (#527, Sale's row 189 b): its account service (empty for
+  /// claktory.com) and its email, masked ("m…@example.com"; empty when
+  /// it isn't signed in). A Claktory says it only to a device it knows;
+  /// null when it said neither, so nothing's known from it.
+  ({String service, String email})? signInSaid;
+
   /// This Claktory is signed in to another Claktory account than this
   /// device (ERROR_CODE_OTHER_ACCOUNT, #529 S4): what it said, which says
   /// which case; null otherwise. [refused] is set with it, so nothing's
   /// tried until [retry].
   final otherAccount = ValueNotifier<String?>(null);
+
+  /// With [otherAccount]: this device was let in here before and is now
+  /// signed in to a different Claktory account, so signing in with the
+  /// right one lets it back in (Error.other_account_before); false for a
+  /// device it never let in, which only a pipe can work with.
+  var otherAccountBefore = false;
 
   /// While this device isn't confirmed as the owner's on this Claktory,
   /// when its grace to confirm ends (`Welcome.confirm_by_ms`); null when it
@@ -1355,6 +1457,15 @@ class Backend implements AppViewTransport {
 
   /// This Mac's Factory's open port, as a WebSocket address.
   final String localEndpoint;
+
+  /// How this PC's own Claktory is reached on Windows: its app-token, sent
+  /// only once the server end of the connection is this same account's.
+  /// Null elsewhere.
+  final WindowsLocal? _windowsLocal;
+
+  /// The app-token this try's Hello carries to this PC's Claktory, read
+  /// afresh each try (the backend writes a new one at every start).
+  String? _localAppToken;
 
   /// Whether this device runs a Factory of its own to show when no other
   /// is chosen: a Mac does, a phone doesn't, and waits to be paired.
@@ -1468,9 +1579,16 @@ class Backend implements AppViewTransport {
     });
     while (!_closed) {
       if (refused.value != null || signInRequired.value != null) {
-        reconnecting.value = false;
-        await _wake.future;
-        continue;
+        // Asked once more, quietly (probeSignIn): one try, its screen
+        // staying up meanwhile; turned away again, it waits here again.
+        if (_probing && refused.value == null) {
+          _probing = false;
+        } else {
+          _probing = false;
+          reconnecting.value = false;
+          await _wake.future;
+          continue;
+        }
       }
       // In the background with its connection closed: nothing until the
       // app is back.
@@ -1528,7 +1646,13 @@ class Backend implements AppViewTransport {
       var abandoned = false;
       try {
         final WebSocket socket;
-        if (loopback) {
+        _localAppToken = null;
+        if (loopback && _windowsLocal != null) {
+          socket = await _orAbandoned(
+            _windowsLoopback(_windowsLocal),
+            late: _let,
+          );
+        } else if (loopback) {
           socket = await _orAbandoned(
             _connectWithin(WebSocket.connect(localEndpoint)),
             late: _let,
@@ -1639,7 +1763,7 @@ class Backend implements AppViewTransport {
             hello: Hello(
               protocolVersion: _protocolVersion,
               clientVersion: _clientVersion,
-              token: _helloVia?.token,
+              token: _helloVia?.token ?? _localAppToken,
               assertion: _helloAssertion,
               // It can sign in and confirm it's the owner's.
               canConfirm: true,
@@ -1859,6 +1983,43 @@ class Backend implements AppViewTransport {
   /// The device assertion the current connection's Hello showed; empty if
   /// none.
   String _helloAssertion = '';
+
+  /// This PC's own Claktory on Windows: its app-token read, the
+  /// connection opened, and the token kept for Hello only if the server end
+  /// of that connection runs as this same Windows account. Otherwise the
+  /// connection closes with nothing sent, and the next try starts again.
+  Future<WebSocket> _windowsLoopback(WindowsLocal local) async {
+    final token = await local.readToken(dev: localPort != '7420');
+    if (token == null) {
+      throw const SocketException("This PC's Claktory has no app-token yet");
+    }
+    final connecting = connectLoopback(localEndpoint);
+    final (socket, ownPort) = await connecting.timeout(
+      _connectWindow(null),
+      onTimeout: () {
+        unawaited(
+          connecting.then((late) => late.$1.close(), onError: (Object _) {}),
+        );
+        throw TimeoutException('no connection', _connectWindow(null));
+      },
+    );
+    final serverPort = Uri.parse(localEndpoint).port;
+    bool ours;
+    try {
+      ours = await local.sameUser(serverPort, ownPort);
+    } on Object {
+      ours = false;
+    }
+    if (!ours) {
+      _log("this PC's Claktory port is held by another account: nothing sent");
+      await _let(socket);
+      throw const SocketException(
+        "This PC's Claktory port belongs to another account",
+      );
+    }
+    _localAppToken = token;
+    return socket;
+  }
 
   /// [connecting], or a [TimeoutException] after [_connectWindow] (with
   /// the tunnel it goes [through]); one that connects after all is closed,
@@ -2233,6 +2394,34 @@ class Backend implements AppViewTransport {
     _backNext = null;
     _freshFailure();
     reconnectFromScratch('asked to');
+  }
+
+  /// A quiet try is due past [signInRequired] (probeSignIn).
+  var _probing = false;
+
+  /// Turned away until this device signs in ([signInRequired]), asks the
+  /// Claktory once more without leaving the sign-in screen: it may have
+  /// let this device in meanwhile (added again in its Settings → Devices,
+  /// or signed in to its account again), and then it connects by itself
+  /// (Sale's row 189). Turned away again, the screen stays as it was.
+  /// Nothing to ask when this device must sign in first (one found
+  /// through the account), nor off screen.
+  void probeSignIn() {
+    final target = _target;
+    if (_closed ||
+        _suspended ||
+        !_onScreen ||
+        _probing ||
+        signInRequired.value == null ||
+        refused.value != null ||
+        (target != null &&
+            target.fromAccount &&
+            !(account?.signedIn ?? false))) {
+      return;
+    }
+    _log('turned away until signed in: asking again');
+    _probing = true;
+    _wakeUp();
   }
 
   /// After a refusal, tries the same Factory again: after signing in, say.
@@ -2999,6 +3188,12 @@ class Backend implements AppViewTransport {
     ClientMessage(refreshModels: RefreshModels(providerId: providerId)),
   );
 
+  /// Settings → Providers opened: Claktory reads again each model list and
+  /// key's credit that's gone stale, and Workspace shows them as they come
+  /// (ProvidersShown). Asked each time it opens; it costs nothing.
+  Future<void> providersShown() =>
+      _request(ClientMessage(providersShown: ProvidersShown()));
+
   /// Adds [model] (`provider/model id`) to Workspace.models once its
   /// provider says this sign-in has it and an agent can run on it; done
   /// already when it's there. A refusal is a sentence to show.
@@ -3057,6 +3252,7 @@ class Backend implements AppViewTransport {
     String description,
     List<SecretEntry> entries, {
     bool askEachTime = false,
+    List<String> sites = const [],
   }) => _request(
     ClientMessage(
       createSecret: CreateSecret(
@@ -3064,6 +3260,7 @@ class Backend implements AppViewTransport {
         description: description,
         entries: entries,
         askEachTime: askEachTime,
+        sites: sites,
       ),
     ),
   );
@@ -3096,6 +3293,15 @@ class Backend implements AppViewTransport {
   /// chose Mark as read. Each leaves Needs you for History.
   Future<void> readAlerts(List<String> ids) =>
       _request(ClientMessage(readAlerts: ReadAlerts(ids: ids)));
+
+  /// Where Claktory's browser may fill a secret in for an errand (#435):
+  /// exact https origins, replacing the list; empty, it's filled nowhere.
+  /// Refused, the reason is in words to show as it is.
+  Future<void> setSecretSites(String id, List<String> sites) => _request(
+    ClientMessage(
+      setSecretSites: SetSecretSites(id: id, sites: sites),
+    ),
+  );
 
   /// Adds a goal of the person's, in their words, to [agentId]'s
   /// checklist.
@@ -3155,9 +3361,16 @@ class Backend implements AppViewTransport {
   Future<void> deleteSecret(String id) =>
       _request(ClientMessage(deleteSecret: DeleteSecret(id: id)));
 
-  Future<void> grantSecret(String id, String agentId) => _request(
+  /// Gives a secret to an agent; with [fillOnly], only to fill in on its
+  /// sites in Claktory's browser (#435), replacing a full grant, as a full
+  /// one replaces it.
+  Future<void> grantSecret(
+    String id,
+    String agentId, {
+    bool fillOnly = false,
+  }) => _request(
     ClientMessage(
-      grantSecret: GrantSecret(id: id, agentId: agentId),
+      grantSecret: GrantSecret(id: id, agentId: agentId, fillOnly: fillOnly),
     ),
   );
 
@@ -3436,9 +3649,9 @@ class Backend implements AppViewTransport {
   /// The whole history of this Claktory's shape (#458): every node and
   /// edge that ever was, with when, the messages per hour and the
   /// chapters. Asked again when [historyChanged] moves.
-  Future<HistoryOverview> historyOverview() async {
+  Future<HistoryOverview> historyOverview({String project = ''}) async {
     final reply = await _call(
-      ClientMessage(getHistoryOverview: GetHistoryOverview()),
+      ClientMessage(getHistoryOverview: GetHistoryOverview(projectId: project)),
     );
     if (!reply.hasHistoryOverview()) {
       throw const RequestFailure("Couldn't load the history. Try again.");
@@ -3447,12 +3660,14 @@ class Backend implements AppViewTransport {
   }
 
   /// A page of the history's events after [cursor] (from the start when
-  /// empty), up to [untilMs] when given.
+  /// empty), up to [untilMs] when given; only [project]'s when given, a
+  /// page then holding fewer, even none, with more to ask for.
   Future<HistoryEvents> historyEvents({
     List<int> cursor = const [],
     Int64? untilMs,
     int limit = 0,
     bool runs = true,
+    String project = '',
   }) async {
     final reply = await _call(
       ClientMessage(
@@ -3461,6 +3676,7 @@ class Backend implements AppViewTransport {
           untilMs: untilMs,
           limit: limit,
           includeRuns: runs,
+          projectId: project,
         ),
       ),
     );
@@ -3472,8 +3688,11 @@ class Backend implements AppViewTransport {
 
   /// While [on], new events come on [historyPushes] and a changed overview
   /// moves [historyChanged].
-  Future<void> watchHistory(bool on) =>
-      _request(ClientMessage(watchHistory: WatchHistory(on: on)));
+  Future<void> watchHistory(bool on, {String project = ''}) => _request(
+    ClientMessage(
+      watchHistory: WatchHistory(on: on, projectId: project),
+    ),
+  );
 
   /// New events while History is watched (WatchHistory).
   Stream<HistoryEvents> get historyPushes => _historyPushes.stream;
@@ -3662,6 +3881,11 @@ class Backend implements AppViewTransport {
   Future<void> accountSignOut() =>
       _request(ClientMessage(accountSignOut: AccountSignOut()));
 
+  /// Drops a sign-in to another account still waiting for its code (Switch
+  /// account…), leaving the one signed in as it was (#529, V6).
+  Future<void> accountSignInCancel() =>
+      _request(ClientMessage(accountSignInCancel: AccountSignInCancel()));
+
   /// The account service to use; empty for claktory.com's.
   Future<void> setAccountService(String url) =>
       _request(ClientMessage(setAccountService: SetAccountService(url: url)));
@@ -3696,6 +3920,13 @@ class Backend implements AppViewTransport {
       confirmRecoveryKey: ConfirmRecoveryKey(checkId: checkId, typed: typed),
     ),
   );
+
+  /// Seals this vault to the account's new recovery key (#239), which this
+  /// Claktory couldn't check by itself (VaultState.recovery_key_change_
+  /// waiting): only the person, on this computer or a device confirmed as
+  /// theirs. A refusal is a sentence to show.
+  Future<void> useRecoveryKey() =>
+      _request(ClientMessage(useRecoveryKey: UseRecoveryKey()));
 
   /// Empties the build cache at [path].
   Future<void> clearBuildCache(String path) =>
@@ -4092,6 +4323,33 @@ class Backend implements AppViewTransport {
     ClientMessage(
       renamePipeGroup: RenamePipeGroup(groupId: groupId, name: name),
     ),
+  );
+
+  /// Pins [agentId] under Rivet in the sidebar before the pin [beforeId]
+  /// (empty: last), or moves its pin there (Settings.pinned_agents).
+  /// Refused, the reason is in words to show as it is.
+  Future<void> pinAgent(String agentId, {String beforeId = ''}) => _request(
+    ClientMessage(
+      pinAgent: PinAgent(agentId: agentId, beforeId: beforeId),
+    ),
+  );
+
+  /// Unpins [agentId]; one not pinned is no change.
+  Future<void> unpinAgent(String agentId) =>
+      _request(ClientMessage(unpinAgent: UnpinAgent(agentId: agentId)));
+
+  /// Has the backend read the places macOS protects at [roots]
+  /// (ProtectedPlace.root) now, macOS asking the person for any it hasn't
+  /// decided on; answered once read, the Workspace following when anything
+  /// changed. The person's only.
+  Future<void> checkProtectedPlaces(List<String> roots) => _request(
+    ClientMessage(checkProtectedPlaces: CheckProtectedPlaces(roots: roots)),
+  );
+
+  /// The OK on a protected place's Needs you item: to History; the place
+  /// stays refused.
+  Future<void> dismissProtectedPlace(String root) => _request(
+    ClientMessage(dismissProtectedPlace: DismissProtectedPlace(root: root)),
   );
 
   /// Deletes a pipe group; its pipes stay, outside any.
@@ -4867,6 +5125,8 @@ class Backend implements AppViewTransport {
         lastConnected.value = null;
         lastFailure.value = null;
         _setAside = null;
+        // Let in after all (asked again: probeSignIn).
+        signInRequired.value = null;
         connected.value = true;
         _log('connected to factoryd ${message.welcome.serverVersion}');
         _sendWhenBack();
@@ -4888,8 +5148,14 @@ class Backend implements AppViewTransport {
         // The backend forgets a watch when the connection closes.
         if (_watching.isNotEmpty) fireAndLog(watchFiles(_watching));
         if (_watch case final watch?) fireAndLog(watchTranscript(watch));
-        // And whether the person is using it.
-        if (_active) fireAndLog(sendActive(true));
+        // And whether the person is using it, and (once it knows) whether
+        // this device shows notifications: Notify goes to the connections
+        // not in use, so an inactive one says it too.
+        if (_active ||
+            notificationPermission() !=
+                NotificationPermission.NOTIFICATION_PERMISSION_UNSPECIFIED) {
+          fireAndLog(sendActive(_active));
+        }
       case ServerMessage_Body.ack:
         _pending.remove(message.replyTo.toInt())?.complete(message);
       case ServerMessage_Body.pairingPending:
@@ -4917,12 +5183,19 @@ class Backend implements AppViewTransport {
         } else if (toHello &&
             message.error.code == ErrorCode.ERROR_CODE_SIGN_IN_REQUIRED) {
           // Refused until this device signs in: neither will it.
-          signInRequired.value = message.error.message;
+          final error = message.error;
+          signInSaid =
+              error.accountService.isEmpty && error.accountEmail.isEmpty
+              ? null
+              : (service: error.accountService, email: error.accountEmail);
+          signInRequired.value = error.message;
         } else if (toHello &&
             message.error.code == ErrorCode.ERROR_CODE_OTHER_ACCOUNT) {
           // Another account's Claktory (#529, S4): nothing's tried until
           // Try again, as when refused, but nothing here is forgotten.
           // What it said shows on its own screen (OtherAccountView).
+          // Set first: what shows reads it as [otherAccount] changes.
+          otherAccountBefore = message.error.otherAccountBefore;
           otherAccount.value = message.error.message;
           refused.value = message.error.message;
         } else if (toHello &&
@@ -5055,7 +5328,6 @@ class Backend implements AppViewTransport {
       // A recovery-codes card's, to this connection only (#435 W8b): to
       // the card that asked, never kept here.
       case ServerMessage_Body.recoveryCodes:
-        // Claktory's browser (#435): the live view comes with P5.
         _pending.remove(message.replyTo.toInt())?.complete(message);
       case ServerMessage_Body.deviceVouched:
         // VouchDevice's answer, to this app only (#529).

@@ -21,6 +21,8 @@ chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
 claktory-account = { path = "../claktory-account", default-features = false }
 # Direct messages end to end: this Claktory's leaf (`user_apps::dms::leaf`).
 claktory-dm-crypto = { path = "../claktory-dm-crypto" }
+# The account's recovery key (#239): X25519, sealing the vault to its public half.
+curve25519-dalek = "5"
 dom_smoothie = "0.19"
 ed25519-dalek = "3"
 factory-agent = { version = "0.1.0", path = "../factory-agent" }
@@ -114,6 +116,12 @@ x11rb = { version = "0.14", features = ["shm", "damage", "xtest", "randr", "xfix
 # folders, TCP ports and, from ABI 6, scopes.
 landlock = "0.4.8"
 
+[target.'cfg(windows)'.dependencies]
+# factoryd on Windows (src/windows): Known Folders for its homes, and its
+# loopback listener bound exclusively (SO_EXCLUSIVEADDRUSE). Already in the
+# tree through tokio and factory-agent.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinSock", "Win32_System_Com", "Win32_UI_Shell"] }
+
 [build-dependencies]
 # The lid-closed helper's XPC client (native/lid_xpc.c, #371), on macOS.
 cc = "1"
@@ -135,6 +143,8 @@ qa-idp-fill = []
 [dev-dependencies]
 # A local account service to sign in at (tests/all/account.rs).
 claktory-account = { path = "../claktory-account" }
+# The push relay, with FCM, for Android pushes end to end (tests/all/push_fcm.rs).
+claktory-push = { path = "../claktory-push" }
 # Its user-apps worker, for app grants (tests/all/app_grants.rs).
 claktory-user-apps = { path = "../claktory-user-apps" }
 # tests/tls.rs: a TLS server with a certificate of its own, and the other

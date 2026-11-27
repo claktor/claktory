@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'controls.dart';
 import 'devices.dart' show thisDeviceKind;
 import 'identity.dart';
+import 'ipad/camera_kept.dart' show CameraKeptBand;
 import 'mobile/device_permissions.dart' show CameraPermission;
 import 'mobile/haptics.dart';
 import 'mobile/header.dart';
@@ -164,8 +165,12 @@ class _ScannerState extends State<_Scanner> with WidgetsBindingObserver {
   /// Why the last code read can't be used.
   String? _problem;
 
-  /// The camera is kept from the app now ([CameraAvailability]).
-  var _unavailable = false;
+  /// What keeps the camera from the app now ([CameraAvailability]); null
+  /// while nothing does.
+  String? _kept;
+
+  /// The camera's picture, kept across the square and the band.
+  final _previewKey = GlobalKey(debugLabel: 'camera');
 
   /// A code was taken: what the camera reads next is ignored.
   var _taken = false;
@@ -326,42 +331,51 @@ class _ScannerState extends State<_Scanner> with WidgetsBindingObserver {
       case CameraAccess.granted:
         final problem = _problem;
         final pasteInstead = widget.pasteInstead;
+        final kept = _kept;
+        // The same native view in the square and in the band, so the
+        // camera coming back finds it still listening.
+        final preview = KeyedSubtree(
+          key: _previewKey,
+          // The camera kept from the app (an iPad sharing its screen,
+          // another app using it): its words in a band, and Paste code
+          // instead below (Sorbet's; Lucy 48961).
+          child: NotificationListener<CameraAvailability>(
+            onNotification: (notice) {
+              if (notice.unavailable != _kept) {
+                setState(() => _kept = notice.unavailable);
+              }
+              return true;
+            },
+            child: AppScope.scope(context).camera.preview(_scanned),
+          ),
+        );
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Square, and no more than half the screen's height, so what's
-            // under it stays in view.
-            Center(
-              child: ConstrainedBox(
-                constraints: BoxConstraints(
-                  maxHeight: MediaQuery.sizeOf(context).height / 2,
-                ),
-                child: AspectRatio(
-                  aspectRatio: 1,
-                  child: Container(
-                    clipBehavior: Clip.antiAlias,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF000000),
-                      borderRadius: BorderRadius.circular(Radii.panel),
-                      border: Border.all(color: palette.hairline),
-                    ),
-                    // The camera kept from the app (an iPad sharing its
-                    // screen, another app using it): its words over the
-                    // picture, and Paste code instead below (Sorbet's).
-                    child: NotificationListener<CameraAvailability>(
-                      onNotification: (notice) {
-                        final unavailable = notice.unavailable != null;
-                        if (unavailable != _unavailable) {
-                          setState(() => _unavailable = unavailable);
-                        }
-                        return true;
-                      },
-                      child: AppScope.scope(context).camera.preview(_scanned),
+            if (kept != null)
+              CameraKeptBand(words: kept, preview: preview)
+            else
+              // Square, and no more than half the screen's height, so
+              // what's under it stays in view.
+              Center(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxHeight: MediaQuery.sizeOf(context).height / 2,
+                  ),
+                  child: AspectRatio(
+                    aspectRatio: 1,
+                    child: Container(
+                      clipBehavior: Clip.antiAlias,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF000000),
+                        borderRadius: BorderRadius.circular(Radii.panel),
+                        border: Border.all(color: palette.hairline),
+                      ),
+                      child: preview,
                     ),
                   ),
                 ),
               ),
-            ),
             if (problem != null) ...[
               const SizedBox(height: Space.s),
               Text(
@@ -369,7 +383,7 @@ class _ScannerState extends State<_Scanner> with WidgetsBindingObserver {
                 style: type.caption.copyWith(color: palette.danger),
               ),
             ],
-            if (_unavailable && pasteInstead != null) ...[
+            if (kept != null && pasteInstead != null) ...[
               const SizedBox(height: Space.l),
               Wrap(
                 alignment: WrapAlignment.end,

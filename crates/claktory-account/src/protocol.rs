@@ -442,6 +442,10 @@ pub struct SignedIn {
     pub epoch: u64,
     pub sealed_share: String,
     pub service_key: String,
+    /// The account's recovery key (#239); None while it has none, and from
+    /// a service before it.
+    #[serde(default)]
+    pub recovery_key: Option<RecoveryKey>,
 }
 
 /// `POST /v1/share`.
@@ -604,6 +608,113 @@ pub struct CheckedIn {
     /// future, or with a value no Claktory could have): never send them again.
     #[serde(default)]
     pub periods_ignored: u32,
+    /// The account's recovery key (#239); None while it has none, and from
+    /// a service before it.
+    #[serde(default)]
+    pub recovery_key: Option<RecoveryKey>,
+}
+
+/// The account's recovery key (#239), as the service gives it: the public
+/// half, the statement of the Claktory that set it, as it sent it, with the
+/// device's signature that approved it, that Claktory's id and its backend
+/// key then, to check the statement with, its name as the account lists it
+/// now, and when the service took it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryKey {
+    pub public_key: String,
+    pub statement: String,
+    #[serde(default)]
+    pub device_sig: String,
+    pub claktory_id: String,
+    /// The Claktory that set it, named as `GET /v1/claktories` names it
+    /// now (its own name, or its machine's); `""` once it was removed from
+    /// the account, or from a service before it (Giorno 49024).
+    #[serde(default)]
+    pub claktory_name: String,
+    pub backend_key: String,
+    pub set_at: i64,
+    /// The account's keys before it, newest first, 9 at most, each without
+    /// a history of its own: the chain back to a key sealed to earlier.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<RecoveryKey>,
+}
+
+/// `PUT /v1/account/recovery-key`: the statement `sign_recovery_key` makes,
+/// and `sign_recovery_key_device`'s signature when it replaces a key.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SetRecoveryKey {
+    pub statement: String,
+    #[serde(default)]
+    pub device_sig: String,
+}
+
+/// `PUT /v1/account/recovery-key`'s answer, and its `409
+/// recovery_key_changed`'s (None: the account has none).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RecoveryKeySet {
+    pub recovery_key: Option<RecoveryKey>,
+}
+
+/// What a Claktory says of the account's recovery key it made (#239):
+/// `public_key` (base64url, 32 bytes, X25519) replaces `replaces` (`""`
+/// for the account's first), made at `iat` (unix seconds), approved on the
+/// device with the account key `device_key` (Fugo 48996: every key, the
+/// account's first too).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryKeyStatement {
+    pub v: u32,
+    pub account_id: String,
+    pub claktory_id: String,
+    pub public_key: String,
+    pub replaces: String,
+    #[serde(default)]
+    pub device_key: String,
+    pub iat: i64,
+}
+
+const RECOVERY_KEY_LABEL: &[u8] = b"claktory recovery key v1\n";
+const RECOVERY_KEY_DEVICE_LABEL: &[u8] = b"claktory recovery key device v1\n";
+
+/// The payload of a statement `sign_recovery_key` made, as it was signed.
+fn recovery_key_payload(text: &str) -> Option<Vec<u8>> {
+    unb64(text.trim().split_once('.')?.0)
+}
+
+/// A device's approval of a recovery key (Fugo 47881): its account key's
+/// signature over `RECOVERY_KEY_DEVICE_LABEL ‖ payload`, of the statement
+/// `sign_recovery_key` made (whose `device_key` is this device's).
+pub fn sign_recovery_key_device(account_key: &SigningKey, statement: &str) -> String {
+    let payload = recovery_key_payload(statement).unwrap_or_default();
+    b64(account_key.sign(&[RECOVERY_KEY_DEVICE_LABEL, &payload].concat()).to_bytes())
+}
+
+/// Whether `device_sig` approves `statement`, by the device its
+/// `device_key` names.
+pub fn verify_recovery_key_device(statement: &str, device_sig: &str) -> bool {
+    let Some(payload) = recovery_key_payload(statement) else { return false };
+    let Ok(said) = serde_json::from_slice::<RecoveryKeyStatement>(&payload) else { return false };
+    let Some(key) = unb64_32(&said.device_key).and_then(|key| VerifyingKey::from_bytes(&key).ok()) else { return false };
+    verify(&key, &[RECOVERY_KEY_DEVICE_LABEL, &payload].concat(), device_sig)
+}
+
+/// A Claktory's statement of a recovery key, signed with its backend key:
+/// `b64(payload) "." b64(signature)`, over `RECOVERY_KEY_LABEL ‖ payload`.
+pub fn sign_recovery_key(backend_key: &SigningKey, statement: &RecoveryKeyStatement) -> String {
+    let payload = serde_json::to_vec(statement).unwrap_or_default();
+    let signature = backend_key.sign(&[RECOVERY_KEY_LABEL, &payload].concat());
+    format!("{}.{}", b64(&payload), b64(signature.to_bytes()))
+}
+
+/// The statement `text` says, if `backend_key` signed it and it's a
+/// version this knows. Its time is the reader's to judge.
+pub fn verify_recovery_key(backend_key: &VerifyingKey, text: &str) -> Option<RecoveryKeyStatement> {
+    let (payload, signature) = text.trim().split_once('.')?;
+    let payload = unb64(payload)?;
+    if !verify(backend_key, &[RECOVERY_KEY_LABEL, &payload].concat(), signature) {
+        return None;
+    }
+    let statement: RecoveryKeyStatement = serde_json::from_slice(&payload).ok()?;
+    (statement.v == 1).then_some(statement)
 }
 
 /// `GET /v1/stats/public`: for a counter on claktory.com.
@@ -744,6 +855,10 @@ pub struct ErrorBody {
     pub retry_after: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_time: Option<i64>,
+    /// `409 recovery_key_changed`: the account's recovery key now (none
+    /// while it has none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_key: Option<Box<RecoveryKey>>,
 }
 
 /// A new Ed25519 key, such as a Claktory's backend key.
@@ -1354,5 +1469,39 @@ mod tests {
         assert!(!ascii_email("mätt@example.com") && !ascii_email("") && !ascii_email("m att@example.com"));
         assert!(valid_claktory_id("abcdefgh_ijkl-mnop"));
         assert!(!valid_claktory_id("short") && !valid_claktory_id("has a space in it ok"));
+    }
+
+    /// #239: a recovery key's statement checks only with the Claktory's
+    /// backend key that signed it, and its device approval only with the
+    /// device its `device_key` names, over the same payload.
+    #[test]
+    fn a_recovery_keys_statement_and_its_device_approval_check_with_their_own_keys() {
+        let (claktory, phone, other) = (new_signing_key(), new_signing_key(), new_signing_key());
+        let said = RecoveryKeyStatement {
+            v: 1,
+            account_id: "acct".to_owned(),
+            claktory_id: "abcdefgh_ijkl-mnop".to_owned(),
+            public_key: b64([7; 32]),
+            replaces: b64([6; 32]),
+            device_key: b64(phone.verifying_key().to_bytes()),
+            iat: 1_763_647_200,
+        };
+        let statement = sign_recovery_key(&claktory, &said);
+        assert_eq!(verify_recovery_key(&claktory.verifying_key(), &statement), Some(said.clone()));
+        assert_eq!(verify_recovery_key(&other.verifying_key(), &statement), None);
+        let device_sig = sign_recovery_key_device(&phone, &statement);
+        assert!(verify_recovery_key_device(&statement, &device_sig));
+        assert!(!verify_recovery_key_device(&statement, &sign_recovery_key_device(&other, &statement)));
+        // The two signatures are each for their own label: neither passes
+        // for the other.
+        let claktory_sig = statement.split_once('.').unwrap().1;
+        assert!(!verify_recovery_key_device(&statement, claktory_sig));
+        let as_statement = format!("{}.{device_sig}", statement.split_once('.').unwrap().0);
+        assert_eq!(verify_recovery_key(&phone.verifying_key(), &as_statement), None);
+        // A payload changed after signing checks with neither.
+        let changed = RecoveryKeyStatement { public_key: b64([8; 32]), ..said };
+        let forged = format!("{}.{claktory_sig}", b64(serde_json::to_vec(&changed).unwrap()));
+        assert_eq!(verify_recovery_key(&claktory.verifying_key(), &forged), None);
+        assert!(!verify_recovery_key_device(&forged, &device_sig));
     }
 }

@@ -91,9 +91,19 @@ impl Extension for Web {
         });
         vec![
             tool(factory, agent, "web_search", "Search the web", SEARCH, search, |factory, agent, args| {
-                Box::pin(run_search(factory, agent, args))
+                Box::pin(async move {
+                    // What it reads is the web's: no errand_open for it
+                    // until its conversation starts afresh (Fugo 50226).
+                    crate::errands::read_outside(&factory, &agent, "web search results");
+                    run_search(factory, agent, args).await
+                })
             }),
-            tool(factory, agent, "web_fetch", "Fetch page", FETCH, fetch, |factory, _agent, args| Box::pin(run_fetch(factory, args))),
+            tool(factory, agent, "web_fetch", "Fetch page", FETCH, fetch, |factory, agent, args| {
+                Box::pin(async move {
+                    crate::errands::read_outside(&factory, &agent, "a web page");
+                    run_fetch(factory, args).await
+                })
+            }),
         ]
     }
 }

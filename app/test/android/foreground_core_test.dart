@@ -207,7 +207,9 @@ void main() {
     'Extensions sheet cancels intact, then Back closes just that sheet',
     (tester) async {
       final harness = await _show(tester);
-      await tester.tap(_inAgent(find.bySemanticsLabel('Extensions')));
+      await tester.tap(
+        _inAgent(find.bySemanticsLabel(RegExp('^More options for '))),
+      );
       await pumpFrames(tester);
       expect(find.text("Mike's extensions"), findsOneWidget);
       expect(find.byType(PhoneSheet), findsOneWidget);
@@ -427,7 +429,7 @@ void main() {
 
   testWidgets('core Android actions have 48dp hit regions', (tester) async {
     await _show(tester);
-    for (final label in ['Menu', 'Extensions', 'Attach files']) {
+    for (final label in ['Menu', 'More options for Mike', 'Attach files']) {
       _target48(tester, _inAgent(find.bySemanticsLabel(label)).first, label);
     }
     _target48(tester, find.byType(SendButton), 'Send');

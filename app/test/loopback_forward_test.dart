@@ -546,6 +546,7 @@ void main() {
       await harness.show(tester);
       await harness.apply(tester, workspace(signedIn: false));
       harness.page.value = AppPage.settings;
+      harness.backend.settingsSection.value = 'providers';
       await settle(tester);
       await tester.tap(find.text('Anthropic (Claude Pro/Max)'));
       await settle(tester);

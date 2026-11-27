@@ -13,18 +13,25 @@ import 'account.dart'
         openDeleteAccountPage;
 import 'backend.dart' show Backend;
 import 'claktory_identity.dart' show claktoryName;
+import 'claktory_problem.dart'
+    show
+        ClaktoryProblemPage,
+        ClaktorySignedOutPage,
+        ProblemAction,
+        ProblemText,
+        showAddClaktory;
 import 'connections.dart';
 import 'controls.dart';
 import 'device_account.dart';
 import 'device_kind.dart' show thisDeviceName;
 import 'device_vouch.dart' show SignInThroughThisMac;
 import 'devices.dart' show thisDeviceKind;
-import 'forms.dart' show FormFrame;
+import 'forms.dart' show FittedHeading, FormFrame;
 import 'identity.dart';
 import 'markdown.dart' show Markdown;
 import 'mobile/drawer.dart' show largeText;
 import 'mobile/input.dart' show InputKind;
-import 'mobile/lines.dart' show ControlsLine;
+import 'mobile/local_network.dart' show connectNewClaktory;
 import 'mobile/metrics.dart' show Touch, TypeScale;
 import 'name_step.dart' show StepButtons, stepFieldScrollPadding;
 import 'pairing.dart'
@@ -33,7 +40,12 @@ import 'people/e2ee.dart' show DmSignOut, E2ee, e2eeFor, e2eeOf, startedE2ee;
 import 'people/people_view.dart' show peopleAvailable;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'rail.dart'
-    show Claktories, ClaktoriesScope, claktoryInitials, confirmRemoveClaktory;
+    show
+        Claktories,
+        ClaktoriesScope,
+        PhoneClaktories,
+        claktoryInitials,
+        confirmRemoveClaktory;
 import 'scope.dart';
 import 'usage.dart' show formatAge;
 
@@ -297,9 +309,30 @@ class _SignOutDeviceState extends State<_SignOutDevice> {
 /// Signs this device in with an emailed code: its email, then the code.
 /// [intro] says why, above the email field.
 class DeviceSignInForm extends StatefulWidget {
-  const DeviceSignInForm({super.key, required this.intro, this.email});
+  const DeviceSignInForm({
+    super.key,
+    required this.intro,
+    this.email,
+    this.refused,
+    this.service,
+    this.hint,
+  });
 
   final String intro;
+
+  /// The address to type, masked as the Claktory asking said it
+  /// ("m…@gmail.com"), as the field's placeholder (Trish 50061); null:
+  /// "Email address".
+  final String? hint;
+
+  /// An account the Claktory asking turns away: "Use this account" isn't
+  /// offered when it's this Mac's Claktory's (Abbacchio row 1541).
+  final String? refused;
+
+  /// The account service to sign in with, when it's known whose it must be
+  /// (a Claktory that turned this device away said); null: a Claktory's
+  /// this app knows of, or claktory.com's.
+  final String? service;
 
   /// Signs in again only with this address (the account this device is
   /// signed in to), shown rather than typed, so a mistyped one can't sign
@@ -336,7 +369,7 @@ class _DeviceSignInFormState extends State<DeviceSignInForm> {
 
   String get _service => _account.signedIn
       ? _account.service
-      : accountServiceFor(ClaktoriesScope.of(context));
+      : widget.service ?? accountServiceFor(ClaktoriesScope.of(context));
 
   /// Keeps the code to its digits, and sends it once all six are in.
   void _codeChanged() {
@@ -451,7 +484,7 @@ class _DeviceSignInFormState extends State<DeviceSignInForm> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // A Mac whose own Claktory is signed in: one click (#529).
-            const SignInThroughThisMac(),
+            SignInThroughThisMac(refused: widget.refused),
             Text(
               widget.intro,
               style: type.body.copyWith(color: palette.textMuted),
@@ -467,7 +500,7 @@ class _DeviceSignInFormState extends State<DeviceSignInForm> {
               TextField(
                 key: const ValueKey('device-email'),
                 controller: _email,
-                placeholder: 'Email address',
+                placeholder: widget.hint ?? 'Email address',
                 kind: InputKind.email,
                 scrollPadding: stepFieldScrollPadding(context),
                 onSubmitted: (_) => _sendCode(),
@@ -583,9 +616,27 @@ class YourClaktories extends StatefulWidget {
     this.onConnect,
     this.hideConnected = false,
     this.offerDelete = false,
+    this.onAsking,
+    this.onNothingLeft,
+    this.accountLine = true,
   });
 
   final void Function(RemoteFactory target)? onConnect;
+
+  /// Told whether a row is asking "Connect to …?" in place, so what's
+  /// around it can drop its own Cancel (Add a Claktory: one Cancel on
+  /// screen); false again when it's gone.
+  final ValueChanged<bool>? onAsking;
+
+  /// Told, once the account's list is read (never while it loads or on an
+  /// error) and whenever that changes, whether every one on it is hidden
+  /// by [hideConnected]: nothing left to add. What to say is the caller's.
+  final ValueChanged<bool>? onNothingLeft;
+
+  /// The "Signed in as …" line with Sign out at the foot; left out where
+  /// this device's sign-in is said elsewhere (a Mac with its own
+  /// Claktory: Settings → Account).
+  final bool accountLine;
 
   /// Leaves out the ones this app shows already (listed beside it).
   final bool hideConnected;
@@ -625,8 +676,20 @@ class _YourClaktoriesState extends State<YourClaktories> {
   @override
   void dispose() {
     _account?.removeListener(_changed);
+    // So what's around it can't keep its Cancel hidden.
+    if (_confirming != null) widget.onAsking?.call(false);
     super.dispose();
   }
+
+  /// Picks [claktory] to ask about, or none, and says so.
+  void _ask(AccountClaktory? claktory) {
+    final was = _confirming != null;
+    setState(() => _confirming = claktory);
+    if (was != (claktory != null)) widget.onAsking?.call(claktory != null);
+  }
+
+  /// What [YourClaktories.onNothingLeft] was last told.
+  bool? _nothingLeft;
 
   void _changed() {
     final account = _account!;
@@ -635,10 +698,8 @@ class _YourClaktoriesState extends State<YourClaktories> {
       unawaited(_list());
     } else if (!account.signedIn && _listedFor.isNotEmpty) {
       _listedFor = '';
-      setState(() {
-        _listed = null;
-        _confirming = null;
-      });
+      setState(() => _listed = null);
+      _ask(null);
     }
   }
 
@@ -661,7 +722,9 @@ class _YourClaktoriesState extends State<YourClaktories> {
     if (connect != null) {
       connect(target);
     } else {
-      AppScope.switchFactory(context, target);
+      // The first Claktory on another machine asks for Local Network
+      // first, as every way in does (devices-signin.md §8.8).
+      unawaited(connectNewClaktory(context, target));
     }
   }
 
@@ -688,10 +751,7 @@ class _YourClaktoriesState extends State<YourClaktories> {
   Widget _confirm(BuildContext context, AccountClaktory claktory) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    final cancel = Button(
-      label: 'Cancel',
-      onPressed: () => setState(() => _confirming = null),
-    );
+    final cancel = Button(label: 'Cancel', onPressed: () => _ask(null));
     final connect = Button(
       label: 'Connect',
       primary: true,
@@ -748,6 +808,20 @@ class _YourClaktoriesState extends State<YourClaktories> {
               ? 'This $thisDeviceKind'
               : 'Connected',
     };
+    // Read, and each one on it already here: nothing left to add.
+    if (listed != null && error == null) {
+      final nothingLeft =
+          widget.hideConnected &&
+          listed.isNotEmpty &&
+          listed.every((claktory) => shown[claktory.endpointId] != null);
+      if (nothingLeft != _nothingLeft) {
+        _nothingLeft = nothingLeft;
+        // Its caller rebuilds, so not while this one builds.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) widget.onNothingLeft?.call(nothingLeft);
+        });
+      }
+    }
     final now = DateTime.now();
     final signOut = Button(
       label: 'Sign out',
@@ -784,11 +858,13 @@ class _YourClaktoriesState extends State<YourClaktories> {
                 claktory: claktory,
                 status: shown[claktory.endpointId],
                 now: now,
-                onTap: () => setState(() => _confirming = claktory),
+                onTap: () => _ask(claktory),
               ),
-        const SizedBox(height: Space.l),
+        if (widget.accountLine) const SizedBox(height: Space.l),
+        if (!widget.accountLine)
+          const SizedBox.shrink()
         // On a phone at the largest text, Sign out under the email.
-        if (isPhoneLayout(context) && largeText(context))
+        else if (isPhoneLayout(context) && largeText(context))
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -1006,11 +1082,15 @@ class DeviceSignInDialog extends StatefulWidget {
     required this.title,
     required this.intro,
     required this.close,
+    this.refused,
   });
 
   final String title;
   final String intro;
   final VoidCallback close;
+
+  /// The account the Claktory asking turns away ([DeviceSignInForm]).
+  final String? refused;
 
   @override
   State<DeviceSignInDialog> createState() => _DeviceSignInDialogState();
@@ -1042,28 +1122,35 @@ class _DeviceSignInDialogState extends State<DeviceSignInDialog> {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final type = TypeScale.of(context);
-    // Scrolls, and Cancel goes under the title, where the text is large
-    // and the screen small.
+    // Scrolls where the text is large and the screen small. Cancel stays
+    // at the title's end, the title wrapping beside it, never pushed under
+    // it on an SE (Zucchero's row 720).
     return SingleChildScrollView(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Wrap(
-            alignment: WrapAlignment.spaceBetween,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: Space.s,
-            runSpacing: Space.s,
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                widget.title,
-                style: type.emphasis.copyWith(color: palette.text),
+              Expanded(
+                child: Padding(
+                  // Level with Cancel's words at the default size.
+                  padding: const EdgeInsets.only(top: Space.s),
+                  // Its words shrink to fit rather than break mid-word in
+                  // a narrow slide-over at the largest text (Pesci 50692).
+                  child: FittedHeading(
+                    widget.title,
+                    style: type.emphasis.copyWith(color: palette.text),
+                  ),
+                ),
               ),
+              const SizedBox(width: Space.s),
               Button(label: 'Cancel', onPressed: widget.close),
             ],
           ),
           const SizedBox(height: Space.l),
-          DeviceSignInForm(intro: widget.intro),
+          DeviceSignInForm(intro: widget.intro, refused: widget.refused),
         ],
       ),
     );
@@ -1182,6 +1269,8 @@ class _OtherAccountViewState extends State<OtherAccountView> {
   /// (MC5), then signs in (Squalo's V2).
   Future<void> _signInWithTheirs(String name) async {
     final account = _account!;
+    // The account it turns away: not offered again as this Mac's.
+    final refused = account.email;
     if (account.signedIn) {
       await signOutOfAccount(context, account);
       if (account.signedIn || !mounted) return;
@@ -1194,6 +1283,7 @@ class _OtherAccountViewState extends State<OtherAccountView> {
             'Use the email $name is signed in with, and $name lets this '
             '$thisDeviceKind in again.',
         close: close,
+        refused: refused.isEmpty ? null : refused,
       ),
     );
   }
@@ -1209,94 +1299,74 @@ class _OtherAccountViewState extends State<OtherAccountView> {
       builder: (context, _) {
         final said = backend.otherAccount.value ?? '';
         final name = claktoryName(backend);
-        // A device it let in before says it's "now signed in to a
-        // different" account; one refused at connect, to open a pipe.
-        final before = said.contains('is now signed in to a different');
+        // A device it let in before, now signed in to another account
+        // (#529, V5: the backend says so); one refused at connect is told
+        // to open a pipe. A Claktory from before the flag says it in
+        // words.
+        final before =
+            backend.otherAccountBefore ||
+            said.contains('is now signed in to a different');
         final masked = account.signedIn ? maskedEmail(account.email) : '';
         final claktory = ClaktoriesScope.of(context)?.all
             .where((claktory) => claktory.backend == backend)
             .firstOrNull;
-        final buttons = [
-          if (claktory != null)
-            Button(
-              label: 'Remove…',
-              onPressed: () =>
-                  unawaited(confirmRemoveClaktory(context, claktory)),
-            ),
-          if (account.signedIn || before)
-            Button(
-              label: 'Sign in…',
-              onPressed: () => unawaited(_signInWithTheirs(name)),
-            ),
-          Button(label: 'Try again', primary: true, onPressed: backend.retry),
-        ];
         final muted = type.body.copyWith(color: palette.textMuted);
-        return Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(Space.xl),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text(
-                    before
-                        ? '$name no longer lets this $thisDeviceKind in'
-                        : '$name is on another Claktory account',
-                    style: type.title.copyWith(color: palette.text),
-                  ),
-                  if (said.isNotEmpty) ...[
-                    const SizedBox(height: Space.s),
-                    Text(said, style: muted),
-                  ],
-                  // Which account this device is on, so "the account it
-                  // uses" means something (Squalo's V2).
-                  if (masked.isNotEmpty) ...[
-                    const SizedBox(height: Space.s),
-                    Text(
-                      'This $thisDeviceKind is signed in as $masked.',
-                      style: muted,
-                    ),
-                  ],
-                  // Refused at connect: it may be the person's own, signed
-                  // in with their other email (Squalo's V3): moved to this
-                  // device's account in the app, never by commands, which
-                  // only the person may run (Fugo 46047, #546 A).
-                  if (!before) ...[
-                    const SizedBox(height: Space.m),
-                    Text(
-                      'If $name is yours, sign it in to this '
-                      "$thisDeviceKind's account instead, in Settings → "
-                      'Account on $name. Then try again here.',
-                      style: muted,
-                    ),
-                    const SizedBox(height: Space.s),
-                    Text(
-                      'No screen on $name? Choose Sign in… to use '
-                      "$name's account on this $thisDeviceKind for now, then "
-                      'sign $name in to yours from here, in its Settings → '
-                      'Account.',
-                      style: muted,
-                    ),
-                  ],
-                  const SizedBox(height: Space.xl),
-                  // On a phone, one a row, Try again at the bottom, nearest
-                  // the thumb; elsewhere together at the end.
-                  if (isPhoneLayout(context))
-                    for (final (i, button) in buttons.indexed) ...[
-                      if (i > 0) const SizedBox(height: Space.s),
-                      button,
-                    ]
-                  else
-                    Align(
-                      alignment: AlignmentDirectional.centerEnd,
-                      child: ControlsLine(children: buttons),
-                    ),
-                ],
+        // Sign in… is the way on where it's offered; Try again works only
+        // once it's signed in to this device's account, so it's quiet
+        // then (§4). Remove… is always quiet: it only asks (Lucy 49057).
+        final signIn = account.signedIn || before
+            ? ProblemAction(
+                'Sign in…',
+                () => unawaited(_signInWithTheirs(name)),
+              )
+            : null;
+        final retry = ProblemAction('Try again', backend.retry);
+        return ClaktoryProblemPage(
+          title: before
+              ? '$name no longer lets this $thisDeviceKind in'
+              : '$name is on another Claktory account',
+          body: [
+            if (said.isNotEmpty) Text(said, style: muted),
+            // Which account this device is on, so "the account it uses"
+            // means something (Squalo's V2).
+            // The word joiner keeps "m…" with its "@example.com" at a
+            // narrow width (Zucchero's row 714).
+            if (masked.isNotEmpty)
+              Text(
+                'This $thisDeviceKind is signed in as '
+                '${masked.replaceFirst('…@', '…\u2060@')}.',
+                style: muted,
               ),
-            ),
-          ),
+            // Refused at connect: it may be the person's own, signed in
+            // with their other email (Squalo's V3): moved to this device's
+            // account in the app, never by commands, which only the person
+            // may run (Fugo 46047, #546 A).
+            if (!before) ...[
+              const SizedBox(height: Space.xs),
+              Text(
+                'If $name is yours, sign it in to this '
+                "$thisDeviceKind's account instead, in Settings → "
+                'Account on $name. Then try again here.',
+                style: muted,
+              ),
+              Text(
+                'No screen on $name? Choose Sign in… to use '
+                "$name's account on this $thisDeviceKind for now, then "
+                'sign $name in to yours from here, in its Settings → '
+                'Account.',
+                style: muted,
+              ),
+            ],
+          ],
+          quiet: [
+            if (signIn != null) retry,
+            if (claktory != null)
+              ProblemAction(
+                'Remove…',
+                () => unawaited(confirmRemoveClaktory(context, claktory)),
+              ),
+          ],
+          primary: signIn ?? retry,
         );
       },
     );
@@ -1319,6 +1389,21 @@ class SignInRequiredView extends StatefulWidget {
 class _SignInRequiredViewState extends State<SignInRequiredView> {
   DeviceAccount? _account;
 
+  /// While it's up, the Claktory is asked again now and then, quietly: let
+  /// in meanwhile, this device connects by itself (Sale's row 189).
+  Timer? _asking;
+
+  /// How often it asks.
+  static const askEvery = Duration(seconds: 30);
+
+  @override
+  void initState() {
+    super.initState();
+    _asking = Timer.periodic(askEvery, (_) {
+      if (mounted) AppScope.of(context).probeSignIn();
+    });
+  }
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -1330,6 +1415,7 @@ class _SignInRequiredViewState extends State<SignInRequiredView> {
 
   @override
   void dispose() {
+    _asking?.cancel();
     _account?.removeListener(_changed);
     super.dispose();
   }
@@ -1343,10 +1429,38 @@ class _SignInRequiredViewState extends State<SignInRequiredView> {
     _wasSignedIn = signedIn;
   }
 
+  /// Cancel, for one still being added by its code: forgotten at once,
+  /// and Add a Claktory again at its code.
+  void _cancel() {
+    final connections = AppScope.scope(context).connections;
+    final current = connections.current;
+    if (current == null) return;
+    final phone = isPhoneLayout(context);
+    final root = Overlay.of(context, rootOverlay: true).context;
+    connections.forget(current);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (phone) {
+        PhoneClaktories.showAdding(code: true);
+      } else if (root.mounted) {
+        showAddClaktory(root, code: true);
+      }
+    });
+  }
+
+  /// The email [backend]'s Claktory is signed in with, masked: as its
+  /// Workspace has it, or as it said turning this device away ([said],
+  /// masked already); '' when not known.
+  static String _theirEmail(Backend backend, String said) {
+    final account = backend.workspace.workspace.account;
+    final known =
+        account.state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SIGNED_IN
+        ? maskedEmail(account.email)
+        : '';
+    return known.isNotEmpty ? known : said;
+  }
+
   @override
   Widget build(BuildContext context) {
-    final palette = Palette.of(context);
-    final type = TypeScale.of(context);
     final backend = AppScope.of(context);
     final account = _account!;
     _wasSignedIn = account.signedIn;
@@ -1354,103 +1468,84 @@ class _SignInRequiredViewState extends State<SignInRequiredView> {
       listenable: Listenable.merge([backend.signInRequired, account]),
       builder: (context, _) {
         final name = claktoryName(backend);
-        final said = backend.signInRequired.value ?? '';
+        final words = backend.signInRequired.value ?? '';
+        // Its own account service: as its Workspace has it, or as it said
+        // turning this device away, with no Workspace yet (a relaunch
+        // straight into it: Sale's row 189 b); else not known.
+        final said = backend.signInSaid;
+        final known = backend.workspace.workspace.account.service;
+        final service = known.isNotEmpty
+            ? known
+            : said == null
+            ? null
+            : said.service.isEmpty
+            ? defaultAccountService
+            : said.service;
+        // Gives up on it: one found through the account with the rail's
+        // own Remove question, never at once; one still being added by
+        // its code with Cancel, back to Add a Claktory, nothing kept
+        // (§4's way out; Lucy 50050).
+        final onCancel = widget.onCancel;
+        final remove = [
+          if (onCancel != null)
+            ProblemAction('Remove…', onCancel)
+          else if (AppScope.scope(context).connections.current != null)
+            ProblemAction('Cancel', _cancel),
+        ];
+        // The email it's signed in with, masked, as it said it.
+        final theirs = _theirEmail(backend, said?.email ?? '');
+        final retry = ProblemAction('Try again', backend.retry);
         // The Claktory itself was signed out of the account (friend bug
         // #38): it's the one to sign in again, in its own Settings, as
-        // the backend's sentence says, not this device (Trish 35985).
-        final claktorySignedOut = said.contains(
-          'was signed out of your Claktory account',
-        );
-        final signOut = Button(
-          label: 'Sign out',
-          onPressed: () => unawaited(signOutOfAccount(context, account)),
-        );
-        final retry = Button(
-          label: 'Try again',
-          primary: true,
-          onPressed: backend.retry,
-        );
-        // Gives up on it: the rail's own Remove question, never at once.
-        final cancel = Button(label: 'Remove…', onPressed: widget.onCancel);
-        return Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(Space.xl),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 420),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text(
-                    claktorySignedOut
-                        ? '$name was signed out'
-                        : 'Sign in to connect to $name',
-                    style: type.title.copyWith(color: palette.text),
-                  ),
-                  if (claktorySignedOut) ...[
-                    // Its Settings → Account is on the Claktory this device
-                    // can't open now. With no screen there, factoryd pair in
-                    // its terminal (offline, the digits typed there) lets
-                    // this device in again by code, to sign it in from here
-                    // (#529 MC4; Fugo 46047, Giorno 46058: the account
-                    // commands are the person's alone, never a terminal's).
-                    const SizedBox(height: Space.s),
-                    Text(
-                      'Sign $name in to your Claktory account again, in '
-                      'Settings → Account on $name. Then try again here.',
-                      style: type.body.copyWith(color: palette.textMuted),
-                    ),
-                    const SizedBox(height: Space.s),
-                    Text(
-                      'No screen on $name? Run factoryd pair in a terminal '
-                      'there and connect this $thisDeviceKind with the code it '
-                      'shows. Then sign $name in from here, in its Settings → '
-                      'Account.',
-                      style: type.body.copyWith(color: palette.textMuted),
-                    ),
-                  ] else if (said.isNotEmpty) ...[
-                    const SizedBox(height: Space.s),
-                    Text(
-                      said,
-                      style: type.body.copyWith(color: palette.textMuted),
-                    ),
-                  ],
-                  const SizedBox(height: Space.xl),
-                  if (claktorySignedOut)
-                    Align(alignment: Alignment.centerRight, child: retry)
-                  else if (account.signedIn) ...[
-                    Text(
-                      'Signed in as ${account.email}.',
-                      style: type.body.copyWith(color: palette.text),
-                    ),
-                    const SizedBox(height: Space.l),
-                    if (isPhoneLayout(context))
-                      StepButtons(children: [retry, signOut])
-                    else
-                      Wrap(
-                        alignment: WrapAlignment.end,
-                        spacing: Space.s,
-                        children: [signOut, retry],
-                      ),
-                  ] else
-                    DeviceSignInForm(
-                      intro: signInWithIntro(
-                        name,
-                        backend.workspace.workspace.account,
-                      ),
-                    ),
-                  if (widget.onCancel != null) ...[
-                    const SizedBox(height: Space.l),
-                    // On a phone, as wide as the buttons above it.
-                    if (isPhoneLayout(context))
-                      StepButtons(children: [cancel])
-                    else
-                      Align(alignment: Alignment.centerLeft, child: cancel),
-                  ],
-                ],
+        // the backend's sentence says, not this device (Trish 35985). The
+        // same page as one this device was let in to before (area 2, 8.4).
+        if (words.contains('was signed out of your Claktory account')) {
+          return ClaktorySignedOutPage(backend: backend, quiet: remove);
+        }
+        final saying = [if (words.isNotEmpty) ProblemText(words)];
+        // Signed in, and still turned away: it uses another account. The
+        // way on switches: Sign out's own question, then the email step
+        // here; Try again for a switch made on another device (Trish
+        // 50061).
+        if (account.signedIn) {
+          final device = thisDeviceKind;
+          return ClaktoryProblemPage(
+            title: '$name uses another account',
+            body: [
+              ProblemText(
+                theirs.isEmpty
+                    ? '$name uses a different account from this $device, '
+                          'which is signed in as ${account.email}. To connect, '
+                          'sign in here with the account $name uses.'
+                    : '$name is signed in as $theirs, and this $device as '
+                          '${account.email}. To connect, sign in here with '
+                          '$theirs.',
               ),
+            ],
+            quiet: [retry, ...remove],
+            primary: ProblemAction(
+              theirs.isEmpty ? 'Switch account…' : 'Switch to $theirs…',
+              () => unawaited(signOutOfAccount(context, account)),
             ),
-          ),
+          );
+        }
+        // The email field, its Send code the way on (§4: Remove… · Send
+        // code★).
+        return ClaktoryProblemPage(
+          title: 'Sign in to connect to $name',
+          body: [
+            ...saying,
+            DeviceSignInForm(
+              intro: signInWithIntro(
+                name,
+                backend.workspace.workspace.account,
+                said: said?.email ?? '',
+              ),
+              service: service,
+              hint: theirs.isEmpty ? null : theirs,
+            ),
+          ],
+          quiet: remove,
         );
       },
     );
@@ -1458,13 +1553,20 @@ class _SignInRequiredViewState extends State<SignInRequiredView> {
 }
 
 /// Which email to sign in with, for [name]: its own, masked
-/// ("m…@gmail.com"), when it said it's signed in with one; else the words
-/// without it (#529, MC13, Trish's words).
-String signInWithIntro(String name, ClaktoryAccount account) {
-  final email =
+/// ("m…@gmail.com"), when it said it's signed in with one, in its
+/// Workspace or, with none yet, as it turned this device away ([said],
+/// masked already: #527); else the words without it (#529, MC13, Trish's
+/// words).
+String signInWithIntro(
+  String name,
+  ClaktoryAccount account, {
+  String said = '',
+}) {
+  final known =
       account.state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SIGNED_IN
       ? maskedEmail(account.email)
       : '';
+  final email = known.isNotEmpty ? known : said;
   return email.isEmpty
       ? 'Sign in with the email $name is signed in with.'
       : 'Sign in with $email, the email $name is signed in with.';

@@ -285,7 +285,7 @@ pub(crate) fn check(command: &Command) -> Result<(), String> {
     if Path::new(&command.cwd).is_dir() {
         Ok(())
     } else {
-        Err(format!("Its folder, {}, isn't there any more, so it can't run: dismiss this card.", command.cwd))
+        Err(format!("Its folder, {}, isn't there any more, so it can't run: dismiss this request.", command.cwd))
     }
 }
 
@@ -515,14 +515,34 @@ pub(crate) fn asking_in(pgid: i32) -> Option<&'static str> {
     })
 }
 
+/// Card `ask`'s command as History shows it (NeedsYouRecord.command): as it
+/// was, with how it ran as kept, its output left out. None when the card
+/// isn't an Execute card (`action`, the asks row's).
+pub(crate) fn in_history(db: &rusqlite::Connection, ask: i64, action: &str) -> Option<v1::AskCommand> {
+    let Ok(crate::card_actions::Action::Execute(command)) = serde_json::from_str(action) else { return None };
+    let run = kept(db, ask, false);
+    Some(to_proto(&command, run.as_ref()))
+}
+
+/// Claktory's heading for a command card, as History titles it: "Run this
+/// command on Matt's Mac Studio".
+pub(crate) fn heading(command: &v1::AskCommand) -> String {
+    if command.machine.is_empty() { "Run this command".to_owned() } else { format!("Run this command on {}", command.machine) }
+}
+
 /// How the run of card `ask` is going or went: while it runs, as it is now.
 pub(crate) fn run_of(runs: &Runs, db: &rusqlite::Connection, ask: i64) -> Option<Run> {
     if let Some(run) = runs.with(|live| live.get(&ask).map(|live| live.run.clone())) {
         return Some(run);
     }
+    kept(db, ask, true)
+}
+
+/// The run of card `ask` as kept, with its output or without.
+fn kept(db: &rusqlite::Connection, ask: i64, output: bool) -> Option<Run> {
     db.query_row(
-        "SELECT state, exit_code, output, truncated, started, duration, device, error FROM ask_runs WHERE ask = ?1",
-        [ask],
+        "SELECT state, exit_code, CASE WHEN ?2 THEN output ELSE '' END, truncated, started, duration, device, error FROM ask_runs WHERE ask = ?1",
+        rusqlite::params![ask, output],
         |row| {
             Ok(Run {
                 state: State::from_name(&row.get::<_, String>(0)?),

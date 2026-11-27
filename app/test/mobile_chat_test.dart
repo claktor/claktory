@@ -10,7 +10,7 @@ import 'package:cupertino_ui/cupertino_ui.dart'
 import 'package:factory_app/scope.dart' show AppPage;
 import 'package:factory_app/agent_view.dart';
 import 'package:factory_app/controls.dart' show GlyphButton;
-import 'package:factory_app/inbox.dart' show NeedsYouChip;
+import 'package:factory_app/inbox.dart' show InboxView, NeedsYouChip;
 import 'package:factory_app/mobile/composer.dart';
 import 'package:factory_app/mobile/needs_you_button.dart';
 import 'package:factory_app/mobile/navigation.dart';
@@ -31,7 +31,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:factory_app/mobile/needs_you_phone.dart' show PhoneNeedsYou;
 
 import 'harness.dart';
 
@@ -128,14 +127,14 @@ void main() {
       find.descendant(of: find.byType(AgentView), matching: finder);
 
   group('the header', () {
-    testWidgets('Back, the name over the role and "…", a finger each', (
+    testWidgets('Back, the name over "role · model" and "…", a finger each', (
       tester,
     ) async {
       final semantics = tester.ensureSemantics();
       await conversation(tester);
       final view = tester.widget<AgentView>(find.byType(AgentView));
       final leading = view.onBack != null ? 'Back' : 'Menu';
-      for (final label in [leading, 'Extensions']) {
+      for (final label in [leading, 'More options for Mike']) {
         final size = tester.getSize(inView(find.bySemanticsLabel(label)).first);
         expect(size.width, greaterThanOrEqualTo(44), reason: label);
         expect(size.height, greaterThanOrEqualTo(44), reason: label);
@@ -144,8 +143,8 @@ void main() {
       expect(inView(find.text('Coordinator')), findsOneWidget);
       expect(
         inView(find.text('Opus 5.5')),
-        findsNothing,
-        reason: 'the model steps aside on a phone',
+        findsOneWidget,
+        reason: 'the model after the role (agent-view.md §5)',
       );
       // Under the status bar.
       expect(tester.getTopLeft(inView(find.text('Mike'))).dy, greaterThan(59));
@@ -191,7 +190,10 @@ void main() {
 
       visit(tester.getSemantics(find.byType(AgentView)));
       expect(wrong, isEmpty);
-      expect(seen, containsAll(['Menu', 'Attach files', 'Send', 'Extensions']));
+      expect(
+        seen,
+        containsAll(['Menu', 'Attach files', 'Send', 'More options for Mike']),
+      );
       semantics.dispose();
     });
 
@@ -786,7 +788,9 @@ void main() {
       findsOneWidget,
     );
     final rect = tester.getRect(chip);
-    final more = tester.getRect(inView(find.bySemanticsLabel('Extensions')));
+    final more = tester.getRect(
+      inView(find.bySemanticsLabel(RegExp('^More options for '))),
+    );
     expect(rect.size, const Size(44, 44));
     // In the header, just before "…".
     expect(rect.top, more.top);
@@ -803,15 +807,16 @@ void main() {
     // (Review) comes over it, and Back returns to it.
     expect(find.byType(PhoneSheet), findsNothing);
     expect(harness.page.value, AppPage.inbox);
-    // One card a screen, open (#514).
-    expect(find.byType(PhoneNeedsYou), findsOneWidget);
+    // The list of what waits first (#599).
+    expect(find.byType(InboxView), findsOneWidget);
     expect(find.textContaining('Add a designer agent'), findsWidgets);
 
-    // Answered elsewhere: the page stays, saying so, for the person to close.
+    // Answered elsewhere: the page stays, saying nothing waits, for the
+    // person to close.
     await harness.apply(tester, waiting([]));
     await pumpFrames(tester);
     expect(harness.page.value, AppPage.inbox);
-    expect(find.textContaining('Answered on'), findsOneWidget);
+    expect(find.text('Nothing is waiting for your answer.'), findsOneWidget);
 
     // Back: the conversation, whose header has no such button now.
     await tester.tap(find.bySemanticsLabel('Back').last);

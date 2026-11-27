@@ -1119,7 +1119,8 @@ impl Agent {
         }
         Ok(match outcome {
             Ok(result) => (result, false),
-            Err(error) => (ToolResult::error(error.to_string()), true),
+            // macOS refusing a protected folder says so (permissions.md P2).
+            Err(error) => (crate::tools::protected::refused(&error).unwrap_or_else(|| ToolResult::error(error.to_string())), true),
         })
     }
 

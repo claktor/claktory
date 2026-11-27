@@ -401,7 +401,7 @@ async fn pages_keep_time_order_through_list_sends() {
     let overview = overview(&mut client).await;
     let (events, _) = every_page(&mut client, &overview.nodes, Vec::new(), 100, false, "").await;
     let ours: Vec<_> = events.iter().filter(|event| event.0 >= t0 && event.0 < t0 + 60_000).collect();
-    assert_eq!(ours.len(), 120, "60 list sends of 5, one event each, and 60 cards");
+    assert_eq!(ours.len(), 120, "60 list sends of 5, one event each, and 60 requests");
     let times: Vec<i64> = events.iter().map(|event| event.0).collect();
     assert!(times.is_sorted(), "{times:?}");
     assert_eq!(events.len() as u64, overview.message_count);
@@ -455,7 +455,18 @@ async fn one_projects_history_is_its_agents_events_at_the_time() {
     assert_eq!(all.message_count - all_before.message_count, 4);
     assert_eq!(site.message_count - site_before.message_count, 3);
     assert_eq!(lab.message_count - lab_before.message_count, 2);
+    // Its chapters name only its nodes, and leave out those with none.
+    let titles = |overview: &v1::HistoryOverview, kind: v1::HistoryChapterKind| -> Vec<String> {
+        overview.chapters.iter().filter(|chapter| chapter.kind() == kind).map(|chapter| chapter.title.clone()).collect()
+    };
+    assert_eq!(titles(&site, v1::HistoryChapterKind::Agents), ["Mike and Sam joined"]);
+    assert_eq!(titles(&lab, v1::HistoryChapterKind::Agents), ["Zoe joined"]);
+    assert_eq!(titles(&site, v1::HistoryChapterKind::Project), ["Site began"]);
+    assert_eq!(titles(&lab, v1::HistoryChapterKind::Project), ["Lab began"]);
+    assert!(titles(&all, v1::HistoryChapterKind::Agents).iter().any(|title| title.contains("Rivet")), "{:?}", all.chapters);
+    assert_eq!(titles(&all, v1::HistoryChapterKind::Project).len(), 2);
     for overview in [&site, &lab] {
+        assert!(overview.chapters.iter().all(|chapter| chapter.node_ids.iter().all(|id| id != "agent:rivet")), "{:?}", overview.chapters);
         assert_eq!(overview.nodes, all.nodes, "the nodes stay whole");
         assert_eq!(overview.start_ms, all.start_ms);
         assert_eq!(overview.histogram.len(), all.histogram.len());

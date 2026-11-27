@@ -18,6 +18,7 @@ void main() {
   ) async {
     final harness = Harness(snapshot());
     harness.page.value = AppPage.settings;
+    harness.backend.settingsSection.value = 'general';
     await harness.show(tester);
     await pumpFrames(tester);
     expect(find.text('Claktory name'), findsOneWidget);

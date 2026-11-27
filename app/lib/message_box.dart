@@ -13,6 +13,7 @@ import 'identity.dart';
 import 'mobile/page_find.dart' show PhonePageFind;
 import 'mobile/composer.dart';
 import 'mobile/device.dart' show hardwareKeyboard;
+import 'mobile/device_permissions.dart' show MicReady, askMicrophone;
 import 'mobile/input.dart';
 import 'mobile/lines.dart';
 import 'mobile/metrics.dart';
@@ -224,7 +225,11 @@ class _MessageBoxState extends State<MessageBox> {
     _drafts.addListener(_draftChanged);
     // Files dropped on the window come here, for this target.
     _drops = FileDrop.dropped.listen(_attach);
-    FileDrop.claim(this, takesFiles: widget.target.takesFiles);
+    FileDrop.claim(
+      this,
+      takesFiles: widget.target.takesFiles,
+      key: widget.target.key,
+    );
     _takeVoice();
   }
 
@@ -313,6 +318,11 @@ class _MessageBoxState extends State<MessageBox> {
   /// Settings.
   var _micDenied = false;
 
+  /// A phone's mic was pressed and what comes before recording (the
+  /// microphone's popover, the speech model's question) is still asking:
+  /// the box shows no recording yet.
+  var _micAsking = false;
+
   /// What the mic says on a phone that can't record voice messages.
   static const noVoiceHere =
       "You can't record voice messages on this phone yet.";
@@ -336,7 +346,14 @@ class _MessageBoxState extends State<MessageBox> {
       setState(() => _error = why);
       return false;
     }
-    if (!await readyForVoice(context) || !mounted) return false;
+    // While the popover asks (and the speech model's question), the box
+    // stays as it was: the recording's row only once it records (Lucy
+    // 49814, Risotto 49783).
+    setState(() => _micAsking = true);
+    final ready = await _micAsked() && mounted && await readyForVoice(context);
+    if (!mounted) return false;
+    setState(() => _micAsking = false);
+    if (!ready) return false;
     setState(() {
       _error = null;
       _micDenied = false;
@@ -352,7 +369,25 @@ class _MessageBoxState extends State<MessageBox> {
       _micDenied = access == MicAccess.denied;
       _error = _voice.error;
     });
+    if (_micDenied) _micBack ??= AppLifecycleListener(onResume: _micResumed);
     return false;
+  }
+
+  /// Watches for the app coming back while the microphone is off: from
+  /// Settings with it on, the line and its Open Settings go by themselves
+  /// (permissions spec, rule 3; Lucy 49814).
+  AppLifecycleListener? _micBack;
+
+  Future<void> _micResumed() async {
+    if (!_micDenied) return;
+    final access = await deviceRecorder.access();
+    if (!mounted || !_micDenied || access != MicAccess.granted) return;
+    setState(() {
+      _micDenied = false;
+      _error = null;
+    });
+    _micBack?.dispose();
+    _micBack = null;
   }
 
   /// Has the keys while recording: Esc cancels, Return sends.
@@ -369,6 +404,25 @@ class _MessageBoxState extends State<MessageBox> {
     if (mounted) setState(() {});
   }
 
+  /// The Mac's and iPad's mic, where the microphone's popover points.
+  final _deskMicKey = GlobalKey(debugLabel: 'desk mic');
+
+  /// The first time, before the system asks for the microphone, its
+  /// popover over the mic says why (Lucy's permissions spec, P5): whether
+  /// to go on now. Not when it was set aside, nor right after it was
+  /// allowed in it: the next tap or hold records, as the finger that asked
+  /// has long lifted. Refused or restricted, recording goes on to fail and
+  /// say so in its own line, with Open Settings where that can help.
+  Future<bool> _micAsked() async {
+    final anchor =
+        (isPhoneLayout(context) ? _micKey : _deskMicKey).currentContext ??
+        context;
+    return switch (await askMicrophone(anchor)) {
+      MicReady.setAside || MicReady.allowedNow => false,
+      _ => true,
+    };
+  }
+
   /// The mic: asks once before the Claktory downloads its speech model
   /// (starting it, so the first message waits only for what's left), then
   /// records.
@@ -382,6 +436,7 @@ class _MessageBoxState extends State<MessageBox> {
       setState(() => _error = why);
       return;
     }
+    if (!await _micAsked() || !mounted) return;
     if (!await readyForVoice(context) || !mounted) return;
     setState(() => _error = null);
     _session.from(context);
@@ -609,7 +664,11 @@ class _MessageBoxState extends State<MessageBox> {
     super.didUpdateWidget(old);
     if (old.target.key != widget.target.key ||
         old.target.takesFiles != widget.target.takesFiles) {
-      FileDrop.claim(this, takesFiles: widget.target.takesFiles);
+      FileDrop.claim(
+        this,
+        takesFiles: widget.target.takesFiles,
+        key: widget.target.key,
+      );
     }
     if (old.target.key == widget.target.key) _session.target = widget.target;
     if (old.target.key != widget.target.key) {
@@ -627,6 +686,7 @@ class _MessageBoxState extends State<MessageBox> {
 
   @override
   void dispose() {
+    _micBack?.dispose();
     unawaited(_drops?.cancel());
     FileDrop.release(this);
     _drafts.removeListener(_draftChanged);
@@ -872,6 +932,9 @@ class _MessageBoxState extends State<MessageBox> {
           // With something written, what's recorded is added to it as its
           // voice note (#425), not sent on its own.
           final adding = _hasDraft;
+          // Pressed, but not recording until what asks first is answered.
+          final active = _phoneVoice.active && !_micAsking;
+          final mode = _micAsking ? PhoneVoiceMode.idle : _phoneVoice.mode;
           final mic = KeyedSubtree(
             key: _micKey,
             child: PhoneMicButton(
@@ -885,14 +948,14 @@ class _MessageBoxState extends State<MessageBox> {
           return PhoneComposerRow(
             accent: target.accent,
             onAttach: target.takesFiles ? _pick : null,
-            canSend: !_phoneVoice.active && _canSend,
+            canSend: !active && _canSend,
             onSend: _send,
             maxFieldHeight: widget.maxFieldHeight,
             // The mic while there's nothing to send; Send (or Add, to the
             // text) for a recording that isn't held.
             primary: !voice
                 ? null
-                : switch (_phoneVoice.mode) {
+                : switch (mode) {
                     PhoneVoiceMode.locked || PhoneVoiceMode.paused
                         when adding =>
                       _AddVoiceNote(voice: _phoneVoice, accent: target.accent),
@@ -915,10 +978,8 @@ class _MessageBoxState extends State<MessageBox> {
                   },
             // Beside Send while there's something written and no voice note
             // yet: one to add to it.
-            beside: voice && adding && _note == null && !_phoneVoice.active
-                ? mic
-                : null,
-            recording: _phoneVoice.active
+            beside: voice && adding && _note == null && !active ? mic : null,
+            recording: active
                 ? PhoneRecordingRow(voice: _phoneVoice, recording: _voice)
                 : null,
             field: TextField(
@@ -1204,12 +1265,15 @@ class _MessageBoxState extends State<MessageBox> {
                                           !_voice.recording &&
                                           (recording || _note == null)) ...[
                                         const SizedBox(width: Space.xs),
-                                        _MicButton(
-                                          unavailable: voiceUnavailable(
-                                            workspace.speechModel,
+                                        KeyedSubtree(
+                                          key: _deskMicKey,
+                                          child: _MicButton(
+                                            unavailable: voiceUnavailable(
+                                              workspace.speechModel,
+                                            ),
+                                            starting: _voice.starting,
+                                            onTap: _record,
                                           ),
-                                          starting: _voice.starting,
-                                          onTap: _record,
                                         ),
                                       ],
                                       // A phone has no Enter key; an
@@ -1620,6 +1684,10 @@ class _Attachments extends StatelessWidget {
         final note = notes.note(boxKey);
         if (files.isEmpty && adding.isEmpty && note == null) {
           return const SizedBox.shrink();
+        }
+        // Decoded while they wait, so they're in the bubble from the tap.
+        for (final file in files) {
+          if (file.isImage) warmSentPicture(context, file.path);
         }
         return Padding(
           padding: const EdgeInsets.only(top: 2, right: Space.xs, bottom: 2),

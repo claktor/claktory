@@ -88,7 +88,7 @@ CREATE TABLE show_all (project TEXT PRIMARY KEY);
 /// Changes to the schema since `SCHEMA`, in order: database version n+1 has
 /// the first n+1 of them. Older backends (after a rollback) ignore tables they
 /// don't know.
-const MIGRATIONS: [&str; 125] = [
+const MIGRATIONS: [&str; 130] = [
     "
 -- Agents with a run that finished or failed since the person last opened them.
 CREATE TABLE unseen (agent TEXT PRIMARY KEY);
@@ -295,6 +295,11 @@ ALTER TABLE tasks ADD COLUMN folder TEXT;
     crate::pipes::shares::EXPIRY,
     crate::extensions::ask::FOLLOWS_FILE,
     crate::given_up::SCHEMA,
+    crate::protected::SCHEMA,
+    crate::account::recovery::SCHEMA,
+    crate::vault::saved::SCHEMA,
+    crate::errands::OUTSIDE_READ,
+    crate::errands::CACHE_OWED,
 ];
 
 /// Migrations from this one on add no index to a table that grows with

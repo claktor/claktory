@@ -82,8 +82,8 @@ async fn an_admin_agent_adds_a_device_the_person_allows_and_the_code_never_reach
     let (_factory, mut client, mut view) = setup(&dir).await;
 
     let said = call(&mut client, &mut view, "devices_add", serde_json::json!({"name": "Laptop"})).await;
-    assert!(said.starts_with("Started adding Laptop. The person sees its code in a card"), "{said}");
-    let (seq, pairing) = card(&view, "Laptop").expect("the card follows the call");
+    assert!(said.starts_with("Started adding Laptop. The person sees its code in a request"), "{said}");
+    let (seq, pairing) = card(&view, "Laptop").expect("the request follows the call");
     assert_eq!((pairing.state(), pairing.agent_id.as_str(), pairing.device_id.as_str()), (DevicePairingState::Waiting, "rivet", "laptop"));
     assert!(pairing.expires_ms > 0 && pairing.ended_ms == 0);
     assert!(view.agent("rivet").waiting_seqs.contains(&seq), "it waits for the person");
@@ -128,7 +128,7 @@ async fn an_admin_agent_adds_a_device_the_person_allows_and_the_code_never_reach
     let removed = call(&mut client, &mut view, "devices_remove", serde_json::json!({"device": "Laptop"})).await;
     assert_eq!(removed, "Removed Laptop: it can't connect to Claktory any more.");
     assert!(factoryd::remote::devices(&home(&dir)).expect("devices").iter().all(|device| device.id != "laptop"));
-    assert_eq!(card(&view, "Laptop").expect("the card").1.state(), DevicePairingState::Added, "the card keeps how it went");
+    assert_eq!(card(&view, "Laptop").expect("the card").1.state(), DevicePairingState::Added, "the request keeps how it went");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -160,7 +160,7 @@ async fn a_card_shows_how_adding_a_device_ended_and_the_agent_is_told() {
     let cancel = client_message::Body::CancelPairing(v1::CancelPairing { device_id: phone.device_id.clone() });
     assert!(matches!(apply_request(&mut client, &mut view, cancel).await, Body::Ack(_)));
     let ended = follow_card(&mut client, &mut view, "Phone", DevicePairingState::Cancelled).await;
-    assert_eq!(ended.kind(), v1::DeviceKind::Phone, "the card keeps what the device is");
+    assert_eq!(ended.kind(), v1::DeviceKind::Phone, "the request keeps what the device is");
 
     // Its 10 minutes run out.
     call(&mut client, &mut view, "devices_add", serde_json::json!({"name": "Watch"})).await;

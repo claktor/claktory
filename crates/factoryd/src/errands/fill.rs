@@ -294,6 +294,19 @@ pub(crate) async fn fill_into(
     fill_node(page, &object, &frame, fillable, variable, account, signing_out, identity_providers).await
 }
 
+/// Chrome's origin of a frame as the vault's sites spell them: an https
+/// origin only, else empty.
+fn https_origin(origin: &str) -> String {
+    url::Url::parse(origin).ok().filter(|url| url.scheme() == "https").map(|url| url.origin().ascii_serialization()).unwrap_or_default()
+}
+
+/// Whether a field whose frame is at `origin` (`https_origin`'s) may take
+/// a secret bound to `sites`: exactly one of them, never http, a subdomain
+/// or another port (Fugo 50018).
+fn fills_on(origin: &str, sites: &[String]) -> bool {
+    !origin.is_empty() && sites.iter().any(|site| site == origin)
+}
+
 /// `fill_into`, for the node `object` (in the reader's world) of `frame`.
 /// On an identity provider's origin only when `identity_providers` (its
 /// ship gate, `identity_provider_fills`) and only in the page's main frame.
@@ -310,13 +323,9 @@ async fn fill_node(
 ) -> Result<Filled, (String, (String, String))> {
     // Chrome's word for whose the field's document is: an https origin,
     // exactly one of the secret's sites.
-    let origin = url::Url::parse(&frame.origin)
-        .ok()
-        .filter(|url| url.scheme() == "https")
-        .map(|url| url.origin().ascii_serialization())
-        .unwrap_or_default();
+    let origin = https_origin(&frame.origin);
     let refuse = |error: &str, why: String| (origin.clone(), (error.to_owned(), why));
-    if origin.is_empty() || !fillable.sites.contains(&origin) {
+    if !fills_on(&origin, &fillable.sites) {
         let shown = if origin.is_empty() { "this page".to_owned() } else { origin.clone() };
         return Err(refuse("wrong_site", format!("{} is only filled on {}, and this field is on {shown}", fillable.name, fillable.sites.join(", "))));
     }
@@ -466,7 +475,7 @@ impl Factory {
         let mut said = if kept { format!("{into}.") } else { format!("{into}, but the page didn't keep it: read the page to see why.") };
         if !card.is_null() {
             said.push_str(&format!(
-                " This is the browser's first sign-in to {}, so Claktory put a card in your conversation telling the person, with Sign out: it isn't yours to answer, and the errand goes on.",
+                " This is the browser's first sign-in to {}, so Claktory put a request in your conversation telling the person, with Sign out: it isn't yours to answer, and the errand goes on.",
                 provider(&origin).unwrap_or_default()
             ));
         }
@@ -535,6 +544,29 @@ mod tests {
         let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
         let element = read.elements.iter().find(|element| element.name.contains(name)).unwrap_or_else(|| panic!("{name} in {:?}", read.elements));
         (read.document.clone(), element.reference.clone())
+    }
+
+    /// Fugo 50018 (H2): a secret bound to https://shop.example is filled
+    /// only in a frame at exactly that origin.
+    #[test]
+    fn a_secret_fills_only_at_exactly_its_sites_origin() {
+        let sites = vec!["https://shop.example".to_owned()];
+        let fills = |frame: &str| fills_on(&https_origin(frame), &sites);
+        assert!(fills("https://shop.example"));
+        assert!(fills("https://shop.example:443"));
+        for frame in [
+            "http://shop.example",
+            "https://sub.shop.example",
+            "https://www.shop.example",
+            "https://shop.example:8443",
+            "https://shop.example.evil.test",
+            "https://evil-shop.example",
+            "wss://shop.example",
+            "null",
+            "",
+        ] {
+            assert!(!fills(frame), "{frame}");
+        }
     }
 
     fn shop_secret(sites: &[&str]) -> Fillable {

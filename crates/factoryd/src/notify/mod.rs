@@ -313,8 +313,12 @@ struct Data {
     /// Each connection's device id, and whether its app is in front, by
     /// number.
     connections: HashMap<u64, (String, bool)>,
-    /// The connections whose apps show notifications (`shows_notifications`).
+    /// The connections whose apps show notifications: as their platform
+    /// (`shows_notifications`) until they say (`Presence::set_permission`).
     showing: BTreeSet<u64>,
+    /// What each device last said of its notifications (item 13), by
+    /// device id, since Claktory started.
+    permissions: HashMap<String, v1::NotificationPermission>,
     next_connection: u64,
     /// When each device last stopped being active, in ms since 1970.
     last_active: HashMap<String, i64>,
@@ -327,6 +331,9 @@ struct Data {
     /// Agents' direct messages waiting for review, by proposal id, as last
     /// seen.
     dm_sends: BTreeSet<String>,
+    /// Places macOS refused whose Needs you item waits, by root, as last
+    /// seen.
+    protected: BTreeSet<String>,
     /// Provider waits as last noted, by provider id; read from factory.db
     /// at the first look (None until then).
     provider_waits: Option<BTreeMap<String, Noted>>,
@@ -431,6 +438,33 @@ impl State {
         self.data().showing.len()
     }
 
+    /// The devices whose notifications are off (refused, or not asked yet),
+    /// by name, for notify_person's word when nothing reached the person
+    /// (item 13): this computer's app as "this computer".
+    pub(crate) fn off_on(&self, factory: &Factory) -> Vec<String> {
+        let off = |permission: v1::NotificationPermission| {
+            matches!(permission, v1::NotificationPermission::Denied | v1::NotificationPermission::NotAsked)
+        };
+        let mut names = Vec::new();
+        if self.permission(crate::remote::LOCAL_DEVICE).is_some_and(off) {
+            names.push("this computer".to_owned());
+        }
+        for device in
+            crate::remote::devices(&factory.home).unwrap_or_default().into_iter().filter(|device| device.id != crate::remote::LOCAL_DEVICE)
+        {
+            let permission = self.permission(&device.id).unwrap_or_else(|| push::permission(factory, &device.id));
+            if off(permission) {
+                names.push(device.name);
+            }
+        }
+        names
+    }
+
+    /// What `device` last said of its notifications since Claktory started.
+    pub(crate) fn permission(&self, device: &str) -> Option<v1::NotificationPermission> {
+        self.data().permissions.get(device).copied()
+    }
+
     /// The person is using Claktory on some device right now.
     fn active_now(data: &Data) -> bool {
         data.connections.values().any(|(_, active)| *active)
@@ -483,6 +517,28 @@ impl Presence {
             let device = device.clone();
             data.last_active.insert(device, now_ms());
         }
+    }
+}
+
+impl Presence {
+    /// SetActive.notifications: whether this connection's app shows a
+    /// Notify now (item 13). Unspecified (an app from before) leaves it to
+    /// its platform.
+    /// Whether its device's word changed (PairedDevice.notification_permission).
+    pub(crate) fn set_permission(&self, permission: v1::NotificationPermission) -> bool {
+        if permission == v1::NotificationPermission::Unspecified {
+            return false;
+        }
+        let mut data = lock(&self.data);
+        let Some((device, _)) = data.connections.get(&self.id) else { return false };
+        let device = device.clone();
+        let before = data.permissions.insert(device, permission);
+        if permission == v1::NotificationPermission::Allowed {
+            data.showing.insert(self.id);
+        } else {
+            data.showing.remove(&self.id);
+        }
+        before != Some(permission)
     }
 }
 
@@ -717,6 +773,7 @@ pub(crate) fn observe(factory: &Factory, inner: &Inner, workspace: &v1::Workspac
             + workspace.pipes.iter().map(|pipe| pipe.waiting_seqs.len()).sum::<usize>()
             + workspace.chats.iter().map(|chat| chat.waiting_seqs.len()).sum::<usize>()
             + workspace.dm_sends.len()
+            + workspace.protected_places.iter().filter(|place| place.needs_you).count()
             + workspace.provider_waits.len()
             + usize::try_from(workspace.alerts_unread).unwrap_or(usize::MAX)
             + usize::from(lid_stuck(workspace))
@@ -745,6 +802,7 @@ fn waiting_keys(workspace: &v1::Workspace) -> BTreeSet<String> {
     }
     keys.extend(workspace.dm_sends.iter().map(|waiting| format!("dm:{}", waiting.proposal_id)));
     keys.extend(workspace.provider_waits.iter().map(|wait| format!("provider:{}", wait.provider_id)));
+    keys.extend(workspace.protected_places.iter().filter(|place| place.needs_you).map(|place| format!("protected:{}", place.root)));
     keys.extend(workspace.alerts.iter().map(|alert| format!("alert:{}", alert.id)));
     if lid_stuck(workspace) {
         keys.insert("keep_awake:lid".to_owned());
@@ -851,6 +909,20 @@ fn changes(data: &mut Data, factory: &Factory, inner: &Inner, settings: &Notific
         }
     }
     data.dm_sends = dm_sends;
+
+    // A place macOS refused Claktory Agents (item 12): Claktory's own words.
+    let protected: BTreeSet<String> =
+        workspace.protected_places.iter().filter(|place| place.needs_you).map(|place| place.root.clone()).collect();
+    if data.started {
+        let machine = inner.config.claktory_name();
+        for place in workspace.protected_places.iter().filter(|place| place.needs_you && !data.protected.contains(&place.root)) {
+            let mut note = Note::new(Kind::NeedsYou, "protected".to_owned(), machine.clone());
+            note.what = format!("{}.", place.title);
+            note.waits = format!("protected:{}", place.root);
+            notes.push(note);
+        }
+    }
+    data.protected = protected;
 
     notes.extend(provider_waits(data, factory, inner, settings, workspace));
     notes.extend(devices(data, factory, inner, workspace));

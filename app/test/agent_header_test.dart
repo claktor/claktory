@@ -1,7 +1,7 @@
 // The agent's bar over its conversation (agent_view.dart's _Header): the
 // title bar's height at ordinary text, and taller rather than cut when
 // large text needs it (Sorbet's iPad pass: "Theo / Researcher" spilled over
-// the pane below at Accessibility XL).
+// the pane below at Accessibility XL). Its controls: agent_menu_test.
 import 'package:factory_app/agent_name.dart';
 import 'package:factory_app/agent_view.dart';
 import 'package:factory_app/identity.dart';
@@ -33,9 +33,17 @@ Finder get _name => find.descendant(
   matching: find.byType(NameOverRole),
 );
 
-/// The bar holding it.
-Finder get _bar =>
-    find.ancestor(of: _name, matching: find.byType(Container)).first;
+/// The bar holding it: at least the title bar's height.
+Finder get _bar => find
+    .ancestor(
+      of: _name,
+      matching: find.byWidgetPredicate(
+        (widget) =>
+            widget is Container &&
+            widget.constraints?.minHeight == titleBarHeight,
+      ),
+    )
+    .first;
 
 void main() {
   testWidgets('the title bar’s height at ordinary text', (tester) async {
@@ -62,15 +70,32 @@ void main() {
   }
 
   // A 600-point window beside the sidebar leaves the conversation about 312
-  // points: the header gives way (the context meter's bar, then its words
-  // cut) rather than overflow (Polnareff).
-  testWidgets('in a 600-point window, the header fits: the context meter '
-      'drops its bar and keeps its words', (tester) async {
+  // points: the header gives way (agent-view.md §3: the meter goes, then
+  // the effort, the role, and the name is cut) rather than overflow; the
+  // model control and ⋯ stay.
+  testWidgets('in a 600-point window, the header fits: the model and ⋯ '
+      'stay', (tester) async {
     final harness = Harness(workspace());
     await harness.show(tester, size: const Size(600, 800));
     await settle(tester);
     expect(tester.takeException(), isNull);
-    expect(find.textContaining('123k'), findsOneWidget);
+    expect(find.textContaining('123k'), findsNothing, reason: 'the meter went');
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            (widget.properties.label ?? '').startsWith('Model: '),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            (widget.properties.label ?? '').startsWith('More options for '),
+      ),
+      findsOneWidget,
+    );
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
   testWidgets('in a wide window, the meter shows its bar beside its words', (

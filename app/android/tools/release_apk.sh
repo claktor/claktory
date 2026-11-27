@@ -55,6 +55,12 @@ while (($#)); do
   esac
 done
 [[ -n "$version" && -n "$key" && -n "$out" ]] || { echo "$usage" >&2; exit 2; }
+# arm64 and x86_64: nothing is built for x86 on an Apple-silicon Mac (Matt's
+# rule), so a release is built on prime (DESIGN.md, "Where builds run").
+if [[ "$(uname -s)/$(uname -m)" == Darwin/arm64 ]]; then
+  echo "A release builds x86_64 too, and nothing is built for x86 on an Apple-silicon Mac: run release_apk.sh on prime (app/android/DESIGN.md, \"Where builds run\")." >&2
+  exit 2
+fi
 [[ "$version" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || { echo "Not a version: $version" >&2; exit 2; }
 major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} patch=${BASH_REMATCH[3]}
 ((minor < 100 && patch < 1000 && rebuild < 100)) || { echo "$version/$rebuild doesn't fit the versionCode scheme" >&2; exit 2; }

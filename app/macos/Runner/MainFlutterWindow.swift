@@ -164,6 +164,10 @@ class MainFlutterWindow: NSWindow {
       name: "factory/device", binaryMessenger: flutterViewController.engine.binaryMessenger)
     deviceChannel?.setMethodCallHandler { call, result in
       switch call.method {
+      // The Mac's time zone by its IANA name ("Europe/London"), which
+      // Flutter can't read: Claktory's browser takes it (#435).
+      case "timeZone":
+        result(TimeZone.current.identifier)
       case "drafts":
         result(UserDefaults.standard.dictionary(forKey: Self.draftsKey) as? [String: String] ?? [:])
       case "setDrafts":

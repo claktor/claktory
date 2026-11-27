@@ -82,7 +82,11 @@ void main() {
     // No approval to comment on, and no reply.
     expect(find.text('Approve'), findsNothing);
     expect(find.text('Reply'), findsNothing);
-    expect(find.byType(EditableText), findsOneWidget, reason: 'the composer');
+    expect(
+      find.byType(EditableText),
+      findsNWidgets(2),
+      reason: "the composer, and the card's field for why not",
+    );
 
     await tester.tap(find.text('Execute'));
     await settle(tester);
@@ -137,7 +141,7 @@ void main() {
     await settle(tester);
     expect(harness.backend.sent.where((m) => m.hasAnswerAsk()), isEmpty);
     expect(
-      find.text('Run it anyway? Read the warnings above first.'),
+      find.text("Read the warnings above, then run it only if you're sure."),
       findsOneWidget,
     );
     // Cancel goes back, sending nothing.
@@ -178,7 +182,7 @@ void main() {
         ),
       ),
     );
-    expect(find.textContaining('Executed'), findsOneWidget);
+    expect(find.textContaining('Ran'), findsOneWidget);
     expect(find.text('Running · 12s'), findsOneWidget);
     expect(
       find.textContaining(" · Run from Matt's iPhone", findRichText: true),

@@ -163,7 +163,11 @@ void main() {
               .first,
         ),
         (context, close) =>
-            AgentSettingsForm(agent: workspace.agent('a1')!, close: close),
+            AgentSettingsForm(
+              agent: workspace.agent('a1')!,
+              close: close,
+              showExtensions: true,
+            ),
       ),
     );
     await pumpFrames(tester);
@@ -171,17 +175,21 @@ void main() {
     for (final name in names.values) {
       final label = find
           .byWidgetPredicate(
-            (widget) => widget is RichText && widget.text.toPlainText() == name,
+            // After its glyph, when it fits beside the switch.
+            (widget) =>
+                widget is RichText &&
+                widget.text.toPlainText().replaceFirst('\uFFFC ', '') == name,
             skipOffstage: false,
           )
           .last;
       await tester.ensureVisible(label);
       await pumpFrames(tester);
       final paragraph = tester.renderObject<RenderParagraph>(label);
+      final start = paragraph.text.toPlainText().indexOf(name);
       // Every line after the first starts after a space.
       double top(int at) => paragraph
           .getBoxesForSelection(
-            TextSelection(baseOffset: at, extentOffset: at + 1),
+            TextSelection(baseOffset: start + at, extentOffset: start + at + 1),
           )
           .first
           .top;

@@ -20,7 +20,8 @@ import java.util.concurrent.Executors
  * this phone keeps (connections, drafts) and what it is (capabilities),
  * which build of the app is installed (appVersionCode), and its time
  * zone's IANA name (timeZone: "Europe/London", for Claktory's browser),
- * and where it came from ([AppSource]: appSource, openAppSource).
+ * and where it came from ([AppSource]: appSource, openAppSource);
+ * openAppSettings opens the app's page in Android's Settings.
  * The stores read and write off the main thread, one call at a time, and
  * answer on it. The attach menu and its pickers are [AttachmentPicker]'s,
  * Take photo's camera [PhotoCapture]'s,
@@ -71,9 +72,14 @@ class DeviceChannel(
                 result.error("unavailable", error.javaClass.simpleName, null)
             }
             "cameraAccess" -> result.success(camera?.access() ?: "unavailable")
+            "cameraRefusedOnce" -> result.success(camera?.refusedOnce() ?: false)
             "requestCamera" -> camera?.request(result) ?: result.success(false)
             "openCameraSettings" -> {
                 camera?.openSettings()
+                result.success(null)
+            }
+            "openAppSettings" -> {
+                AppSettings.open(context)
                 result.success(null)
             }
             "qrCode" -> result.success(QrCodes.modules(call.arguments as? String ?: ""))

@@ -8,6 +8,7 @@ import 'identity.dart';
 import 'mobile/metrics.dart' show TypeScale;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
+import 'settings_shell.dart' show SettingsLink;
 import 'tell_rivet.dart' show ErrorLine;
 
 /// Needs you's question while Workspace.keep_awake.ask (#352 P1, Matt's
@@ -27,9 +28,6 @@ String keepAwakeMac(Backend backend) =>
 String keepAwakeSummary(Backend backend) =>
     'Agents keep working while ${keepAwakeMac(backend)} is plugged in with '
     'its lid open.';
-
-/// The rest, in the opened card above the answers.
-const keepAwakeBody = 'You can change this in Settings → General.';
 
 /// Settings' switch, its note on a laptop, and while it holds.
 String keepAwakeLabel(Backend backend) =>
@@ -100,8 +98,14 @@ class _KeepAwakeCardState extends State<KeepAwakeCard> with PublishesAnswer {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          keepAwakeBody,
+        // The rest, above the answers, with where it changes later as a
+        // link there (Lucy's Settings spec §5).
+        SettingsLink(
+          before: 'You can change this in ',
+          label: 'Settings → General',
+          after: '.',
+          section: 'general',
+          setting: 'keep-awake',
           style: TypeScale.of(context).caption
               .copyWith(color: palette.textMuted),
         ),

@@ -15,7 +15,7 @@ pub(crate) fn canonical(input: &str) -> Result<String, String> {
     let input = input.trim();
     let url = url::Url::parse(input).map_err(|_| format!("\"{input}\" isn't a web address. Give one like https://example.com."))?;
     if url.scheme() != "https" {
-        return Err("Only https:// sites can be read.".to_owned());
+        return Err("Only https:// sites are allowed.".to_owned());
     }
     if !url.username().is_empty() || url.password().is_some() {
         return Err("Give the site without a user name or password in it.".to_owned());

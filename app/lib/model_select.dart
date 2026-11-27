@@ -205,6 +205,7 @@ class ModelChooser extends StatefulWidget {
     required this.onCancel,
     this.extra = const [],
     this.title = 'Model',
+    this.embedded = false,
   });
 
   final Workspace workspace;
@@ -213,6 +214,11 @@ class ModelChooser extends StatefulWidget {
   final String title;
   final ValueChanged<String> onChoose;
   final VoidCallback onCancel;
+
+  /// Inside a popover of its own (an iPad's model popover): the search and
+  /// the list only, scrolling, the chosen one checked, with no title and no
+  /// Cancel or Choose, as a choice applies at once there.
+  final bool embedded;
 
   @override
   State<ModelChooser> createState() => _ModelChooserState();
@@ -355,80 +361,113 @@ class _ModelChooserState extends State<ModelChooser> {
     final typed = groups.isEmpty || query.contains('/')
         ? _typed()
         : const <({String id, String provider})>[];
+    final search = <Widget>[
+      TextField(
+        controller: _search,
+        // In a popover on touch, no keyboard until the search is tapped.
+        autofocus: !isPhoneLayout(context) && !widget.embedded,
+        placeholder: 'Search models or providers',
+        semanticsLabel: 'Search models',
+        // What matches the words as they are now, even before the
+        // list has redrawn for them.
+        onSubmitted: (_) => _first()?.call(),
+      ),
+      const SizedBox(height: Space.s),
+    ];
+    final rows = <Widget>[
+      for (final option in extra)
+        _ModelRow(
+          label: option.label,
+          chosen: option.value == widget.value,
+          onTap: () => widget.onChoose(option.value),
+        ),
+      if (groups.isEmpty && typed.isEmpty && query.isNotEmpty)
+        Text(
+          'No model matches “$query”.',
+          style: type.body.copyWith(color: palette.textMuted),
+        ),
+      for (final (provider, models) in groups) ...[
+        Padding(
+          padding: const EdgeInsets.only(
+            top: Space.s,
+            left: Space.s,
+            bottom: 2,
+          ),
+          child: Text(
+            provider,
+            style: type.caption.copyWith(
+              color: palette.textMuted,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+        for (final model in models)
+          _ModelRow(
+            label: _name(model),
+            // What it can do beyond writing, as the provider says it.
+            note: model.imageOutput ? modelMakesImages : '',
+            chosen: model.id == widget.value,
+            check: widget.embedded,
+            onTap: () => widget.onChoose(model.id),
+          ),
+      ],
+      if (typed.isNotEmpty) ...[
+        Padding(
+          padding: const EdgeInsets.only(
+            top: Space.s,
+            left: Space.s,
+            bottom: 2,
+          ),
+          child: Text(
+            'Not in the list',
+            style: type.caption.copyWith(
+              color: palette.textMuted,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+        for (final (:id, :provider) in typed)
+          _ModelRow(
+            label: _checking == id
+                ? 'Checking with $provider…'
+                : 'Use “${id.substring(id.indexOf('/') + 1)}” from '
+                      '$provider',
+            chosen: false,
+            onTap: () => _use(id),
+          ),
+      ],
+    ];
+    if (widget.embedded) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // A search only for a long list (Lucy): two models need none.
+          if (widget.workspace.models.length + widget.extra.length >
+              embeddedSearchPast)
+            ...search,
+          Flexible(
+            child: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: rows,
+              ),
+            ),
+          ),
+          if (_error case final error?)
+            Padding(
+              padding: const EdgeInsets.only(top: Space.s),
+              child: Text(
+                error,
+                style: type.body.copyWith(color: palette.danger),
+              ),
+            ),
+        ],
+      );
+    }
     return FormFrame(
       title: widget.title,
-      fields: [
-        TextField(
-          controller: _search,
-          autofocus: !isPhoneLayout(context),
-          placeholder: 'Search models or providers',
-          semanticsLabel: 'Search models',
-          // What matches the words as they are now, even before the
-          // list has redrawn for them.
-          onSubmitted: (_) => _first()?.call(),
-        ),
-        const SizedBox(height: Space.s),
-        for (final option in extra)
-          _ModelRow(
-            label: option.label,
-            chosen: option.value == widget.value,
-            onTap: () => widget.onChoose(option.value),
-          ),
-        if (groups.isEmpty && typed.isEmpty && query.isNotEmpty)
-          Text(
-            'No model matches “$query”.',
-            style: type.body.copyWith(color: palette.textMuted),
-          ),
-        for (final (provider, models) in groups) ...[
-          Padding(
-            padding: const EdgeInsets.only(
-              top: Space.s,
-              left: Space.s,
-              bottom: 2,
-            ),
-            child: Text(
-              provider,
-              style: type.caption.copyWith(
-                color: palette.textMuted,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-          for (final model in models)
-            _ModelRow(
-              label: _name(model),
-              // What it can do beyond writing, as the provider says it.
-              note: model.imageOutput ? modelMakesImages : '',
-              chosen: model.id == widget.value,
-              onTap: () => widget.onChoose(model.id),
-            ),
-        ],
-        if (typed.isNotEmpty) ...[
-          Padding(
-            padding: const EdgeInsets.only(
-              top: Space.s,
-              left: Space.s,
-              bottom: 2,
-            ),
-            child: Text(
-              'Not in the list',
-              style: type.caption.copyWith(
-                color: palette.textMuted,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-          for (final (:id, :provider) in typed)
-            _ModelRow(
-              label: _checking == id
-                  ? 'Checking with $provider…'
-                  : 'Use “${id.substring(id.indexOf('/') + 1)}” from '
-                        '$provider',
-              chosen: false,
-              onTap: () => _use(id),
-            ),
-        ],
-      ],
+      fields: [...search, ...rows],
       error: _error,
       submitLabel: _checking == null ? 'Choose' : 'Checking…',
       onSubmit: first,
@@ -436,6 +475,10 @@ class _ModelChooserState extends State<ModelChooser> {
     );
   }
 }
+
+/// An embedded list ([ModelChooser.embedded]) longer than this has a
+/// search.
+const embeddedSearchPast = 8;
 
 /// What the model list says after a model that can make images (#403,
 /// Model.image_output).
@@ -448,11 +491,15 @@ class _ModelRow extends StatelessWidget {
     required this.chosen,
     required this.onTap,
     this.note = '',
+    this.check = false,
   });
 
   final String label;
   final String note;
   final bool chosen;
+
+  /// The chosen one has a check at its end too.
+  final bool check;
   final VoidCallback onTap;
 
   @override
@@ -466,7 +513,8 @@ class _ModelRow extends StatelessWidget {
           onTap: onTap,
           builder: (context, hovered) => Container(
             constraints: BoxConstraints(
-              minHeight: isPhoneLayout(context) ? Touch.target : 30,
+              // A finger's row on touch: a phone, an iPad's popover.
+              minHeight: touchFirst(context) ? Metrics.of(context).target : 30,
             ),
             padding: const EdgeInsets.symmetric(horizontal: Space.s),
             alignment: Alignment.centerLeft,
@@ -478,18 +526,33 @@ class _ModelRow extends StatelessWidget {
                   : null,
               borderRadius: BorderRadius.circular(Radii.control),
             ),
-            child: Text.rich(
-              TextSpan(
-                children: [
-                  TextSpan(text: label),
-                  if (note.isNotEmpty)
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text.rich(
                     TextSpan(
-                      text: '  $note',
-                      style: TextStyle(color: palette.textFaint),
+                      children: [
+                        TextSpan(text: label),
+                        if (note.isNotEmpty)
+                          TextSpan(
+                            text: '  $note',
+                            style: TextStyle(color: palette.textFaint),
+                          ),
+                      ],
                     ),
+                    style: TypeScale.of(context).body
+                        .copyWith(color: palette.text),
+                  ),
+                ),
+                if (check && chosen) ...[
+                  const SizedBox(width: Space.s),
+                  ExtensionGlyph(
+                    icon: 'check',
+                    name: 'Chosen',
+                    color: palette.text,
+                  ),
                 ],
-              ),
-              style: TypeScale.of(context).body.copyWith(color: palette.text),
+              ],
             ),
           ),
         ),

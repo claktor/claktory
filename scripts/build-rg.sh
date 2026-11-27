@@ -108,12 +108,14 @@ case "${1:-}" in
     ARCH="${2:-}" OUT="${3:-}"; [[ -n "$ARCH" && -n "$OUT" ]] || usage
     SRC="$(source_tree)"
     FACTORY_LINUX_SRC="$SRC" "$ROOT/scripts/build-linux.sh" "$ARCH" "$OUT" rg
-    # Checked in a container of its own architecture (emulated when it isn't
-    # this machine's): the pinned version, and it searches.
-    ENGINE="${FACTORY_CONTAINER:-$(command -v podman >/dev/null && echo podman || echo docker)}"
+    # Checked in a container of its own architecture, natively (an x86_64
+    # build on FACTORY_X86_HOST, scripts/lib.sh container_for): the pinned
+    # version, and it searches.
     case "$ARCH" in x86_64) PLATFORM=linux/amd64 ;; aarch64) PLATFORM=linux/arm64 ;; *) usage ;; esac
+    source "$ROOT/scripts/lib.sh"
+    container_for "$ARCH"
     DIR="$(cd "$(dirname "$OUT")" && pwd -P)"
-    GOT="$("$ENGINE" run --rm --platform "$PLATFORM" -v "$DIR:/out:ro" docker.io/library/alpine:3 \
+    GOT="$(engine run --rm --platform "$PLATFORM" -v "$DIR:/out:ro" docker.io/library/alpine:3 \
       sh -c "/out/$(basename "$OUT") --version | head -1; printf 'claktory\\n' | /out/$(basename "$OUT") -q claktory && echo searches" 2>/dev/null)" || true
     [[ "$GOT" == "ripgrep $RG_VERSION"$'\n'"searches" ]] || { echo "$OUT isn't a working ripgrep $RG_VERSION for $ARCH: $GOT" >&2; exit 1; }
     if strings "$OUT" | grep -q "$HOME"; then echo "$OUT holds this Mac's home folder ($HOME)" >&2; exit 1; fi

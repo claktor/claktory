@@ -452,7 +452,7 @@ async fn rivet_asks_on_cards_to_send_waiting_reports_and_to_let_a_reader_go() {
     apply_request(&mut client, &mut view, forward(&pipe, "", false)).await;
     apply_request(&mut client, &mut view, select("rivet")).await;
     let why = refused(&mut client, &mut view, answer(seq, false)).await;
-    assert_eq!(why, "Who reads that pipe's reports changed since this card was asked: dismiss it, and ask again.");
+    assert_eq!(why, "Who reads that pipe's reports changed since this request was asked: dismiss it, and ask again.");
     apply_request(&mut client, &mut view, forward(&pipe, "ingrid", false)).await;
     apply_request(&mut client, &mut view, answer(seq, false)).await;
     let page = list(&mut client, &mut view, &pipe, "").await;

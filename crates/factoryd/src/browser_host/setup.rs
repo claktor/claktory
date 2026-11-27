@@ -2,8 +2,9 @@
 //! before it starts, and shown on the setup card with what fixes it. On
 //! Linux: a supported system, Landlock ABI 4 or later, Chrome and Xvfb,
 //! the browser's own user and folders, the sudo line for exactly the
-//! runner, Chrome's policy (no local network, no sign-in to Chrome itself)
-//! and the firewall's unit (`scripts/browser-setup-linux.md`, Pericolo's
+//! runner, the empty folder the runner mounts Chrome's policy over (no
+//! local network, no sign-in to Chrome itself: only in its own namespace,
+//! never the person's Chrome) and the firewall's unit (`scripts/browser-setup-linux.md`, Pericolo's
 //! table). Without them
 //! Claktory refuses to run it, rather than run Chrome less contained. On a
 //! Mac: Apple silicon, macOS 26 or later and Apple's container tool,
@@ -28,7 +29,13 @@ pub(crate) const USER: &str = "claktory-browser";
 pub(crate) const HOME: &str = "/var/lib/claktory-browser";
 pub(crate) const RUNNER_DIR: &str = "/opt/claktory-browser";
 pub(crate) const RUNNER: &str = "/opt/claktory-browser/runner";
-const POLICY: &str = "/etc/opt/chrome/policies/managed/claktory.json";
+/// Where Google Chrome and Chromium read managed policy: the runner mounts
+/// a tmpfs of its own over them and writes Claktory's policy there, so only
+/// its Chrome reads it (Fugo 49031). Setup only makes them, empty and
+/// root's, and takes out the policy file older setups wrote in them, which
+/// the person's own Chrome read too.
+const POLICY_FOLDERS: [&str; 2] = ["/etc/opt/chrome/policies/managed", "/etc/chromium/policies/managed"];
+const OLD_POLICY: &str = "claktory.json";
 const FIREWALL: &str = "/etc/claktory-browser.nft";
 const FIREWALL_UNIT: &str = "/etc/systemd/system/claktory-browser-nft.service";
 /// What `sudo -n -l` lists for the runner when the sudo line is there.
@@ -150,8 +157,10 @@ fn missing() -> Vec<String> {
     if !sudo_line() {
         missing.push("its sudo line".to_owned());
     }
-    if !policy_ok() {
-        missing.push("Chrome's policy".to_owned());
+    match policy_folder() {
+        PolicyFolder::Ready => {}
+        PolicyFolder::Missing => missing.push("Chrome's policy folder".to_owned()),
+        PolicyFolder::Old => missing.push("removing an old setting that changed your own Chrome".to_owned()),
     }
     // A site sees the fonts a person's computer has (change 3); fontconfig
     // finds them as Chrome does, on NixOS too (Pericolo 37396).
@@ -194,23 +203,33 @@ fn emoji_font() -> bool {
         .is_ok_and(|listed| String::from_utf8_lossy(&listed.stdout).lines().any(|line| !line.trim().is_empty()))
 }
 
-fn policy_ok() -> bool {
-    std::fs::read_to_string(POLICY).is_ok_and(|text| policy_says_enough(&text))
+#[derive(Debug, PartialEq)]
+enum PolicyFolder {
+    Ready,
+    /// Chrome's isn't there as a real folder of root's (a link, or anyone
+    /// else's, is refused, as the runner refuses it).
+    Missing,
+    /// An older setup's policy file is still in one, where the person's own
+    /// Chrome reads it.
+    Old,
 }
 
-/// Whether the policy keeps pages off the local network, and Chrome from
-/// signing in or syncing itself, so a site's sign-in (Google's, say) stays
-/// that site's cookies, which Sign out can clear (Fugo 41236, Giorno 41237).
-/// LocalNetworkAccessRestrictionsEnabled isn't required: Chrome 158 calls
-/// it an unknown policy (Fugo 41628), so setup writes it for older Chromes
-/// only.
-fn policy_says_enough(text: &str) -> bool {
-    let Ok(policy) = serde_json::from_str::<serde_json::Value>(text) else { return false };
-    policy["LocalNetworkAccessBlockedForUrls"].as_array().is_some_and(|urls| urls.iter().any(|url| url == "*"))
-        && policy["BrowserSignin"] == 0
-        && policy["SyncDisabled"] == true
-        // The runner's fixed flags show no warning bar (R11, Fugo 41700).
-        && policy["CommandLineFlagSecurityWarningsEnabled"] == false
+fn policy_folder() -> PolicyFolder {
+    policy_folder_in(&POLICY_FOLDERS.map(Path::new))
+}
+
+/// `folders[0]` is the one the runner needs (Chrome's), as a real folder of
+/// root's; none may hold our old policy file. Whatever else is in them (an
+/// employer's policy for the person's Chrome) is theirs, never a problem.
+fn policy_folder_in(folders: &[&Path]) -> PolicyFolder {
+    use std::os::unix::fs::MetadataExt;
+    if folders.iter().any(|folder| folder.join(OLD_POLICY).exists()) {
+        return PolicyFolder::Old;
+    }
+    match folders.first().map(std::fs::symlink_metadata) {
+        Some(Ok(meta)) if meta.file_type().is_dir() && meta.uid() == 0 => PolicyFolder::Ready,
+        _ => PolicyFolder::Missing,
+    }
 }
 
 /// The kernel's Landlock ABI, 0 with none.
@@ -260,7 +279,6 @@ let
   person = "NAME";  # who runs Claktory
   # Google's Chrome where nixpkgs has it for this machine, Chromium elsewhere.
   chrome = if lib.meta.availableOn pkgs.stdenv.hostPlatform pkgs.google-chrome then pkgs.google-chrome else pkgs.chromium;
-  policy = builtins.toJSON { LocalNetworkAccessRestrictionsEnabled = true; LocalNetworkAccessBlockedForUrls = [ "*" ]; BrowserSignin = 0; SyncDisabled = true; CommandLineFlagSecurityWarningsEnabled = false; };
 in {
   nixpkgs.config.allowUnfree = true;
   environment.systemPackages = with pkgs; [ chrome xvfb xorg.xauth ];
@@ -277,8 +295,10 @@ in {
     users = [ person ]; runAs = "claktory-browser";
     commands = [{ command = "/opt/claktory-browser/runner browser-runner *"; options = [ "NOPASSWD" ]; }];
   }];
-  environment.etc."opt/chrome/policies/managed/claktory.json".text = policy;
-  environment.etc."chromium/policies/managed/claktory.json".text = policy;
+  # Empty places the runner mounts Chrome's policy over, in its own
+  # namespace only: your own Chrome never reads it.
+  environment.etc."opt/chrome/policies/managed/claktory-browser-mount.json".text = "{}";
+  environment.etc."chromium/policies/managed/claktory-browser-mount.json".text = "{}";
   networking.nftables.enable = true;
   networking.nftables.tables.claktory_browser = { family = "inet"; content = builtins.readFile ./claktory-browser.nft; };
 }"#;
@@ -302,26 +322,30 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Fugo 49031: the policy lives only in the runner's namespace. Setup's
+    /// folder is ready when Chrome's is a real folder of root's with no
+    /// policy file of ours left in either; another file there (an
+    /// employer's) is fine.
     #[test]
-    fn the_policy_keeps_chrome_off_the_local_network_and_out_of_its_own_sign_in() {
-        let all = r#"{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"], "BrowserSignin": 0, "SyncDisabled": true, "CommandLineFlagSecurityWarningsEnabled": false}"#;
-        assert!(policy_says_enough(all));
-        // The NixOS lines say the same.
-        assert!(NIXOS.contains("BrowserSignin = 0; SyncDisabled = true; CommandLineFlagSecurityWarningsEnabled = false;"));
-        // An older setup's policy, without the sign-in keys, is missing.
-        assert!(!policy_says_enough(r#"{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"]}"#));
-        // The key Chrome 158 ignores isn't needed.
-        assert!(policy_says_enough(r#"{"LocalNetworkAccessBlockedForUrls": ["*"], "BrowserSignin": 0, "SyncDisabled": true, "CommandLineFlagSecurityWarningsEnabled": false}"#));
-        for (right, wrong) in [
-            (r#""BrowserSignin": 0"#, r#""BrowserSignin": 1"#),
-            (r#""BrowserSignin": 0"#, r#""BrowserSignin": "0""#),
-            (r#""SyncDisabled": true"#, r#""SyncDisabled": false"#),
-            (r#""CommandLineFlagSecurityWarningsEnabled": false"#, r#""CommandLineFlagSecurityWarningsEnabled": true"#),
-        ] {
-            let text = all.replace(right, wrong);
-            assert_ne!(text, all);
-            assert!(!policy_says_enough(&text), "{text}");
-        }
-        assert!(!policy_says_enough("not json"));
+    fn the_policy_folder_is_roots_and_holds_no_policy_of_ours() {
+        let dir = std::env::temp_dir().join(format!("policy-check-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("chromium")).unwrap();
+        let chromium = dir.join("chromium");
+        // A system folder of root's (never a link: /etc is one on a Mac), as Chrome's, with other files in it.
+        assert_eq!(policy_folder_in(&[Path::new("/usr"), &chromium]), PolicyFolder::Ready);
+        // Not root's, or a link to root's, or not there.
+        assert_eq!(policy_folder_in(&[&dir, &chromium]), PolicyFolder::Missing);
+        let link = dir.join("link");
+        std::os::unix::fs::symlink("/usr", &link).unwrap();
+        assert_eq!(policy_folder_in(&[&link, &chromium]), PolicyFolder::Missing);
+        assert_eq!(policy_folder_in(&[&dir.join("missing"), &chromium]), PolicyFolder::Missing);
+        // An older setup's policy, in either, is to be taken out.
+        std::fs::write(chromium.join("claktory.json"), "{}").unwrap();
+        assert_eq!(policy_folder_in(&[Path::new("/usr"), &chromium]), PolicyFolder::Old);
+        std::fs::remove_dir_all(&dir).unwrap();
+        // The NixOS lines write no policy, only the mount points.
+        assert!(!NIXOS.contains("BrowserSignin") && !NIXOS.contains("managed/claktory.json"));
+        assert!(NIXOS.contains(r#"environment.etc."opt/chrome/policies/managed/claktory-browser-mount.json".text = "{}";"#));
     }
 }

@@ -240,15 +240,16 @@ class ReplayVideo {
       ..project = replay.project
       ..loaded = true;
     final end = math.max(timeline.end, replay.log.last);
-    TimeWarp warp(double seconds) => TimeWarp.build(
+    // Its quiet stretches found once; each length tried only re-times them.
+    final found = TimeWarp.build(
       start: timeline.start,
       end: end,
       speed: HistorySpeed.auto,
       times: replay.log.times,
       loaded: const [(double.negativeInfinity, double.infinity)],
-      seconds: seconds,
       limited: false,
     );
+    TimeWarp warp(double seconds) => found.retimed(seconds);
     // The busy part's seconds that make the whole of it [length], less a
     // last look at the end: what's squeezed plays for less as it goes
     // faster, so it's found by halving.

@@ -49,17 +49,20 @@ class SheetAction<T> {
 /// on an iPad's wide window a popover pointing at [context]'s widget (the
 /// row or button it's about), without Cancel: a tap outside it cancels;
 /// elsewhere a dialog listing them. Completes with the action's value, or
-/// null when cancelled.
+/// null when cancelled. [beside]: the popover to the right of the widget
+/// rather than under it, where there's room (a sidebar row's menu).
 Future<T?> showActions<T>(
   BuildContext context, {
   String? title,
   String? message,
   required List<SheetAction<T>> actions,
   String cancelLabel = 'Cancel',
+  bool beside = false,
 }) {
   if (popoverHere(context)) {
     return presentPopover<T>(
       context,
+      beside: beside,
       wrap: (child) => _CountedSheet(child: child),
       builder: (context, close) => _ActionList<T>(
         title: title,

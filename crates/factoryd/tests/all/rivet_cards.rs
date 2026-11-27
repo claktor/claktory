@@ -148,7 +148,7 @@ async fn rivet_narrows_a_pipe_at_once_and_widens_it_only_with_the_persons_approv
     let now = pipe_of(&view, &pipe);
     assert_eq!(now.limits.expect("limits").messages_per_hour, lower);
     assert!(now.review_incoming);
-    assert!(cards(&view).is_empty(), "no card for narrowing");
+    assert!(cards(&view).is_empty(), "no request for narrowing");
     let lines = pipes::messages_for_test(&factory, &pipe);
     assert!(
         lines
@@ -285,7 +285,7 @@ async fn moving_a_pipe_into_a_group_that_shares_websites_asks_the_person() {
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
     match apply_request(&mut client, &mut view, answer(seq, false)).await {
         v1::server_message::Body::Error(error) => {
-            assert_eq!(error.message, "The group shares more websites now: dismiss this card and ask again.")
+            assert_eq!(error.message, "The group shares more websites now: dismiss this request and ask again.")
         }
         other => panic!("not refused: {other:?}"),
     }
@@ -403,7 +403,7 @@ async fn rivet_asks_to_share_a_website_only_on_a_card_that_shows_what_it_exposes
         let refused = call(&mut client, &mut view, "rivet", "pipes_share", &args.to_string()).await;
         assert!(!refused.starts_with("Asked "), "{hours}: {refused}");
     }
-    assert!(cards(&view).is_empty(), "a refusal made a card");
+    assert!(cards(&view).is_empty(), "a refusal made a request");
 
     // The card: what it exposes, in Claktory's words; nothing shared yet.
     let said = call(&mut client, &mut view, "rivet", "pipes_share", &ask(port)).await;
@@ -432,7 +432,7 @@ async fn rivet_asks_to_share_a_website_only_on_a_card_that_shows_what_it_exposes
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
     match apply_request(&mut client, &mut view, answer(seq, false)).await {
         v1::server_message::Body::Error(error) => {
-            assert_eq!(error.message, format!("Nothing answers on port {port} now, so there's nothing to share: dismiss this card."))
+            assert_eq!(error.message, format!("Nothing answers on port {port} now, so there's nothing to share: dismiss this request."))
         }
         other => panic!("not refused: {other:?}"),
     }
@@ -457,7 +457,7 @@ async fn rivet_asks_to_share_a_website_only_on_a_card_that_shows_what_it_exposes
     pipes::shares::unnamed_listener_for_test(port);
     match apply_request(&mut client, &mut view, answer(seq, false)).await {
         v1::server_message::Body::Error(error) => {
-            assert_eq!(error.message, format!("A different program listens on port {port} now: dismiss this card and ask again."))
+            assert_eq!(error.message, format!("A different program listens on port {port} now: dismiss this request and ask again."))
         }
         other => panic!("not refused: {other:?}"),
     }

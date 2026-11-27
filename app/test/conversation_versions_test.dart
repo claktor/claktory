@@ -216,11 +216,11 @@ void main() {
       ),
       Branch(id: 'b2', forkedAtMs: Int64(_at), messages: 1),
     ];
-    final button = find.byWidgetPredicate(
-      (widget) => widget is GlyphButton && widget.label == 'Other versions, 2',
-    );
-    expect(button, findsOneWidget);
-    await tester.tap(button);
+    // In the header's ⋯ (agent-view.md §4).
+    await _menu(tester);
+    final row = find.text('Other versions (2)');
+    expect(row, findsOneWidget);
+    await tester.tap(row);
     await pumpFrames(tester);
     expect(find.text("Builder's other versions"), findsOneWidget);
     expect(find.text('Look at the scheduler again'), findsWidgets);
@@ -256,12 +256,8 @@ void main() {
     harness.backend.branches['a1'] = [
       Branch(id: 'b1', forkedAtMs: Int64(_at), messages: 3),
     ];
-    await tester.tap(
-      find.byWidgetPredicate(
-        (widget) =>
-            widget is GlyphButton && widget.label == 'Other versions, 1',
-      ),
-    );
+    await _menu(tester);
+    await tester.tap(find.text('Other versions (1)'));
     await pumpFrames(tester);
     expect(find.text('Switch to this version'), findsOneWidget);
     int asked() =>
@@ -295,7 +291,9 @@ void main() {
       harness.backend.branches['a1'] = [
         Branch(id: 'b1', forkedAtMs: Int64(_at), messages: 3),
       ];
-      await tester.tap(find.bySemanticsLabel('Extensions').first);
+      await tester.tap(
+        find.bySemanticsLabel(RegExp('^More options for ')).first,
+      );
       await pumpFrames(tester);
       final row = find.text('Versions (2)…');
       expect(row, findsOneWidget);
@@ -308,15 +306,10 @@ void main() {
     }, variant: TargetPlatformVariant.only(TargetPlatform.iOS));
   }
 
-  testWidgets('no versions, no button', (tester) async {
+  testWidgets('no versions, no row', (tester) async {
     await _show(tester);
-    expect(
-      find.byWidgetPredicate(
-        (widget) =>
-            widget is GlyphButton && widget.label.startsWith('Other versions'),
-      ),
-      findsNothing,
-    );
+    await _menu(tester);
+    expect(find.textContaining('Other versions'), findsNothing);
   }, variant: mac);
 
   test("your message's files come back into the box; a voice message's "
@@ -374,4 +367,15 @@ void main() {
       'on Tue 17 Nov at 09:05',
     );
   });
+}
+
+/// Opens the agent's ⋯.
+Future<void> _menu(WidgetTester tester) async {
+  await tester.tap(
+    find.byWidgetPredicate(
+      (widget) =>
+          widget is GlyphButton && widget.label.startsWith('More options for '),
+    ),
+  );
+  await pumpFrames(tester);
 }

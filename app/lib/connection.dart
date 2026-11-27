@@ -6,7 +6,7 @@ import 'backend.dart';
 import 'claktory_identity.dart' show claktoryName;
 import 'controls.dart';
 import 'device_account.dart' show AccountClaktory;
-import 'devices.dart' show FactoryChooser, thisDeviceKind;
+import 'devices.dart' show thisDeviceKind;
 import 'extensions.dart' show logTime;
 import 'forms.dart';
 import 'identity.dart';
@@ -183,6 +183,14 @@ class Connection {
 
   String get _name => machine ?? 'this Claktory';
 
+  /// Refused: "nixos no longer allows this Mac" once this device saw it
+  /// since the app opened (it was removed there), else "doesn't allow",
+  /// since it may never have let it in (a code that expired). The footer
+  /// and the page say it alike (Abbacchio 49877).
+  String notAllowed(String device) => backend.workspace.received
+      ? '$_name no longer allows this $device'
+      : "$_name doesn't allow this $device";
+
   /// The tunnel's status it says it can't connect for: the try's own once
   /// it failed; while a new try dials (its status afresh), the last
   /// failure (row 475, 480).
@@ -219,7 +227,7 @@ class Connection {
     Link.connecting =>
       machine == null ? 'Connecting…' : 'Connecting to $machine…',
     Link.failing => "Can't connect to $_name",
-    Link.refused => "$_name doesn't allow this device",
+    Link.refused => notAllowed('device'),
     Link.moved => switch (backend.movedAway.value?.to ?? '') {
       '' => 'Moved to another computer',
       final to => 'Moved to $to',
@@ -338,8 +346,7 @@ class ConnectionDot extends StatelessWidget {
 /// The sidebar footer's connection line: its mark and words, with how it
 /// connects on hover (or a long press), and a click for [ConnectionDialog].
 /// Not connected, the click reconnects at once too ([reconnectFirst]).
-/// Turned away, a click lists the Claktories instead: trying again won't
-/// help.
+/// Turned away, the content's page says what to do (devices-signin.md §4).
 class ConnectionLine extends StatelessWidget {
   const ConnectionLine({super.key, required this.backend, this.machine});
 
@@ -375,13 +382,6 @@ class ConnectionLine extends StatelessWidget {
             hint: reconnectFirst(connection.link) ? reconnectAndShowHint : null,
             child: Pressable(
               onTap: () {
-                if (connection.link == Link.refused) {
-                  showModal(
-                    context,
-                    (context, close) => FactoryChooser(close: close),
-                  );
-                  return;
-                }
                 if (reconnectFirst(connection.link)) backend.reconnectNow();
                 showModal(
                   context,
@@ -507,16 +507,6 @@ class ConnectionDialog extends StatelessWidget {
               },
           cancelLabel: 'Close',
           onCancel: close,
-          secondary: Button(
-            label: 'Switch Claktory…',
-            onPressed: () {
-              close();
-              showModal(
-                context,
-                (context, close) => FactoryChooser(close: close),
-              );
-            },
-          ),
         );
       },
     );

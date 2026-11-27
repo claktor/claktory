@@ -32,10 +32,10 @@ void main() {
 
   testWidgets('header bars sit at the top of the window', (tester) async {
     final harness = await showFocused(tester);
-    // The sidebar's band, the extension bar's and the agent's header.
+    // The sidebar's band and the agent's header.
     final bands = find.byType(WindowDrag);
-    expect(bands, findsNWidgets(3));
-    for (var i = 0; i < 3; i++) {
+    expect(bands, findsNWidgets(2));
+    for (var i = 0; i < 2; i++) {
       expect(tester.getTopLeft(bands.at(i)).dy, 0);
     }
     expect(tester.getTopLeft(find.text('Builder').last).dy, lessThan(44));

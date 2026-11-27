@@ -132,12 +132,15 @@ pub(crate) fn public(address: IpAddr) -> bool {
 /// While `hops` is on (the agent asked for a file, R9), a redirect may lead
 /// off the sites to any https address on the internet, since files often
 /// come from elsewhere (a CDN); what comes back from off the sites is let
-/// through only if it's a file, never a page to show.
+/// through only if it's a file, never a page to show. While `fetching` is
+/// on (browser_download itself), a PDF counts as a file and comes as one,
+/// saved rather than shown in Chrome's viewer (Ghiaccio 40395).
 pub(crate) async fn guard(
     page: Arc<Page>,
     sites: Vec<String>,
     blocked: Arc<Mutex<Option<Blocked>>>,
     hops: Arc<AtomicBool>,
+    fetching: Arc<AtomicBool>,
 ) -> Result<(), Error> {
     let mut events = page.cdp().events();
     // The top frame keeps its id for the page's life: asking for it while
@@ -167,21 +170,23 @@ pub(crate) async fn guard(
             let frame = event.params["frameId"].as_str().unwrap_or_default().to_owned();
             let page = page.clone();
             let (sites, blocked) = (sites.clone(), blocked.clone());
-            let params = &event.params;
+            let params = event.params.clone();
             let paused = Paused {
                 top: frame == top,
                 answered: params.get("responseStatusCode").is_some() || params.get("responseErrorReason").is_some(),
                 status: params["responseStatusCode"].as_u64().unwrap_or(0),
                 file: is_file(&params["responseHeaders"]),
+                pdf: is_pdf(&params["responseHeaders"]),
                 redirect: params["redirectedRequestId"].as_str().is_some_and(|id| !id.is_empty()),
                 hopping: hops.load(Ordering::SeqCst),
+                fetching: fetching.load(Ordering::SeqCst),
             };
             // Each on its own, so a slow lookup holds no other request.
             tokio::spawn(async move {
                 let verdict = decide(&page, &sites, &url, paused).await;
                 let (fine, signed_in) = (verdict.is_ok(), verdict.err().unwrap_or(false));
                 if fine {
-                    let _ = page.call("Fetch.continueRequest", json!({"requestId": request})).await;
+                    let_through(&page, &request, &params, paused.saves_pdf()).await;
                 } else {
                     let site = url::Url::parse(&url).map(|url| url.origin().ascii_serialization()).unwrap_or_else(|_| short(&url));
                     *crate::locking::lock(&blocked) = Some(Blocked { site, signed_in });
@@ -207,6 +212,47 @@ pub(crate) struct Paused {
     pub redirect: bool,
     /// The agent asked for a file just now.
     pub hopping: bool,
+    /// The response is a PDF.
+    pub pdf: bool,
+    /// The agent asked for this file itself (browser_download).
+    pub fetching: bool,
+}
+
+impl Paused {
+    /// The page's own response is a PDF the agent asked to download: it
+    /// comes as a file, never into Chrome's viewer.
+    fn saves_pdf(self) -> bool {
+        self.top && self.answered && self.fetching && self.pdf && (200..300).contains(&self.status)
+    }
+}
+
+/// Lets a paused request or response go on: as an attachment when
+/// `as_file` (Chrome then saves it, as any download), else as it is.
+pub(crate) async fn let_through(page: &Page, request: &str, params: &serde_json::Value, as_file: bool) {
+    if as_file {
+        // Chrome takes new headers only with the status they go with.
+        let headers = attached(&params["responseHeaders"]);
+        let given = json!({"requestId": request, "responseCode": params["responseStatusCode"], "responseHeaders": headers});
+        if page.call("Fetch.continueResponse", given).await.is_ok() {
+            return;
+        }
+    }
+    let _ = page.call("Fetch.continueRequest", json!({"requestId": request})).await;
+}
+
+/// Response `headers` (CDP's [{name, value}]) with the file made an
+/// attachment: any Content-Disposition of its own replaced.
+fn attached(headers: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut kept: Vec<serde_json::Value> = headers
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|header| !header["name"].as_str().is_some_and(|name| name.eq_ignore_ascii_case("content-disposition")))
+        .take(200)
+        .cloned()
+        .collect();
+    kept.push(json!({"name": "Content-Disposition", "value": "attachment"}));
+    kept
 }
 
 /// Whether the fence lets `url` through: Ok, or Err(signed in) when it
@@ -217,7 +263,7 @@ pub(crate) async fn decide(page: &Page, sites: &[String], url: &str, paused: Pau
     } else if paused.answered {
         // Only a hop off the sites gets here off them: a redirect goes on
         // (its next address is checked), a file comes, a page doesn't.
-        (300..400).contains(&paused.status) || check(sites, url).is_ok() || (paused.file && paused.hopping)
+        (300..400).contains(&paused.status) || check(sites, url).is_ok() || ((paused.file || (paused.pdf && paused.fetching)) && paused.hopping)
     } else if paused.hopping && paused.redirect && check(sites, url).is_err() {
         // Never with the person's cookies for a site the errand wasn't
         // opened for: what it fetched as them would leave with the agent
@@ -275,27 +321,37 @@ async fn off_sites(address: &str) -> Result<(), String> {
     resolved(&url).await
 }
 
+/// A response header's value, lowercase; empty when it has none.
+fn header(headers: &serde_json::Value, name: &str) -> String {
+    headers
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|header| header["name"].as_str().is_some_and(|key| key.eq_ignore_ascii_case(name)))
+        .and_then(|header| header["value"].as_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default()
+}
+
+/// The response's type, without its parameters.
+fn kind_of(headers: &serde_json::Value) -> String {
+    header(headers, "content-type").split(';').next().unwrap_or_default().trim().to_owned()
+}
+
 /// Whether response `headers` (CDP's [{name, value}]) make a file Chrome
 /// downloads rather than a page it shows: an attachment, or a type it
 /// doesn't show.
 fn is_file(headers: &serde_json::Value) -> bool {
-    let header = |name: &str| {
-        headers
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|header| header["name"].as_str().is_some_and(|key| key.eq_ignore_ascii_case(name)))
-            .and_then(|header| header["value"].as_str())
-            .map(str::to_ascii_lowercase)
-            .unwrap_or_default()
-    };
-    if header("content-disposition").trim_start().starts_with("attachment") {
+    if header(headers, "content-disposition").trim_start().starts_with("attachment") {
         return true;
     }
-    let kind = header("content-type");
-    let kind = kind.split(';').next().unwrap_or_default().trim();
     let shown = ["xhtml+xml", "xml", "json", "pdf", "javascript", "ecmascript", "rss+xml", "atom+xml", "x-javascript"];
-    kind.strip_prefix("application/").is_some_and(|kind| !shown.contains(&kind))
+    kind_of(headers).strip_prefix("application/").is_some_and(|kind| !shown.contains(&kind))
+}
+
+/// Whether the response is a PDF, which Chrome shows in its viewer.
+fn is_pdf(headers: &serde_json::Value) -> bool {
+    matches!(kind_of(headers).as_str(), "application/pdf" | "application/x-pdf")
 }
 
 /// browser_download: Chrome fetches `address`, on the errand's sites, as
@@ -451,6 +507,12 @@ mod tests {
         assert_eq!(decide(&page, &sites(), "https://cdn.example/f.html", Paused { file: false, ..file }).await, Err(false));
         assert_eq!(decide(&page, &sites(), "https://cdn.example/f.zip", Paused { hopping: false, ..file }).await, Err(false));
         assert_eq!(decide(&page, &sites(), "https://cdn.example/next", Paused { status: 302, file: false, ..file }).await, Ok(()));
+        // A PDF from off the sites: a file only when the agent asked for it
+        // with browser_download.
+        let pdf = Paused { file: false, pdf: true, ..file };
+        assert_eq!(decide(&page, &sites(), "https://cdn.example/f.pdf", pdf).await, Err(false));
+        assert_eq!(decide(&page, &sites(), "https://cdn.example/f.pdf", Paused { fetching: true, ..pdf }).await, Ok(()));
+        assert!(Paused { fetching: true, ..pdf }.saves_pdf() && !pdf.saves_pdf());
         // Frames inside the page load as it asks.
         assert_eq!(decide(&page, &sites(), "https://drive.example/", Paused::default()).await, Ok(()));
     }
@@ -460,11 +522,12 @@ mod tests {
         let html = r#"<a href="https://evil.example/steal">Continue</a>"#;
         let Some((_local, page, profile)) = crate::errands::reader::tests::page_with(html).await else { return };
         let blocked = Arc::new(Mutex::new(None));
-        guard(page.clone(), sites(), blocked.clone(), Arc::new(AtomicBool::new(false))).await.unwrap();
+        guard(page.clone(), sites(), blocked.clone(), Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false))).await.unwrap();
         let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
         let link = read.elements.iter().find(|element| element.name == "Continue").unwrap().reference.clone();
         // The reader says the link leaves; the browser's own click is stopped all the same.
-        let _ = page.act(&Op::on_element(&read.document, 0, &link, None).unwrap()).await;
+        let mut hands = crate::errands::reader::tests::TestHand::new();
+        let _ = page.act(&mut hands.hand(), &Op::on_element(&read.document, 0, &link, None).unwrap()).await;
         let stopped = |site: &'static str| {
             let blocked = blocked.clone();
             async move {

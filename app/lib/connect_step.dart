@@ -7,6 +7,7 @@ import 'controls.dart';
 import 'devices.dart' show thisDeviceKind;
 import 'identity.dart';
 import 'links.dart' show confirmPairing;
+import 'mobile/local_network.dart' show connectNewClaktory;
 import 'name_step.dart' show StepCard;
 import 'pasted_code.dart';
 import 'rail.dart' show ClaktoriesScope;
@@ -47,9 +48,11 @@ class _ConnectStepState extends State<ConnectStep> {
     super.dispose();
   }
 
-  /// One of the person's own, from their account: connects.
+  /// One of the person's own, from their account: connects, the first
+  /// Claktory on an iPad asking for Local Network first, as every way in
+  /// does (devices-signin.md §8.8).
   void _connect(RemoteFactory target) =>
-      AppScope.switchFactory(context, target);
+      unawaited(connectNewClaktory(context, target));
 
   /// A pasted code connects only once the person says so, as every way a
   /// code comes in does (confirmPairing, Fugo).

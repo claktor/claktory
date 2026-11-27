@@ -132,6 +132,11 @@ Future<Harness> _approval(
   return harness;
 }
 
+// The header's title reads its name, role and model; the model by its id,
+// the test's Workspace listing no models.
+const _model = 'anthropic/claude-opus-5-5';
+const _mike = 'Mike, Coordinator, $_model';
+
 void main() {
   setUpAll(_fonts);
   setUp(() => PhonePlatformPolicy.debugAndroidPolicy = true);
@@ -158,15 +163,15 @@ void main() {
         labels,
         containsAllInOrder([
           'Menu',
-          'Mike, Coordinator',
-          'Extensions',
+          _mike,
+          'More options for Mike',
           'Attach files',
           'Message Mike',
           'Send',
         ]),
       );
       final title = find.semantics
-          .byLabel('Mike, Coordinator')
+          .byLabel(_mike)
           .evaluate()
           .single
           .getSemanticsData();
@@ -192,8 +197,8 @@ void main() {
     _action(tester, 'Menu');
     await pumpFrames(tester);
     expect(find.byType(Sidebar), findsOneWidget);
-    expect(find.semantics.byLabel('Extensions'), findsNothing);
-    expect(find.semantics.byLabel('Mike, Coordinator'), findsNothing);
+    expect(find.semantics.byLabel('More options for Mike'), findsNothing);
+    expect(find.semantics.byLabel(_mike), findsNothing);
     await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
     await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
     _action(tester, 'Search');
@@ -230,7 +235,7 @@ void main() {
     _action(tester, 'Close menu');
     await pumpFrames(tester);
     expect(find.byType(Sidebar), findsNothing);
-    expect(find.semantics.byLabel('Extensions'), findsOne);
+    expect(find.semantics.byLabel('More options for Mike'), findsOne);
   }, variant: android);
 
   testWidgets(
@@ -246,10 +251,10 @@ void main() {
       await tester.enterText(field, 'Retain focus and draft');
       final editable = tester.widget<EditableText>(field);
       expect(editable.focusNode.hasFocus, isTrue);
-      _action(tester, 'Extensions');
+      _action(tester, 'More options for Mike');
       await pumpFrames(tester);
       expect(find.text("Mike's extensions"), findsOneWidget);
-      expect(find.semantics.byLabel('Mike, Coordinator'), findsNothing);
+      expect(find.semantics.byLabel(_mike), findsNothing);
       expect(editable.focusNode.hasFocus, isFalse);
       final route = find.semantics.byLabel("Mike's extensions").evaluate();
       expect(route, isNotEmpty);
@@ -258,7 +263,7 @@ void main() {
         isTrue,
       );
       await _back(tester);
-      expect(find.semantics.byLabel('Mike, Coordinator'), findsOne);
+      expect(find.semantics.byLabel(_mike), findsOne);
       expect(editable.focusNode.hasFocus, isTrue);
       expect(harness.drafts.of('mike'), 'Retain focus and draft');
     },
@@ -353,13 +358,13 @@ void main() {
         size: const Size(360, 640),
       );
       final data = find.semantics
-          .byLabel('$name, $role')
+          .byLabel('$name, $role, $_model')
           .evaluate()
           .single
           .getSemanticsData();
       expect(data.hint, 'Opens agent settings');
       expect(data.flagsCollection.isButton, isTrue);
-      _action(tester, '$name, $role');
+      _action(tester, '$name, $role, $_model');
       await pumpFrames(tester);
       expect(find.byType(FormFrame), findsOneWidget);
       expect(find.text('Agent settings'), findsWidgets);
@@ -526,10 +531,10 @@ void main() {
           16 * scale,
         );
         await _settings(tester);
-        expect(find.semantics.byLabel('Extensions'), findsNothing);
+        expect(find.semantics.byLabel('More options for Mike'), findsNothing);
         _action(tester, 'Back');
         await pumpFrames(tester);
-        _action(tester, 'Mike, Coordinator');
+        _action(tester, _mike);
         await pumpFrames(tester);
         expect(find.byType(FormFrame), findsOneWidget);
         final field = find

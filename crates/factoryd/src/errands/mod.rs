@@ -17,12 +17,15 @@
 #![allow(dead_code)]
 
 pub(crate) mod cdp;
+pub(crate) mod checks;
 pub(crate) mod code;
 pub(crate) mod downloads;
 pub(crate) mod fence;
 pub(crate) mod fill;
 pub(crate) mod handoff;
+pub(crate) mod keys;
 pub(crate) mod log;
+pub(crate) mod pace;
 pub(crate) mod reader;
 
 use std::sync::Arc;
@@ -76,11 +79,73 @@ CREATE INDEX errand_log_at ON errand_log (at);
 CREATE TABLE errand_agents (agent TEXT PRIMARY KEY, since INTEGER NOT NULL);
 ";
 
+/// Agents whose conversation has read outside content through Claktory's
+/// own tools (web_search, web_fetch, an app with web access) since it last
+/// started afresh (Fugo 50226): no errand_open for them, as for an agent
+/// that read a page in an errand. Not pipes' taint, which would make every
+/// such agent's secrets ask (card 283). Cleared at /clear.
+pub(crate) const OUTSIDE_READ: &str = "
+CREATE TABLE errand_outside_read (agent TEXT PRIMARY KEY, what TEXT NOT NULL, since INTEGER NOT NULL);
+";
+
+/// The origins whose cached pages Chrome still owes a clear (row 1699,
+/// Fugo 50272): recorded when a recovery-codes or two-step handoff is
+/// asked, removed once its clear succeeds, and cleared at the browser's
+/// next driven start, before its first page, when the browser went away
+/// before (a restart, a crash, Stop).
+pub(crate) const CACHE_OWED: &str = "
+CREATE TABLE errand_cache_owed (origin TEXT PRIMARY KEY, since INTEGER NOT NULL);
+";
+
+/// A clear of `origin`'s cached pages is owed (`CACHE_OWED`).
+pub(crate) fn owe_cache_clear(factory: &Factory, origin: &str) {
+    let owed = factory.store.db().execute(
+        "INSERT OR IGNORE INTO errand_cache_owed (origin, since) VALUES (?1, ?2)",
+        params![origin, now_ms()],
+    );
+    if let Err(error) = owed {
+        tracing::error!(%origin, %error, "could not record a cache clear owed");
+    }
+}
+
+/// The origins owed a clear.
+fn caches_owed(factory: &Factory) -> Vec<String> {
+    crate::store::query(&factory.store.db(), "SELECT origin FROM errand_cache_owed ORDER BY since", [], |row| row.get(0)).unwrap_or_default()
+}
+
+/// `agent` read outside content through one of Claktory's tools: `what`,
+/// in words for its refusal ("a web page"). The first one is kept.
+pub(crate) fn read_outside(factory: &Factory, agent: &str, what: &str) {
+    let marked = factory.store.db().execute(
+        "INSERT OR IGNORE INTO errand_outside_read (agent, what, since) VALUES (?1, ?2, ?3)",
+        params![agent, what, now_ms()],
+    );
+    if let Err(error) = marked {
+        tracing::error!(%agent, %error, "could not record that an agent read outside content");
+    }
+}
+
+/// What `agent` read from outside since its conversation started afresh,
+/// if it did. An unreadable record counts as read.
+fn outside_read(factory: &Factory, agent: &str) -> Option<String> {
+    use rusqlite::OptionalExtension;
+    match factory.store.db().query_row("SELECT what FROM errand_outside_read WHERE agent = ?1", [agent], |row| row.get(0)).optional() {
+        Ok(what) => what,
+        Err(_) => Some("something from outside".to_owned()),
+    }
+}
+
+/// /clear: a new conversation has read nothing from outside.
+pub(crate) fn clear_outside_read(factory: &Factory, agent: &str) {
+    if let Err(error) = factory.store.db().execute("DELETE FROM errand_outside_read WHERE agent = ?1", [agent]) {
+        tracing::error!(%agent, %error, "could not clear that an agent read outside content");
+    }
+}
+
 /// Why an errand open when Claktory stopped ended.
 const RESTARTED: &str = "Claktory restarted, which closed the browser.";
 
-/// How long a check that the visitor is a person gets to clear by itself.
-const CHECK_CLEARS: std::time::Duration = std::time::Duration::from_secs(10);
+pub use checks::check_timing_for_test;
 
 /// The most sites an errand is for.
 pub(crate) const MAX_SITES: usize = 10;
@@ -109,6 +174,40 @@ pub(crate) struct Errands {
     /// The address the errand last drove (errand, address): after a
     /// relaunch, its tab is the one there (Ghiaccio 38596).
     last: Mutex<Option<(String, String)>>,
+    /// The browser's one lane (#530, R11.4): an errand's steps go one at a
+    /// time, at its person's pace. Taken before `live`, and held while a
+    /// step paces, which `live` isn't: the person's Stop and turns never
+    /// wait for a step.
+    lane: tokio::sync::Mutex<Option<Pacing>>,
+    /// The errand waiting to try a page again for its check that the
+    /// visitor is a person (W5), and how long it waits.
+    checking: Mutex<Option<checks::Waiting>>,
+    check_timing: Mutex<checks::Timing>,
+}
+
+/// What paces an errand's steps: the person it drives as, drawn once for
+/// the errand, where its mouse is, and when it has read enough to change
+/// the page again.
+struct Pacing {
+    errand: String,
+    person: pace::Person,
+    rng: pace::Rng,
+    pointer: Option<pace::Point>,
+    /// The page the pointer is on: a new connection puts it nowhere.
+    page: usize,
+    /// No change to the page before then: the time to read what the last
+    /// read showed.
+    ready_at: Instant,
+    /// The words of each document counted as read.
+    read: std::collections::HashMap<String, usize>,
+}
+
+impl Pacing {
+    fn new(errand: &str) -> Pacing {
+        let mut rng = pace::Rng::fresh();
+        let person = pace::Person::drawn(&mut rng);
+        Pacing { errand: errand.to_owned(), person, rng, pointer: None, page: 0, ready_at: Instant::now(), read: Default::default() }
+    }
 }
 
 /// The connection an errand drives.
@@ -122,6 +221,9 @@ struct Live {
     /// Whether the fence lets the top frame's redirects leave the sites,
     /// for a file only: while the agent asks for a download.
     hops: Arc<std::sync::atomic::AtomicBool>,
+    /// Whether the agent asked for a file itself (browser_download): a PDF
+    /// then comes as a file, not into Chrome's viewer.
+    fetching: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// An errand's state, as kept.
@@ -457,16 +559,20 @@ impl Factory {
             if self.pipes.contained(opener) {
                 return Err("A contained agent can't open errands.".to_owned());
             }
-            if !self.pipes.tainted(opener).is_empty() {
-                let read = crate::pipes::agents::what_was_read(self, opener);
+            let read = if self.pipes.tainted(opener).is_empty() {
+                outside_read(self, opener)
+            } else {
+                Some(crate::pipes::agents::what_was_read(self, opener))
+            };
+            if let Some(read) = read {
                 return Err(format!(
-                    "You've read {read}, which may hold someone else's instructions, so you can't open an errand until your conversation starts afresh: the browser is signed in to {person}'s sites. Ask {person} to open it instead."
+                    "You've read {read}, which may hold someone else's instructions, so you can't open an errand until your conversation starts afresh: the browser is signed in to {person}'s sites."
                 ));
             }
         }
         if !extension_on || !contained(self, agent) {
             return Err(format!(
-                "{name} can't do errands: it must be contained, with the errands extension on, which only {person} sets in the app."
+                "{name} can't do errands: {person} turns on Use for errands… in its settings, then its Errands extension."
             ));
         }
         let purpose = plain("purpose", purpose, PURPOSE_MAX)?;
@@ -546,10 +652,16 @@ impl Factory {
         record.state = state.wire() as i32;
         record.ended_ms = now_ms();
         record.end_reason = reason.to_owned();
-        record.handoff = None;
+        let handoff = record.handoff.take();
         self.save_errand(record, None);
         let mut live = self.errands.live.lock().await;
         if live.as_ref().is_some_and(|live| live.errand == errand) {
+            // A recovery-codes or two-step card still waiting: what its page
+            // showed leaves Chrome's caches all the same (Fugo 1642).
+            let page = live.as_ref().map(|live| live.page.clone()).filter(|page| !page.cdp().closed());
+            if let (Some(page), Some(handoff)) = (page, handoff.filter(|handoff| shows_secrets(handoff.kind))) {
+                clear_caches(self, &page, &handoff.origin).await;
+            }
             *live = None;
         }
         drop(live);
@@ -559,6 +671,21 @@ impl Factory {
         };
         if let (Some(begun), Some(browser)) = (begun, self.errands.browser()) {
             browser.end(&begun);
+        }
+    }
+
+    /// A recovery-codes or two-step handoff of `errand` at `origin` ended:
+    /// what its page showed (the codes, a setup key) leaves Chrome's caches
+    /// on disk, whatever the outcome, so a site that sent it cacheable
+    /// doesn't leave it in the errands' profile (Fugo 1642).
+    pub(crate) async fn forget_cached(&self, errand: &str, origin: &str) {
+        let Some(errand) = self.errands.get(errand).filter(|errand| State::from_wire(errand.state).open()) else { return };
+        let mut live = self.errands.live.lock().await;
+        let page = self.page(&mut live, &errand).await;
+        drop(live);
+        match page {
+            Ok(page) => clear_caches(self, &page, origin).await,
+            Err((_, why)) => tracing::warn!(errand = %errand.id, %why, "couldn't clear the browser's caches after a handoff"),
         }
     }
 
@@ -581,6 +708,10 @@ impl Factory {
                 return Err(("interrupted".to_owned(), "Claktory's browser isn't driven now: try again in a moment".to_owned()));
             }
         }
+        transport
+            .bootstrapped()
+            .await
+            .map_err(|why| ("interrupted".to_owned(), format!("Claktory's browser didn't start hidden ({})", schema::one_line(&why, 200))))?;
         let pipe = transport.connect().map_err(|why| ("interrupted".to_owned(), why))?;
         let cdp = Arc::new(Cdp::new(pipe));
         let gone = |error: cdp::Error| ("interrupted".to_owned(), schema::one_line(&error.to_string(), 200));
@@ -593,7 +724,8 @@ impl Factory {
         transport.on_release(&errand.id, vec![session]);
         let blocked = Arc::new(Mutex::new(None));
         let hops = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        fence::guard(page.clone(), errand.sites.clone(), blocked.clone(), hops.clone()).await.map_err(gone)?;
+        let fetching = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        fence::guard(page.clone(), errand.sites.clone(), blocked.clone(), hops.clone(), fetching.clone()).await.map_err(gone)?;
         // Downloads go to the runner's folder, each under its GUID, never a
         // name the page chose (R9); none where it has no folder.
         let behavior = match transport.download_dir() {
@@ -604,7 +736,20 @@ impl Factory {
         let tracker = Arc::new(downloads::Tracker::default());
         downloads::watch(cdp, tracker.clone(), transport.clone());
         page.set_two_step(code::two_step_origins(self, &errand.id));
-        *live = Some(Live { errand: errand.id.clone(), page: page.clone(), blocked, downloads: tracker, hops });
+        // Clears owed since the browser went away mid-handoff, before its
+        // first page (row 1699).
+        for origin in caches_owed(self) {
+            clear_caches(self, &page, &origin).await;
+        }
+        // A driven start opens only a blank page: back to where the errand
+        // was, through the fence and with downloads set, as a navigation of
+        // its own would.
+        if let Some(last) = &last
+            && page.frame().await.is_ok_and(|frame| frame.url == "about:blank")
+        {
+            let _ = fence::go(&page, &errand.sites, last).await;
+        }
+        *live = Some(Live { errand: errand.id.clone(), page: page.clone(), blocked, downloads: tracker, hops, fetching });
         Ok(page)
     }
 
@@ -616,7 +761,7 @@ impl Factory {
         };
         match State::from_wire(errand.state) {
             State::Running => Ok(errand),
-            State::PersonsTurn => Err(("paused".to_owned(), format!("the browser is {person}'s until they answer your handoff card"))),
+            State::PersonsTurn => Err(("paused".to_owned(), format!("the browser is {person}'s until they answer your handoff request"))),
             _ => Err(("paused".to_owned(), format!("{person} took the browser over: wait until they hand it back"))),
         }
     }
@@ -624,43 +769,87 @@ impl Factory {
     /// Runs `op` for `agent`'s errand: the page's answer, fenced as a
     /// stranger's words, with the agent tainted by the site first, and the
     /// downloads it made; or the failure, as the extension's are.
+    ///
+    /// A check that the visitor is a person that doesn't clear by itself
+    /// makes the errand wait and try again later (W5): its steps meanwhile
+    /// are refused.
     pub(crate) async fn errand_step(self: &Arc<Self>, agent: &str, step: Step) -> Result<(String, serde_json::Value), String> {
-        self.errand_step_handing(agent, step, true).await
-    }
-
-    /// errand_step; a check that the visitor is a person that doesn't
-    /// clear is handed to the person on a card only when `hands_checks`:
-    /// when the agent's own tool asked, since only its result posts the
-    /// card. Otherwise (the read after the person's Done) the agent is told
-    /// the page still shows one, and its next read hands it over
-    /// (Ghiaccio 40233, Fugo 40242).
-    pub(crate) async fn errand_step_handing(
-        self: &Arc<Self>,
-        agent: &str,
-        step: Step,
-        hands_checks: bool,
-    ) -> Result<(String, serde_json::Value), String> {
         let errand = self.driving(agent).map_err(said)?;
+        if let Some(waiting) = self.check_waiting(&errand.id) {
+            return Err(said(("paused".to_owned(), waiting)));
+        }
+        // One step at a time, the lane before the connection.
+        let mut lane = self.errands.lane.lock().await;
+        if lane.as_ref().is_some_and(|pacing| pacing.errand != errand.id) {
+            *lane = None;
+        }
+        let pacing = lane.get_or_insert_with(|| Pacing::new(&errand.id));
         let mut live = self.errands.live.lock().await;
         let page = self.page(&mut live, &errand).await.map_err(said)?;
-        let Some((blocked, tracker, hops)) = live.as_ref().map(|live| {
-            (crate::locking::lock(&live.blocked).take(), live.downloads.clone(), live.hops.clone())
+        let Some((blocked, tracker, hops, fetching)) = live.as_ref().map(|live| {
+            (crate::locking::lock(&live.blocked).take(), live.downloads.clone(), live.hops.clone(), live.fetching.clone())
         }) else {
             return Err(said(("interrupted".to_owned(), "the browser's connection went".to_owned())));
+        };
+        // Paced outside the connection's lock: the person's Stop or turn
+        // ends the connection mid-step, and the step stops at its next
+        // event.
+        drop(live);
+        if pacing.page != Arc::as_ptr(&page) as usize {
+            pacing.page = Arc::as_ptr(&page) as usize;
+            pacing.pointer = None;
+        }
+        let browser = self.errands.browser();
+        let still = {
+            let (factory, id, page, person) = (self.clone(), errand.id.clone(), page.clone(), self.lock().config.person().to_owned());
+            let browser = browser.clone();
+            move || -> Result<(), (String, String)> {
+                match factory.errands.get(&id).map(|errand| State::from_wire(errand.state)) {
+                    Some(State::Running) => {}
+                    Some(State::PersonsTurn) => return Err(("paused".to_owned(), format!("the browser is {person}'s until they answer your handoff request"))),
+                    Some(State::TakenOver) => return Err(("paused".to_owned(), format!("{person} took the browser over: wait until they hand it back"))),
+                    _ => return Err(("interrupted".to_owned(), "the errand is over".to_owned())),
+                }
+                if page.cdp().closed() {
+                    return Err(("interrupted".to_owned(), "the browser closed".to_owned()));
+                }
+                if browser.as_ref().and_then(|browser| browser.states()).is_some_and(|states| *states.borrow() != BrowserState::Driven) {
+                    return Err(("paused".to_owned(), "Claktory's browser isn't driven now".to_owned()));
+                }
+                Ok(())
+            }
+        };
+        let mut hand = reader::Hand { person: &pacing.person, rng: &mut pacing.rng, pointer: &mut pacing.pointer, still: &still };
+        // A change to the page waits until what was read last had a
+        // person's time to be read (R11.4).
+        let changes = matches!(step, Step::Scroll { .. } | Step::Act(_) | Step::Dismiss { .. } | Step::Navigate { .. } | Step::Download { .. });
+        if changes {
+            hand.wait_until(pacing.ready_at).await.map_err(said)?;
+        }
+        // Agent input (Input.*) reaches Chrome only under a lease (R11.3
+        // #5), held for this step alone and for the longest it may take: a
+        // fill types at the person's pace.
+        let lease = |until: std::time::Duration| match &browser {
+            Some(browser) => browser.input_lease(until).map_err(|why| ("interrupted".to_owned(), schema::one_line(&why, 200))),
+            None => Ok(None),
+        };
+        let until = match &step {
+            Step::Act(Op::Fill { text, .. }) => pace::typing_time(&pacing.person, text) * 2 + ONE_ACTION,
+            _ => ONE_ACTION,
         };
         let (action, target) = step.logged();
         // A download is the agent's only when it asked for one: a file, or
         // a click, which may start one (R9).
         let asks_file = matches!(step, Step::Download { .. } | Step::Act(Op::Click { .. }));
         let before = tracker.count();
-        if asks_file {
-            tracker.expect(Instant::now() + downloads::FINISHES);
-            hops.store(true, std::sync::atomic::Ordering::SeqCst);
-        }
+        // Cleared whenever the step ends, finished or dropped midway (an
+        // errand stopped, the connection gone): never left on for the next
+        // step (Fugo 41301).
+        let asking = asks_file.then(|| FileAsk::new(hops, fetching, tracker.clone(), matches!(step, Step::Download { .. })));
         // Read, scroll and act only on the errand's sites, or a blank page:
         // never a tab somewhere else the fence didn't see it go (Fugo 38499).
         let elsewhere = match &step {
-            Step::Read { .. } | Step::Scroll { .. } | Step::Act(_) => match page.elsewhere(&errand.sites).await {
+            Step::Read { .. } | Step::Scroll { .. } | Step::Act(_) | Step::Dismiss { .. } => match page.elsewhere(&errand.sites).await {
                 Ok(None) => None,
                 Ok(Some(origin)) => Some(("off_site".to_owned(), format!("this tab is on {origin}, not one of the errand's sites: go back to one with errand_navigate"))),
                 Err(error) => Some(("interrupted".to_owned(), schema::one_line(&error.to_string(), 200))),
@@ -670,35 +859,47 @@ impl Factory {
         let outcome = match (&step, elsewhere) {
             (_, Some(refused)) => Err(refused),
             (Step::Read { limit }, None) => page.read(*limit).await.map(Some),
-            (Step::Scroll { direction, pages }, None) => page.scroll(*direction, *pages).await.map(Some),
+            (Step::Scroll { direction, pages }, None) => match lease(until) {
+                Ok(_held) => page.scroll(&mut hand, *direction, *pages).await.map(Some),
+                Err(refused) => Err(refused),
+            },
             (Step::Act(op), None) => match self.while_signing_out(&page).await {
                 Some(refused) => Err(refused),
-                None => {
-                    // A click's mouse events reach Chrome only under an input
-                    // lease, held for this action alone (R11.3 #5).
-                    let lease = match (op, self.errands.browser()) {
-                        (Op::Click { .. }, Some(browser)) => browser.input_lease(ONE_ACTION),
-                        _ => Ok(None),
-                    };
-                    match lease {
-                        Ok(_held) => page.act(op).await.map(Some),
-                        Err(why) => Err(("interrupted".to_owned(), schema::one_line(&why, 200))),
-                    }
-                }
+                None => match lease(until) {
+                    Ok(_held) => page.act(&mut hand, op).await.map(Some),
+                    Err(refused) => Err(refused),
+                },
+            },
+            (Step::Dismiss { document }, None) => match self.while_signing_out(&page).await {
+                Some(refused) => Err(refused),
+                None => match lease(until) {
+                    Ok(_held) => page.dismiss(&mut hand, document).await.map(Some),
+                    Err(refused) => Err(refused),
+                },
             },
             (Step::Navigate { address }, None) => fence::go(&page, &errand.sites, address).await.map(Some),
             (Step::Download { address }, None) => fence::fetch(&page, &errand.sites, address).await.map(|()| None),
         };
-        drop(live);
+        // What a read showed that's new takes a person's time to read
+        // before the next change.
+        if let Ok(Some(Answer::Page(read))) = &outcome {
+            let words = pace::words(&read.text);
+            let counted = pacing.read.entry(read.document.clone()).or_default();
+            if words > *counted {
+                let reading = pace::reading(&mut pacing.rng, &pacing.person, words - *counted);
+                *counted = words;
+                pacing.ready_at = pacing.ready_at.max(Instant::now() + reading);
+            }
+        }
+        drop(lane);
         let mut began = false;
         if asks_file {
             let wait = if matches!(step, Step::Download { .. }) { downloads::BEGINS } else { downloads::AFTER_CLICK };
             let until = Instant::now() + wait;
             tracker.expect(until);
             began = outcome.is_ok() && tracker.begun_since(before, until).await;
-            tracker.expect_none();
-            hops.store(false, std::sync::atomic::Ordering::SeqCst);
         }
+        drop(asking);
         let frame = page.frame().await.ok();
         if let Some(frame) = &frame {
             *crate::locking::lock(&self.errands.last) = Some((errand.id.clone(), frame.url.clone()));
@@ -712,18 +913,42 @@ impl Factory {
             Ok(None) if !began => Err(("not_a_file".to_owned(), "that address opened a page, not a file: read it with errand_read".to_owned())),
             outcome => outcome,
         };
+        // What a dismiss cleared, in Claktory's words: never the page's.
+        let dismissed = match &outcome {
+            Ok(Some(Answer::Dismissed(dismissed))) => Some(dismissed),
+            _ => None,
+        };
+        let action = match dismissed {
+            Some(dismissed) => format!("Cleared a {}{}", dismissed.kind, if dismissed.escape { " with Escape" } else { "" }),
+            None => action,
+        };
         log::write(
             &self.store,
             &log::Entry {
                 errand: errand.id.clone(),
                 agent: agent.to_owned(),
                 origin: origin.clone(),
-                path,
+                path: path.clone(),
                 action,
                 outcome: outcome.as_ref().err().map(|(error, why)| format!("{error}: {why}")).unwrap_or_default(),
                 target: target.unwrap_or_default(),
             },
         );
+        // Cookies taken because the notice offered nothing else are said on
+        // their own line (Bruno 40530).
+        if dismissed.is_some_and(|dismissed| dismissed.accepted_cookies) {
+            log::write(
+                &self.store,
+                &log::Entry {
+                    errand: errand.id.clone(),
+                    agent: agent.to_owned(),
+                    origin: origin.clone(),
+                    path,
+                    action: "Accepted the site's cookies: its notice offered no other choice".to_owned(),
+                    ..Default::default()
+                },
+            );
+        }
         // A check that the visitor is a person, on arrival: often it clears
         // by itself in a few seconds; otherwise it's the person's, before
         // anything is filled (Bruno 37122).
@@ -733,20 +958,14 @@ impl Factory {
                 Err((error, _)) => error == "not_a_file",
             };
         if moved && page.check().await.is_some() {
-            let until = Instant::now() + CHECK_CLEARS;
+            let until = Instant::now() + crate::locking::lock(&self.errands.check_timing).clears;
             while page.check().await.is_some() && Instant::now() < until {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
             let site = if origin.is_empty() { "The page" } else { origin.as_str() };
             if page.check().await.is_some() {
-                if !hands_checks {
-                    let person = self.lock().config.person().to_owned();
-                    return Ok((
-                        format!("{site} still shows a check that you're a person. Read the page again: if the check is still there, Claktory hands it to {person} on a new card."),
-                        json!({}),
-                    ));
-                }
-                return Ok(handoff::hand_check(self, agent, &origin).await);
+                let address = frame.as_ref().map(|frame| frame.url.clone()).unwrap_or_default();
+                return Ok((self.check_wait(&errand, agent, &origin, &address), json!({})));
             }
             return Ok((format!("{site} showed a check that you're a person, which cleared by itself: read the page again."), json!({})));
         }
@@ -757,7 +976,7 @@ impl Factory {
         let notice = blocked.map(|blocked| format!("{}\n", blocked.said())).unwrap_or_default();
         let files = if landed.is_empty() { String::new() } else { format!("\n{}", fenced("downloads", &landed.join("\n"))) };
         let answer = outcome.map_err(|failure| format!("{notice}{}{files}", said(failure)))?;
-        let read_page = matches!(answer, Some(Answer::Page(_) | Answer::Filled(_) | Answer::Navigated(_)));
+        let read_page = matches!(answer, Some(Answer::Page(_) | Answer::Filled(_) | Answer::Navigated(_) | Answer::Dismissed(_)));
         if !origin.is_empty() && (read_page || !landed.is_empty()) {
             crate::pipes::agents::taint(self, agent, &crate::pipes::agents::Kind::Browser(&origin).key());
         }
@@ -837,6 +1056,9 @@ const STARTING: std::time::Duration = std::time::Duration::from_secs(60);
 /// Claktory's browser as errands use it: P4's host
 /// (`crate::browser_host::Handle`), or a local Chrome in tests, which has
 /// no turns, so does nothing but connect.
+/// A driven start, finishing.
+pub(crate) type Bootstrapped = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
+
 pub(crate) trait Browser: Transport {
     /// It starts, or goes on, driven for `errand`, at `url`; Err says why
     /// not (another errand has it, the person is using it).
@@ -853,6 +1075,13 @@ pub(crate) trait Browser: Transport {
     /// Driven again after the person's Done.
     fn resume(&self) -> Result<(), String> {
         Ok(())
+    }
+
+    /// Done once its driven start is (Chrome started hidden, on a blank
+    /// page, nothing it restored left open: Giorno 40850); Err says why it
+    /// couldn't. At once when there's nothing to wait for.
+    fn bootstrapped(&self) -> Bootstrapped {
+        Box::pin(async { Ok(()) })
     }
 
     /// `errand` is over.
@@ -938,8 +1167,9 @@ pub(crate) trait Browser: Transport {
 /// An input lease held (`Browser::input_lease`): it ends when dropped.
 pub(crate) type InputLease = Box<dyn std::any::Any + Send>;
 
-/// The longest one action's input lease lasts: a click is three mouse
-/// events, after the reader's checks.
+/// The longest one step's input lease lasts past its planned time: a
+/// click's travel, rest and press, a scroll's bouts, a fill's checks
+/// between keys.
 const ONE_ACTION: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// A sign-in turn on its way (`Browser::sign_in_turn`).
@@ -963,6 +1193,10 @@ impl Browser for cdp::Local {}
 impl Browser for crate::browser_host::Handle {
     fn begin(&self, errand: &str, url: Option<String>) -> Result<(), String> {
         crate::browser_host::Handle::begin(self, errand, url)
+    }
+
+    fn bootstrapped(&self) -> Bootstrapped {
+        crate::browser_host::Handle::bootstrapped(self)
     }
 
     fn handoff(&self, undriven: bool, url: Option<&str>) -> Result<(), String> {
@@ -1070,6 +1304,44 @@ async fn follow(factory: std::sync::Weak<Factory>, mut states: tokio::sync::watc
     }
 }
 
+/// Whether a handoff of `kind` showed what the person alone may keep: a
+/// recovery-codes card's codes, or the setup of two-step sign-in.
+pub(crate) fn shows_secrets(kind: i32) -> bool {
+    kind == v1::ErrandHandoffKind::RecoveryCodes as i32 || kind == v1::ErrandHandoffKind::TwoStep as i32
+}
+
+/// Chrome's HTTP cache emptied, and `origin`'s Cache Storage (Fugo 1642).
+/// Recorded for tests when Chrome took both.
+async fn clear_caches(factory: &Factory, page: &Page, origin: &str) {
+    let cache = page.call("Network.clearBrowserCache", json!({})).await;
+    let storage = page.call("Storage.clearDataForOrigin", json!({"origin": origin, "storageTypes": "cache_storage"})).await;
+    match (cache, storage) {
+        (Ok(_), Ok(_)) => {
+            if let Err(error) = factory.store.db().execute("DELETE FROM errand_cache_owed WHERE origin = ?1", [origin]) {
+                tracing::error!(%origin, %error, "could not record a cache clear made");
+            }
+            let mut cleared = crate::locking::lock(&CLEARED);
+            if cleared.len() >= 64 {
+                cleared.remove(0);
+            }
+            cleared.push((factory.home.root().to_path_buf(), origin.to_owned()));
+        }
+        (cache, storage) => {
+            tracing::warn!(cache = ?cache.err(), storage = ?storage.err(), "the browser's caches weren't all cleared after a handoff");
+        }
+    }
+}
+
+/// Tests: the origins whose caches were cleared, by Claktory (the last 64).
+static CLEARED: Mutex<Vec<(std::path::PathBuf, String)>> = Mutex::new(Vec::new());
+
+/// Tests: the origins `factory` cleared Chrome's caches for, in order.
+#[doc(hidden)]
+pub fn caches_cleared_for_test(factory: &Factory) -> Vec<String> {
+    let root = factory.home.root();
+    crate::locking::lock(&CLEARED).iter().filter(|(home, _)| home == root).map(|(_, origin)| origin.clone()).collect()
+}
+
 /// `text` between markers made fresh for it, which the text can't guess,
 /// so it can't close them and pass itself off as Claktory's words.
 pub(crate) fn fenced(what: &str, text: &str) -> String {
@@ -1151,6 +1423,8 @@ struct Turns {
     /// only while one is.
     leases: Arc<std::sync::atomic::AtomicUsize>,
     factory: std::sync::Weak<Factory>,
+    /// Why its driven start fails, while the test says so.
+    unbooted: Mutex<Option<String>>,
 }
 
 /// A lease of `Turns`': it ends when dropped.
@@ -1226,6 +1500,11 @@ impl Browser for Turns {
     fn resume(&self) -> Result<(), String> {
         self.call("resume".to_owned(), Some(BrowserState::Driven));
         Ok(())
+    }
+
+    fn bootstrapped(&self) -> Bootstrapped {
+        let unbooted = crate::locking::lock(&self.unbooted).clone();
+        Box::pin(async move { unbooted.map_or(Ok(()), Err) })
     }
 
     fn end(&self, errand: &str) {
@@ -1344,6 +1623,7 @@ pub fn local_chrome_with_turns_for_test(factory: &Arc<Factory>, profile: &std::p
         signing_out: Mutex::default(),
         leases: Arc::default(),
         factory: Arc::downgrade(factory),
+        unbooted: Mutex::default(),
     });
     crate::locking::lock(&TURNS).push((Arc::as_ptr(factory) as usize, turns.clone()));
     install(factory, turns);
@@ -1391,6 +1671,15 @@ pub fn browser_state_for_test(factory: &Arc<Factory>, state: i32) {
     }
 }
 
+/// Tests: the browser's driven start fails, saying `why`, or succeeds
+/// again (None).
+#[doc(hidden)]
+pub fn browser_unbooted_for_test(factory: &Arc<Factory>, why: Option<&str>) {
+    if let Some(turns) = turns_of(factory) {
+        *crate::locking::lock(&turns.unbooted) = why.map(str::to_owned);
+    }
+}
+
 /// Tests: the open errand's page shows `html` (no network in tests).
 #[doc(hidden)]
 pub async fn show_for_test(factory: &Factory, html: &str) {
@@ -1418,6 +1707,27 @@ pub async fn end_errand_for_test(factory: &Factory, errand: &str) {
 #[doc(hidden)]
 pub fn lose_codes_for_test(factory: &Factory, card: &str) {
     code::drop_codes(factory, card.parse().unwrap_or_default());
+}
+
+/// Tests: the origins owed a cache clear (`CACHE_OWED`).
+#[doc(hidden)]
+pub fn caches_owed_for_test(factory: &Factory) -> Vec<String> {
+    caches_owed(factory)
+}
+
+/// Tests: the browser connection goes without anything said to the page,
+/// as when Claktory or the browser restarts (the test then gives it
+/// another browser).
+#[doc(hidden)]
+pub async fn drop_connection_for_test(factory: &Factory) {
+    *factory.errands.live.lock().await = None;
+}
+
+/// Tests: `agent` read `what` from outside, as web_search marks it (a
+/// search needs the internet).
+#[doc(hidden)]
+pub fn read_outside_for_test(factory: &Factory, agent: &str, what: &str) {
+    read_outside(factory, agent, what);
 }
 
 /// Tests: `factory`'s code and agreement cards may be asked on pages
@@ -1516,11 +1826,45 @@ pub(crate) async fn set_contained(factory: &Arc<Factory>, agent: &str, on: bool)
     Ok(())
 }
 
+/// A step that may bring a file (R9): the fence lets the page's redirects
+/// hop off the sites for a file, and with browser_download a PDF comes as
+/// one, until it's dropped, however the step ends; then the tracker expects
+/// no more.
+struct FileAsk {
+    hops: Arc<std::sync::atomic::AtomicBool>,
+    fetching: Arc<std::sync::atomic::AtomicBool>,
+    tracker: Arc<downloads::Tracker>,
+}
+
+impl FileAsk {
+    fn new(
+        hops: Arc<std::sync::atomic::AtomicBool>,
+        fetching: Arc<std::sync::atomic::AtomicBool>,
+        tracker: Arc<downloads::Tracker>,
+        download: bool,
+    ) -> FileAsk {
+        tracker.expect(Instant::now() + downloads::FINISHES);
+        hops.store(true, std::sync::atomic::Ordering::SeqCst);
+        fetching.store(download, std::sync::atomic::Ordering::SeqCst);
+        FileAsk { hops, fetching, tracker }
+    }
+}
+
+impl Drop for FileAsk {
+    fn drop(&mut self) {
+        self.tracker.expect_none();
+        self.hops.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.fetching.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// One errand tool's step on the page.
 pub(crate) enum Step {
     Read { limit: usize },
     Scroll { direction: schema::Direction, pages: u8 },
     Act(Op),
+    /// errand_act's dismiss: clear what covers the page read as `document`.
+    Dismiss { document: String },
     Navigate { address: String },
     /// browser_download: the file at `address`, on the errand's sites.
     Download { address: String },
@@ -1541,6 +1885,7 @@ impl Step {
                 (format!("Typed {count} character{}", if count == 1 { "" } else { "s" }), None)
             }
             Step::Act(_) => ("Acted".to_owned(), None),
+            Step::Dismiss { .. } => ("Cleared what covered the page".to_owned(), None),
             Step::Navigate { address } => {
                 let to = url::Url::parse(address).map(|url| format!("{}{}", url.origin().ascii_serialization(), fence::path_of(&url)));
                 ("Went to a page".to_owned(), to.ok())
@@ -1588,6 +1933,28 @@ mod tests {
             assert_eq!(State::from_wire(state.wire() as i32), state);
         }
         assert!(State::PersonsTurn.open() && !State::Done.open());
+    }
+
+    /// A step dropped midway (an errand stopped, the connection gone)
+    /// leaves no file asked for: the next step's redirects stay on the
+    /// sites and its PDFs show (Fugo 41301).
+    #[tokio::test]
+    async fn a_step_dropped_midway_leaves_no_file_asked_for() {
+        let (hops, fetching) = (Arc::new(std::sync::atomic::AtomicBool::new(false)), Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let tracker = Arc::new(downloads::Tracker::default());
+        let read = |flag: &Arc<std::sync::atomic::AtomicBool>| flag.load(std::sync::atomic::Ordering::SeqCst);
+        let step = {
+            let (hops, fetching, tracker) = (hops.clone(), fetching.clone(), tracker.clone());
+            async move {
+                let _asking = FileAsk::new(hops, fetching, tracker, true);
+                std::future::pending::<()>().await;
+            }
+        };
+        let mut step = Box::pin(step);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut step).await.is_err(), "still going");
+        assert!(read(&hops) && read(&fetching) && tracker.expecting(), "asked while it runs");
+        drop(step);
+        assert!(!read(&hops) && !read(&fetching) && !tracker.expecting(), "cleared once dropped");
     }
 
     #[test]

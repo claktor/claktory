@@ -181,7 +181,7 @@ pub(crate) fn sql_error(error: &rusqlite::Error, target: &Target) -> String {
     }
     if *target == Target::Factory && (text.contains("prohibited") || text.contains("not authorized")) {
         return format!(
-            "{text}. Agents' memory (the memory_ tables), pipes (pipes, pipe_), comments on files (threads, thread_), quiet copies (quiet_copies), ink (ink_, presentations), the Map's history (map_history) and what commands on cards printed (ask_runs) aren't readable, even by admin agents; comments sent to you are in comments_list, and your quiet copies in agents_copies."
+            "{text}. Agents' memory (the memory_ tables), pipes (pipes, pipe_), comments on files (threads, thread_), quiet copies (quiet_copies), ink (ink_, presentations), the Map's history (map_history) and what commands in requests printed (ask_runs) aren't readable, even by admin agents; comments sent to you are in comments_list, and your quiet copies in agents_copies."
         );
     }
     if text.contains("not authorized") {
@@ -447,7 +447,7 @@ mod tests {
         assert_eq!(query(&db, &target, "SELECT * FROM messages", None).as_deref(), Ok("agent | text\nrivet | hi"));
         let memory = query(&db, &target, "SELECT body FROM memory_notes", None).unwrap_err();
         assert!(
-            memory.contains("(the memory_ tables), pipes (pipes, pipe_), comments on files (threads, thread_), quiet copies (quiet_copies), ink (ink_, presentations), the Map's history (map_history) and what commands on cards printed (ask_runs) aren't readable"),
+            memory.contains("(the memory_ tables), pipes (pipes, pipe_), comments on files (threads, thread_), quiet copies (quiet_copies), ink (ink_, presentations), the Map's history (map_history) and what commands in requests printed (ask_runs) aren't readable"),
             "{memory}"
         );
         // Comments on files hold the person's drafts: no table of them is read, joined or listed.
@@ -474,7 +474,7 @@ mod tests {
             "SELECT output FROM ask_runs",
         ] {
             let refused = query(&db, &target, sql, None).unwrap_err();
-            assert!(refused.contains("quiet copies (quiet_copies), ink (ink_, presentations), the Map's history (map_history) and what commands on cards printed (ask_runs) aren't readable"), "{sql}: {refused}");
+            assert!(refused.contains("quiet copies (quiet_copies), ink (ink_, presentations), the Map's history (map_history) and what commands in requests printed (ask_runs) aren't readable"), "{sql}: {refused}");
         }
         assert!(exec(&mut db, &target, "INSERT INTO messages VALUES ('x', 'y')", None).is_err());
         assert_eq!(schema(&db, &target, None).as_deref(), Ok("messages (1 rows): agent TEXT, text TEXT"));

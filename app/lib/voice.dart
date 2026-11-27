@@ -18,6 +18,7 @@ import 'audio.dart';
 import 'backend.dart';
 import 'claktory_identity.dart' show claktoryName;
 import 'controls.dart';
+import 'devices.dart' show thisDeviceKind;
 import 'forms.dart' show FormFrame;
 import 'identity.dart';
 import 'protocol/factory/v1/factory.pb.dart';
@@ -37,7 +38,9 @@ String micRefusedForGood() => switch (defaultTargetPlatform) {
     "Claktory can't use the microphone. Allow it in System Settings → "
         'Privacy & Security → Microphone.',
   TargetPlatform.iOS =>
-    'To record, allow microphone access in Settings → Claktory.',
+    // The system's Settings, not Claktory's own (Lucy's Settings spec §5).
+    "To record, allow microphone access in the $thisDeviceKind's Settings "
+        'app.',
   TargetPlatform.android =>
     'To record, allow Claktory to use the microphone in Settings.',
   _ => "Claktory can't use the microphone. Allow it in this device's settings.",
@@ -1133,14 +1136,13 @@ class _VoiceSettingsState extends State<VoiceSettings> with SettingRequests {
             ],
           ),
         ),
-        const KeptRecordings(),
       ],
     );
   }
 }
 
-/// Settings → Voice: recordings said for an answer and not sent, kept on
-/// this device (#401), whose card has gone (answered elsewhere, say) or
+/// Settings → This iPhone (this device's own section): recordings said
+/// for an answer and not sent, kept on this device (#401), whose card has gone (answered elsewhere, say) or
 /// isn't open now: each to play, or delete. One whose card opens goes back
 /// to it, and is sent.
 class KeptRecordings extends StatelessWidget {
@@ -1161,7 +1163,7 @@ class KeptRecordings extends StatelessWidget {
         return Padding(
           padding: const EdgeInsets.only(top: Space.m),
           child: SettingRow(
-            label: 'Not sent',
+            label: 'Recordings not sent',
             top: true,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,

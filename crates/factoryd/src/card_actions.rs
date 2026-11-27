@@ -106,9 +106,9 @@ pub(crate) enum Action {
 }
 
 /// Approving a pipe's card without its choices.
-const APPROVE_ON_THE_CARD: &str = "Approve it with the choices on the card, or in the pipe.";
+const APPROVE_ON_THE_CARD: &str = "Approve it with the choices in the request, or in the pipe.";
 /// Approving a trust card on an app that can't show it.
-const ACCEPT_ON_THE_CARD: &str = "Accept it on the card, or in the pipe.";
+const ACCEPT_ON_THE_CARD: &str = "Accept it in the request, or in the pipe.";
 
 /// A program listening on a port of this computer.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -397,23 +397,23 @@ pub(crate) fn same_website(factory: &Factory, port: u16, shown: &Option<Listener
     // or no lsof here) is never shared from a card (Fugo 33782).
     let problem = crate::pipes::shares::port_problem(factory, u32::from(port)).or_else(|| crate::pipes::shares::backend_problem(port));
     if let Some(why) = problem {
-        return Err(format!("{why} Dismiss this card."));
+        return Err(format!("{why} Dismiss this request."));
     }
     if !answers(port) {
-        return Err(format!("Nothing answers on port {port} now, so there's nothing to share: dismiss this card."));
+        return Err(format!("Nothing answers on port {port} now, so there's nothing to share: dismiss this request."));
     }
     let same = match (heard(port), shown) {
         (Heard::Mine(now), Some(shown)) => now.is(shown),
         (Heard::Others(user), _) => {
             return Err(format!(
-                "{}, so it can't be shared from this card. You can share it yourself from the pipe's settings; dismiss this card.",
+                "{}, so it can't be shared from this request. You can share it yourself from the pipe's settings; dismiss this request.",
                 others_program(&user, port)
             ));
         }
         _ => false,
     };
     if !same {
-        return Err(format!("A different program listens on port {port} now: dismiss this card and ask again."));
+        return Err(format!("A different program listens on port {port} now: dismiss this request and ask again."));
     }
     Ok(())
 }
@@ -560,9 +560,9 @@ impl PipeChange {
         match (self.looped_at, looped) {
             (Some(asked), Some(now)) if asked == now => Ok(()),
             (None, None) => Ok(()),
-            (Some(_), None) => Err("The pipe isn't paused for looping any more, so there's nothing to continue: dismiss this card.".to_owned()),
+            (Some(_), None) => Err("The pipe isn't paused for looping any more, so there's nothing to continue: dismiss this request.".to_owned()),
             (_, Some(_)) => Err(
-                "The pipe paused again after this card was asked, so it's for an earlier pause: dismiss it. The new pause needs a card of its own.".to_owned(),
+                "The pipe paused again after this request was asked, so it's for an earlier pause: dismiss it. The new pause needs a request of its own.".to_owned(),
             ),
         }
     }
@@ -694,14 +694,14 @@ impl PipeChange {
         if (self.name.is_some() || self.purpose.is_some() || self.instructions.is_some())
             && self.words_were.as_ref() != Some(&PipeWords::of(record))
         {
-            return Err("The pipe's name, what it's for or its instructions changed since this card was asked: dismiss it, and ask again."
+            return Err("The pipe's name, what it's for or its instructions changed since this request was asked: dismiss it, and ask again."
                 .to_owned());
         }
         if self.spend_cap_usd.is_some() {
             let now = crate::pipes::spend::caps(&factory.store.db(), &self.spend_agent).map(|(usd, _)| usd).unwrap_or_default();
             if now != self.spend_cap_was || record.lead != self.spend_agent {
                 return Err(
-                    "The pipe's liaison or its spending limit changed since this card was asked: dismiss it, and ask again.".to_owned()
+                    "The pipe's liaison or its spending limit changed since this request was asked: dismiss it, and ask again.".to_owned()
                 );
             }
         }
@@ -757,7 +757,7 @@ fn ask_saying(
     let body = format!("{description} {reason}");
     let person = factory.lock().config.person().to_owned();
     let said = format!(
-        "{before}Asked {person}: they see a card to approve or dismiss it, and only their approval makes the change. You'll be told which in an event. Its id is {id}: if it stops applying before they answer on the card (they answer it in your chat, say), take it back with ask_withdraw."
+        "{before}Asked {person}: they see a request to approve or dismiss it, and only their approval makes the change. You'll be told which in an event. Its id is {id}: if it stops applying before they answer in the request (they answer it in your chat, say), take it back with ask_withdraw."
     );
     let mut details = serde_json::json!({
         "ask": id,
@@ -850,7 +850,7 @@ pub(crate) fn listed(parts: &[String]) -> String {
 
 /// The card's action, read back.
 fn parse(action: &str) -> Result<Action, String> {
-    serde_json::from_str(action).map_err(|_| "This card's change can't be read by this version of Claktory: dismiss it.".to_owned())
+    serde_json::from_str(action).map_err(|_| "This request's change can't be read by this version of Claktory: dismiss it.".to_owned())
 }
 
 /// Whether the change is still one to make, checked when the person
@@ -862,32 +862,32 @@ pub(crate) fn check(factory: &Factory, action: &str) -> Result<(), String> {
             if factory.lock().config.apps.iter().any(|installed| installed.id == app) {
                 Ok(())
             } else {
-                Err("That app isn't installed any more, so there's nothing to uninstall: dismiss this card.".to_owned())
+                Err("That app isn't installed any more, so there's nothing to uninstall: dismiss this request.".to_owned())
             }
         }
         Action::GroupPipe { pipe, group, shares, .. } => {
-            let record = factory.pipes.get(&pipe).ok_or_else(|| "That pipe is gone: dismiss this card.".to_owned())?;
+            let record = factory.pipes.get(&pipe).ok_or_else(|| "That pipe is gone: dismiss this request.".to_owned())?;
             if record.state == crate::pipes::State::Closed {
-                return Err("That pipe is closed now: dismiss this card.".to_owned());
+                return Err("That pipe is closed now: dismiss this request.".to_owned());
             }
-            crate::pipes::groups::get(factory, &group).ok_or_else(|| "That group is gone: dismiss this card.".to_owned())?;
+            crate::pipes::groups::get(factory, &group).ok_or_else(|| "That group is gone: dismiss this request.".to_owned())?;
             // Only what the card showed (Fugo 31072).
             if crate::pipes::shares::of_group(factory, &group).iter().any(|(id, _)| !shares.contains(id)) {
-                return Err("The group shares more websites now: dismiss this card and ask again.".to_owned());
+                return Err("The group shares more websites now: dismiss this request and ask again.".to_owned());
             }
             Ok(())
         }
         Action::Pipe(change) => {
-            let record = factory.pipes.get(&change.pipe).ok_or_else(|| "That pipe is gone: dismiss this card.".to_owned())?;
+            let record = factory.pipes.get(&change.pipe).ok_or_else(|| "That pipe is gone: dismiss this request.".to_owned())?;
             if change.delete {
                 if record.state != crate::pipes::State::Closed {
-                    return Err("That pipe isn't closed now: dismiss this card.".to_owned());
+                    return Err("That pipe isn't closed now: dismiss this request.".to_owned());
                 }
             } else if record.state == crate::pipes::State::Closed {
-                return Err("That pipe is closed now: dismiss this card.".to_owned());
+                return Err("That pipe is closed now: dismiss this request.".to_owned());
             }
             if change.resume && record.paused == crate::pipes::Pause::Peer {
-                return Err("The other side paused the pipe since: only they can resume it. Dismiss this card.".to_owned());
+                return Err("The other side paused the pipe since: only they can resume it. Dismiss this request.".to_owned());
             }
             change.paused_as_asked(&record)?;
             change.still_as_asked(factory, &record)?;
@@ -895,45 +895,45 @@ pub(crate) fn check(factory: &Factory, action: &str) -> Result<(), String> {
             let gone = change.add.iter().chain(&change.commands).chain(&change.lead).find(|id| inner.config.agent(id).is_none());
             match gone {
                 Some(id) => Err(format!(
-                    "{} is no longer in this Claktory, so this change can't be made: dismiss this card.",
+                    "{} is no longer in this Claktory, so this change can't be made: dismiss this request.",
                     change.names.get(id).unwrap_or(id)
                 )),
                 None => Ok(()),
             }
         }
         Action::Share { pipe, port, listener, again, .. } => {
-            let record = factory.pipes.get(&pipe).ok_or_else(|| "That pipe is gone: dismiss this card.".to_owned())?;
+            let record = factory.pipes.get(&pipe).ok_or_else(|| "That pipe is gone: dismiss this request.".to_owned())?;
             if let Some(why) = share_refusal(factory, &record) {
-                return Err(format!("{why} Dismiss this card."));
+                return Err(format!("{why} Dismiss this request."));
             }
             if let Some(again) = again
                 && crate::pipes::shares::on_pipe_by_port(factory, &pipe, port).is_none_or(|(id, _, ended)| id != again || !ended)
             {
-                return Err("That website isn't the one the card showed any more: dismiss this card.".to_owned());
+                return Err("That website isn't the one the request showed any more: dismiss this request.".to_owned());
             }
             same_website(factory, port, &listener)
         }
         Action::ReleaseReader { agent, .. } => {
-            release_refusal(factory, &agent).map_or(Ok(()), |why| Err(format!("{why} Dismiss this card.")))
+            release_refusal(factory, &agent).map_or(Ok(()), |why| Err(format!("{why} Dismiss this request.")))
         }
         Action::DecideReports { pipe, send, recipient, waiting } => {
-            factory.pipes.get(&pipe).ok_or_else(|| "That pipe is gone: dismiss this card.".to_owned())?;
+            factory.pipes.get(&pipe).ok_or_else(|| "That pipe is gone: dismiss this request.".to_owned())?;
             if crate::pipes::handoff::waiting_ids(factory, &pipe) != waiting {
-                return Err("Other reports wait on that pipe now than the card showed: dismiss it, and ask again.".to_owned());
+                return Err("Other reports wait on that pipe now than the request showed: dismiss it, and ask again.".to_owned());
             }
             if send && reports_recipient(factory, &pipe).as_deref() != Some(recipient.as_str()) {
-                return Err("Who reads that pipe's reports changed since this card was asked: dismiss it, and ask again.".to_owned());
+                return Err("Who reads that pipe's reports changed since this request was asked: dismiss it, and ask again.".to_owned());
             }
             Ok(())
         }
         Action::ShowShare { pipe, share, key } => {
-            let record = factory.pipes.get(&pipe).ok_or_else(|| "That pipe is gone: dismiss this card.".to_owned())?;
+            let record = factory.pipes.get(&pipe).ok_or_else(|| "That pipe is gone: dismiss this request.".to_owned())?;
             if crate::pipes::approval_card::key_of(&record) != key {
-                return Err("The pipe's other side changed since this card was asked: dismiss it.".to_owned());
+                return Err("The pipe's other side changed since this request was asked: dismiss it.".to_owned());
             }
             match crate::pipes::shares::theirs_on(factory, &pipe, &share) {
-                None => Err("That website isn't shared with you any more: dismiss this card.".to_owned()),
-                Some((_, false)) => Err("That website isn't hidden any more: dismiss this card.".to_owned()),
+                None => Err("That website isn't shared with you any more: dismiss this request.".to_owned()),
+                Some((_, false)) => Err("That website isn't hidden any more: dismiss this request.".to_owned()),
                 Some((_, true)) => Ok(()),
             }
         }
@@ -946,7 +946,7 @@ pub(crate) fn check(factory: &Factory, action: &str) -> Result<(), String> {
         Action::Handoff { handoff } if handoff.kind == v1::ErrandHandoffKind::RecoveryCodes as i32 => Ok(()),
         Action::Handoff { handoff } => match factory.errands.get(&handoff.errand) {
             Some(errand) if errand.state == v1::ErrandState::PersonsTurn as i32 => Ok(()),
-            _ => Err("That errand is over: dismiss this card.".to_owned()),
+            _ => Err("That errand is over: dismiss this request.".to_owned()),
         },
         Action::BrowserSignOut { provider, secret, .. } => crate::errands::code::check(factory, &provider, &secret),
     }
@@ -1016,7 +1016,7 @@ pub(crate) async fn apply(factory: &Arc<Factory>, action: &str) -> Result<String
             crate::pipes::line(
                 factory,
                 &pipe,
-                format!("You showed {} again, on a card you approved.", crate::pipes::agents::escape(&name)),
+                format!("You showed {} again, in a request you approved.", crate::pipes::agents::escape(&name)),
             );
             Ok("It's shown again, and reachable on this computer once more.".to_owned())
         }
@@ -1048,8 +1048,8 @@ pub(crate) async fn apply(factory: &Arc<Factory>, action: &str) -> Result<String
         Action::ApprovePipe(_) => Err(APPROVE_ON_THE_CARD.to_owned()),
         Action::TrustPipe(_) => Err(ACCEPT_ON_THE_CARD.to_owned()),
         // Run by the card's answer itself, never from here.
-        Action::Execute(_) => Err("A command runs only from its card's Execute.".to_owned()),
-        Action::Handoff { .. } => Err("A handoff is answered on its card.".to_owned()),
+        Action::Execute(_) => Err("A command runs only from its request's Execute.".to_owned()),
+        Action::Handoff { .. } => Err("A handoff is answered in its request.".to_owned()),
         Action::BrowserSignOut { provider, errand, .. } => crate::errands::code::sign_out(factory, &provider, &errand).await,
     }
 }
@@ -1142,7 +1142,7 @@ pub(crate) async fn apply_pipe(factory: &Arc<Factory>, change: &PipeChange, by: 
         };
         let worded = listed(&worded.describe(Tense::Done, "this pipe", &named));
         if !worded.is_empty() {
-            crate::pipes::line(factory, &record.id, format!("You {worded}, on a card you approved."));
+            crate::pipes::line(factory, &record.id, format!("You {worded}, in a request you approved."));
         }
         for id in change.add.iter().filter(|id| !record.members.contains(id)) {
             crate::pipes::line(factory, &record.id, format!("{} joined the pipe.", named(id)));
@@ -1174,7 +1174,7 @@ pub(crate) async fn apply_pipe(factory: &Arc<Factory>, change: &PipeChange, by: 
             let name = crate::pipes::agents::escape(name);
             match by {
                 Some(by) => format!("{by} stopped sharing {name} with this pipe."),
-                None => format!("You stopped sharing {name} with this pipe, on a card you approved."),
+                None => format!("You stopped sharing {name} with this pipe, in a request you approved."),
             }
         };
         // One stopped meanwhile (by the person, say) is stopped already.
@@ -1322,7 +1322,7 @@ mod tests {
         assert!(Listener { started: Some(5), ..shown.clone() }.is(&shown));
         assert!(!Listener { started: Some(6), ..shown.clone() }.is(&shown), "a pid given to another program since");
         assert!(!Listener { command: "node".into(), ..shown.clone() }.is(&shown));
-        assert!(Listener { started: Some(6), ..shown.clone() }.is(&Listener { started: None, ..shown.clone() }), "a card from before");
+        assert!(Listener { started: Some(6), ..shown.clone() }.is(&Listener { started: None, ..shown.clone() }), "a request from before");
         // A card from before keeps reading.
         let old: Listener = serde_json::from_str(r#"{"pid": 42, "command": "vite"}"#).expect("old card");
         assert_eq!(old.started, None);

@@ -150,6 +150,71 @@ pub(crate) struct Page {
     pub(crate) unsupported: Vec<String>,
     #[serde(default)]
     pub(crate) unsupported_page: Option<String>,
+    /// What covers the page (an errand's reader): "cookie notice",
+    /// "pop-up".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) overlays: Vec<String>,
+    /// The page's frames, as Claktory read them (never the reader's to
+    /// say): a frame of the page's own site read like it, another site's
+    /// only its place.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) frames: Vec<Frame>,
+}
+
+/// A frame of a page an errand reads (Fugo 40527).
+#[derive(Debug, Serialize)]
+pub(crate) struct Frame {
+    /// Where its page is from: Chrome's own say, never the page's.
+    pub(crate) origin: String,
+    /// The page's own site (its registrable domain, https): read and acted
+    /// on as the page is. Another site's: only where it is, and if it
+    /// covers the page, errand_act's dismiss may clear it.
+    pub(crate) same_site: bool,
+    /// Its box in the page's viewport, CSS pixels.
+    pub(crate) left: i64,
+    pub(crate) top: i64,
+    pub(crate) width: i64,
+    pub(crate) height: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) text: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) elements: Vec<Element>,
+    /// It covers the page (another site's): "pop-up", "cookie notice".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) overlay: Option<String>,
+    /// Why it isn't read: a sign-in, a payment or a check that's the
+    /// person's, or too many frames.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) not_read: Option<String>,
+}
+
+/// What covers a page: the kinds the reader names.
+pub(crate) const OVERLAYS: [&str; 2] = ["cookie notice", "pop-up"];
+
+/// What dismiss did: which kind it cleared, the buttons it pressed (their
+/// names, the page's words: a notice's settings, then a choice there) or
+/// Escape, whether that took cookies the notice offered no way to refuse,
+/// and whether what covered the page is gone.
+#[derive(Debug, Serialize)]
+pub(crate) struct Dismissed {
+    pub(crate) done: bool,
+    pub(crate) kind: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) pressed: Vec<String>,
+    /// Purposes a consent panel had on, turned off before saving it.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub(crate) turned_off: u32,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) escape: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) accepted_cookies: bool,
+    pub(crate) gone: bool,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Something on the page the agent may refer to by its ref.
@@ -178,6 +243,9 @@ pub(crate) struct Element {
     pub(crate) expanded: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) path: Option<String>,
+    /// The overlay it's in (an errand's reader).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) overlay: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -229,11 +297,13 @@ pub(crate) struct Failure {
 /// An answer, read strictly.
 #[derive(Debug)]
 pub(crate) enum Answer {
-    Page(Page),
+    Page(Box<Page>),
     Scrolled(Scrolled),
     Clicked(Clicked),
     Filled(Filled),
     Navigated(Navigated),
+    /// Made by Claktory, never read from a page.
+    Dismissed(Dismissed),
     /// One of `ERRORS`, and why in the extension's words (bounded, one line).
     Failed(String, String),
 }
@@ -257,7 +327,7 @@ pub(crate) fn answer(op: &Op, json: &str) -> Result<Answer, &'static str> {
         Op::Read { limit } => {
             let page: Page = serde_json::from_value(value).map_err(|_| "not a page")?;
             check_page(&page, *limit)?;
-            Ok(Answer::Page(page))
+            Ok(Answer::Page(Box::new(page)))
         }
         Op::Scroll { .. } => {
             let scrolled: Scrolled = serde_json::from_value(value).map_err(|_| "not a scroll")?;
@@ -316,6 +386,9 @@ fn check_page(page: &Page, limit: usize) -> Result<(), &'static str> {
     if let Some(note) = &page.unsupported_page {
         bounded(note, NAME_MAX)?;
     }
+    if page.overlays.len() > OVERLAYS.len() || page.overlays.iter().any(|kind| !OVERLAYS.contains(&kind.as_str())) {
+        return Err("an unknown overlay");
+    }
     for element in &page.elements {
         id(&element.reference)?;
         if element.role.is_empty() {
@@ -335,6 +408,9 @@ fn check_page(page: &Page, limit: usize) -> Result<(), &'static str> {
         }
         if let Some(to) = &element.path {
             link(to)?;
+        }
+        if element.overlay.as_deref().is_some_and(|kind| !OVERLAYS.contains(&kind)) {
+            return Err("an unknown overlay");
         }
     }
     Ok(())
@@ -406,6 +482,7 @@ pub(crate) fn fenced(origin: &str, answer: &Answer) -> String {
         Answer::Clicked(clicked) => serde_json::to_string(clicked).unwrap_or_default(),
         Answer::Filled(filled) => serde_json::to_string(filled).unwrap_or_default(),
         Answer::Navigated(navigated) => serde_json::to_string(navigated).unwrap_or_default(),
+        Answer::Dismissed(dismissed) => serde_json::to_string(dismissed).unwrap_or_default(),
         Answer::Failed(error, why) => serde_json::json!({"error": error, "why": why}).to_string(),
     };
     format!(

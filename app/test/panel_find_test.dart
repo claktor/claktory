@@ -4,6 +4,7 @@ import 'package:factory_app/database.dart' show DatabaseView;
 import 'package:factory_app/find.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart' show AppPage;
+import 'package:factory_app/settings_shell.dart' show SettingsSearchField;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -104,37 +105,33 @@ void main() {
     expect(_washes(tester), contains(('release', true)));
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 
-  testWidgets('Settings: the words its controls show, scrolled to', (
-    tester,
-  ) async {
+  // Settings has a search of its own, always on screen (area 3, §4.3):
+  // ⌘F goes there rather than to a find bar over the section.
+  testWidgets('Settings: ⌘F goes to its search, which opens the section '
+      'of what it finds', (tester) async {
     final harness = Harness(workspace());
     await harness.show(tester, size: const Size(1200, 700));
     harness.page.value = AppPage.settings;
     await settle(tester);
     await pumpFrames(tester);
-
-    final session = await _find(tester, find.text('Profile'), 'resources');
-    expect(session.target.placeholder, 'Search Settings');
-    final count = session.target.count;
-    expect(count, greaterThan(0));
-    // The Resources section, far down, in sight now.
-    final heading = find.text('Resources').first;
-    final view = tester.getRect(find.byType(FindBar));
-    final y = tester.getTopLeft(heading).dy;
-    expect(y, greaterThan(view.top));
-    expect(y, lessThan(700));
-    // Esc closes it, and nothing's marked.
-    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    final field = find.descendant(
+      of: find.byType(SettingsSearchField),
+      matching: find.byType(EditableText),
+    );
+    await tester.tap(inSettingsSection('profile', find.text('Profile')));
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyF);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
     await pumpFrames(tester);
     expect(find.byType(FindBar), findsNothing);
-    expect(session.target.count, 0);
-    // The keys go back to the pane, not to a field in it (typing next
-    // would rename the Claktory).
+    expect(tester.widget<EditableText>(field).focusNode.hasFocus, isTrue);
+    await tester.enterText(field, 'disk');
+    await pumpFrames(tester);
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await pumpFrames(tester);
     expect(
-      tester
-          .widgetList<EditableText>(find.byType(EditableText))
-          .where((field) => field.focusNode.hasFocus),
-      isEmpty,
+      inSettingsSection('resources', find.text('Resources')),
+      findsOneWidget,
     );
   }, variant: TargetPlatformVariant.only(TargetPlatform.macOS));
 

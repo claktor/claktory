@@ -74,6 +74,8 @@ impl Factory {
             self.reset_presence(id);
             // It has read no pipe yet.
             crate::pipes::agents::clear_taint(self, id);
+            // Nor anything from the web (errand_open's check).
+            crate::errands::clear_outside_read(self, id);
             // Its questions went with the old conversation.
             if let Err(error) = crate::extensions::ask::cleared(&self.store, id) {
                 tracing::warn!(agent = %id, %error, "could not dismiss its questions");

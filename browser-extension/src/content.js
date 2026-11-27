@@ -212,6 +212,8 @@
     const root = document.body || document.documentElement;
     const all = root ? root.textContent || '' : '';
     cutoff = null;
+    pageWords = all + ' ' + document.title;
+    shadowsLeftOut = new Map();
     if (root && CODES_ABOUT.test(all + ' ' + document.title)) {
       // How many words, and code words, each element holds, counted from
       // its text nodes up (its textContent runs list items together).
@@ -273,6 +275,35 @@
     for (const w of withheld) { const block = w.el.deref(); if (block && block.contains(el)) return w.why; }
     return null;
   };
+  // An errand also reads open shadow roots (overlays, components), which
+  // the scan for recovery codes and setup keys above doesn't see: one that
+  // may hold either is left out whole, its text and its elements.
+  let pageWords = ''; // the page's own text and title, as codeBlocks saw them
+  let shadowsLeftOut = new Map(); // ShadowRoot -> left out, for this read
+  const secretive = (root) => {
+    // Its words text node by text node: its textContent runs them together.
+    const texts = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node && texts.length < SCAN_LIMIT; node = walker.nextNode()) texts.push(node.nodeValue);
+    const own = texts.join(' ');
+    const about = pageWords + ' ' + own;
+    // Past the scan's limit nothing more of it is checked: on a page about
+    // codes or a key it's left out, as the page past its cutoff is.
+    if (texts.length >= SCAN_LIMIT && (CODES_ABOUT.test(about) || KEY_ABOUT.test(about))) return true;
+    if (/otpauth:/i.test(own) || root.querySelector(OTPAUTH_ATTRIBUTES)) return true;
+    if (CODES_ABOUT.test(about) && codeWords(own) >= 4) return true;
+    return KEY_ABOUT.test(about) && (texts.some((text) => hasKey(text, true)) || hasKey(own, true) ||
+      Array.from(root.querySelectorAll('img,svg,canvas,picture,object')).some(squarePicture) ||
+      Array.from(root.querySelectorAll('input,textarea')).some((field) => hasKey(field.value || '', true)));
+  };
+  // Whether `node` is in, or is, a shadow root left out (or one inside one).
+  function unreadShadow(node) {
+    for (let root = node.getRootNode(); root instanceof ShadowRoot; root = root.host.getRootNode()) {
+      if (!shadowsLeftOut.has(root)) shadowsLeftOut.set(root, secretive(root));
+      if (shadowsLeftOut.get(root)) return true;
+    }
+    return false;
+  }
 
   // Where a click goes when it leaves the page: another origin, a new tab.
   function leaves(el) {
@@ -331,6 +362,121 @@
     return s.slice(0, n);
   }
 
+  // ---- Errands: past what covers the page (Fugo 40527) ----
+  // Claktory's errand reader sets __claktoryErrand in its own isolated
+  // world: there the reader reaches into open shadow roots, lists what
+  // covers the page first and can clear it. The extension never does.
+  const errand = () => globalThis.__claktoryErrand === true;
+
+  // The element at (x, y), through open shadow roots.
+  function deepFromPoint(x, y) {
+    let e = document.elementFromPoint(x, y);
+    while (e && e.shadowRoot) {
+      const inner = e.shadowRoot.elementFromPoint(x, y);
+      if (!inner || inner === e) break;
+      e = inner;
+    }
+    return e;
+  }
+  const fromPoint = (x, y) => errand() ? deepFromPoint(x, y) : document.elementFromPoint(x, y);
+
+  // Whether `inner` is `outer` or inside it: across open shadow roots for
+  // an errand.
+  function inside(outer, inner) {
+    if (!errand()) return outer.contains(inner);
+    for (let e = inner; e; e = e.parentNode || (e instanceof ShadowRoot ? e.host : null)) if (e === outer) return true;
+    return false;
+  }
+
+  // Every element matching `selector`, in open shadow roots too.
+  function deepQuery(selector, root = document, found = []) {
+    for (const el of root.querySelectorAll(selector)) found.push(el);
+    for (const host of root.querySelectorAll('*')) if (host.shadowRoot) deepQuery(selector, host.shadowRoot, found);
+    return found;
+  }
+
+  const parentOf = (e) => e.parentElement || (e.getRootNode() instanceof ShadowRoot ? e.getRootNode().host : null);
+  const modal = (e) => e.getAttribute('aria-modal') === 'true' || /^(alert)?dialog$/.test(e.getAttribute('role') || '') || (e.tagName === 'DIALOG' && e.open);
+  // The outermost fixed, sticky or modal element around `el`: what floats
+  // over the page.
+  function floating(el) {
+    let root = null;
+    for (let e = el; e && e !== document.body && e !== document.documentElement; e = parentOf(e)) {
+      const position = getComputedStyle(e).position;
+      if (position === 'fixed' || position === 'sticky' || modal(e)) root = e;
+    }
+    return root;
+  }
+  const scrollBlocked = () => [document.documentElement, document.body].some((e) => e && ['hidden', 'clip'].includes(getComputedStyle(e).overflowY));
+  const COOKIE_WORDS = /cookie|consent|gdpr|your privacy|privacy (choices|preferences|settings|center|centre)/i;
+  const PRESSABLE = 'button,[role=button],input[type=button],input[type=submit],input[type=reset],a[href]';
+  function pressables(root) {
+    return deepQuery(PRESSABLE, root.shadowRoot || root).concat(root.matches(PRESSABLE) ? [root] : []).filter(visible);
+  }
+  // What covers the page now, the most of it first: cookie notices, and
+  // dialogs or pop-ups over a third of it, modal, or keeping it from
+  // scrolling. A fixed header or a chat button isn't one.
+  function overlays() {
+    const seen = new Map();
+    for (let i = 1; i < 8; i++) {
+      for (let j = 1; j < 8; j++) {
+        const top = deepFromPoint(innerWidth * i / 8, innerHeight * j / 8);
+        const root = top && floating(top);
+        if (root) seen.set(root, (seen.get(root) || 0) + 1);
+      }
+    }
+    for (const el of deepQuery('[role=dialog],[role=alertdialog],[aria-modal=true],dialog[open]')) {
+      const root = floating(el) || el;
+      if (!seen.has(root)) seen.set(root, 0);
+    }
+    const blocked = scrollBlocked();
+    const found = [];
+    for (const [root, count] of [...seen].sort((a, b) => b[1] - a[1])) {
+      // A frame that covers the page is Claktory's to see to, from outside.
+      if (!visible(root) || root.tagName === 'IFRAME' || root.tagName === 'FRAME') continue;
+      const r = root.getBoundingClientRect();
+      const area = Math.max(0, Math.min(r.right, innerWidth) - Math.max(r.left, 0)) * Math.max(0, Math.min(r.bottom, innerHeight) - Math.max(r.top, 0));
+      const covers = area / Math.max(1, innerWidth * innerHeight);
+      let kind = null;
+      if (COOKIE_WORDS.test(textOf(root).slice(0, 4000)) && pressables(root).length) kind = 'cookie notice';
+      else if (covers >= 0.3 || (modal(root) && covers > 0.02) || (blocked && covers > 0.1)) kind = 'pop-up';
+      if (kind) found.push({root, kind, covers, shown: count});
+    }
+    return found;
+  }
+  // The overlay `el` is in, if any, among `covering`.
+  const overlayOf = (el, covering) => covering.find((o) => inside(o.root, el));
+
+  // What covers a target, in Claktory's words: never the page's.
+  function coveredBy(top) {
+    if (!errand() || !top) return 'covered';
+    const over = overlayOf(top, overlays());
+    if (over) return 'covered by a ' + over.kind + ': clear it with errand_act op dismiss, then read the page again';
+    if (top.tagName === 'IFRAME' || top.tagName === 'FRAME') return 'covered by a frame: read the page again to see it';
+    return 'covered by something else on the page: read it again';
+  }
+
+  // A button's choice in a cookie notice or a pop-up, by its name: the
+  // most private first. Never page code, only its words.
+  const PRIVATE = /^(reject|decline|refuse|deny|disagree)( all| cookies| all cookies| optional cookies| non-essential cookies| additional cookies)?$|^(use |allow |accept )?(only )?(strictly )?(necessary|essential|required)( cookies)?( only)?$|^continue without (accepting|agreeing|cookies)$/i;
+  const CLOSE = /^(close|dismiss|×|✕|✖|x|no,? thanks?|not now|maybe later|not interested|skip|continue without.*|close (dialog|banner|this|pop-?up|message|window))$/i;
+  const ACCEPT = /^(accept|agree|allow|ok|okay|got it|i understand|i agree|understood)( all| cookies| all cookies| and continue| and close| & close)?$/i;
+  // A notice's settings, where a more private choice may be; and saving
+  // them as they're set (nothing optional, by the law it answers to).
+  const SETTINGS = /^(cookie |privacy )?(settings|preferences|options)$|^(manage|customi[sz]e|change|adjust|set|show)( my| your)?( cookie| privacy)? (settings|preferences|choices|options|cookies|purposes|details)$|^(manage|customi[sz]e|more options)$/i;
+  const SAVE = /^(confirm|save)( my| your)? (choices|selection|settings|preferences)( and close| & close)?$|^(allow|accept) (selection|selected)$/i;
+  function choice(el) {
+    const words = oneLine(rawName(el), NAME_LIMIT).replace(/[.!]+$/, '').trim();
+    if (PRIVATE.test(words)) return 'private';
+    if (CLOSE.test(words)) return 'close';
+    if (SAVE.test(words)) return 'save';
+    if (SETTINGS.test(words)) return 'settings';
+    if (ACCEPT.test(words)) return 'accept';
+    return null;
+  }
+  // Fields that make an overlay the person's: sign-in, payment, a code.
+  const personal = (root) => deepQuery('input,textarea,[contenteditable]', root.shadowRoot || root).some((field) => sensitive(field));
+
   // The visible page, bounded: `limit` bytes of text at most, and the whole
   // answer within `budget` bytes of JSON. Interactive elements first (up to
   // 200, in half the budget), then the text in reading order, by walking the
@@ -358,11 +504,23 @@
       refs.set(id, {el: new WeakRef(el), fp: fingerprint(el)});
       elements.push(item);
     }
-    for (const el of document.querySelectorAll(INTERACTIVE)) {
+    // An errand lists what covers the page first, then what's on screen,
+    // then the rest: a cookie notice at a long page's end is never cut.
+    const covering = errand() ? overlays() : [];
+    let candidates = document.querySelectorAll(INTERACTIVE);
+    if (errand()) {
+      const rank = (el) => {
+        const over = covering.findIndex((o) => inside(o.root, el));
+        if (over >= 0) return over;
+        return inViewport(el.getBoundingClientRect()) ? 100 : 200;
+      };
+      candidates = deepQuery(INTERACTIVE).map((el, at) => [rank(el), at, el]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((entry) => entry[2]);
+    }
+    for (const el of candidates) {
       if (elements.length && elements.length % 50 === 0 && overdue()) break;
       if (!visible(el)) continue;
       // Inside recovery codes: not offered at all, so no name of it is read.
-      if (withheldWhy(el) || otpauth(el) || pastCutoff(el)) continue;
+      if (withheldWhy(el) || otpauth(el) || pastCutoff(el) || (errand() && unreadShadow(el))) continue;
       const r = role(el);
       if (r === 'hidden' || (r === 'label' && !fileLabel(el))) continue;
       if (elements.length >= ELEMENTS_LIMIT) { notListed++; continue; }
@@ -377,6 +535,8 @@
       const out = leaves(el);
       if (out) item.leaves = out;
       if (!inViewport(el.getBoundingClientRect())) item.offscreen = true;
+      const over = errand() && overlayOf(el, covering);
+      if (over) item.overlay = over.kind;
       if (el.disabled || el.getAttribute('aria-disabled') === 'true') item.disabled = true;
       const checked = el instanceof HTMLInputElement && ['checkbox', 'radio'].includes(el.type)
         ? (el.indeterminate ? 'mixed' : String(el.checked))
@@ -403,14 +563,19 @@
       revision, title: oneLine(document.title, 300), title_marks: marks(document.title), path: webPath('', location.pathname),
       text: '', text_marks: [], truncated: false, elements, elements_not_listed: notListed, unsupported: [], unsupported_page: null,
     };
+    if (errand() && covering.length) answer.overlays = [...new Set(covering.map((o) => o.kind))];
     // What's left of the budget, with room for the notes at the end.
     let textBytes = Math.min(limit, budget);
     let textJson = budget - utf8(JSON.stringify(answer)) - 512;
     const pieces = [];
     const textMarks = new Set();
     let truncated = notListed > 0;
-    const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+    const shadows = [];
+    const skipped = new Set(covering.map((o) => o.root));
+    const walkerOf = (root, skipping) => document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
+        if (skipping && skipped.has(node)) return NodeFilter.FILTER_REJECT;
+        if (errand() && node.nodeType === Node.ELEMENT_NODE && node.shadowRoot && !shadows.includes(node.shadowRoot)) shadows.push(node.shadowRoot);
         if (node.nodeType === Node.ELEMENT_NODE) {
           const tag = node.tagName;
           if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'TEMPLATE') return NodeFilter.FILTER_REJECT;
@@ -419,7 +584,7 @@
           if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return NodeFilter.FILTER_REJECT;
           // Recovery codes: never read.
           if (blocks.includes(node) || pastCutoff(node)) return NodeFilter.FILTER_REJECT;
-          if (node.shadowRoot) notes.open_shadow_roots++;
+          if (node.shadowRoot && !errand()) notes.open_shadow_roots++;
           else if (node instanceof HTMLElement && chrome.dom && chrome.dom.openOrClosedShadowRoot(node)) notes.closed_shadow_roots++;
           if (!visible(node)) return NodeFilter.FILTER_REJECT;
           // What's typed into an editable region is a value: never read.
@@ -430,9 +595,13 @@
       },
     });
     let seen = 0;
-    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      if (++seen % 100 === 0 && overdue()) break;
-      if (pastCutoff(node)) { truncated = true; break; }
+    // A cut ends every walk: the text is whole up to it.
+    let full = false;
+    const said = (words) => { if (!full) { pieces.push(words); textBytes -= utf8(words); textJson -= jsonBytes(words); } };
+    const walk = (walker) => {
+    for (let node = walker.nextNode(); node && !full; node = walker.nextNode()) {
+      if (++seen % 100 === 0 && overdue()) { full = true; break; }
+      if (pastCutoff(node)) { truncated = true; full = true; break; }
       let piece = node.nodeValue.replace(/\s+/g, ' ');
       if (!piece.trim()) continue;
       for (const m of marks(node.nodeValue)) if (m !== 'line_break') textMarks.add(m);
@@ -444,13 +613,24 @@
         const part = cut(piece, textBytes, textJson);
         if (part) pieces.push(part);
         truncated = true;
+        full = true;
         break;
       }
       pieces.push(piece);
       textBytes -= bytes;
       textJson -= json;
     }
+    };
+    for (const over of covering) {
+      if (unreadShadow(over.root)) continue;
+      said(' ⟦' + over.kind + ':⟧ ');
+      walk(walkerOf(over.root, false));
+      said(' ⟦end of the ' + over.kind + '⟧ ');
+    }
+    walk(walkerOf(document.body || document.documentElement, true));
+    for (let i = 0; i < shadows.length && i < 50; i++) if (!unreadShadow(shadows[i])) walk(walkerOf(shadows[i], true));
     if (cutoff) answer.unsupported.push('the page is too long to check for recovery codes or a setup key past its start: the rest isn\'t read');
+    if ([...shadowsLeftOut.values()].some(Boolean)) answer.unsupported.push('a part of the page that may hold recovery codes or a setup key, inside a component, isn\'t read');
     if (late) {
       truncated = true;
       answer.unsupported.push('the page is too big to read whole in time: only its start was read');
@@ -458,7 +638,8 @@
     answer.text = pieces.join('');
     answer.text_marks = [...textMarks];
     answer.truncated = truncated;
-    if (notes.frames) answer.unsupported.push(notes.frames + ' frames not read');
+    // An errand's frames are Claktory's to read, beside the page.
+    if (notes.frames && !errand()) answer.unsupported.push(notes.frames + ' frames not read');
     if (notes.closed_shadow_roots) answer.unsupported.push(notes.closed_shadow_roots + ' closed shadow roots not readable');
     if (notes.open_shadow_roots) answer.unsupported.push(notes.open_shadow_roots + ' open shadow roots not read');
     if (notes.canvases) answer.unsupported.push(notes.canvases + ' canvases not readable');
@@ -500,8 +681,8 @@
     const r = el.getBoundingClientRect();
     if (!inViewport(r)) return {error: 'stale_target', why: 'offscreen: scroll, read, then act'};
     const x = Math.min(Math.max(r.left + r.width / 2, 0), innerWidth - 1), y = Math.min(Math.max(r.top + r.height / 2, 0), innerHeight - 1);
-    const top = document.elementFromPoint(x, y);
-    if (!top || (top !== el && !el.contains(top) && !(el.tagName === 'LABEL' && el.control === top))) return {error: 'stale_target', why: 'covered'};
+    const top = fromPoint(x, y);
+    if (!top || (top !== el && !inside(el, top) && !(el.tagName === 'LABEL' && el.control === top))) return {error: 'stale_target', why: coveredBy(top)};
     return {el, kept};
   }
 
@@ -527,6 +708,12 @@
       if (a && !/^https?:/i.test(a.href) && !(a.getAttribute('href') || '').startsWith('#')) return {error: 'sensitive_action', why: 'it opens another app or runs the page\'s own link code: the person does this'};
       const p = asksPermission(el);
       if (p) return {error: 'sensitive_action', why: p};
+      if (errand() && choice(el) === 'accept') {
+        const over = overlayOf(el, overlays());
+        if (over && over.kind === 'cookie notice' && pressables(over.root).some((b) => ['private', 'settings'].includes(choice(b)))) {
+          return {error: 'sensitive_action', why: 'a cookie notice with a more private choice: clear it with errand_act op dismiss, which picks it'};
+        }
+      }
     } else {
       if (el instanceof HTMLSelectElement) return {error: 'unsupported_target', why: 'choosing from a list isn\'t supported: the person picks it'};
       if (!fillable(el)) return {error: 'unsupported_target', why: 'it isn\'t a text field'};
@@ -588,6 +775,11 @@
       document.execCommand('insertText', false, text);
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
+    return filled(el, text, before);
+  }
+
+  // Whether `el` holds `text` now, and if not why and what it holds.
+  function filled(el, text, before) {
     const after = valueOf(el) || '';
     const took = el.isContentEditable ? after.replace(/\s+/g, ' ').trim() === text.replace(/\s+/g, ' ').trim() : after === text;
     const answer = {done: true, took};
@@ -618,8 +810,179 @@
     return {scroll_y: Math.round(scrollY)};
   }
 
+  // ---- Errands only (agent-browser-r11.md) ----
+  // Claktory's errand reader, in its own isolated world, sets
+  // __claktoryErrand: the browser's own input clicks, types and scrolls
+  // there, paced as a person's, and these only check and measure. The
+  // extension never has them.
+
+  // A target still the one read, where it's acted on: its box and the
+  // viewport's; for a text field, which kind and whether it holds text
+  // (never what), keeping what it held to tell what typing changed.
+  function aim(id) {
+    const t = check(id);
+    if (t.error) return t;
+    const r = t.el.getBoundingClientRect();
+    const answer = {left: r.left, top: r.top, width: r.width, height: r.height, view_width: innerWidth, view_height: innerHeight};
+    if (fillable(t.el)) {
+      t.kept.before = valueOf(t.el) || '';
+      answer.field = t.el instanceof HTMLInputElement ? 'input' : t.el instanceof HTMLTextAreaElement ? 'textarea' : 'editable';
+      answer.holds_text = t.kept.before !== '';
+      answer.focused = focusedOn(t.el);
+    }
+    return answer;
+  }
+
+  // The target is what's at (x, y), now: checked right before the press.
+  function hits(id, x, y) {
+    const t = check(id);
+    if (t.error) return t;
+    if (!(x >= 0 && y >= 0 && x < innerWidth && y < innerHeight)) return {error: 'stale_target', why: 'offscreen: scroll, read, then act'};
+    const top = fromPoint(x, y);
+    const el = t.el;
+    if (!top || (top !== el && !inside(el, top) && !(el.tagName === 'LABEL' && el.control === top))) return {error: 'stale_target', why: coveredBy(top)};
+    return {};
+  }
+
+  // Whether the keyboard's focus is on `el` itself, through open shadow
+  // roots; for a part of an editable region, its caret is in it.
+  function focusedOn(el) {
+    let active = document.activeElement;
+    while (active && active.shadowRoot && active.shadowRoot.activeElement) active = active.shadowRoot.activeElement;
+    if (active === el) return true;
+    const selection = getSelection();
+    return !!(active && el.isContentEditable && active.isContentEditable && active.contains(el) && selection && el.contains(selection.anchorNode));
+  }
+
+  // Checked before every key: still the field read, still focused.
+  // In a frame, the frame must have the keyboard too.
+  function focused(id, frame) {
+    const found = known(id);
+    if (found.error) return found;
+    return {focused: focusedOn(found.el) && (!frame || document.hasFocus())};
+  }
+
+  // After typing: what the field holds against what was meant.
+  function typed(id, text) {
+    const found = known(id);
+    if (found.error) return found;
+    return filled(found.el, text, found.kept.before === undefined ? null : found.kept.before);
+  }
+
+  // Elements a wheel must not turn: it would change their value or scroll
+  // something the reader doesn't read.
+  const UNWHEELED = 'input,textarea,select,option,iframe,frame,object,embed,canvas,video,audio,[contenteditable]:not([contenteditable=false]),[role=slider],[role=spinbutton],[role=listbox],[role=combobox]';
+  // Scrolled by the page's own scrollbar, not a box inside it.
+  function pageScrolls(el) {
+    for (let e = el; e && e !== document.body && e !== document.documentElement; e = e.parentElement) {
+      const s = getComputedStyle(e);
+      if (/(auto|scroll|overlay)/.test(s.overflowY) && e.scrollHeight > e.clientHeight + 1) return false;
+    }
+    return true;
+  }
+  function wheelable(x, y) {
+    if (!(x >= 0 && y >= 0 && x < innerWidth && y < innerHeight)) return false;
+    const top = deepFromPoint(x, y);
+    const active = document.activeElement;
+    const onFocused = !!active && active !== document.body && active !== document.documentElement && (active === top || active.contains(top));
+    return !!top && !top.closest(UNWHEELED) && !onFocused && pageScrolls(top);
+  }
+
+  // Where the wheel turns: (x, y) if it still may, or another such place;
+  // and how far the page is scrolled and can be.
+  function wheelSpot(x, y) {
+    const where = {scroll_y: Math.round(scrollY), scroll_max: Math.max(0, Math.round(document.documentElement.scrollHeight - innerHeight)), view_width: innerWidth, view_height: innerHeight};
+    if (Number.isFinite(x) && Number.isFinite(y) && wheelable(x, y)) return Object.assign(where, {x, y});
+    for (const fy of [0.5, 0.35, 0.65, 0.2, 0.8]) {
+      for (const fx of [0.5, 0.3, 0.7, 0.15, 0.85]) {
+        const px = Math.round(innerWidth * fx), py = Math.round(innerHeight * fy);
+        if (wheelable(px, py)) return Object.assign(where, {x: px, y: py});
+      }
+    }
+    return {error: 'unsupported_target', why: 'nowhere on the page turns its own scroll without touching a field, a list or a frame: the person scrolls it'};
+  }
+
+  // What covers the page, for a dismiss: each overlay, whether it's the
+  // person's (sign-in, payment, a code), and its buttons with their names
+  // and choices; a link or a button that sends a form is marked, never
+  // pressed to dismiss.
+  function covers() {
+    const found = overlays().slice(0, 5).map((o) => ({kind: o.kind, covers: Math.round(o.covers * 100), personal: personal(o.root), buttons: buttonsIn(o.root), switches: switchesIn(o.root)}));
+    return {overlays: found, scroll_blocked: scrollBlocked()};
+  }
+  // The purposes a consent panel in `root` may switch on (Fugo 41149):
+  // every checkbox and switch that can change (a disabled one is what the
+  // site needs, always on), whether it's on, and a ref to press it (itself,
+  // or its label when it's drawn hidden), or none when neither shows.
+  function switchesIn(root) {
+    const switches = [];
+    const toggles = deepQuery('input[type=checkbox],[role=switch],[role=checkbox]', root.shadowRoot || root);
+    for (const el of toggles.slice(0, 40)) {
+      if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+      const on = el instanceof HTMLInputElement ? el.checked : el.getAttribute('aria-checked') === 'true';
+      const target = visible(el) ? el : Array.from(el.labels || []).find(visible);
+      const entry = {on};
+      if (target) {
+        const id = ref();
+        refs.set(id, {el: new WeakRef(target), fp: fingerprint(target)});
+        entry.ref = id;
+      }
+      switches.push(entry);
+    }
+    return switches;
+  }
+  // The buttons in `root`, each with a ref, its name and its choice.
+  function buttonsIn(root) {
+    const buttons = [];
+    for (const b of pressables(root).slice(0, 40)) {
+      const id = ref();
+      refs.set(id, {el: new WeakRef(b), fp: fingerprint(b)});
+      const button = {ref: id, name: oneLine(rawName(b), NAME_LIMIT), choice: choice(b)};
+      // A link that goes anywhere (another page, or runs the page's own
+      // link code) is never pressed to dismiss: only one to this page.
+      const a = b.closest('a[href]');
+      if (a) {
+        try {
+          const to = new URL(a.href, location.href), here = new URL(location.href);
+          to.hash = ''; here.hash = '';
+          if (to.href !== here.href) button.link = true;
+        } catch (_) { button.link = true; }
+      }
+      if (submits(b) && !((b.form || b.closest('form')).getAttribute('method') || '').match(/^dialog$/i)) button.submits = true;
+      const s = sensitive(b);
+      if (s) button.sensitive = s;
+      buttons.push(button);
+    }
+    return buttons;
+  }
+  // Another site's frame that covers the page, for a dismiss: only its
+  // buttons, whether it's about cookies and whether it asks for what's the
+  // person's. Never its text.
+  function frameButtons() {
+    refs = new Map();
+    const root = document.body || document.documentElement;
+    if (!root) return {cookies: false, personal: false, buttons: [], switches: []};
+    const cookies = COOKIE_WORDS.test(document.title + ' ' + textOf(root).slice(0, 4000));
+    return {cookies, personal: personal(root), buttons: buttonsIn(root), switches: switchesIn(root)};
+  }
+
+  function errandOp(cmd) {
+    if (cmd.op === 'covers') return covers();
+    if (cmd.op === 'frame_buttons') return frameButtons();
+    if (cmd.op === 'aim' && typeof cmd.target === 'string') return aim(cmd.target);
+    if (cmd.op === 'hits' && typeof cmd.target === 'string' && Number.isFinite(cmd.x) && Number.isFinite(cmd.y)) return hits(cmd.target, cmd.x, cmd.y);
+    if (cmd.op === 'focused' && typeof cmd.target === 'string') return focused(cmd.target, cmd.frame === true);
+    if (cmd.op === 'typed' && typeof cmd.target === 'string' && typeof cmd.text === 'string') return typed(cmd.target, cmd.text);
+    if (cmd.op === 'wheel_spot') return wheelSpot(cmd.x, cmd.y);
+    return null;
+  }
+
   function run(cmd) {
     if (!cmd || typeof cmd !== 'object') return {error: 'bad_command'};
+    if (globalThis.__claktoryErrand) {
+      const answer = errandOp(cmd);
+      if (answer) return answer;
+    }
     if (cmd.op === 'read' && Number.isInteger(cmd.limit) && Number.isInteger(cmd.budget)) return read(Math.min(Math.max(cmd.limit, 1), 65536), Math.min(Math.max(cmd.budget, 1024), 65536));
     if (cmd.op === 'scroll' && ['up', 'down'].includes(cmd.direction) && [1, 2, 3].includes(cmd.pages)) return scroll(cmd.direction, cmd.pages);
     if (cmd.op === 'forget') { refs = new Map(); if (watching) { watching.disconnect(); watching = null; } return {}; }

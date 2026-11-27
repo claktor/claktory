@@ -99,6 +99,8 @@ class _Routes implements PhoneRoutes {
   @override
   bool get canPop => false;
   @override
+  bool openFocus() => false;
+  @override
   void openConversation(String agentId, {int? seq}) {}
 
   @override

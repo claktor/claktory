@@ -608,21 +608,33 @@ class _PaneLayoutState extends State<PaneLayout> {
                 expanded: true,
               ),
             ),
-      child: projection == null
-          ? LayoutBuilder(
-              builder: (context, constraints) {
-                _room(constraints.maxWidth);
-                return _laid(full, null, _dragged ?? full, chat);
-              },
-            )
-          : LayoutBuilder(
-              builder: (context, constraints) {
-                // Asked every time: what fits follows the room and the
-                // focus.
-                final view = projection.project(full, constraints.biggest);
-                return _laid(full, view, _dragged ?? view.shown, chat);
-              },
-            ),
+      // Under a pane expanded over it, VoiceOver reads only the pane: the
+      // panes here are hidden, and the block hides what the window drew
+      // before them (the agent's header and its Find, the sidebar), as a
+      // modal barrier does (Squalo's ST14). Here, not in the pane: the
+      // pane is read where its OverlayPortal is, so this place must stay,
+      // or the pane goes with it (Zucchero's row 665).
+      child: BlockSemantics(
+        blocking: expanded != null,
+        child: ExcludeSemantics(
+          excluding: expanded != null,
+          child: projection == null
+              ? LayoutBuilder(
+                  builder: (context, constraints) {
+                    _room(constraints.maxWidth);
+                    return _laid(full, null, _dragged ?? full, chat);
+                  },
+                )
+              : LayoutBuilder(
+                  builder: (context, constraints) {
+                    // Asked every time: what fits follows the room and
+                    // the focus.
+                    final view = projection.project(full, constraints.biggest);
+                    return _laid(full, view, _dragged ?? view.shown, chat);
+                  },
+                ),
+        ),
+      ),
     );
   }
 
@@ -900,9 +912,9 @@ class _ExpandedPaneState extends State<ExpandedPane> {
     return KeyEventResult.ignored;
   }
 
-  // Not wrapped in a BlockSemantics: in the window's overlay that hid the
-  // pane's own controls from VoiceOver too (Zucchero's row 665). What's
-  // under it stays readable meanwhile (ST14), until that's hidden properly.
+  // Not wrapped in a BlockSemantics: in the window's overlay that took the
+  // place it's read at too, and with it the pane's own controls (row 665).
+  // PaneLayout hides what's under it instead.
   @override
   Widget build(BuildContext context) => ValueListenableBuilder(
     valueListenable: windowControls,
@@ -1030,9 +1042,13 @@ class _BandChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
+    // Its own element, which VoiceOver presses as a click does (Abbacchio's
+    // row 1599: merged into the pane's node, its press went nowhere).
     return Semantics(
+      container: true,
       button: true,
       label: label,
+      onTap: onTap,
       excludeSemantics: true,
       child: Pressable(
         onTap: onTap,

@@ -106,9 +106,13 @@ class PermissionWords {
 }
 
 /// Restricted: why Settings can't help (Trish, 43277).
-String restrictedFallback() =>
-    'Screen Time or whoever manages this $thisDeviceKind turned it off, so '
-    "it can't be changed here.";
+String restrictedFallback() => defaultTargetPlatform == TargetPlatform.android
+    // Screen Time is Apple's; on Android it's whoever runs the phone
+    // (Risotto 49784, Trish 49822).
+    ? 'Whoever manages this $thisDeviceKind, such as your workplace, turned '
+          "it off, so it can't be changed here."
+    : 'Screen Time or whoever manages this $thisDeviceKind turned it off, so '
+          "it can't be changed here.";
 
 /// One permission the system guards: what the sheet needs of it.
 abstract class Permission {
@@ -181,6 +185,11 @@ class PermissionFlow extends ChangeNotifier {
   PermissionAccess get result => _result;
 
   final _done = Completer<PermissionAccess>();
+
+  /// Whether a sheet or dialog shows it now (its content listens while
+  /// it's built): one that went before it was done was lost with its
+  /// window (row 198).
+  bool get shown => hasListeners;
 
   /// Completes with [result] once it's done.
   Future<PermissionAccess> get done => _done.future;
@@ -294,8 +303,14 @@ BuildContext? get permissionHost {
 /// permissions asked for away from any screen show; answers how to stop.
 VoidCallback registerPermissionHost(BuildContext context) {
   _hosts.add(context);
+  permissionHosts.value++;
   return () => _hosts.remove(context);
 }
+
+/// Counts up as each screen registers ([registerPermissionHost]): a new
+/// window (a resize between an iPad's narrow and wide layouts builds one)
+/// is where an ask lost with the old one shows again (row 198).
+final permissionHosts = ValueNotifier<int>(0);
 
 /// Asks for [permission] where it's needed now: nothing when it's allowed
 /// already or there's nothing to ask for; otherwise its sheet (a phone's)
@@ -318,7 +333,7 @@ Future<PermissionAccess> askPermission(
 
 /// Shows [flow] until it's done or set aside: a sheet on a phone (held
 /// while it explains or the system asks: no grabber, no swipe, no Close),
-/// a dialog elsewhere. Completes as it closes.
+/// a dialog elsewhere (an iPad's at every width). Completes as it closes.
 ///
 /// [untilAnswered]: it closes once the system has answered, whatever it
 /// said, for a feature that says a no in its own place (the mic's line).
@@ -335,7 +350,9 @@ Future<void> presentPermission(
     onDone: close,
   );
 
-  if (isPhoneLayout(context)) {
+  // An iPad's is a dialog at every width, a narrow window's too, where the
+  // system's own prompt comes next (rule 8, §4; Sorbet).
+  if (isPhoneLayout(context) && !_onIPad) {
     return presentSheet<void>(
       context,
       closeButton: false,
@@ -344,7 +361,7 @@ Future<void> presentPermission(
       builder: (context, close) => content(close),
     );
   }
-  return showModal(context, (context, close) => content(close));
+  return showModal(context, (context, close) => content(close), dialog: true);
 }
 
 /// The sheet is held while the flow is.
@@ -518,14 +535,17 @@ class _PermissionContentState extends State<PermissionContent>
           ),
         ),
         SizedBox(height: compact ? Space.s : Space.m),
-        Text(
+        // Its words whole too: one too long for the column ("Claktory" at
+        // the largest text in Slide Over's 320) shrinks the lines rather
+        // than breaking (Sale's row 198, Lucy 49620).
+        FittedHeading(
           body,
           textAlign: align,
           style: type.body.copyWith(color: palette.textMuted),
         ),
         if (caption != null) ...[
           const SizedBox(height: Space.m),
-          Text(
+          FittedHeading(
             caption,
             textAlign: align,
             style: type.caption.copyWith(color: palette.textMuted),
@@ -563,7 +583,14 @@ class _PermissionContentState extends State<PermissionContent>
         ? (phone || compact || widget.fill
               ? [openSettings, Center(child: wayOut)]
               : [wayOut, openSettings])
-        : [proceed];
+        // A way out given (Paste code instead) shows from the start, under
+        // Continue: never only after the system's been told no, which on
+        // Android takes two (Sale's row 189c).
+        : widget.wayOut == null
+        ? [proceed]
+        : (phone || compact || widget.fill
+              ? [proceed, Center(child: wayOut)]
+              : [wayOut, proceed]);
     // The way on at the foot, under the thumb on a phone; a dialog's
     // buttons at its end on an iPad or a Mac, the quiet one first.
     final Widget buttons = phone || compact || widget.fill
@@ -606,7 +633,33 @@ class _PermissionContentState extends State<PermissionContent>
         // A popover leaves the keys where they are while the keyboard on
         // screen is up (taking them would drop it from under the mic).
         autofocus: !widget.compact || device.hardwareKeyboard.value,
-        child: widget.fill
+        child: widget.fill && _onIPad
+            // An iPad's screen keeps the words and the way on together in
+            // the window's middle at every width, Slide Over's 320 too,
+            // never a phone's foot (area 5a, P7; Sorbet).
+            // The words scroll when they must; the buttons stay under them.
+            ? Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Flexible(
+                      child: ScrollsWithFade(
+                        key: ValueKey(off),
+                        child: Align(
+                          alignment: start
+                              ? Alignment.centerLeft
+                              : Alignment.center,
+                          child: text,
+                        ),
+                      ),
+                    ),
+                    SizedBox(height: off ? Space.l : Space.xl),
+                    buttons,
+                  ],
+                ),
+              )
+            : widget.fill
             ? Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -628,7 +681,16 @@ class _PermissionContentState extends State<PermissionContent>
                   buttons,
                 ],
               )
-            : _layout(phone && !compact, compact, start, off, text, buttons),
+            : _layout(
+                // An iPad's is a dialog, padded by it, at every width
+                // (Sale's row 198).
+                phone && !compact && !_onIPad,
+                compact,
+                start,
+                off,
+                text,
+                buttons,
+              ),
       ),
     );
   }
@@ -674,6 +736,11 @@ class _PermissionContentState extends State<PermissionContent>
   }
 }
 
+/// Whether this is an iPad, at any window width (the native idiom).
+bool get _onIPad =>
+    defaultTargetPlatform == TargetPlatform.iOS &&
+    device.deviceCapabilities.idiom == Idiom.pad;
+
 /// The quiet way out: a finger's height, its label a caption.
 class _QuietLink extends StatelessWidget {
   const _QuietLink(this.label, {required this.onTap});
@@ -685,6 +752,10 @@ class _QuietLink extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     return Semantics(
+      // Its own node, the size of the link: without it the label joins the
+      // nearest one up, and TalkBack's box framed the whole sheet (Sale's
+      // row 195).
+      container: true,
       button: true,
       label: label,
       onTap: onTap,

@@ -7,6 +7,7 @@
 // from a [SceneFrame]; what moves every frame is painted from the
 // playhead alone.
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/widgets.dart';
@@ -183,6 +184,7 @@ class _HistoryBoardState extends State<HistoryBoard> {
                   frame: frame,
                   palette: palette,
                   focus: focus,
+                  clip: _projectRect(controller, boxRects),
                 ),
               ),
             ),
@@ -274,6 +276,17 @@ class _HistoryBoardState extends State<HistoryBoard> {
 }
 
 extension on _HistoryBoardState {
+  /// With one project shown, its box as drawn ([rects]): a line shared with
+  /// what's outside it (Rivet's to every agent) ends at its edge, as the
+  /// pulses do, rather than running on into the empty board (Abbacchio's
+  /// row 1619).
+  Rect? _projectRect(HistoryController controller, List<Rect> rects) {
+    final project = controller.project;
+    if (project == null) return null;
+    final box = controller.scene!.projectBox(project);
+    return box < 0 || box >= rects.length ? null : rects[box];
+  }
+
   /// [still], drawn as it says.
   Widget _still(BuildContext context, BoardStill still) {
     final controller = widget.controller;
@@ -306,6 +319,7 @@ extension on _HistoryBoardState {
               frame: frame,
               palette: palette,
               focus: null,
+              clip: _projectRect(controller, still.boxRects),
             ),
           ),
         ),
@@ -621,12 +635,16 @@ class _LinesPainter extends CustomPainter {
     required this.frame,
     required this.palette,
     required this.focus,
+    this.clip,
   });
 
   final HistoryScene scene;
   final SceneFrame frame;
   final Palette palette;
   final int? focus;
+
+  /// The project's box, with one shown: no line past its edges.
+  final Rect? clip;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -652,6 +670,10 @@ class _LinesPainter extends CustomPainter {
         ..drawCircle(end, 3.5, _stroke(color, 2));
     }
 
+    final clip = this.clip;
+    canvas.save();
+    // A stroke on the edge itself stays whole.
+    if (clip != null) canvas.clipRect(clip.inflate(2));
     for (final pass in [false, true]) {
       for (var i = 0; i < scene.wires.length; i++) {
         final state = frame.wires[i];
@@ -696,6 +718,7 @@ class _LinesPainter extends CustomPainter {
               : color.withValues(alpha: 0.22),
       );
     }
+    canvas.restore();
   }
 
   String _idOf(int chip) => scene.chips[chip].id;
@@ -705,14 +728,17 @@ class _LinesPainter extends CustomPainter {
       old.scene != scene ||
       old.frame != frame ||
       old.palette != palette ||
-      old.focus != focus;
+      old.focus != focus ||
+      old.clip != clip;
 }
 
 /// Agents working, glowing in their color; an agent renamed lights up for
 /// a moment.
 class _GlowPainter extends CustomPainter {
   _GlowPainter(this.controller, this.palette, {required this.reduced})
-    : super(repaint: controller.time);
+    // The playhead, and the controller (another project shown while paused:
+    // Abbacchio's row 1613).
+    : super(repaint: Listenable.merge([controller, controller.time]));
 
   final HistoryController controller;
   final Palette palette;
@@ -728,7 +754,7 @@ class _GlowPainter extends CustomPainter {
     final project = controller.project;
     bool out(int chip) =>
         project != null && !scene.chipInProject(chip, t, project);
-    for (final node in controller.log.runStarts.keys) {
+    for (final node in controller.log.runNodes) {
       if (!controller.log.running(node, t)) continue;
       final chip = scene.chipAt(node, t);
       if (chip < 0 || out(chip)) continue;
@@ -786,7 +812,9 @@ class _GlowPainter extends CustomPainter {
 /// The pulses and ticks at the playhead.
 class _PulsePainter extends CustomPainter {
   _PulsePainter(this.controller, this.palette, {required this.budget})
-    : super(repaint: controller.time);
+    // The playhead, and the controller (another project shown while paused:
+    // Abbacchio's row 1613).
+    : super(repaint: Listenable.merge([controller, controller.time]));
 
   final HistoryController controller;
   final Palette palette;
@@ -818,6 +846,19 @@ class _PulsePainter extends CustomPainter {
         2 + 6 * tick.age,
         _stroke(palette.textMuted.withValues(alpha: 1 - tick.age), 1.25),
       );
+    }
+    // Hundreds of dots a frame, each its own call was the frame's biggest
+    // cost at a year or more (Polpo 49940): by color and size, one call
+    // each, tails under the pulses, the counts over them.
+    final tails = _Dots();
+    final heads = _Dots();
+    final counts = <(TextPainter, Offset)>[];
+    // Counts by the thousand at a year or more: kept to the latest few.
+    if (_counts.length > 512) {
+      for (final text in _counts.values) {
+        text.dispose();
+      }
+      _counts.clear();
     }
     for (final pulse in pulses) {
       // Through a pipe: never drawn over its pad, which brightens as the
@@ -862,6 +903,7 @@ class _PulsePainter extends CustomPainter {
         PulseKind.app => mapLayerColor(MapLayer.apps, palette),
       };
       final pipe = pulse.kind == PulseKind.pipe;
+      final point = pulse.point;
       final strength = pulse.quiet && !pipe ? 0.55 : 1.0;
       final radius =
           (pipe
@@ -872,9 +914,9 @@ class _PulsePainter extends CustomPainter {
           (pulse.count > 1 ? 1.2 * math.log(pulse.count) / math.ln2 : 0);
       // Through a pipe: a halo, so a message to or from another Claktory
       // is noticed (Bruno 44370).
-      if (pipe && !over(pulse.point)) {
+      if (pipe && !over(point)) {
         canvas.drawCircle(
-          pulse.point,
+          point,
           math.min(radius, 8) * 2.4,
           Paint()..color = pipeColor.withValues(alpha: 0.22),
         );
@@ -882,20 +924,17 @@ class _PulsePainter extends CustomPainter {
       // A short tail behind it.
       for (var k = 3; k >= 1; k--) {
         final behind = pulse.at - 0.025 * k;
-        if (behind < 0 || over(pulse.route.at(behind))) continue;
-        canvas.drawCircle(
-          pulse.route.at(behind),
+        if (behind < 0) continue;
+        final at = pulse.route.at(behind);
+        if (over(at)) continue;
+        tails.add(
+          at,
           radius * (1 - 0.18 * k),
-          Paint()..color = color.withValues(alpha: strength * (0.5 - 0.12 * k)),
+          color.withValues(alpha: strength * (0.5 - 0.12 * k)),
         );
       }
-      final point = pulse.point;
       if (over(point)) continue;
-      canvas.drawCircle(
-        point,
-        math.min(radius, 8),
-        Paint()..color = color.withValues(alpha: strength),
-      );
+      heads.add(point, math.min(radius, 8), color.withValues(alpha: strength));
       if (pulse.count > 1) {
         final text = _counts.putIfAbsent(
           (pulse.count, color.toARGB32()),
@@ -912,8 +951,13 @@ class _PulsePainter extends CustomPainter {
             textDirection: TextDirection.ltr,
           )..layout(),
         );
-        text.paint(canvas, point + Offset(radius + 2, -text.height / 2));
+        counts.add((text, point + Offset(radius + 2, -text.height / 2)));
       }
+    }
+    tails.draw(canvas);
+    heads.draw(canvas);
+    for (final (text, at) in counts) {
+      text.paint(canvas, at);
     }
   }
 
@@ -922,6 +966,52 @@ class _PulsePainter extends CustomPainter {
       old.controller != controller ||
       old.palette != palette ||
       old.budget != budget;
+}
+
+/// Filled dots gathered by color and size (to a quarter pixel), each group
+/// drawn in one call as round points.
+class _Dots {
+  final _groups = <int, _DotGroup>{};
+
+  void add(Offset at, double radius, Color color) {
+    final quarters = (radius * 4).round().clamp(1, 255);
+    (_groups[color.toARGB32() * 256 + quarters] ??= _DotGroup(
+      color,
+      quarters / 2,
+    )).add(at);
+  }
+
+  void draw(Canvas canvas) {
+    for (final group in _groups.values) {
+      canvas.drawRawPoints(
+        ui.PointMode.points,
+        Float32List.sublistView(group.points, 0, group.length),
+        Paint()
+          ..color = group.color
+          ..strokeWidth = group.width
+          ..strokeCap = StrokeCap.round,
+      );
+    }
+  }
+}
+
+class _DotGroup {
+  _DotGroup(this.color, this.width);
+
+  final Color color;
+
+  /// The dots' diameter.
+  final double width;
+  var points = Float32List(16);
+  var length = 0;
+
+  void add(Offset at) {
+    if (length + 2 > points.length) {
+      points = Float32List(points.length * 2)..setRange(0, length, points);
+    }
+    points[length++] = at.dx;
+    points[length++] = at.dy;
+  }
 }
 
 /// A dashed rounded outline, over a chip's own.

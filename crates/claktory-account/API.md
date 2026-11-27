@@ -139,7 +139,9 @@ the same Claktory, which then moves from another account it signed out of
 rather than `409 claktory_taken`. Signed with another key it proves nothing;
 a time that's off is `401 clock_skew` (with `server_time`) and a signature
 seen before `401 replayed`, each leaving the code to use again.
-`200 {"account_id", "email", "claktory_id", "machine_token", "epoch", "sealed_share", "service_key"}`.
+`200 {"account_id", "email", "claktory_id", "machine_token", "epoch", "sealed_share", "service_key", "recovery_key"}`
+(`recovery_key`: the account's recovery key, below, or `null` while it has
+none; newer, so a client reads its absence as none).
 Errors: `400 wrong_code` (`attempts_left`), `410 code_expired` (expired, or
 out of tries: start again), `409 claktory_taken` (that id belongs to another
 account), `403 too_many_claktories` (10 per account), `409
@@ -195,7 +197,12 @@ Neither is a relay credential (Fugo 34608):
   it's `403 review_account` and the code is spent. A review account's
   Claktory moves (`POST /v1/move`) to no other key, and one under another
   key (signed in before the pin) gets no relay token (`POST
-  /v1/relay/token`: `403 review_account`);
+  /v1/relay/token`: `403 review_account`). Since the box's key is pinned,
+  it isn't retired for this: after a reviewer signs the box out
+  (`POST /v1/claktories/sign-out`) it signs in to a review email again with
+  the same key, its verify signed as above; any other retired key is
+  still `409 backend_key_retired`, and with any email but a review one so
+  is the box's;
 - the web pages don't remove a review account's Claktories: `/account`
   shows no Remove, and `/account/remove` answers `403` with a page saying
   so. Delete account works as for any account (Apple's review needs it):
@@ -299,10 +306,11 @@ At start, then hourly while running. Everything but `version` and
     `agents_working` × 60, a value no Claktory could have) is left out and
     counted in `periods_ignored`; the rest are recorded. Don't send it again.
 
-`200 {"relays": ["https://relay-eu.claktory.com"], "server_time": 1763647200, "epoch": 4, "periods_recorded": 1, "periods_ignored": 0}`
+`200 {"relays": ["https://relay-eu.claktory.com"], "server_time": 1763647200, "epoch": 4, "periods_recorded": 1, "periods_ignored": 0, "recovery_key": {…} | null}`
 (relays empty until Claktory runs its own; `epoch` is the current one, so a
 backend notices a new one it missed; `periods_recorded` counts the periods
-new to the service). Updates the Claktory's last contact, version,
+new to the service; `recovery_key` is the account's recovery key, below, or
+`null` while it has none: newer, a client reads its absence as none). Updates the Claktory's last contact, version,
 platform, counts, setup and devices. The service also notes where the request came from:
 country, region and city, from its IP with an offline GeoIP file, keeping
 only the place, never the IP.
@@ -360,7 +368,9 @@ week for either), its endpoints leave the relay allowlist, and the
 account's devices no longer list it. Unlike a removal, its token no longer
 matches anything, so every call with it is `401 unauthorized` (never `403
 revoked`), and its backend key is retired for good: a sign-in with it is
-`409 backend_key_retired`, and it proves nothing at verify. The devices it
+`409 backend_key_retired` (except the review box's pinned key, which signs
+in a review email again: see the review accounts below), and it proves
+nothing at verify. The devices it
 vouched for (`/v1/devices/vouch`) are signed out as `/v1/devices/sign-out`
 does, and its vouches not used yet stop working (#529). Signing in again
 with a new backend key, the same Claktory id is registered again, at the
@@ -368,6 +378,78 @@ next epoch, as after a removal. Also for a Claktory removed already. A
 sign-out that's answered `401 unauthorized` happened already (its answer was
 lost), or the Claktory signed in again since: nothing's left to do.
 Errors: `401`.
+
+### The account's recovery key (#239)
+One recovery key covers every Claktory of the account
+(`coordination/security/recovery-and-sign-in.md`, part 1). The person saves
+its private half once, on the Claktory that made it, which then forgets it;
+each Claktory of the account seals its own vault key to the public half, as
+one more way in. The service keeps only the public half, as the account's,
+and never sees the private one. Only a signed-in Claktory sets or changes
+it; never a device, the web pages or the service itself.
+
+**The statement.** The Claktory that makes a key signs it with its backend
+key: `b64(payload) "." b64(sig)`, payload the JSON
+`{"v": 1, "account_id", "claktory_id", "public_key": b64(32 bytes), "replaces": b64 | "", "device_key": b64, "iat"}`
+and sig the backend key's signature over
+`"claktory recovery key v1\n" ‖ payload`
+(`protocol::sign_recovery_key`, `verify_recovery_key`). `public_key` is the
+key pair's public half (X25519, 32 bytes, how it's made from the saved key
+is factoryd's); `replaces` the public half it replaces, `""` for the
+account's first; `iat` when it was made (unix seconds).
+
+**A device's approval** (Fugo 47881, 48996): every key, the account's first
+too, is made from the app, on a device the person uses, which signs the same payload
+with its account key: `device_key` is that key (Ed25519, as the device
+signed in with) and `device_sig` = `b64(sig)` over
+`"claktory recovery key device v1\n" ‖ payload`
+(`protocol::sign_recovery_key_device`, `verify_recovery_key_device`), so
+one Claktory's backend key alone can neither plant the account's first key
+nor change it. The service checks the signature but can't vouch for the device: each
+Claktory seals to a key by itself only for a device it paired itself (the
+first key as a change), and warns otherwise.
+
+**What every answer gives** (`recovery_key`):
+```json
+{"public_key": b64, "statement": "b64(payload).b64(sig)", "device_sig": b64, "claktory_id": "…", "claktory_name": "Mac mini", "backend_key": b64, "set_at": 1763647200,
+ "history": [{"public_key", "statement", "device_sig", "claktory_id", "claktory_name", "backend_key", "set_at"}, …]}
+```
+the statement as the Claktory that set it sent it, with the device's
+signature; that Claktory's id and its backend key when it set it (to
+check the statement with); its name as `GET /v1/claktories` gives it now
+(`claktory_name`, `""` once it's no longer the account's: a Claktory has no
+other way to list the account's, Giorno 49024); when the service took it; and `history`, the
+account's keys before it, newest first, 9 at most (each without a
+`history` of its own), so a Claktory that was off through several changes
+walks back from this key to the one it sealed to, checking each link.
+A Claktory compares `public_key` with the one it sealed to: the same,
+nothing to do; a chain of statements back to it, each approved by a device
+it paired itself, is a new key to seal to (and to note in History);
+anything else is the warning (part 1, points 3 and 6). Which keys it
+trusts is factoryd's: the service's word on a Claktory's backend key is
+only the service's.
+
+#### `PUT /v1/account/recovery-key` (signed)
+`{"statement": "b64(payload).b64(sig)", "device_sig": b64}` sets the
+account's recovery key, or changes it. The statement must check with this
+Claktory's backend key, name this Claktory and its account, have `v` 1 and
+an `iat` within 300 s of the service's time, and a `public_key` of 32
+bytes, not all zero. It must carry `device_key` and a `device_sig` that
+checks with it, the account's first key too. It replaces
+only the key it names: `replaces` must be the account's public key now
+(`""` while it has none), so two Claktories making a key at once can't
+undo each other. The same `public_key` as the account's now is answered as
+set (a retry whose answer was lost).
+`200 {"recovery_key": {…}}`, as above.
+Errors: `400 invalid_request` (the statement doesn't check, names another
+Claktory or account, is out of time, its key is malformed, or it replaces
+a key without a device's signature that checks), `401`, `403 revoked`,
+`409 recovery_key_changed` (`replaces` isn't the account's key now: the
+answer's `recovery_key` is the one it has, absent while it has none), `429 rate_limited`
+(10 a day per account).
+
+The key stays with the account when the Claktory that set it signs out or
+is removed, and goes when the account is deleted.
 
 ### `POST /v1/pipe-identity` (signed)
 Verified pipes: the service's word, for the Claktories this one has pipes
@@ -922,6 +1004,7 @@ breakdown with fewer than 5 in all one `Other` row per metric,
 | 404 | `not_found` | |
 | 409 | `claktory_taken` | |
 | 409 | `backend_key_retired` | a backend key its Claktory signed out with; make a new one |
+| 409 | `recovery_key_changed` | the account's recovery key isn't the one `replaces` names; `recovery_key` is the one it has |
 | 410 | `code_expired` | |
 | 429 | `rate_limited` | `retry_after` |
 | 500 | `internal` | the service's fault; try again later |

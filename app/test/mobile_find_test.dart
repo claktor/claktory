@@ -11,6 +11,7 @@ import 'package:fixnum/fixnum.dart';
 import 'package:factory_app/mobile/header.dart';
 import 'package:factory_app/mobile/navigation.dart';
 import 'package:flutter/foundation.dart';
+import 'package:factory_app/settings_shell.dart' show SettingsSearchField;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -230,47 +231,26 @@ void main() {
     );
   });
 
-  // Needs you is one card a screen on a phone (#514): no page to search,
-  // its header's end is ˄ ˅.
-  for (final (name, page) in [('Settings', AppPage.settings)]) {
-    testWidgets('$name: Search in its header opens its find', (tester) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
-      addTearDown(() => debugDefaultTargetPlatformOverride = null);
-      final harness = Harness(snapshot());
-      tester.view.padding = const FakeViewPadding(top: 59, bottom: 34);
-      addTearDown(tester.view.resetPadding);
-      await harness.show(tester, size: const Size(393, 852));
-      await pumpFrames(tester);
-      harness.page.value = page;
-      await pumpFrames(tester);
-      // Settings' own list has no find; a section's page does.
-      if (page == AppPage.settings) {
-        expect(find.byKey(const ValueKey('phone-search')), findsNothing);
-        await tester.tap(find.text('General'));
-        await pumpFrames(tester);
-      }
-      await shots?.call(tester, 'header-$name');
-      final search = find.byKey(const ValueKey('phone-search'));
-      expect(search, findsOneWidget);
-      await tester.tap(search);
-      await pumpFrames(tester);
-      expect(find.byKey(const ValueKey('phone-find-bar')), findsOneWidget);
-      await shots?.call(tester, 'bar-$name');
-      // Done puts the keyboard away: no field of the page takes the keys
-      // (General's first is the Claktory's name).
-      await tester.tap(find.text('Done'));
-      await pumpFrames(tester);
-      expect(find.byKey(const ValueKey('phone-find-bar')), findsNothing);
-      final focused = FocusManager.instance.primaryFocus?.context;
-      expect(
-        focused == null ||
-            focused.findAncestorWidgetOfExactType<EditableText>() == null &&
-                focused.widget is! EditableText,
-        isTrue,
-      );
-      expect(tester.testTextInput.isVisible, isFalse);
-    });
-  }
+  // Settings searches everything from its list (area 3, §4.3): one search,
+  // so a section's page has no find of its own (Zucchero's 613-615).
+  testWidgets('Settings: the search at the top of its list, none on a '
+      "section's page", (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final harness = Harness(snapshot());
+    tester.view.padding = const FakeViewPadding(top: 59, bottom: 34);
+    addTearDown(tester.view.resetPadding);
+    await harness.show(tester, size: const Size(393, 852));
+    await pumpFrames(tester);
+    harness.page.value = AppPage.settings;
+    await pumpFrames(tester);
+    expect(find.byType(SettingsSearchField), findsOneWidget);
+    await shots?.call(tester, 'header-Settings');
+    await tester.tap(find.text('General'));
+    await pumpFrames(tester);
+    expect(find.byKey(const ValueKey('phone-search')), findsNothing);
+    expect(find.byKey(const ValueKey('phone-find-bar')), findsNothing);
+  });
 
   testWidgets('a pipe with no liaison: Search in its header\'s …; its composer '
       'steps aside for the bar, keeping what was typed', (tester) async {
@@ -386,7 +366,7 @@ void main() {
     // A draft in the box.
     await tester.enterText(find.byType(EditableText).last, 'Half written');
     await pumpFrames(tester);
-    await tester.tap(find.bySemanticsLabel('Extensions').last);
+    await tester.tap(find.bySemanticsLabel(RegExp('^More options for ')).last);
     await pumpFrames(tester);
     await tester.tap(find.text('Search'));
     await pumpFrames(tester);

@@ -25,9 +25,9 @@ Errors are `{error, message, retry_after?}`:
 
 - 400 `invalid_request`.
 - 404 `unknown_handle`: forget the handle.
-- 410 `gone`: Apple or Google retired the token. Every handle of that token is deleted.
+- 410 `gone`: Apple or Google retired the token, or says it isn't one. Every handle of that token is deleted.
 - 429 `rate_limited`.
-- 502 `unavailable` (try again later) or `refused`.
+- 502 `unavailable` (try again later) or `refused`: Apple or Google won't take this push, for a reason other than the token (the push itself, or the relay's own key), so trying again won't help. The handle stays.
 
 Handles that no push has used for 180 days are forgotten.
 

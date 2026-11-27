@@ -31,6 +31,8 @@ pub mod text;
 pub mod tools;
 pub mod types;
 pub mod usage;
+#[cfg(windows)]
+pub mod windows;
 
 pub use agent::{AbortHandle, AfterCompaction, Agent, AgentOptions, Arrived, DetachHandle, Inbox, Listener, NewContext, Settings, WaitNetwork, WaitOut, WaitProvider};
 pub use errors::Error;

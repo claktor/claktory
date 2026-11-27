@@ -25,11 +25,13 @@ void main() {
   /// Settings as a pane narrower than a page's least beside the
   /// conversation, as the B6 pass had it, on an iPad: a window too narrow
   /// for both their leasts (with room, a page gets its least).
-  Future<Finder> show(WidgetTester tester) async {
+  Future<Finder> show(WidgetTester tester, {String section = 'profile'}) async {
     asIPad();
     final harness = Harness(snapshot(layout: beside('settings', '')));
     harness.backend.appliesLayouts = true;
-    await harness.show(tester, size: const Size(925, 900));
+    // Narrow, a section is a page of its own.
+    harness.backend.settingsSection.value = section;
+    await harness.show(tester, size: const Size(880, 900));
     await settle(tester);
     final pane = find.byType(PageSideways);
     expect(tester.getSize(pane).width, lessThan(pagePaneMinWidth - 40));
@@ -126,7 +128,7 @@ void main() {
 
   testWidgets('a finger dragging up scrolls Settings down, and the pane '
       'stays put sideways', (tester) async {
-    final pane = await show(tester);
+    final pane = await show(tester, section: 'defaults');
     final position = sideways(tester, pane);
     final down = list(tester);
     expect(down.pixels, 0);

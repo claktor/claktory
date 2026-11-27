@@ -915,8 +915,60 @@ mixin _ShareOpening<W extends StatefulWidget> on State<W> {
   /// Asks the browser again when the app comes back to the front: the
   /// person may have chosen another in System Settings meanwhile.
   late final _lifecycle = AppLifecycleListener(
-    onResume: () => unawaited(_askBrowser()),
+    onResume: () {
+      unawaited(_askBrowser());
+      // Back from a browser over the app (Android's tab, a Mac's browser).
+      _visitEnded();
+    },
   );
+
+  /// An Open's visit to the page (#505, Zucchero row 655): the share's
+  /// last failure as it was at Open, so one that happened while the page
+  /// was up (the site stopped, say, which the browser can't tell from a
+  /// page that loaded) is said once the person is back; null with no
+  /// visit under way.
+  Int64? _visitFrom;
+  var _visitSeen = false;
+  var _visitBack = false;
+  Timer? _visitTimer;
+
+  void _visitStarted() {
+    _visitFrom = _share.lastFailureMs;
+    _visitSeen = false;
+    _visitBack = false;
+    _visitTimer?.cancel();
+  }
+
+  /// Back from the page: what failed meanwhile is said, now or as the
+  /// Claktory's word of it comes in the next moments.
+  void _visitEnded() {
+    if (_visitFrom == null || _visitBack) return;
+    _visitBack = true;
+    _visitTimer = Timer(const Duration(seconds: 5), () => _visitFrom = null);
+    _visitCheck();
+  }
+
+  /// Says the share's last failure once back, if it's newer than the
+  /// visit; [rebuild] false where a build follows anyway.
+  void _visitCheck({bool rebuild = true}) {
+    final from = _visitFrom;
+    if (from == null || !_visitBack || !mounted) return;
+    final at = _share.lastFailureMs;
+    if (at == 0 || at == from) return;
+    _visitFrom = null;
+    _visitTimer?.cancel();
+    final why = _share.lastFailure;
+    void say() => _show(
+      why.isNotEmpty ? why : "${visibleCodes(_share.name)} didn't open.",
+    );
+    rebuild ? setState(say) : say();
+  }
+
+  @override
+  void didUpdateWidget(W old) {
+    super.didUpdateWidget(old);
+    _visitCheck(rebuild: false);
+  }
 
   Backend? _backend;
 
@@ -944,6 +996,7 @@ mixin _ShareOpening<W extends StatefulWidget> on State<W> {
     inAppShareBrowser.removeListener(_pageChanged);
     _lifecycle.dispose();
     _copiedTimer?.cancel();
+    _visitTimer?.cancel();
     super.dispose();
   }
 
@@ -1032,6 +1085,7 @@ mixin _ShareOpening<W extends StatefulWidget> on State<W> {
       _busy = true;
       _show(null);
     });
+    _visitStarted();
     try {
       final backend = AppScope.of(context);
       final url = await _serve(backend);
@@ -1118,11 +1172,14 @@ mixin _ShareOpening<W extends StatefulWidget> on State<W> {
   /// under it (#505), as an Open that failed here would say it.
   void _pageChanged() {
     final backend = _backend;
-    if (backend == null ||
-        !mounted ||
-        !inAppShareBrowser.takeFailure(backend, _share.id)) {
-      return;
+    if (backend == null || !mounted) return;
+    // Its page on screen, then gone (Done): what failed meanwhile.
+    if (inAppShareBrowser.shows(backend, _share.id)) {
+      _visitSeen = true;
+    } else if (_visitSeen) {
+      _visitEnded();
     }
+    if (!inAppShareBrowser.takeFailure(backend, _share.id)) return;
     final error = backend.forwards.shareLastError(_share.id);
     if (!backend.connected.value) {
       _failed(const RequestFailure('Connection lost.'));

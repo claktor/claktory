@@ -27,10 +27,14 @@ final class ConnectionStore {
   /// Whether a write the Keychain refuses goes to user defaults instead
   /// (the Mac) or fails (the iPhone, where nothing secret goes in a plist).
   private let fallsBack: Bool
-  /// The last read failed: nothing is written until one succeeds or the
-  /// person starts over, so a store that couldn't be read is never written
-  /// over with nothing (Raj's DESIGN.md §5).
-  private(set) var readFailed = false
+  /// Whether what's kept has been read: nothing is written until a read
+  /// succeeds or the person starts over, so a store that wasn't read yet,
+  /// or couldn't be, is never written over with nothing (Raj's DESIGN.md
+  /// §5; Fugo: not read yet counts as not read, from the start).
+  private enum ReadState { case notYet, read, failed }
+  private var readState = ReadState.notYet
+  /// The last read failed.
+  var readFailed: Bool { readState == .failed }
   private let log: (String) -> Void
 
   init(
@@ -80,7 +84,7 @@ final class ConnectionStore {
   func read() throws -> [String: Any] {
     let kept = defaults.dictionary(forKey: Self.defaultsKey)
     guard let keychain, keychainWorks else {
-      readFailed = false
+      readState = .read
       return kept ?? [:]
     }
     if let kept {
@@ -91,35 +95,42 @@ final class ConnectionStore {
       } catch {
         fallBack(error)
       }
-      readFailed = false
+      readState = .read
       return kept
     }
     let data: Data?
     do {
       data = try keychain.read()
     } catch {
-      readFailed = true
+      readState = .failed
       log("couldn't read them: \(error)")
       throw StoreFailure(code: "credentials_unavailable", message: "\(error)")
     }
     guard let data else {
-      readFailed = false
+      readState = .read
       return [:]
     }
     guard let connections = Self.decode(data) else {
-      readFailed = true
+      readState = .failed
       log("what's kept can't be read as connections")
       throw StoreFailure(
         code: "credentials_unreadable", message: "What's kept isn't readable as connections.")
     }
-    readFailed = false
+    readState = .read
     return connections
   }
 
-  /// Keeps [connections]; refused (credentials_read_failed) while the last
-  /// read failed, and credentials_write_failed when it can't be kept.
+  /// Keeps [connections]; refused (credentials_read_failed) before the
+  /// first read that worked, or while the last read failed, and
+  /// credentials_write_failed when it can't be kept.
   func write(_ connections: [String: Any]) throws {
-    if readFailed {
+    switch readState {
+    case .read: break
+    case .notYet:
+      throw StoreFailure(
+        code: "credentials_read_failed",
+        message: "They haven't been read yet, so they aren't written over.")
+    case .failed:
       throw StoreFailure(
         code: "credentials_read_failed",
         message: "They couldn't be read, so they aren't written over.")
@@ -153,7 +164,7 @@ final class ConnectionStore {
       }
     }
     keychainWorks = true
-    readFailed = false
+    readState = .read
     log("started over")
   }
 

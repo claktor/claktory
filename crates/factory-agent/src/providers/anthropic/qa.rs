@@ -79,6 +79,18 @@ fn check(var: &str, url: &str, home: &Path, real_homes: &[PathBuf], port: u16) -
 
 /// The real Claktories' homes, under this user's home as the user database
 /// has it (a sandbox's factoryd runs with a HOME of its own) and as HOME says.
+#[cfg(windows)]
+fn real_homes() -> Vec<PathBuf> {
+    // Where a Windows Claktory lives (factoryd's windows::dirs), and the
+    // Mac-style homes under the profile, in case one was made there.
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).map(|local| local.join("Claktory"));
+    let profile = std::env::var_os("USERPROFILE").map(PathBuf::from);
+    let mut homes: Vec<PathBuf> = local.iter().flat_map(|claktory| [claktory.join("factory"), claktory.join("factory-dev")]).collect();
+    homes.extend(profile.iter().flat_map(|user| [user.join(".factory"), user.join(".factory-dev")]));
+    homes
+}
+
+#[cfg(unix)]
 fn real_homes() -> Vec<PathBuf> {
     let mut users: Vec<PathBuf> = std::env::var_os("HOME").map(PathBuf::from).into_iter().collect();
     // SAFETY: getpwuid_r fills `entry` from `buffer`, both ours and big
@@ -152,8 +164,11 @@ mod tests {
         // Named another way (a trailing slash, a symlink), it's the same home.
         let refused = check(URL_VAR, url, &dir.path().join(".factory/"), &homes, 7500).expect_err("home");
         assert!(refused.contains("a real Claktory's home"), "{refused}");
-        std::os::unix::fs::symlink(&real, dir.path().join("link")).expect("link");
-        assert!(check(URL_VAR, url, &dir.path().join("link"), &homes, 7500).is_err());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&real, dir.path().join("link")).expect("link");
+            assert!(check(URL_VAR, url, &dir.path().join("link"), &homes, 7500).is_err());
+        }
         assert!(check(URL_VAR, url, &dir.path().join(".factory-dev"), &homes, 7500).is_err());
         assert!(check(URL_VAR, url, &dir.path().join("sandbox"), &homes, 7500).is_ok());
         // The user database's home counts, whatever HOME says.

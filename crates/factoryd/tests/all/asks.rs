@@ -100,8 +100,8 @@ async fn an_ask_waits_for_the_person_who_answers_it() {
     let dir = temp_dir();
     let (_factory, mut client, mut view) = setup(&dir).await;
     let (said, shown) = ask(&mut client, &mut view, "Which color for the launch page?", true).await;
-    assert!(said.starts_with("Asked the person: they see it as a card"), "{said}");
-    let (seq, shown) = shown.expect("a card after the call");
+    assert!(said.starts_with("Asked the person: they see it as a request"), "{said}");
+    let (seq, shown) = shown.expect("a request after the call");
     assert_eq!(
         (shown.title.as_str(), shown.wants_text, shown.state()),
         ("Which color for the launch page?", true, AskPersonState::Pending)
@@ -192,7 +192,7 @@ async fn a_reply_is_told_as_the_persons_words_never_as_a_yes() {
     let text = told(&mut client, &mut view, 1).await;
     assert!(
         text.starts_with(
-            "The person replied to your question \"Deploy to production?\":\n\nNo, staging first.\n\nIf what they wrote needs an answer from you, reply on the card with ask_reply (id 1) so it reaches them where they are, rather than in your chat.\n\nYou asked:"
+            "The person replied to your question \"Deploy to production?\":\n\nNo, staging first.\n\nIf what they wrote needs an answer from you, reply in the request with ask_reply (id 1) so it reaches them where they are, rather than in your chat.\n\nYou asked:"
         ),
         "{text}"
     );
@@ -473,18 +473,18 @@ async fn a_procedure_goes_one_step_at_a_time_and_counts_once() {
     let (seq, shown) = shown.expect("a card");
     assert_eq!(shown.steps.iter().map(|step| step.text.as_str()).collect::<Vec<_>>(), steps);
     assert_eq!(states(&shown), [v1::AskStepState::Pending; 3]);
-    assert_eq!(view.agent("builder").waiting_seqs, [seq], "one card, however many steps");
+    assert_eq!(view.agent("builder").waiting_seqs, [seq], "one request, however many steps");
 
     // Only the current step can be answered; a step needs saying which.
     assert_eq!(refused(&mut client, &mut view, step(seq, 1, false, "")).await, "You haven't reached that step yet.");
-    assert_eq!(refused(&mut client, &mut view, answer(seq, false, "")).await, "Answer the step the card shows.");
+    assert_eq!(refused(&mut client, &mut view, answer(seq, false, "")).await, "Answer the step the request shows.");
 
     // Done: the agent is told, and the next step is current.
     assert!(matches!(apply_request(&mut client, &mut view, step(seq, 0, false, "It's under General.")).await, Body::Ack(_)));
     let said = told(&mut client, &mut view, 1).await;
     assert!(
         said.starts_with(
-            "The person did step 1 of 3 of \"Set up signing\": Open Settings → Signing.\n\nTheir comment:\n\nIt's under General.\n\nIf what they wrote needs an answer from you, reply on the card with ask_reply (id 1) so it reaches them where they are, rather than in your chat.\n\nThey see step 2 next: Click **Add key**."
+            "The person did step 1 of 3 of \"Set up signing\": Open Settings → Signing.\n\nTheir comment:\n\nIt's under General.\n\nIf what they wrote needs an answer from you, reply in the request with ask_reply (id 1) so it reaches them where they are, rather than in your chat.\n\nThey see step 2 next: Click **Add key**."
         ),
         "{said}"
     );
@@ -519,7 +519,7 @@ async fn a_procedure_goes_one_step_at_a_time_and_counts_once() {
     let said = told(&mut client, &mut view, 4).await;
     assert!(
         said.starts_with(
-            "The person can't or won't do step 1 of 3 of \"Set up signing\": Open Settings → Signing.\n\nTheir comment:\n\nThere's no Signing.\n\nIt stops there, waiting for you, and nothing was marked done. Steps 2 to 3 weren't shown to them. If they can't, find a way without them and rewrite the steps on this card: ask_reply (id 2) with steps, step 1 rewritten, and a short answer, and it opens again at step 1. If their words say they won't, respect it: stop the card, and don't do that step another way. To stop: ask_reply (id 2) with resolve: true and a short word for them, and the card shows it stopped at step 1; then use your best judgment"
+            "The person can't or won't do step 1 of 3 of \"Set up signing\": Open Settings → Signing.\n\nTheir comment:\n\nThere's no Signing.\n\nIt stops there, waiting for you, and nothing was marked done. Steps 2 to 3 weren't shown to them. If they can't, find a way without them and rewrite the steps in this request: ask_reply (id 2) with steps, step 1 rewritten, and a short answer, and it opens again at step 1. If their words say they won't, respect it: stop the request, and don't do that step another way. To stop: ask_reply (id 2) with resolve: true and a short word for them, and the request shows it stopped at step 1; then use your best judgment"
         ),
         "{said}"
     );

@@ -17,6 +17,7 @@ mod common;
 use common::{Client, View, apply_request, create_agent, create_project, send_message, start, temp_dir};
 use factory_protocol::v1::{self, AgentStatus, ErrandState, client_message, entry::Kind, server_message::Body};
 use serde_json::json;
+use std::time::Duration;
 
 const FORM: &str = r#"<!doctype html><title>Sign up</title>
     <h1>Organization</h1><p>Fill this in.</p>
@@ -100,7 +101,7 @@ async fn an_errand_from_its_lead_to_the_persons_turn_and_back() {
 
     // Only an agent the person contained gets errands.
     let Body::Error(refused) = apply_request(&mut client, &mut view, errands_on("runner")).await else { panic!("refused") };
-    assert!(refused.message.contains("contained for errands"), "{}", refused.message);
+    assert!(refused.message.contains("Use for errands"), "{}", refused.message);
     let contain = |on: bool| client_message::Body::SetAgentContained(v1::SetAgentContained { agent_id: "runner".into(), contained: on });
     apply_request(&mut client, &mut view, contain(true)).await;
     assert!(view.agent("runner").contained);
@@ -138,7 +139,7 @@ async fn an_errand_from_its_lead_to_the_persons_turn_and_back() {
     // A payment is the person's: on a card, and the agent waits.
     let pay = json!({"kind": "payment", "what": "Pay Google Play's $25 registration fee."});
     let (said, card) = call(&mut client, &mut view, "runner", "errand_handoff", pay).await;
-    let (seq, card) = card.unwrap_or_else(|| panic!("a card: {said}"));
+    let (seq, card) = card.unwrap_or_else(|| panic!("a request: {said}"));
     assert_eq!(card.title, "Your turn: a payment");
     let handoff = card.handoff.clone().expect("the card's handoff");
     assert_eq!((handoff.kind(), handoff.what.as_str()), (v1::ErrandHandoffKind::Payment, "Pay Google Play's $25 registration fee."));
@@ -149,39 +150,57 @@ async fn an_errand_from_its_lead_to_the_persons_turn_and_back() {
     let (said, _) = call(&mut client, &mut view, "runner", "ask_withdraw", json!({"id": card.id, "reason": "Changed my mind"})).await;
     assert!(said.contains("Nothing was withdrawn"), "{said}");
 
-    // Done: the browser is the agent's again, and it's told the page.
-    let done = client_message::Body::AnswerAsk(v1::AnswerAsk { agent_id: "runner".into(), seq, ..Default::default() });
+    // Done: the browser is the agent's again, and it's told the page. Words
+    // an older app sends with it are dropped, never kept as an answer the
+    // agent didn't get (Abbacchio 1640).
+    let done = client_message::Body::AnswerAsk(v1::AnswerAsk { agent_id: "runner".into(), seq, text: "Paid with the Visa".into(), ..Default::default() });
     let reply = apply_request(&mut client, &mut view, done).await;
     assert!(!matches!(reply, Body::Error(_)), "{reply:?}");
     view.follow(&mut client, |view| told(view, "finished your handoff") && idle(view, "runner")).await;
     assert!(told(&view, "The page is now"));
+    let card = view.entries.iter().find_map(|entry| match &entry.kind {
+        Some(Kind::AskPerson(ask)) if entry.seq == seq => Some(ask.clone()),
+        _ => None,
+    });
+    let card = card.expect("the card");
+    assert_eq!((card.state(), card.answer.as_str()), (v1::AskPersonState::Answered, ""));
+    assert!(!told(&view, "Paid with the Visa"));
     assert_eq!(errand(&view).state(), ErrandState::Running);
 
-    // A check that the agent is a person, which doesn't clear: Claktory
-    // hands it over itself. Can't do this ends the errand, with the
-    // person's reason.
+    // A check that the agent is a person, which doesn't clear by itself:
+    // no one can pass it for the browser, so Claktory tries the page again
+    // later while the errand's steps wait, and tells the agent (W5).
+    factoryd::errands::check_timing_for_test(&factory, [Duration::from_secs(3); 3], Duration::from_millis(300));
     factoryd::errands::show_for_test(&factory, "<title>Just a moment...</title><p>Checking your browser</p>").await;
     let (said, card) = call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
-    assert!(said.contains("put up a check that you're a person"), "{said}");
-    let (seq, card) = card.unwrap_or_else(|| panic!("a card: {said}"));
-    assert_eq!(card.handoff.expect("its handoff").kind(), v1::ErrandHandoffKind::Captcha);
-    // Done while the check still shows: the agent is told so and the
-    // browser stays its own, never paused without a card; its next read
-    // hands the check over on a new one (Ghiaccio 40233).
-    let done = client_message::Body::AnswerAsk(v1::AnswerAsk { agent_id: "runner".into(), seq, ..Default::default() });
-    apply_request(&mut client, &mut view, done).await;
-    view.follow(&mut client, |view| told(view, "still shows a check") && idle(view, "runner")).await;
+    assert!(said.contains("put up a check that you're a person") && said.contains("tries the page again"), "{said}");
+    assert!(card.is_none(), "no one's turn");
     assert_eq!(errand(&view).state(), ErrandState::Running);
-    let (said, card) = call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
-    assert!(said.contains("put up a check that you're a person"), "{said}");
-    let (seq, card) = card.unwrap_or_else(|| panic!("a new card: {said}"));
-    assert_eq!(card.handoff.expect("its handoff").kind(), v1::ErrandHandoffKind::Captcha);
-    assert_eq!(errand(&view).handoff.expect("the errand's handoff").seq, seq);
-    let cant = v1::AnswerAsk { agent_id: "runner".into(), seq, dismiss: true, text: "No card with me".into(), ..Default::default() };
-    apply_request(&mut client, &mut view, client_message::Body::AnswerAsk(cant)).await;
-    view.follow(&mut client, |view| told(view, "couldn't do your handoff") && idle(view, "runner")).await;
-    assert_eq!(errand(&view).state(), ErrandState::Cancelled);
-    assert_eq!(errand(&view).end_reason, "No card with me");
+    let (said, _) = call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
+    assert!(said.starts_with("paused") && said.contains("for its check that you're a person"), "{said}");
+    factoryd::errands::show_for_test(&factory, FORM).await;
+    view.follow(&mut client, |view| told(view, "cleared when Claktory tried the page again") && idle(view, "runner")).await;
+    let (said, _) = call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
+    assert!(said.contains("Organization"), "{said}");
+
+    // One that never clears: after the last try, the errand fails.
+    factoryd::errands::check_timing_for_test(&factory, [Duration::from_millis(200); 3], Duration::from_millis(200));
+    factoryd::errands::show_for_test(&factory, "<title>Just a moment...</title><p>Checking your browser</p>").await;
+    let (said, _) = call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
+    assert!(said.contains("tries the page again"), "{said}");
+    view.follow(&mut client, |view| told(view, "Claktory tried the page 3 more times") && idle(view, "runner")).await;
+    assert_eq!(errand(&view).state(), ErrandState::Failed);
+    assert!(errand(&view).end_reason.contains("kept showing a check that you're a person"), "{}", errand(&view).end_reason);
+
+    // Proving who the person is ends an errand: never handed over.
+    select(&mut client, &mut view, "lead").await;
+    let (said, _) = call(&mut client, &mut view, "lead", "errand_open", open(json!(["play.google.com"]))).await;
+    assert!(said.starts_with("Opened errand"), "{said}");
+    select(&mut client, &mut view, "runner").await;
+    let id = json!({"kind": "identity", "what": "Upload a passport photo."});
+    let (said, card) = call(&mut client, &mut view, "runner", "errand_handoff", id).await;
+    assert!(card.is_none() && said.contains("never does") && said.contains("is over"), "{said}");
+    assert_eq!(errand(&view).state(), ErrandState::Stopped);
 
     // Another errand: the agent reports to its lead, fenced, and finishes.
     select(&mut client, &mut view, "lead").await;
@@ -254,6 +273,45 @@ async fn lead_and_runner(client: &mut Client, view: &mut View, dir: &std::path::
     assert!(!matches!(reply, Body::Error(_)), "{reply:?}");
 }
 
+/// Row 1695 (Fugo 50226): a lead whose conversation read the web through
+/// Claktory's own tools can't open an errand until it's cleared; the mark
+/// isn't pipes' taint, so its secrets don't start asking.
+#[tokio::test]
+async fn a_lead_that_read_the_web_opens_no_errand_until_it_is_cleared() {
+    use client_message::Body as Request;
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    if !factoryd::errands::local_chrome_with_turns_for_test(&factory, &dir.join("profile")) {
+        eprintln!("no Chrome here: skipped");
+        return;
+    }
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    lead_and_runner(&mut client, &mut view, &dir).await;
+    select(&mut client, &mut view, "lead").await;
+    // Refused as a local address, but read all the same as far as errands go.
+    call(&mut client, &mut view, "lead", "web_fetch", json!({"url": "http://127.0.0.1:9/"})).await;
+    assert!(view.agent("lead").tainted_by_pipes.is_empty(), "not pipes' taint: {:?}", view.agent("lead").tainted_by_pipes);
+    let open = json!({"agent": "runner", "purpose": "Fill the Play form", "sites": ["play.google.com"]});
+    let (said, _) = call(&mut client, &mut view, "lead", "errand_open", open.clone()).await;
+    assert!(said.contains("You've read a web page") && said.contains("can't open an errand"), "{said}");
+    assert!(view.workspace.errands.is_empty());
+    // A fresh conversation may.
+    let clear = v1::RunCommand { agent_id: "lead".into(), name: "clear".into(), args: String::new() };
+    apply_request(&mut client, &mut view, Request::RunCommand(clear)).await;
+    view.follow(&mut client, |view| idle(view, "lead")).await;
+    let (said, _) = call(&mut client, &mut view, "lead", "errand_open", open).await;
+    assert!(said.starts_with("Opened errand"), "{said}");
+    // Web search marks it too.
+    let clear = v1::RunCommand { agent_id: "lead".into(), name: "clear".into(), args: String::new() };
+    apply_request(&mut client, &mut view, Request::RunCommand(clear)).await;
+    view.follow(&mut client, |view| idle(view, "lead")).await;
+    factoryd::errands::read_outside_for_test(&factory, "lead", "web search results");
+    let open = json!({"agent": "runner", "purpose": "Another", "sites": ["play.google.com"]});
+    let (said, _) = call(&mut client, &mut view, "lead", "errand_open", open).await;
+    assert!(said.contains("You've read web search results"), "{said}");
+}
+
 #[tokio::test]
 async fn an_errand_follows_the_browsers_turns() {
     let dir = temp_dir();
@@ -279,20 +337,20 @@ async fn an_errand_follows_the_browsers_turns() {
     call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
     assert_eq!(calls(), [format!("release {id} 1")]);
 
-    // A check that it's a person is the person's, undriven; a payment
-    // stays driven. Done drives it again.
+    // A check that it's a person is no one's turn: the browser stays
+    // driven while Claktory tries again (W5). A payment stays driven too,
+    // and Done drives it again.
+    factoryd::errands::check_timing_for_test(&factory, [Duration::from_secs(2); 3], Duration::from_millis(200));
     factoryd::errands::show_for_test(&factory, "<title>Just a moment...</title><p>Checking your browser</p>").await;
     let (said, card) = call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
-    let (seq, _) = card.unwrap_or_else(|| panic!("a card: {said}"));
-    assert_eq!(calls(), ["handoff undriven "]);
-    let done = |seq| client_message::Body::AnswerAsk(v1::AnswerAsk { agent_id: "runner".into(), seq, ..Default::default() });
+    assert!(card.is_none() && said.contains("tries the page again"), "{said}");
     factoryd::errands::show_for_test(&factory, "<title>Sign up</title><p>Organization</p>").await;
-    apply_request(&mut client, &mut view, done(seq)).await;
-    view.follow(&mut client, |view| told(view, "finished your handoff") && idle(view, "runner")).await;
-    assert_eq!(calls(), ["resume"]);
+    view.follow(&mut client, |view| told(view, "cleared when Claktory tried") && idle(view, "runner")).await;
+    assert!(calls().is_empty());
+    let done = |seq| client_message::Body::AnswerAsk(v1::AnswerAsk { agent_id: "runner".into(), seq, ..Default::default() });
     let pay = json!({"kind": "payment", "what": "Pay the fee."});
     let (said, card) = call(&mut client, &mut view, "runner", "errand_handoff", pay).await;
-    let (seq, _) = card.unwrap_or_else(|| panic!("a card: {said}"));
+    let (seq, _) = card.unwrap_or_else(|| panic!("a request: {said}"));
     assert_eq!(calls(), ["handoff driven "]);
     apply_request(&mut client, &mut view, done(seq)).await;
     view.follow(&mut client, |view| errand(view).state() == ErrandState::Running && idle(view, "runner")).await;
@@ -614,7 +672,7 @@ async fn a_code_goes_from_the_persons_card_into_the_field_and_never_to_the_agent
 
     // The card is Claktory's, for a code only.
     let (said, card) = call(&mut client, &mut view, "runner", "errand_handoff", hand(&code)).await;
-    let (seq, card) = card.unwrap_or_else(|| panic!("a card: {said}"));
+    let (seq, card) = card.unwrap_or_else(|| panic!("a request: {said}"));
     assert!(said.contains("you never see it"), "{said}");
     assert_eq!(card.title, "shown.test asks for a code");
     assert!(card.code && card.wants_text, "{card:?}");
@@ -669,7 +727,7 @@ async fn a_code_goes_from_the_persons_card_into_the_field_and_never_to_the_agent
     let (document, code) = reference(&said, "Code");
     let again = json!({"kind": "code", "what": "Type the code.", "document": document, "target": code});
     let (said, card) = call(&mut client, &mut view, "runner", "errand_handoff", again).await;
-    let (seq, _) = card.unwrap_or_else(|| panic!("a card: {said}"));
+    let (seq, _) = card.unwrap_or_else(|| panic!("a request: {said}"));
     factoryd::errands::show_for_test(&factory, "<title>Signed out</title><p>Your session ended.</p>").await;
     let answer = Request::AnswerAsk(v1::AnswerAsk { agent_id: "runner".into(), seq, text: "654321".into(), ..Default::default() });
     apply_request(&mut client, &mut view, answer).await;
@@ -689,7 +747,7 @@ async fn a_code_goes_from_the_persons_card_into_the_field_and_never_to_the_agent
     let (document, code) = reference(&said, "Code");
     let again = json!({"kind": "code", "what": "Type the code.", "document": document, "target": code});
     let (said, card) = call(&mut client, &mut view, "runner", "errand_handoff", again).await;
-    let (seq, card) = card.unwrap_or_else(|| panic!("a card: {said}"));
+    let (seq, card) = card.unwrap_or_else(|| panic!("a request: {said}"));
     assert!(card.handoff.expect("its handoff").numeric);
     let no = Request::AnswerAsk(v1::AnswerAsk { agent_id: "runner".into(), seq, dismiss: true, text: "No code came".into(), ..Default::default() });
     apply_request(&mut client, &mut view, no).await;
@@ -739,7 +797,7 @@ async fn an_agreement_is_ticked_only_on_the_persons_accept_and_a_reply_ticks_not
 
     // The card shows the box's words as the site's.
     let (said, card) = call(&mut client, &mut view, "runner", "errand_handoff", agree(&document, &terms)).await;
-    let (seq, card) = card.unwrap_or_else(|| panic!("a card: {said}"));
+    let (seq, card) = card.unwrap_or_else(|| panic!("a request: {said}"));
     assert_eq!(card.title, "shown.test asks you to agree");
     let handoff = card.handoff.clone().expect("its handoff");
     assert_eq!((handoff.kind(), handoff.agreement.as_str()), (v1::ErrandHandoffKind::Agreement, "I agree to the Developer Distribution Agreement"));
@@ -761,7 +819,7 @@ async fn an_agreement_is_ticked_only_on_the_persons_accept_and_a_reply_ticks_not
     let (said, _) = call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
     let ((document, terms), _) = refs(&said);
     let (said, card) = call(&mut client, &mut view, "runner", "errand_handoff", agree(&document, &terms)).await;
-    let (seq, _) = card.unwrap_or_else(|| panic!("a card: {said}"));
+    let (seq, _) = card.unwrap_or_else(|| panic!("a request: {said}"));
     apply_request(&mut client, &mut view, answer(seq, "", false)).await;
     view.follow(&mut client, |view| told(view, "Claktory ticked the box") && idle(view, "runner")).await;
     assert!(told(&view, "agreed"), "the box ticked");
@@ -777,7 +835,7 @@ async fn an_agreement_is_ticked_only_on_the_persons_accept_and_a_reply_ticks_not
     let (said, _) = call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
     let ((document, terms), _) = refs(&said);
     let (said, card) = call(&mut client, &mut view, "runner", "errand_handoff", agree(&document, &terms)).await;
-    let (seq, _) = card.unwrap_or_else(|| panic!("a card: {said}"));
+    let (seq, _) = card.unwrap_or_else(|| panic!("a request: {said}"));
     factoryd::errands::show_for_test(&factory, &AGREE.replace("the Developer Distribution Agreement", "pay $99 a month")).await;
     apply_request(&mut client, &mut view, answer(seq, "", false)).await;
     view.follow(&mut client, |view| told(view, "couldn't tick the box") && idle(view, "runner")).await;
@@ -837,12 +895,16 @@ async fn recovery_codes_go_to_the_person_only_and_two_step_is_theirs_to_turn_on(
     let (said, _) = call(&mut client, &mut view, "runner", "errand_act", click(&document, &turn_on)).await;
     assert!(said.contains("sensitive_action") && said.contains("kind two_step"), "{said}");
     let (said, card) = call(&mut client, &mut view, "runner", "errand_handoff", json!({"kind": "two_step", "what": "The shop asks to turn on 2-Step Verification."})).await;
-    let (seq, card) = card.unwrap_or_else(|| panic!("a card: {said}"));
+    let (seq, card) = card.unwrap_or_else(|| panic!("a request: {said}"));
     assert_eq!(card.title, "shown.test wants two-step sign-in turned on");
     assert_eq!(card.handoff.as_ref().map(|handoff| handoff.kind()), Some(v1::ErrandHandoffKind::TwoStep));
     let approve = |seq: u64| Request::AnswerAsk(v1::AnswerAsk { agent_id: "runner".into(), seq, ..Default::default() });
     apply_request(&mut client, &mut view, approve(seq)).await;
     view.follow(&mut client, |view| told(view, "approved turning on two-step sign-in") && idle(view, "runner")).await;
+    // What the page showed leaves Chrome's caches once the card ends,
+    // whatever the answer (Fugo 1642).
+    let cleared = || factoryd::errands::caches_cleared_for_test(&factory);
+    assert_eq!(cleared(), ["https://shown.test"]);
     let (said, _) = call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
     let (document, turn_on) = reference(&said, "Turn on 2-Step");
     let (_, authenticator_now) = reference(&said, "authenticator app");
@@ -858,7 +920,7 @@ async fn recovery_codes_go_to_the_person_only_and_two_step_is_theirs_to_turn_on(
     assert!(!said.contains("a8f2-91kd"), "{said}");
     let (document, block) = reference(&said, "recovery codes (withheld)");
     let (said, card) = call(&mut client, &mut view, "runner", "errand_handoff", json!({"kind": "recovery_codes", "what": "Save the shop's backup codes.", "document": document, "target": block})).await;
-    let (seq, card) = card.unwrap_or_else(|| panic!("a card: {said}"));
+    let (seq, card) = card.unwrap_or_else(|| panic!("a request: {said}"));
     assert!(said.contains("You never see them"), "{said}");
     assert_eq!(card.title, "shown.test recovery codes");
     assert!(card.body.starts_with("Claktory keeps them safe until you choose."), "{}", card.body);
@@ -889,6 +951,7 @@ async fn recovery_codes_go_to_the_person_only_and_two_step_is_theirs_to_turn_on(
     let keep = Request::KeepRecoveryCodes(v1::KeepRecoveryCodes { agent_id: "runner".into(), seq });
     apply_request(&mut client, &mut view, keep.clone()).await;
     view.follow(&mut client, |view| told(view, "kept the recovery codes in Secrets") && idle(view, "runner")).await;
+    assert_eq!(cleared().len(), 2, "{:?}", cleared());
     let vault = view.workspace.vault.clone().expect("the vault");
     let secret = vault.secrets.iter().find(|secret| secret.name == "shown.test recovery codes").expect("kept");
     assert!(secret.grants.is_empty(), "{secret:?}");
@@ -903,9 +966,11 @@ async fn recovery_codes_go_to_the_person_only_and_two_step_is_theirs_to_turn_on(
     let (said, _) = call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
     let (document, block) = reference(&said, "recovery codes (withheld)");
     let (said, card) = call(&mut client, &mut view, "runner", "errand_handoff", json!({"kind": "recovery_codes", "what": "Save them.", "document": document, "target": block})).await;
-    let (seq, _) = card.unwrap_or_else(|| panic!("a card: {said}"));
+    let (seq, _) = card.unwrap_or_else(|| panic!("a request: {said}"));
     apply_request(&mut client, &mut view, approve(seq)).await;
     view.follow(&mut client, |view| told(view, "saved the recovery codes") && idle(view, "runner")).await;
+    assert_eq!(cleared().len(), 3, "{:?}", cleared());
+    assert!(cleared().iter().all(|origin| origin == "https://shown.test"), "{:?}", cleared());
     let show = Request::ShowRecoveryCodes(v1::ShowRecoveryCodes { agent_id: "runner".into(), seq });
     let Body::Error(gone) = apply_request(&mut client, &mut view, show).await else { panic!("gone") };
     assert!(gone.message.contains("These codes are gone"), "{}", gone.message);
@@ -915,11 +980,11 @@ async fn recovery_codes_go_to_the_person_only_and_two_step_is_theirs_to_turn_on(
     let (said, _) = call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
     let (document, block) = reference(&said, "recovery codes (withheld)");
     let (said, card) = call(&mut client, &mut view, "runner", "errand_handoff", json!({"kind": "recovery_codes", "what": "Save them.", "document": document, "target": block})).await;
-    let (seq, card) = card.unwrap_or_else(|| panic!("a card: {said}"));
+    let (seq, card) = card.unwrap_or_else(|| panic!("a request: {said}"));
     factoryd::errands::lose_codes_for_test(&factory, &card.id);
     let show = Request::ShowRecoveryCodes(v1::ShowRecoveryCodes { agent_id: "runner".into(), seq });
     let Body::Error(gone) = apply_request(&mut client, &mut view, show).await else { panic!("gone") };
-    assert!(gone.message.contains("Choose I saved them to close the card."), "{}", gone.message);
+    assert!(gone.message.contains("Choose I saved them to close the request."), "{}", gone.message);
     let keep = Request::KeepRecoveryCodes(v1::KeepRecoveryCodes { agent_id: "runner".into(), seq });
     let Body::Error(gone) = apply_request(&mut client, &mut view, keep).await else { panic!("nothing to keep") };
     assert!(gone.message.contains("nothing to keep"), "{}", gone.message);
@@ -931,7 +996,7 @@ async fn recovery_codes_go_to_the_person_only_and_two_step_is_theirs_to_turn_on(
     let (said, _) = call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
     let (document, block) = reference(&said, "recovery codes (withheld)");
     let (said, card) = call(&mut client, &mut view, "runner", "errand_handoff", json!({"kind": "recovery_codes", "what": "Save them.", "document": document, "target": block})).await;
-    let (seq, _) = card.unwrap_or_else(|| panic!("a card: {said}"));
+    let (seq, _) = card.unwrap_or_else(|| panic!("a request: {said}"));
     let held = Request::ShowRecoveryCodes(v1::ShowRecoveryCodes { agent_id: "runner".into(), seq });
     assert!(matches!(apply_request(&mut client, &mut view, held).await, Body::RecoveryCodes(_)));
     let clear = v1::RunCommand { agent_id: "runner".into(), name: "clear".into(), args: String::new() };
@@ -976,7 +1041,7 @@ async fn recovery_codes_go_to_the_person_only_and_two_step_is_theirs_to_turn_on(
         }
     }
     let actions: Vec<&str> = log.entries.iter().map(|entry| entry.action.as_str()).collect();
-    for action in ["Asked you about two-step sign-in", "You approved two-step sign-in on https://shown.test", "Handed to you: recovery codes", "You kept the recovery codes in Secrets", "You saved the recovery codes", "Recovery codes kept in Secrets as shown.test recovery codes 2: their card closed"] {
+    for action in ["Asked you about two-step sign-in", "You approved two-step sign-in on https://shown.test", "Handed to you: recovery codes", "You kept the recovery codes in Secrets", "You saved the recovery codes", "Recovery codes kept in Secrets as shown.test recovery codes 2: their request closed"] {
         assert!(actions.contains(&action), "{action} in {actions:?}");
     }
 }
@@ -1007,9 +1072,19 @@ async fn recovery_codes_outlast_their_errand() {
     let (said, _) = call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
     let (document, block) = reference(&said, "recovery codes (withheld)");
     let (said, card) = call(&mut client, &mut view, "runner", "errand_handoff", json!({"kind": "recovery_codes", "what": "Save them.", "document": document, "target": block})).await;
-    let (seq, _) = card.unwrap_or_else(|| panic!("a card: {said}"));
+    let (seq, _) = card.unwrap_or_else(|| panic!("a request: {said}"));
+    // Its page may be in Chrome's caches: a clear is owed until it's made
+    // (row 1699). The browser goes away first, as at a restart, so the
+    // errand's end can't make it.
+    let owed = || factoryd::errands::caches_owed_for_test(&factory);
+    let cleared = || factoryd::errands::caches_cleared_for_test(&factory);
+    assert_eq!(owed(), ["https://shown.test"]);
+    factoryd::errands::drop_connection_for_test(&factory).await;
+    assert!(factoryd::errands::local_chrome_for_test(&factory, &dir.join("profile-again")), "a browser again");
     let ended = errand(&view).id.clone();
     factoryd::errands::end_errand_for_test(&factory, &ended).await;
+    assert_eq!(owed(), ["https://shown.test"]);
+    assert!(cleared().is_empty(), "{:?}", cleared());
     let show = Request::ShowRecoveryCodes(v1::ShowRecoveryCodes { agent_id: "runner".into(), seq });
     assert!(matches!(apply_request(&mut client, &mut view, show.clone()).await, Body::RecoveryCodes(_)), "kept through the errand's end");
     // Still no Dismiss.
@@ -1022,4 +1097,87 @@ async fn recovery_codes_outlast_their_errand() {
     assert!(answered(&view, seq));
     let Body::Error(gone) = apply_request(&mut client, &mut view, show).await else { panic!("gone") };
     assert!(gone.message.contains("These codes are gone"), "{}", gone.message);
+    // The browser's next driven start makes the owed clear before its
+    // first page.
+    assert_eq!(owed(), ["https://shown.test"]);
+    select(&mut client, &mut view, "lead").await;
+    let open = json!({"agent": "runner", "purpose": "Check the shop account", "sites": ["shop.example"]});
+    let (said, _) = call(&mut client, &mut view, "lead", "errand_open", open).await;
+    assert!(said.starts_with("Opened errand"), "{said}");
+    select(&mut client, &mut view, "runner").await;
+    let (said, _) = call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
+    assert_eq!(cleared(), ["https://shown.test"], "{said}");
+    assert!(owed().is_empty(), "{:?}", owed());
+}
+
+/// A page a cookie notice covers, which offers only its Accept.
+const NOTICE: &str = r#"<!doctype html><title>Kettles</title><h1>Kettles</h1>
+    <div role=dialog style="position:fixed;bottom:0;left:0;right:0;height:140px;background:#fff">We use cookies.
+    <button onclick="this.parentNode.remove()">Got it</button></div>"#;
+
+#[tokio::test]
+async fn an_errand_clears_what_covers_the_page_and_logs_cookies_it_had_to_take() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    if !factoryd::errands::local_chrome_for_test(&factory, &dir.join("profile")) {
+        eprintln!("no Chrome here: skipped");
+        return;
+    }
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    lead_and_runner(&mut client, &mut view, &dir).await;
+    select(&mut client, &mut view, "lead").await;
+    let open = json!({"agent": "runner", "purpose": "Find a kettle", "sites": ["play.google.com"]});
+    let (said, _) = call(&mut client, &mut view, "lead", "errand_open", open).await;
+    assert!(said.starts_with("Opened errand"), "{said}");
+    select(&mut client, &mut view, "runner").await;
+    call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
+    factoryd::errands::show_for_test(&factory, NOTICE).await;
+    let (said, _) = call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
+    assert!(said.contains(r#""overlays":["cookie notice"]"#), "{said}");
+    let (document, got_it) = reference(&said, "Got it");
+
+    // A dismiss names only the page: Claktory picks what to press.
+    let (said, _) = call(&mut client, &mut view, "runner", "errand_act", json!({"op": "dismiss", "document": document, "target": got_it})).await;
+    assert!(said.contains("takes only document"), "{said}");
+    let (said, _) = call(&mut client, &mut view, "runner", "errand_act", json!({"op": "dismiss"})).await;
+    assert!(said.contains("needs document"), "{said}");
+    let (said, _) = call(&mut client, &mut view, "runner", "errand_act", json!({"op": "dismiss", "document": document})).await;
+    assert!(said.contains(r#""pressed":["Got it"]"#) && said.contains(r#""accepted_cookies":true"#) && said.contains(r#""gone":true"#), "{said}");
+
+    // The log says what was cleared, and that its cookies were taken, in
+    // Claktory's words.
+    let Body::ErrandLog(log) =
+        apply_request(&mut client, &mut view, client_message::Body::ListErrandLog(v1::ListErrandLog::default())).await
+    else {
+        panic!("the log")
+    };
+    let actions: Vec<&str> = log.entries.iter().map(|entry| entry.action.as_str()).collect();
+    assert!(actions.contains(&"Cleared a cookie notice"), "{actions:?}");
+    assert!(actions.contains(&"Accepted the site's cookies: its notice offered no other choice"), "{actions:?}");
+    assert!(log.entries.iter().all(|entry| !format!("{entry:?}").contains("Got it")), "{log:?}");
+}
+
+#[tokio::test]
+async fn an_errand_waits_for_the_browsers_hidden_start_and_says_when_it_failed() {
+    let dir = temp_dir();
+    let (addr, factory) = start(&dir).await;
+    if !factoryd::errands::local_chrome_with_turns_for_test(&factory, &dir.join("profile")) {
+        eprintln!("no Chrome here: skipped");
+        return;
+    }
+    let (mut client, workspace, _) = Client::connect(addr).await;
+    let mut view = View { workspace, ..View::default() };
+    lead_and_runner(&mut client, &mut view, &dir).await;
+    select(&mut client, &mut view, "lead").await;
+    let open = json!({"agent": "runner", "purpose": "Find a kettle", "sites": ["play.google.com"]});
+    let (said, _) = call(&mut client, &mut view, "lead", "errand_open", open).await;
+    assert!(said.starts_with("Opened errand"), "{said}");
+    select(&mut client, &mut view, "runner").await;
+    factoryd::errands::browser_unbooted_for_test(&factory, Some("a window showed"));
+    let (said, _) = call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
+    assert_eq!(said, "interrupted: Claktory's browser didn't start hidden (a window showed)");
+    factoryd::errands::browser_unbooted_for_test(&factory, None);
+    let (said, _) = call(&mut client, &mut view, "runner", "errand_read", json!({})).await;
+    assert!(said.contains("a stranger's words"), "{said}");
 }

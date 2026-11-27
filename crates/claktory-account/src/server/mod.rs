@@ -70,7 +70,7 @@ fn signed(method: &Method, path: &str) -> bool {
                 | "/v1/devices/vouch"
                 | "/v1/pipe-identity"
                 | "/v1/claktories/sign-out"
-        ) | (&Method::PUT, "/v1/endpoints")
+        ) | (&Method::PUT, "/v1/endpoints" | "/v1/account/recovery-key")
             | (&Method::GET, "/v1/devices/me" | "/v1/claktories")
     ) || path.starts_with("/v1/apps/")
 }
@@ -410,6 +410,7 @@ impl Service {
             (&Method::PUT, "/v1/endpoints") => api::endpoints(self, call),
             (&Method::POST, "/v1/move") => api::move_claktory(self, call).await,
             (&Method::POST, "/v1/claktories/sign-out") => api::sign_out(self, call).await,
+            (&Method::PUT, "/v1/account/recovery-key") => api::set_recovery_key(self, call),
             (&Method::POST, "/v1/devices/sign-in/start") => devices::sign_in_start(self, call).await,
             (&Method::POST, "/v1/devices/sign-in/verify") => devices::sign_in_verify(self, call),
             (&Method::GET, "/v1/devices/me") => devices::me(self, call),
@@ -581,6 +582,7 @@ impl ApiError {
                 attempts_left: None,
                 retry_after: None,
                 server_time: None,
+                recovery_key: None,
             },
         }
     }

@@ -7,8 +7,7 @@
 import 'package:factory_app/ask_card.dart';
 import 'package:factory_app/avatar.dart' show PersonAvatar;
 import 'package:factory_app/characters/character.dart' show AgentCharacter;
-import 'package:factory_app/controls.dart' show Button;
-import 'package:factory_app/decision.dart' show DecisionComment;
+import 'package:factory_app/decision.dart' show DecisionComment, QuietLink;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:fixnum/fixnum.dart';
@@ -154,8 +153,6 @@ void main() {
     final harness = _inConversation(_ask(thread: _thread()));
     await harness.show(tester);
     await settle(tester);
-    await tester.tap(_inCard(find.text('Add a comment')));
-    await settle(tester);
     await tester.enterText(_comment, 'Fine, but encrypt them');
     await settle(tester);
     await tester.tap(_inCard(find.text('Submit')));
@@ -174,8 +171,8 @@ void main() {
     final field = _inCard(find.byType(EditableText)).first;
     expect(
       tester
-          .widget<Button>(_inCard(find.widgetWithText(Button, 'Reply')))
-          .onPressed,
+          .widget<QuietLink>(_inCard(find.widgetWithText(QuietLink, 'Reply')))
+          .onTap,
       isNull,
     );
     await tester.enterText(field, 'And the cost?');
@@ -202,7 +199,7 @@ void main() {
   // ended, and says so; an answer says how much of the talk it showed, so
   // one after a reply the person didn't see is refused.
   group('approving after a talk', () {
-    const follows = "Approving agrees with June's last reply.";
+    const follows = "Approve means you agree with June's last reply.";
 
     testWidgets('the card says Approve agrees with the last reply, above '
         'it, and the answer says how much of the talk it showed', (
@@ -214,9 +211,11 @@ void main() {
       await harness.show(tester);
       await settle(tester);
       final line = tester.getTopLeft(_inCard(find.text(follows)));
+      // In the card's row, beside its buttons (Lucy's spec: line · no ·
+      // primary).
       expect(
         line.dy,
-        lessThan(tester.getTopLeft(_inCard(find.text('Approve'))).dy),
+        lessThan(tester.getBottomLeft(_inCard(find.text('Approve'))).dy),
       );
       expect(
         tester.getTopLeft(_inCard(find.text(_theirs))).dy,
@@ -339,7 +338,7 @@ void main() {
       expect(
         _inCard(
           find.text(
-            'Approving does only what the card says, not what was said in '
+            'Approving does only what the request says, not what was said in '
             'the talk.',
           ),
         ),
@@ -349,9 +348,8 @@ void main() {
     });
   });
 
-  testWidgets('a procedure with a thread has Reply and Resolve under Done', (
-    tester,
-  ) async {
+  testWidgets('a procedure with a thread has Resolve under Done, and Send '
+      'once words are typed (#533)', (tester) async {
     final harness = _inConversation(
       _ask(
         thread: _thread(),
@@ -365,19 +363,18 @@ void main() {
     await settle(tester);
     expect(_inCard(find.text('Done')), findsOneWidget);
     expect(_inCard(find.text('Resolve')), findsOneWidget);
-    await tester.tap(_inCard(find.text('Add a comment')));
-    await settle(tester);
     await tester.enterText(_comment, 'Which console?');
     await settle(tester);
-    await tester.tap(_inCard(find.text('Reply')));
+    expect(_inCard(find.text('Reply')), findsNothing);
+    await tester.tap(_inCard(find.text('Send')));
     await settle(tester);
     expect(harness.last.answerAsk.reply, isTrue);
     expect(harness.last.answerAsk.hasStep(), isFalse);
   });
 
   testWidgets('a procedure still at its next step, its agent having '
-      'answered the comment on the step before, shows the talk with Done, '
-      'Reply and Resolve (Bruno 30251)', (tester) async {
+      'answered the comment on the step before, shows the talk with Done '
+      'and Resolve (Bruno 30251)', (tester) async {
     final harness = _inConversation(
       _ask(
         thread: [
@@ -406,7 +403,8 @@ void main() {
     await settle(tester);
     expect(_inCard(find.text('The new one, under Settings.')), findsOneWidget);
     expect(_inCard(find.text('Resolve')), findsOneWidget);
-    expect(_inCard(find.text('Reply')), findsOneWidget);
+    // Send, once words are typed, replies (#533).
+    expect(_inCard(find.text('Reply')), findsNothing);
     await tester.tap(_inCard(find.text('Done')));
     await settle(tester);
     expect(harness.last.answerAsk.step, 1);

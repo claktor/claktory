@@ -11,6 +11,13 @@ import '../identity.dart' show Palette;
 import '../mobile/metrics.dart' show withoutInsets;
 import '../phone.dart' show PairScreen;
 
+/// The pairing screen's key, the same in the narrow layout's (phone.dart)
+/// and the wide one's: crossing between them (Split View and full screen,
+/// a rotation from 504 to 809) builds a new window (main.dart), and the
+/// key carries the screen across, at its step, rather than starting over
+/// (Sale's row 198, Lucy 49619). Only one is ever there at a time.
+final pairScreenKey = GlobalKey(debugLabel: 'pairing');
+
 /// [PairScreen] filling the window beside the rail (Shell's steps place
 /// it), on the canvas, inside the safe area and above the keyboard.
 class IPadPairStep extends StatelessWidget {
@@ -29,7 +36,7 @@ class IPadPairStep extends StatelessWidget {
           top: safe.top,
           bottom: math.max(safe.bottom, keyboard),
         ),
-        child: withoutInsets(context, child: const PairScreen()),
+        child: withoutInsets(context, child: PairScreen(key: pairScreenKey)),
       ),
     );
   }

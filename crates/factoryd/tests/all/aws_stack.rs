@@ -251,7 +251,7 @@ async fn aws_connects_with_the_proposals_exact_statements_and_gives_narrowed_ses
         Some(Kind::ConnectProposal(shown)) => Some(shown.clone()),
         _ => None,
     });
-    assert_eq!(shown.expect("the card").statements, proposal.statements, "the card shows them too");
+    assert_eq!(shown.expect("the card").statements, proposal.statements, "the request shows them too");
 
     // Without a proposal there's nothing to allow; with it, AWS's page.
     let start = |proposal_id: &str| {

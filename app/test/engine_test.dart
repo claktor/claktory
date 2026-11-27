@@ -170,6 +170,7 @@ void main() {
       await harness.show(tester, size: const Size(1200, 900));
       await pumpFrames(tester);
       harness.page.value = AppPage.settings;
+      harness.backend.settingsSection.value = 'general';
       await pumpFrames(tester);
       return harness;
     }
@@ -177,7 +178,7 @@ void main() {
     testWidgets('where its service runs it: the choice and the switch; '
         'choosing sends it, turning off asks first', (tester) async {
       final harness = await general(tester, _workspace());
-      expect(find.text('When I quit Claktory'), findsOneWidget);
+      expect(find.text('When you quit Claktory'), findsOneWidget);
       expect(find.text('Keep agents running'), findsOneWidget);
       expect(find.text('Claktory on this Mac'), findsOneWidget);
       expect(find.text('Running'), findsOneWidget);
@@ -203,7 +204,7 @@ void main() {
 
     testWidgets('nothing where its service doesn\'t run it', (tester) async {
       await general(tester, _workspace(canStop: false));
-      expect(find.text('When I quit Claktory'), findsNothing);
+      expect(find.text('When you quit Claktory'), findsNothing);
       expect(find.text('Claktory on this Mac'), findsNothing);
     });
   });
@@ -221,6 +222,14 @@ void main() {
       await pumpFrames(tester);
       expect(find.byType(WhenAppQuitsStep), findsOneWidget);
       expect(find.text('When you quit Claktory'), findsOneWidget);
+      // Where macOS can turn it off, said before it's on (P6).
+      expect(
+        find.text(
+          'macOS lists Claktory Agents under Login Items. If you turn it off '
+          'there, your agents stop when you quit Claktory.',
+        ),
+        findsOneWidget,
+      );
       await tester.tap(
         find.byWidgetPredicate(
           (w) => w is Button && w.label == 'Keep agents running',

@@ -226,10 +226,16 @@ void main() {
     harness.page.value = AppPage.inbox;
     await pumpFrames(tester);
     await settle(tester);
-    // An iPhone's Needs you shows the card itself, one a screen (#514).
+    // An iPhone's Needs you lists it first (#599); tapped, it alone.
+    await tester.tap(find.text('Allow the helper · Step 6 of 7'));
+    await pumpFrames(tester);
+    await settle(tester);
     expect(find.text('Step 6 of 7'), findsOneWidget);
 
+    // Still waiting on step 7: it stays (Squalo L4).
     await _done(tester, harness, 6);
+    await tester.pump(const Duration(seconds: 1));
+    await settle(tester);
     expect(find.text('Step 6 of 7'), findsNothing);
     expect(find.text('Step 7 of 7'), findsOneWidget);
   });

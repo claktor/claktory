@@ -241,8 +241,103 @@ void main() {
       'Confirm this device is yours: sign in.',
     );
     expect(backend.refused.value, isNull);
+    // Nothing said of its account: nothing known from it.
+    expect(backend.signInSaid, isNull);
     backend.retry();
     expect(backend.signInRequired.value, isNull);
+    await backend.close();
+    await server.close(force: true);
+  });
+
+  test('a Claktory that knows this device says where to sign in as it '
+      "turns it away (Sale's row 189 b)", () async {
+    final (server, _) = await answering(
+      (_) => ServerMessage(
+        error: Error(
+          code: ErrorCode.ERROR_CODE_SIGN_IN_REQUIRED,
+          message: 'Confirm this device is yours: sign in.',
+          accountService: 'https://account.example.test',
+          accountEmail: 'm…@example.com',
+        ),
+      ),
+    );
+    final backend = backendWith(FakeTunnels(FakeTunnel(server.port)))
+      ..deviceKey = ((_) => 'k' * 64)
+      ..account = DeviceAccount();
+    backend.connectTo(
+      parsePairingCode('factory://?t=${'c' * 64}&e=${'a' * 64}&name=mac-mini'),
+    );
+    unawaited(backend.run());
+    await until(() => backend.signInRequired.value != null);
+    expect(backend.signInSaid?.service, 'https://account.example.test');
+    expect(backend.signInSaid?.email, 'm…@example.com');
+    await backend.close();
+    await server.close(force: true);
+  });
+
+  test('turned away until it signs in, it asks again quietly, its screen '
+      'staying up, and connects once let in (row 189)', () async {
+    var letIn = false;
+    var hellos = 0;
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      socket.listen((frame) {
+        final message = ClientMessage.fromBuffer(frame as List<int>);
+        if (!message.hasHello()) return;
+        hellos++;
+        if (letIn) {
+          socket.add(
+            (ServerMessage(
+              welcome: Welcome(serverVersion: 'test'),
+            )..replyTo = message.id).writeToBuffer(),
+          );
+          return;
+        }
+        socket.add(
+          (ServerMessage(
+            error: Error(
+              code: ErrorCode.ERROR_CODE_SIGN_IN_REQUIRED,
+              message: 'Confirm this device is yours: sign in.',
+            ),
+          )..replyTo = message.id).writeToBuffer(),
+        );
+        unawaited(socket.close());
+      });
+    });
+    final backend = backendWith(FakeTunnels(FakeTunnel(server.port)))
+      ..deviceKey = ((_) => 'k' * 64)
+      ..account = DeviceAccount();
+    backend.connectTo(
+      parsePairingCode('factory://?t=${'c' * 64}&e=${'a' * 64}&name=mac-mini'),
+    );
+    unawaited(backend.run());
+    await until(() => backend.signInRequired.value != null);
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(hellos, 1);
+
+    // Asked again while still turned away: the screen never leaves.
+    var cleared = false;
+    void watch() {
+      if (backend.signInRequired.value == null) cleared = true;
+    }
+
+    backend.signInRequired.addListener(watch);
+    backend.probeSignIn();
+    await until(() => hellos == 2);
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(hellos, 2);
+    expect(cleared, isFalse);
+    expect(backend.signInRequired.value, isNotNull);
+    expect(backend.connected.value, isFalse);
+
+    // Let in meanwhile: the next ask connects.
+    letIn = true;
+    backend.probeSignIn();
+    await until(() => backend.connected.value);
+    expect(backend.connected.value, isTrue);
+    expect(backend.signInRequired.value, isNull);
+    backend.signInRequired.removeListener(watch);
     await backend.close();
     await server.close(force: true);
   });

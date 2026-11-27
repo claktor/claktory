@@ -14,7 +14,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use serde_json::{Value, json};
 
+use std::time::{Duration, Instant};
+
+use unicode_segmentation::UnicodeSegmentation;
+
 use super::cdp::{Cdp, Error};
+use super::keys;
+use super::pace::{self, Point};
 use crate::browser::schema::{self, Answer, Op};
 
 /// The reader, as the extension ships it.
@@ -57,6 +63,7 @@ fn source() -> String {
          if (globalThis.__claktoryAsk) return;\n\
          globalThis.__claktoryDownloads = true;\n\
          globalThis.__claktoryFills = true;\n\
+         globalThis.__claktoryErrand = true;\n\
          HTMLElement.prototype.click = function () {{\n\
            const r = this.getBoundingClientRect();\n\
            globalThis.__claktoryClick = {{x: r.left + r.width / 2, y: r.top + r.height / 2}};\n\
@@ -144,16 +151,42 @@ pub(crate) struct Page {
     /// Where the errand may turn on two-step sign-in, as the person
     /// approved (`super::code::two_step_refusal`).
     two_step: std::sync::Mutex<Vec<String>>,
+    /// What dismiss cleared: (document, what it was), so one that comes
+    /// back isn't dismissed again in a loop (Fugo 40527).
+    dismissed: Mutex<Vec<(String, String)>>,
+    /// Refs read in a frame, and the frame's world they're acted on in.
+    frame_refs: Mutex<std::collections::HashMap<String, frames::FrameRef>>,
+    /// Sessions attached to frames in processes of their own, let go at
+    /// the next read.
+    frame_sessions: Mutex<Vec<String>>,
+    /// The reader's worlds in frames in the page's process, by frame and
+    /// document.
+    frame_worlds: Mutex<std::collections::HashMap<(String, String), i64>>,
 }
 
 impl Page {
     pub(crate) fn new(cdp: Arc<Cdp>, session: String) -> Page {
-        Page { cdp, session, world: Mutex::new(None), documents: AtomicU64::new(0), two_step: std::sync::Mutex::new(Vec::new()) }
+        Page {
+            cdp,
+            session,
+            world: Mutex::new(None),
+            documents: AtomicU64::new(0),
+            two_step: std::sync::Mutex::new(Vec::new()),
+            dismissed: Mutex::new(Vec::new()),
+            frame_refs: Mutex::default(),
+            frame_sessions: Mutex::default(),
+            frame_worlds: Mutex::default(),
+        }
     }
 
     /// Where the errand may turn on two-step sign-in now.
     pub(crate) fn set_two_step(&self, origins: Vec<String>) {
         *crate::locking::lock(&self.two_step) = origins;
+    }
+
+    /// Where the person approved two-step sign-in.
+    fn two_step(&self) -> Vec<String> {
+        crate::locking::lock(&self.two_step).clone()
     }
 
     /// The errand's tab, attached and brought to the front: the one the
@@ -283,6 +316,12 @@ impl Page {
         self.cdp.call(method, params, Some(&self.session)).await
     }
 
+    /// A call on `session` (a frame's in a process of its own), or the
+    /// page's.
+    async fn call_on(&self, session: Option<&str>, method: &str, params: Value) -> Result<Value, Error> {
+        self.cdp.call(method, params, Some(session.unwrap_or(&self.session))).await
+    }
+
     /// The top frame: its id, its document's loader and its address.
     pub(crate) async fn frame(&self) -> Result<Frame, Error> {
         let tree = self.call("Page.getFrameTree", json!({})).await?;
@@ -345,9 +384,16 @@ impl Page {
     /// Asks the reader `command` in `context`: its answer as JSON, at most
     /// `schema::RESULT_MAX`.
     async fn ask(&self, context: i64, command: Value) -> Result<String, (String, String)> {
+        self.ask_on(None, context, command).await
+    }
+
+    /// Asks the reader in `context` of `session` (a frame's), or of the
+    /// page's.
+    async fn ask_on(&self, session: Option<&str>, context: i64, command: Value) -> Result<String, (String, String)> {
         let expression = format!("globalThis.__claktoryAsk({command})");
         let evaluated = self
-            .call(
+            .call_on(
+                session,
                 "Runtime.evaluate",
                 json!({"expression": expression, "contextId": context, "awaitPromise": true, "returnByValue": true}),
             )
@@ -357,7 +403,9 @@ impl Page {
             // The world went with its document between the check and the
             // call: the page changed.
             Err(Error::Refused(..)) => {
-                self.forget();
+                if session.is_none() {
+                    self.forget();
+                }
                 return Err(stale_document());
             }
             Err(error) => return Err(gone(error)),
@@ -379,33 +427,59 @@ impl Page {
         let json = self.ask(context, json!({"op": "read", "limit": limit, "budget": schema::RESULT_MAX - 1024})).await?;
         let mut value: Value = serde_json::from_str(&json).map_err(|_| unreadable())?;
         if value.get("error").is_none() {
-            value["document"] = Value::String(document);
+            value["document"] = Value::String(document.clone());
         }
         let op = Op::Read { limit };
         let mut answer = schema::answer(&op, &value.to_string()).map_err(|_| unreadable())?;
         if let Answer::Page(page) = &mut answer {
             let origin = self.frame().await.map(|frame| frame.origin).unwrap_or_default();
-            let approved = crate::locking::lock(&self.two_step).clone();
-            for element in &mut page.elements {
-                let words = format!("{} {}", element.name, element.shows.as_deref().unwrap_or(""));
-                if element.sensitive.is_none() && tickable(&element.role) && agreement(&words) {
-                    element.sensitive = Some(AGREEMENT.to_owned());
-                }
-                // Two-step sign-in (#435 W8b): the person's call.
-                if let Some(why) = element.sensitive.is_none().then(|| super::code::two_step_refusal(&words, &origin, &approved)).flatten() {
-                    element.sensitive = Some(why.to_owned());
-                }
-            }
+            mark_sensitive(&mut page.elements, &origin, &self.two_step());
+            // Its frames, beside it: Claktory's to read, never the page's
+            // to say (Fugo 40527).
+            self.read_frames(page).await;
         }
         Ok(answer)
     }
 
-    /// Scrolls the page by `pages` screens.
-    pub(crate) async fn scroll(&self, direction: schema::Direction, pages: u8) -> Result<Answer, (String, String)> {
-        let (context, _, _) = self.world().await.map_err(gone)?;
+    /// Scrolls the page `pages` screens as a person does (R11.4): the
+    /// mouse goes where the wheel may turn (never over a field, a list, a
+    /// frame or a box that scrolls on its own), and turns it in bouts,
+    /// each checked again, until the screens asked for or the page's end.
+    pub(crate) async fn scroll(&self, hand: &mut Hand<'_>, direction: schema::Direction, pages: u8) -> Result<Answer, (String, String)> {
         let op = Op::Scroll { direction, pages: pages.clamp(1, 3) };
-        let json = self.ask(context, serde_json::to_value(&op).unwrap_or_default()).await?;
-        schema::answer(&op, &json).map_err(|_| unreadable())
+        let sign = if direction == schema::Direction::Up { -1.0 } else { 1.0 };
+        let mut spot = self.errand_op(json!({"op": "wheel_spot"})).await?;
+        let view = (number(&spot, "view_width")?, number(&spot, "view_height")?);
+        let mut at = (number(&spot, "x")?, number(&spot, "y")?);
+        self.move_to(hand, at, view, 200.0).await?;
+        for (n, bout) in pace::bouts(hand.rng, view.1, pages.clamp(1, 3)).into_iter().enumerate() {
+            if n > 0 {
+                let pause = pace::between_bouts(hand.rng);
+                hand.wait_until(Instant::now() + pause).await?;
+                spot = self.errand_op(json!({"op": "wheel_spot", "x": at.0, "y": at.1})).await?;
+                let now = (number(&spot, "x")?, number(&spot, "y")?);
+                if now != at {
+                    self.move_to(hand, now, view, 200.0).await?;
+                    at = now;
+                }
+            }
+            let (y, end) = (number(&spot, "scroll_y")?, number(&spot, "scroll_max")?);
+            if (sign > 0.0 && y >= end) || (sign < 0.0 && y <= 0.0) {
+                break;
+            }
+            let mut next = Instant::now();
+            for (delta, gap) in bout {
+                next += gap;
+                hand.wait_until(next).await?;
+                let wheel = json!({"type": "mouseWheel", "x": at.0, "y": at.1, "deltaX": 0, "deltaY": sign * delta, "pointerType": "mouse"});
+                self.call("Input.dispatchMouseEvent", wheel).await.map_err(gone)?;
+            }
+        }
+        let pause = pace::between_bouts(hand.rng);
+        hand.wait_until(Instant::now() + pause).await?;
+        let spot = self.errand_op(json!({"op": "wheel_spot", "x": at.0, "y": at.1})).await?;
+        let scrolled = json!({"scroll_y": number(&spot, "scroll_y")?});
+        schema::answer(&op, &scrolled.to_string()).map_err(|_| unreadable())
     }
 
     /// The element `target` of `document`, as the agent read it, for a fill
@@ -443,20 +517,12 @@ impl Page {
         Ok((object.to_owned(), frame))
     }
 
-    /// Clicks or fills `target` of `document`, as the agent read it: the
-    /// reader checks it's still the element read, where it was, not covered
-    /// and not off-limits; a click is then the browser's own, at its middle.
-    pub(crate) async fn act(&self, op: &Op) -> Result<Answer, (String, String)> {
-        let (document, target, kind, text) = match op {
-            Op::Click { document, target, .. } => (document, target, "click", ""),
-            Op::Fill { document, target, text, .. } => (document, target, "fill", text.as_str()),
-            _ => return Err(("unsupported_target".to_owned(), "only a click or a fill acts on an element".to_owned())),
-        };
-        let (context, now, new) = self.world().await.map_err(gone)?;
-        if new || *document != now {
-            return Err(stale_document());
-        }
-        let described = self.ask(context, json!({"op": "describe", "kind": kind, "target": target, "text": text})).await?;
+    /// Checks `target` of `document`, as the agent read it, for a click or
+    /// a fill of `text`: still the element read, where it was, not covered
+    /// and not off-limits.
+    async fn validated(&self, document: &str, target: &str, kind: &str, text: &str) -> Result<frames::Place, (String, String)> {
+        let place = self.place_of(document, target).await?;
+        let described = self.ask_on(place.session.as_deref(), place.context, json!({"op": "describe", "kind": kind, "target": target, "text": text})).await?;
         let described: Value = serde_json::from_str(&described).map_err(|_| unreadable())?;
         if let Some(error) = described["error"].as_str() {
             let why = described["why"].as_str().unwrap_or_default();
@@ -467,56 +533,675 @@ impl Page {
         if tickable(action["role"].as_str().unwrap_or("")) && agreement(&words) {
             return Err(("sensitive_action".to_owned(), AGREEMENT.to_owned()));
         }
-        // On an identity provider's sign-in, only Next and the like (#435 W6).
-        // The reader's world is the main frame's: a target in a child frame
-        // (W3) passes its own frame's origin, and false.
-        let origin = self.frame().await.map_err(gone)?.origin;
+        // On an identity provider's sign-in, only Next and the like (#435
+        // W6): a target in a child frame passes its own frame's origin, and
+        // false.
+        let (origin, main_frame) = match self.frame_origin(target) {
+            Some(origin) => (origin, false),
+            None => (self.frame().await.map_err(gone)?.origin, true),
+        };
         // Two-step sign-in (#435 W8b): only where the person approved it,
         // and never an authenticator, security key or passkey.
-        let approved = crate::locking::lock(&self.two_step).clone();
-        if let Some(why) = super::code::two_step_refusal(&words, &origin, &approved) {
+        if let Some(why) = super::code::two_step_refusal(&words, &origin, &self.two_step()) {
             return Err(("sensitive_action".to_owned(), why.to_owned()));
         }
-        if let Some(refused) = super::fill::on_identity_provider(&origin, true, kind, action) {
+        if let Some(refused) = super::fill::on_identity_provider(&origin, main_frame, kind, action) {
             return Err(refused);
         }
-        if kind == "click" {
-            let cleared = json!({"expression": "globalThis.__claktoryClick = null", "contextId": context});
-            self.call("Runtime.evaluate", cleared).await.map_err(gone)?;
+        Ok(place)
+    }
+
+    /// Clicks or fills an element the agent read, as a person does
+    /// (R11.4): the mouse travels to it, rests, and presses where the
+    /// element is checked to be right then; a fill types each character
+    /// with the browser's own keys, the field checked to hold the focus
+    /// before every one, and what it holds read back.
+    pub(crate) async fn act(&self, hand: &mut Hand<'_>, op: &Op) -> Result<Answer, (String, String)> {
+        match op {
+            Op::Click { document, target, .. } => {
+                let place = self.validated(document, target, "click", "").await?;
+                self.click(hand, &place, target).await?;
+                schema::answer(op, r#"{"done":true}"#).map_err(|_| unreadable())
+            }
+            Op::Fill { document, target, text, .. } => self.fill(hand, op, document, target, text).await,
+            _ => Err(("unsupported_target".to_owned(), "only a click or a fill acts on an element".to_owned())),
         }
-        let json = self.ask(context, json!({"op": "act", "kind": kind, "target": target, "text": text})).await?;
-        let answer = schema::answer(op, &json).map_err(|_| unreadable())?;
-        if !matches!(answer, Answer::Clicked(_)) {
-            return Ok(answer);
+    }
+
+    /// Clicks `target`, validated: the mouse travels to it and presses,
+    /// and the page is given a moment to answer.
+    async fn click(&self, hand: &mut Hand<'_>, place: &frames::Place, target: &str) -> Result<(), (String, String)> {
+        let aimed = self.op_at(place, json!({"op": "aim", "target": target})).await?;
+        let spot = self.spot(place, &aimed).await?;
+        let at = self.point_in(hand, &spot, target).await?;
+        self.press(hand, &spot, target, at).await?;
+        // Pressed and let go: the click is done, whatever comes next.
+        tokio::time::sleep(pace::settle(hand.rng)).await;
+        Ok(())
+    }
+
+    /// Clears what covers the page (#435, Fugo 40527): the overlay that
+    /// covers most of it, never one that asks for a password, a card or a
+    /// code. A cookie notice gets its most private choice (refusing what's
+    /// optional, or only what's needed), else its close, else its
+    /// settings and the most private choice there, and its Accept only when
+    /// it offers nothing else, said in the answer (Bruno 40530); a pop-up
+    /// its close. Only a button pressed as a person does, never a link or
+    /// one that sends a form; Escape when there's none. One that comes back
+    /// in the same page isn't dismissed again.
+    pub(crate) async fn dismiss(&self, hand: &mut Hand<'_>, document: &str) -> Result<Answer, (String, String)> {
+        let (context, now, new) = self.world().await.map_err(gone)?;
+        if new || document != now {
+            return Err(stale_document());
         }
-        // The reader checked the element and called click(): in this world
-        // that only noted where; the browser clicks there now.
-        let place = self
-            .call(
-                "Runtime.evaluate",
-                json!({"expression": "(() => { const at = globalThis.__claktoryClick; globalThis.__claktoryClick = null; return at; })()", "contextId": context, "returnByValue": true}),
-            )
-            .await
-            .map_err(gone)?;
-        let at = &place["result"]["value"];
-        let (Some(x), Some(y)) = (at["x"].as_f64(), at["y"].as_f64()) else {
-            return Err(("outcome_unknown".to_owned(), "the click wasn't placed: read the page again".to_owned()));
+        if untouched(&self.frame().await.map_err(gone)?.url) {
+            return Err(("sensitive_action".to_owned(), UNTOUCHED_WHY.to_owned()));
+        }
+        // The page's own overlay, or else (or when it's only a frame's
+        // holder, with no button of its own) another site's frame that
+        // covers it.
+        let covering = Covering::read(&self.errand_op_in(context, json!({"op": "covers"})).await?)?;
+        let mut first = covering.into_iter().next().map(|over| (over, None));
+        if first.as_ref().is_none_or(|(over, _)| over.buttons.is_empty())
+            && let Some((over, place)) = self.covering_frame().await?
+        {
+            first = Some((over, Some(place)));
+        }
+        let Some((over, frame)) = first else {
+            return Err(("unsupported_target".to_owned(), "nothing covers the page now: read it again".to_owned()));
         };
-        if !(x.is_finite() && y.is_finite() && (0.0..100_000.0).contains(&x) && (0.0..100_000.0).contains(&y)) {
-            return Err(("outcome_unknown".to_owned(), "the click wasn't placed: read the page again".to_owned()));
+        if over.personal {
+            return Err((
+                "sensitive_action".to_owned(),
+                format!("the {} asks for a password, a card or a code: the person's, with errand_handoff", over.kind),
+            ));
         }
-        for kind in ["mouseMoved", "mousePressed", "mouseReleased"] {
-            let mut event = json!({"type": kind, "x": x, "y": y});
-            if kind != "mouseMoved" {
+        let signature = format!("{}\u{1f}{}", frame.is_some(), over.signature());
+        if crate::locking::lock(&self.dismissed).iter().any(|(on, what)| *on == now && *what == signature) {
+            return Err((
+                "unsupported_target".to_owned(),
+                format!(
+                    "this {} came back after it was dismissed: Claktory doesn't dismiss it again. Work around it, or hand it to the person with errand_handoff",
+                    over.kind
+                ),
+            ));
+        }
+        let mut answer = schema::Dismissed { done: true, kind: over.kind.to_owned(), pressed: Vec::new(), turned_off: 0, escape: false, accepted_cookies: false, gone: false };
+        let pressing = self.pressing(hand, &now, over, frame.as_ref(), &mut answer).await;
+        // Once anything was pressed, it counts as dismissed, done or not.
+        if !answer.pressed.is_empty() || answer.escape {
+            let mut dismissed = crate::locking::lock(&self.dismissed);
+            if dismissed.len() >= DISMISSED_KEPT {
+                dismissed.remove(0);
+            }
+            dismissed.push((now.clone(), signature));
+        }
+        pressing?;
+        let (_, current, new) = self.world().await.map_err(gone)?;
+        answer.gone = new
+            || current != now
+            || match &frame {
+                None => !self.covering_at(None).await?.iter().any(|left| left.kind == answer.kind),
+                Some(_) => self.covering_frame().await.is_ok_and(|left| left.is_none()),
+            };
+        Ok(Answer::Dismissed(answer))
+    }
+
+    /// Presses what dismisses `over` in `document` (in `frame`, when it's
+    /// a frame's), saying in `answer` what it pressed: a cookie notice's
+    /// settings first, when that's where its private choice is.
+    async fn pressing(
+        &self,
+        hand: &mut Hand<'_>,
+        document: &str,
+        mut over: Covering,
+        frame: Option<&frames::Place>,
+        answer: &mut schema::Dismissed,
+    ) -> Result<(), (String, String)> {
+        let mut opened_settings = false;
+        loop {
+            match over.pick(opened_settings) {
+                Pick::Press(button, accepts) => {
+                    let place = self.validated(document, &button.reference, "click", "").await?;
+                    answer.pressed.push(button.name.clone());
+                    answer.accepted_cookies = accepts;
+                    return self.click(hand, &place, &button.reference).await;
+                }
+                Pick::Settings(button) => {
+                    let place = self.validated(document, &button.reference, "click", "").await?;
+                    answer.pressed.push(button.name.clone());
+                    self.click(hand, &place, &button.reference).await?;
+                    opened_settings = true;
+                    let (_, now, new) = self.world().await.map_err(gone)?;
+                    if new || now != document {
+                        return Err(stale_document());
+                    }
+                    // Its settings, shown in place of the notice or over it.
+                    let covering = self.covering_at(frame).await?;
+                    match covering.into_iter().find(|over| over.kind == "cookie notice" && !over.personal) {
+                        Some(settings) => over = settings,
+                        None => return Ok(()),
+                    }
+                }
+                Pick::Save(button) => {
+                    // Saved only with every purpose off: a panel may come
+                    // with some ticked, and saving those agrees to them
+                    // (Fugo 41149). Each one on is turned off, once, as a
+                    // person would, then all are read again. Vendor and
+                    // legitimate-interest lists on another tab of the
+                    // panel aren't reached: a residual Fugo accepted.
+                    if over.switches.iter().any(|switch| switch.on) {
+                        let mut off = Vec::new();
+                        for switch in over.switches.iter().filter(|switch| switch.on).take(20) {
+                            let Some(reference) = &switch.reference else { return self.escape(hand, answer).await };
+                            let place = self.validated(document, reference, "click", "").await?;
+                            self.click(hand, &place, reference).await?;
+                            off.push(reference.clone());
+                        }
+                        answer.turned_off = off.len() as u32;
+                        let covering = self.covering_at(frame).await?;
+                        let again = covering.into_iter().find(|over| over.kind == "cookie notice" && !over.personal);
+                        let save = again.as_ref().and_then(|again| match again.pick(true) {
+                            Pick::Save(save) if again.switches.iter().all(|switch| !switch.on) => Some(save.reference.clone()),
+                            _ => None,
+                        });
+                        let Some(save) = save else { return self.escape(hand, answer).await };
+                        let name = again.as_ref().and_then(|again| again.buttons.iter().find(|button| button.reference == save)).map(|button| button.name.clone());
+                        let place = self.validated(document, &save, "click", "").await?;
+                        answer.pressed.push(name.unwrap_or_default());
+                        return self.click(hand, &place, &save).await;
+                    }
+                    let place = self.validated(document, &button.reference, "click", "").await?;
+                    answer.pressed.push(button.name.clone());
+                    return self.click(hand, &place, &button.reference).await;
+                }
+                Pick::Escape => return self.escape(hand, answer).await,
+            }
+        }
+    }
+
+    /// Escape, as a person presses it, when nothing else may clear it.
+    async fn escape(&self, hand: &mut Hand<'_>, answer: &mut schema::Dismissed) -> Result<(), (String, String)> {
+        let pause = pace::hover(hand.rng);
+        hand.wait_until(Instant::now() + pause).await?;
+        answer.escape = true;
+        self.press_key("Escape", "Escape", 27, pace::key_hold(hand.rng)).await.map_err(gone)?;
+        tokio::time::sleep(pace::settle(hand.rng)).await;
+        Ok(())
+    }
+
+    async fn fill(&self, hand: &mut Hand<'_>, op: &Op, document: &str, target: &str, text: &str) -> Result<Answer, (String, String)> {
+        // Typed text is only characters: Tab moves the keyboard to another
+        // field, Enter can send a form or a message (R11.3 #3).
+        if text.contains('\t') {
+            return Err(("unsupported_target".to_owned(), "a tab moves the keyboard to another field: fill this one without tabs".to_owned()));
+        }
+        if text.contains(['\n', '\r']) {
+            return Err((
+                "unsupported_target".to_owned(),
+                "Enter can send what's typed: fill it without line breaks, and send it with the page's own button".to_owned(),
+            ));
+        }
+        let place = self.validated(document, target, "fill", text).await?;
+        let planned = pace::typing_time(hand.person, text);
+        if planned > FILL_LONGEST {
+            return Err((
+                "limit_exceeded".to_owned(),
+                format!(
+                    "typing it at a person's pace takes about {} minutes, more than the {} a fill may: fill a shorter text",
+                    planned.as_secs().div_ceil(60),
+                    FILL_LONGEST.as_secs() / 60
+                ),
+            ));
+        }
+        let aimed = self.op_at(&place, json!({"op": "aim", "target": target})).await?;
+        let spot = self.spot(&place, &aimed).await?;
+        // In a frame, the frame must hold the keyboard as well.
+        if aimed["focused"] != true || place.frame.is_some() {
+            // Clicked into, as a person would, to take the keyboard.
+            let at = self.point_in(hand, &spot, target).await?;
+            self.press(hand, &spot, target, at).await?;
+            let pause = pace::hover(hand.rng);
+            hand.wait_until(Instant::now() + pause).await?;
+            if self.focus_held(&place, target).await.is_err() {
+                return Err(("unsupported_target".to_owned(), "the field didn't take the keyboard when clicked: the person fills it".to_owned()));
+            }
+        }
+        let graphemes: Vec<&str> = text.graphemes(true).collect();
+        let of = graphemes.len();
+        let mut typist = pace::Typist::new(hand.person, hand.rng);
+        let mut next = Instant::now();
+        if aimed["holds_text"] == true {
+            // Its text selected whole, to be typed over (or deleted).
+            self.focus_held(&place, target).await?;
+            self.select_all().await.map_err(|error| failed_after(gone(error), 0, of))?;
+            let held = pace::key_hold(hand.rng);
+            next = Instant::now() + typist.gap(hand.rng, "", held);
+            if graphemes.is_empty() {
+                hand.wait_until(next).await?;
+                self.focus_held(&place, target).await?;
+                self.press_key("Backspace", "Backspace", 8, pace::key_hold(hand.rng)).await.map_err(|error| failed_after(gone(error), 0, of))?;
+            }
+        }
+        for (done, grapheme) in graphemes.iter().enumerate() {
+            hand.wait_until(next).await.map_err(|failure| failed_after(failure, done, of))?;
+            self.focus_held(&place, target).await.map_err(|failure| failed_after(failure, done, of))?;
+            let held = pace::key_hold(hand.rng);
+            let down = Instant::now();
+            let lead = Duration::from_millis(u64::from(hand.rng.whole(25, 70)));
+            if let Err(error) = self.type_one(grapheme, held, lead).await {
+                let failure = ("outcome_unknown".to_owned(), format!("a key may not have gone through ({error})"));
+                return Err(failed_after(failure, done, of));
+            }
+            next = down + typist.gap(hand.rng, grapheme, held);
+        }
+        // The page reacts (a framework re-rendering, an editor's own
+        // rules), then what the field holds is read back.
+        tokio::time::sleep(Duration::from_millis(u64::from(hand.rng.whole(150, 400)))).await;
+        let typed = self.op_at(&place, json!({"op": "typed", "target": target, "text": text})).await?;
+        schema::answer(op, &typed.to_string()).map_err(|_| unreadable())
+    }
+
+    /// The errand-only ops (content.js's errandOp): their answer, or the
+    /// reader's refusal as the extension's.
+    async fn errand_op(&self, command: Value) -> Result<Value, (String, String)> {
+        let (context, _, _) = self.world().await.map_err(gone)?;
+        self.errand_op_in(context, command).await
+    }
+
+    async fn errand_op_in(&self, context: i64, command: Value) -> Result<Value, (String, String)> {
+        let json = self.ask(context, command).await?;
+        let value: Value = serde_json::from_str(&json).map_err(|_| unreadable())?;
+        if let Some(error) = value.get("error").and_then(Value::as_str) {
+            return Err(failed(error, value["why"].as_str().unwrap_or_default()));
+        }
+        Ok(value)
+    }
+
+    /// The field read still has the keyboard: checked before every key.
+    async fn focus_held(&self, place: &frames::Place, target: &str) -> Result<(), (String, String)> {
+        if self.op_at(place, json!({"op": "focused", "target": target, "frame": place.frame.is_some()})).await?["focused"] == true {
+            Ok(())
+        } else {
+            Err(("interrupted".to_owned(), "the field lost the keyboard".to_owned()))
+        }
+    }
+
+    /// Where in `target` to press: near its middle, checked to be on it;
+    /// its very middle when that isn't.
+    async fn point_in(&self, hand: &mut Hand<'_>, spot: &frames::Spot<'_>, target: &str) -> Result<Point, (String, String)> {
+        let (rect, view) = (spot.rect, spot.view);
+        let aimed = pace::aim(hand.rng, rect, view);
+        if self.hits(spot, target, aimed).await.is_ok() {
+            return Ok(aimed);
+        }
+        let middle = ((rect.0 + rect.2 / 2.0).clamp(0.0, view.0 - 1.0), (rect.1 + rect.3 / 2.0).clamp(0.0, view.1 - 1.0));
+        self.hits(spot, target, middle).await?;
+        Ok(middle)
+    }
+
+    /// The mouse travels to `at`, rests, and presses there: right after
+    /// `target` is checked to be the element there, nothing awaited
+    /// between (R11.3 #1). Held, then let go.
+    async fn press(&self, hand: &mut Hand<'_>, spot: &frames::Spot<'_>, target: &str, at: Point) -> Result<(), (String, String)> {
+        self.move_to(hand, at, spot.view, spot.rect.2.min(spot.rect.3)).await?;
+        let pause = pace::hover(hand.rng);
+        hand.wait_until(Instant::now() + pause).await?;
+        self.hits(spot, target, at).await?;
+        let hold = pace::hold(hand.rng);
+        if let Err(error) = self.mouse("mousePressed", at).await {
+            return Err(("outcome_unknown".to_owned(), format!("the click didn't finish ({error})")));
+        }
+        tokio::time::sleep(hold).await;
+        if let Err(error) = self.mouse("mouseReleased", at).await {
+            return Err(("outcome_unknown".to_owned(), format!("the click may have happened: read the page ({error})")));
+        }
+        Ok(())
+    }
+
+    /// The mouse goes from where it is to `to` over a person's time, on a
+    /// gentle curve inside the `view`; it first shows up somewhere inside.
+    async fn move_to(&self, hand: &mut Hand<'_>, to: Point, view: Point, width: f64) -> Result<(), (String, String)> {
+        let from = match *hand.pointer {
+            Some((x, y)) => (x.clamp(0.0, view.0 - 1.0), y.clamp(0.0, view.1 - 1.0)),
+            None => {
+                let start = (view.0 * hand.rng.between(0.2, 0.8), view.1 * hand.rng.between(0.2, 0.8));
+                (hand.still)()?;
+                self.mouse("mouseMoved", start).await.map_err(gone)?;
+                *hand.pointer = Some(start);
+                start
+            }
+        };
+        let took = pace::travel(hand.rng, (to.0 - from.0).hypot(to.1 - from.1), width);
+        let mut next = Instant::now();
+        for (point, gap) in pace::path(hand.rng, from, to, view, took) {
+            next += gap;
+            hand.wait_until(next).await?;
+            self.mouse("mouseMoved", point).await.map_err(gone)?;
+            *hand.pointer = Some(point);
+        }
+        Ok(())
+    }
+
+    /// One mouse event at `at`: the left button goes down with a press
+    /// and up with a release.
+    async fn mouse(&self, kind: &str, at: Point) -> Result<Value, Error> {
+        let mut event = json!({"type": kind, "x": at.0, "y": at.1, "pointerType": "mouse"});
+        match kind {
+            "mousePressed" => {
                 event["button"] = json!("left");
+                event["buttons"] = json!(1);
                 event["clickCount"] = json!(1);
             }
-            if let Err(error) = self.call("Input.dispatchMouseEvent", event).await {
-                let why = if kind == "mouseReleased" { "the click may have happened: read the page" } else { "the click didn't finish" };
-                return Err(("outcome_unknown".to_owned(), format!("{why} ({error})")));
+            "mouseReleased" => {
+                event["button"] = json!("left");
+                event["buttons"] = json!(0);
+                event["clickCount"] = json!(1);
             }
+            _ => event["buttons"] = json!(0),
         }
-        Ok(answer)
+        self.call("Input.dispatchMouseEvent", event).await
+    }
+
+    /// Types `grapheme`: its key, held `held` (Shift first, `lead` before,
+    /// for a capital or a symbol), or as text when no key types it.
+    ///
+    /// No key event carries `nativeVirtualKeyCode`, ever: it's the
+    /// platform's own key number, which Chrome reads as such, so a Windows
+    /// code sent on a Mac pressed other keys (Shift and C opened Chrome's
+    /// settings). Chrome derives the native key from `code` and the
+    /// Windows virtual key instead (Fugo 40712).
+    async fn type_one(&self, grapheme: &str, held: Duration, lead: Duration) -> Result<(), Error> {
+        let Some(key) = keys::key(grapheme) else {
+            return self.call("Input.insertText", json!({"text": grapheme})).await.map(drop);
+        };
+        let modifiers = if key.shift { SHIFT } else { 0 };
+        if key.shift {
+            let shift = json!({"type": "rawKeyDown", "key": "Shift", "code": "ShiftLeft", "windowsVirtualKeyCode": 16, "modifiers": SHIFT});
+            self.call("Input.dispatchKeyEvent", shift).await?;
+            tokio::time::sleep(lead).await;
+        }
+        let down = json!({
+            "type": "keyDown", "key": key.key, "code": key.code, "windowsVirtualKeyCode": key.vk,
+            "text": grapheme, "unmodifiedText": key.unshifted, "modifiers": modifiers,
+        });
+        self.call("Input.dispatchKeyEvent", down).await?;
+        tokio::time::sleep(held).await;
+        let up = json!({"type": "keyUp", "key": key.key, "code": key.code, "windowsVirtualKeyCode": key.vk, "modifiers": modifiers});
+        self.call("Input.dispatchKeyEvent", up).await?;
+        if key.shift {
+            let shift = json!({"type": "keyUp", "key": "Shift", "code": "ShiftLeft", "windowsVirtualKeyCode": 16, "modifiers": 0});
+            self.call("Input.dispatchKeyEvent", shift).await?;
+        }
+        Ok(())
+    }
+
+    /// A key that types nothing (Backspace), held `held`.
+    async fn press_key(&self, key: &str, code: &str, vk: u32, held: Duration) -> Result<(), Error> {
+        let event = |kind: &str| json!({"type": kind, "key": key, "code": code, "windowsVirtualKeyCode": vk});
+        self.call("Input.dispatchKeyEvent", event("rawKeyDown")).await?;
+        tokio::time::sleep(held).await;
+        self.call("Input.dispatchKeyEvent", event("keyUp")).await.map(drop)
+    }
+
+    /// Ctrl+A in the field that has the keyboard: its whole text selected.
+    async fn select_all(&self) -> Result<(), Error> {
+        let control = |kind: &str, modifiers: u32| {
+            json!({"type": kind, "key": "Control", "code": "ControlLeft", "windowsVirtualKeyCode": 17, "modifiers": modifiers})
+        };
+        let a = |kind: &str| {
+            let mut event = json!({"type": kind, "key": "a", "code": "KeyA", "windowsVirtualKeyCode": 65, "modifiers": CONTROL});
+            if kind == "rawKeyDown" {
+                event["commands"] = json!([keys::SELECT_ALL]);
+            }
+            event
+        };
+        self.call("Input.dispatchKeyEvent", control("rawKeyDown", CONTROL)).await?;
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        self.call("Input.dispatchKeyEvent", a("rawKeyDown")).await?;
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        self.call("Input.dispatchKeyEvent", a("keyUp")).await?;
+        self.call("Input.dispatchKeyEvent", control("keyUp", 0)).await.map(drop)
+    }
+}
+
+/// CDP's modifier bits.
+const CONTROL: u32 = 2;
+const SHIFT: u32 = 8;
+
+/// The longest a fill may take, typed at the errand's pace: past it, it's
+/// refused rather than typed faster (R11.3 #7).
+const FILL_LONGEST: Duration = Duration::from_secs(15 * 60);
+
+/// An element's box: left, top, width, height, CSS pixels.
+type Rect = (f64, f64, f64, f64);
+
+/// Sign-in, payment and check-you're-a-person services: what they show is
+/// never read past its place, pressed or dismissed by an errand, whatever
+/// covers what (Fugo 40527). Each with its subdomains.
+const UNTOUCHED: &[&str] = &[
+    "accounts.google.com",
+    "appleid.apple.com",
+    "login.microsoftonline.com",
+    "login.live.com",
+    "stripe.com",
+    "stripe.network",
+    "paypal.com",
+    "paypalobjects.com",
+    "adyen.com",
+    "adyenpayments.com",
+    "checkout.com",
+    "braintreegateway.com",
+    "braintree-api.com",
+    "klarna.com",
+    "klarnaservices.com",
+    "challenges.cloudflare.com",
+    "hcaptcha.com",
+    "recaptcha.net",
+    "captcha-delivery.com",
+    "arkoselabs.com",
+    "funcaptcha.com",
+];
+
+pub(crate) const UNTOUCHED_WHY: &str = "it's a sign-in, a payment or a check that you're a person: the person's, with errand_handoff";
+
+/// Whether `url` is on one of [`UNTOUCHED`]'s services, or Google's
+/// reCAPTCHA.
+pub(crate) fn untouched(url: &str) -> bool {
+    let Ok(url) = url::Url::parse(url) else { return false };
+    let Some(host) = url.host_str().map(|host| host.trim_end_matches('.').to_ascii_lowercase()) else { return false };
+    let under = |domain: &str| host == domain || host.ends_with(&format!(".{domain}"));
+    UNTOUCHED.iter().any(|domain| under(domain)) || ((under("google.com") || under("gstatic.com")) && url.path().starts_with("/recaptcha"))
+}
+
+/// How many dismissals a page keeps in mind.
+const DISMISSED_KEPT: usize = 64;
+
+/// Something covering the page, as the reader's `covers` said.
+struct Covering {
+    kind: &'static str,
+    personal: bool,
+    buttons: Vec<Button>,
+    switches: Vec<Switch>,
+}
+
+/// A purpose a consent panel may switch on: whether it's on, and the ref
+/// that presses it, when something of it shows.
+struct Switch {
+    reference: Option<String>,
+    on: bool,
+}
+
+/// A button on it: what it's called, which choice that is, and whether
+/// dismiss may press it (a button, not a link, a form's sending or a
+/// control that's the person's).
+struct Button {
+    reference: String,
+    name: String,
+    choice: Option<&'static str>,
+    usable: bool,
+}
+
+/// What dismiss does next.
+enum Pick<'a> {
+    /// Press it; true when it accepts the notice's cookies.
+    Press(&'a Button, bool),
+    /// Open a cookie notice's settings, for a more private choice there.
+    Settings(&'a Button),
+    /// Save the settings, once every purpose there is off.
+    Save(&'a Button),
+    Escape,
+}
+
+/// The choices a button's name may be.
+const CHOICES: [&str; 5] = ["private", "close", "save", "settings", "accept"];
+
+impl Covering {
+    /// The reader's answer, read strictly: at most five, each with at most
+    /// 40 buttons.
+    fn read(covers: &Value) -> Result<Vec<Covering>, (String, String)> {
+        let mut found = Vec::new();
+        for over in covers["overlays"].as_array().ok_or_else(unreadable)?.iter().take(5) {
+            let kind = schema::OVERLAYS.into_iter().find(|kind| over["kind"] == *kind).ok_or_else(unreadable)?;
+            found.push(Covering { kind, personal: over["personal"] != false, buttons: Covering::buttons(over)?, switches: Covering::switches(over)? });
+        }
+        Ok(found)
+    }
+
+    /// Its buttons, as the reader listed them (at most 40).
+    fn buttons(over: &Value) -> Result<Vec<Button>, (String, String)> {
+        let mut buttons = Vec::new();
+        for button in over["buttons"].as_array().ok_or_else(unreadable)?.iter().take(40) {
+            let reference = button["ref"].as_str().filter(|id| !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric())).ok_or_else(unreadable)?;
+            let choice = match &button["choice"] {
+                Value::Null => None,
+                said => Some(CHOICES.into_iter().find(|choice| said == *choice).ok_or_else(unreadable)?),
+            };
+            let usable = button.get("link").is_none() && button.get("submits").is_none() && button.get("sensitive").is_none();
+            let name = schema::one_line(button["name"].as_str().unwrap_or_default(), 200);
+            buttons.push(Button { reference: reference.to_owned(), name, choice, usable });
+        }
+        Ok(buttons)
+    }
+
+    /// Its purposes' switches, as the reader listed them (at most 40).
+    fn switches(over: &Value) -> Result<Vec<Switch>, (String, String)> {
+        let mut switches = Vec::new();
+        for switch in over["switches"].as_array().ok_or_else(unreadable)?.iter().take(40) {
+            let reference = match &switch["ref"] {
+                Value::Null => None,
+                said => Some(
+                    said.as_str()
+                        .filter(|id| !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric()))
+                        .ok_or_else(unreadable)?
+                        .to_owned(),
+                ),
+            };
+            switches.push(Switch { reference, on: switch["on"] != false });
+        }
+        Ok(switches)
+    }
+
+    /// What it is, to know it again: its kind and its buttons' names.
+    fn signature(&self) -> String {
+        let names: Vec<&str> = self.buttons.iter().take(20).map(|button| button.name.as_str()).collect();
+        format!("{}\u{1f}{}", self.kind, names.join("\u{1f}"))
+    }
+
+    /// The button to press, the most private first: a cookie notice's
+    /// refusal, its close, its settings (then saving them as they are,
+    /// once open), and its Accept only when it offers nothing else; a
+    /// pop-up's refusal or close. Escape otherwise.
+    fn pick(&self, opened_settings: bool) -> Pick<'_> {
+        let find = |choice: &str| self.buttons.iter().find(|button| button.usable && button.choice == Some(choice));
+        if self.kind == "cookie notice" {
+            if let Some(button) = find("private") {
+                return Pick::Press(button, false);
+            }
+            if opened_settings && let Some(button) = find("save") {
+                return Pick::Save(button);
+            }
+            if let Some(button) = find("close") {
+                return Pick::Press(button, false);
+            }
+            if !opened_settings && let Some(button) = find("settings") {
+                return Pick::Settings(button);
+            }
+            // Accept only when it's all the notice offers: never while a
+            // refusal, a close or settings is there, even one dismiss can't
+            // press (Bruno 40530).
+            let offered = |choice: &str| self.buttons.iter().any(|button| button.choice == Some(choice));
+            let other = opened_settings || ["private", "close", "save", "settings"].into_iter().any(offered);
+            return match find("accept") {
+                Some(button) if !other => Pick::Press(button, true),
+                _ => Pick::Escape,
+            };
+        }
+        find("private").or_else(|| find("close")).map_or(Pick::Escape, |button| Pick::Press(button, false))
+    }
+}
+
+/// What paces one step: the errand's person, its random source, where its
+/// mouse is, and the check, before every input event, that the errand may
+/// still drive (its state, its connection, the browser driven).
+pub(crate) struct Hand<'a> {
+    pub person: &'a pace::Person,
+    pub rng: &'a mut pace::Rng,
+    pub pointer: &'a mut Option<Point>,
+    pub still: &'a (dyn Fn() -> Result<(), (String, String)> + Send + Sync),
+}
+
+impl Hand<'_> {
+    /// Waits until `at`, checking at least every quarter second, and once
+    /// more at the end, that the errand may still drive.
+    pub(crate) async fn wait_until(&self, at: Instant) -> Result<(), (String, String)> {
+        loop {
+            let now = Instant::now();
+            if now >= at {
+                return (self.still)();
+            }
+            (self.still)()?;
+            tokio::time::sleep((at - now).min(Duration::from_millis(250))).await;
+        }
+    }
+}
+
+/// A number the reader gave, bounded: the page's script can't reach the
+/// reader's world, but a page can be any size.
+fn number(value: &Value, key: &str) -> Result<f64, (String, String)> {
+    value[key].as_f64().filter(|n| n.is_finite() && (-1e7..1e7).contains(n)).ok_or_else(unreadable)
+}
+
+/// The box `aim` gave and the viewport's size, both of some size.
+fn boxes(aimed: &Value) -> Result<(Rect, Point), (String, String)> {
+    let rect = (number(aimed, "left")?, number(aimed, "top")?, number(aimed, "width")?, number(aimed, "height")?);
+    let view = (number(aimed, "view_width")?, number(aimed, "view_height")?);
+    if view.0 < 1.0 || view.1 < 1.0 || rect.2 <= 0.0 || rect.3 <= 0.0 {
+        return Err(unreadable());
+    }
+    Ok((rect, view))
+}
+
+/// A failure partway through typing: how much went in, never typed again.
+fn failed_after((error, why): (String, String), done: usize, of: usize) -> (String, String) {
+    if done == 0 {
+        return (error, why);
+    }
+    (error, format!("{why}, after {done} of {of} characters were typed: read the page and look at the field; Claktory doesn't type them again"))
+}
+
+/// Agreement checkboxes, and controls that turn on two-step sign-in where
+/// the person didn't approve it (#435 W8b), marked as the person's: on a
+/// page or frame of `origin`.
+fn mark_sensitive(elements: &mut [schema::Element], origin: &str, approved: &[String]) {
+    for element in elements {
+        let words = format!("{} {}", element.name, element.shows.as_deref().unwrap_or(""));
+        if element.sensitive.is_none() && tickable(&element.role) && agreement(&words) {
+            element.sensitive = Some(AGREEMENT.to_owned());
+        }
+        if let Some(why) = element.sensitive.is_none().then(|| super::code::two_step_refusal(&words, origin, approved)).flatten() {
+            element.sensitive = Some(why.to_owned());
+        }
     }
 }
 
@@ -545,6 +1230,17 @@ fn gone(error: Error) -> (String, String) {
         other => ("interrupted".to_owned(), schema::one_line(&other.to_string(), 200)),
     }
 }
+
+#[path = "frames.rs"]
+mod frames;
+
+#[cfg(test)]
+#[path = "reader_overlays.rs"]
+mod overlay_tests;
+
+#[cfg(test)]
+#[path = "reader_frames.rs"]
+mod frame_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -713,6 +1409,7 @@ pub(crate) mod tests {
     pub(crate) async fn page_with(html: &str) -> Option<(super::super::cdp::Local, Arc<Page>, std::path::PathBuf)> {
         use super::super::cdp::{Local, Transport, find_chrome};
         let chrome = find_chrome()?;
+        room_for_chromes();
         static N: AtomicU64 = AtomicU64::new(0);
         let profile =
             std::env::temp_dir().join(format!("factoryd-reader-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
@@ -728,6 +1425,22 @@ pub(crate) mod tests {
         Some((local, page, profile))
     }
 
+    /// Room for the many Chromes tests run at once: a Mac's 256 open
+    /// files by default run out.
+    pub(crate) fn room_for_chromes() {
+        static RAISED: std::sync::Once = std::sync::Once::new();
+        RAISED.call_once(|| {
+            let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+            // SAFETY: getrlimit and setrlimit only read and write `limit`.
+            unsafe {
+                if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 && limit.rlim_cur < 4096 {
+                    limit.rlim_cur = limit.rlim_max.min(4096);
+                    libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+                }
+            }
+        });
+    }
+
     const FORM: &str = r#"<!doctype html><title>Sign up</title>
         <h1>Organization</h1><p>Fill this in.</p>
         <label>Name <input id=name></label>
@@ -735,13 +1448,35 @@ pub(crate) mod tests {
         <label><input type=checkbox id=terms> I agree to the Developer Distribution Agreement</label>
         <button id=next onclick="document.title = 'clicked ' + event.isTrusted">Next</button>"#;
 
-    fn element<'a>(page: &'a schema::Page, name: &str) -> &'a schema::Element {
+    pub(crate) fn element<'a>(page: &'a schema::Page, name: &str) -> &'a schema::Element {
         page.elements.iter().find(|element| element.name.contains(name)).unwrap_or_else(|| panic!("{name} in {:?}", page.elements))
+    }
+
+    /// A hand for tests: a quick person, a fixed seed, always free to drive.
+    pub(crate) struct TestHand {
+        person: pace::Person,
+        rng: pace::Rng,
+        pointer: Option<Point>,
+    }
+
+    fn free() -> Result<(), (String, String)> {
+        Ok(())
+    }
+
+    impl TestHand {
+        pub(crate) fn new() -> TestHand {
+            TestHand { person: pace::Person { typing_wpm: 75.0, reading_wpm: 300.0 }, rng: pace::Rng::seeded(1), pointer: None }
+        }
+
+        pub(crate) fn hand(&mut self) -> Hand<'_> {
+            Hand { person: &self.person, rng: &mut self.rng, pointer: &mut self.pointer, still: &free }
+        }
     }
 
     #[tokio::test]
     async fn the_reader_reads_a_page_and_keeps_the_persons_controls_from_the_agent() {
         let Some((_local, page, profile)) = page_with(FORM).await else { return };
+        let mut hands = TestHand::new();
         let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
         assert!(read.text.contains("Organization") && read.title == "Sign up", "{read:?}");
         assert_eq!(element(&read, "Password").sensitive.as_deref(), Some("password"));
@@ -751,18 +1486,18 @@ pub(crate) mod tests {
 
         // The agreement is refused, read or not.
         let terms = element(&read, "I agree").reference.clone();
-        let refused = page.act(&Op::on_element(&document, 0, &terms, None).unwrap()).await.unwrap_err();
+        let refused = page.act(&mut hands.hand(), &Op::on_element(&document, 0, &terms, None).unwrap()).await.unwrap_err();
         assert_eq!(refused.0, "sensitive_action");
         let password = element(&read, "Password").reference.clone();
-        let refused = page.act(&Op::on_element(&document, 0, &password, Some("hunter2")).unwrap()).await.unwrap_err();
+        let refused = page.act(&mut hands.hand(), &Op::on_element(&document, 0, &password, Some("hunter2")).unwrap()).await.unwrap_err();
         assert_eq!(refused.0, "sensitive_action");
 
         // A fill types; a click is the browser's own, as a person's.
         let name = element(&read, "Name").reference.clone();
-        let filled = page.act(&Op::on_element(&document, 0, &name, Some("Copium Labs")).unwrap()).await.unwrap();
+        let filled = page.act(&mut hands.hand(), &Op::on_element(&document, 0, &name, Some("Copium Labs")).unwrap()).await.unwrap();
         assert!(matches!(filled, Answer::Filled(schema::Filled { took: true, .. })), "{filled:?}");
         let next = element(&read, "Next").reference.clone();
-        let clicked = page.act(&Op::on_element(&document, 0, &next, None).unwrap()).await.unwrap();
+        let clicked = page.act(&mut hands.hand(), &Op::on_element(&document, 0, &next, None).unwrap()).await.unwrap();
         assert!(matches!(clicked, Answer::Clicked(_)));
         let title = page.call("Runtime.evaluate", json!({"expression": "document.title", "returnByValue": true})).await.unwrap();
         assert_eq!(title["result"]["value"], "clicked true");
@@ -774,8 +1509,176 @@ pub(crate) mod tests {
         assert_eq!(seen["result"]["value"], "undefined");
 
         // A ref of another document is stale.
-        let stale = page.act(&Op::on_element("d999", 0, &next, None).unwrap()).await.unwrap_err();
+        let stale = page.act(&mut hands.hand(), &Op::on_element("d999", 0, &next, None).unwrap()).await.unwrap_err();
         assert_eq!(stale.0, "stale_document");
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    /// What the page saw of the input, as its own script records it.
+    pub(crate) async fn seen(page: &Page, expression: &str) -> Value {
+        page.call("Runtime.evaluate", json!({"expression": expression, "returnByValue": true})).await.unwrap()["result"]["value"].clone()
+    }
+
+    const RECORDED: &str = r#"<script>
+        window.events = [];
+        for (const kind of ['mousemove', 'mousedown', 'mouseup', 'click', 'keydown', 'keyup', 'input', 'wheel'])
+          addEventListener(kind, (e) => events.push({kind, trusted: e.isTrusted, at: e.timeStamp, key: e.key || '', field: (e.target && e.target.id) || ''}), true);
+        </script>"#;
+
+    /// R11 (#530): a person's input, from the browser itself. The mouse
+    /// travels before it presses and holds the button a moment; a fill types
+    /// every character with a trusted key, over what the field held; a
+    /// scroll turns the wheel.
+    #[tokio::test]
+    async fn the_errand_moves_types_and_scrolls_as_a_person_does() {
+        let html = format!(
+            r#"{RECORDED}<label>Name <input id=name value="Old name"></label><label>About <textarea id=about></textarea></label>
+            <button id=next onclick="document.title = 'clicked ' + event.isTrusted">Next</button><div style="height:4000px">Long</div>"#
+        );
+        let Some((_local, page, profile)) = page_with(&html).await else { return };
+        let mut hands = TestHand::new();
+        let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
+        let document = read.document.clone();
+        let name = element(&read, "Name").reference.clone();
+        let filled = page.act(&mut hands.hand(), &Op::on_element(&document, 0, &name, Some("Copium Labs")).unwrap()).await.unwrap();
+        assert!(matches!(filled, Answer::Filled(schema::Filled { took: true, .. })), "{filled:?}");
+        assert_eq!(seen(&page, "document.getElementById('name').value").await, "Copium Labs");
+        let keys = seen(&page, "events.filter(e => e.kind == 'keydown' && e.field == 'name').map(e => e.key).join('')").await;
+        assert_eq!(keys, "ControlaShiftCopium ShiftLabs", "{keys}");
+        assert_eq!(seen(&page, "events.every(e => e.trusted)").await, true);
+        // Keys at a typist's pace, not at once.
+        let span = seen(&page, "(() => { const k = events.filter(e => e.kind == 'keydown'); return k[k.length - 1].at - k[0].at; })()").await;
+        assert!(span.as_f64().unwrap() > 1500.0, "{span}");
+
+        let next = element(&read, "Next").reference.clone();
+        let clicked = page.act(&mut hands.hand(), &Op::on_element(&document, 0, &next, None).unwrap()).await.unwrap();
+        assert!(matches!(clicked, Answer::Clicked(_)));
+        assert_eq!(seen(&page, "document.title").await, "clicked true");
+        let moves = seen(&page, "events.filter(e => e.kind == 'mousemove').length").await;
+        assert!(moves.as_u64().unwrap() >= 10, "the mouse travelled: {moves}");
+        let held = seen(&page, "(() => { const d = events.findLast(e => e.kind == 'mousedown'), u = events.findLast(e => e.kind == 'mouseup'); return u.at - d.at; })()").await;
+        assert!((35.0..400.0).contains(&held.as_f64().unwrap()), "held {held}");
+
+        // Tab and Enter are never typed.
+        let about = element(&read, "About").reference.clone();
+        for text in ["one\ttwo", "one\ntwo"] {
+            let refused = page.act(&mut hands.hand(), &Op::on_element(&document, 0, &about, Some(text)).unwrap()).await.unwrap_err();
+            assert_eq!(refused.0, "unsupported_target", "{text:?}");
+        }
+
+        let scrolled = page.scroll(&mut hands.hand(), schema::Direction::Down, 1).await.unwrap();
+        let Answer::Scrolled(scrolled) = scrolled else { panic!("scrolled") };
+        assert!(scrolled.scroll_y > 100.0, "{scrolled:?}");
+        let wheels = seen(&page, "events.filter(e => e.kind == 'wheel' && e.trusted).length").await;
+        assert!(wheels.as_u64().unwrap() >= 5, "{wheels}");
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    /// The field loses the keyboard mid-word (the page moves it): typing
+    /// stops, says how far it got, and never types again; the other field
+    /// gets at most the one key that raced it.
+    #[tokio::test]
+    async fn typing_stops_when_the_field_loses_the_keyboard() {
+        let html = r#"<label>Name <input id=name></label><label>Other <input id=other></label>
+            <script>let n = 0; document.getElementById('name').addEventListener('keydown', () => { if (++n == 3) document.getElementById('other').focus(); });</script>"#;
+        let Some((_local, page, profile)) = page_with(html).await else { return };
+        let mut hands = TestHand::new();
+        let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
+        let name = element(&read, "Name").reference.clone();
+        let refused = page.act(&mut hands.hand(), &Op::on_element(&read.document, 0, &name, Some("Copium")).unwrap()).await.unwrap_err();
+        assert_eq!(refused.0, "interrupted", "{refused:?}");
+        // The third keydown (Shift, C, o) moved it: "o" raced, "p" waits.
+        assert!(refused.1.contains("after 2 of 6 characters") && refused.1.contains("doesn't type them again"), "{}", refused.1);
+        let other = seen(&page, "document.getElementById('other').value").await;
+        assert!(other.as_str().unwrap().chars().count() <= 1, "{other}");
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    /// Every key keys.rs maps, typed into a field, with Ctrl+A over what it
+    /// held: none reaches Chrome's own shortcuts (Fugo 40712, after Shift
+    /// and C opened a Mac's settings): the page, its tabs and its window
+    /// stay as they were, and the field holds exactly the text.
+    #[tokio::test]
+    async fn no_key_typed_reaches_the_browsers_own_shortcuts() {
+        let Some((_local, page, profile)) = page_with(r#"<label>Everything <input id=all value="was here"></label>"#).await else { return };
+        let mut hands = TestHand::new();
+        let targets = |cdp: Arc<Cdp>| async move {
+            let listed = cdp.call("Target.getTargets", json!({}), None).await.unwrap();
+            // Workers come and go as Chrome's own extensions wake: not a key's doing.
+            let mut urls: Vec<String> = listed["targetInfos"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|t| !t["type"].as_str().unwrap().ends_with("worker"))
+                .map(|t| format!("{} {}", t["type"].as_str().unwrap(), t["url"].as_str().unwrap()))
+                .collect();
+            urls.sort();
+            urls
+        };
+        // Chrome 158 preloads its omnibox popup's page a few seconds after it
+        // starts, with no input at all (Fugo 41917): waited for before any
+        // key, so it's in the targets before as well as after, and anything
+        // else new is a key's doing. An older Chrome never shows it.
+        let popup = "browser_ui chrome://omnibox-popup.top-chrome/".to_owned();
+        for _ in 0..150 {
+            if targets(page.cdp().clone()).await.contains(&popup) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let window = |page: &Page| {
+            let page = page.cdp().clone();
+            async move { page.call("Browser.getWindowForTarget", json!({}), None).await.map(|w| w["bounds"].clone()).ok() }
+        };
+        let (before, url, bounds) = (targets(page.cdp().clone()).await, page.frame().await.unwrap().url, window(&page).await);
+        let every: String = (' '..='~').collect();
+        assert_eq!(every.chars().filter(|c| keys::key(&c.to_string()).is_some()).count(), 95, "every printable ASCII has its key");
+        let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
+        let field = element(&read, "Everything").reference.clone();
+        let filled = page.act(&mut hands.hand(), &Op::on_element(&read.document, 0, &field, Some(&every)).unwrap()).await.unwrap();
+        assert!(matches!(filled, Answer::Filled(schema::Filled { took: true, .. })), "{filled:?}");
+        assert_eq!(seen(&page, "document.getElementById('all').value").await, every.as_str());
+        assert_eq!(page.frame().await.unwrap().url, url, "the page stayed");
+        let after = targets(page.cdp().clone()).await;
+        assert_eq!(after, before, "no tab, window or Chrome page opened");
+        assert!(after.iter().all(|target| !target.starts_with("page chrome://")), "{after:?}");
+        assert_eq!(window(&page).await, bounds, "the window as it was");
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    /// Stopped mid-step (the person's Stop or turn): no more input.
+    #[tokio::test]
+    async fn a_step_stops_at_its_next_event_once_the_errand_may_not_drive() {
+        let html = format!("{RECORDED}<label>Name <input id=name></label>");
+        let Some((_local, page, profile)) = page_with(&html).await else { return };
+        let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
+        let name = element(&read, "Name").reference.clone();
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let still = || {
+            if checks.fetch_add(1, Ordering::SeqCst) < 20 { Ok(()) } else { Err(("paused".to_owned(), "the person took over".to_owned())) }
+        };
+        let (person, mut rng, mut pointer) = (pace::Person { typing_wpm: 75.0, reading_wpm: 300.0 }, pace::Rng::seeded(2), None);
+        let mut hand = Hand { person: &person, rng: &mut rng, pointer: &mut pointer, still: &still };
+        let refused = page.act(&mut hand, &Op::on_element(&read.document, 0, &name, Some("A longer name than twenty checks")).unwrap()).await.unwrap_err();
+        assert_eq!(refused.0, "paused", "{refused:?}");
+        let after = seen(&page, "events.length").await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(seen(&page, "events.length").await, after, "nothing more");
+        let typed = seen(&page, "document.getElementById('name').value").await;
+        assert!(typed.as_str().unwrap().len() < "A longer name than twenty checks".len(), "{typed}");
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    /// The wheel never turns over a field or a box that scrolls itself:
+    /// with nowhere else on the page, the scroll is refused.
+    #[tokio::test]
+    async fn the_wheel_turns_only_where_it_changes_nothing_but_the_page() {
+        let html = r#"<textarea style="position:fixed;inset:0;width:100%;height:100%"></textarea><div style="height:4000px"></div>"#;
+        let Some((_local, page, profile)) = page_with(html).await else { return };
+        let mut hands = TestHand::new();
+        let refused = page.scroll(&mut hands.hand(), schema::Direction::Down, 1).await.unwrap_err();
+        assert_eq!(refused.0, "unsupported_target", "{refused:?}");
+        assert_eq!(seen(&page, "scrollY").await, 0);
         let _ = std::fs::remove_dir_all(&profile);
     }
 
@@ -885,6 +1788,40 @@ pub(crate) mod tests {
         let Ok(Answer::Page(long)) = page.read(65536).await else { panic!("a page") };
         assert!(!format!("{long:?}").contains("z9q1"), "{long:?}");
         assert!(long.unsupported.iter().any(|why| why.contains("too long to check")), "{:?}", long.unsupported);
+        // Open shadow roots, which an errand reads and the scan doesn't see:
+        // one that may hold codes or a key is left out whole, its text and
+        // its elements, and the reader says so; another's text is read.
+        let shadowed = |html: &str, inside: &str| {
+            format!(
+                "{{ document.documentElement.innerHTML = {html:?}; document.getElementById('host').attachShadow({{mode: 'open'}}).innerHTML = {inside:?}; }}"
+            )
+        };
+        // A component too long to check whole, its codes past the scan's
+        // limit (Fugo 48548): left out, as the page past its cutoff is.
+        let long = format!("{}<ul><li>q4ty-8mzx</li><li>b2rk-61dn</li><li>w0pl-3vhc</li><li>e5ga-97sj</li></ul>", "<span>word</span>".repeat(5100));
+        let cases = [
+            ("<title>Backup codes</title><h1>Save your backup codes</h1><div id=host></div>", "<ul><li>q4ty-8mzx</li><li>b2rk-61dn</li><li>w0pl-3vhc</li><li>e5ga-97sj</li></ul><button>Copy q4ty-8mzx</button>"),
+            ("<title>Authenticator</title><p>Can't scan it? Enter this key instead:</p><div id=host></div>", "<code>mfrg gzdf mztw q2lk</code><button>Copy mfrg gzdf mztw q2lk</button>"),
+            ("<title>Backup codes</title><h1>Save your backup codes</h1><div id=host></div>", long.as_str()),
+        ];
+        for (html, inside) in cases {
+            let done = page.call("Runtime.evaluate", json!({"expression": shadowed(html, inside)})).await.unwrap();
+            assert!(done.get("exceptionDetails").is_none(), "{done}");
+            let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
+            assert_eq!(read.title, html[7..html.find("</title>").unwrap()]);
+            let everything = format!("{read:?}").to_lowercase();
+            for part in ["q4ty", "e5ga", "mfrg", "q2lk", "copy"] {
+                assert!(!everything.contains(part), "{part} in {read:?}");
+            }
+            assert!(read.unsupported.iter().any(|why| why.contains("inside a component")), "{:?}", read.unsupported);
+        }
+        let shop = shadowed("<title>Kettles</title><h1>Kettles</h1><div id=host></div>", "<p>Free delivery over 40 pounds</p><button>Add to basket</button>");
+        let done = page.call("Runtime.evaluate", json!({"expression": shop})).await.unwrap();
+        assert!(done.get("exceptionDetails").is_none(), "{done}");
+        let Ok(Answer::Page(read)) = page.read(4096).await else { panic!("a page") };
+        assert!(read.text.contains("Free delivery"), "{read:?}");
+        assert!(read.elements.iter().any(|element| element.name == "Add to basket"), "{:?}", read.elements);
+        assert!(!read.unsupported.iter().any(|why| why.contains("inside a component")), "{:?}", read.unsupported);
         // An ordinary page with numbers isn't touched.
         let orders = "<title>Orders</title><p>Orders 1001 1002 1003 1004 1005 shipped.</p>";
         page.call("Page.setDocumentContent", json!({"frameId": frame.id, "html": orders})).await.unwrap();

@@ -4,7 +4,7 @@
 // Settings, so "Sleep" found nothing. Now: the pane last tapped in the
 // agent's view, else the conversation, rather than a pane only beside it
 // (row 101). And while a pane is expanded over the window, what's under it
-// (the header's Find with it) is out of VoiceOver's reach.
+// (the header's ⋯, Find… in it) is out of VoiceOver's reach.
 import 'package:factory_app/conversation_find.dart' show ConversationFind;
 import 'package:factory_app/find.dart' show FindSession, FindSessions;
 import 'package:factory_app/ipad/workbench.dart';
@@ -13,7 +13,7 @@ import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/settings_view.dart' show SettingsView;
 import 'package:factory_app/shell.dart';
 import 'package:fixnum/fixnum.dart';
-import 'package:flutter/semantics.dart' show SemanticsNode;
+import 'package:flutter/semantics.dart' show SemanticsAction, SemanticsNode;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -45,7 +45,14 @@ Future<Harness> _show(WidgetTester tester) async {
     size: const Size(1376, 1032),
     home: WorkbenchScope(
       focus: focus,
-      child: const Shell(rail: SizedBox(width: 56)),
+      child: Shell(
+        rail: Semantics(
+          button: true,
+          label: 'Rail tile',
+          onTap: () {},
+          child: const SizedBox(width: 56, height: 56),
+        ),
+      ),
     ),
   );
   await settle(tester);
@@ -71,12 +78,35 @@ FindSession _settings(WidgetTester tester) {
   );
 }
 
-Finder get _find => glyphButton('Find');
+/// Find… in the agent's ⋯ (area 4), where the header's magnifier was.
+Future<void> _openFind(WidgetTester tester) async {
+  await tester.tap(glyphButton('More options for Builder'));
+  await pumpFrames(tester);
+  await tester.tap(find.text('Find…'));
+}
 
 /// Whether VoiceOver's tree, as the window sends it, has a node [label]d.
+/// A pane in the window's overlay (an expanded one) is grafted under the
+/// node of the place it came from (its OverlayPortal's traversal parent);
+/// with that node gone, the window drops the pane and all in it, as on an
+/// iPad (row 665), so it isn't counted here either.
 bool _inTree(WidgetTester tester, String label) {
+  final parents = <Object>{};
+  void collect(SemanticsNode node) {
+    if (node.traversalParentIdentifier case final Object id?) parents.add(id);
+    node.visitChildren((child) {
+      collect(child);
+      return true;
+    });
+  }
+
   var found = false;
   bool visit(SemanticsNode node) {
+    // Grafted under a node that isn't there: dropped, with all in it.
+    if (node.traversalChildIdentifier case final Object id?
+        when !parents.contains(id)) {
+      return true;
+    }
     if (node.label == label) found = true;
     node.visitChildren(visit);
     return !found;
@@ -84,7 +114,10 @@ bool _inTree(WidgetTester tester, String label) {
 
   for (final view in tester.binding.renderViews) {
     final root = view.owner?.semanticsOwner?.rootSemanticsNode;
-    if (root != null) visit(root);
+    if (root != null) {
+      collect(root);
+      visit(root);
+    }
   }
   return found;
 }
@@ -93,7 +126,7 @@ void main() {
   testWidgets('nothing tapped yet: Find opens the conversation\'s find, '
       'not the pane beside it', (tester) async {
     await _show(tester);
-    await tester.tap(_find);
+    await _openFind(tester);
     await pumpFrames(tester);
     expect(_conversation().isOpen.value, isTrue);
     expect(_settings(tester).isOpen.value, isFalse);
@@ -106,42 +139,66 @@ void main() {
     await tester.tapAt(tester.getCenter(find.byType(SettingsView)));
     await pumpFrames(tester);
     expect(FindSessions.instance.pressedWithin(view), same(_settings(tester)));
-    await tester.tap(_find);
+    await _openFind(tester);
     await pumpFrames(tester);
     expect(_conversation().isOpen.value, isFalse);
 
     await tester.tap(find.text('Shipped.'));
     await pumpFrames(tester);
     expect(FindSessions.instance.pressedWithin(view), isNull);
-    await tester.tap(_find);
+    await _openFind(tester);
     await pumpFrames(tester);
     expect(_conversation().isOpen.value, isTrue);
   });
 
-  // Row 665: the BlockSemantics ST14 put around the expanded pane hid the
-  // pane's own controls from VoiceOver too (Back, Collapse, Close and all
-  // of Settings), on an iPad and a Mac. It's gone until what's under the
-  // pane can be hidden on its own; meanwhile the header stays readable
-  // under it, as before ST14.
-  testWidgets('a pane expanded over the window blocks nothing from '
-      'VoiceOver: the window stays readable, collapsed too', (tester) async {
+  // Row 665: hidden with what's under it, the pane itself was dropped too
+  // (BlockSemantics in the overlay took the node it's grafted under).
+  testWidgets('a pane expanded over the window is read alone: its band and '
+      'its own controls, never the header\'s ⋯ (Find… in it) under it; collapsed, the '
+      'window again', (tester) async {
     final handle = tester.ensureSemantics();
     await _show(tester);
-    expect(_inTree(tester, 'Find'), isTrue);
+    expect(_inTree(tester, 'More options for Builder'), isTrue);
     await tester.tap(glyphButton('Expand Settings'));
     await settle(tester);
     expect(find.byType(ExpandedPane), findsOneWidget);
-    expect(
-      find.ancestor(
-        of: find.text('Back to Builder'),
-        matching: find.byType(BlockSemantics),
-      ),
-      findsNothing,
+    // Its fade in done.
+    await tester.pump(const Duration(seconds: 1));
+    for (final label in [
+      'Back to Builder',
+      'Collapse Settings',
+      'Close',
+      // Settings' own: its search, an index row, a section's setting.
+      'Search Settings',
+      'Display',
+      'Profile',
+    ]) {
+      expect(_inTree(tester, label), isTrue, reason: label);
+    }
+    expect(_inTree(tester, 'More options for Builder'), isFalse);
+    expect(_inTree(tester, 'Message Builder\nSend'), isFalse);
+    expect(_inTree(tester, 'Hide sidebar'), isFalse);
+    expect(_inTree(tester, 'Rail tile'), isFalse);
+    // Pressed by VoiceOver, Back goes back, as a click does (row 1599).
+    final back = tester.semantics.find(
+      find.bySemanticsLabel('Back to Builder'),
     );
-    expect(_inTree(tester, 'Find'), isTrue);
-    await tester.tap(find.text('Back to Builder'));
+    expect(back.getSemanticsData().hasAction(SemanticsAction.tap), isTrue);
+    tester.binding.rootPipelineOwner.semanticsOwner?.performAction(
+      back.id,
+      SemanticsAction.tap,
+    );
+    // Some pipeline owners are the views'.
+    for (final view in tester.binding.renderViews) {
+      view.owner?.semanticsOwner?.performAction(back.id, SemanticsAction.tap);
+    }
     await settle(tester);
-    expect(_inTree(tester, 'Find'), isTrue);
+    await tester.pump();
+    expect(find.byType(ExpandedPane), findsNothing);
+    expect(_inTree(tester, 'More options for Builder'), isTrue);
+    expect(_inTree(tester, 'Hide sidebar'), isTrue);
+    expect(_inTree(tester, 'Rail tile'), isTrue);
+    expect(_inTree(tester, 'Collapse Settings'), isFalse);
     handle.dispose();
   });
 }

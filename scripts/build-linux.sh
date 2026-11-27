@@ -20,6 +20,9 @@
 #       (scripts/qa.sh --container builds a commit's `git archive` this way)
 #
 #   FACTORY_CONTAINER=docker   the container engine (podman unless it's missing)
+#   FACTORY_X86_HOST=user@host an x86_64 Linux machine (podman) that runs the
+#       x86_64 builds over ssh, which never run on an arm64 Mac;
+#       FACTORY_X86_KEY, FACTORY_X86_KNOWN_HOSTS: its key and host key
 #   FACTORY_LINUX_JOBS=N       parallel jobs (2: more can run a small VM out of memory)
 #
 # Each arch keeps its build in a volume, factory-linux-target-ARCH, and the
@@ -48,7 +51,10 @@ case "$PACKAGE" in
   rg) [[ -n "${FACTORY_LINUX_SRC:-}" ]] || { echo "rg builds from ripgrep's source: run scripts/build-rg.sh linux ARCH OUT" >&2; exit 2; } ;;
   *) usage ;;
 esac
-SRC_ROOT="${FACTORY_LINUX_SRC:-$ROOT}"
+# Its real path: a release's export is /tmp/claktory-release/src, and the
+# container engine's VM on a Mac shares /private, never /tmp (v0.1.25's
+# first build stopped at "statfs /tmp/claktory-release/src").
+SRC_ROOT="$(cd "${FACTORY_LINUX_SRC:-$ROOT}" && pwd -P)"
 FRESH=false; [[ "${FACTORY_LINUX_FRESH:-}" != 1 ]] || FRESH=true
 # ripgrep, and a fresh build, build into the container's own /tmp, gone when
 # it ends; the rest into the build volume.
@@ -67,21 +73,15 @@ if [[ "$PACKAGE" == claktory-speech ]]; then
   esac
 fi
 
-ENGINE="${FACTORY_CONTAINER:-}"
-if [[ -z "$ENGINE" ]]; then
-  if command -v podman >/dev/null; then ENGINE=podman
-  elif command -v docker >/dev/null; then ENGINE=docker
-  else
-    echo "building for Linux needs podman (brew install podman; podman machine init; podman machine start) or docker" >&2
-    exit 1
-  fi
-fi
-
-# The container runs natively: the same architecture as this machine.
-case "$(uname -m)" in
-  arm64 | aarch64) PLATFORM=linux/arm64 ;;
-  *) PLATFORM=linux/amd64 ;;
-esac
+# The container runs natively: on this machine for its own architecture (and
+# cross-compiling the other with zig), never emulated. An x86_64 build on an
+# arm64 Mac runs on FACTORY_X86_HOST over ssh (scripts/lib.sh container_for:
+# Matt's rule, no x86_64 builds on arm).
+source "$ROOT/scripts/lib.sh"
+container_for "$ARCH"
+PLATFORM="$CONTAINER_PLATFORM"
+# Parallel jobs: 2 in this Mac's small VM; more on the x86_64 host.
+JOBS="${FACTORY_LINUX_JOBS:-2}"; [[ -z "$X86_REMOTE" || -n "${FACTORY_LINUX_JOBS:-}" ]] || JOBS=16
 TARGET="$ARCH-unknown-linux-musl"
 
 mkdir -p "$(dirname "$OUT")"
@@ -97,19 +97,19 @@ if $FRESH; then
   [[ -z "$RUN" ]] || VOLUMES=(-v "factory-linux-run-$RUN-target-$ARCH:/target" -v "factory-linux-run-$RUN-cargo:/usr/local/cargo/registry")
 fi
 # Once per run: a run's first build makes its crates volume.
-if $FRESH && { [[ -z "$RUN" ]] || ! "$ENGINE" volume inspect "factory-linux-run-$RUN-cargo" >/dev/null 2>&1; }; then
+if $FRESH && { [[ -z "$RUN" ]] || ! engine volume inspect "factory-linux-run-$RUN-cargo" >/dev/null 2>&1; }; then
   # Removed first (refused while another build uses it: try again then), so
   # what's pulled is all Docker Hub's, none of it kept on this machine.
-  if ID="$("$ENGINE" image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null)" && ! "$ENGINE" rmi "$ID" >/dev/null; then
+  if ID="$(engine image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null)" && ! engine rmi "$ID" >/dev/null; then
     echo "another build is using the Linux build image; try again when it's done" >&2
     exit 1
   fi
-  "$ENGINE" pull -q --platform "$PLATFORM" "$IMAGE" >/dev/null
+  engine pull -q --platform "$PLATFORM" "$IMAGE" >/dev/null
 fi
 
 # The checkout goes in read-only and is copied, so nothing in it changes; the
 # copy leaves out the Mac's build output and the app.
-"$ENGINE" run --rm --platform "$PLATFORM" \
+engine run --rm --platform "$PLATFORM" \
   -v "$SRC_ROOT:/src:ro" -v "$OUT_DIR:/out" \
   ${VOLUMES[@]+"${VOLUMES[@]}"} \
   -e FACTORY_VERSION -e FACTORY_UPDATE_URL -e CARGO_TARGET_DIR="$TARGET_DIR" \
@@ -152,6 +152,6 @@ fi
       esac
     fi
     cp "$file" "/out/.$2.partial"
-  ' sh "${FACTORY_LINUX_JOBS:-2}" "$(basename "$OUT")" "$TARGET" "$PACKAGE"
+  ' sh "$JOBS" "$(basename "$OUT")" "$TARGET" "$PACKAGE"
 mv -f "$OUT_DIR/.$(basename "$OUT").partial" "$OUT"
 echo "built $OUT ($ARCH)"

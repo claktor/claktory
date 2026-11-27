@@ -108,7 +108,9 @@ void main() {
             (text.widget as Text).data ?? '',
         ].where((text) => text.isNotEmpty);
         final all = shown.join(' | ');
-        note('  on screen: ${all.length > 300 ? '${all.substring(0, 300)}…' : all}');
+        note(
+          '  on screen: ${all.length > 300 ? '${all.substring(0, 300)}…' : all}',
+        );
       }
     }
 
@@ -252,7 +254,9 @@ void main() {
       await settle();
     }
     await step('sheet', () async {
-      await tester.tap(find.bySemanticsLabel('Extensions').first);
+      await tester.tap(
+        find.bySemanticsLabel(RegExp('^More options for ')).first,
+      );
       await settle();
       await shot('05-more-sheet');
     });

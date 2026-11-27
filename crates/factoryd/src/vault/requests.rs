@@ -27,15 +27,20 @@ async fn blocking<T: Send + 'static>(
 /// The vault's key, if `given` is its passphrase or recovery key; a wrong
 /// one is refused after a second.
 pub(crate) async fn prove(factory: &Arc<Factory>, given: &str) -> Result<Key, RequestError> {
+    Ok(prove_which(factory, given).await?.0)
+}
+
+/// `prove`, with the hash of the protector that opened (`Vault::check_which`).
+async fn prove_which(factory: &Arc<Factory>, given: &str) -> Result<(Key, String), RequestError> {
     let given = zeroize::Zeroizing::new(given.to_owned());
     let (found, passphrase) = blocking(factory, move |vault| {
         let (vault_id, protectors) = vault.protectors()?;
         let passphrase = protectors.iter().any(|protector| protector.kind == "passphrase");
-        Ok((Vault::check(&vault_id, &protectors, &given), passphrase))
+        Ok((Vault::check_which(&vault_id, &protectors, &given), passphrase))
     })
     .await?;
     match found {
-        Some(vmk) => Ok(vmk),
+        Some(found) => Ok(found),
         None => {
             tokio::time::sleep(WRONG_DELAY).await;
             // Only vaults from before Claktory made them by itself have a passphrase.
@@ -47,9 +52,14 @@ pub(crate) async fn prove(factory: &Arc<Factory>, given: &str) -> Result<Key, Re
 
 /// Opens a locked vault; in any mode, checks the passphrase.
 pub(crate) async fn unlock(factory: &Arc<Factory>, passphrase: &str) -> Result<(), RequestError> {
-    let vmk = prove(factory, passphrase).await?;
+    let (vmk, opened_by) = prove_which(factory, passphrase).await?;
     if !factory.vault.is_open() {
         factory.vault.unlock(vmk);
+        // A recovery key typed here has been seen here (#239): the app
+        // offers to make a new one. A passphrase's hash matches none.
+        if let Err(error) = factory.vault.note_recovery_used(&opened_by) {
+            tracing::warn!(%error, "could not keep that the recovery key was used");
+        }
         factory.vault_changed();
         crate::account::opened_by_hand(factory);
     }
@@ -365,6 +375,14 @@ pub(crate) async fn new_recovery_key(
     request: &v1::NewRecoveryKey,
 ) -> Result<v1::RecoveryKey, RequestError> {
     open(factory, request.proof.as_ref()).await?;
+    // The account's key (#239) is made on the person's device and approved
+    // there (public_key, then PublishRecoveryKey), which needs the device's
+    // own account key on its connection: not in this version yet. Covered
+    // by the account's key, a key of this Claktory's own would only be one
+    // more way in, never shown again.
+    if !request.public_key.is_empty() || factory.vault.account_covered_now() {
+        return Err(VaultError::Invalid("This version of Claktory can't make a new recovery key for your account yet.".to_owned()).into());
+    }
     let key = factory.vault.new_recovery_key()?;
     Ok(v1::RecoveryKey { key, unlocked_until_ms: 0 })
 }
@@ -456,7 +474,7 @@ fn approve_to_admin(factory: &Arc<Factory>, asked: &v1::SecretRequest, comment: 
     );
     text.push_str(&note(&person, comment));
     text.push_str(&format!(
-        "\n\nGive it a matching secret from the vault: secrets_list to look, then secrets_grant with request: \"{id}\" (and aliases if its variable names differ). When none fits, secrets_collect with request: \"{id}\" asks {person} to add one: the card shows in your conversation, prefilled, and they type the values straight into the vault; you never see them. You'll be told how it ends either way.",
+        "\n\nGive it a matching secret from the vault: secrets_list to look, then secrets_grant with request: \"{id}\" (and aliases if its variable names differ). When none fits, secrets_collect with request: \"{id}\" asks {person} to add one: the request shows in your conversation, prefilled, and they type the values straight into the vault; you never see them. You'll be told how it ends either way.",
         id = approved.id
     ));
     let event = factory_agent::Event {

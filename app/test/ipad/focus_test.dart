@@ -14,6 +14,7 @@ import 'package:factory_app/needs_you_focus.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/shell.dart' show Shell;
 import 'package:fixnum/fixnum.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -137,6 +138,31 @@ void main() {
     await settle(tester);
     expect(find.byType(FocusContext), findsNothing);
     expect(_onStage('Question 7'), findsOneWidget);
+
+    // Open, it leaves the stage's header in reach: its Context button
+    // hides it again (Zucchero's row 666), and so does its own close.
+    await tester.tap(find.bySemanticsLabel(RegExp(r'^Context$')).first);
+    await settle(tester);
+    final header = find.descendant(
+      of: find.byType(FocusStage),
+      matching: find.text('Done'),
+    );
+    expect(tester.getRect(header).bottom, lessThan(panel.top));
+    expect(
+      tester
+          .hitTestOnBinding(tester.getCenter(header))
+          .path
+          .any((entry) => entry.target is RenderParagraph),
+      isTrue,
+    );
+    await tester.tap(find.bySemanticsLabel(RegExp(r'^Context$')).first);
+    await settle(tester);
+    expect(find.byType(FocusContext), findsNothing);
+    await tester.tap(find.bySemanticsLabel(RegExp(r'^Context$')).first);
+    await settle(tester);
+    await tester.tap(find.bySemanticsLabel('Hide Context'));
+    await settle(tester);
+    expect(find.byType(FocusContext), findsNothing);
   });
 
   testWidgets('11" portrait: the stage alone; "1 of 3" shows the queue, a '
@@ -158,10 +184,10 @@ void main() {
     await settle(tester);
     expect(find.byType(FocusQueue), findsNothing);
     expect(_onStage('Question 1'), findsOneWidget);
-    await tester.tap(find.bySemanticsLabel('Next card'));
+    await tester.tap(find.bySemanticsLabel('Next request'));
     await settle(tester);
     expect(_onStage('Question 2'), findsOneWidget);
-    await tester.tap(find.bySemanticsLabel('Previous card'));
+    await tester.tap(find.bySemanticsLabel('Previous request'));
     await settle(tester);
     expect(_onStage('Question 1'), findsOneWidget);
   });

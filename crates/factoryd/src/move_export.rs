@@ -91,7 +91,7 @@ impl Place {
     /// `--dev`, `FACTORY_HOME` and `FACTORY_PORT` included.
     pub fn this_user(dev: bool) -> Option<Place> {
         let user_home = std::env::home_dir()?;
-        let mut instance = crate::home::instance(dev, &user_home);
+        let mut instance = crate::home::instance_in(dev, crate::home::instance_root(dev)?);
         let custom = std::env::var_os("FACTORY_HOME").is_some();
         if let Some(root) = std::env::var_os("FACTORY_HOME") {
             instance.home = Home::new(root.into());

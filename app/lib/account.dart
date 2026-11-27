@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -7,7 +8,8 @@ import 'package:flutter/widgets.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'backend.dart';
-import 'claktory_identity.dart' show claktoryNameInText;
+import 'claktory_identity.dart' show claktoryName, claktoryNameInText;
+import 'devices.dart' show thisDeviceKind;
 import 'controls.dart';
 import 'forms.dart';
 import 'identity.dart';
@@ -22,6 +24,7 @@ import 'scope.dart';
 import 'selection.dart';
 import 'settings_view.dart';
 import 'usage.dart';
+import 'your_claktories.dart' show DeviceSignInDialog, signOutOfAccount;
 
 /// The Claktory account: signing this Claktory in to claktory.com with an
 /// emailed code (the first launch's first step), and Settings → Account.
@@ -53,6 +56,8 @@ bool asksSignIn(BuildContext context) {
   final backend = AppScope.of(context);
   final store = backend.workspace;
   if (!backend.connected.value || !store.received) return false;
+  // Turned away (removed there): its problem page, not its sign-in.
+  if (backend.refused.value != null) return false;
   final workspace = store.workspace;
   if (!workspace.hasAccount()) return false;
   final state = workspace.account.state;
@@ -142,6 +147,7 @@ class CodeBoxes extends StatefulWidget {
   const CodeBoxes({
     super.key,
     required this.controller,
+    this.focusNode,
     this.autofocus = false,
     this.onSubmitted,
     this.semanticsLabel = 'Code from your email',
@@ -149,6 +155,14 @@ class CodeBoxes extends StatefulWidget {
   });
 
   final TextEditingController controller;
+
+  /// The boxes' focus, for a form that puts it back (after Resend code);
+  /// their own when null.
+  final FocusNode? focusNode;
+
+  /// Whether the boxes take the focus as they show: always, even from the
+  /// button that brought the code step (Send code), which keeps it after
+  /// its press on a Mac or an iPad with a keyboard.
   final bool autofocus;
   final ValueChanged<String>? onSubmitted;
   final String semanticsLabel;
@@ -159,11 +173,25 @@ class CodeBoxes extends StatefulWidget {
 }
 
 class _CodeBoxesState extends State<CodeBoxes> {
-  final _focus = FocusNode();
+  FocusNode? _own;
+  FocusNode get _focus => widget.focusNode ?? (_own ??= FocusNode());
+
+  @override
+  void initState() {
+    super.initState();
+    // A field's autofocus gives way to whatever has the focus already (the
+    // Send code button just pressed): these take it outright (V6,
+    // Abbacchio).
+    if (widget.autofocus) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _focus.requestFocus();
+      });
+    }
+  }
 
   @override
   void dispose() {
-    _focus.dispose();
+    _own?.dispose();
     super.dispose();
   }
 
@@ -302,6 +330,7 @@ class SignInStep extends StatefulWidget {
 class _SignInStepState extends State<SignInStep> {
   final _email = TextEditingController();
   final _code = TextEditingController();
+  final _codeFocus = FocusNode();
   var _busy = false;
   String? _error;
 
@@ -327,6 +356,7 @@ class _SignInStepState extends State<SignInStep> {
   void dispose() {
     _email.dispose();
     _code.dispose();
+    _codeFocus.dispose();
     super.dispose();
   }
 
@@ -423,6 +453,9 @@ class _SignInStepState extends State<SignInStep> {
         _resent = true;
         _code.clear();
       });
+      // Back in the boxes for the new code, from Resend's button (V6,
+      // Abbacchio).
+      _codeFocus.requestFocus();
     }
   }
 
@@ -598,6 +631,7 @@ class _SignInStepState extends State<SignInStep> {
           CodeBoxes(
             key: const ValueKey('code'),
             controller: _code,
+            focusNode: _codeFocus,
             autofocus: true,
             scrollPadding: stepFieldScrollPadding(context),
             onSubmitted: (_) =>
@@ -741,6 +775,9 @@ class _AccountSettingsState extends State<AccountSettings>
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final account = widget.account;
+    // Its own service's name where it isn't claktory.com's (a self-hosted
+    // one: Zucchero's V6 NIT).
+    final site = accountSiteName(account.service);
     final state = account.state;
     final signedOut =
         state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SIGNED_OUT ||
@@ -748,6 +785,7 @@ class _AccountSettingsState extends State<AccountSettings>
         state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_UNSPECIFIED;
     final revoked =
         state == ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_REVOKED;
+    final vault = AppScope.of(context).workspace.workspace.vault;
     final type = TypeScale.of(context);
     final muted = type.body.copyWith(color: palette.textMuted);
     final caption = type.caption.copyWith(color: palette.textMuted);
@@ -779,9 +817,21 @@ class _AccountSettingsState extends State<AccountSettings>
                     Button(label: 'Sign in…', onPressed: _signIn),
                   ],
                 )
-              : Text(
-                  account.email,
-                  style: type.body.copyWith(color: palette.text),
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      account.email,
+                      style: type.body.copyWith(color: palette.text),
+                    ),
+                    // A switch waiting for its code (#529, V6).
+                    if (account.switchingTo.isNotEmpty)
+                      Text(
+                        'Switching to ${account.switchingTo}: enter the code '
+                        'sent there to finish.',
+                        style: caption,
+                      ),
+                  ],
                 ),
         ),
         if (revoked)
@@ -792,7 +842,7 @@ class _AccountSettingsState extends State<AccountSettings>
               children: [
                 Text(
                   'This Claktory was removed from your account at '
-                  'claktory.com. Sign in again so your secrets unlock on '
+                  '$site. Sign in again so your secrets unlock on '
                   'their own after a restart.',
                   style: type.body.copyWith(color: palette.danger),
                 ),
@@ -847,17 +897,17 @@ class _AccountSettingsState extends State<AccountSettings>
             child: Text(account.problem, style: caption),
           ),
         SettingRow(
-          label: 'Shared with claktory.com',
+          label: 'Shared with $site',
           top: true,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
                 'When it starts, and every hour while it runs, this Claktory '
-                'tells claktory.com its version, the kind of computer it runs '
+                'tells $site its version, the kind of computer it runs '
                 "on, and how much it's used: how many agents, projects and "
                 'devices, the hours agents worked, and tokens per model. '
-                'claktory.com also works out roughly where it is (city, '
+                '$site also works out roughly where it is (city, '
                 'region and country) from its internet address. When it '
                 'restarts, its internet address is kept for 30 days, so you '
                 'can see where your secrets were unlocked. Never your '
@@ -917,15 +967,28 @@ class _AccountSettingsState extends State<AccountSettings>
           runSpacing: Space.s,
           children: [
             Button(
-              label: 'Manage account at claktory.com',
+              label: 'Manage account at $site',
               onPressed: () => openAccountPage(accountPage(account.service)),
             ),
-            if (!signedOut)
+            // No Claktory keeps the account's key once it covers the vault
+            // (#239): nothing to show then.
+            if (!signedOut &&
+                !(vault.recoveryKeyCovered && !vault.recoveryKeyShowable))
               Button(
                 label: 'Show recovery key…',
                 onPressed: () => showModal(
                   context,
                   (context, close) => _RecoveryKey(close: close),
+                ),
+              ),
+            if (!signedOut && !revoked)
+              Button(
+                label: account.switchingTo.isEmpty
+                    ? 'Switch account…'
+                    : 'Enter code…',
+                onPressed: () => showModal(
+                  context,
+                  (context, close) => SwitchAccountForm(close: close),
                 ),
               ),
             if (!signedOut)
@@ -939,10 +1002,11 @@ class _AccountSettingsState extends State<AccountSettings>
           ],
         ),
         // Last and apart: it can't be undone. The account site asks once
-        // more before it deletes anything.
+        // more before it deletes anything. On a phone its help goes under
+        // it (settings §4.1).
         const SizedBox(height: Space.xl),
         _line(
-          stack: stack,
+          stack: isPhoneLayout(context),
           children: [
             Button(
               label: 'Delete account…',
@@ -1062,18 +1126,298 @@ class _SignOutFormState extends State<_SignOutForm> {
   }
 
   @override
-  Widget build(BuildContext context) => FormFrame(
-    title: 'Sign out of Claktory?',
-    body:
-        'Your agents keep working. If Claktory restarts before you sign in '
-        'again, unlock your secrets with this Claktory\'s recovery key.',
-    fields: const [],
-    error: _error,
-    submitLabel: 'Sign out',
-    onSubmit: _busy ? null : _signOut,
-    onCancel: widget.close,
-  );
+  Widget build(BuildContext context) {
+    final backend = AppScope.of(context);
+    final name = claktoryName(backend);
+    // This device reached it through the account (found under On your
+    // account): signed out, it stops letting this device in (#529, V6;
+    // Trish 47407).
+    final through = backend.target?.fromAccount ?? false;
+    return FormFrame(
+      title: 'Sign out of Claktory?',
+      body:
+          'Your agents keep working. If Claktory restarts before you sign in '
+          'again, unlock your secrets with this Claktory\'s recovery key.'
+          '${through ? '\n\n${disconnectsThroughAccount(name)}' : ''}',
+      fields: const [],
+      error: _error,
+      submitLabel: 'Sign out',
+      onSubmit: _busy ? null : _signOut,
+      onCancel: widget.close,
+    );
+  }
 }
+
+/// Switch account… (#529, V6): another address and its code, this
+/// Claktory staying signed in as it is until the code checks out; Cancel
+/// drops the code asked for. Closes once the switch is made.
+class SwitchAccountForm extends StatefulWidget {
+  const SwitchAccountForm({super.key, required this.close});
+
+  final VoidCallback close;
+
+  @override
+  State<SwitchAccountForm> createState() => _SwitchAccountFormState();
+}
+
+class _SwitchAccountFormState extends State<SwitchAccountForm> {
+  final _email = TextEditingController();
+  final _code = TextEditingController();
+  final _codeFocus = FocusNode();
+  var _busy = false;
+  var _resent = false;
+  String? _error;
+
+  /// Typing another address while a code waits.
+  var _changingEmail = false;
+  late final Backend _backend = AppScope.of(context);
+  late final String _from = _account.email;
+
+  ClaktoryAccount get _account => _backend.workspace.workspace.account;
+
+  bool get _awaitingCode => _account.switchingTo.isNotEmpty && !_changingEmail;
+
+  @override
+  void initState() {
+    super.initState();
+    _code.addListener(_codeChanged);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _from;
+    _backend.workspace.addListener(_changed);
+  }
+
+  @override
+  void dispose() {
+    _backend.workspace.removeListener(_changed);
+    _email.dispose();
+    _code.dispose();
+    _codeFocus.dispose();
+    super.dispose();
+  }
+
+  /// Switched: signed in as the new address, nothing pending.
+  void _changed() {
+    final account = _account;
+    if (account.switchingTo.isEmpty &&
+        account.email != _from &&
+        account.state ==
+            ClaktoryAccountState.CLAKTORY_ACCOUNT_STATE_SIGNED_IN) {
+      widget.close();
+    } else if (mounted) {
+      setState(() {});
+    }
+  }
+
+  void _codeChanged() {
+    final text = _code.text;
+    var digits = text.replaceAll(RegExp(r'\D'), '');
+    if (digits.length > codeLength) digits = digits.substring(0, codeLength);
+    if (digits != text) {
+      _code.value = TextEditingValue(
+        text: digits,
+        selection: TextSelection.collapsed(offset: digits.length),
+      );
+      return;
+    }
+    if (digits.length == codeLength && !_busy) unawaited(_verify());
+  }
+
+  Future<bool> _run(Future<void> Function() request) async {
+    if (_busy) return false;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await request();
+      return true;
+    } on RequestFailure catch (failure) {
+      if (mounted) setState(() => _error = failure.message);
+      return false;
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _sendCode() async {
+    final email = _email.text.trim();
+    if (!looksLikeEmail(email)) {
+      setState(() => _error = 'Enter an email address, like you@example.com.');
+      return;
+    }
+    if (await _run(() => _backend.accountSignIn(email)) && mounted) {
+      setState(() {
+        _changingEmail = false;
+        _resent = false;
+        _code.clear();
+      });
+    }
+  }
+
+  Future<void> _verify() async {
+    final code = _code.text;
+    if (!await _run(() => _backend.accountVerify(code)) && mounted) {
+      _code.clear();
+    }
+  }
+
+  Future<void> _resend() async {
+    if (await _run(_backend.accountResend) && mounted) {
+      setState(() {
+        _resent = true;
+        _code.clear();
+      });
+      // Back in the boxes for the new code, from Resend's button (V6,
+      // Abbacchio).
+      _codeFocus.requestFocus();
+    }
+  }
+
+  /// Resend code, once [resendAfter] has passed since the code was sent;
+  /// until then, how long to wait.
+  Widget _resendButton(ClaktoryAccount account) {
+    final sentAt = account.codeExpiresMs.toInt() == 0
+        ? null
+        : DateTime.fromMillisecondsSinceEpoch(account.codeExpiresMs.toInt())
+              .subtract(codeLife);
+    return Ticking(
+      active:
+          sentAt != null && DateTime.now().isBefore(sentAt.add(resendAfter)),
+      builder: (context, now) {
+        final wait = sentAt == null
+            ? Duration.zero
+            : sentAt.add(resendAfter).difference(now);
+        if (wait > Duration.zero) {
+          final type = TypeScale.of(context);
+          return Text(
+            _resent
+                ? 'New code sent.'
+                : 'Resend in ${(wait.inMilliseconds / 1000).ceil()}s',
+            style: type.caption.copyWith(color: Palette.of(context).textFaint),
+          );
+        }
+        return Button(label: 'Resend code', onPressed: _busy ? null : _resend);
+      },
+    );
+  }
+
+  /// Cancel: the code asked for is dropped, the account stays.
+  Future<void> _cancel() async {
+    if (_account.switchingTo.isNotEmpty) {
+      await _run(_backend.accountSignInCancel);
+    }
+    widget.close();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = Palette.of(context);
+    final type = TypeScale.of(context);
+    final account = _account;
+    final name = claktoryName(_backend);
+    final through = _backend.target?.fromAccount ?? false;
+    final stays =
+        '$name stays signed in as ${account.email} until you enter the new '
+        "account's code.";
+    final warning = through ? switchWarning(name) : null;
+    final caption = type.caption.copyWith(color: palette.textFaint);
+    if (_awaitingCode) {
+      final different = Button(
+        label: 'Use a different email',
+        onPressed: () => setState(() {
+          _changingEmail = true;
+          _error = null;
+          if (_email.text.isEmpty) _email.text = account.switchingTo;
+        }),
+      );
+      return FormFrame(
+        title: 'Check your email',
+        body:
+            'Enter the 6-digit code sent to ${account.switchingTo}. It works '
+            'for 15 minutes.',
+        fields: [
+          CodeBoxes(
+            key: const ValueKey('switch-code'),
+            controller: _code,
+            focusNode: _codeFocus,
+            autofocus: true,
+            onSubmitted: (_) =>
+                _code.text.length == codeLength ? _verify() : null,
+          ),
+          const SizedBox(height: Space.s),
+          Text(
+            [
+              if (account.codeFrom.isNotEmpty) "It's from ${account.codeFrom}.",
+              "Can't find it? Check your spam folder.",
+            ].join(' '),
+            style: caption,
+          ),
+          const SizedBox(height: Space.s),
+          // Under the code, not beside Cancel and Switch: three buttons
+          // don't fit a dialog's row.
+          Wrap(
+            spacing: Space.s,
+            runSpacing: Space.s,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [_resendButton(account), different],
+          ),
+          if (warning != null) ...[
+            const SizedBox(height: Space.m),
+            Text(warning, style: type.body.copyWith(color: palette.textMuted)),
+          ],
+        ],
+        error: _error,
+        submitLabel: 'Switch',
+        onSubmit: _busy || _code.text.length != codeLength ? null : _verify,
+        onCancel: () => unawaited(_cancel()),
+      );
+    }
+    return ListenableBuilder(
+      listenable: _email,
+      builder: (context, _) => FormFrame(
+        title: 'Switch account',
+        body: stays,
+        fields: [
+          TextField(
+            key: const ValueKey('switch-email'),
+            controller: _email,
+            placeholder: 'Email address',
+            autofocus: true,
+            kind: InputKind.email,
+            onSubmitted: (_) => _sendCode(),
+          ),
+          if (warning != null) ...[
+            const SizedBox(height: Space.m),
+            Text(warning, style: type.body.copyWith(color: palette.textMuted)),
+          ],
+        ],
+        error: _error,
+        submitLabel: 'Send code',
+        onSubmit: _email.text.trim().isEmpty || _busy ? null : _sendCode,
+        onCancel: () => unawaited(_cancel()),
+      ),
+    );
+  }
+}
+
+/// Switching [name] to another account, when this device reached it
+/// through the one it's signed in with now (#529, V6; Trish 47407).
+String switchWarning(String name) =>
+    "If the new account isn't the one this $thisDeviceKind uses, $name "
+    'stops letting this $thisDeviceKind in. To connect again, add this '
+    '$thisDeviceKind on $name in Settings → Devices, or run factoryd pair '
+    'in a terminal there.';
+
+/// What signing [name] out of its account does to this device when it
+/// reached [name] through that account, and the ways back (#529, V6).
+String disconnectsThroughAccount(String name) =>
+    'This $thisDeviceKind disconnects from $name, which let it in through '
+    'your account. To connect again, add this $thisDeviceKind on $name in '
+    'Settings → Devices, or run factoryd pair in a terminal there.';
 
 /// The account service's address, for someone running their own.
 class _ServiceForm extends StatefulWidget {
@@ -1272,6 +1616,68 @@ class _RecoveryKeyState extends State<_RecoveryKey> {
         ),
         ...buttons,
       ],
+    );
+  }
+}
+
+/// This device's own sign-in to the Claktory account, the first row of
+/// Settings → This iPhone (area 2, §6 and 8.5; area 3 settings §3, Lucy
+/// 49738): "Signed in as matt@example.com." with a quiet Sign out…, which
+/// asks first and names the Claktories that stop connecting (MC5); or "Not
+/// signed in." with Sign in…. Never in Account, which is the Claktory's.
+class DeviceAccountRow extends StatelessWidget {
+  const DeviceAccountRow({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final account = AppScope.scope(context).connections.account;
+    return ListenableBuilder(
+      listenable: account,
+      builder: (context, _) {
+        final palette = Palette.of(context);
+        final type = TypeScale.of(context);
+        final signedIn = account.signedIn;
+        final words = Text(
+          // The section names the device and the label the account: the
+          // line says neither again (Trish 49744).
+          signedIn ? 'Signed in as ${account.email}.' : 'Not signed in.',
+          style: type.body.copyWith(color: palette.textMuted),
+        );
+        final action = Button(
+          label: signedIn ? 'Sign out…' : 'Sign in…',
+          onPressed: signedIn
+              ? () => unawaited(signOutOfAccount(context, account))
+              : () => showModal(
+                  context,
+                  (context, close) => DeviceSignInDialog(
+                    title: 'Sign in on this $thisDeviceKind',
+                    intro:
+                        'Sign in with your Claktory email to see your '
+                        'Claktories here and connect without a code.',
+                    close: close,
+                  ),
+                ),
+        );
+        return SettingRow(
+          label: 'Claktory account',
+          child: isPhoneLayout(context) && largeText(context)
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    words,
+                    const SizedBox(height: Space.s),
+                    action,
+                  ],
+                )
+              : Row(
+                  children: [
+                    Expanded(child: words),
+                    const SizedBox(width: Space.m),
+                    action,
+                  ],
+                ),
+        );
+      },
     );
   }
 }

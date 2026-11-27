@@ -1,13 +1,14 @@
-// Needs you on an iPhone (#514 §7), drawn: with SHOTS set, PNGs of one
-// card a screen and the answer under the thumb, on an iPhone SE and a Pro
-// Max, at the default text size and the largest:
+// Needs you on an iPhone, drawn: with SHOTS set, PNGs of the list first
+// (#599), a request tapped there alone with the answer under the thumb, and
+// focus mode's card and queue (#514 §7), on an iPhone SE and a Pro Max, at
+// the default text size and the largest:
 //   SHOTS=/tmp/needs-you flutter test test/mobile_needs_you_shots_test.dart
 // test-bundle: alone (loads the app's fonts)
 import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:factory_app/card_answer.dart' show AnswerDock, CardAnswer;
-import 'package:factory_app/inbox.dart' show NeedsYouCard;
+import 'package:factory_app/inbox.dart' show NeedsYouCard, NeedsYouList;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/scope.dart';
 import 'package:fixnum/fixnum.dart';
@@ -97,9 +98,21 @@ void main() {
         await tester.pump();
         await pumpFrames(tester);
         expect(tester.takeException(), isNull);
-        await _shot(tester, '$phone-$scale-card');
+        await _shot(tester, '$phone-$scale-list');
 
-        // The answer docked at the foot, as Illuso's cards will publish it.
+        // A request tapped: it alone.
+        final row = find.descendant(
+          of: find.byType(NeedsYouList),
+          matching: find.text('Ship the migration tonight?'),
+        );
+        await tester.ensureVisible(row);
+        await pumpFrames(tester);
+        await tester.tap(row);
+        await pumpFrames(tester);
+        expect(tester.takeException(), isNull);
+        await _shot(tester, '$phone-$scale-alone');
+
+        // The answer docked at the foot, as Illuso's cards publish it.
         final field = TextEditingController();
         addTearDown(field.dispose);
         AnswerDock.of(tester.element(find.byType(NeedsYouCard)))!
@@ -117,6 +130,17 @@ void main() {
         await tester.pump(const Duration(seconds: 2));
         expect(tester.takeException(), isNull);
         await _shot(tester, '$phone-$scale-dock');
+
+        // Back, then focus mode.
+        await tester.tap(find.bySemanticsLabel('Back').last);
+        await pumpFrames(tester);
+        final focus = find.bySemanticsLabel('Focus on Needs you');
+        await tester.ensureVisible(focus);
+        await pumpFrames(tester);
+        await tester.tap(focus);
+        await pumpFrames(tester);
+        expect(tester.takeException(), isNull);
+        await _shot(tester, '$phone-$scale-card');
 
         await tester.tap(find.text(scale > 1.5 ? '1/2' : '1 of 2'));
         await pumpFrames(tester);

@@ -110,10 +110,7 @@ void main() {
     expect(harness.camera.asked, 0);
     expect(find.text('The camera is off for Claktory'), findsOneWidget);
     // No Paste code instead here, so the words don't offer it.
-    expect(
-      find.text("Turn it on in Settings on this iPhone."),
-      findsOneWidget,
-    );
+    expect(find.text("Turn it on in Settings on this iPhone."), findsOneWidget);
     await tester.tap(find.text('Open Settings'));
     await pumpFrames(tester);
     expect(harness.camera.settingsOpened, 1);
@@ -149,10 +146,7 @@ void main() {
     await harness.show(tester, size: phone);
     await pumpFrames(tester);
     final result = await _scan(tester);
-    expect(
-      find.text("Turn it on in Android's Settings."),
-      findsOneWidget,
-    );
+    expect(find.text("Turn it on in Android's Settings."), findsOneWidget);
     await tester.tap(find.text('Not now'));
     await pumpFrames(tester);
     expect(await result.future, isNull);
@@ -197,6 +191,31 @@ void main() {
     expect(find.text('Not now'), findsNothing);
     await tester.tap(find.text('Paste code instead'));
     await pumpFrames(tester);
+    expect(await result.future, isNull);
+    expect(pasted, 1);
+  });
+
+  testWidgets('not asked yet, with a field to paste in: Paste code instead '
+      "is under Continue from the start (Sale's row 189c)", (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final harness = Harness(workspace());
+    harness.camera.state = CameraAccess.undetermined;
+    await harness.show(tester, size: phone);
+    await pumpFrames(tester);
+    var pasted = 0;
+    final result = await _scan(tester, onPasteInstead: () => pasted++);
+    expect(find.text('Continue'), findsOneWidget);
+    final paste = find.text('Paste code instead');
+    expect(paste, findsOneWidget);
+    // Under Continue.
+    expect(
+      tester.getTopLeft(paste).dy,
+      greaterThan(tester.getTopLeft(find.text('Continue')).dy),
+    );
+    await tester.tap(paste);
+    await pumpFrames(tester);
+    expect(harness.camera.asked, 0);
     expect(await result.future, isNull);
     expect(pasted, 1);
   });

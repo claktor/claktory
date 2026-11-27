@@ -1,6 +1,10 @@
-use std::fs::{self, DirBuilder, OpenOptions};
+use std::fs;
+#[cfg(unix)]
+use std::fs::{DirBuilder, OpenOptions};
 use std::future::Future;
+#[cfg(unix)]
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, fchown};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -38,6 +42,18 @@ fn read_json(file: &Path) -> Result<Option<Value>, Error> {
 }
 
 /// Written through a temp file so an interrupted write cannot truncate the session; a rewrite keeps the file's owner and group.
+/// On Windows a private file (this user and SYSTEM), replaced whole the
+/// same way; its files have no owner and group to keep.
+#[cfg(windows)]
+fn write_json(file: &Path, data: &Value) -> Result<(), Error> {
+    if let Some(parent) = file.parent() {
+        crate::windows::private::create_dir_all(parent)?;
+    }
+    let text = format!("{}\n", serde_json::to_string_pretty(data)?);
+    Ok(crate::windows::private::write(file, text.as_bytes())?)
+}
+
+#[cfg(unix)]
 fn write_json(file: &Path, data: &Value) -> Result<(), Error> {
     if let Some(parent) = file.parent() {
         DirBuilder::new().recursive(true).mode(0o700).create(parent)?;

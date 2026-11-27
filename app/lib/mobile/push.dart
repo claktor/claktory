@@ -25,6 +25,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart' show AppLifecycleListener, BuildContext;
 
 import '../backend.dart' show Backend;
 import '../diagnostics_record.dart'
@@ -33,7 +34,13 @@ import '../notifications.dart' show claktoryId;
 import '../protocol/factory/v1/factory.pb.dart';
 import '../rail.dart' show Claktories, Claktory;
 import 'device_permissions.dart' show NotificationsPermission;
-import 'permission.dart' show askPermission, permissionHost;
+import 'permission.dart'
+    show
+        PermissionFlow,
+        PermissionStage,
+        permissionHost,
+        permissionHosts,
+        presentPermission;
 
 /// Claktory's own push relay, when a Claktory's settings name none.
 const defaultPushRelay = 'https://push.claktory.com';
@@ -98,6 +105,14 @@ class PushState {
   final String platform;
 
   bool get allowed => permission == 'allowed';
+
+  /// As the Claktory names it (SetActive.notifications,
+  /// RegisterNotifications.permission; item 13).
+  NotificationPermission get notificationPermission => switch (permission) {
+    'allowed' => NotificationPermission.NOTIFICATION_PERMISSION_ALLOWED,
+    'denied' => NotificationPermission.NOTIFICATION_PERMISSION_DENIED,
+    _ => NotificationPermission.NOTIFICATION_PERMISSION_NOT_ASKED,
+  };
 
   /// As the Claktory names it (RegisterNotifications.platform).
   PushPlatform get pushPlatform => switch (platform) {
@@ -209,6 +224,16 @@ class PushRegistrar {
     required this.relay,
     DateTime Function()? now,
   }) : _now = now ?? DateTime.now {
+    // Each Claktory hears whether this device shows notifications with
+    // every SetActive (item 13), and again whenever that changes.
+    Backend.notificationPermission = _permission;
+    _lifecycle = AppLifecycleListener(
+      onResume: () {
+        unawaited(refresh());
+        unawaited(_askAgainIfLost());
+      },
+    );
+    permissionHosts.addListener(_newHost);
     claktories.addListener(_follow);
     _tokens = device.tokens.listen((state) {
       _state = state;
@@ -253,7 +278,26 @@ class PushRegistrar {
   final DateTime Function() _now;
 
   late final StreamSubscription<PushState> _tokens;
-  PushState? _state;
+  late final AppLifecycleListener _lifecycle;
+  PushState? _current;
+
+  PushState? get _state => _current;
+
+  /// A permission that changed (allowed or turned off in the system's
+  /// Settings, the person's answer) is said to every Claktory connected.
+  set _state(PushState? next) {
+    final before = _current?.permission;
+    _current = next;
+    if (next == null || next.permission == before) return;
+    for (final claktory in claktories.all) {
+      claktory.backend.resendActive();
+    }
+  }
+
+  /// What this device says of its notifications: unsaid until it's read.
+  NotificationPermission _permission() =>
+      _current?.notificationPermission ??
+      NotificationPermission.NOTIFICATION_PERMISSION_UNSPECIFIED;
   final _followed = <Claktory, VoidCallback>{};
   final _syncing = <Claktory, Future<void>>{};
   bool _asked = false;
@@ -399,6 +443,7 @@ class PushRegistrar {
           handle: kept.handle,
           key: kept.key,
           platform: state.pushPlatform,
+          permission: state.notificationPermission,
         ),
       );
       _failed(backend, null);
@@ -474,7 +519,7 @@ class PushRegistrar {
     // P3); with no screen to show it on, the system asks straight.
     final host = permissionHost;
     if (host != null && host.mounted) {
-      await askPermission(host, NotificationsPermission(this));
+      await _askOn(host);
       return;
     }
     final answer = await _safely(device.ask);
@@ -483,6 +528,56 @@ class PushRegistrar {
       _syncAll();
     }
   }
+
+  /// The in-context ask on screen, until it closes.
+  PermissionFlow? _asking;
+
+  Future<void> _askOn(BuildContext host) async {
+    final permission = NotificationsPermission(this);
+    final access = await permission.access();
+    if (PermissionFlow.stageFor(access) == null || !host.mounted) return;
+    final flow = PermissionFlow(permission, from: access);
+    _asking = flow;
+    await presentPermission(host, flow);
+    // Closed in a window still showing: the person set it aside, or it's
+    // answered. Gone with its window, it's kept, to ask again.
+    if (identical(_asking, flow) && host.mounted) _asking = null;
+  }
+
+  /// A new window: an ask lost with the old one shows there, once it's
+  /// built.
+  void _newHost() {
+    if (_asking == null) return;
+    // After the window registering it is built.
+    Timer.run(() => unawaited(_askAgainIfLost()));
+  }
+
+  /// The ask went before an answer, its window with it (a resize between
+  /// an iPad's narrow and wide layouts, Sale's row 198): asked again in
+  /// the window showing now, or the next time the app comes back with a
+  /// Claktory connected (Lucy 49620).
+  Future<void> _askAgainIfLost() async {
+    final flow = _asking;
+    if (flow == null || flow.shown || flow.stage == PermissionStage.done) {
+      return;
+    }
+    final state = await _safely(device.state) ?? _state;
+    if (state == null || state.permission != 'not_determined') {
+      if (identical(_asking, flow)) _asking = null;
+      return;
+    }
+    final connected = claktories.all.any(
+      (claktory) => claktory.backend.connectedSince.value != null,
+    );
+    final host = permissionHost;
+    if (!connected || host == null || !host.mounted) return;
+    if (!identical(_asking, flow) || flow.shown) return;
+    _asking = null;
+    await _askOn(host);
+  }
+
+  static NotificationPermission _unsaid() =>
+      NotificationPermission.NOTIFICATION_PERMISSION_UNSPECIFIED;
 
   static Future<T?> _safely<T>(Future<T> Function() call) async {
     try {
@@ -496,6 +591,11 @@ class PushRegistrar {
 
   void dispose() {
     if (identical(current, this)) current = null;
+    if (Backend.notificationPermission == _permission) {
+      Backend.notificationPermission = _unsaid;
+    }
+    _lifecycle.dispose();
+    permissionHosts.removeListener(_newHost);
     claktories.removeListener(_follow);
     for (final entry in _followed.entries) {
       entry.key.backend.connectedSince.removeListener(entry.value);

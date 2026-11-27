@@ -136,7 +136,9 @@ FocusColumns focusColumnsFor(
         queue: 0,
         stage: width,
         context: 0,
-        contextPanel: 0,
+        // Over the one-card screen, a strip of it left to tap back to
+        // (Gelato, row 183).
+        contextPanel: width - FocusGeometry.stageStrip,
       );
   }
 }

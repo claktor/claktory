@@ -300,9 +300,10 @@ void main() {
 
   testWidgets('Dismiss takes a comment for the agent', (tester) async {
     final harness = await show(tester, _start());
-    await tester.tap(find.text('Add a comment'));
-    await settle(tester);
-    expect(find.text('Rivet gets it if you dismiss this.'), findsOneWidget);
+    expect(
+      find.text('Why not? Rivet sees this only if you dismiss.'),
+      findsOneWidget,
+    );
     await tester.enterText(
       find.descendant(
         of: find.byType(DecisionComment),

@@ -71,7 +71,7 @@ fn card(view: &View) -> (u64, v1::AppGrantProposal) {
 fn card_at(view: &View, seq: u64) -> v1::AppGrantProposal {
     match &view.entries.iter().find(|entry| entry.seq == seq).expect("the card").kind {
         Some(Kind::AppGrant(proposal)) => proposal.clone(),
-        other => panic!("expected a card, got {other:?}"),
+        other => panic!("expected a request, got {other:?}"),
     }
 }
 
@@ -126,7 +126,7 @@ async fn rivet_proposes_app_access_and_only_the_persons_approval_gives_it() {
     assert!(refused.starts_with("Name what it would reach in Direct messages"), "{refused}");
     let refused = call(&mut client, &mut view, &proposal("Nobody", &["dm.read"], "c-1")).await;
     assert_eq!(refused, "There's no agent \"Nobody\" in this Claktory.");
-    assert!(view.entries.iter().all(|entry| !matches!(entry.kind, Some(Kind::AppGrant(_)))), "no card");
+    assert!(view.entries.iter().all(|entry| !matches!(entry.kind, Some(Kind::AppGrant(_)))), "no request");
 
     // A liaison, limited to a pipe, is never given access (Fugo's review).
     apply_request(&mut client, &mut view, create_project("Site", &dir.join("site"))).await;
@@ -135,11 +135,11 @@ async fn rivet_proposes_app_access_and_only_the_persons_approval_gives_it() {
     apply_request(&mut client, &mut view, Request::SelectAgent(v1::SelectAgent { agent_id: "rivet".into() })).await;
     let refused = call(&mut client, &mut view, &proposal("Liaison", &["dm.read"], "c-1")).await;
     assert!(refused.starts_with("Liaison is limited to a pipe"), "{refused}");
-    assert!(view.entries.iter().all(|entry| !matches!(entry.kind, Some(Kind::AppGrant(_)))), "no card");
+    assert!(view.entries.iter().all(|entry| !matches!(entry.kind, Some(Kind::AppGrant(_)))), "no request");
 
     // A card, waiting for the person; nothing is given yet.
     let said = call(&mut client, &mut view, &proposal("Mike", &["dm.read", "dm.draft"], "c-1")).await;
-    assert!(said.starts_with("Opened a card in your conversation for the person to approve or decline giving Mike access"), "{said}");
+    assert!(said.starts_with("Opened a request in your conversation for the person to approve or decline giving Mike access"), "{said}");
     let (seq, shown) = card(&view);
     assert_eq!((shown.state(), shown.app_id.as_str(), shown.app_name.as_str()), (State::Pending, "dms", "Direct messages"));
     assert_eq!(shown.agent_id, "mike");
@@ -290,6 +290,6 @@ async fn only_an_untainted_rivet_of_a_signed_in_claktory_proposes() {
     factoryd::pipes::taint_for_test(&factory, "rivet", "browser:https://example.com");
     let refused = call(&mut client, &mut view, &proposal("Mike", &["dm.read"], "c-1")).await;
     assert!(refused.starts_with("You've read a page on https://example.com, so you can't propose access"), "{refused}");
-    assert!(view.entries.iter().all(|entry| !matches!(entry.kind, Some(Kind::AppGrant(_)))), "no card");
+    assert!(view.entries.iter().all(|entry| !matches!(entry.kind, Some(Kind::AppGrant(_)))), "no request");
     assert_eq!(incarnation(&dir, "mike"), None, "none made for nothing");
 }

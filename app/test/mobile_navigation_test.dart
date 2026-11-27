@@ -15,6 +15,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:factory_app/inbox.dart' show InboxView;
 import 'package:factory_app/mobile/needs_you_phone.dart' show PhoneNeedsYou;
 
 import 'harness.dart';
@@ -231,7 +232,7 @@ void main() {
 
   testWidgets('Needs you leads the drawer as on a Mac: one row with the '
       'count, which pushes the Needs you page', (tester) async {
-    // An iPhone's Needs you, focus mode (Android keeps the list for now).
+    // An iPhone's: the list of what waits first (#599).
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final snapshot = workspace();
@@ -259,7 +260,8 @@ void main() {
     await tester.tap(_inDrawer('Needs you'));
     await pumpFrames(tester);
     expect(harness.page.value, AppPage.inbox);
-    expect(find.byType(PhoneNeedsYou), findsOneWidget);
+    expect(find.byType(InboxView), findsOneWidget);
+    expect(find.byType(PhoneNeedsYou), findsNothing);
     expect(find.byType(Sidebar), findsNothing);
     await tester.tap(find.bySemanticsLabel('Back'));
     await pumpFrames(tester);

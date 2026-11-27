@@ -1,4 +1,5 @@
-import 'package:factory_app/connection.dart' show Connection;
+import 'package:factory_app/connection.dart' show Connection, ConnectionDialog;
+import 'package:factory_app/mobile/local_network.dart';
 import 'package:factory_app/connections.dart' show parsePairingCode;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:factory_app/tunnel/api/tunnel.dart';
@@ -11,14 +12,15 @@ import 'tunnel_test.dart' show tunnelStatus;
 
 // Zucchero's row 480 (#37): while the drawer and the connection sheet said
 // "Can't connect", the main pane behind them said "Connecting…". It says
-// the same now, briefly, with Reconnect.
+// the same now, as a problem page (devices-signin.md §4): what to check,
+// Details and Try again.
 
 void main() {
   for (final (platform, size) in [
     (TargetPlatform.iOS, const Size(320, 568)),
     (TargetPlatform.macOS, const Size(1200, 800)),
   ]) {
-    testWidgets("can't connect, the main pane says so with Reconnect, never "
+    testWidgets("can't connect, the main pane says so with Try again, never "
         'Connecting… (${platform.name})', (tester) async {
       debugDefaultTargetPlatformOverride = platform;
       addTearDown(() => debugDefaultTargetPlatformOverride = null);
@@ -40,7 +42,7 @@ void main() {
         ..reconnecting.value = false;
       await pumpFrames(tester);
       expect(find.text('Connecting…'), findsWidgets);
-      expect(find.text('Reconnect'), findsNothing);
+      expect(find.text('Try again'), findsNothing);
 
       backend.lastConnected.value = DateTime.now().subtract(
         const Duration(minutes: 12),
@@ -55,8 +57,17 @@ void main() {
       expect(tester.takeException(), isNull);
       expect(find.text('Connecting…'), findsNothing);
       expect(find.text("Can't connect to mac-mini"), findsWidgets);
-      expect(find.text('Last seen 12 min ago. Trying again…'), findsOneWidget);
-      final reconnect = find.text('Reconnect');
+      expect(
+        find.text(
+          'Make sure mac-mini is on, awake and online. Last seen 12 min ago. '
+          'Trying again…',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Details'), findsOneWidget);
+      // No Local Network to ask about here.
+      expect(find.text('Is Local Network on?'), findsNothing);
+      final reconnect = find.text('Try again');
       expect(reconnect, findsOneWidget);
       await tester.ensureVisible(reconnect);
       await pumpFrames(tester);
@@ -73,7 +84,7 @@ void main() {
       backend.connected.value = true;
       backend.workspace.apply(Workspace());
       await pumpFrames(tester);
-      expect(find.text('Reconnect'), findsNothing);
+      expect(find.text('Try again'), findsNothing);
       expect(find.textContaining('Trying again'), findsNothing);
     });
   }
@@ -124,4 +135,74 @@ void main() {
     );
     expect(Connection(backend).error, 'no route');
   });
+
+  // An iPhone or iPad (devices-signin.md §7): whether Local Network is on,
+  // asked, never checked unasked; Details is the connection in full.
+  testWidgets("on an iPhone, can't connect asks whether Local Network is on, "
+      'and Check Local Network opens its sheet', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final network = _Network();
+    localNetwork = network;
+    addTearDown(() => localNetwork = null);
+    final harness = Harness(Workspace(), localBackend: false);
+    harness.connections.use(
+      parsePairingCode('factory://?t=${'b' * 64}&name=mac-mini&e=${'d' * 64}'),
+    );
+    await harness.show(tester, size: const Size(390, 844));
+    await pumpFrames(tester);
+    harness.backend
+      ..connected.value = false
+      ..reconnecting.value = false
+      ..tunnel.value = tunnelStatus(
+        phase: TunnelPhase.failed,
+        path: TunnelPath.none,
+        failure: TunnelFailure.unreachable,
+        error: 'no route',
+      );
+    await pumpFrames(tester);
+    expect(find.text('Is Local Network on?'), findsOneWidget);
+    expect(network.checks, 0, reason: 'never checked unasked');
+    await tester.tap(find.text('Check Local Network'));
+    await pumpFrames(tester);
+    expect(find.text('Find your Claktory on this network'), findsOneWidget);
+  });
+
+  testWidgets("can't connect: Details shows the connection in full", (
+    tester,
+  ) async {
+    final harness = Harness(Workspace(), localBackend: false);
+    harness.connections.use(
+      parsePairingCode('factory://?t=${'b' * 64}&name=mac-mini&e=${'d' * 64}'),
+    );
+    await harness.show(tester, size: const Size(1200, 800));
+    await pumpFrames(tester);
+    harness.backend
+      ..connected.value = false
+      ..reconnecting.value = false
+      ..tunnel.value = tunnelStatus(
+        phase: TunnelPhase.failed,
+        path: TunnelPath.none,
+        failure: TunnelFailure.unreachable,
+        error: 'no route',
+      );
+    await pumpFrames(tester);
+    await tester.tap(find.text('Details'));
+    await pumpFrames(tester);
+    expect(find.byType(ConnectionDialog), findsOneWidget);
+    expect(find.text('no route'), findsWidgets);
+  });
+}
+
+class _Network implements LocalNetwork {
+  var checks = 0;
+
+  @override
+  Future<LocalNetworkAccess> check() async {
+    checks++;
+    return LocalNetworkAccess.granted;
+  }
+
+  @override
+  Future<void> openSettings() async {}
 }

@@ -87,6 +87,7 @@ Future<Harness> _openHistory(
 }
 
 void main() {
+  _historyKinds();
   testWidgets("a read alert: who sent it, its title, and where it was read "
       "(§3.9)", (tester) async {
     NeedsYouRecord alert(
@@ -198,6 +199,37 @@ void main() {
     expect(find.text('Nothing is waiting for your answer.'), findsOneWidget);
   });
 
+  // Zucchero's row 708: the backend counts a yes answered; only a written
+  // answer has words. Secco's 1f050cdff: an Execute card as its card says.
+  testWidgets('a yes reads Approved; an Execute card its heading, its '
+      'command and how it ran', (tester) async {
+    await _openHistory(tester, [
+      _record('june', 'Order the banners?'),
+      _record(
+        'omar',
+        'Run this command on Matt’s Mac',
+        kind: NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_COMMAND,
+        outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_APPROVED,
+        ago: const Duration(days: 1),
+      )..command = AskCommand(
+        command: 'npm test\nnpm run lint',
+        machine: 'Matt’s Mac',
+        run: CommandRun(
+          state: CommandRunState.COMMAND_RUN_STATE_EXITED,
+          exitCode: 1,
+          durationMs: Int64(3400),
+        ),
+      ),
+    ]);
+    expect(find.text('Approved', findRichText: true), findsOneWidget);
+    expect(find.textContaining('npm test'), findsOneWidget);
+    expect(find.textContaining('npm run lint'), findsNothing);
+    expect(
+      find.textContaining('Ran · Exited with code 1', findRichText: true),
+      findsOneWidget,
+    );
+  });
+
   testWidgets("a search finds the agent you talked to about emails", (
     tester,
   ) async {
@@ -304,7 +336,7 @@ void main() {
       find.text('Trip ideas · 2 h ago', findRichText: true),
       findsOneWidget,
     );
-    expect(find.text('Approved', findRichText: true), findsOneWidget);
+    expect(find.text('Approved', findRichText: true), findsNWidgets(2));
     expect(find.textContaining('Acme launch'), findsNothing);
   });
 
@@ -532,6 +564,133 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('Resolved', findRichText: true), findsOneWidget);
+  });
+
+  testWidgets("a procedure says where it ended, and a secret how it was "
+      "given, in its card's own words (#533 §7)", (tester) async {
+    const secret = NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_SECRET_REQUEST;
+    const approved = NeedsYouOutcome.NEEDS_YOU_OUTCOME_APPROVED;
+    var hours = 1;
+    NeedsYouRecord at(NeedsYouRecord record) => record
+      ..decidedMs = Int64(
+        _now.subtract(Duration(hours: hours++)).millisecondsSinceEpoch,
+      );
+    NeedsYouRecord steps(
+      String title,
+      NeedsYouOutcome outcome, {
+      required int step,
+      int of = 4,
+      bool stopped = false,
+    }) => at(
+      _record('june', title, outcome: outcome)
+        ..step = step
+        ..steps = of
+        ..stepStopped = stopped,
+    );
+    NeedsYouRecord given(
+      String title,
+      NeedsYouSecretOutcome how, {
+      String name = '',
+      bool toNoOne = false,
+    }) => at(
+      _record('omar', title, kind: secret, outcome: approved)
+        ..secretOutcome = how
+        ..secretGivenName = name
+        ..secretToNoOne = toNoOne
+        ..subjectAgentId =
+            how == NeedsYouSecretOutcome.NEEDS_YOU_SECRET_OUTCOME_ADMIN
+            ? 'june'
+            : '',
+    );
+    await _openHistory(tester, [
+      steps(
+        'Set up the printer',
+        NeedsYouOutcome.NEEDS_YOU_OUTCOME_RESOLVED,
+        step: 2,
+        stopped: true,
+      )..agentReason = 'I will print from the other Mac instead.',
+      steps(
+        'Sign the release',
+        NeedsYouOutcome.NEEDS_YOU_OUTCOME_DISMISSED,
+        step: 2,
+      ),
+      steps(
+        'Pair the keyboard',
+        NeedsYouOutcome.NEEDS_YOU_OUTCOME_REPLIED,
+        step: 3,
+      ),
+      steps(
+        'Plug in the drive',
+        NeedsYouOutcome.NEEDS_YOU_OUTCOME_APPROVED,
+        step: 2,
+        of: 2,
+      ),
+      steps(
+        'Reset the router',
+        NeedsYouOutcome.NEEDS_YOU_OUTCOME_APPROVED,
+        step: 4,
+      ),
+      given(
+        'Hetzner',
+        NeedsYouSecretOutcome.NEEDS_YOU_SECRET_OUTCOME_GAVE,
+        name: 'Hetzner production',
+      ),
+      given('Resend', NeedsYouSecretOutcome.NEEDS_YOU_SECRET_OUTCOME_ADDED),
+      given(
+        'Deploy key',
+        NeedsYouSecretOutcome.NEEDS_YOU_SECRET_OUTCOME_GENERATED,
+        name: 'deploy-key',
+      ),
+      given(
+        'Keystore',
+        NeedsYouSecretOutcome.NEEDS_YOU_SECRET_OUTCOME_IMPORTED,
+        name: 'Android keystore',
+      ),
+      given(
+        'Signing',
+        NeedsYouSecretOutcome.NEEDS_YOU_SECRET_OUTCOME_IMPORTED,
+        toNoOne: true,
+      ),
+      given(
+        'Relay key',
+        NeedsYouSecretOutcome.NEEDS_YOU_SECRET_OUTCOME_GENERATED,
+        name: 'relay-key',
+        toNoOne: true,
+      ),
+      given('Cloudflare', NeedsYouSecretOutcome.NEEDS_YOU_SECRET_OUTCOME_ADMIN),
+    ], size: const Size(1200, 1400));
+    for (final words in [
+      'Stopped at step 2 of 4',
+      "Couldn't do step 2 of 4",
+      'Replied on step 3',
+      'Both steps done',
+      'All 4 steps done',
+      'Gave Hetzner production',
+      'Added and gave Resend',
+      'Generated deploy-key',
+      'Imported, given to Omar',
+      'Imported, given to no one',
+      'Generated relay-key, given to no one',
+      'Left to June',
+    ]) {
+      expect(
+        find.textContaining(words, findRichText: true),
+        findsOneWidget,
+        reason: words,
+      );
+    }
+    // Its agent's words under where it stopped, as its own.
+    expect(
+      find.textContaining(
+        'June: “I will print from the other Mac instead.”',
+        findRichText: true,
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining('settled in the talk', findRichText: true),
+      findsNothing,
+    );
   });
 
   testWidgets('a web page read is marked by a globe, not a pipe\'s portal '
@@ -957,6 +1116,31 @@ void main() {
       expect(harness.backend.reveal.value?.seq, 40);
     });
 
+    testWidgets('a pipe or an app it gave up reads the same (#561): the '
+        "sentence, its reason, a click at its call, not the pipe's", (
+      tester,
+    ) async {
+      final harness = await _openHistory(tester, [
+        _record(
+            'june',
+            'June left the pipe with Fred',
+            kind: NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_GIVEN_UP,
+            outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_CHANGED,
+            seq: 41,
+          )
+          ..agentName = 'June'
+          ..pipeId = 'pipe1'
+          ..agentReason = 'The launch is over.',
+      ]);
+      expect(find.text('June left the pipe with Fred'), findsOneWidget);
+      expect(find.text('June: “The launch is over.”'), findsOneWidget);
+      expect(find.text('Undo'), findsNothing);
+      await tester.tap(find.text('June left the pipe with Fred'));
+      await settle(tester);
+      expect(harness.last.selectAgent.agentId, 'june');
+      expect(harness.backend.reveal.value?.seq, 41);
+    });
+
     testWidgets('with no call to show, a click opens its conversation', (
       tester,
     ) async {
@@ -966,5 +1150,60 @@ void main() {
       expect(harness.last.selectAgent.agentId, 'june');
       expect(harness.backend.reveal.value, isNull);
     });
+  });
+}
+
+void _historyKinds() {
+  testWidgets("using the account's new recovery key here: yours, its "
+      'sentence, and it opens Settings → Secrets (#239)', (tester) async {
+    await _openHistory(tester, [
+      NeedsYouRecord(
+        kind: NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_RECOVERY_KEY_CHANGED,
+        outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_CHANGED,
+        title: "You chose to use your account's new recovery key here",
+        decidedMs: Int64(_now.millisecondsSinceEpoch),
+      ),
+    ]);
+    expect(find.textContaining('You · '), findsOneWidget);
+    expect(find.textContaining('An agent'), findsNothing);
+    await tester.tap(
+      find.text("You chose to use your account's new recovery key here"),
+    );
+    await settle(tester);
+    expect(
+      find.byKey(const ValueKey('settings-section:secrets')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets("an agent saving a secret (save_as): Claktory's sentence and "
+      "the description in the agent's words (#589)", (tester) async {
+    await _openHistory(tester, [
+      _record(
+        'june',
+        'June saved Play deploy key, a new secret made with Google Cloud',
+        kind: NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_SECRET_SAVED,
+        outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_CHANGED,
+      )..agentReason = 'Deploys the Android app to Play',
+    ]);
+    expect(
+      find.text('June: “Deploys the Android app to Play”'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a protected place dismissed, then let in: says so (item 12)', (
+    tester,
+  ) async {
+    await _openHistory(tester, [
+      NeedsYouRecord(
+        kind: NeedsYouRecordKind.NEEDS_YOU_RECORD_KIND_PROTECTED_PLACE,
+        outcome: NeedsYouOutcome.NEEDS_YOU_OUTCOME_CHANGED,
+        title: "Your agents can't work in Documents",
+        decidedMs: Int64(_now.millisecondsSinceEpoch),
+      ),
+    ]);
+    expect(find.textContaining('Allowed later'), findsOneWidget);
+    expect(find.textContaining('You · '), findsOneWidget);
   });
 }

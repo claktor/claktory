@@ -7,13 +7,15 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'agent_view.dart';
+import 'agent_menu.dart' show showAgentSettings;
 import 'backend.dart';
 import 'changelog.dart';
 import 'chats.dart' show ChatView, selectedChat;
 import 'claktory_identity.dart' show claktoryName;
 import 'connections.dart';
 import 'history/export_job.dart' show ReplayJobBanner;
-import 'inbox.dart' show InboxView;
+import 'needs_you_entries.dart' show NeedsYouEntries;
+import 'inbox.dart' show InboxView, needsYouItems;
 import 'links.dart' show confirmPairing;
 import 'controls.dart';
 import 'conversation_versions.dart' show showVersions;
@@ -22,8 +24,10 @@ import 'explorer.dart';
 import 'extensions.dart';
 import 'forms.dart' show FittedHeading;
 import 'identity.dart';
+import 'ipad/camera_kept.dart' show CameraKeptBand;
 import 'ipad/columns.dart' show compactRoutes;
 import 'ipad/document_host.dart' show ipadDocumentPane, ipadProjectDocument;
+import 'ipad/pair_step.dart' show pairScreenKey;
 import 'ipad/workbench.dart' show WorkbenchFocus, WorkbenchScope;
 import 'layout.dart';
 import 'map.dart';
@@ -50,10 +54,12 @@ import 'mobile/platform_policy.dart';
 import 'mobile/needs_you_phone.dart' show PhoneNeedsYou;
 import 'mobile/quick_actions.dart' show PhoneQuickActions;
 import 'mobile/review_bar.dart';
+import 'mobile/scroll_fade.dart' show ScrollsWithFade;
 import 'mobile/share.dart' show globalRectOf, shareText;
 import 'mobile/presentation.dart'
     show PhoneSheetHost, SheetOverlay, presentSheet;
 import 'pairing.dart';
+import 'pinned_agents.dart' show togglePin;
 import 'pasted_code.dart';
 import 'panes.dart' show AppPane, appKind, pageOfKind, paneGlyph, paneTitle;
 import 'pipes.dart' show PipeView, selectedPipe;
@@ -198,10 +204,12 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
       _page = page..addListener(_pageChanged);
       _syncPage();
     }
+    _followNeedsYou(AppScope.of(context));
   }
 
   @override
   void dispose() {
+    _followNeedsYou(null);
     _phoneScreensUp--;
     _unhostPermissions();
     if (_attached) _host?.detach(this);
@@ -286,15 +294,111 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
       AppPage.map => const MapView(),
       AppPage.usage => const UsageView(),
       AppPage.monitors => const MonitorsOverview(),
-      // On an iPhone (and a narrow iPad), focus mode itself, one card a
-      // screen (#514 §7); Android keeps its list until its own design.
-      AppPage.inbox =>
-        defaultTargetPlatform == TargetPlatform.iOS
-            ? const PhoneNeedsYou()
-            : const InboxView(),
+      // The list of what waits first, as everywhere (#599); on an iPhone
+      // (and a narrow iPad) a request tapped opens alone on its own screen,
+      // where its answer rides the keyboard. Android opens it in place.
+      AppPage.inbox => InboxView(
+        onOpen: defaultTargetPlatform == TargetPlatform.iOS
+            ? (item) => _openRequest(item.key)
+            : null,
+      ),
       AppPage.agent => const SizedBox.shrink(),
     },
   );
+
+  /// The Claktory whose Needs you this follows: a request a notification
+  /// asks for.
+  Backend? _needsYouOf;
+
+  static const _requestRoute = 'needs-you:request';
+  static const _focusRoute = 'needs-you-focus';
+
+  /// The request showing alone ([_openRequest]), by its key.
+  String? _request;
+
+  void _followNeedsYou(Backend? backend) {
+    if (backend == _needsYouOf) return;
+    _needsYouOf?.needsYouCard.removeListener(_requestAsked);
+    _needsYouOf = backend;
+    backend?.needsYouCard.addListener(_requestAsked);
+  }
+
+  /// Focus mode on an iPhone (#599, Squalo's L1): its sitting on a screen
+  /// of its own over the list, for as long as it shows, never kept as the
+  /// device's focus mode (that would bring it back at the next launch).
+  /// Back, or Done once nothing is left, comes back to the list. An
+  /// iPad's window, narrow too, has its own (shell.dart's FocusModeLayer):
+  /// false there.
+  @override
+  bool openFocus() {
+    if (defaultTargetPlatform != TargetPlatform.iOS ||
+        deviceIdiom(context) == Idiom.pad) {
+      return false;
+    }
+    if (_stack.any((entry) => entry.id == 'route:$_focusRoute')) return true;
+    unawaited(
+      push<void>(
+        PhoneRoute(
+          id: _focusRoute,
+          builder: (context) =>
+              PhoneNeedsYou(onClose: () => _removePage('route:$_focusRoute')),
+        ),
+      ),
+    );
+    return true;
+  }
+
+  /// A notification asked for a request (notifications.dart): it alone,
+  /// over the list, once the list is up (it's opened in the same breath).
+  /// One answered or taken back meanwhile leaves the list showing; in
+  /// focus mode, the sitting shows it itself.
+  void _requestAsked() {
+    final backend = _needsYouOf;
+    final key = backend?.needsYouCard.value;
+    if (backend == null || key == null || key == _request) return;
+    if (defaultTargetPlatform != TargetPlatform.iOS) return;
+    if (_stack.any((entry) => entry.id == 'route:$_focusRoute')) return;
+    _soon(() {
+      if (backend.needsYouCard.value != key) return;
+      final waiting = needsYouItems(backend.workspace.workspace);
+      final item = waiting.where((item) => item.key == key).firstOrNull;
+      if (item == null) {
+        backend.needsYouCard.value = null;
+        return;
+      }
+      // As it is now (Squalo's B4), as one tapped in the list is.
+      NeedsYouEntries.of(backend).fetch(item);
+      _openRequest(key);
+    });
+  }
+
+  /// The request at [key] alone, over what shows (the list): Back, or its
+  /// answer accepted, comes back there.
+  void _openRequest(String key) {
+    _request = key;
+    unawaited(
+      push<void>(
+        PhoneRoute(
+          id: _requestRoute,
+          builder: (context) => PhoneNeedsYou(
+            only: key,
+            onClose: () => _removePage('route:$_requestRoute'),
+          ),
+        ),
+      ).then((_) {
+        if (_request == key) _request = null;
+      }),
+    );
+  }
+
+  /// Takes the page [id] off the stack, wherever it is.
+  void _removePage(String id) {
+    final at = _stack.lastIndexWhere((entry) => entry.id == id);
+    if (at < 0) return;
+    final entry = _stack.removeAt(at);
+    setState(() {});
+    _gone(entry);
+  }
 
   /// [entry] went, by Back, a swipe or from here: what it showed closes.
   void _gone(_Entry entry, [Object? result]) {
@@ -677,40 +781,54 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
   }
 
   /// The agent's extensions and the viewers beside its conversation, in a
-  /// sheet: one opens its panel, or pushes the viewer.
-  void _listExtensions(Agent agent) => unawaited(
-    presentSheet<void>(
-      context,
-      padded: false,
-      builder: (context, close) => PhoneExtensionList(
-        agent: agent,
-        chosen: close,
-        // The conversation can be searched: Search first.
-        onSearch: switch (_rootFind.currentState?.session) {
-          final session? => () {
+  /// sheet, then Pin/Unpin and its settings. Actions use this owner after
+  /// the sheet closes, never the sheet's going context or another Claktory.
+  void _listExtensions(Agent agent) {
+    final owner = context;
+    final backend = AppScope.of(owner);
+    bool currentOwner() => mounted && identical(AppScope.of(owner), backend);
+    unawaited(
+      presentSheet<void>(
+        owner,
+        padded: false,
+        builder: (context, close) => PhoneExtensionList(
+          agent: agent,
+          chosen: close,
+          onPin: (now) {
             close();
-            session.open();
+            if (currentOwner()) unawaited(togglePin(owner, now));
           },
-          null => null,
-        },
-        // Its other versions, while it has any (friend bug #9).
-        onVersions: agent.branches > 0
-            ? () {
-                close();
-                unawaited(showVersions(this.context, agent));
-              }
-            : null,
-        viewed: (id) {
-          close();
-          _showViewer(agent.id, id);
-          // Opened: it's the newest, on top of this list next time.
-          fireAndLog(
-            AppScope.scope(this.context).backend.paneOpened(agent.id, id),
-          );
-        },
+          onSettings: (now) {
+            close();
+            if (currentOwner()) showAgentSettings(owner, now);
+          },
+          // The conversation can be searched: Search first.
+          onSearch: switch (_rootFind.currentState?.session) {
+            final session? => () {
+              close();
+              session.open();
+            },
+            null => null,
+          },
+          // Its other versions, while it has any (friend bug #9).
+          onVersions: agent.branches > 0
+              ? () {
+                  close();
+                  unawaited(showVersions(this.context, agent));
+                }
+              : null,
+          viewed: (id) {
+            close();
+            _showViewer(agent.id, id);
+            // Opened: it's the newest, on top of this list next time.
+            fireAndLog(
+              AppScope.scope(this.context).backend.paneOpened(agent.id, id),
+            );
+          },
+        ),
       ),
-    ),
-  );
+    );
+  }
 
   void _back(Agent agent) {
     final history = AppScope.scope(context).history;
@@ -761,7 +879,12 @@ class _PhoneScreensState extends State<_PhoneScreens> implements PhonePages {
       builder: (context, _) {
         if (scope.connections.current == null && !backend.localBackend) {
           _soon(_detach);
-          return const _Screen(overKeyboard: true, child: PairScreen());
+          // Its key carries it, at its step, across a change to the wide
+          // layout and back (ipad/pair_step.dart).
+          return _Screen(
+            overKeyboard: true,
+            child: PairScreen(key: pairScreenKey),
+          );
         }
         // Another account's Claktory (#529, S4): what it said, before any
         // sign-in.
@@ -1285,7 +1408,11 @@ class _BackButton extends StatelessWidget {
 /// code without the backend's key, from a Claktory before it, is turned
 /// down.
 class PairScreen extends StatefulWidget {
-  const PairScreen({super.key});
+  const PairScreen({super.key, this.code = false});
+
+  /// Open at "Use a code instead": where a new code is the way back (a
+  /// Claktory that no longer allows this phone: Use a new code, §4).
+  final bool code;
 
   @override
   State<PairScreen> createState() => _PairScreenState();
@@ -1311,6 +1438,13 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
 
   /// Why the last code scanned can't be used.
   String? _scanError;
+
+  /// What keeps the camera from the app now, as its picture says
+  /// ([CameraAvailability]); null while it doesn't.
+  String? _cameraKept;
+
+  /// The camera's picture, kept across the square and the band.
+  final _previewKey = GlobalKey(debugLabel: 'camera');
 
   /// A way to connect was chosen on the first screen ([_start]), shown
   /// while this device has no Claktory yet (#363 F1, F2).
@@ -1466,10 +1600,14 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     final access = _access;
-    final withAccount = _withAccount ??= AppScope.scope(context)
-        .connections
-        .account
-        .signedIn;
+    // Your account first, a code second (area 2, §3 and 8.2): signed in,
+    // or with a Claktory already here, it opens on the account (signed
+    // out, its email sign-in), never on the scanner; with nothing here yet
+    // and signed out, the first screen's choices.
+    final connections = AppScope.scope(context).connections;
+    final withAccount = _withAccount ??=
+        !widget.code &&
+        (connections.account.signedIn || connections.saved.isNotEmpty);
     // Nothing here yet, from the store: what's needed first, and the ways
     // in, email first (#363).
     final start =
@@ -1534,6 +1672,77 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
         !_pasting &&
         !_pasteOnly &&
         (access == CameraAccess.undetermined || access == CameraAccess.denied);
+    // The camera kept from the app: the band saying why and Paste code
+    // instead stay in sight at every size, the words above scrolling when
+    // they must (area 5a, P7; Lucy 48961).
+    if (!start &&
+        !withAccount &&
+        !_pasting &&
+        !_pasteOnly &&
+        access == CameraAccess.granted &&
+        _cameraKept != null) {
+      return Padding(
+        key: const ValueKey('camera-kept'),
+        padding: const EdgeInsets.all(Space.xl),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (_backToStart)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: _BackButton(onBack: _toStart),
+                  ),
+                Flexible(
+                  child: ScrollsWithFade(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        FittedHeading(
+                          'Connect to your Claktory',
+                          style: TypeScale.of(context).title
+                              .copyWith(color: palette.text),
+                        ),
+                        const SizedBox(height: Space.s),
+                        Text(
+                          _scanWhere,
+                          style: TypeScale.of(context).body
+                              .copyWith(color: palette.textMuted),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                // Why the camera's away stays in sight with the way on;
+                // the words above scroll first.
+                const SizedBox(height: Space.xl),
+                // Twice the words' share when both must give way.
+                Flexible(flex: 2, child: body),
+                const SizedBox(height: Space.l),
+                Button(
+                  label: 'Paste code instead',
+                  primary: true,
+                  onPressed: () => setState(() {
+                    _pasting = true;
+                    // The camera says again whether it's kept, when it's
+                    // back.
+                    _cameraKept = null;
+                  }),
+                ),
+                _Link(
+                  'Sign in with your email instead',
+                  onTap: () => setState(() => _withAccount = true),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
     // The camera's own screen fills the height: its words in the middle,
     // Continue at the foot, under the thumb (area 5a, P7).
     if (explains) {
@@ -1606,15 +1815,7 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
                             "Devices → Add a device on a device that's "
                             'already connected, or where you set up your '
                             'Claktory.'
-                      // Android is often paired to a Claktory on a
-                      // server, with no Mac in sight.
-                      : defaultTargetPlatform == TargetPlatform.android
-                      ? 'Scan the code for this $thisDeviceKind. Find it in Settings → '
-                            "Devices → Add a device on a device that's "
-                            'already connected, or where you set up your '
-                            'Claktory.'
-                      : 'On your Mac, open Claktory and go to Settings → '
-                            'Devices → Add a device. Then scan the code.',
+                      : _scanWhere,
                   style: TypeScale.of(context).body
                       .copyWith(color: palette.textMuted),
                 ),
@@ -1644,33 +1845,70 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
     );
   }
 
+  /// Where the code to scan is.
+  String get _scanWhere =>
+      // Android is often paired to a Claktory on a server, with no Mac in
+      // sight.
+      defaultTargetPlatform == TargetPlatform.android
+      ? 'Scan the code for this $thisDeviceKind. Find it in Settings → '
+            "Devices → Add a device on a device that's already connected, "
+            'or where you set up your Claktory.'
+      : 'On your Mac, open Claktory and go to Settings → Devices → Add a '
+            'device. Then scan the code.';
+
   Widget _scanner(BuildContext context) {
     final palette = Palette.of(context);
     final error = _scanError;
+    final kept = _cameraKept;
+    // The same native view in the square and in the band, so the camera
+    // coming back finds it still listening (Pesci).
+    final preview = KeyedSubtree(
+      key: _previewKey,
+      // The camera kept from the app (an iPad sharing its screen, another
+      // app using it): its words in a band, and Paste code instead the way
+      // on until it's back (area 5a, P7; Lucy 48961).
+      child: NotificationListener<CameraAvailability>(
+        onNotification: (notice) {
+          if (notice.unavailable != _cameraKept) {
+            setState(() => _cameraKept = notice.unavailable);
+          }
+          return true;
+        },
+        child: AppScope.scope(context).camera.preview(_scanned),
+      ),
+    );
     return Column(
+      mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // Square, and on a phone on its side no more than half the
-        // screen's height, so what's under it stays in view.
-        Center(
-          child: ConstrainedBox(
-            constraints: BoxConstraints(
-              maxHeight: MediaQuery.sizeOf(context).height / 2,
-            ),
-            child: AspectRatio(
-              aspectRatio: 1,
-              child: Container(
-                clipBehavior: Clip.antiAlias,
-                decoration: BoxDecoration(
-                  color: const Color(0xFF000000),
-                  borderRadius: BorderRadius.circular(Radii.panel),
-                  border: Border.all(color: palette.hairline),
+        if (kept != null)
+          // Shorter when it must be (Flexible in [build]'s kept layout),
+          // its words scrolling.
+          Flexible(
+            child: CameraKeptBand(words: kept, preview: preview),
+          )
+        else
+          // Square, and on a phone on its side no more than half the
+          // screen's height, so what's under it stays in view.
+          Center(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.sizeOf(context).height / 2,
+              ),
+              child: AspectRatio(
+                aspectRatio: 1,
+                child: Container(
+                  clipBehavior: Clip.antiAlias,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF000000),
+                    borderRadius: BorderRadius.circular(Radii.panel),
+                    border: Border.all(color: palette.hairline),
+                  ),
+                  child: preview,
                 ),
-                child: AppScope.scope(context).camera.preview(_scanned),
               ),
             ),
           ),
-        ),
         if (error != null) ...[
           const SizedBox(height: Space.s),
           Text(
@@ -1679,11 +1917,14 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
                 .copyWith(color: palette.danger),
           ),
         ],
-        const SizedBox(height: Space.m),
-        _Link(
-          'Paste code instead',
-          onTap: () => setState(() => _pasting = true),
-        ),
+        // Kept, the way on is pinned under it instead ([build]).
+        if (kept == null) ...[
+          const SizedBox(height: Space.m),
+          _Link(
+            'Paste code instead',
+            onTap: () => setState(() => _pasting = true),
+          ),
+        ],
       ],
     );
   }
@@ -1795,32 +2036,15 @@ class _PairScreenState extends State<PairScreen> with WidgetsBindingObserver {
               ),
             ],
             const SizedBox(height: Space.l),
-            // At the largest text, one above the other, Connect first.
-            if (largeText(context))
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Button(
-                    label: 'Connect',
-                    primary: true,
-                    onPressed: target != null ? connect : null,
-                  ),
-                  const SizedBox(height: Space.s),
-                  Button(label: 'Paste', onPressed: _paste),
-                ],
-              )
-            else
-              Row(
-                children: [
-                  Button(label: 'Paste', onPressed: _paste),
-                  const Spacer(),
-                  Button(
-                    label: 'Connect',
-                    primary: true,
-                    onPressed: target != null ? connect : null,
-                  ),
-                ],
-              ),
+            // Never side by side on a phone (§7): Connect full width, then
+            // Paste a link under it (Lucy 49738).
+            Button(
+              label: 'Connect',
+              primary: true,
+              onPressed: target != null ? connect : null,
+            ),
+            const SizedBox(height: Space.s),
+            _Link('Paste', onTap: _paste),
             // Back to the camera, even one refused so far (friend bug #2):
             // it says how to allow it, with Open Settings. Only a camera
             // this phone can't have (none, or restricted) has no way back.
@@ -1905,6 +2129,8 @@ class _Link extends StatelessWidget {
   Widget build(BuildContext context) {
     final palette = Palette.of(context);
     return Semantics(
+      // Its own node, the link's size, never the screen's (row 195).
+      container: true,
       button: true,
       label: label,
       // Its own tap, which excludeSemantics would drop with Pressable's:

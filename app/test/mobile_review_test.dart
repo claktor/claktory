@@ -24,7 +24,7 @@ import 'package:factory_app/dictation.dart';
 import 'package:factory_app/recorder.dart';
 import 'package:factory_app/voice.dart' show voiceMessagesOn;
 
-import 'package:factory_app/mobile/needs_you_phone.dart' show PhoneNeedsYou;
+import 'package:factory_app/inbox.dart' show InboxView, NeedsYouList;
 
 import 'harness.dart';
 import 'voice_test.dart' show FakeRecorder, io;
@@ -69,6 +69,18 @@ Future<void> Function(WidgetTester, String)? shots;
 
 PhoneRoutes _routes(WidgetTester tester) =>
     tester.widget<PhoneRoutesScope>(find.byType(PhoneRoutesScope)).routes;
+
+/// The request in Needs you's list, tapped: it alone, on its own screen.
+Future<void> _openRequest(WidgetTester tester) async {
+  final row = find.descendant(
+    of: find.byType(NeedsYouList),
+    matching: find.textContaining('Review the release plan'),
+  );
+  await tester.ensureVisible(row.first);
+  await pumpFrames(tester);
+  await tester.tap(row.first);
+  await pumpFrames(tester);
+}
 
 void main() {
   Future<Harness> phone(
@@ -205,7 +217,7 @@ void main() {
     await tester.tap(find.bySemanticsLabel('Back').last);
     await pumpFrames(tester);
     expect(find.text('Builder asks you to review this'), findsNothing);
-    expect(find.byType(PhoneNeedsYou), findsOneWidget);
+    expect(find.byType(InboxView), findsOneWidget);
     expect(harness.page.value, AppPage.inbox);
   });
 
@@ -231,7 +243,8 @@ void main() {
     final harness = await phone(tester);
     harness.page.value = AppPage.inbox;
     await pumpFrames(tester);
-    // One card a screen, already open (#514).
+    // Listed first (#599): the request alone, then its Review.
+    await _openRequest(tester);
     await tester.tap(find.text('Review').last);
     await pumpFrames(tester);
     expect(find.text('Builder asks you to review this'), findsOneWidget);
@@ -248,7 +261,8 @@ void main() {
     await tester.tap(find.byType(PhoneNeedsYouButton));
     await pumpFrames(tester);
     expect(harness.page.value, AppPage.inbox);
-    // One card a screen, already open (#514).
+    // Listed first (#599): the request alone, then its Review.
+    await _openRequest(tester);
     await tester.tap(find.text('Review').last);
     await pumpFrames(tester);
     // On top: its bar takes a tap, with nothing over it.
@@ -337,7 +351,8 @@ void main() {
       ]);
     harness.page.value = AppPage.inbox;
     await pumpFrames(tester);
-    // One card a screen, already open (#514).
+    // Listed first (#599): the request alone, then its Review.
+    await _openRequest(tester);
     await tester.tap(find.text('Review').last);
     await pumpFrames(tester);
     expect(find.text('Builder asks you to review this'), findsOneWidget);
@@ -529,7 +544,7 @@ void main() {
     await pumpFrames(tester);
     expect(find.text('And the appendix'), findsOneWidget);
     expect(
-      find.text('That card was closed. This is another one from Builder.'),
+      find.text('That request was closed. This is another one from Builder.'),
       findsOneWidget,
     );
     expect(find.text('Draft for R3a'), findsNothing);
@@ -617,7 +632,7 @@ void main() {
     await pumpFrames(tester);
     expect(find.text('Builder asks you to review this'), findsNothing);
     expect(harness.page.value, AppPage.inbox);
-    expect(find.byType(PhoneNeedsYou), findsOneWidget);
+    expect(find.byType(InboxView), findsOneWidget);
   });
 
   testWidgets('the field and the bar sit above the keyboard', (tester) async {

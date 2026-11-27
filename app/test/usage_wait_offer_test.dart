@@ -58,6 +58,7 @@ Future<Harness> _showProviders(
   final harness = Harness(snapshot);
   await harness.show(tester, size: const Size(1200, 1100));
   harness.page.value = AppPage.settings;
+  harness.backend.settingsSection.value = 'providers';
   await settle(tester);
   return harness;
 }

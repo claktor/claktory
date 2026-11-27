@@ -154,7 +154,9 @@ pub trait Models: Send + Sync {
     }
     /// Reads the provider's model list from the provider, as it came; None
     /// when there's none to read (not signed in, or a scripted provider).
-    fn fetch_models<'a>(&'a self, _provider: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
+    /// A provider that didn't take the sign-in or key fails
+    /// `is_unauthorized` or `is_refused`.
+    fn fetch_models<'a>(&'a self, _provider: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, Error>> {
         Box::pin(async { Ok(None) })
     }
     /// Takes a model list `fetch_models` brought, checked whole, in place of
@@ -217,7 +219,7 @@ impl Models for Registry {
         Registry::fetches_models(self, provider)
     }
 
-    fn fetch_models<'a>(&'a self, provider: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
+    fn fetch_models<'a>(&'a self, provider: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, Error>> {
         Box::pin(Registry::fetch_models(self, provider))
     }
 

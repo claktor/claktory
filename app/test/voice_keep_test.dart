@@ -273,10 +273,12 @@ void main() {
       ),
     );
     harness.page.value = AppPage.settings;
+    // This device's: they wait here, not on the Claktory.
+    harness.backend.settingsSection.value = 'device';
     await harness.show(tester, size: const Size(1200, 1600));
     await io(tester);
     await pumpFrames(tester);
-    await tester.ensureVisible(find.text('Not sent'));
+    await tester.ensureVisible(find.text('Recordings not sent'));
     await pumpFrames(tester);
     expect(find.text('Your answer to June: Ship it?'), findsOneWidget);
     expect(find.textContaining('1:05 · '), findsOneWidget);

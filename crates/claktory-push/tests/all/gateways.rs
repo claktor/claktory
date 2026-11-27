@@ -107,6 +107,25 @@ async fn fcm_gets_a_data_message_with_an_access_token_from_the_service_account()
             Some("unregistered") => {
                 (400, json!({"error": {"status": "INVALID_ARGUMENT", "details": [{"errorCode": "UNREGISTERED"}]}}).to_string())
             }
+            Some("other-project") => {
+                (403, json!({"error": {"status": "PERMISSION_DENIED", "details": [{"errorCode": "SENDER_ID_MISMATCH"}]}}).to_string())
+            }
+            Some("malformed") => (
+                400,
+                json!({"error": {"status": "INVALID_ARGUMENT", "details": [
+                    {"@type": "type.googleapis.com/google.firebase.fcm.v1.FcmError", "errorCode": "INVALID_ARGUMENT"},
+                    {"@type": "type.googleapis.com/google.rpc.BadRequest", "fieldViolations": [{"field": "message.token"}]},
+                ]}})
+                .to_string(),
+            ),
+            Some("too-big") => (
+                400,
+                json!({"error": {"status": "INVALID_ARGUMENT", "details": [
+                    {"@type": "type.googleapis.com/google.rpc.BadRequest", "fieldViolations": [{"field": "message.data"}]},
+                ]}})
+                .to_string(),
+            ),
+            Some("no-role") => (403, json!({"error": {"status": "PERMISSION_DENIED"}}).to_string()),
             _ => (503, json!({"error": {"status": "UNAVAILABLE"}}).to_string()),
         }
     })
@@ -142,6 +161,13 @@ async fn fcm_gets_a_data_message_with_an_access_token_from_the_service_account()
 
     assert_eq!(fcm.send("gone", &push(Urgency::Normal)).await, Delivery::Gone);
     assert_eq!(fcm.send("unregistered", &push(Urgency::Normal)).await, Delivery::Gone);
+    // Not a token at all: it never works.
+    assert_eq!(fcm.send("malformed", &push(Urgency::Normal)).await, Delivery::Gone);
+    // What's wrong is the message, or the relay's service account (no FCM
+    // role, or another project's): the token stays.
+    assert!(matches!(fcm.send("other-project", &push(Urgency::Normal)).await, Delivery::Refused(_)));
+    assert!(matches!(fcm.send("too-big", &push(Urgency::Normal)).await, Delivery::Refused(_)));
+    assert!(matches!(fcm.send("no-role", &push(Urgency::Normal)).await, Delivery::Refused(_)));
     assert!(matches!(fcm.send("busy", &push(Urgency::Normal)).await, Delivery::Transient(_)));
     let tokens = google.seen.lock().expect("lock").iter().filter(|seen| seen.head.contains("/token")).count();
     assert_eq!(tokens, 1, "the access token is reused");

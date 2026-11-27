@@ -33,15 +33,16 @@ use prost::Message as _;
 const WORKSPACE: u32 = 5;
 /// Workspace.agents.
 const AGENTS: u32 = 2;
-/// Workspace.pipes, dm_sends and alerts: they hold what waits on the person
-/// (a pipe message to review, a direct message to approve, an alert to
-/// read).
-const WAITING_WORKSPACE: [u32; 3] = [26, 37, 51];
+/// Workspace.pipes, dm_sends, alerts and protected_places: they hold what
+/// waits on the person (a pipe message to review, a direct message to
+/// approve, an alert to read, a place macOS refused).
+const WAITING_WORKSPACE: [u32; 4] = [26, 37, 51, 53];
 /// Agent.id.
 const AGENT_ID: u32 = 1;
-/// Agent.status, waiting_seqs and waiting_items: whether it's working (it
-/// changes only as a run starts or ends) and its questions for the person.
-const WAITING_AGENT: [u32; 3] = [7, 32, 42];
+/// Agent.status, waiting_seqs, waiting_items and waiting_versions: whether
+/// it's working (it changes only as a run starts or ends) and its questions
+/// for the person, and whether one of them changed (Squalo's B3).
+const WAITING_AGENT: [u32; 4] = [7, 32, 42, 55];
 
 /// How often a device on another machine gets the Workspace at most.
 pub(crate) const REMOTE_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
@@ -462,22 +463,54 @@ pub(crate) struct Tally {
     counts: [(u64, u64); KINDS.len()],
 }
 
-/// The kinds counted, and the ServerMessage bodies each is.
-const KINDS: [(&str, &[u32]); 7] = [
+/// The kinds counted, and the ServerMessage bodies each is (Polpo 47790):
+/// a Transcript whole or resumed (#413), an agent's earlier entries (page),
+/// a chat's transcript and pages; and, before any of them, whatever came
+/// for the conversation the connection watches (#514).
+const KINDS: [(&str, &[u32]); 11] = [
     ("workspace", &[WORKSPACE]),
     ("patch", &[27]),
     ("entry", &[7, 46]),
     ("delta", &[8, 47]),
-    ("transcript", &[6, 26, 45, 48]),
+    ("transcript", &[TRANSCRIPT]),
+    (TRANSCRIPT_RESUMED, &[]),
+    ("page", &[26]),
+    ("chat", &[45, 48]),
+    (WATCHED_KIND, &[]),
     ("file", &[14, 16, 59, 70]),
     ("other", &[]),
 ];
+/// ServerMessage.transcript, and Transcript.resumed (#413).
+const TRANSCRIPT: u32 = 6;
+const RESUMED: u32 = 4;
+const TRANSCRIPT_RESUMED: &str = "transcript_resumed";
+/// ServerMessage.watched (#514).
+const WATCHED: u32 = 90;
+const WATCHED_KIND: &str = "watched";
+
+/// Whether `message` has the bool (or other varint) field `number` set.
+fn flag(message: &[u8], fields: &[Field], number: u32) -> bool {
+    fields.iter().any(|field| field.number == number && field.wire_type == 0 && message[field.value.clone()].iter().any(|byte| byte & 0x7f != 0))
+}
 
 impl Tally {
     /// Counts `frame`, an encoded ServerMessage.
     pub(crate) fn count(&mut self, frame: &[u8]) {
-        let body = body_number(frame);
-        let kind = KINDS.iter().position(|(_, bodies)| body.is_some_and(|body| bodies.contains(&body))).unwrap_or(KINDS.len() - 1);
+        let fields = Field::all(frame).unwrap_or_default();
+        let body = fields.iter().find(|field| (2..REVISION).contains(&field.number));
+        let named = |name: &str| KINDS.iter().position(|(kind, _)| *kind == name).unwrap_or(KINDS.len() - 1);
+        let resumed = body.filter(|body| body.number == TRANSCRIPT).is_some_and(|body| {
+            let transcript = &frame[body.value.clone()];
+            flag(transcript, &Field::all(transcript).unwrap_or_default(), RESUMED)
+        });
+        let kind = if flag(frame, &fields, WATCHED) {
+            named(WATCHED_KIND)
+        } else if resumed {
+            named(TRANSCRIPT_RESUMED)
+        } else {
+            let body = body.map(|body| body.number);
+            KINDS.iter().position(|(_, bodies)| body.is_some_and(|body| bodies.contains(&body))).unwrap_or(KINDS.len() - 1)
+        };
         let (frames, bytes) = &mut self.counts[kind];
         *frames += 1;
         *bytes += frame.len() as u64;
@@ -1114,6 +1147,36 @@ mod tests {
         assert_eq!(
             tally.words(),
             format!("frames=workspace:1,delta:2,other:1 bytes=workspace:{},delta:{},other:{}", whole.len(), 2 * delta.len(), ack.len())
+        );
+    }
+
+    /// Polpo 47790: what used to be one "transcript" kind, apart: a whole
+    /// Transcript, a resumed one (#413), an agent's earlier entries, a
+    /// chat's, and anything for the watched conversation (#514).
+    #[test]
+    fn a_tally_tells_transcripts_pages_chats_and_watched_apart() {
+        let encode = |body: Body, watched: bool| ServerMessage { body: Some(body), watched, ..Default::default() }.encode_to_vec();
+        let whole = encode(Body::Transcript(v1::Transcript { agent_id: "sam".into(), ..Default::default() }), false);
+        let resumed = encode(Body::Transcript(v1::Transcript { agent_id: "sam".into(), resumed: true, ..Default::default() }), false);
+        let page = encode(Body::EntryPage(v1::EntryPage { agent_id: "sam".into(), ..Default::default() }), false);
+        let chat = encode(Body::ChatTranscript(v1::ChatTranscript::default()), false);
+        let chat_page = encode(Body::ChatEntryPage(v1::ChatEntryPage::default()), false);
+        let watched = encode(Body::Transcript(v1::Transcript { agent_id: "ana".into(), resumed: true, ..Default::default() }), true);
+        let watched_delta = encode(Body::Delta(v1::EntryDelta { text: "hi".into(), ..Default::default() }), true);
+        let mut tally = Tally::default();
+        for frame in [&whole, &resumed, &resumed, &page, &chat, &chat_page, &watched, &watched_delta] {
+            tally.count(frame);
+        }
+        assert_eq!(
+            tally.words(),
+            format!(
+                "frames=transcript:1,transcript_resumed:2,page:1,chat:2,watched:2 bytes=transcript:{},transcript_resumed:{},page:{},chat:{},watched:{}",
+                whole.len(),
+                2 * resumed.len(),
+                page.len(),
+                chat.len() + chat_page.len(),
+                watched.len() + watched_delta.len()
+            )
         );
     }
 

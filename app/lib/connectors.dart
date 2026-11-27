@@ -8,7 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'avatar.dart';
 import 'backend.dart';
 import 'card_answer.dart'
-    show AnswerNotSent, CardAnswer, PublishesAnswer, noComment;
+    show AnswerNotSent, CardAnswer, PublishesAnswer, insteadLine, noComment;
 import 'characters/character.dart';
 import 'controls.dart';
 import 'decision.dart';
@@ -17,7 +17,6 @@ import 'forms.dart';
 import 'identity.dart';
 import 'mobile/metrics.dart' show Metrics, TypeScale;
 import 'mobile/input.dart' show InputKind;
-import 'mobile/lines.dart';
 import 'mobile/platform_policy.dart' show PhonePlatformPolicy;
 import 'markdown.dart';
 import 'protocol/factory/v1/factory.pb.dart';
@@ -1146,7 +1145,7 @@ class _ConnectProposalCardState extends State<ConnectProposalCard>
           style: TypeScale.of(context).body.copyWith(color: palette.textMuted),
         ),
         const SizedBox(height: Space.m),
-        _dismissRow(agent),
+        _answer(agent),
       ];
     }
     final fields = _fieldsFor(connector)!;
@@ -1167,54 +1166,59 @@ class _ConnectProposalCardState extends State<ConnectProposalCard>
         onChanged: () => setState(() {}),
         onSubmit: () => _connect(run),
       ),
-      // Once a comment is typed, Submit (below) replies instead: this
-      // says what that does.
-      CommentTyped(
-        controller: _comment,
-        builder: (context, typed) {
-          final line = Text(
-            _error ??
-                (typed
-                    ? 'Nothing is connected. $agent gets your comment and '
-                          'can ask again.'
-                    : 'Connecting gives $agent nothing yet. You or Rivet '
-                          'then give it only the access it needs.'),
-            style: TypeScale.of(context).caption.copyWith(
-              color: _error == null ? palette.textFaint : palette.danger,
-            ),
-          );
-          if (typed) return line;
-          return ActionLine(
-            lead: line,
-            action: Button(
-              label: phone ? 'Connect' : 'Connect $service',
-              primary: true,
-              onPressed: _dismissing ? null : () => _connect(run),
-            ),
-          );
-        },
+      _answer(
+        agent,
+        line:
+            'Connecting gives $agent nothing yet. You or Rivet then give '
+            'it only the access it needs.',
+        primary: Button(
+          label: phone ? 'Connect' : 'Connect $service',
+          primary: true,
+          onPressed: _dismissing ? null : () => _connect(run),
+        ),
       ),
-      const SizedBox(height: Space.m),
-      _dismissRow(agent),
     ];
   }
 
-  /// A comment for the agent, and Dismiss; once something is typed, Submit
-  /// in its place (Return too), the comment going as a reply (#370).
-  Widget _dismissRow(String agent) => CommentTyped(
-    controller: _comment,
-    builder: (context, typed) => ActionLine(
-      lead: DecisionComment(
-        controller: _comment,
-        agent: agent,
-        enabled: !_dismissing,
-        onSubmit: () => _dismiss(reply: true),
-      ),
-      action: typed
-          ? SubmitButton(
-              onPressed: _dismissing ? null : () => _dismiss(reply: true),
-            )
-          : Button(label: 'Dismiss', onPressed: _dismissing ? null : _dismiss),
+  /// The field, open from the start, above the row (Lucy's rules 2 and 4):
+  /// Dismiss and the card's [primary], with [line]; once something is
+  /// typed, one Submit in their place (Return too), the words going as a
+  /// reply (#370).
+  Widget _answer(
+    String agent, {
+    String? line,
+    Widget? primary,
+  }) => CardAnswerBlock(
+    field: (focus) => DecisionComment(
+      controller: _comment,
+      focusNode: focus,
+      agent: agent,
+      enabled: !_dismissing,
+      onSubmit: () => _dismiss(reply: true),
+    ),
+    row: CommentTyped(
+      controller: _comment,
+      builder: (context, typed) {
+        final palette = Palette.of(context);
+        final said = _error ?? (typed ? insteadLine('connecting') : line);
+        return CardRow(
+          line: said == null
+              ? null
+              : CardLine(said, color: _error == null ? null : palette.danger),
+          quiet: [
+            if (!typed)
+              Button(
+                label: 'Dismiss',
+                onPressed: _dismissing ? null : _dismiss,
+              ),
+          ],
+          primary: typed
+              ? SubmitButton(
+                  onPressed: _dismissing ? null : () => _dismiss(reply: true),
+                )
+              : primary,
+        );
+      },
     ),
   );
 

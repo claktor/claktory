@@ -260,15 +260,22 @@ class ReplayJob extends ChangeNotifier {
   /// asked for only now and then.
   var _screenOn = true;
 
+  /// A frame on screen every so many of the video's.
+  static const _screenEvery = 8;
+
   /// A frame drawn on the screen between two of the video's. Impeller
   /// keeps what it draws a frame from in a buffer that only a frame on
   /// screen rewinds: frame after frame of a video with none between grew
   /// it by about 5 MB each (Polpo: 8.7 GB for a minute's video, the engine's
   /// snapshot path, flutter/flutter#192097). It's waited for only briefly:
-  /// a hidden window draws nothing.
+  /// a hidden window draws nothing. Every [_screenEvery]th video frame
+  /// only: the screen's frame redraws the whole window, which cost more
+  /// than the video's own (Polpo 50054: 64% of the raster thread), and the
+  /// buffer grows by only a few such frames meanwhile.
   Future<void> _screenFrame(int i) async {
+    if (i % _screenEvery != 0) return;
     made.value = i;
-    if (!_screenOn && i % 30 != 0) return;
+    if (!_screenOn && i % (_screenEvery * 4) != 0) return;
     final binding = SchedulerBinding.instance;
     binding.scheduleFrame();
     final drawn = Completer<bool>();

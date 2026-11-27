@@ -59,7 +59,7 @@ void main() {
     final harness = Harness(snapshot);
     await harness.show(tester, size: const Size(393, 852));
     await pumpFrames(tester);
-    await tester.tap(find.bySemanticsLabel('Extensions'));
+    await tester.tap(find.bySemanticsLabel(RegExp('^More options for ')));
     await pumpFrames(tester);
     expect(find.text('Files'), findsOneWidget);
     double top(String name) => tester.getTopLeft(find.text(name)).dy;
@@ -98,7 +98,7 @@ void main() {
     final harness = Harness(snapshot);
     await harness.show(tester, size: const Size(393, 852));
     await pumpFrames(tester);
-    await tester.tap(find.bySemanticsLabel('Extensions'));
+    await tester.tap(find.bySemanticsLabel(RegExp('^More options for ')));
     await pumpFrames(tester);
     harness.backend.sent.clear();
     await tester.tap(find.text('old.md'));

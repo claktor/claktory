@@ -79,9 +79,9 @@ pub(crate) const TOOL: &str = "apps_propose_access";
 pub(crate) const LIST_TOOL: &str = "apps_list";
 pub(crate) const SET_TOOL: &str = "apps_set_access";
 
-pub(crate) const LIST_DESCRIPTION: &str = "The person's installed apps (such as Charts), or one (app, its id): what each can read (sources, each on or off, and whether it's private), whether it reaches the internet, its scopes and the tools they give, its events, and what each agent has of it. Look here before apps_set_access, and tell the person first when what they want needs their approval on a card.";
+pub(crate) const LIST_DESCRIPTION: &str = "The person's installed apps (such as Charts), or one (app, its id): what each can read (sources, each on or off, and whether it's private), whether it reaches the internet, its scopes and the tools they give, its events, and what each agent has of it. Look here before apps_set_access, and tell the person first when what they want needs their approval in a request.";
 
-pub(crate) const SET_DESCRIPTION: &str = "Set up one of the person's installed apps for what they asked (\"have Ingrid keep a chart of her bugs by severity\"): app, its id; sources, each source id turned on (true) or off (false), those left out staying as they are (activity has no message text: prefer it; an app that reads files takes a CSV or TSV as file:<place>:<path>, such as file:web-site:reports/bugs.csv); agents, each {agent, its id or name; scopes, the scopes it has from now on, [] to take the app away; hears, the app's events it hears, each needing its scope, left out to keep those it hears now}; reason, why, in a sentence for the person. Only what you name changes. Taking anything away is applied at once. Giving is applied at once too when it's not private data, to an app that reaches no site, for agents and by you that haven't read a web page; otherwise it goes on a card in your conversation for the person to approve, and the answer says why. Every change shows in the person's History, where they can undo it. Use this, never config.json, to change what apps read and who uses them. proposal: the id of an approved proposal whose grants name it, once you've reviewed it: then it's made without a card when it's within one of them; otherwise the card opens as usual and the answer says why.";
+pub(crate) const SET_DESCRIPTION: &str = "Set up one of the person's installed apps for what they asked (\"have Ingrid keep a chart of her bugs by severity\"): app, its id; sources, each source id turned on (true) or off (false), those left out staying as they are (activity has no message text: prefer it; an app that reads files takes a CSV or TSV as file:<place>:<path>, such as file:web-site:reports/bugs.csv); agents, each {agent, its id or name; scopes, the scopes it has from now on, [] to take the app away; hears, the app's events it hears, each needing its scope, left out to keep those it hears now}; reason, why, in a sentence for the person. Only what you name changes. Taking anything away is applied at once. Giving is applied at once too when it's not private data, to an app that reaches no site, for agents and by you that haven't read a web page; otherwise it goes in a request in your conversation for the person to approve, and the answer says why. Every change shows in the person's History, where they can undo it. Use this, never config.json, to change what apps read and who uses them. proposal: the id of an approved proposal whose grants name it, once you've reviewed it: then it's made without a request when it's within one of them; otherwise the request opens as usual and the answer says why.";
 
 /// The longest reason a card shows, and the most it may name.
 const MAX_REASON: usize = 500;
@@ -349,7 +349,7 @@ pub(crate) async fn set_access(factory: &Arc<Factory>, rivet: &str, args: SetArg
     let app = factory.lock().config.apps.iter().find(|installed| installed.id == app.id).cloned().unwrap_or(app);
     let card = file(factory, rivet, &app, &manifest, &widen, &reason, &rules)?;
     text.push_str(&format!(
-        "What it gives needs {person}'s approval, so it's on a card in your conversation: {} You'll be told what they decide.",
+        "What it gives needs {person}'s approval, so it's in a request in your conversation: {} You'll be told what they decide.",
         rules.join(" ")
     ));
     details["app_access"] = json!(STANDARD.encode(card.encode_to_vec()));
@@ -665,7 +665,7 @@ fn file(
         .map_err(|error| error.to_string())?;
     if waiting >= MAX_PENDING {
         return Err(format!(
-            "{waiting} of your cards already wait for the person. Wait for them to decide before asking for more; what it takes away was applied."
+            "{waiting} of your requests already wait for the person. Wait for them to decide before asking for more; what it takes away was applied."
         ));
     }
     db.execute(
@@ -682,7 +682,7 @@ fn file(
             card.created_ms,
         ],
     )
-    .map_err(|error| format!("Couldn't keep the card: {error}"))?;
+    .map_err(|error| format!("Couldn't keep the request: {error}"))?;
     Ok(card)
 }
 
@@ -709,7 +709,7 @@ pub(crate) fn list(factory: &Arc<Factory>, rivet: &str, args: ListArgs) -> Resul
     let mut listed = Vec::new();
     if tainted(factory, rivet) {
         text.push_str(&format!(
-            "You have read {}, so anything you give with apps_set_access goes on a card for the person; taking away is applied at once.\n\n",
+            "You have read {}, so anything you give with apps_set_access goes in a request for the person; taking away is applied at once.\n\n",
             crate::pipes::agents::what_was_read(factory, rivet)
         ));
     }
@@ -736,11 +736,11 @@ pub(crate) fn list(factory: &Arc<Factory>, rivet: &str, args: ListArgs) -> Resul
             let others = super::data::holds_others_words(&source.id);
             let state = if source.granted { "on" } else { "off" };
             let kind = if super::files::is_file(&source.id) {
-                "private: a file may hold anything, so giving it needs a card"
+                "private: a file may hold anything, so giving it needs a request"
             } else if others {
-                "private, and holds messages from other Claktories: giving it needs a card"
+                "private, and holds messages from other Claktories: giving it needs a request"
             } else if source.private {
-                "private: giving it needs a card"
+                "private: giving it needs a request"
             } else {
                 "not private"
             };
@@ -753,7 +753,7 @@ pub(crate) fn list(factory: &Arc<Factory>, rivet: &str, args: ListArgs) -> Resul
         }
         let reads_files = manifest.data.iter().any(|data| data.kind == super::bundle::FILE);
         if reads_files {
-            text.push_str("- Files: it reads CSV or TSV files you name as file:<place>:<path>, the place being workspace, a project's id or <project>/<folder>, the path in its folder (file:web-site:reports/bugs.csv). Each file is private: giving one needs a card.\n");
+            text.push_str("- Files: it reads CSV or TSV files you name as file:<place>:<path>, the place being workspace, a project's id or <project>/<folder>, the path in its folder (file:web-site:reports/bugs.csv). Each file is private: giving one needs a request.\n");
         }
         text.push_str("Scopes (give agents with apps_set_access's agents):\n");
         let mut scope_items = Vec::new();
@@ -797,7 +797,7 @@ pub(crate) fn list(factory: &Arc<Factory>, rivet: &str, args: ListArgs) -> Resul
             "sources": source_items, "reads_files": reads_files, "scopes": scope_items, "events": event_items, "agents": agent_items,
         }));
     }
-    text.push_str("Giving a source that isn't private, or scopes, to an app that reaches no site is applied at once; taking anything away always is. The rest goes on a card: say so to the person first.");
+    text.push_str("Giving a source that isn't private, or scopes, to an app that reaches no site is applied at once; taking anything away always is. The rest goes in a request: say so to the person first.");
     Ok(ToolResult::text(text, json!({"apps": listed, "you_read_pipes": tainted(factory, rivet)})))
 }
 

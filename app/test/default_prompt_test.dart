@@ -20,8 +20,7 @@ Future<Harness> _open(
   final harness = Harness(workspace(agents: [agent]));
   await harness.show(tester);
   await settle(tester);
-  await tester.tap(find.text('Opus 5.5 · High'));
-  await settle(tester);
+  await openAgentSettings(tester);
   return harness;
 }
 

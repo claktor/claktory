@@ -475,7 +475,7 @@ void main() {
       ),
     );
     await settle(tester);
-    expect(find.textContaining("Left to June"), findsOneWidget);
+    expect(find.textContaining("Dismissed"), findsOneWidget);
   });
 
   testWidgets('a chip over the conversation says how many need you, '

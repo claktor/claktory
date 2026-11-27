@@ -3,8 +3,10 @@
 //! kept on disk (L) and one the service releases only to this Claktory (S):
 //! `KEK = HKDF(L ‖ S, salt = vault_id, info = "claktory vault account v1")`.
 //! The key on disk (`auto.key`) goes, and a recovery key is made and kept,
-//! sealed with the vault's key, to show the person. After a restart the
-//! account module fetches S and opens the vault with `open_with_account`.
+//! sealed with the vault's key, to show the person, until the account's
+//! own recovery key covers the vault (`account_recovery`, #239). After a
+//! restart the account module fetches S and opens the vault with
+//! `open_with_account`.
 
 use rusqlite::{Connection, OptionalExtension, params};
 use zeroize::Zeroizing;
@@ -114,27 +116,25 @@ impl Vault {
         Ok(inner.vmk.is_some())
     }
 
-    /// The recovery key, to show the person (logged); one is made and kept
-    /// if there's none yet.
+    /// The recovery key, to show the person (logged): this Claktory's own
+    /// while it's shown (`own_showable`), made and kept if there's none and
+    /// the account's key doesn't cover the vault (#239). Covered by it,
+    /// there's nothing to show: no Claktory keeps the account's key.
     pub(crate) fn recovery_key(&self, device: &str) -> Result<String, VaultError> {
         let kept = {
             let inner = self.lock();
-            let vmk = Self::open_vmk(&inner)?;
-            let db = Self::db(&inner)?;
-            let sealed: Option<Vec<u8>> =
-                db.query_row("SELECT sealed FROM kept WHERE name = 'recovery'", [], |row| row.get(0)).optional()?;
-            let text = match sealed {
-                Some(sealed) => {
-                    let opened = crypto::open(vmk, &sealed, &aad(&["kept", &inner.vault_id, "recovery"]))
-                        .ok_or_else(|| VaultError::Invalid("The kept recovery key doesn't open; make a new one.".to_owned()))?;
-                    Some(String::from_utf8_lossy(&opened).into_owned())
-                }
-                None => None,
+            Self::open_vmk(&inner)?;
+            let text = if Self::own_showable(&inner)? {
+                Self::kept_recovery(&inner)?
+            } else if Self::account_covered(Self::db(&inner)?)? {
+                return Err(VaultError::Invalid("This Claktory uses your account's recovery key. Claktory doesn't keep a copy, so it can't show it here.".to_owned()));
+            } else {
+                Self::kept_recovery(&inner)?
             };
             if text.is_some() {
-                Self::log(db, "", "", "recovery", "", "", device)?;
+                Self::log(Self::db(&inner)?, "", "", "recovery", "", "", device)?;
             }
-            text
+            text.map(|text| text.to_string())
         };
         match kept {
             Some(text) => Ok(text),

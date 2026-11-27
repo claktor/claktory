@@ -3,18 +3,15 @@ package com.claktory.app
 import android.Manifest
 import android.app.Activity
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaRecorder
-import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.provider.Settings
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -233,15 +230,10 @@ class MediaMic(private val context: Context) : Mic {
  * factory/recorder and factory/recorder/events on Android: [RecorderCore]
  * with the phone's microphone, its permission, and what interrupts it.
  *
- * Access: granted; undetermined while asking can still show the system's
- * question (never asked, or refused once: Android asks a second time);
- * denied once the person said no in this run of the app and Android won't
- * ask again, so only Settings changes it (before asking, Android doesn't
- * tell "never asked" from "won't ask again", and the app keeps no record
- * of asking: then it's undetermined, and asking answers no at once, which
- * the app takes to Settings). Recording takes the audio focus, as the iPhone's session
- * does: a call taking it, or the app leaving the screen (Android gives an
- * app in the background no microphone), interrupts it.
+ * Access as [PermissionState] reads it. Recording takes the audio focus,
+ * as the iPhone's session does: a call taking it, or the app leaving the
+ * screen (Android gives an app in the background no microphone),
+ * interrupts it.
  */
 class RecorderChannel(
     messenger: BinaryMessenger,
@@ -252,7 +244,6 @@ class RecorderChannel(
     private val main = Handler(Looper.getMainLooper())
     private var sink: EventChannel.EventSink? = null
     private var asking: MethodChannel.Result? = null
-    private var refused = false
     private val audio = activity.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private var focus: AudioFocusRequest? = null
     private val focusChanged = AudioManager.OnAudioFocusChangeListener { change ->
@@ -274,19 +265,21 @@ class RecorderChannel(
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "access" -> result.success(
-                when {
-                    granted() -> "granted"
-                    refused && !activity.shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO) -> "denied"
-                    else -> "undetermined"
-                },
+                PermissionState.of(
+                    granted = granted(),
+                    refusedForGood = Refusals.refusedForGood(Manifest.permission.RECORD_AUDIO),
+                    androidWouldExplain = activity.shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO),
+                ),
+            )
+            "refusedOnce" -> result.success(
+                PermissionState.refusedOnce(
+                    granted = granted(),
+                    androidWouldExplain = activity.shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO),
+                ),
             )
             "request" -> request(result)
             "openSettings" -> {
-                runCatching {
-                    activity.startActivity(
-                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", activity.packageName, null)),
-                    )
-                }
+                AppSettings.open(activity)
                 result.success(null)
             }
             "start" -> {
@@ -320,13 +313,23 @@ class RecorderChannel(
         if (granted()) return result.success(true)
         if (asking != null) return result.success(false)
         asking = result
+        Refusals.asking(
+            Manifest.permission.RECORD_AUDIO,
+            explains = activity.shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO),
+            at = SystemClock.elapsedRealtime(),
+        )
         activity.requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQUEST)
     }
 
     override fun onPermissionResult(requestCode: Int, permissions: Array<out String>, grants: IntArray): Boolean {
         if (requestCode != REQUEST) return false
         val allowed = grants.isNotEmpty() && grants.all { it == PackageManager.PERMISSION_GRANTED }
-        if (!allowed) refused = true
+        Refusals.answered(
+            Manifest.permission.RECORD_AUDIO,
+            allowed,
+            explains = activity.shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO),
+            at = SystemClock.elapsedRealtime(),
+        )
         asking?.success(allowed)
         asking = null
         return true

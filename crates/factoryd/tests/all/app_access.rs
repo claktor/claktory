@@ -150,7 +150,7 @@ pub(crate) fn card(view: &View) -> (u64, v1::AppAccessProposal) {
 fn card_at(view: &View, seq: u64) -> v1::AppAccessProposal {
     match &view.entries.iter().find(|entry| entry.seq == seq).expect("the card").kind {
         Some(Kind::AppAccess(proposal)) => proposal.clone(),
-        other => panic!("expected a card, got {other:?}"),
+        other => panic!("expected a request, got {other:?}"),
     }
 }
 
@@ -215,7 +215,7 @@ async fn rivet_sets_an_app_up_at_once_when_nothing_needs_the_person_and_the_pers
     let args = json!({"app": "charts", "sources": {"activity": true}, "agents": [{"agent": "Lea", "scopes": ["view", "edit"], "hears": ["alert"]}], "reason": reason});
     let said = set(&mut client, &mut view, &args).await;
     assert!(said.starts_with("Done: you let Charts read Activity; let Lea use Charts: See dashboards, Change dashboards; let Lea hear from Charts: a chart crossed its line."), "{said}");
-    assert_eq!(cards(&view), 0, "no card");
+    assert_eq!(cards(&view), 0, "no request");
     view.follow(&mut client, |view| !app(view).grants.is_empty()).await;
     let given = app(&view);
     let grant = given.grants.first().expect("Lea's");
@@ -523,7 +523,7 @@ async fn reading_conversations_through_an_app_marks_no_one() {
     let said =
         set(&mut client, &mut view, &json!({"app": "charts", "agents": [{"agent": "Lea", "scopes": ["edit"]}], "reason": reason})).await;
     assert!(said.starts_with("Done: "), "{said}");
-    assert_eq!(cards(&view), before, "no card");
+    assert_eq!(cards(&view), before, "no request");
 
     // Rivet reads them: no mark, and it still gives without a card.
     let said = call(&mut client, &mut view, "charts_query", &json!({"source": "conversations", "sql": "SELECT text FROM messages"})).await;
@@ -536,7 +536,7 @@ async fn reading_conversations_through_an_app_marks_no_one() {
     )
     .await;
     assert!(said.starts_with("Done: "), "{said}");
-    assert_eq!(cards(&view), before, "no card");
+    assert_eq!(cards(&view), before, "no request");
 }
 
 fn pipe_message(dir: &std::path::Path) {

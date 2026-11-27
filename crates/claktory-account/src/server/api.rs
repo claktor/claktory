@@ -53,15 +53,26 @@ fn review_wrong(email: &str) -> String {
 /// no other Claktory on the relay (#319, Fugo 34608). Other emails pass.
 /// Every way a Claktory joins an account goes through it (Fugo 46276).
 pub(super) fn review_box_only(service: &Service, email: &str, backend_key: &str) -> Result<(), ApiError> {
-    if service.review(email).is_none() {
-        return Ok(());
-    }
-    let pinned = service.config.review_claktory_key.as_deref();
-    if pinned.is_some() && verifying_key(backend_key).map(|key| b64(key.to_bytes())).as_deref() == pinned {
+    if service.review(email).is_none() || review_box_key(service, email, backend_key) {
         return Ok(());
     }
     tracing::warn!("review account: a Claktory refused, not the review box");
     Err(review_refused())
+}
+
+/// Whether `backend_key` is the review box's (`--review-claktory-key`) and
+/// `email` a review email.
+fn review_box_key(service: &Service, email: &str, backend_key: &str) -> bool {
+    let pinned = service.config.review_claktory_key.as_deref();
+    service.review(email).is_some() && pinned.is_some() && verifying_key(backend_key).map(|key| b64(key.to_bytes())).as_deref() == pinned
+}
+
+/// Whether a sign-in's backend key was retired by its Claktory's sign-out
+/// (#524). The review box's key is pinned, so the box signs in again with
+/// it after a reviewer signs it out (Fugo 46822): only for a review email,
+/// and its verify must still be signed by it (`review_box_signed`).
+fn key_retired_for(service: &Service, email: &str, backend_key: &str) -> Result<bool, ApiError> {
+    Ok(db::backend_key_retired(&service.db(), backend_key)? && !review_box_key(service, email, backend_key))
 }
 
 /// Records a sign-in and emails its code; the request's id. The review
@@ -162,7 +173,7 @@ pub(super) async fn sign_in_start(service: &Service, call: &Call) -> Result<Repl
     {
         return Err(ApiError::invalid("A field is missing or out of range."));
     }
-    if db::backend_key_retired(&service.db(), &body.backend_key)? {
+    if key_retired_for(service, &email, &body.backend_key)? {
         return Err(key_retired());
     }
     review_box_only(service, &email, &body.backend_key)?;
@@ -192,7 +203,7 @@ pub(super) fn sign_in_verify(service: &Service, call: &Call) -> Result<Reply, Ap
         .ok_or_else(|| ApiError::invalid("eph_pub isn't a key to seal to."))?;
     let request = check_code(service, &body.request_id, &body.code, "claktory", &call.ip)?;
     // Retired after its sign-in started: the code is spent.
-    if db::backend_key_retired(&service.db(), request.backend_key.as_deref().unwrap_or_default())? {
+    if key_retired_for(service, &request.email, request.backend_key.as_deref().unwrap_or_default())? {
         db::delete_request(&service.db(), &request.id)?;
         return Err(key_retired());
     }
@@ -230,7 +241,9 @@ pub(super) fn sign_in_verify(service: &Service, call: &Call) -> Result<Reply, Ap
     let sealed_share =
         seal_share(&share, &eph_pub, &claktory_id, epoch).ok_or_else(|| ApiError::invalid("eph_pub isn't a key to seal to."))?;
     tracing::info!("signed in: Claktory {claktory_id} of account {account_id}, epoch {epoch}");
+    let recovery_key = db::recovery_key(&service.db(), &account_id)?;
     Ok(Reply::json(&SignedIn {
+        recovery_key,
         account_id,
         email: request.email,
         claktory_id,
@@ -332,6 +345,62 @@ fn signed_with_token<'a>(service: &Service, call: &'a Call) -> Result<(db::Clakt
     signed_by(service, call, &key, ApiError::unauthorized)?;
     service.verified(call, &claktory.backend_key)?;
     Ok((claktory, token))
+}
+
+/// How often an account's recovery key may be set or changed a day.
+const RECOVERY_KEYS_PER_DAY: u32 = 10;
+
+/// `PUT /v1/account/recovery-key` (#239): a signed-in Claktory sets the
+/// account's recovery key, or changes the one it has (replacing only the
+/// one it names), with its statement and a device's approval, the first
+/// key's too (Fugo 47881, 48996). The service keeps only the public half.
+pub(super) fn set_recovery_key(service: &Service, call: &Call) -> Result<Reply, ApiError> {
+    let claktory = authenticate(service, call)?;
+    let body: SetRecoveryKey = call.json()?;
+    let key = verifying_key(&claktory.backend_key).ok_or_else(ApiError::unauthorized)?;
+    let said = verify_recovery_key(&key, &body.statement)
+        .ok_or_else(|| ApiError::invalid("The statement isn't signed by this Claktory's backend key."))?;
+    let public_key = unb64_32(&said.public_key).filter(|public_key| public_key != &[0; 32]);
+    if said.claktory_id != claktory.id || said.account_id != claktory.account_id {
+        return Err(ApiError::invalid("The statement is for another Claktory or account."));
+    }
+    if (said.iat - service.now()).abs() > MAX_SKEW {
+        return Err(ApiError::invalid("The statement is out of time: make it again."));
+    }
+    if public_key.is_none() || (!said.replaces.is_empty() && unb64_32(&said.replaces).is_none()) {
+        return Err(ApiError::invalid("public_key and replaces must be keys of 32 bytes."));
+    }
+    // Every key needs a device's approval, the account's first too (Fugo
+    // 48996): one Claktory's backend key alone plants none.
+    if said.device_key.is_empty() || !verify_recovery_key_device(&body.statement, &body.device_sig) {
+        return Err(ApiError::invalid("A new recovery key needs a device's approval: device_key and a device_sig that checks with it."));
+    }
+    service.limit(&[(&format!("recovery-key:{}", claktory.account_id), 86_400, RECOVERY_KEYS_PER_DAY)])?;
+    let set = RecoveryKey {
+        public_key: said.public_key.clone(),
+        statement: body.statement.trim().to_owned(),
+        device_sig: body.device_sig.trim().to_owned(),
+        claktory_id: claktory.id.clone(),
+        claktory_name: String::new(),
+        backend_key: claktory.backend_key.clone(),
+        set_at: service.now(),
+        history: Vec::new(),
+    };
+    match db::set_recovery_key(&mut service.db(), &claktory.account_id, &said.replaces, &set)? {
+        Ok(recovery_key) => {
+            tracing::info!("recovery key set for account {} by Claktory {}", claktory.account_id, claktory.id);
+            Ok(Reply::json(&RecoveryKeySet { recovery_key: Some(recovery_key) }))
+        }
+        Err(now) => {
+            let mut error = ApiError::new(
+                StatusCode::CONFLICT,
+                "recovery_key_changed",
+                "The account's recovery key changed meanwhile: look at it again before you make a new one.",
+            );
+            error.body.recovery_key = now.map(Box::new);
+            Err(error)
+        }
+    }
 }
 
 /// `POST /v1/claktories/sign-out` (#524): a Claktory signs itself out. Its
@@ -518,6 +587,7 @@ pub(super) fn check_in(service: &Service, call: &Call) -> Result<Reply, ApiError
         epoch: claktory.epoch,
         periods_recorded: recorded,
         periods_ignored: ignored,
+        recovery_key: db::recovery_key(&service.db(), &claktory.account_id)?,
     }))
 }
 

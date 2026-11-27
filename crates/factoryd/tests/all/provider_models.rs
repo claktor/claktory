@@ -28,6 +28,8 @@ struct Listing {
     reads: AtomicUsize,
     /// It can't be reached.
     down: AtomicBool,
+    /// It doesn't take the sign-in (answers 401).
+    unauthorized: AtomicBool,
 }
 
 impl Listing {
@@ -38,6 +40,7 @@ impl Listing {
             read: AtomicBool::new(false),
             reads: AtomicUsize::new(0),
             down: AtomicBool::new(false),
+            unauthorized: AtomicBool::new(false),
         })
     }
 }
@@ -95,10 +98,16 @@ impl Models for Listing {
         provider == "scripted"
     }
 
-    fn fetch_models<'a>(&'a self, _provider: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
+    fn fetch_models<'a>(&'a self, _provider: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, Error>> {
         self.reads.fetch_add(1, Ordering::Relaxed);
-        let down = self.down.load(Ordering::Relaxed);
-        Box::pin(async move { if down { Err("Scripted couldn't be reached.".into()) } else { Ok(Some(b"the list".to_vec())) } })
+        let (down, unauthorized) = (self.down.load(Ordering::Relaxed), self.unauthorized.load(Ordering::Relaxed));
+        Box::pin(async move {
+            if unauthorized {
+                let message = "Scripted didn't take this sign-in (401).".to_owned();
+                return Err(Error::Models { code: factory_agent::errors::UNAUTHORIZED, message });
+            }
+            if down { Err(Error::Other("Scripted couldn't be reached.".into())) } else { Ok(Some(b"the list".to_vec())) }
+        })
     }
 
     fn take_models(&self, _provider: &str, body: &[u8]) -> Result<bool, String> {
@@ -254,4 +263,44 @@ async fn a_stale_list_is_read_again_when_the_person_looks_at_the_models() {
     assert!(matches!(apply_request(&mut client, &mut view, shown()).await, Body::Ack(_)));
     view.follow(&mut client, |view| scripted(view).models_fetched_ms > before && !scripted(view).models_fetching).await;
     assert_eq!(again.reads.load(Ordering::Relaxed), 1);
+}
+
+/// A list read the provider refuses as unauthorized (401) says the
+/// sign-in likely expired, as a hint only: the provider stays signed in
+/// and its models stay; the next read that works clears it, and one that
+/// fails otherwise doesn't set it.
+#[tokio::test]
+async fn a_list_read_refused_as_unauthorized_hints_the_sign_in_expired_until_one_works() {
+    let dir = temp_dir();
+    let models = Listing::new();
+    let (mut client, mut view, _factory) = start(&dir, models.clone()).await;
+    view.follow(&mut client, |view| scripted(view).models_fetched_ms > 0 && listed(view, "scripted/listed").is_some()).await;
+    assert!(!scripted(&view).models_fetch_signed_out);
+    let signed_in_with = scripted(&view).signed_in_with.clone();
+    let refresh = || Request::RefreshModels(v1::RefreshModels { provider_id: "scripted".into() });
+
+    models.unauthorized.store(true, Ordering::Relaxed);
+    let failed = apply_request(&mut client, &mut view, refresh()).await;
+    assert_eq!(refused(&failed), "Scripted didn't take this sign-in (401).");
+    view.follow(&mut client, |view| scripted(view).models_fetch_signed_out).await;
+    let provider = scripted(&view);
+    assert_eq!(provider.models_fetch_error, "Scripted didn't take this sign-in (401).");
+    assert_eq!((provider.signed_in_with.as_str(), provider.models_fetchable), (signed_in_with.as_str(), true), "still signed in");
+    assert!(listed(&view, "scripted/listed").is_some(), "its models stay");
+
+    // Unreachable instead: an error, not a sign-in that expired.
+    models.unauthorized.store(false, Ordering::Relaxed);
+    models.down.store(true, Ordering::Relaxed);
+    apply_request(&mut client, &mut view, refresh()).await;
+    view.follow(&mut client, |view| scripted(view).models_fetch_error == "Scripted couldn't be reached.").await;
+    assert!(!scripted(&view).models_fetch_signed_out);
+
+    // Refused again, then a read that works clears it.
+    models.down.store(false, Ordering::Relaxed);
+    models.unauthorized.store(true, Ordering::Relaxed);
+    apply_request(&mut client, &mut view, refresh()).await;
+    view.follow(&mut client, |view| scripted(view).models_fetch_signed_out).await;
+    models.unauthorized.store(false, Ordering::Relaxed);
+    assert!(matches!(apply_request(&mut client, &mut view, refresh()).await, Body::Ack(_)));
+    view.follow(&mut client, |view| !scripted(view).models_fetch_signed_out && scripted(view).models_fetch_error.is_empty()).await;
 }

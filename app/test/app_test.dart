@@ -12,7 +12,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:factory_app/controls.dart';
 import 'package:factory_app/identity.dart';
 import 'package:factory_app/scope.dart';
-import 'package:factory_app/settings_view.dart' show SettingsView;
+import 'package:factory_app/settings_shell.dart' show SettingsSearchField;
 
 import 'harness.dart';
 import 'ipad/as_ipad.dart';
@@ -251,6 +251,7 @@ void main() {
   ) async {
     final harness = await showApp(tester, workspace(signedIn: false));
     harness.page.value = AppPage.settings;
+    harness.backend.settingsSection.value = 'providers';
     await settle(tester);
     await tester.tap(find.text('Anthropic (Claude Pro/Max)'));
     await settle(tester);
@@ -300,6 +301,7 @@ void main() {
       ),
     );
     harness.page.value = AppPage.settings;
+    harness.backend.settingsSection.value = 'providers';
     await settle(tester);
 
     expect(find.text('The key was rejected.'), findsOneWidget);
@@ -328,6 +330,7 @@ void main() {
       ),
     );
     harness.page.value = AppPage.settings;
+    harness.backend.settingsSection.value = 'providers';
     await settle(tester);
 
     final secret = settingsField;
@@ -343,16 +346,7 @@ void main() {
     harness.page.value = AppPage.settings;
     await settle(tester);
 
-    await tester.scrollUntilVisible(
-      _defaultModel,
-      200,
-      scrollable: find
-          .descendant(
-            of: find.byType(SettingsView),
-            matching: find.byType(Scrollable),
-          )
-          .first,
-    );
+    await revealInSettings(tester, _defaultModel);
     await settle(tester);
     // The field names the provider after the model (U3).
     expect(
@@ -382,13 +376,7 @@ void main() {
     final harness = await showApp(tester, workspace()..appsAvailable = true);
     harness.page.value = AppPage.settings;
     await settle(tester);
-    final settings = find
-        .descendant(
-          of: find.byType(SettingsView),
-          matching: find.byType(Scrollable),
-        )
-        .first;
-    await tester.scrollUntilVisible(_defaultModel, 200, scrollable: settings);
+    await revealInSettings(tester, _defaultModel);
     await settle(tester);
     expect(find.text('Install from a file…'), findsNothing);
 
@@ -407,8 +395,7 @@ void main() {
   testWidgets('agent settings move, change model, and delete', (tester) async {
     final harness = await showApp(tester, workspace());
 
-    await tester.tap(find.text('Opus 5.5 · High'));
-    await settle(tester);
+    await openAgentSettings(tester);
     expect(find.text('Prompt'), findsOneWidget);
 
     await tester.ensureVisible(find.byType(ModelSelect).first);
@@ -430,8 +417,7 @@ void main() {
     expect(update.projectId, '');
     expect(update.hasName(), isFalse);
 
-    await tester.tap(find.text('Opus 5.5 · High'));
-    await settle(tester);
+    await openAgentSettings(tester);
     await tester.tap(find.text('Delete agent…'));
     await settle(tester);
     expect(find.text('Its conversation is deleted too.'), findsOneWidget);
@@ -505,14 +491,20 @@ void main() {
     expect(harness.last.arrangeAgent.projectId, 'p2');
     expect(harness.last.arrangeAgent.parentId, '', reason: 'its top level');
 
-    // Beside Rivet, on its upper edge: into the workspace, before it.
+    // Beside Rivet, on its upper edge: a gap in the top group, so it's
+    // pinned there and stays in its project (pinned-agents.md §5).
     final rivet = tester.getRect(
       find.ancestor(of: find.text('Rivet'), matching: find.byType(Row)).first,
     );
     await dragTo(rivet.topCenter + const Offset(0, 3));
+    expect(harness.last.pinAgent.agentId, 'a1');
+    expect(harness.last.pinAgent.beforeId, '');
+
+    // Onto Rivet's row: out of its project, reporting to Rivet.
+    await dragTo(rivet.center);
     expect(harness.last.arrangeAgent.projectId, '');
     expect(harness.last.arrangeAgent.hasProjectId(), isTrue);
-    expect(harness.last.arrangeAgent.beforeId, 'rivet');
+    expect(harness.last.arrangeAgent.parentId, 'rivet');
   });
 
   testWidgets('an agent with news stands out until it is opened', (
@@ -656,8 +648,7 @@ void main() {
       tester,
       workspace(agents: [builder(working: false)]),
     );
-    await tester.tap(find.text('Opus 5.5 · High'));
-    await settle(tester);
+    await openAgentSettings(tester);
     expect(find.textContaining('separate lines'), findsOneWidget);
     final field = find.descendant(
       of: find.ancestor(
@@ -681,8 +672,7 @@ void main() {
       tester,
       workspace(agents: [builder(working: false)..placeholder = 'Old hint']),
     );
-    await tester.tap(find.text('Opus 5.5 · High'));
-    await settle(tester);
+    await openAgentSettings(tester);
     expect(find.text('Message box hint'), findsOneWidget);
     final field = find.descendant(
       of: find.ancestor(
@@ -698,8 +688,7 @@ void main() {
     expect(harness.last.updateAgent.placeholder, 'What should Builder build?');
     expect(harness.last.updateAgent.hasName(), isFalse);
 
-    await tester.tap(find.text('Opus 5.5 · High'));
-    await settle(tester);
+    await openAgentSettings(tester);
     await tester.enterText(field, '');
     await tester.pump();
     // Left empty, it shows the default as its own hint.
@@ -1008,6 +997,8 @@ Finder get settingsField => find
           element.widget is EditableText &&
           (element.widget as EditableText).controller.text != 'Matt' &&
           element.findAncestorWidgetOfExactType<ClaktoryIdentity>() == null &&
-          element.findAncestorWidgetOfExactType<ProviderPicker>() == null,
+          element.findAncestorWidgetOfExactType<ProviderPicker>() == null &&
+          // Not Settings' search, at the top of its index.
+          element.findAncestorWidgetOfExactType<SettingsSearchField>() == null,
     )
     .first;

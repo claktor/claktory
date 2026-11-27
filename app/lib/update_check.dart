@@ -7,15 +7,16 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 
 import 'android/android_app_updates.dart' show openAndroidAppUpdatePage;
+import 'app_source.dart' show AppSourceButton;
 import 'app_update.dart' show UpdateProgress, UpdateStage;
 import 'changelog.dart' show installedVersion;
-import 'claktory_identity.dart' show claktoryName;
+import 'claktory_identity.dart' show claktoryName, claktoryNameInSettings;
 import 'controls.dart';
 import 'identity.dart';
 import 'mobile/metrics.dart' show TypeScale;
 import 'protocol/factory/v1/factory.pb.dart';
 import 'scope.dart';
-import 'settings_view.dart' show SettingRequests, SettingRow;
+import 'settings_view.dart' show SettingRequests, SettingRow, versionLabel;
 import 'update.dart';
 
 /// What a check found, in the person's words, and whether Update goes with
@@ -232,7 +233,13 @@ class _UpdateCheckRowState extends State<UpdateCheckRow> with SettingRequests {
                 children: [
                   if (version.isNotEmpty)
                     Text(
-                      version,
+                      // On a phone or an iPad, the computer's: named, since
+                      // This iPhone has the app's own (Lucy's Settings spec
+                      // §6, ST1).
+                      replacesApp
+                          ? versionLabel(version)
+                          : '${claktoryNameInSettings(scope.backend)} · Claktory '
+                                '${versionLabel(version)}',
                       style: type.body.copyWith(
                         color: palette.text,
                         fontFeatures: const [FontFeature.tabularFigures()],
@@ -286,6 +293,10 @@ class _UpdateCheckRowState extends State<UpdateCheckRow> with SettingRequests {
                           primary: true,
                           onPressed: _updating ? null : _update,
                         ),
+                      // An iPhone's or iPad's from its store, the one it
+                      // came from (settings.md ST1); none on a dev build.
+                      if (answer.appFirst && updatesHere && !replacesApp)
+                        const AppSourceButton(primary: true),
                       // Android's app comes from its download page, not a
                       // store (Sale's row 60).
                       if (answer.appFirst && !updatesHere)
@@ -296,6 +307,15 @@ class _UpdateCheckRowState extends State<UpdateCheckRow> with SettingRequests {
                         ),
                     ],
                   ),
+                // What the browser's download may ask (Lucy's permissions
+                // spec, Android).
+                if (answer.appFirst && !updatesHere) ...[
+                  const SizedBox(height: Space.xs),
+                  Text(
+                    'Android may ask you to let your browser install apps.',
+                    style: type.caption.copyWith(color: palette.textMuted),
+                  ),
+                ],
                 if (_openFailed && answer.appFirst) ...[
                   const SizedBox(height: Space.xs),
                   Text(

@@ -192,7 +192,8 @@ struct Row {
     /// PIPE_MEMBER: the agent let send to the pipe, or stopped. GIVEN_UP:
     /// the agent it no longer messages.
     member: String,
-    /// WITHDRAWN and SECRET_GIVEN_UP: the agent's reason, cut.
+    /// WITHDRAWN and SECRET_GIVEN_UP: the agent's reason, cut;
+    /// SECRET_SAVED: the secret's description.
     reason: String,
     /// QUESTION, REVIEW and PROPOSAL: how many times its agent changed it (#428).
     updates: u32,
@@ -207,6 +208,8 @@ struct Row {
     procedure: Procedure,
     /// SECRET_REQUEST: how it was approved.
     secret: SecretOutcome,
+    /// COMMAND: the card's command, with how it ran.
+    command: Option<v1::AskCommand>,
     /// All the text a search looks in, lowercase.
     search: String,
 }
@@ -265,7 +268,8 @@ struct SecretOutcome {
 impl SecretOutcome {
     /// From a request's row: its state, its new secret's JSON (what the
     /// card asked to make, and whether the person added it there, #360),
-    /// the name of the secret given, and the admin agent it went to.
+    /// the name of the secret given, and the admin agent it went to ('' when
+    /// the person decided it themselves).
     fn of(state: &str, new_secret: &str, given_name: String, admin: String) -> SecretOutcome {
         use v1::NeedsYouSecretOutcome as Secret;
         let new: Value = serde_json::from_str(new_secret).unwrap_or_default();
@@ -367,6 +371,7 @@ impl Row {
             on: None,
             procedure: Procedure::default(),
             secret: SecretOutcome::default(),
+            command: None,
             search: String::new(),
         }
     }
@@ -498,24 +503,35 @@ fn from_factory(
 ) -> rusqlite::Result<()> {
     found.add(rows(
         db,
-        "SELECT id, agent, title, answer, state, created, decided, taint, review, body, replied, reason, revision, resolved, steps FROM asks
+        "SELECT id, agent, title, answer, state, created, decided, taint, review, body, replied, reason, revision, resolved, steps, action FROM asks
          WHERE state IN ('answered', 'dismissed', 'withdrawn') AND decided >= ?1 AND decided < ?2 ORDER BY decided DESC LIMIT ?3",
         window,
         |row| {
             let review: String = row.get(8)?;
-            let kind = if review.is_empty() { Kind::Question } else { Kind::Review };
-            let outcome = withdrawn(row, 4, outcome(row, 4, 10, ("answered", Outcome::Answered), Outcome::Dismissed)?)?;
+            let id: i64 = row.get(0)?;
+            // An Execute card: Claktory's heading, its command, how it ran.
+            let command = crate::command_cards::in_history(db, id, &row.get::<_, Option<String>>(15)?.unwrap_or_default());
+            let kind = match (&command, review.is_empty()) {
+                (Some(_), _) => Kind::Command,
+                (None, true) => Kind::Question,
+                (None, false) => Kind::Review,
+            };
+            let answered = if command.is_some() { Outcome::Approved } else { Outcome::Answered };
+            let outcome = withdrawn(row, 4, outcome(row, 4, 10, ("answered", answered), Outcome::Dismissed)?)?;
             // Talked through on its card and ended with Resolve (#430).
             let outcome = if row.get::<_, bool>(13)? { Outcome::Resolved } else { outcome };
-            let mut found = Row::new(kind, row.get::<_, i64>(0)?.to_string(), row.get(1)?, outcome, row.get(5)?, row.get(6)?);
-            found.title = cut(&row.get::<_, String>(2)?, MAX_TITLE);
+            let mut found = Row::new(kind, id.to_string(), row.get(1)?, outcome, row.get(5)?, row.get(6)?);
+            let agents_title: String = row.get(2)?;
+            found.title = cut(&command.as_ref().map_or_else(|| agents_title.clone(), crate::command_cards::heading), MAX_TITLE);
             found.reply = cut(&row.get::<_, String>(3)?, MAX_REPLY);
             found.taint = row.get(7)?;
             let reason: String = row.get(11)?;
             found.reason = cut(&reason, MAX_REPLY);
             found.updates = updates(row.get(12)?);
             found.procedure = Procedure::of(row.get::<_, Option<String>>(14)?.as_deref(), row.get(10)?, row.get(13)?);
-            Ok(found.searched(&[&row.get::<_, String>(9)?, &row.get::<_, String>(3)?, &reason]))
+            let words = command.as_ref().map(|command| command.command.clone()).unwrap_or_default();
+            found.command = command;
+            Ok(found.searched(&[&row.get::<_, String>(9)?, &row.get::<_, String>(3)?, &reason, &agents_title, &words]))
         },
     )?);
     found.add(rows(
@@ -686,7 +702,25 @@ fn from_factory(
     from_member_changes(db, window, names, found)?;
     from_given_up(db, window, names, found)?;
     from_access_given_up(db, window, names, found)?;
+    from_saved(db, window, names, found)?;
     from_alerts(db, window, found)?;
+    from_protected(db, window, found)?;
+    from_recovery_key_changes(db, window, found)?;
+    Ok(())
+}
+
+/// The places macOS refused whose Needs you item ended (`protected`): the
+/// item's words when it was raised, dismissed with its OK or ended by a
+/// check that found the place let in.
+fn from_protected(db: &Connection, window: &Window, found: &mut Found) -> rusqlite::Result<()> {
+    let ended = crate::protected::between(db, window.since, window.before, i64::from(MAX_SCAN) + 1)?;
+    found.changes(ended, |ended| {
+        let outcome = if ended.dismissed { Outcome::Dismissed } else { Outcome::Changed };
+        let mut row = Row::new(Kind::ProtectedPlace, format!("protected:{}", ended.id), ended.agent.clone(), outcome, ended.raised, ended.ended);
+        row.title = cut(&ended.title, MAX_TITLE);
+        row.excerpt = cut(&ended.text, MAX_EXCERPT);
+        row.searched(&[&ended.text])
+    });
     Ok(())
 }
 
@@ -702,6 +736,19 @@ fn from_alerts(db: &Connection, window: &Window, found: &mut Found) -> rusqlite:
         row.on = Some(read.on);
         row.alert = Some(alert);
         row.searched(&[&searched[0], &searched[1]])
+    });
+    Ok(())
+}
+
+/// The account's recovery key changes this Claktory sealed its vault to
+/// (`account::recovery`, #239): Claktory's sentence, asked when the
+/// check-in saw the new key.
+fn from_recovery_key_changes(db: &Connection, window: &Window, found: &mut Found) -> rusqlite::Result<()> {
+    let changes = crate::account::recovery::between(db, window.since, window.before, i64::from(MAX_SCAN) + 1)?;
+    found.changes(changes, |change| {
+        let mut row = Row::new(Kind::RecoveryKeyChanged, format!("recovery:{}", change.id), String::new(), Outcome::Changed, change.seen, change.at);
+        row.title = cut(&change.title, MAX_TITLE);
+        row.searched(&[])
     });
     Ok(())
 }
@@ -750,6 +797,20 @@ fn from_access_given_up(db: &Connection, window: &Window, names: &HashMap<String
             _ => row.member = given.target.clone(),
         }
         row.searched(&[&given.reason, &given.label])
+    });
+    Ok(())
+}
+
+/// The secrets agents saved from a command's output (`vault::saved`):
+/// Claktory's sentence, the secret's description apart.
+fn from_saved(db: &Connection, window: &Window, names: &HashMap<String, String>, found: &mut Found) -> rusqlite::Result<()> {
+    let saved = crate::vault::saved::between(db, window.since, window.before, i64::from(MAX_SCAN) + 1)?;
+    found.changes(saved, |saved| {
+        let mut row = Row::new(Kind::SecretSaved, saved.id.to_string(), saved.agent.clone(), Outcome::Changed, saved.at, saved.at);
+        row.title = cut(&saved.title(names), MAX_TITLE);
+        row.reason = cut(&saved.description, MAX_REPLY);
+        let parents = saved.parents.join(" ");
+        row.searched(&[&saved.description, &saved.name, &parents])
     });
     Ok(())
 }
@@ -981,7 +1042,9 @@ fn from_vault(db: &Connection, window: &Window, found: &mut Found) -> rusqlite::
             replied("requests"),
             // Added later: '' in a vault from before them.
             if has_column(db, "requests", "given_name") { "given_name" } else { "'' AS given_name" },
-            if has_column(db, "requests", "admin") { "admin" } else { "'' AS admin" },
+            // The admin agent only when the request passed to it (its
+            // approval stamped): every request names the one it would.
+            if has_column(db, "requests", "admin") { "CASE WHEN approved > 0 THEN admin ELSE '' END AS admin" } else { "'' AS admin" },
         ),
         window,
         |row| {
@@ -1025,7 +1088,7 @@ fn from_vault(db: &Connection, window: &Window, found: &mut Found) -> rusqlite::
 fn card<'a>(entries: impl DoubleEndedIterator<Item = &'a v1::Entry>, row: &Row) -> Option<(u64, Vec<v1::PipeTaint>)> {
     entries.rev().find_map(|entry| {
         let taint = match (&entry.kind, row.kind) {
-            (Some(Entry::AskPerson(ask)), Kind::Question | Kind::Review) if ask.id == row.id => ask.taint.clone(),
+            (Some(Entry::AskPerson(ask)), Kind::Question | Kind::Review | Kind::Command) if ask.id == row.id => ask.taint.clone(),
             (Some(Entry::Proposal(proposal)), Kind::Proposal) if proposal.id == row.id => proposal.taint.clone(),
             (Some(Entry::SecretRequest(request)), Kind::SecretRequest) if request.id == row.id => Vec::new(),
             (Some(Entry::ConnectProposal(proposal)), Kind::Connect) if proposal.id == row.id => Vec::new(),
@@ -1059,6 +1122,9 @@ fn card<'a>(entries: impl DoubleEndedIterator<Item = &'a v1::Entry>, row: &Row) 
                 Vec::new()
             }
             (Some(Entry::ToolCall(call)), Kind::GivenUp) if crate::given_up::given_up_of(call).as_deref() == Some(row.id.as_str()) => {
+                Vec::new()
+            }
+            (Some(Entry::ToolCall(call)), Kind::SecretSaved) if crate::vault::saved::saved_of(call).as_deref() == Some(row.id.as_str()) => {
                 Vec::new()
             }
             (Some(Entry::ToolCall(call)), Kind::Conversation)
@@ -1222,7 +1288,7 @@ impl Factory {
                         _ if row.outcome == Outcome::Resolved => row.reason,
                         Kind::Model => row.model.reason,
                         Kind::Conversation => row.conversation.reason,
-                        Kind::SecretGivenUp | Kind::GivenUp => row.reason,
+                        Kind::SecretGivenUp | Kind::GivenUp | Kind::SecretSaved => row.reason,
                         _ => row.app.reason,
                     },
                     model_change_id: row.model.change,
@@ -1252,6 +1318,7 @@ impl Factory {
                     secret_outcome: row.secret.outcome.into(),
                     secret_given_name: row.secret.given_name,
                     secret_to_no_one: row.secret.to_no_one,
+                    command: row.command,
                 }
             })
             .collect();

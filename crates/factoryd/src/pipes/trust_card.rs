@@ -97,10 +97,10 @@ pub(crate) fn ask(factory: &Arc<Factory>, agent: &str, record: &Record, reason: 
     }
     if let Some((id, whose, _)) = waiting(factory, &record.id).first() {
         return Err(if whose == agent {
-            format!("Your card {id} about that pipe is still waiting for {person}. Nothing was asked.")
+            format!("Your request {id} about that pipe is still waiting for {person}. Nothing was asked.")
         } else {
             format!(
-                "{} already asked {person} about that pipe on a card that's still waiting. Nothing was asked.",
+                "{} already asked {person} about that pipe in a request that's still waiting. Nothing was asked.",
                 factory.agent_name(whose)
             )
         });
@@ -146,7 +146,7 @@ pub(crate) fn ask(factory: &Arc<Factory>, agent: &str, record: &Record, reason: 
     });
     Ok(factory_agent::ToolResult::text(
         format!(
-            "Asked {person}: their card shows who the other side was and is now, which you never see, and asks them to check the change with the other person themselves. Only their tap accepts it, and you'll be told only whether they accepted it or dismissed it. Its id is {id}; it's withdrawn by itself if the change is accepted in the pipe, clears or becomes another, or the pipe closes."
+            "Asked {person}: their request shows who the other side was and is now, which you never see, and asks them to check the change with the other person themselves. Only their tap accepts it, and you'll be told only whether they accepted it or dismissed it. Its id is {id}; it's withdrawn by itself if the change is accepted in the pipe, clears or becomes another, or the pipe closes."
         ),
         details,
     ))
@@ -163,7 +163,7 @@ pub(crate) fn claim(factory: &Factory, record: &Record, card_id: &str) -> Result
     }
     let void = || {
         RequestError::Pipe(
-            "This card no longer waits for you: what the other side shows changed since it was asked. Look at the pipe itself.".to_owned(),
+            "This request no longer waits for you: what the other side shows changed since it was asked. Look at the pipe itself.".to_owned(),
         )
     };
     let (id, _, action) = crate::extensions::ask::pending_action(factory, card).ok_or_else(void)?;
@@ -198,7 +198,7 @@ pub(crate) fn settle(factory: &Factory, pipe: &str, why: &str) {
         if record.as_ref().is_some_and(|record| trust.holds(factory, record)) {
             continue;
         }
-        crate::extensions::ask::withdraw_for(factory, id, &format!("This card is void: {why}."));
+        crate::extensions::ask::withdraw_for(factory, id, &format!("This request is void: {why}."));
     }
 }
 

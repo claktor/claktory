@@ -317,12 +317,8 @@ void main() {
       );
       expect(tester.takeException(), isNull);
       await _shot(tester, 'alerts-$where');
-      // An iPhone's Needs you is focus mode (#514): one alert a stage,
-      // read there, until its own Alerts stage (§3.9) is built.
-      if (phone) {
-        expect(find.text('Mark as read'), findsOneWidget);
-        return;
-      }
+      // An iPhone's Needs you is the list too (#599): alerts stay rows,
+      // their folds opening in place.
       await tester.ensureVisible(find.textContaining('· 3 alerts'));
       await pumpFrames(tester);
       await tester.tap(find.textContaining('· 3 alerts'));

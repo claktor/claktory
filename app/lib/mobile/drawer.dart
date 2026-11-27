@@ -13,6 +13,7 @@ import '../controls.dart';
 import '../identity.dart';
 import '../phone.dart' show PhoneProjects;
 import '../pipes.dart' show selectedPipe;
+import '../pinned_agents.dart' show sidebarDragging;
 import '../rail.dart' show ClaktoriesScope, OffAccountMark, PhoneConnectionWord;
 import '../scope.dart';
 import '../selection.dart' show Unselectable;
@@ -47,6 +48,10 @@ abstract class PhonePages {
   bool showPane(String agentId, String paneId);
 
   /// [PhoneRoutes.pushApp].
+  /// Focus mode on a screen of its own (an iPhone's); false where the
+  /// window has its own (an iPad's).
+  bool openFocus();
+
   void showApp(ViewLeaf leaf);
 
   /// The page on top, as Back closes it; null with none.
@@ -148,6 +153,28 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
   PhoneBack? _localBack;
   PhoneBack? _windowBack;
   BackHandle? _windowNavigation;
+  BackHandle? _sidebarDragBack;
+
+  // A picked-up row owns its touch until it lands. The Back occurrence is
+  // also captured here, so a swipe begun during the drag cannot close the
+  // drawer after the row is released.
+  void _sidebarDragChanged() {
+    if (sidebarDragging.value && _open) {
+      _dragging = false;
+      _drawer.stop();
+      _drawer.value = 1;
+    }
+    _syncSidebarDragBack();
+  }
+
+  void _syncSidebarDragBack() {
+    if (sidebarDragging.value && _open) {
+      _sidebarDragBack ??= back.register(const _SidebarDragBack());
+    } else {
+      _sidebarDragBack?.release();
+      _sidebarDragBack = null;
+    }
+  }
 
   /// Android borrows the window's registry; iOS and standalone phone hosts
   /// retain their original local registry and tree.
@@ -168,6 +195,7 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
     super.initState();
     _live.add(this);
     _front.addListener(_frontAsked);
+    sidebarDragging.addListener(_sidebarDragChanged);
   }
 
   @override
@@ -180,6 +208,8 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
         ? context.dependOnInheritedWidgetOfExactType<PhoneBackScope>()?.back
         : null;
     if (identical(window, _windowBack)) return;
+    _sidebarDragBack?.release();
+    _sidebarDragBack = null;
     _windowNavigation?.release();
     _windowBack = window;
     _windowNavigation = window?.attachNavigation(
@@ -188,6 +218,7 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
       topPage: () => _pages?.topPage,
       popPage: pop,
     );
+    _syncSidebarDragBack();
   }
 
   Widget _backHost(BuildContext context, Widget child) => _windowBack != null
@@ -197,6 +228,8 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
   @override
   void dispose() {
     _live.remove(this);
+    sidebarDragging.removeListener(_sidebarDragChanged);
+    _sidebarDragBack?.release();
     _windowNavigation?.release();
     _localBack?.dispose();
     _front.dispose();
@@ -222,6 +255,7 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
       if (!mounted || _pages != null || !_open) return;
       _open = false;
       _drawer.value = 0;
+      _syncSidebarDragBack();
       pagesChanged();
     });
     pagesChanged();
@@ -266,6 +300,7 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
 
   void _settle(bool open) {
     _open = open;
+    _syncSidebarDragBack();
     _drawer.animateTo(
       open ? 1 : 0,
       duration: _duration,
@@ -294,6 +329,7 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
 
   @override
   void closeDrawer() {
+    if (sidebarDragging.value) return;
     if (!_open && _drawer.value == 0) return;
     _settle(false);
   }
@@ -354,6 +390,14 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
   }
 
   @override
+  bool openFocus() {
+    final pages = _pages;
+    if (pages == null) return false;
+    closeDrawer();
+    return pages.openFocus();
+  }
+
+  @override
   void pushApp(ViewLeaf leaf) {
     final pages = _pages;
     if (pages == null) return;
@@ -378,7 +422,10 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
   /// Whether a swipe from the edge may open it now: nothing else holds the
   /// finger, and no sheet is up.
   bool get _swipeAllowed =>
-      _edgeShown && _holds == 0 && sheetsPresented.value == 0;
+      _edgeShown &&
+      _holds == 0 &&
+      !sidebarDragging.value &&
+      sheetsPresented.value == 0;
 
   double get _width => drawerWidth(MediaQuery.sizeOf(context).width);
 
@@ -386,6 +433,7 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
       Directionality.of(context) == TextDirection.rtl ? -1.0 : 1.0;
 
   void _dragStart(DragStartDetails details) {
+    if (sidebarDragging.value) return;
     _dragging = true;
     _dragFromOpen = _open;
     _drawer.stop();
@@ -393,12 +441,12 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
   }
 
   void _dragUpdate(DragUpdateDetails details) {
-    if (!_dragging) return;
+    if (sidebarDragging.value || !_dragging) return;
     _drawer.value += _sign * (details.primaryDelta ?? 0) / _width;
   }
 
   void _dragEnd(DragEndDetails details) {
-    if (!_dragging) return;
+    if (sidebarDragging.value || !_dragging) return;
     _dragging = false;
     final velocity = _sign * (details.primaryVelocity ?? 0);
     final bool open;
@@ -413,7 +461,7 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
 
   // Also called for a tap that never became a drag: nothing moved then.
   void _dragCancel() {
-    if (!_dragging) return;
+    if (sidebarDragging.value || !_dragging) return;
     _dragging = false;
     _settle(_dragFromOpen);
   }
@@ -562,6 +610,18 @@ class PhoneDrawerHostState extends State<PhoneDrawerHost>
       ),
     );
   }
+}
+
+/// A picked-up row, not a dismissible page or sheet. A captured Back stays
+/// a no-op even if the drag ends before that Back gesture commits.
+class _SidebarDragBack implements BackToken {
+  const _SidebarDragBack();
+
+  @override
+  bool get canClose => false;
+
+  @override
+  void back() {}
 }
 
 class _Hold implements DrawerHold {

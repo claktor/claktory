@@ -4,6 +4,7 @@
 
 import 'package:factory_app/android/android_app_updates.dart'
     show androidAppInstallPage;
+import 'package:factory_app/app_source.dart';
 import 'package:factory_app/controls.dart' show Button, GlyphButton;
 import 'package:factory_app/mobile/platform_policy.dart';
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
@@ -149,6 +150,28 @@ void main() {
     expect(_button('Update'), findsNothing);
   });
 
+  testWidgets('versions as the backend stamps them carry their "v" on the '
+      'Version row and in the sidebar (Lucy 50427)', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final harness =
+        Harness(
+            _workspace(UpdateCheckState.UPDATE_CHECK_STATE_NONE)
+              ..version = '0.1.24',
+          )
+          ..appVersion = '0.1.23'
+          ..bundlePath = '/Applications/Factory.app';
+    await harness.show(tester, size: const Size(1200, 1600));
+    await settle(tester);
+    expect(find.text('Claktory v0.1.24 · app v0.1.23'), findsOneWidget);
+    harness.page.value = AppPage.settings;
+    await settle(tester);
+    await reveal(tester, find.text('Check for updates'));
+    // The newer of the two, what this Mac has installed.
+    expect(find.text('v0.1.24'), findsOneWidget);
+    expect(find.text('0.1.24'), findsNothing);
+  });
+
   testWidgets('on a phone it says which Claktory updates, and Update updates '
       'only it', (tester) async {
     final harness = Harness(
@@ -166,8 +189,8 @@ void main() {
     final ready = find.text('Studio can update to Claktory v0.1.17.');
     await tester.ensureVisible(ready);
     await pumpFrames(tester);
-    // The Claktory's version, which is what updates.
-    expect(find.text('v0.1.16'), findsOneWidget);
+    // The Claktory's version, which is what updates, named (ST1).
+    expect(find.text('Studio · Claktory v0.1.16'), findsOneWidget);
     await tester.tap(_button('Update'));
     await pumpFrames(tester);
     expect(harness.last.installUpdate.appPath, isEmpty);
@@ -267,6 +290,30 @@ void main() {
       expect(first, findsOneWidget);
       expect(_button('Update'), findsNothing);
       expect(find.textContaining("won't connect"), findsNothing);
+      // A dev build, from no store: no store's button.
+      expect(_button('App Store'), findsNothing);
+      expect(_button('TestFlight'), findsNothing);
+    });
+
+    testWidgets("installed from TestFlight, its app first has TestFlight's "
+        'button, which opens its invitation (settings.md ST1)', (tester) async {
+      debugAppSource = AppSource.testFlight;
+      addTearDown(() => debugAppSource = null);
+      final harness = Harness(
+        offer(devices: [paired('me', "Ana's iPhone", behind: true)]),
+      )..appVersion = 'v0.1.19';
+      harness.backend.deviceId = 'me';
+      await harness.show(tester, size: const Size(393, 852));
+      harness.page.value = AppPage.settings;
+      await pumpFrames(tester);
+      await tester.tap(find.text('General'));
+      await pumpFrames(tester);
+      final button = _button('TestFlight');
+      await tester.ensureVisible(button);
+      await pumpFrames(tester);
+      await tester.tap(button);
+      await pumpFrames(tester);
+      expect(harness.opened, [testFlightUrl]);
     });
 
     testWidgets("on an Android phone that can't follow it: no Update, and "
@@ -300,6 +347,10 @@ void main() {
       expect(first, findsOneWidget);
       expect(find.textContaining('App Store'), findsNothing);
       expect(_button('Update'), findsNothing);
+      expect(
+        find.text('Android may ask you to let your browser install apps.'),
+        findsOneWidget,
+      );
       // Download opens the app's download page; one that doesn't open
       // says so, and Download tries again.
       await tester.tap(_button('Download'));

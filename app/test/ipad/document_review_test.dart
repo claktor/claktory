@@ -862,7 +862,7 @@ void main() {
     await waiting([8]);
     expect(find.text('And the appendix'), findsOneWidget);
     expect(
-      find.text('That card was closed. This is another one from Builder.'),
+      find.text('That request was closed. This is another one from Builder.'),
       findsOneWidget,
     );
     expect(tester.widget<EditableText>(_field).controller.text, isEmpty);

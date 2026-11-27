@@ -77,7 +77,7 @@ void main() {
       findsOneWidget,
     );
     expect(find.textContaining('Left to'), findsNothing);
-    expect(find.text("Can't do this…"), findsNothing);
+    expect(find.text("Can't do this"), findsNothing);
   });
 
   testWidgets('a question being answered when it is withdrawn just closes', (

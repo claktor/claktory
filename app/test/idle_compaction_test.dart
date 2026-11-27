@@ -1,5 +1,4 @@
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
-import 'package:factory_app/settings_view.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -11,16 +10,7 @@ Finder toggle(String label) => find.byWidgetPredicate(
 );
 
 Future<void> reveal(WidgetTester tester, Finder target) async {
-  await tester.scrollUntilVisible(
-    target,
-    200,
-    scrollable: find
-        .descendant(
-          of: find.byType(SettingsView),
-          matching: find.byType(Scrollable),
-        )
-        .first,
-  );
+  await revealInSettings(tester, target);
   await pumpFrames(tester);
 }
 

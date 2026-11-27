@@ -72,7 +72,11 @@ Future<Harness> _settings(WidgetTester tester, {required bool limited}) async {
   showModal(
     tester.element(find.text('Liaison').first),
     (context, close) =>
-        AgentSettingsForm(agent: workspace.agents.first, close: close),
+        AgentSettingsForm(
+      agent: workspace.agents.first,
+      close: close,
+      showExtensions: true,
+    ),
   );
   await pumpFrames(tester);
   return harness;

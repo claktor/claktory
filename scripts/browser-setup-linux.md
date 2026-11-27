@@ -15,7 +15,7 @@ when one is missing. Nothing here is used by anything but the browser.
 | The runner's folder | `/opt/claktory-browser` | the person, 0755 | factoryd copies itself here before each start |
 | The runner | `/opt/claktory-browser/runner` | the person, 0755 | `factoryd browser-runner`, run through sudo |
 | Sudo, exactly the runner | `/etc/sudoers.d/claktory-browser`, one line: `<person> ALL=(claktory-browser) NOPASSWD: /opt/claktory-browser/runner browser-runner *` | root, 0440, checked with `visudo -cf` | |
-| Chrome's policy | `/etc/opt/chrome/policies/managed/claktory.json`: `{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"], "BrowserSignin": 0, "SyncDisabled": true, "CommandLineFlagSecurityWarningsEnabled": false}` | root, 0644 | pages can't reach the local network (Fugo); Chrome never signs in or syncs itself, so a sign-in on a site stays that site's cookies (Fugo 41236); no warning bar for the runner's fixed flags, which hide `navigator.webdriver` while an agent drives (R11, Fugo 41700) |
+| Chrome's policy | `/etc/opt/chrome/policies/managed` (and `/etc/chromium/policies/managed` where Chromium is there): empty mount points, real folders (never links); Claktory's own `claktory.json` from earlier setups is taken out, and any other file there is left alone (an employer's policy for your own Chrome, say). The policy itself is never written there: the runner mounts a private tmpfs over the folder inside its own namespace and writes `claktory.json` into it, `{"LocalNetworkAccessRestrictionsEnabled": true, "LocalNetworkAccessBlockedForUrls": ["*"], "BrowserSignin": 0, "SyncDisabled": true, "CommandLineFlagSecurityWarningsEnabled": false, "AutofillCreditCardEnabled": false, "AutofillAddressEnabled": false}`, so only the errands' Chrome sees it and your own Chrome on this machine doesn't (Ghiaccio 49028, Fugo 49032) | root, 0755 | pages can't reach the local network (Fugo); Chrome never signs in or syncs itself, so a sign-in on a site stays that site's cookies (Fugo 41236); no warning bar for the runner's fixed flags, which hide `navigator.webdriver` while an agent drives (R11, Fugo 41700); no autofill of cards or addresses |
 | The firewall | nft table `inet claktory_browser`, from `/etc/claktory-browser.nft` (a copy of `scripts/claktory-browser.nft`), loaded by `/usr/local/sbin/claktory-browser-nft` (a copy of `scripts/claktory-browser-nft.sh`, which the Mac image uses too), which replaces only that table in one transaction and then adds the resolvers in `/etc/resolv.conf` to its sets `dns4` and `dns6` (port 53 only), run by `claktory-browser-nft.service` (`/etc/systemd/system`, enabled, wanted by sysinit.target, before network-pre.target, restarted with nftables.service). `/etc/nftables.conf` and nftables.service are left alone (Fugo) | root; 0644, the loader 0755 | the browser's user reaches neither this machine nor the local network, by any protocol |
 | User namespaces for the runner (Ubuntu 23.10 and later: only where `kernel.apparmor_restrict_unprivileged_userns` exists) | `/etc/apparmor.d/claktory-browser-runner`: profile `claktory-browser-runner` for `/opt/claktory-browser/runner`, `flags=(unconfined)`, `userns,` only; loaded with `apparmor_parser -r`, checked with `aa-status` | root, 0644 | the runner's private /proc and PID 1 (Ghiaccio). It lets the runner, and anything the person puts at its path, make user namespaces (Fugo accepted) |
 | X's socket folder | `/tmp/.X11-unix`, made at every boot by `/etc/tmpfiles.d/claktory-browser.conf` (`D! /tmp/.X11-unix 1777 root root -`, as systemd's own x11.conf); each runner mounts its own tmpfs over it and refuses to start unless it's a real folder of root's | root, 1777 | two browsers can't take each other's display (Ghiaccio, Fugo 38527) |
@@ -61,7 +61,6 @@ let
   person = "NAME";  # who runs Claktory
   # Google's Chrome where nixpkgs has it for this machine, Chromium elsewhere.
   chrome = if lib.meta.availableOn pkgs.stdenv.hostPlatform pkgs.google-chrome then pkgs.google-chrome else pkgs.chromium;
-  policy = builtins.toJSON { LocalNetworkAccessRestrictionsEnabled = true; LocalNetworkAccessBlockedForUrls = [ "*" ]; BrowserSignin = 0; SyncDisabled = true; CommandLineFlagSecurityWarningsEnabled = false; };
 in {
   nixpkgs.config.allowUnfree = true;
   environment.systemPackages = with pkgs; [ chrome xvfb xorg.xauth ];
@@ -78,8 +77,10 @@ in {
     users = [ person ]; runAs = "claktory-browser";
     commands = [{ command = "/opt/claktory-browser/runner browser-runner *"; options = [ "NOPASSWD" ]; }];
   }];
-  environment.etc."opt/chrome/policies/managed/claktory.json".text = policy;
-  environment.etc."chromium/policies/managed/claktory.json".text = policy;
+  # Chrome's policy is the runner's own (a tmpfs inside its namespace); these
+  # only make the empty mount points, root's.
+  environment.etc."opt/chrome/policies/managed/claktory-browser-mount.json".text = "{}";
+  environment.etc."chromium/policies/managed/claktory-browser-mount.json".text = "{}";
   networking.nftables.enable = true;
   networking.nftables.tables.claktory_browser = { family = "inet"; content = builtins.readFile ./claktory-browser.nft; };
 }
@@ -94,8 +95,19 @@ resolver.
 ## The Mac image
 
 On a Mac the browser runs in a Linux VM (Apple's `container`), from the image
-`ghcr.io/claktory/claktory-browser`, pinned by digest in each release's factoryd
-(`CLAKTORY_BROWSER_IMAGE` at build time). `scripts/browser-image.sh` builds it:
+each release builds and ships beside its backend as an OCI archive, never from
+a registry (#435 W11): `claktory-browser.oci.tar.zst` in the release folder,
+and on GitHub as the release's asset `claktory-browser-vX.Y.Z-arm64.oci.tar.zst`.
+`scripts/release.sh` builds the release's linux-aarch64 runner, then the image,
+then compiles into the Mac factoryd `CLAKTORY_BROWSER_REF` (the name
+`container image load` prints, `localhost/claktory-browser:vX.Y.Z`),
+`CLAKTORY_BROWSER_IMAGE` (`claktory-browser@sha256:` the image's manifest
+digest, which `container image inspect` shows as its one linux/arm64
+variant's), `CLAKTORY_BROWSER_ARCHIVE_SHA256` (the .zst's) and
+`CLAKTORY_BROWSER_ARCHIVE_URL` (the asset's address). factoryd checks the
+archive's SHA-256 before anything reads it, loads it, checks the variant's
+digest before every run and runs it by that name, never by digest (`container`
+asks a registry for any digest reference). `scripts/browser-image.sh` builds it:
 a base (`browser-image/Containerfile.base`: Ubuntu 24.04 arm64, Chrome from
 Google's repository with the key pinned as above, Xvfb, xauth, the fonts, the
 same policy, `/etc/claktory-browser.nft` and the loader) and, per release, the

@@ -2,13 +2,40 @@ package com.claktory.app
 
 import android.content.Intent
 import android.content.res.Configuration
+import android.os.Build
+import android.os.Bundle
 import android.view.View
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 
 /** Thin on purpose: each native feature is an adapter of its own ([Adapters]). */
 class MainActivity : FlutterActivity() {
     private var adapters: Adapters? = null
+
+    /**
+     * Back at the root from Android 13, where Back comes as the system's
+     * callbacks (enableOnBackInvokedCallback, row 187) and onBackPressed no
+     * longer does: registered before Flutter's own, so Flutter's (there while
+     * the Dart has something to pop) is always above it and this answers
+     * only when nothing else does. The system's default there finishes a
+     * task that wasn't started from the launcher (a link, a share), tearing
+     * the engine down; this leaves as [popSystemNavigator] does, as Home.
+     */
+    private val rootBack: OnBackInvokedCallback? =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) OnBackInvokedCallback { leaveAtRoot() } else null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, rootBack!!)
+        }
+        super.onCreate(savedInstanceState)
+    }
+
+    private fun leaveAtRoot() {
+        if (!popSystemNavigator()) finish()
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)

@@ -340,11 +340,68 @@ void main() {
     await io(tester);
     expect(recorder.recordingInto, isNull);
     expect(
-      find.text("To record, allow microphone access in Settings → Claktory."),
+      find.text(
+        "To record, allow microphone access in the iPhone's Settings app.",
+      ),
       findsOneWidget,
     );
     expect(find.text('Open Settings'), findsOneWidget);
     expect(find.byType(PhoneRecordingRow), findsNothing);
+  });
+
+  testWidgets('back from Settings with the microphone on, its line and Open '
+      'Settings go by themselves (Lucy 49814)', (tester) async {
+    recorder.granted = MicAccess.denied;
+    await conversation(tester);
+    await tester.tap(mic);
+    await io(tester);
+    expect(find.text('Open Settings'), findsOneWidget);
+    // Still off when it comes back: the line stays.
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await io(tester);
+    expect(find.text('Open Settings'), findsOneWidget);
+
+    recorder.granted = MicAccess.granted;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await io(tester);
+    expect(find.text('Open Settings'), findsNothing);
+    expect(
+      find.text(
+        "To record, allow microphone access in the iPhone's Settings app.",
+      ),
+      findsNothing,
+    );
+  });
+
+  testWidgets("while the mic's popover asks, the box shows no recording yet "
+      '(Lucy 49814)', (tester) async {
+    recorder.granted = MicAccess.undetermined;
+    await conversation(tester);
+    await tester.tap(mic);
+    await io(tester);
+    expect(find.text('Talk instead of typing'), findsOneWidget);
+    expect(find.byType(PhoneRecordingRow), findsNothing);
+    expect(find.text('Cancel'), findsNothing);
+    // Allowed in it: still nothing recording until the next tap.
+    await tester.tap(find.text('Continue'));
+    await io(tester);
+    expect(find.byType(PhoneRecordingRow), findsNothing);
+    expect(recorder.recordingInto, isNull);
+  });
+
+  testWidgets("the box going while the mic's popover asks leaves nothing "
+      'behind to answer (Doppio, Bruno 50105)', (tester) async {
+    recorder.granted = MicAccess.undetermined;
+    await conversation(tester);
+    await tester.tap(mic);
+    await io(tester);
+    expect(find.text('Talk instead of typing'), findsOneWidget);
+    // The window retires, popover and all: the tap's start answers late.
+    await tester.pumpWidget(const SizedBox());
+    await io(tester);
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('restrictions say so, with no Settings to open', (tester) async {
@@ -363,27 +420,27 @@ void main() {
     expect(find.text('Open Settings'), findsNothing);
   });
 
-  testWidgets('on Android, a first no asks again on the next tap; a second '
-      'offers Settings', (tester) async {
+  testWidgets("on Android, a first no leaves the mic's popover to ask once "
+      'more; a second offers Settings', (tester) async {
     recorder
       ..granted = MicAccess.undetermined
       ..allow = false
       ..afterRefusal = MicAccess.undetermined;
     await conversation(tester, platform: TargetPlatform.android);
+    // The popover first (permissions spec, P5); its Continue asks.
     await tester.tap(mic);
     await io(tester);
+    expect(find.text('Talk instead of typing'), findsOneWidget);
+    await tester.tap(find.text('Continue'));
+    await io(tester);
     expect(recorder.requests, [false]);
-    expect(
-      find.text(
-        'Claktory needs the microphone to record. Tap the microphone again '
-        'to allow it.',
-      ),
-      findsOneWidget,
-    );
+    // Android can still ask: the popover stays, its Continue asking once
+    // more, and nothing says it's off for good yet.
+    expect(find.text('Talk instead of typing'), findsOneWidget);
     expect(find.text('Open Settings'), findsNothing);
 
     recorder.afterRefusal = MicAccess.denied;
-    await tester.tap(mic);
+    await tester.tap(find.text('Continue'));
     await io(tester);
     expect(recorder.requests, [false, false]);
     expect(

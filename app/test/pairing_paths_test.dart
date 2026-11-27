@@ -11,22 +11,18 @@ import 'package:flutter_test/flutter_test.dart';
 /// Where the app switches Claktories (AppScope.switchFactory, or
 /// connections.use), and why each is allowed: how many in each file.
 const _allowed = {
-  // _show: This Mac, a saved Claktory, one on the account; a pasted code
-  // only after confirmPairing (_connectPasted). (Its rows' Remove… is the
-  // rail's, which forgets, and the rail shows what's left: #529, MC8.)
-  'lib/devices.dart': 1,
-  // _connect: one on the account; a pasted code only after confirmPairing
-  // (_connectPasted).
-  'lib/connect_step.dart': 1,
   // A link already saved. A new one, after confirmPairing, goes through
   // connectNewClaktory (mobile/local_network.dart).
   'lib/links.dart': 1,
   // connectNewClaktory, the first connection's Local Network sheet before
   // it: from phone.dart's _connect after confirmPairing (scanned or
-  // pasted) and its account rows, and from a link after confirmPairing.
+  // pasted) and its account rows, from a link after confirmPairing,
+  // from Add a Claktory (devices.dart's _connect): a pasted or scanned
+  // code only after its PairingCheck's Connect, and its account rows; and
+  // from Your Claktories' rows (one on the person's account); and from
+  // the wide layout's first connect (connect_step.dart's _connect): one on
+  // the account, or a pasted code only after confirmPairing.
   'lib/mobile/local_network.dart': 1,
-  // A Claktory on the person's account (or the caller's onConnect).
-  'lib/your_claktories.dart': 1,
   // The rail: This Mac, a saved Claktory, the first saved.
   'lib/rail.dart': 3,
   // The shell's request (#245): only while nothing is saved, from a file
@@ -54,11 +50,52 @@ void main() {
 
   test('each pasted or scanned code is asked about before it connects', () {
     // The paste fields: their Connect and Return go through confirmPairing.
-    for (final path in ['lib/devices.dart', 'lib/connect_step.dart']) {
+    for (final path in ['lib/connect_step.dart']) {
       final source = File(path).readAsStringSync();
       expect(source, contains('confirmPairing(context, target)'), reason: path);
       expect(source, contains('_connectPasted(target)'), reason: path);
     }
+    // Add a Claktory (area 2) asks in its own dialog, with confirmPairing's
+    // pieces: a pasted code (Connect, Return) and a scanned one only reach
+    // _check, which shows PairingCheck; _connect runs from that check's
+    // Connect and from an account row (YourClaktories asks in place), and
+    // from nowhere else.
+    final add = File('lib/devices.dart').readAsStringSync();
+    expect(add, contains('if (target != null) unawaited(_check(target));'));
+    expect(
+      add,
+      contains(
+        'if (pastedPairingCode(scanned) case final target?) '
+        'await _check(target);',
+      ),
+    );
+    expect(add, contains('await pairingOnAccount(context, target);'));
+    expect(add, contains('PairingCheck(target: target, onAccount: onAccount)'));
+    expect(add, contains('title: pairingCheckTitle,'));
+    expect(add, contains('onPrimary: () => unawaited(_connect(target)),'));
+    expect(
+      add,
+      contains('onConnect: (target) => unawaited(_connect(target)),'),
+    );
+    expect(
+      RegExp(r'_connect\(').allMatches(add).length,
+      3,
+      reason:
+          "_connect's definition, the check's Connect and the account "
+          'rows: a new call is looked at here first',
+    );
+    expect(
+      RegExp(r'connectNewClaktory\(').allMatches(add).length,
+      1,
+      reason: 'only in _connect',
+    );
+    // confirmPairing is those pieces, so both ask the same.
+    final links = File('lib/links.dart').readAsStringSync();
+    expect(
+      links,
+      contains('PairingCheck(target: target, onAccount: onAccount)'),
+    );
+    expect(links, contains('pairingOnAccount(context, target)'));
     final phone = File('lib/phone.dart').readAsStringSync();
     expect(phone, contains('confirmPairing(context, target)'));
   });

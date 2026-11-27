@@ -217,7 +217,7 @@ async fn an_app_back_with_the_conversation_gets_only_its_new_entries_and_ends_as
     let shown = transcript(&resumed);
     assert!(shown.resumed, "{resumed:?}");
     let newest = held.last().map_or(0, |entry| entry.seq);
-    assert!(shown.entries.iter().any(|entry| entry.seq == card), "the card as answered: {shown:?}");
+    assert!(shown.entries.iter().any(|entry| entry.seq == card), "the request as answered: {shown:?}");
     assert!(shown.entries.iter().all(|entry| entry.seq > newest || entry.seq == card), "only what changed: {shown:?}");
     assert!(shown.entries.iter().any(|entry| entry.seq > newest), "and what's new");
     apply(&mut held, &resumed);

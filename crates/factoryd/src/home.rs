@@ -90,8 +90,47 @@ pub struct Instance {
 
 /// The real Factory lives in `~/.factory`, the dev one in `~/.factory-dev`.
 pub fn instance(dev: bool, user_home: &Path) -> Instance {
-    let (root, port) = if dev { (user_home.join(".factory-dev"), DEV_PORT) } else { (user_home.join(".factory"), PORT) };
+    instance_in(dev, user_home.join(if dev { ".factory-dev" } else { ".factory" }))
+}
+
+/// Where this computer's Claktory keeps its files, the dev one's with
+/// `dev`: `~/.factory` (`~/.factory-dev`), and on Windows
+/// `%LOCALAPPDATA%\Claktory\factory` (`factory-dev`). None when there's no
+/// home folder to put it in. FACTORY_HOME, where it's honoured, goes over
+/// it.
+pub fn instance_root(dev: bool) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        crate::windows::dirs::factory_home(dev).ok()
+    }
+    #[cfg(not(windows))]
+    {
+        Some(std::env::home_dir()?.join(if dev { ".factory-dev" } else { ".factory" }))
+    }
+}
+
+/// The Factory whose files are at `root`, on the real or the dev port.
+pub fn instance_in(dev: bool, root: PathBuf) -> Instance {
     // Local-only for now; remote access comes later.
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), if dev { DEV_PORT } else { PORT });
     Instance { home: Home::new(root), addr }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_instances_live_in_the_home_folder_on_their_own_ports() {
+        let user_home = std::env::home_dir().expect("a home folder");
+        for (dev, name, port) in [(false, ".factory", PORT), (true, ".factory-dev", DEV_PORT)] {
+            let root = instance_root(dev).expect("a root");
+            assert_eq!(root, user_home.join(name));
+            let found = instance_in(dev, root.clone());
+            assert_eq!((found.home.root(), found.addr.port()), (root.as_path(), port));
+            let old = instance(dev, &user_home);
+            assert_eq!((old.home.root(), old.addr), (root.as_path(), found.addr));
+        }
+    }
 }

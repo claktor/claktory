@@ -63,8 +63,19 @@ class PhoneVoice extends ChangeNotifier {
   /// up, say).
   var _letGo = false;
 
+  /// Its box went (the window retired, the conversation closed) while a
+  /// start it began was still asking: what comes back after is no one's
+  /// (Doppio's popover_back_test, Bruno 50105).
+  var _disposed = false;
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
+
   void _set(PhoneVoiceMode mode) {
-    if (mode == _mode) return;
+    if (_disposed || mode == _mode) return;
     _mode = mode;
     notifyListeners();
   }
@@ -74,7 +85,9 @@ class PhoneVoice extends ChangeNotifier {
     if (active) return;
     _set(PhoneVoiceMode.locked);
     unawaited(Haptics.impact());
-    if (!await start()) _set(PhoneVoiceMode.idle);
+    final started = await start();
+    if (_disposed) return;
+    if (!started) _set(PhoneVoiceMode.idle);
   }
 
   /// A finger held on the mic.
@@ -84,6 +97,7 @@ class PhoneVoice extends ChangeNotifier {
     _set(PhoneVoiceMode.holding);
     unawaited(Haptics.impact());
     final started = await start();
+    if (_disposed) return;
     if (!started) {
       _set(PhoneVoiceMode.idle);
     } else if (_letGo) {

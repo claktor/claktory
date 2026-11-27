@@ -37,7 +37,21 @@ import 'voice_session.dart' show VoiceBarHost;
 import 'zoom.dart';
 
 Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+  final binding = WidgetsFlutterBinding.ensureInitialized();
+  // Windows shows the window on the first frame that reaches it
+  // (app/windows/runner/flutter_window.cpp), and the runner asks for one at
+  // once: without this, that's an empty frame, a blank white window, until
+  // the first screen is built after the loading below (Hermes, row 21).
+  final deferred = defaultTargetPlatform == TargetPlatform.windows;
+  if (deferred) binding.deferFirstFrame();
+  try {
+    await _start();
+  } finally {
+    if (deferred) binding.allowFirstFrame();
+  }
+}
+
+Future<void> _start() async {
   // Whether the Mac's window can be seen, and its Reduce motion (sight.dart).
   Sight.start();
   // The Mac draws Claktory Dev's mark itself, over the whole window
@@ -467,18 +481,22 @@ class DevMark extends StatelessWidget {
       fit: StackFit.expand,
       children: [
         child,
+        // Never a click, and never read aloud: VoiceOver otherwise fused
+        // it with whatever lay under it (Sale's row 198).
         IgnorePointer(
-          child: Center(
-            child: Transform.rotate(
-              angle: -0.35,
-              child: Text(
-                'DEV VERSION',
-                textAlign: TextAlign.center,
-                style: TextStyles.title.copyWith(
-                  fontSize: 120,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 12,
-                  color: palette.signal.withValues(alpha: 0.07),
+          child: ExcludeSemantics(
+            child: Center(
+              child: Transform.rotate(
+                angle: -0.35,
+                child: Text(
+                  'DEV VERSION',
+                  textAlign: TextAlign.center,
+                  style: TextStyles.title.copyWith(
+                    fontSize: 120,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 12,
+                    color: palette.signal.withValues(alpha: 0.07),
+                  ),
                 ),
               ),
             ),

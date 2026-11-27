@@ -1,5 +1,7 @@
 import 'package:factory_app/device_kind.dart';
 import 'package:factory_app/devices.dart' as devices;
+import 'package:factory_app/mobile/device.dart'
+    show DeviceCapabilities, Idiom, debugDeviceCapabilities;
 import 'package:factory_app/protocol/factory/v1/factory.pb.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart' show Size;
@@ -73,6 +75,24 @@ void main() {
         reason: '$side',
       );
     }
+  });
+
+  test('an iPad in Split View or Slide Over is still an iPad, by its idiom: '
+      "never a phone named iPhone while it waits to be let in (Sale's row "
+      '198)', () async {
+    addTearDown(() => debugDeviceCapabilities = null);
+    debugDeviceCapabilities = const DeviceCapabilities(idiom: Idiom.pad);
+    expect(
+      await deviceKindOf(TargetPlatform.iOS),
+      DeviceKind.DEVICE_KIND_TABLET,
+    );
+    expect(await deviceNameOf(TargetPlatform.iOS), 'iPad');
+    debugDeviceCapabilities = const DeviceCapabilities(idiom: Idiom.phone);
+    expect(
+      await deviceKindOf(TargetPlatform.iOS),
+      DeviceKind.DEVICE_KIND_PHONE,
+    );
+    expect(await deviceNameOf(TargetPlatform.iOS), 'iPhone');
   });
 
   test(

@@ -163,7 +163,7 @@ fn print(answer: &Answer, json: bool) -> ExitCode {
 
 /// The Claktory these commands talk to, as the backend itself finds it.
 fn instance(dev: bool) -> Option<Instance> {
-    let mut instance = crate::home::instance(dev, &std::env::home_dir()?);
+    let mut instance = crate::home::instance_in(dev, crate::home::instance_root(dev)?);
     if let Some(root) = std::env::var_os("FACTORY_HOME") {
         instance.home = Home::new(root.into());
     }
@@ -299,7 +299,8 @@ pub async fn run(instance: &Instance, flags: &Flags, stdin: impl FnOnce() -> Str
         ["account", "resend"] => match client.request(client_message::Body::AccountResend(v1::AccountResend {})).await {
             Ok(_) => {
                 let account = account(&client.workspace);
-                let text = format!("Sent a new code to {}.", account["email"].as_str().unwrap_or_default());
+                let to = ["switching_to", "sent_to"].iter().find_map(|key| account[*key].as_str()).unwrap_or_default();
+                let text = format!("Sent a new code to {to}.");
                 Answer::needs_human(Answer::ok(account, text))
             }
             Err(answer) => answer,
@@ -559,6 +560,14 @@ fn account(workspace: &v1::Workspace) -> Value {
         }
         State::SignedIn | State::Revoked => value["email"] = json!(account.email),
         _ => {}
+    }
+    // Switch account… (V6): signed in, with a code asked for another address.
+    if !account.switching_to.is_empty() {
+        value["switching_to"] = json!(mask(&account.switching_to));
+        if !account.code_from.is_empty() {
+            value["sent_from"] = json!(account.code_from);
+        }
+        value["expires_in"] = json!((account.code_expires_ms - crate::transcript::now_ms()).max(0) / 1000);
     }
     if !account.problem.is_empty() {
         value["problem"] = json!(account.problem);

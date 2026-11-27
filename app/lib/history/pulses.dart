@@ -75,7 +75,6 @@ class Tick {
   final from = log.lowerBound(historyAt(now - _longest));
   final until = log.upperBound(t);
   final you = scene.layout.you;
-  final pulses = <Pulse>[];
   final ticks = <Tick>[];
 
   // With one project shown: its box, where what's outside it comes in or
@@ -86,9 +85,9 @@ class Tick {
   // Where an event's node is now: a chip, the person or a pad (then its
   // index, else -1); outside the project shown, the point on its box's edge
   // toward it ("o…").
-  (String, Rect, int, int)? place(int node) {
+  _Place? place(int node) {
     if (node == 0) return you == null ? null : ('you', you, -1, -1);
-    (String, Rect, int, int) outside(String key, Rect rect) {
+    _Place outside(String key, Rect rect) {
       final edge = Routes.edgeToward(boxRect!, rect.center);
       return (
         'o$key',
@@ -113,22 +112,98 @@ class Tick {
     return ('c$chip', scene.chips[chip].rect, chip, -1);
   }
 
+  // At a year or more played in a minute, tens of thousands of messages
+  // are under way at once, between the same few hundred pairs: where each
+  // node is, each pair's route, its length and its line, and the pulses
+  // each route's messages merge into, are found once a frame (Polpo's
+  // history-scale.md items 3 and 4), in lists by node rather than maps,
+  // with no pulse made for each message. Every message still counts, for
+  // the merged pulses' numbers.
+  final nodes = scene.timeline.nodes.length + 1;
+  final placed = List<_Place?>.filled(nodes, null);
+  final known = List<bool>.filled(nodes, false);
+  final placedLate = <int, _Place?>{};
+  _Place? placeOf(int node) {
+    if (node < 0 || node >= nodes) {
+      return placedLate.containsKey(node)
+          ? placedLate[node]
+          : (placedLate[node] = place(node));
+    }
+    if (known[node]) return placed[node];
+    known[node] = true;
+    return placed[node] = place(node);
+  }
+
+  final ticking = <int, int>{};
+  int tickChip(int node) => ticking[node] ??= () {
+    final chip = scene.chipAt(node, t);
+    if (chip < 0) return -1;
+    if (project != null && !scene.chipInProject(chip, t, project)) return -1;
+    return chip;
+  }();
+  // By where its ends are: legs between the same places share one.
+  final routed = <(String, String, bool), _Tracked>{};
+  final pulses = _Merging(budget);
+  final legs = List<_Leg?>.filled(nodes * nodes, null);
+  final legsLate = <int, _Leg>{};
+  _Leg leg(int sender, int recipient) {
+    final a = placeOf(sender);
+    final b = placeOf(recipient);
+    // Neither end in the project shown: not its message.
+    if (a == null ||
+        b == null ||
+        b.$1 == a.$1 ||
+        (a.$1.startsWith('o') && b.$1.startsWith('o'))) {
+      return _Leg.none;
+    }
+    final pad = a.$4 >= 0 && b.$3 >= 0
+        ? a.$4
+        : b.$4 >= 0 && a.$3 >= 0
+        ? b.$4
+        : -1;
+    if (a.$3 >= 0 && b.$3 >= 0) {
+      return _Leg(
+        pad,
+        routed[(a.$1, b.$1, false)] ??= pulses.track(routes.across(a.$3, b.$3)),
+        along: () => routed[(a.$1, b.$1, true)] ??= pulses.track(
+          routes.chips(a.$3, b.$3),
+        ),
+        lines: scene.timeline.messagingSpans(sender, recipient),
+      );
+    }
+    return _Leg(
+      pad,
+      routed[(a.$1, b.$1, false)] ??= pulses.track(_route(routes, a, b)),
+    );
+  }
+
+  _Leg legOf(int sender, int recipient) {
+    if (sender >= 0 && sender < nodes && recipient >= 0 && recipient < nodes) {
+      final k = sender * nodes + recipient;
+      return legs[k] ??= leg(sender, recipient);
+    }
+    return legsLate[sender * 0x100000 + recipient] ??= leg(sender, recipient);
+  }
+
   for (var i = from; i < until; i++) {
-    final age = now - playAt(log.time(i));
+    final time = log.time(i);
+    final age = now - playAt(time);
     if (age < 0) continue;
     final kind = log.kind(i);
+    final count = log.toCount(i);
     if (kind.tick) {
       if (age >= tickSeconds) continue;
-      for (var k = 0; k < log.toCount(i); k++) {
-        final chip = scene.chipAt(log.to(i, k), t);
-        if (chip < 0) continue;
-        if (project != null && !scene.chipInProject(chip, t, project)) continue;
-        ticks.add(Tick(chip, age / tickSeconds));
+      for (var k = 0; k < count; k++) {
+        final chip = tickChip(log.to(i, k));
+        if (chip >= 0) ticks.add(Tick(chip, age / tickSeconds));
       }
       continue;
     }
-    final sender = place(log.from(i));
-    if (sender == null) continue;
+    // The longest way takes _longest seconds: one older than that is on
+    // none (each route's own seconds decide the rest).
+    if (age >= _longest) continue;
+    final sender = log.from(i);
+    if (placeOf(sender) == null) continue;
     final style = switch (kind) {
       EventKind.person => PulseKind.person,
       EventKind.pipeIn || EventKind.pipeOut => PulseKind.pipe,
@@ -137,86 +212,227 @@ class Tick {
       _ => PulseKind.agent,
     };
     final quiet = log.flags(i) & eventQuiet != 0;
-    for (var k = 0; k < log.toCount(i); k++) {
-      final to = log.to(i, k);
-      final recipient = place(to);
-      if (recipient == null || recipient.$1 == sender.$1) continue;
-      // Neither end in the project shown: not its message.
-      if (sender.$1.startsWith('o') && recipient.$1.startsWith('o')) continue;
-      final Route route;
-      if (sender.$3 >= 0 && recipient.$3 >= 0) {
-        // Along their line, or straight across when none is known then.
-        route = scene.timeline.messagingAt(log.from(i), to, log.time(i))
-            ? routes.chips(sender.$3, recipient.$3)
-            : routes.across(sender.$3, recipient.$3);
-      } else if (recipient.$3 >= 0 && sender.$4 >= 0) {
-        route = routes.pipe(sender.$4, recipient.$3, toChip: true);
-      } else if (sender.$3 >= 0 && recipient.$4 >= 0) {
-        route = routes.pipe(recipient.$4, sender.$3, toChip: false);
-      } else if (recipient.$3 >= 0) {
-        route = routes.place(sender.$1, sender.$2, recipient.$3, toChip: true);
-      } else if (sender.$3 >= 0) {
-        route = routes.place(
-          recipient.$1,
-          recipient.$2,
-          sender.$3,
-          toChip: false,
-        );
-      } else {
-        route = Routes.arc(sender.$2, recipient.$2);
-      }
-      final at = age / pulseSeconds(route.length);
+    for (var k = 0; k < count; k++) {
+      final way = legOf(sender, log.to(i, k));
+      final straight = way.route;
+      if (straight == null) continue;
+      // Along their line, or straight across when none is known then.
+      final route = way.along != null && way.lined(time)
+          ? way.alongRoute
+          : straight;
+      final at = age / route.seconds;
       if (at >= 1) continue;
-      final pad = sender.$4 >= 0 && recipient.$3 >= 0
-          ? sender.$4
-          : recipient.$4 >= 0 && sender.$3 >= 0
-          ? recipient.$4
-          : -1;
-      pulses.add(Pulse(route, at, style, quiet: quiet, pad: pad));
+      pulses.add(route, at, style, quiet, way.pad);
     }
   }
-  return (pulses: merge(pulses, budget), ticks: ticks);
+  return (pulses: pulses.done(), ticks: ticks);
+}
+
+typedef _Place = (String, Rect, int, int);
+
+/// A route as a frame's pulses use it: its index among the frame's routes,
+/// for their bins, and how long a pulse takes along it.
+class _Tracked {
+  _Tracked(this.route, this.id) : seconds = pulseSeconds(route.length);
+
+  final Route route;
+  final int id;
+  final double seconds;
+}
+
+/// Messages from one node to another this frame: their route, straight
+/// across between two chips, and along their line ([lines]' spans) when
+/// they have one then; or none, when nothing is drawn for them.
+class _Leg {
+  _Leg(this.pad, this.route, {this.along, this.lines = const []});
+  _Leg._none() : pad = -1, route = null, along = null, lines = const [];
+
+  static final none = _Leg._none();
+
+  final int pad;
+  final _Tracked? route;
+  final _Tracked Function()? along;
+  late final _Tracked alongRoute = along!();
+  final List<List<Span>> lines;
+
+  /// Since and until when [_lined] holds.
+  var _from = double.infinity;
+  var _until = double.negativeInfinity;
+  var _lined = false;
+
+  /// Whether they had a line at [t]: worked out again only past the stretch
+  /// the last answer holds for, as a frame's times come in order.
+  bool lined(double t) {
+    if (t >= _from && t < _until) return _lined;
+    var from = double.negativeInfinity;
+    var until = double.infinity;
+    var lined = false;
+    for (final spans in lines) {
+      for (final span in spans) {
+        if (span.contains(t)) {
+          if (!lined) {
+            lined = true;
+            from = span.from;
+            until = span.to;
+          } else {
+            from = math.min(from, span.from);
+            until = math.max(until, span.to);
+          }
+        } else if (!lined) {
+          if (span.to <= t) from = math.max(from, span.to);
+          if (span.from > t) until = math.min(until, span.from);
+        }
+      }
+    }
+    _from = from;
+    _until = until;
+    return _lined = lined;
+  }
+}
+
+/// The route between [sender] and [recipient] (as pulsesAt places them:
+/// key, rect, chip, pad) when they aren't two chips.
+Route _route(
+  Routes routes,
+  (String, Rect, int, int) sender,
+  (String, Rect, int, int) recipient,
+) {
+  if (recipient.$3 >= 0 && sender.$4 >= 0) {
+    return routes.pipe(sender.$4, recipient.$3, toChip: true);
+  }
+  if (sender.$3 >= 0 && recipient.$4 >= 0) {
+    return routes.pipe(recipient.$4, sender.$3, toChip: false);
+  }
+  if (recipient.$3 >= 0) {
+    return routes.place(sender.$1, sender.$2, recipient.$3, toChip: true);
+  }
+  if (sender.$3 >= 0) {
+    return routes.place(recipient.$1, recipient.$2, sender.$3, toChip: false);
+  }
+  return Routes.arc(sender.$2, recipient.$2);
 }
 
 /// [pulses] within [budget]: those on the same route close together merge,
 /// ever more widely until they fit; past that, the busiest routes' only.
 List<Pulse> merge(List<Pulse> pulses, int budget) {
-  if (pulses.length <= budget) return pulses;
-  var out = pulses;
-  for (final width in [0.25, 0.5, 1.0]) {
-    final bins = <(Route, int, PulseKind), _Bin>{};
-    for (final pulse in pulses) {
-      final key = (pulse.route, (pulse.at / width).floor(), pulse.kind);
-      (bins[key] ??= _Bin()).add(pulse);
-    }
-    out = [for (final bin in bins.values) bin.pulse];
-    if (out.length <= budget) return out;
+  final merging = _Merging(budget);
+  final tracked = Map<Route, _Tracked>.identity();
+  for (final pulse in pulses) {
+    merging.add(
+      tracked[pulse.route] ??= merging.track(pulse.route),
+      pulse.at,
+      pulse.kind,
+      pulse.quiet,
+      pulse.pad,
+      count: pulse.count,
+    );
   }
-  out.sort((a, b) => b.count.compareTo(a.count));
-  return out.sublist(0, budget);
+  return merging.done(pulses.length <= budget ? pulses : null);
+}
+
+/// Pulses merging as they come: each kept as it is while they fit in
+/// [budget], and in bins by route, a quarter of the way along and kind
+/// meanwhile, so wider bins are those added up.
+class _Merging {
+  _Merging(this.budget);
+
+  final int budget;
+  final _pulses = <Pulse>[];
+  var _added = 0;
+  var _routes = 0;
+
+  /// Bins by key ((route * 4 + quarter) * kinds + kind), and their keys in
+  /// the order each was made.
+  final _bins = <_Bin?>[];
+  final _order = <int>[];
+
+  static final _kinds = PulseKind.values.length;
+
+  /// [route], numbered for this frame's bins.
+  _Tracked track(Route route) => _Tracked(route, _routes++);
+
+  void add(
+    _Tracked route,
+    double at,
+    PulseKind kind,
+    bool quiet,
+    int pad, {
+    int count = 1,
+  }) {
+    final seq = _added++;
+    if (seq < budget + 1 && seq == _pulses.length) {
+      _pulses.add(
+        Pulse(route.route, at, kind, quiet: quiet, count: count, pad: pad),
+      );
+    }
+    // at is 0 to 1: a quarter is 0 to 3.
+    final key = (route.id * 4 + (at / 0.25).floor()) * _kinds + kind.index;
+    if (key >= _bins.length) {
+      _bins.length = math.max(key + 1, _bins.length * 2);
+    }
+    var bin = _bins[key];
+    if (bin == null) {
+      bin = _bins[key] = _Bin(route.route, kind, seq);
+      _order.add(key);
+    }
+    bin.add(at, quiet, pad, count, seq);
+  }
+
+  /// The pulses: [all] (or each as added) when they fit.
+  List<Pulse> done([List<Pulse>? all]) {
+    if (_added <= budget) return all ?? _pulses;
+    var bins = [for (final key in _order) _bins[key]!];
+    for (final quarters in [1, 2, 4]) {
+      if (quarters > 1) {
+        // Bins in the order their first pulse came, as each wider one is.
+        final wider = <int, _Bin>{};
+        final kinds = _kinds;
+        for (final key in _order) {
+          final bin = _bins[key]!;
+          final quarter = key ~/ kinds % 4;
+          final id = key ~/ kinds ~/ 4;
+          final at = (id * 4 + quarter ~/ quarters) * kinds + key % kinds;
+          (wider[at] ??= _Bin(bin.route, bin.kind, bin.first)).join(bin);
+        }
+        bins = wider.values.toList();
+      }
+      if (bins.length <= budget) return [for (final bin in bins) bin.pulse];
+    }
+    final out = [for (final bin in bins) bin.pulse]
+      ..sort((a, b) => b.count.compareTo(a.count));
+    return out.sublist(0, budget);
+  }
 }
 
 class _Bin {
-  Pulse? _lead;
+  _Bin(this.route, this.kind, this.first);
+
+  final Route route;
+  final PulseKind kind;
+
+  /// When its first pulse came, and its lead's (the furthest along).
+  final int first;
+  var _lead = -1;
+  var _at = 0.0;
+  var _pad = -1;
   var _count = 0;
   var _quiet = true;
 
-  void add(Pulse pulse) {
-    _count += pulse.count;
-    _quiet &= pulse.quiet;
-    final lead = _lead;
-    if (lead == null || pulse.at > lead.at) _lead = pulse;
+  void add(double at, bool quiet, int pad, int count, int seq) {
+    _count += count;
+    _quiet &= quiet;
+    if (_lead < 0 || at > _at || (at == _at && seq < _lead)) {
+      _lead = seq;
+      _at = at;
+      _pad = pad;
+    }
   }
 
-  Pulse get pulse {
-    final lead = _lead!;
-    return Pulse(
-      lead.route,
-      lead.at,
-      lead.kind,
-      quiet: _quiet,
-      count: _count,
-      pad: lead.pad,
-    );
+  void join(_Bin bin) {
+    _count += bin._count - 1;
+    add(bin._at, bin._quiet, bin._pad, 1, bin._lead);
   }
+
+  Pulse get pulse =>
+      Pulse(route, _at, kind, quiet: _quiet, count: _count, pad: _pad);
 }

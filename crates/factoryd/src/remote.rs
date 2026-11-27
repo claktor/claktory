@@ -267,6 +267,10 @@ pub struct Device {
     pub app_platform: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub app_version: String,
+    /// The person dismissed the "Get notified…" offer on it (area 5a item
+    /// 4), until it says its notifications are allowed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub notifications_offer_dismissed: bool,
 }
 
 /// Why a device isn't let in while this Claktory's disk fails it (friend bug
@@ -820,6 +824,7 @@ fn write_local_pairing(home: &Home, endpoint_id: &str, port: u16) -> Result<(), 
             // A new token; the key this machine's app connected through the
             // tunnel with stays known.
             let endpoint_id = local.map(|index| devices[index].endpoint_id.clone()).unwrap_or_default();
+            let notifications_offer_dismissed = local.is_some_and(|index| devices[index].notifications_offer_dismissed);
             let device = Device {
                 id: LOCAL_DEVICE.to_owned(),
                 name: machine_name().to_owned(),
@@ -834,6 +839,7 @@ fn write_local_pairing(home: &Home, endpoint_id: &str, port: u16) -> Result<(), 
                 pending_kind: 0,
                 pending_since: None,
                 unnamed: false,
+                notifications_offer_dismissed,
                 ..Device::default()
             };
             match local {
@@ -1019,10 +1025,22 @@ struct Tunnel {
     failed: Option<Wanted>,
 }
 
+/// Why a session is closed, when it's turned away rather than unpaired:
+/// set before its `closed` is notified, told to it before it closes.
+pub(crate) type Refusal = Arc<Mutex<Option<v1::Error>>>;
+
 /// One of a device's open sessions.
 struct Session {
     closed: Arc<tokio::sync::Notify>,
     endpoint_id: String,
+    /// The account it came in through, for a device found through the
+    /// account (`Device::discovered`); empty for any other (a code's, this
+    /// machine's app), which the account's sign-in doesn't hold open.
+    account: String,
+    /// Its Hello's platform, to name it if it's turned away.
+    platform: String,
+    /// Why it's closed, when it's turned away rather than unpaired.
+    refusal: Refusal,
 }
 
 /// What Factory keeps of remote access while it runs.
@@ -1148,6 +1166,9 @@ pub(crate) struct Owner {
     pub signed_in_ms: i64,
     /// This Claktory's name, for what a device is told.
     pub name: String,
+    /// The email it's signed in with, masked as the app shows it
+    /// ("m…@example.com"), for what a device is told; empty if unknown.
+    pub email: String,
 }
 
 /// What `admit` decided, by the device's place in the list.
@@ -1163,6 +1184,10 @@ enum Admission {
     /// here before: ERROR_CODE_OTHER_ACCOUNT, with
     /// Error.other_account_before.
     OtherAccountNow(String),
+    /// Turned away to sign in, a device this Claktory recognizes (paired
+    /// here, not removed): ERROR_CODE_SIGN_IN_REQUIRED, with where to sign
+    /// in (Error.account_service, account_email; Fugo 47717).
+    SignInKnown(String),
     Unknown,
 }
 
@@ -1196,17 +1221,41 @@ fn fingerprint_of(key: &str) -> String {
     short.chunks(4).map(|chunk| chunk.iter().collect::<String>()).collect::<Vec<_>>().join(" ")
 }
 
-/// Why a device signed in to another account than this Claktory's is
-/// turned away (#527 S4): `known`, one let in here before; `platform`, its
-/// Hello's, to name it; `name`, this Claktory's.
-fn other_account(known: bool, platform: &str, name: &str) -> String {
-    let device = match platform {
+/// What a device is called by its Hello's platform.
+fn device_word(platform: &str) -> &'static str {
+    match platform {
         "macos" => "Mac",
         "ios" => "iPhone",
         "ipados" => "iPad",
         "android" => "phone",
         _ => "device",
-    };
+    }
+}
+
+/// Why a device let in here through the account before is turned away
+/// once this Claktory, `name`, is signed in to another account, `email`
+/// (masked; row 713, Fugo 50367, Trish 50372): it's this Claktory that
+/// changed, not the device.
+fn claktory_switched(platform: &str, name: &str, email: &str) -> String {
+    let device = device_word(platform);
+    if email.is_empty() {
+        format!(
+            "{name} is now signed in to a different account, so it no longer lets this {device} in. To connect again, sign in here with the \
+             account {name} uses, or use a new code."
+        )
+    } else {
+        format!(
+            "{name} is now signed in as {email}, a different account, so it no longer lets this {device} in. To connect again, sign in here \
+             with {email}, or use a new code."
+        )
+    }
+}
+
+/// Why a device signed in to another account than this Claktory's is
+/// turned away (#527 S4): `known`, one let in here before; `platform`, its
+/// Hello's, to name it; `name`, this Claktory's.
+fn other_account(known: bool, platform: &str, name: &str) -> String {
+    let device = device_word(platform);
     if known {
         format!("This {device} is now signed in to a different Claktory account. Sign in with the account {name} uses to connect again.")
     } else {
@@ -1282,19 +1331,26 @@ fn admit(
         if *code == v1::ErrorCode::OtherAccount
             && let Some(owner) = owner
         {
-            let mut known = false;
+            let (mut known, mut switched) = (false, false);
             for device in devices
                 .iter_mut()
                 .filter(|device| !device.local && !device.endpoint_id.is_empty() && device.endpoint_id == peer.endpoint_id)
             {
                 known = true;
+                // Confirmed for another account than this Claktory's now:
+                // it's this Claktory that changed accounts (row 713).
+                switched |= !device.confirmed_as.is_empty() && device.confirmed_as != owner.account_id;
                 // Noted once a minute at most, however often it retries.
                 if device.turned_why != TURNED_OTHER_ACCOUNT || device.turned_ms.is_none_or(|at| now - at >= TURNED_EVERY) {
                     device.turned_ms = Some(now);
                     device.turned_why = TURNED_OTHER_ACCOUNT.to_owned();
                 }
             }
-            let reason = other_account(known, knock.platform, &owner.name);
+            let reason = if switched {
+                claktory_switched(knock.platform, &owner.name, &owner.email)
+            } else {
+                other_account(known, knock.platform, &owner.name)
+            };
             return if known { Admission::OtherAccountNow(reason) } else { Admission::Turned(*code, reason) };
         }
         // With a code, never Unauthorized: that says it was removed, and
@@ -1371,12 +1427,9 @@ fn admit(
         }
         if known && !signed_in {
             return match shown {
-                Some(Err(_)) if owner.is_none() => Admission::Turned(v1::ErrorCode::SignInRequired, SIGNED_OUT.to_owned()),
+                Some(Err(_)) if owner.is_none() => Admission::SignInKnown(SIGNED_OUT.to_owned()),
                 Some(Err((code, reason))) => Admission::Turned(code, reason),
-                _ => Admission::Turned(
-                    v1::ErrorCode::SignInRequired,
-                    "Sign in to your Claktory account on this device to connect.".to_owned(),
-                ),
+                _ => Admission::SignInKnown("Sign in to your Claktory account on this device to connect.".to_owned()),
             };
         }
         if found.is_none() && pending.is_none() {
@@ -1437,10 +1490,7 @@ fn admit(
         if signed_in {
             device.confirmed_as.clone_from(&owner.account_id);
         } else if !device.confirmed_for(Some(&owner.account_id)) {
-            return Admission::Turned(
-                v1::ErrorCode::SignInRequired,
-                "Sign in to your Claktory account on this device to connect.".to_owned(),
-            );
+            return Admission::SignInKnown("Sign in to your Claktory account on this device to connect.".to_owned());
         }
     }
     // Versions before kept a deadline: gone once it's confirmed. One past
@@ -1502,6 +1552,9 @@ struct Shown {
     relay_connected: bool,
     /// How each connected device's connection travels, by its id.
     paths: HashMap<String, v1::DevicePath>,
+    /// This machine's own app (not one of `devices`) dismissed the "Get
+    /// notified…" offer.
+    local_offer_dismissed: bool,
 }
 
 /// Claktory's own relay (iroh-relay), the first of the relays the tunnel
@@ -1564,6 +1617,9 @@ pub(crate) struct Connected {
     pub device: Device,
     /// Notified when the device is unpaired: the session closes.
     pub closed: Arc<tokio::sync::Notify>,
+    /// Set before `closed` when it's turned away rather than unpaired (row
+    /// 713): the refusal it's told first.
+    pub refusal: Refusal,
     factory: Weak<Factory>,
 }
 
@@ -1597,6 +1653,7 @@ impl Factory {
             account_id: owner.account_id,
             signed_in_ms: owner.signed_in_ms,
             name: self.identity().name,
+            email: self.account.where_to_sign_in(&account).1,
         });
         // What its assertion shows, if it brought one through the tunnel.
         let shown = (!knock.assertion.is_empty() && !peer.endpoint_id.is_empty()).then(|| {
@@ -1604,6 +1661,7 @@ impl Factory {
                 .map(|assertion| assertion.account_id)
                 .map_err(refusal)
         });
+        let proved = shown.as_ref().and_then(|shown| shown.as_ref().ok().cloned());
         let mut replaced = Vec::new();
         let mut noted = false;
         let changing = devices_lock();
@@ -1698,6 +1756,11 @@ impl Factory {
                     v1::Error { code: v1::ErrorCode::OtherAccount.into(), message, other_account_before: true, ..Default::default() };
                 return self.turn_away(peer, noted, refusal).await;
             }
+            Admission::SignInKnown(message) => {
+                let (account_service, account_email) = self.account.where_to_sign_in(&account);
+                let refusal = v1::Error { code: v1::ErrorCode::SignInRequired.into(), message, account_service, account_email, ..Default::default() };
+                return self.turn_away(peer, noted, refusal).await;
+            }
             Admission::Unknown | Admission::Connected(_) | Admission::Pending(_) => {
                 // The loopback port's refusals are logged where they're known.
                 if !peer.endpoint_id.is_empty() {
@@ -1708,10 +1771,20 @@ impl Factory {
             }
         };
         let closed = Arc::new(tokio::sync::Notify::new());
-        let session = Session { closed: closed.clone(), endpoint_id: peer.endpoint_id.clone() };
+        let refusal = Arc::new(Mutex::new(None));
+        // Found through the account, it's in only while the account it
+        // proved is this Claktory's (row 713, Fugo 49686): see `recheck`.
+        let account = if device.discovered { proved.unwrap_or_else(|| device.confirmed_as.clone()) } else { String::new() };
+        let session = Session {
+            closed: closed.clone(),
+            endpoint_id: peer.endpoint_id.clone(),
+            account,
+            platform: knock.platform.to_owned(),
+            refusal: refusal.clone(),
+        };
         lock(&self.remote.connected).entry(device.id.clone()).or_default().push(session);
         self.refresh_remote();
-        Authorized::Connected(Connected { device, closed, factory: Arc::downgrade(self) })
+        Authorized::Connected(Connected { device, closed, refusal, factory: Arc::downgrade(self) })
     }
 
     /// ConfirmDevice, from `asker` (its device id; `LOCAL_DEVICE` for this
@@ -2001,9 +2074,56 @@ impl Factory {
     /// devices may find it; the gate follows.
     pub(crate) fn account_open(&self) -> bool {
         let account = self.lock().config.account.clone();
-        let open = crate::account::owner(self, &account).is_some();
+        let owner = crate::account::owner(self, &account).map(|owner| owner.account_id);
+        let open = owner.is_some();
         self.remote.account_open.store(open, Ordering::Relaxed);
+        self.recheck(owner.as_deref(), &account);
         open
+    }
+
+    /// Turns away the open sessions of devices found through the account
+    /// whose account isn't this Claktory's now, `owner` (row 713, Fugo
+    /// 49686): signed out, removed at the service, switched to another
+    /// account or signing in turned off. Each hears what a new connection
+    /// would (signed out: sign it in again; another account's: that), after
+    /// the answer it's being sent, if any. A device paired with a code, and
+    /// this machine's app, stay connected.
+    fn recheck(&self, owner: Option<&str>, config: &crate::config::AccountConfig) {
+        let turned: Vec<(Arc<tokio::sync::Notify>, Refusal, String)> = lock(&self.remote.connected)
+            .values()
+            .flatten()
+            .filter(|session| !session.account.is_empty() && owner != Some(session.account.as_str()))
+            .map(|session| (session.closed.clone(), session.refusal.clone(), session.platform.clone()))
+            .collect();
+        if turned.is_empty() {
+            return;
+        }
+        let name = self.identity().name;
+        for (closed, why, platform) in turned {
+            let mut why = lock(&why);
+            if why.is_some() {
+                continue;
+            }
+            *why = Some(if owner.is_none() {
+                let (account_service, account_email) = self.account.where_to_sign_in(config);
+                v1::Error {
+                    code: v1::ErrorCode::SignInRequired.into(),
+                    message: SIGNED_OUT.to_owned(),
+                    account_service,
+                    account_email,
+                    ..Default::default()
+                }
+            } else {
+                v1::Error {
+                    code: v1::ErrorCode::OtherAccount.into(),
+                    message: claktory_switched(&platform, &name, &self.account.where_to_sign_in(config).1),
+                    other_account_before: true,
+                    ..Default::default()
+                }
+            });
+            closed.notify_one();
+        }
+        tracing::info!(signed_in = owner.is_some(), "closed the connections of devices this Claktory's account no longer lets in");
     }
 
     /// Re-reads what the Workspace shows of remote access, and sends it if
@@ -2056,11 +2176,13 @@ impl Factory {
                 })
                 .collect()
         };
+        let local_offer_dismissed = devices.iter().any(|device| device.local && device.notifications_offer_dismissed);
         let changed = {
             let mut shown = lock(&self.remote.shown);
             let now = Shown {
                 // This machine's app isn't one of the devices shown.
                 devices: devices.into_iter().filter(|device| !device.local).collect(),
+                local_offer_dismissed,
                 on,
                 relays: plan,
                 custom_relays: !relays.is_empty(),
@@ -2128,6 +2250,7 @@ impl Factory {
             })
             .collect();
         allow_notices.sort_by_key(|notice| notice.allowed_ms);
+        let local_notifications_offer_dismissed = shown.local_offer_dismissed;
         // The backend an update would bring, if it would bring one.
         let offered = Some(inner.latest_release.backend.as_str())
             .filter(|offered| !offered.is_empty() && *offered != crate::update::VERSION)
@@ -2157,6 +2280,12 @@ impl Factory {
                         // (paired before the tunnel) shows as expired.
                         code_expires_ms: if device.endpoint_id.is_empty() { device.code_expires.unwrap_or(device.created) } else { 0 },
                         notifications: crate::notify::push::registered(self, &device.id),
+                        // As it said since Claktory started, else as kept with its pushes.
+                        notification_permission: self
+                            .notify
+                            .permission(&device.id)
+                            .unwrap_or_else(|| crate::notify::push::permission(self, &device.id))
+                            .into(),
                         platform: device.app_platform,
                         update_leaves_behind: leaves_behind(&device.app_version, offered),
                         app_version: device.app_version,
@@ -2172,6 +2301,7 @@ impl Factory {
                         allowed_by_name: device.allowed_by_name,
                         turned_ms: device.turned_ms.unwrap_or_default(),
                         turned_why: device.turned_why,
+                        notifications_offer_dismissed: device.notifications_offer_dismissed,
                         ..v1::PairedDevice::default()
                     }
                 })
@@ -2184,7 +2314,53 @@ impl Factory {
             home_relay: shown.home_relay,
             relay_connected: shown.relay_connected,
             allow_notices,
+            local_notifications_offer_dismissed,
         }
+    }
+
+    /// DismissNotificationsOffer (area 5a item 4): the "Get notified…"
+    /// offer, dismissed on `device` (`LOCAL_DEVICE` for this computer's own
+    /// app), until it says its notifications are allowed.
+    pub async fn dismiss_notifications_offer(&self, device: &str) -> Result<(), RequestError> {
+        self.set_notifications_offer(device, true)
+    }
+
+    /// SetActive.notifications from `device`: once they're allowed, the
+    /// offer dismissed there is cleared, so it shows again only if they're
+    /// turned off later and the person hasn't dismissed it since.
+    pub(crate) fn notifications_reported(&self, device: &str, permission: v1::NotificationPermission) {
+        if permission != v1::NotificationPermission::Allowed {
+            return;
+        }
+        // Most reports change nothing: only a device that dismissed it is
+        // written.
+        let dismissed = {
+            let shown = lock(&self.remote.shown);
+            match device {
+                LOCAL_DEVICE => shown.local_offer_dismissed,
+                _ => shown.devices.iter().any(|known| known.id == device && known.notifications_offer_dismissed),
+            }
+        };
+        if dismissed && let Err(error) = self.set_notifications_offer(device, false) {
+            tracing::error!(%device, %error, "could not clear a device's dismissed notifications offer");
+        }
+    }
+
+    fn set_notifications_offer(&self, device: &str, dismissed: bool) -> Result<(), RequestError> {
+        {
+            let _changing = devices_lock();
+            let mut devices = devices(&self.home).map_err(|error| RequestError::Remote(error.to_string()))?;
+            let Some(known) = devices.iter_mut().find(|known| known.id == device) else {
+                return Err(RequestError::Remote("This device isn't one of this Claktory's.".to_owned()));
+            };
+            if known.notifications_offer_dismissed == dismissed {
+                return Ok(());
+            }
+            known.notifications_offer_dismissed = dismissed;
+            save_devices(&self.home, &devices).map_err(|error| RequestError::Remote(error.to_string()))?;
+        }
+        self.refresh_remote();
+        Ok(())
     }
 
     /// DismissAllowNotice: the notice of a device's Allow leaves Needs you
@@ -3205,7 +3381,7 @@ mod tests {
     }
 
     fn owner(signed_in_ms: i64) -> Owner {
-        Owner { account_id: "acct".to_owned(), signed_in_ms, name: "Mac Studio".to_owned() }
+        Owner { account_id: "acct".to_owned(), signed_in_ms, name: "Mac Studio".to_owned(), email: "m…@example.com".to_owned() }
     }
 
     fn ours() -> Option<Result<String, (v1::ErrorCode, String)>> {
@@ -3236,7 +3412,7 @@ mod tests {
         // Its key alone is never enough: anything that borrows the device's
         // tunnel shares its key.
         let alone = admit(&mut devices, &knock("", ""), &tunnel("k1"), Some(&owner(now - 29 * MINUTE)), None, now + 1);
-        assert!(matches!(alone, Admission::Turned(v1::ErrorCode::SignInRequired, _)), "not by its key alone");
+        assert!(matches!(alone, Admission::SignInKnown(_)), "not by its key alone");
         let expired = Some(Err(refusal(crate::account::AssertionRefusal::Expired)));
         let stale = admit(&mut devices, &knock("", "A1"), &tunnel("k1"), Some(&owner(now - 29 * MINUTE)), expired, now + 1);
         assert!(
@@ -3259,7 +3435,7 @@ mod tests {
         assert!(
             matches!(
                 admit(&mut devices, &knock("", ""), &tunnel("k2"), None, None, now),
-                Admission::Turned(v1::ErrorCode::SignInRequired, _)
+                Admission::SignInKnown(_)
             ),
             "waiting, but never by its key alone"
         );
@@ -3312,7 +3488,7 @@ mod tests {
         let turned = admit(&mut devices, &knock("", "A1"), &tunnel("k"), None, signed_out.clone(), now);
         // Not Unauthorized: that says it was removed, and the app wipes
         // what it hadn't sent (#446).
-        assert!(matches!(turned, Admission::Turned(v1::ErrorCode::SignInRequired, reason) if reason == SIGNED_OUT));
+        assert!(matches!(turned, Admission::SignInKnown(reason) if reason == SIGNED_OUT));
         // A device it doesn't know still hears how to be added, as one
         // not paired (Unauthorized).
         let turned = admit(&mut devices, &knock("", "A1"), &tunnel("other"), None, signed_out, now);
@@ -3386,7 +3562,7 @@ mod tests {
         // Let in by a program: the owner's assertion first, at once.
         let mut devices = vec![paired(false)];
         let turned = admit(&mut devices, &knock("M", ""), &tunnel("m"), Some(&owner(1)), None, now);
-        assert!(matches!(turned, Admission::Turned(v1::ErrorCode::SignInRequired, _)));
+        assert!(matches!(turned, Admission::SignInKnown(_)));
         assert!(matches!(admit(&mut devices, &knock("M", "A"), &tunnel("m"), Some(&owner(1)), ours(), now), Admission::Connected(0)));
         assert_eq!(devices[0].confirmed_as, "acct");
         // Not signed in, nothing is asked.
@@ -3430,7 +3606,7 @@ mod tests {
         allowed_before(&mut devices[0], now);
         assert!(!devices[0].allow_confirmed && devices[0].allowed_by.is_empty());
         let turned = admit(&mut devices, &knock("M", ""), &tunnel("m"), Some(&owner(1)), None, now);
-        assert!(matches!(turned, Admission::Turned(v1::ErrorCode::SignInRequired, _)));
+        assert!(matches!(turned, Admission::SignInKnown(_)));
         assert!(matches!(admit(&mut devices, &knock("M", ""), &tunnel("m"), None, None, now), Admission::Connected(0)));
         assert_eq!(devices[0].confirm_by, Some(now - 1), "kept until it confirms");
         allowed_before(&mut devices[0], now);

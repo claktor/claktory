@@ -366,14 +366,14 @@ class ReportTypesSettings extends StatelessWidget {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // What they're for, and where pipes are made (Lucy's Settings
+            // spec §6, ST5); the section's title names them already.
             Text(
-              'Report types',
-              style: TextStyles.caption.copyWith(
-                color: palette.textMuted,
-                fontWeight: FontWeight.w500,
-              ),
+              'What a pipe’s agent fills in for each kind of report it passes '
+              'on. Pipes themselves are set up in their project.',
+              style: type.body.copyWith(color: palette.textMuted),
             ),
-            const SizedBox(height: Space.xs),
+            const SizedBox(height: Space.m),
             for (final each in types)
               ReportTypeRow(key: ValueKey(each.id), type: each),
             const SizedBox(height: Space.s),

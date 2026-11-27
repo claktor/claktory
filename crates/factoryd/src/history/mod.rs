@@ -659,7 +659,10 @@ fn build_overview(factory: &Factory, now: i64, project: &str) -> rusqlite::Resul
             *count += events;
         }
     }
-    let chapters = chapters(&db, &nodes, &releases, since, first_hour, &histogram)?;
+    // One project's: only its nodes, at the time (Bruno 47544).
+    let project_node = format!("project:{project}");
+    let ours = |id: &str, at: i64| project.is_empty() || id == project_node || membership.project(id, at) == project;
+    let chapters = chapters(&db, &nodes, &ours, &releases, since, first_hour, &histogram)?;
     let max_seq: i64 = db.query_row("SELECT coalesce(max(seq), 0) FROM map_history", [], |row| row.get(0))?;
     Ok(v1::HistoryOverview {
         start_ms: start,
@@ -705,10 +708,12 @@ fn names(names: &[String]) -> String {
     }
 }
 
-/// The big moments, oldest first.
+/// The big moments, oldest first. Those that name nodes name only the ones
+/// `ours` keeps (a node, at a time), and are left out with none.
 fn chapters(
     db: &Connection,
     nodes: &BTreeMap<String, Life>,
+    ours: &dyn Fn(&str, i64) -> bool,
     releases: &BTreeMap<String, i64>,
     since: i64,
     first_hour: i64,
@@ -723,7 +728,7 @@ fn chapters(
     let label = |life: &Life| text(&life.fields, "label").to_owned();
     let mut joined: BTreeMap<i64, Vec<(&String, &Life)>> = BTreeMap::new();
     let mut first_secret: Option<(&String, &Life)> = None;
-    for (id, life) in nodes.iter().filter(|(_, life)| life.first > 0) {
+    for (id, life) in nodes.iter().filter(|(id, life)| life.first > 0 && ours(id, life.first)) {
         match text(&life.fields, "kind") {
             "project" => chapters.push(chapter(life.first, Kind::Project, format!("{} began", label(life)), vec![id.clone()])),
             "agent" => joined.entry(life.first.div_euclid(24 * HOUR)).or_default().push((id, life)),
@@ -761,6 +766,9 @@ fn chapters(
     )?;
     for (agent, at) in goals.into_iter().filter(|(agent, _)| !crate::chats::is_chat(agent)) {
         let id = format!("agent:{agent}");
+        if !ours(&id, at) {
+            continue;
+        }
         let name = nodes.get(&id).map_or_else(|| agent.clone(), label);
         chapters.push(chapter(at, Kind::Goal, format!("{name} finished a goal"), vec![id]));
     }

@@ -7,6 +7,7 @@ import '../extensions.dart' show enabledExtensions;
 import '../identity.dart';
 import '../layout.dart';
 import '../panes.dart' show pageOfKind, paneGlyph, paneTitle;
+import '../pinned_agents.dart' show pinLabel;
 import '../protocol/factory/v1/factory.pb.dart';
 import '../scope.dart';
 import 'metrics.dart';
@@ -26,6 +27,8 @@ class PhoneExtensionList extends StatefulWidget {
     required this.viewed,
     this.onSearch,
     this.onVersions,
+    this.onPin,
+    this.onSettings,
   });
 
   final Agent agent;
@@ -39,6 +42,10 @@ class PhoneExtensionList extends StatefulWidget {
 
   /// An extension was chosen: its panel opens, so the list closes.
   final VoidCallback chosen;
+
+  /// Runs after this sheet closes, on the phone's stable owner context.
+  final ValueChanged<Agent>? onPin;
+  final ValueChanged<Agent>? onSettings;
 
   /// A file beside the conversation was chosen: its pane's id.
   final ValueChanged<String> viewed;
@@ -70,7 +77,9 @@ class _PhoneExtensionListState extends State<PhoneExtensionList> {
   Widget _list(BuildContext context, Agent agent) {
     final palette = Palette.of(context);
     final backend = AppScope.of(context);
-    final extensions = enabledExtensions(backend.workspace.workspace, agent);
+    final workspace = backend.workspace.workspace;
+    final extensions = enabledExtensions(workspace, agent);
+    final pin = widget.onPin == null ? null : pinLabel(workspace, agent);
     // Secrets shows what the agent was given, though the backend sends no
     // view for it.
     bool shows(Extension extension) =>
@@ -166,6 +175,34 @@ class _PhoneExtensionListState extends State<PhoneExtensionList> {
                 muted: true,
                 onTap: () => setState(() => _more = true),
               ),
+          if (pin != null || widget.onSettings != null) ...[
+            Container(
+              height: 1,
+              margin: const EdgeInsets.symmetric(
+                horizontal: Touch.gutter,
+                vertical: Space.s,
+              ),
+              color: palette.hairline,
+            ),
+            if (pin != null)
+              _Row(
+                glyph: ExtensionGlyph(
+                  icon: pin == 'Pin' ? 'pin' : 'pin-off',
+                  name: pin,
+                  color: palette.textMuted,
+                ),
+                name: pin,
+                label: pin,
+                onTap: () => widget.onPin!(agent),
+              ),
+            if (widget.onSettings case final settings?)
+              _Row(
+                glyph: CogGlyph(color: palette.textMuted),
+                name: 'Agent settings…',
+                label: 'Agent settings',
+                onTap: () => settings(agent),
+              ),
+          ],
         ],
       ),
     );

@@ -172,8 +172,8 @@ SecretRequest _secret({bool collect = false}) => SecretRequest(
     variables: [SecretVariable(name: 'EXAMPLE_TOKEN')],
   ),
   reason: 'Exercise the shared request card.',
-  // A connected service makes it: the card's main action is Approve, the
-  // admin agent's (#360).
+  // A connected service makes it: the card's main action is Let Rivet
+  // make it, the admin agent's (#360).
   fittingSecretId: collect ? '' : 'audit-connection',
   fittingSecretName: collect ? '' : 'Audit service',
 );
@@ -219,7 +219,7 @@ Finder _inside(Type type, Finder finder) =>
     find.descendant(of: find.byType(type), matching: finder);
 Finder _secretValue() => find.descendant(
   of: find.byWidgetPredicate(
-    (w) => w is TextField && w.placeholder == 'Paste the value',
+    (w) => w is TextField && w.placeholder == 'Paste it here',
   ),
   matching: find.byType(EditableText),
 );
@@ -307,7 +307,7 @@ void main() {
         if (surface == 'Move form') {
           await _openMove(tester);
         } else {
-          _tap(tester, 'Extensions');
+          _tap(tester, 'More options for Mike');
           await pumpFrames(tester);
           expect(find.text("Mike's extensions"), findsOneWidget);
         }
@@ -495,7 +495,7 @@ void main() {
           final harness = await _showSecret(tester, size: size, scale: scale);
           await _reveal(
             tester,
-            _inside(SecretRequestCard, find.text('Approve')),
+            _inside(SecretRequestCard, find.text('Let Rivet make it')),
           );
           expect(
             await _gesture('startBackGesture'),
@@ -509,7 +509,7 @@ void main() {
             isEmpty,
           );
           await expectLater(tester, meetsGuideline(androidTapTargetGuideline));
-          _tap(tester, 'Approve');
+          _tap(tester, 'Let Rivet make it');
           await pumpFrames(tester);
           final asks = harness.backend.sent
               .where((m) => m.hasDecideSecretRequest())
@@ -581,8 +581,8 @@ void main() {
           );
           tester.view.viewInsets = const FakeViewPadding();
           await pumpFrames(tester);
-          await _reveal(tester, find.text('Add and give'));
-          _tap(tester, 'Add and give');
+          await _reveal(tester, find.text('Add and give to Mike'));
+          _tap(tester, 'Add and give to Mike');
           await pumpFrames(tester);
           final decisions = harness.backend.sent
               .where((m) => m.hasDecideSecretRequest())

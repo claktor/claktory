@@ -68,6 +68,38 @@ struct Registration {
     /// When it registered, in ms since 1970.
     #[serde(default)]
     registered: i64,
+    /// What it last said of its notifications (item 13): "allowed",
+    /// "denied", "not_asked", "unsupported", or "" when it hasn't (an app
+    /// from before). Nothing is pushed to one that can't show them.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    permission: String,
+}
+
+/// How a device's word on its notifications is kept.
+fn permission_name(permission: v1::NotificationPermission) -> &'static str {
+    match permission {
+        v1::NotificationPermission::Unspecified => "",
+        v1::NotificationPermission::Allowed => "allowed",
+        v1::NotificationPermission::Denied => "denied",
+        v1::NotificationPermission::NotAsked => "not_asked",
+        v1::NotificationPermission::Unsupported => "unsupported",
+    }
+}
+
+/// A kept word back as the protocol's.
+fn permission_of(name: &str) -> v1::NotificationPermission {
+    match name {
+        "allowed" => v1::NotificationPermission::Allowed,
+        "denied" => v1::NotificationPermission::Denied,
+        "not_asked" => v1::NotificationPermission::NotAsked,
+        "unsupported" => v1::NotificationPermission::Unsupported,
+        _ => v1::NotificationPermission::Unspecified,
+    }
+}
+
+/// Whether pushes to a device with this word can show.
+fn can_show(permission: &str) -> bool {
+    !matches!(permission, "denied" | "not_asked" | "unsupported")
 }
 
 /// Pushes and the devices that get them.
@@ -145,9 +177,14 @@ pub(crate) fn register(factory: &Factory, device: &str, request: &v1::RegisterNo
     let mut registry = registry(factory);
     let registrations = registry.get_or_insert_default();
     let same_key = registrations.get(device).filter(|before| before.key == key);
+    // Said now, or as it last said.
+    let permission = match permission_name(request.permission()) {
+        "" => same_key.map_or_else(String::new, |before| before.permission.clone()),
+        said => said.to_owned(),
+    };
     // A phone sends its registration again on every connect, to heal a
     // Claktory that lost it: the same one changes nothing.
-    if same_key.is_some_and(|before| before.handle == handle && before.platform == platform) {
+    if same_key.is_some_and(|before| before.handle == handle && before.platform == platform && before.permission == permission) {
         return Ok(());
     }
     // Under the same key the counter goes on: the phone drops a push whose
@@ -159,6 +196,7 @@ pub(crate) fn register(factory: &Factory, device: &str, request: &v1::RegisterNo
         key,
         platform: platform.to_owned(),
         registered: crate::transcript::now_ms(),
+        permission,
     };
     // Counters saved ahead, from the start.
     reserve(&mut registration);
@@ -200,6 +238,42 @@ pub(crate) fn registered(factory: &Factory, device: &str) -> bool {
     registry(factory).as_ref().is_some_and(|registrations| registrations.contains_key(device))
 }
 
+/// What a registered `device` last said of its notifications; Unspecified
+/// when it isn't registered or hasn't said.
+pub(crate) fn permission(factory: &Factory, device: &str) -> v1::NotificationPermission {
+    registry(factory)
+        .as_ref()
+        .and_then(|registrations| registrations.get(device))
+        .map_or(v1::NotificationPermission::Unspecified, |registration| permission_of(&registration.permission))
+}
+
+/// SetActive.notifications from `device` (item 13): kept with its
+/// registration, if it has one, so a phone that turned them off gets no
+/// pushes while it's away.
+pub(crate) fn set_permission(factory: &Factory, device: &str, permission: v1::NotificationPermission) {
+    let said = permission_name(permission);
+    if said.is_empty() {
+        return;
+    }
+    let mut registry = registry(factory);
+    let registrations = registry.get_or_insert_default();
+    let Some(registration) = registrations.get_mut(device) else { return };
+    if registration.permission == said {
+        return;
+    }
+    let before = std::mem::replace(&mut registration.permission, said.to_owned());
+    if let Err(error) = save(factory, registrations) {
+        tracing::error!(%device, %error, "could not keep a device's notification permission");
+        if let Some(registration) = registrations.get_mut(device) {
+            registration.permission = before;
+        }
+        return;
+    }
+    drop(registry);
+    tracing::info!(%device, permission = said, "a device's notifications changed");
+    factory.broadcast_workspace(&factory.lock());
+}
+
 /// Seals `notify` for each registered device it should be pushed to, and
 /// queues it for the relay: devices that aren't in use, while the person
 /// isn't using another (`State::push_waits`); every device for a test. How many it was queued for.
@@ -227,6 +301,10 @@ pub(crate) fn queue(factory: &Factory, config: &Config, settings: &super::Notifi
         }
         for (device, registration) in registrations.iter_mut() {
             if !test && factory.notify.push_waits(device, now) {
+                continue;
+            }
+            // Its system wouldn't show it (item 13).
+            if !can_show(&registration.permission) {
                 continue;
             }
             let Some(key) = STANDARD.decode(&registration.key).ok().filter(|key| key.len() == 32) else { continue };
@@ -512,7 +590,14 @@ pub(crate) async fn flush(factory: &Factory) -> bool {
                 forgotten = true;
             }
             Ok(response) if response.status().is_server_error() || response.status().as_u16() == 429 => {
-                tracing::warn!(device = %job.device, status = %response.status(), "the push relay couldn't take a push for now");
+                let status = response.status();
+                // Apple or Google refused it for good: trying again would
+                // only spend the device's share of the relay's limits.
+                if response.json::<serde_json::Value>().await.is_ok_and(|body| body["error"] == "refused") {
+                    tracing::error!(device = %job.device, "Apple or Google refused a push");
+                    continue;
+                }
+                tracing::warn!(device = %job.device, %status, "the push relay couldn't take a push for now");
                 job.attempts += 1;
                 if job.attempts < ATTEMPTS {
                     again.push(job);

@@ -60,6 +60,7 @@ Future<Harness> showSettings(
   final harness = Harness(snapshot);
   await harness.show(tester, size: size);
   harness.page.value = AppPage.settings;
+  harness.backend.settingsSection.value = 'providers';
   await settle(tester);
   return harness;
 }
@@ -286,6 +287,19 @@ void main() {
     expect(harness.last.updateAccount.accountId, 'k1');
     expect(harness.last.updateAccount.retry, isTrue);
     expect(harness.last.updateAccount.hasLabel(), isFalse);
+  });
+
+  testWidgets("an API key with a spending limit says what's left on its row "
+      '(settings.md §8.9)', (tester) async {
+    final provider = claude();
+    provider.accounts.last.credit = AccountCredit(
+      limited: true,
+      limit: 20,
+      left: 12.4,
+      leftShown: r'$12.40 left',
+    );
+    await showSettings(tester, provider);
+    expect(find.textContaining(r'API key · $12.40 left'), findsOneWidget);
   });
 
   testWidgets('a key from the environment stays put and last', (tester) async {

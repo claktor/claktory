@@ -457,6 +457,11 @@ fn app_tool(factory: &Arc<Factory>, agent: &str, manifest: &Manifest, spec: &bun
         let (weak, agent, app, name) = (weak.clone(), agent.clone(), app.clone(), name.clone());
         Box::pin(async move {
             let Some(factory) = weak.upgrade() else { return Err(factory_agent::Error::Other("Claktory is stopping.".into())) };
+            // An app that reaches the web hands its words on: no errand_open
+            // for the agent until its conversation starts afresh (Fugo 50226).
+            if factory.apps.manifest(&app).is_some_and(|manifest| !manifest.hosts.is_empty()) {
+                crate::errands::read_outside(&factory, &agent, "what an app read from the web");
+            }
             call(&factory, &app, &name, &args, &agent).await.map_err(factory_agent::Error::Other)
         })
     });

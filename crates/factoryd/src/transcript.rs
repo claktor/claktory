@@ -286,8 +286,9 @@ pub struct Transcript {
     /// trial, and the version it rolls back to may not read JSON Lines.
     old_form: Arc<AtomicBool>,
     context_tokens: u64,
-    /// The entries waiting for the person's answer (see `waits`).
-    waiting: BTreeSet<u64>,
+    /// The entries waiting for the person's answer (see `waits`), each with
+    /// its fingerprint as held now (`fingerprint`).
+    waiting: BTreeMap<u64, u64>,
     /// The person's message the next assistant text answers (its entry seq):
     /// set by their message, cleared by an event (the text then answers the
     /// event, which quotes nothing) and taken by the first assistant text.
@@ -388,7 +389,7 @@ impl Transcript {
             unsaved: Arc::new(AtomicBool::new(false)),
             old_form: Arc::new(AtomicBool::new(false)),
             context_tokens: 0,
-            waiting: BTreeSet::new(),
+            waiting: BTreeMap::new(),
             awaiting_reply: None,
             live: Live::default(),
             models: Vec::new(),
@@ -754,13 +755,20 @@ impl Transcript {
     /// The seqs of the entries waiting for the person's answer, oldest
     /// first: requests for secrets and proposals still pending.
     pub fn waiting_seqs(&self) -> Vec<u64> {
-        self.waiting.iter().copied().collect()
+        self.waiting.keys().copied().collect()
     }
 
-    /// Notes whether `entry` waits for the person now.
+    /// Each waiting entry's fingerprint (Agent.waiting_versions, Squalo's
+    /// B3): it changes whenever anything in the entry does, so the app
+    /// fetches again only the cards that changed.
+    pub fn waiting_versions(&self) -> BTreeMap<u64, u64> {
+        self.waiting.clone()
+    }
+
+    /// Notes whether `entry` waits for the person now, and as what.
     fn track(&mut self, entry: &Entry) {
         if waits(entry.kind.as_ref(), &self.owner) {
-            self.waiting.insert(entry.seq);
+            self.waiting.insert(entry.seq, fingerprint(entry));
         } else {
             self.waiting.remove(&entry.seq);
         }
@@ -886,7 +894,9 @@ impl Transcript {
     pub fn set_answered_on(&mut self, seq: u64, on: v1::AnsweredOn) -> Option<Entry> {
         let entry = self.in_memory_mut().find(|entry| entry.seq == seq)?;
         entry.answered_on = Some(on);
-        Some(entry.clone())
+        let entry = entry.clone();
+        self.track(&entry);
+        Some(entry)
     }
 
     /// Adds a harness notice. Notices are for display only and aren't saved.
@@ -1640,6 +1650,12 @@ fn context_tokens(message: &AssistantMessage) -> u64 {
 /// Whether an entry waits for the person's answer: a request for a secret,
 /// a proposal (to connect a service, or to Rivet), a device being added, a
 /// pipe secret approval or a question still pending.
+/// An entry's fingerprint: FNV-1a over its encoding, the same for the same
+/// entry from one start to the next.
+fn fingerprint(entry: &Entry) -> u64 {
+    prost::Message::encode_to_vec(entry).iter().fold(0xcbf2_9ce4_8422_2325, |hash: u64, byte| (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3))
+}
+
 fn waits(kind: Option<&Kind>, owner: &str) -> bool {
     match kind {
         // An approved request waits on its admin agent, not the person, so
